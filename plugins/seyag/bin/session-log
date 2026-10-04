@@ -8,7 +8,11 @@ transcripts: a /clear keeps the app session and starts a new transcript. A
 transcript without a bridge id is a local (terminal) session.
 
 Usage:
-  session-log list   [FILTERS] [--no-archive]                one row per transcript, local times
+  session-log list   [FILTERS] [--no-archive] [--paths-to FILE]
+                                                    one row per transcript, local times; FILE gets the
+                                                    full local transcript paths (for session-extract)
+  session-log stats  [FILTERS] [--subagents] [--by driver|slug|session] [--json]
+                                                    per-driver process metrics, local transcripts only
   session-log grep   [FILTERS] [--no-archive] [--role user|agent|tool|all] [-i] [--raw]
                      [--subagents] [--max N] PATTERN         search decoded text, one line per hit
   session-log ledger [FILTERS] [--no-archive] [--lens L] [--unmined]
@@ -34,6 +38,19 @@ grep:     Python re over decoded text. Roles: user = owner turns and mid-turn qu
           results, all = every role. --raw keeps <system-reminder> blocks in the searched
           text; --subagents also reads subagent transcripts (project shown as .../sub).
           Exits 0 with hits, 1 with none.
+stats:    reads local transcripts only (--no-archive is accepted and has no effect). A driver is the
+          (model, message-id prefix) pair: msg_ + claude-* = anthropic, msg_ + other = zai, gen- =
+          openrouter, else unknown; <synthetic> is skipped; --subagents adds subagent files, keyed
+          with a /sub suffix. Per driver: replies, tool calls and errors, owner turns (never in
+          subagent files; automated <task-notification> and <local-command-stdout|stderr|caveat>
+          entries are not owner turns, a <command-name> slash command is), mid-turn
+          queued messages (tagged vs plain), deduped tokens. An errored tool result goes to the driver
+          of its tool_use; an owner turn or queued message goes to the next reply's driver. Error
+          classes: hook:<name>, classifier-denied:<reason>, classifier-unavailable, edit-miss,
+          edit-multimatch, edit-noop, read-first, stale-read, missing-file, exit-code, other.
+          Also: SYG_/HARNESS_ bypass-prefix use, and per hook block whether the next reply (a later
+          message.id, not a sibling call) used the same tool (retried) or another (moved_on).
+          --by slug|session splits each driver by project or session. Error text is never printed.
 Ids are shown shortened (transcript 8 chars, app and archive cse id 14 chars); a full id appearing inside printed
 message text (a title, a prompt, a grep snippet) is masked the same way. The ledger holds full ids.
 Usage errors exit 2.
@@ -43,6 +60,7 @@ import json
 import os
 import re
 import sys
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -240,7 +258,8 @@ def app_ok(app, a):
 
 
 def user_text(e):
-    c = (e.get("message") or {}).get("content")
+    m = e.get("message")
+    c = m.get("content") if isinstance(m, dict) else None
     if isinstance(c, str):
         return c
     if isinstance(c, list):
@@ -510,6 +529,13 @@ def cmd_list(a):
     else:
         summary += f"; archive: {len(arows)} rows ({c} cloud/aged-out only, {p} partial)"
     print(summary)
+    if a.paths_to:
+        paths = [str(s["path"]) for s in rows if not s.get("archive")]  # printed order, local transcripts only
+        try:
+            Path(a.paths_to).write_text("".join(p + "\n" for p in paths), encoding="utf-8")
+        except OSError as err:
+            die(f"cannot write {a.paths_to}: {err.strerror}")
+        print(f"paths: {len(paths)} written to {a.paths_to}")
 
 
 # ---- grep ------------------------------------------------------------------------------
@@ -803,6 +829,215 @@ def cmd_mark(a):
         print(f"marked  {lens}  {id8(tid)}  {app_short(app)}  {project(slug)}  {utc_min(fr)} → {utc_min(to)}  {note}".rstrip())
 
 
+# ---- stats -----------------------------------------------------------------------------
+# Per-driver process metrics over local transcripts. The driver is the (model, message-id prefix)
+# pair: the same model name can come from several lanes, and the id prefix tells them apart.
+
+MID_TAG_RE = re.compile(r"^<([a-z][a-z0-9-]*)[\s>/]")
+HOOK_ERR_RE = re.compile(r"^\w+:\w+ hook error: \[(.*?)\]:")
+BYPASS_RE = re.compile(r"\b((?:SYG|HARNESS)_(?:ALLOW_[A-Z_]+|[A-Z_]+_CHECKED))=")
+CLASSIFIER_REASON_RE = re.compile(r"Reason: \[([^\]]*)\]")
+ERROR_CLASSES = (("classifier-unavailable", re.compile(r"is temporarily unavailable")),
+                 ("edit-miss", re.compile(r"String to replace not found")),
+                 ("edit-multimatch", re.compile(r"Found \d+ matches of the string to replace")),
+                 ("edit-noop", re.compile(r"No changes to make")), ("read-first", re.compile(r"File has not been read yet")),
+                 ("stale-read", re.compile(r"File has been modified since read")),
+                 ("missing-file", re.compile(r"File does not exist")), ("exit-code", re.compile(r"^Exit code \d+")))
+NOT_OWNER = ("<task-notification>", "<local-command-stdout>", "<local-command-stderr>", "<local-command-caveat>")
+TOKEN_FIELDS = ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens")
+
+
+def driver_key(m, sub=False):
+    """The lane of one assistant message, or None for the <synthetic> placeholder."""
+    model, mid = m.get("model") or "?", m.get("id") or ""
+    if model == "<synthetic>":
+        return None
+    if mid.startswith("gen-"):
+        key = f"openrouter:{model}"
+    elif mid.startswith("msg_"):
+        key = f"{'anthropic' if model.startswith('claude') else 'zai'}:{model}"
+    else:
+        key = f"unknown:{model}"
+    return key + "/sub" if sub else key
+
+
+def hook_name(bracket):
+    tok = bracket.split()[-1].strip("\"'") if bracket.split() else "?"
+    return re.sub(r"\.(sh|py|js)$", "", os.path.basename(tok)) or "?"
+
+
+def error_class(text):
+    text = text.strip()
+    if m := HOOK_ERR_RE.match(text):
+        return "hook:" + mask(hook_name(m.group(1)))
+    if "denied by the Claude Code auto mode classifier" in text or "server-side auto mode classifier" in text:
+        r = CLASSIFIER_REASON_RE.search(text)
+        return "classifier-denied:" + (mask(r.group(1))[:60] if r else "unbracketed")
+    return next((name for name, rx in ERROR_CLASSES if rx.search(text)), "other")
+
+
+def result_text(p):
+    c = p.get("content")
+    return c if isinstance(c, str) else " ".join(x.get("text", "") for x in (c or []) if isinstance(x, dict))
+
+
+def new_group():
+    return {"ids": set(), "anon": 0, "tool_calls": 0, "tool_errors": 0, "owner": 0, "tagged": 0, "plain": 0,
+            "tags": Counter(), "classes": Counter(), "bypass": Counter()}
+
+
+def stats_file(path, sub, gk, since, until, st):
+    """Fold one transcript into st; returns True when it contributed anything in the window."""
+    seq, tool_drv, tool_pos, tool_names, used = [], {}, {}, [], False
+    msgno, last_mid = 0, None  # tool_names entries are (name, reply number): a reply = one message.id
+    for t, ts, e in Reader(path).scan():
+        inwin = bool(ts and since <= ts < until)
+        m = e.get("message")
+        m = m if isinstance(m, dict) else {}
+        if t == "assistant":
+            drv = driver_key(m, sub)
+            if drv is None:
+                continue
+            seq.append(("a", drv))
+            g = st["groups"].setdefault(gk(drv), new_group()) if inwin else None
+            mid = m.get("id")
+            if not mid or mid != last_mid:
+                msgno += 1
+            last_mid = mid
+            for p in m.get("content") or []:
+                if isinstance(p, dict) and p.get("type") == "tool_use":
+                    if p.get("id"):
+                        tool_drv[p["id"]], tool_pos[p["id"]] = drv, len(tool_names)
+                    tool_names.append((p.get("name"), msgno))
+                    if inwin:
+                        g["tool_calls"] += 1
+                        text = json.dumps(p.get("input"), ensure_ascii=False)
+                        for name in set(BYPASS_RE.findall(f'{p.get("name", "")} {text}')):
+                            g["bypass"][name] += 1
+            if inwin:
+                used = True
+                if mid:
+                    g["ids"].add(mid)
+                else:
+                    g["anon"] += 1
+                st["anon"] += not mid
+                u = m.get("usage") or {}
+                key = (mid, e.get("requestId")) if mid else ("anon", st["anon"])
+                cur = st["usage"].setdefault(key, [gk(drv)] + [0] * len(TOKEN_FIELDS))
+                for i, f in enumerate(TOKEN_FIELDS, 1):
+                    cur[i] = max(cur[i], u.get(f) or 0)
+        elif not inwin:
+            continue
+        elif t == "user":
+            c = m.get("content")
+            for p in c if isinstance(c, list) else []:
+                if isinstance(p, dict) and p.get("type") == "tool_result" and p.get("is_error"):
+                    seq.append(("e", p.get("tool_use_id"), result_text(p)))
+            text = clean(user_text(e)).lstrip()
+            if not sub and not e.get("isMeta") and text and not text.startswith(NOT_OWNER):
+                seq.append(("o",))
+        elif t == "queue-operation" and e.get("operation") == "enqueue" and isinstance(e.get("content"), str):
+            seq.append(("m", e["content"]))
+    nxt, n = [None] * len(seq), None
+    for i in range(len(seq) - 1, -1, -1):
+        n = seq[i][1] if seq[i][0] == "a" else n
+        nxt[i] = n
+    prev = None
+    for i, it in enumerate(seq):
+        if it[0] == "a":
+            prev = it[1]
+            continue
+        used = True
+        if it[0] == "e":
+            drv = tool_drv.get(it[1]) or prev or "unknown:?"
+        else:
+            drv = nxt[i] or prev or "unknown:?"
+        g = st["groups"].setdefault(gk(drv), new_group())
+        if it[0] == "o":
+            g["owner"] += 1
+        elif it[0] == "m":
+            tag = MID_TAG_RE.match(it[1].lstrip())
+            g["tagged" if tag else "plain"] += 1
+            if tag:
+                g["tags"][tag.group(1)] += 1
+        else:
+            cls = error_class(it[2])
+            g["tool_errors"] += 1
+            g["classes"][cls] += 1
+            if cls.startswith("hook:"):
+                r = st["retries"].setdefault(cls[5:], Counter())
+                r["blocks"] += 1
+                pos = tool_pos.get(it[1])
+                later = next((n for n, k in tool_names[pos + 1:] if k > tool_names[pos][1]), None) if pos is not None else None
+                r["retried" if later is not None and later == tool_names[pos][0] else "moved_on"] += 1
+    return used
+
+
+def label(key):
+    return "|".join(key)
+
+
+def render_stats(a, since, until, st, files, subs):
+    rows = sorted(st["groups"].items(), key=lambda kv: -len(kv[1]["ids"]) - kv[1]["anon"])
+    tok = {k: [0] * len(TOKEN_FIELDS) for k in st["groups"]}
+    for gkey, *vals in st["usage"].values():
+        for i, v in enumerate(vals):
+            tok[gkey][i] += v
+    if a.json:
+        out = {"since": iso_utc(since), "until": iso_utc(until), "by": a.by, "groups": [], "retries": {h: {k: c[k] for k in ("blocks", "retried", "moved_on")} for h, c in st["retries"].items()},
+               "transcripts": files, "subagent_files": subs}
+        for key, g in rows:
+            out["groups"].append({"key": list(key), "replies": len(g["ids"]) + g["anon"], "tool_calls": g["tool_calls"],
+                                  "tool_errors": g["tool_errors"], "owner_turns": g["owner"], "midturn_tagged": g["tagged"],
+                                  "midturn_plain": g["plain"], "midturn_tags": dict(g["tags"]),
+                                  **dict(zip(TOKEN_FIELDS, tok[key])), "error_classes": dict(g["classes"]), "bypass": dict(g["bypass"])})
+        print(json.dumps(out, indent=1))
+        return
+    fmt = lambda dt, edge: edge if dt in (FAR_PAST, FAR_FUTURE) else dt.astimezone().strftime("%Y-%m-%d %H:%M")
+    tz = datetime.now().astimezone().tzname()
+    print(f"# session-log stats  {fmt(since, 'beginning')} → {fmt(until, 'end')}  (local transcripts{' + subagents' if a.subagents else ''}; times local ({tz}))")
+    ncols = 1 if a.by == "driver" else 2
+    w = [max([len(k[i]) for k, _ in rows] + [6]) for i in range(ncols)]
+    print("  ".join(h.ljust(x) for h, x in zip(["project" if a.by == "slug" else "session"] * (a.by != "driver") + ["driver"], w))
+          + "  replies  tools  errors  err%  owner  mid(tag/plain)  in_tok  out_tok")
+    for key, g in rows:
+        t = tok[key]
+        pct = f"{g['tool_errors'] / g['tool_calls'] * 100:.1f}" if g["tool_calls"] else "-"
+        print("  ".join(k.ljust(x) for k, x in zip(key, w)) + f"  {len(g['ids']) + g['anon']:>7}  {g['tool_calls']:>5}  {g['tool_errors']:>6}  {pct:>4}  "
+              f"{g['owner']:>5}  {str(g['tagged']) + '/' + str(g['plain']):>14}  {round((t[0] + t[1] + t[2]) / 1000):>5}K  {round(t[3] / 1000):>6}K")
+    for title, field in (("error classes", "classes"), ("bypass prefixes", "bypass")):
+        print(f"## {title}")
+        tot = Counter()
+        for _, g in rows:
+            tot.update(g[field])
+        for name, n in tot.most_common():
+            pairs = " ".join(f"{label(k)}={g[field][name]}" for k, g in rows if g[field][name])
+            print(f"{name}  {pairs}  total={n}")
+        if not tot:
+            print("none")
+    print("## retry after hook block")
+    for h, c in sorted(st["retries"].items(), key=lambda kv: -kv[1]["blocks"]):
+        print(f"{h}  blocks={c['blocks']} retried={c['retried']} moved_on={c['moved_on']}")
+    print(f"{len(rows)} groups, {files} transcripts" + (f", {subs} subagent files" if a.subagents else ""))
+
+
+def cmd_stats(a):
+    since, until = bounds(a)
+    st = {"groups": {}, "usage": {}, "retries": {}, "anon": 0}
+    files = subs = 0
+    for slug, path, parent in transcripts(a.subagents):
+        if not file_ok(slug, path, a, since):
+            continue
+        if not app_ok(bridge_id(parent or path), a):
+            continue
+        sid = id8((parent or path).stem)
+        gk = {"driver": lambda d: (d,), "slug": lambda d: (project(slug), d), "session": lambda d: (sid, d)}[a.by]
+        if stats_file(path, bool(parent), gk, since, until, st):
+            files, subs = files + (not parent), subs + bool(parent)
+    render_stats(a, since, until, st, files, subs)
+    sys.exit(0 if st["groups"] else 1)
+
+
 # ---- entry -----------------------------------------------------------------------------
 
 class Parser(argparse.ArgumentParser):
@@ -820,7 +1055,14 @@ def main(argv):
     filters.add_argument("--no-archive", action="store_true")
     top = Parser(prog="session-log", add_help=False)
     sub = top.add_subparsers(dest="verb", required=True)
-    sub.add_parser("list", parents=[filters], add_help=False).set_defaults(fn=cmd_list)
+    ls = sub.add_parser("list", parents=[filters], add_help=False)
+    ls.add_argument("--paths-to")
+    ls.set_defaults(fn=cmd_list)
+    sp = sub.add_parser("stats", parents=[filters], add_help=False)
+    sp.add_argument("--subagents", action="store_true")
+    sp.add_argument("--by", choices=("driver", "slug", "session"), default="driver")
+    sp.add_argument("--json", action="store_true")
+    sp.set_defaults(fn=cmd_stats)
     g = sub.add_parser("grep", parents=[filters], add_help=False)
     g.add_argument("--role", choices=("user", "agent", "tool", "all"), default="user")
     g.add_argument("-i", dest="ignore_case", action="store_true")

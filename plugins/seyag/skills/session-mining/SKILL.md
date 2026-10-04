@@ -40,6 +40,7 @@ For any question about what happened in past sessions ("what went wrong yesterda
 ```bash
 session-log ledger --unmined                                        # unmined ranges per lens, machine-wide, grouped by app session
 session-log list --since <date>                                     # sizes, turn counts, titles for the window
+session-log list --since <date> --paths-to "$C/window-paths.txt"    # full paths for session-extract; never paste them
 ```
 
 Compare each session's span against the ledger's unmined ranges. **Never re-mine a range through a lens already applied to it**, because re-mined findings inflate recurrence counts. The rule is per lens: a range mined owner-only is still unmined for the agent lens. Raw JSONLs age out (Claude Code deletes old transcripts after `cleanupPeriodDays`, 30 by default; owners also delete them for disk space) while their extracts and ledger marks survive, so a range whose raw file is gone can take only the lenses whose extract exists: the owner lens needs `.txt`, the agent and procedure lenses need `.agent.txt`. Extract new deltas promptly. The active session can be included; note that its tail is still being written.
@@ -67,6 +68,12 @@ grep -H '^--- ' "$C"/*.agent.txt > "$C/procedures-<date>.txt"
 ```
 
 Positive-control it: non-empty, and its line count should be roughly the sum of the `tool calls` + `tool errors` counts printed by `session-extract` for the window's sessions.
+
+## Step 1b: metrics (scripted, before any miner)
+
+Run `session-log stats --since <T> --until <T> --subagents` (and again with `--json > reports/metrics-<daterange>.json`) before mining. Its `hook:<name>` rows are the GUARD LEDGER's trip counts; its driver rows are the DRIVER SPLIT numbers; its retry table (a block followed, in the next reply, by the same tool = retried, by a different tool = moved_on) is block→retry evidence for over-aggressive hooks; its `classifier-denied:<reason>` rows are the CLASSIFIER row. Give miners the class table as context instead of having them re-count.
+
+Positive-control it: without `--subagents`, the top-level `tool_errors` total should be close to the sum of `session-extract`'s `tool errors` counts for the same window.
 
 ## Step 2: mine (parallel reader agents)
 
@@ -111,7 +118,7 @@ Per item: `#` · the sequence normalized, one line per step · occurrences (sess
 
 Report file: `reports/procedures-<daterange>-report.md`.
 
-**Driver attribution** (when the window spans model switches): pin the driver timeline from each message's `.message.model` (`<synthetic>` is a Claude Code placeholder, not a switch), tag every item with the driver in effect, and add a `DRIVER SPLIT` section.
+**Driver attribution** (when the window spans model switches): the driver is the pair (model, message-id prefix), not `.message.model` alone: `msg_` + `claude-*` = Anthropic, `msg_` + any other model = z.ai, `gen-` = OpenRouter (`<synthetic>` is a Claude Code placeholder, not a switch). `session-log stats --by session` gives the timeline per transcript. Tag every item with the driver in effect, and add a `DRIVER SPLIT` section.
 
 **Orchestrator quality** (when the window includes orchestrated or delegated work): flag separate ORCH items for review rounds over ~3 on one PR, defect origin (spec, worker, or the orchestrator's own edits), self-fed review loops (round N fixing round N-1's fix), work claims a reviewer or the owner had to correct, and wrong premises in a dispatched spec that the worker caught. Attribute honestly: when the evidence lands on a different driver than the one the lens targets, the caveat header says so.
 
