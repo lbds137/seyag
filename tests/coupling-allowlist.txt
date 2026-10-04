@@ -17,7 +17,6 @@ gdrive:tests/context-audit.probe.sh
 # lbds137
 lbds137:.claude-plugin/marketplace.json
 lbds137:plugins/seyag/.claude-plugin/plugin.json
-lbds137:plugins/seyag/hooks/session-start.sh
 lbds137:plugins/seyag/hooks/session-start.probe.sh
 lbds137:README.md
 lbds137:CLAUDE.md
