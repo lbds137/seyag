@@ -111,8 +111,17 @@ format_duration() {
 tokens_display=$(format_tokens "$current_tokens")
 duration_display=$(format_duration "$duration_ms")
 
-# Get directory path, shortened with ~ for home, trailing slash
-dir_name="${cwd/#$HOME/\~}"
+# Get directory path, shortened with ~ for home, trailing slash. Only $HOME
+# itself or a path under $HOME/ shortens: a sibling sharing the prefix
+# (${HOME}2/x) stays as is.
+dir_name=$cwd
+if [ -n "$HOME" ]; then
+    if [ "$cwd" = "$HOME" ]; then
+        dir_name="~"
+    elif [[ "$cwd" == "$HOME"/* ]]; then
+        dir_name="~${cwd#"$HOME"}"
+    fi
+fi
 [[ "$dir_name" != */ ]] && dir_name="${dir_name}/"
 
 # Get git branch and dirty status
@@ -276,12 +285,16 @@ fi
 # (volatile left, stable right), and this block changes every render and drives the
 # usage-gate decisions.
 base_url=$(jq -r '.env.ANTHROPIC_BASE_URL // empty' "$HOME/.claude/settings.json" 2>/dev/null)
-# Vendor routing is anchored on the base_url HOST (scheme + path stripped),
-# end-anchored so a lookalike like api.anthropic.com.evil.com can't borrow
-# another lane's quota segment. Empty/absent base_url = the Anthropic lane
-# (no override configured). The z.ai and Anthropic segments below are
-# unchanged; the OpenRouter segment is new.
-vendor_host=$(printf '%s' "$base_url" | sed -E 's#^[a-zA-Z]+://##; s#/.*$##')
+# Vendor routing is anchored on the base_url HOST (scheme, path, userinfo@ and
+# :port stripped, then lowercased), end-anchored so a lookalike like
+# api.anthropic.com.evil.com can't borrow another lane's quota segment. The
+# userinfo strip also keeps a credential out of the unknown-lane label.
+# Empty/absent base_url = the Anthropic lane (no override configured). The
+# z.ai and Anthropic segments below are unchanged; the OpenRouter segment is
+# new.
+vendor_host=$(printf '%s' "$base_url" \
+    | sed -E 's#^[a-zA-Z]+://##; s#/.*$##; s#^.*@##; s#:[0-9]*$##' \
+    | tr '[:upper:]' '[:lower:]')
 vendor_lane=unknown
 case "$vendor_host" in
     z.ai|*.z.ai)                              vendor_lane=zai ;;
@@ -442,26 +455,26 @@ if [ -n "$version" ]; then
     fi
 fi
 
-# Harness version + update nudge. The marketplace IS the local repo, so
+# Seyag version + update nudge. The marketplace IS the local repo, so
 # "update available" = the repo manifest version is NEWER than the
 # installed cache dir — two tiny local reads, no network. The segment
 # hides when either side is unreadable (no opinion). Override points
 # exist for the hermetic probe.
-harness_reg="${CLAUDE_PLUGIN_REGISTRY:-$HOME/.claude/plugins/installed_plugins.json}"
+syg_reg="${CLAUDE_PLUGIN_REGISTRY:-$HOME/.claude/plugins/installed_plugins.json}"
 # The Seyag rename moves the repo dir, the plugin dir, AND the registry
 # key (harness@claude-harness -> seyag@lbds137); probe candidates
 # newest-first so the segment survives every stage of the migration.
-harness_manifest="${HARNESS_PLUGIN_MANIFEST:-}"
-if [ -z "$harness_manifest" ]; then
+syg_manifest="${HARNESS_PLUGIN_MANIFEST:-}"
+if [ -z "$syg_manifest" ]; then
     for cand in "$HOME/Projects/seyag/plugins/seyag/.claude-plugin/plugin.json" \
                 "$HOME/Projects/seyag/plugins/harness/.claude-plugin/plugin.json" \
                 "$HOME/Projects/claude-harness/plugins/seyag/.claude-plugin/plugin.json" \
                 "$HOME/Projects/claude-harness/plugins/harness/.claude-plugin/plugin.json"; do
-        [ -r "$cand" ] && harness_manifest="$cand" && break
+        [ -r "$cand" ] && syg_manifest="$cand" && break
     done
 fi
-harness_installed=$(jq -r '[(.plugins["harness@claude-harness"][0].installPath // empty), (.plugins["seyag@lbds137"][0].installPath // empty)] | map(select(length > 0)) | last // empty' "$harness_reg" 2>/dev/null | awk -F/ '{print $NF}')
-harness_repo=$(jq -r '.version // empty' "$harness_manifest" 2>/dev/null)
+syg_installed=$(jq -r '[(.plugins["harness@claude-harness"][0].installPath // empty), (.plugins["seyag@lbds137"][0].installPath // empty)] | map(select(length > 0)) | last // empty' "$syg_reg" 2>/dev/null | awk -F/ '{print $NF}')
+syg_repo=$(jq -r '.version // empty' "$syg_manifest" 2>/dev/null)
 # Directory-marketplace wiring (extraKnownMarketplaces.lbds137 -> a local
 # checkout): the running plugin IS the repo tip — /reload-plugins loads it
 # straight from the tree and no install record is written, so the recorded
@@ -469,16 +482,16 @@ harness_repo=$(jq -r '.version // empty' "$harness_manifest" 2>/dev/null)
 # nudge can never be true; render plain at the repo version.
 if jq -e '.extraKnownMarketplaces.lbds137.source.source == "directory"' \
     "$HOME/.claude/settings.json" >/dev/null 2>&1; then
-    harness_installed="$harness_repo"
+    syg_installed="$syg_repo"
 fi
-if [ -n "$harness_installed" ] && [ -n "$harness_repo" ]; then
+if [ -n "$syg_installed" ] && [ -n "$syg_repo" ]; then
     syg_sep="$sep"; [ "$cc_shown" = 1 ] && syg_sep=" "
-    if [ "$harness_repo" != "$harness_installed" ] && [ "$harness_repo" = "$(printf '%s\n%s\n' "$harness_installed" "$harness_repo" | sort -V | tail -1)" ]; then
+    if [ "$syg_repo" != "$syg_installed" ] && [ "$syg_repo" = "$(printf '%s\n%s\n' "$syg_installed" "$syg_repo" | sort -V | tail -1)" ]; then
         # Nudge stays fully yellow: escalation must look like escalation.
-        output="$output${syg_sep}${yellow}SYG: ${harness_installed}⬆${reset}"
+        output="$output${syg_sep}${yellow}SYG: ${syg_installed}⬆${reset}"
     else
         # Label pops in the SYG brand violet; version text stays gray.
-        output="$output${syg_sep}${syg_brand}SYG:${reset} ${gray}${harness_installed}${reset}"
+        output="$output${syg_sep}${syg_brand}SYG:${reset} ${gray}${syg_installed}${reset}"
     fi
 fi
 

@@ -534,7 +534,7 @@ def cmd_list(a):
         try:
             Path(a.paths_to).write_text("".join(p + "\n" for p in paths), encoding="utf-8")
         except OSError as err:
-            die(f"cannot write {a.paths_to}: {err.strerror}")
+            die(f"cannot write {a.paths_to}: {err.strerror or str(err)}")
         print(f"paths: {len(paths)} written to {a.paths_to}")
 
 
@@ -922,7 +922,7 @@ def stats_file(path, sub, gk, since, until, st):
                     g["anon"] += 1
                 st["anon"] += not mid
                 u = m.get("usage") or {}
-                key = (mid, e.get("requestId")) if mid else ("anon", st["anon"])
+                key = (gk(drv), mid, e.get("requestId")) if mid else ("anon", st["anon"])
                 cur = st["usage"].setdefault(key, [gk(drv)] + [0] * len(TOKEN_FIELDS))
                 for i, f in enumerate(TOKEN_FIELDS, 1):
                     cur[i] = max(cur[i], u.get(f) or 0)
@@ -933,7 +933,7 @@ def stats_file(path, sub, gk, since, until, st):
             for p in c if isinstance(c, list) else []:
                 if isinstance(p, dict) and p.get("type") == "tool_result" and p.get("is_error"):
                     seq.append(("e", p.get("tool_use_id"), result_text(p)))
-            text = clean(user_text(e)).lstrip()
+            text = clean(user_text(e))
             if not sub and not e.get("isMeta") and text and not text.startswith(NOT_OWNER):
                 seq.append(("o",))
         elif t == "queue-operation" and e.get("operation") == "enqueue" and isinstance(e.get("content"), str):
@@ -997,8 +997,9 @@ def render_stats(a, since, until, st, files, subs):
     tz = datetime.now().astimezone().tzname()
     print(f"# session-log stats  {fmt(since, 'beginning')} → {fmt(until, 'end')}  (local transcripts{' + subagents' if a.subagents else ''}; times local ({tz}))")
     ncols = 1 if a.by == "driver" else 2
-    w = [max([len(k[i]) for k, _ in rows] + [6]) for i in range(ncols)]
-    print("  ".join(h.ljust(x) for h, x in zip(["project" if a.by == "slug" else "session"] * (a.by != "driver") + ["driver"], w))
+    heads = ["project" if a.by == "slug" else "session"] * (a.by != "driver") + ["driver"]
+    w = [max([len(k[i]) for k, _ in rows] + [len(heads[i])]) for i in range(ncols)]
+    print("  ".join(h.ljust(x) for h, x in zip(heads, w))
           + "  replies  tools  errors  err%  owner  mid(tag/plain)  in_tok  out_tok")
     for key, g in rows:
         t = tok[key]

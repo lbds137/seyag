@@ -96,19 +96,19 @@ assert_out() {
 run 2 "trigger 1: repo edit --visibility=public" "$FIX" -- \
   "gh repo edit -R example/one --visibility=public"
 assert_out "pin: repo edit message first line" first-line \
-  "blocked: gh repo edit would make example/one public. Run the going-public checklist (seyag:going-public) for it first; on pass set SYG_PUBLISH_CHECKED=example/one (colon-list ok; any non-empty value for a gist)."
+  "blocked: gh repo edit would make example/one public. Run the going-public checklist (seyag:going-public) for it first; on pass set SYG_PUBLISH_CHECKED=example/one (colon-list ok; any non-empty value for a gist) (it is read from the session's environment at start: the owner restarts the session with it exported, or runs the command herself with \`!\`)."
 run 2 "trigger 2: repo create --public" "$FIX" -- \
   "gh repo create --public"
 assert_out "pin: repo create message first line" first-line \
-  "blocked: gh repo create would make example/one public. Run the going-public checklist (seyag:going-public) for it first; on pass set SYG_PUBLISH_CHECKED=example/one (colon-list ok; any non-empty value for a gist)."
+  "blocked: gh repo create would make example/one public. Run the going-public checklist (seyag:going-public) for it first; on pass set SYG_PUBLISH_CHECKED=example/one (colon-list ok; any non-empty value for a gist) (it is read from the session's environment at start: the owner restarts the session with it exported, or runs the command herself with \`!\`)."
 run 2 "trigger 3: gist create -p" "$FIX" -- \
   "gh gist create -p"
 assert_out "pin: gist create message first line" first-line \
-  "blocked: gh gist create would make a gist public. Run the going-public checklist (seyag:going-public) for it first; on pass set SYG_PUBLISH_CHECKED=<any non-empty value> (colon-list ok; any non-empty value for a gist)."
+  "blocked: gh gist create would make a gist public. Run the going-public checklist (seyag:going-public) for it first; on pass set SYG_PUBLISH_CHECKED=<any non-empty value> (colon-list ok; any non-empty value for a gist) (it is read from the session's environment at start: the owner restarts the session with it exported, or runs the command herself with \`!\`)."
 run 2 "trigger 4: api PATCH with private=false" "$FIX" -- \
   "gh api repos/example/one -X PATCH -f private=false"
 assert_out "pin: api message first line" first-line \
-  "blocked: gh api PATCH repos/example/one would make example/one public. Run the going-public checklist (seyag:going-public) for it first; on pass set SYG_PUBLISH_CHECKED=example/one (colon-list ok; any non-empty value for a gist)."
+  "blocked: gh api PATCH repos/example/one would make example/one public. Run the going-public checklist (seyag:going-public) for it first; on pass set SYG_PUBLISH_CHECKED=example/one (colon-list ok; any non-empty value for a gist) (it is read from the session's environment at start: the owner restarts the session with it exported, or runs the command herself with \`!\`)."
 
 # =============================================================================
 # Group 2: negatives pass
@@ -221,6 +221,29 @@ run 2 "api implicit POST via -f visibility=public" "$FIX" -- \
   "gh api repos/example/one -f visibility=public"
 run 2 "api --input counts as a write; separate -f decides" "$FIX" -- \
   "gh api repos/example/one --input=body.json -f private=false"
+# An --input body on stdin is in the command text: the whole text is scanned.
+run 2 "api --input - here-string body private:false" "$FIX" -- \
+  "gh api repos/example/one -X PATCH --input - <<< '{\"private\":false}'"
+run 2 "api --input - heredoc body visibility:public" "$FIX" -- \
+  "gh api repos/example/one -X PATCH --input - <<'EOF'
+{\"visibility\": \"public\"}
+EOF"
+run 2 "api --input - echo-pipe body (spaced, uppercase False)" "$FIX" -- \
+  "echo '{\"private\" : False}' | gh api repos/example/one -X PATCH --input -"
+assert_out "pin: --input body block names the api target" first-line \
+  "blocked: gh api PATCH repos/example/one would make example/one public. Run the going-public checklist (seyag:going-public) for it first; on pass set SYG_PUBLISH_CHECKED=example/one (colon-list ok; any non-empty value for a gist) (it is read from the session's environment at start: the owner restarts the session with it exported, or runs the command herself with \`!\`)."
+run 2 "api --input - body with backslash-escaped quotes (echo \"{\\\"private\\\": false}\")" "$FIX" -- \
+  "echo \"{\\\"private\\\": false}\" | gh api repos/example/one -X PATCH --input -"
+run 2 "api --input - body with escaped visibility:public" "$FIX" -- \
+  "echo \"{\\\"visibility\\\": \\\"public\\\"}\" | gh api repos/example/one -X PATCH --input -"
+run 2 "api --input - body from a jq object literal with an unquoted key" "$FIX" -- \
+  "jq -n '{private:false}' | gh api repos/example/one -X PATCH --input -"
+run 0 "negative: api --input - with private:true" "$FIX" -- \
+  "gh api repos/example/one -X PATCH --input - <<< '{\"private\": true}'"
+run 0 "negative: escaped private:true still allowed" "$FIX" -- \
+  "echo \"{\\\"private\\\": true}\" | gh api repos/example/one -X PATCH --input -"
+run 0 "negative: JSON flip text without any --input" "$FIX" -- \
+  "gh api repos/example/one -X PATCH -f description='{\"private\":false}'"
 run 2 "api -X PUT with private=false" "$FIX" -- \
   "gh api repos/example/one -X PUT -f private=false"
 run 2 "api attached -XPATCH method" "$FIX" -- \
@@ -240,11 +263,11 @@ run 0 "api -p is --preview (a value flag), not a publish" "$FIX" -- \
 run 2 "api explicit -X POST with private=false" "$FIX" -- \
   "gh api repos/example/one -X POST -f private=false"
 assert_out "pin: explicit POST message first line" first-line \
-  "blocked: gh api POST repos/example/one would make example/one public. Run the going-public checklist (seyag:going-public) for it first; on pass set SYG_PUBLISH_CHECKED=example/one (colon-list ok; any non-empty value for a gist)."
+  "blocked: gh api POST repos/example/one would make example/one public. Run the going-public checklist (seyag:going-public) for it first; on pass set SYG_PUBLISH_CHECKED=example/one (colon-list ok; any non-empty value for a gist) (it is read from the session's environment at start: the owner restarts the session with it exported, or runs the command herself with \`!\`)."
 run 2 "api --method=POST with visibility=public" "$FIX" -- \
   "gh api repos/example/one --method=POST -f visibility=public"
 assert_out "pin: --method=POST message first line" first-line \
-  "blocked: gh api POST repos/example/one would make example/one public. Run the going-public checklist (seyag:going-public) for it first; on pass set SYG_PUBLISH_CHECKED=example/one (colon-list ok; any non-empty value for a gist)."
+  "blocked: gh api POST repos/example/one would make example/one public. Run the going-public checklist (seyag:going-public) for it first; on pass set SYG_PUBLISH_CHECKED=example/one (colon-list ok; any non-empty value for a gist) (it is read from the session's environment at start: the owner restarts the session with it exported, or runs the command herself with \`!\`)."
 run 0 "api explicit -X POST with a benign field" "$FIX" -- \
   "gh api repos/example/one -X POST -f description=hi"
 run 0 "api explicit -X POST with no fields" "$FIX" -- \
@@ -260,14 +283,14 @@ run 2 "remotes resolve the target (no -R)" "$FIX" -- \
 run 2 "r1: positional operand names the target" "$FIX" -- \
   "gh repo edit other/two --visibility=public"
 assert_out "r1: positional target in the pinned first line" first-line \
-  "blocked: gh repo edit would make other/two public. Run the going-public checklist (seyag:going-public) for it first; on pass set SYG_PUBLISH_CHECKED=other/two (colon-list ok; any non-empty value for a gist)."
+  "blocked: gh repo edit would make other/two public. Run the going-public checklist (seyag:going-public) for it first; on pass set SYG_PUBLISH_CHECKED=other/two (colon-list ok; any non-empty value for a gist) (it is read from the session's environment at start: the owner restarts the session with it exported, or runs the command herself with \`!\`)."
 run 2 "r1: wrong-slug env does NOT unblock a positional target" "$FIX" \
   SYG_PUBLISH_CHECKED=example/one -- \
   "gh repo edit other/two --visibility=public"
 run 2 "r1: create with OWNER/NAME positional" "$FIX" -- \
   "gh repo create example/three --public"
 assert_out "r1: create positional target named" first-line \
-  "blocked: gh repo create would make example/three public. Run the going-public checklist (seyag:going-public) for it first; on pass set SYG_PUBLISH_CHECKED=example/three (colon-list ok; any non-empty value for a gist)."
+  "blocked: gh repo create would make example/three public. Run the going-public checklist (seyag:going-public) for it first; on pass set SYG_PUBLISH_CHECKED=example/three (colon-list ok; any non-empty value for a gist) (it is read from the session's environment at start: the owner restarts the session with it exported, or runs the command herself with \`!\`)."
 run 2 "r1: create with a BARE name is unresolvable" "$FIX" -- \
   "gh repo create three --public"
 assert_out "r1: bare-name advice line" present \
@@ -279,7 +302,7 @@ assert_out "r1: unresolvable positional advice line" present \
 run 2 "r1: positional URL form parses" "$FIX" -- \
   "gh repo edit https://github.com/example/three.git --visibility=public"
 assert_out "r1: URL positional target named" first-line \
-  "blocked: gh repo edit would make example/three public. Run the going-public checklist (seyag:going-public) for it first; on pass set SYG_PUBLISH_CHECKED=example/three (colon-list ok; any non-empty value for a gist)."
+  "blocked: gh repo edit would make example/three public. Run the going-public checklist (seyag:going-public) for it first; on pass set SYG_PUBLISH_CHECKED=example/three (colon-list ok; any non-empty value for a gist) (it is read from the session's environment at start: the owner restarts the session with it exported, or runs the command herself with \`!\`)."
 run 0 "r1: positional with a private visibility passes" "$FIX" -- \
   "gh repo edit other/two --visibility private"
 run 0 "r1: correct-slug env unblocks a positional target" "$FIX" \
@@ -313,21 +336,21 @@ run 2 "api {owner}/{repo} placeholders from remotes" "$FIX" -- \
 run 2 "r2: pushd swap lands in FIX" "$TWO" -- \
   "pushd ../fix && gh repo edit --visibility=public"
 assert_out "r2: pushd swap resolved example/one" first-line \
-  "blocked: gh repo edit would make example/one public. Run the going-public checklist (seyag:going-public) for it first; on pass set SYG_PUBLISH_CHECKED=example/one (colon-list ok; any non-empty value for a gist)."
+  "blocked: gh repo edit would make example/one public. Run the going-public checklist (seyag:going-public) for it first; on pass set SYG_PUBLISH_CHECKED=example/one (colon-list ok; any non-empty value for a gist) (it is read from the session's environment at start: the owner restarts the session with it exported, or runs the command herself with \`!\`)."
 run 2 "r2: pushd then popd is back in TWO" "$TWO" -- \
   "pushd ../fix && popd && gh repo edit --visibility=public"
 assert_out "r2: popd restored other/two" first-line \
-  "blocked: gh repo edit would make other/two public. Run the going-public checklist (seyag:going-public) for it first; on pass set SYG_PUBLISH_CHECKED=other/two (colon-list ok; any non-empty value for a gist)."
+  "blocked: gh repo edit would make other/two public. Run the going-public checklist (seyag:going-public) for it first; on pass set SYG_PUBLISH_CHECKED=other/two (colon-list ok; any non-empty value for a gist) (it is read from the session's environment at start: the owner restarts the session with it exported, or runs the command herself with \`!\`)."
 run 2 "r2: GIT_DIR prefix reads the other fixture" "$FIX" -- \
   "GIT_DIR=../two/.git gh repo edit --visibility=public"
 assert_out "r2: GIT_DIR resolved other/two" first-line \
-  "blocked: gh repo edit would make other/two public. Run the going-public checklist (seyag:going-public) for it first; on pass set SYG_PUBLISH_CHECKED=other/two (colon-list ok; any non-empty value for a gist)."
+  "blocked: gh repo edit would make other/two public. Run the going-public checklist (seyag:going-public) for it first; on pass set SYG_PUBLISH_CHECKED=other/two (colon-list ok; any non-empty value for a gist) (it is read from the session's environment at start: the owner restarts the session with it exported, or runs the command herself with \`!\`)."
 run 2 "r2: GIT_WORK_TREE prefix alone still blocks" "$FIX" -- \
   "GIT_WORK_TREE=../two gh repo edit --visibility=public"
 run 2 "r2: export GH_REPO then unset falls back to remotes" "$FIX" -- \
   "export GH_REPO=other/two; unset GH_REPO; gh repo edit --visibility=public"
 assert_out "r2: unset GH_REPO restored example/one" first-line \
-  "blocked: gh repo edit would make example/one public. Run the going-public checklist (seyag:going-public) for it first; on pass set SYG_PUBLISH_CHECKED=example/one (colon-list ok; any non-empty value for a gist)."
+  "blocked: gh repo edit would make example/one public. Run the going-public checklist (seyag:going-public) for it first; on pass set SYG_PUBLISH_CHECKED=example/one (colon-list ok; any non-empty value for a gist) (it is read from the session's environment at start: the owner restarts the session with it exported, or runs the command herself with \`!\`)."
 
 # --- r5: cheap pins for code-read behavior -----------------------------------
 run 2 "r5: api.github.com-prefixed endpoint blocks" "$FIX" -- \
@@ -338,12 +361,12 @@ run 2 "r5: env GH_REPO fills {owner}/{repo}" "$FIX" \
   GH_REPO=example/one -- \
   "gh api repos/{owner}/{repo} -X PATCH -f private=false"
 assert_out "r5: GH_REPO placeholder target named" first-line \
-  "blocked: gh api PATCH repos/{owner}/{repo} would make example/one public. Run the going-public checklist (seyag:going-public) for it first; on pass set SYG_PUBLISH_CHECKED=example/one (colon-list ok; any non-empty value for a gist)."
+  "blocked: gh api PATCH repos/{owner}/{repo} would make example/one public. Run the going-public checklist (seyag:going-public) for it first; on pass set SYG_PUBLISH_CHECKED=example/one (colon-list ok; any non-empty value for a gist) (it is read from the session's environment at start: the owner restarts the session with it exported, or runs the command herself with \`!\`)."
 run 2 "r5: literal endpoint beats GH_REPO" "$FIX" \
   GH_REPO=other/two -- \
   "gh api repos/example/one -X PATCH -f private=false"
 assert_out "r5: literal endpoint target named" first-line \
-  "blocked: gh api PATCH repos/example/one would make example/one public. Run the going-public checklist (seyag:going-public) for it first; on pass set SYG_PUBLISH_CHECKED=example/one (colon-list ok; any non-empty value for a gist)."
+  "blocked: gh api PATCH repos/example/one would make example/one public. Run the going-public checklist (seyag:going-public) for it first; on pass set SYG_PUBLISH_CHECKED=example/one (colon-list ok; any non-empty value for a gist) (it is read from the session's environment at start: the owner restarts the session with it exported, or runs the command herself with \`!\`)."
 
 # =============================================================================
 # Redirections next to a gh publish never degrade target resolution: a
@@ -353,19 +376,19 @@ assert_out "r5: literal endpoint target named" first-line \
 run 2 "redir: trailing 2>&1 in a pipe still names example/one" "$FIX" -- \
   "gh repo edit -R example/one --visibility=public 2>&1 | head -3"
 assert_out "redir: -R target named despite 2>&1" first-line \
-  "blocked: gh repo edit would make example/one public. Run the going-public checklist (seyag:going-public) for it first; on pass set SYG_PUBLISH_CHECKED=example/one (colon-list ok; any non-empty value for a gist)."
+  "blocked: gh repo edit would make example/one public. Run the going-public checklist (seyag:going-public) for it first; on pass set SYG_PUBLISH_CHECKED=example/one (colon-list ok; any non-empty value for a gist) (it is read from the session's environment at start: the owner restarts the session with it exported, or runs the command herself with \`!\`)."
 run 2 "redir: 2>&1 after a pipe, rc echo after" "$FIX" -- \
   'gh repo edit -R example/one --visibility=public 2>&1 | head -3; echo "rc=$?"'
 assert_out "redir: -R target named with rc echo" first-line \
-  "blocked: gh repo edit would make example/one public. Run the going-public checklist (seyag:going-public) for it first; on pass set SYG_PUBLISH_CHECKED=example/one (colon-list ok; any non-empty value for a gist)."
+  "blocked: gh repo edit would make example/one public. Run the going-public checklist (seyag:going-public) for it first; on pass set SYG_PUBLISH_CHECKED=example/one (colon-list ok; any non-empty value for a gist) (it is read from the session's environment at start: the owner restarts the session with it exported, or runs the command herself with \`!\`)."
 run 2 "redir: positional plus 2>/dev/null" "$FIX" -- \
   "gh repo edit other/two --visibility=public 2>/dev/null"
 assert_out "redir: positional target named despite 2>/dev/null" first-line \
-  "blocked: gh repo edit would make other/two public. Run the going-public checklist (seyag:going-public) for it first; on pass set SYG_PUBLISH_CHECKED=other/two (colon-list ok; any non-empty value for a gist)."
+  "blocked: gh repo edit would make other/two public. Run the going-public checklist (seyag:going-public) for it first; on pass set SYG_PUBLISH_CHECKED=other/two (colon-list ok; any non-empty value for a gist) (it is read from the session's environment at start: the owner restarts the session with it exported, or runs the command herself with \`!\`)."
 run 2 "redir: gist create with 2>&1" "$FIX" -- \
   "gh gist create -p 2>&1"
 assert_out "redir: gist pinned message" first-line \
-  "blocked: gh gist create would make a gist public. Run the going-public checklist (seyag:going-public) for it first; on pass set SYG_PUBLISH_CHECKED=<any non-empty value> (colon-list ok; any non-empty value for a gist)."
+  "blocked: gh gist create would make a gist public. Run the going-public checklist (seyag:going-public) for it first; on pass set SYG_PUBLISH_CHECKED=<any non-empty value> (colon-list ok; any non-empty value for a gist) (it is read from the session's environment at start: the owner restarts the session with it exported, or runs the command herself with \`!\`)."
 run 2 "redir: bare-name create with >out.txt 2>&1 stays unresolvable" "$FIX" -- \
   "gh repo create three --public >out.txt 2>&1"
 assert_out "redir: bare-name advice line survives the redirection" present \
@@ -373,19 +396,19 @@ assert_out "redir: bare-name advice line survives the redirection" present \
 run 2 "redir: api PATCH with 2>&1 | head" "$FIX" -- \
   "gh api repos/example/one -X PATCH -f private=false 2>&1 | head -1"
 assert_out "redir: api endpoint target named despite 2>&1" first-line \
-  "blocked: gh api PATCH repos/example/one would make example/one public. Run the going-public checklist (seyag:going-public) for it first; on pass set SYG_PUBLISH_CHECKED=example/one (colon-list ok; any non-empty value for a gist)."
+  "blocked: gh api PATCH repos/example/one would make example/one public. Run the going-public checklist (seyag:going-public) for it first; on pass set SYG_PUBLISH_CHECKED=example/one (colon-list ok; any non-empty value for a gist) (it is read from the session's environment at start: the owner restarts the session with it exported, or runs the command herself with \`!\`)."
 run 2 "redir: append redirect 2>>log" "$FIX" -- \
   "gh repo edit -R example/one --visibility public 2>>log"
 assert_out "redir: 2>> target named" first-line \
-  "blocked: gh repo edit would make example/one public. Run the going-public checklist (seyag:going-public) for it first; on pass set SYG_PUBLISH_CHECKED=example/one (colon-list ok; any non-empty value for a gist)."
+  "blocked: gh repo edit would make example/one public. Run the going-public checklist (seyag:going-public) for it first; on pass set SYG_PUBLISH_CHECKED=example/one (colon-list ok; any non-empty value for a gist) (it is read from the session's environment at start: the owner restarts the session with it exported, or runs the command herself with \`!\`)."
 run 2 "redir: stdin redirect <in.txt" "$FIX" -- \
   "gh repo edit -R example/one --visibility=public <in.txt"
 assert_out "redir: <in.txt target named" first-line \
-  "blocked: gh repo edit would make example/one public. Run the going-public checklist (seyag:going-public) for it first; on pass set SYG_PUBLISH_CHECKED=example/one (colon-list ok; any non-empty value for a gist)."
+  "blocked: gh repo edit would make example/one public. Run the going-public checklist (seyag:going-public) for it first; on pass set SYG_PUBLISH_CHECKED=example/one (colon-list ok; any non-empty value for a gist) (it is read from the session's environment at start: the owner restarts the session with it exported, or runs the command herself with \`!\`)."
 run 2 "redir: split operator form > /dev/null" "$FIX" -- \
   "gh repo edit -R example/one --visibility=public > /dev/null"
 assert_out "redir: > /dev/null target named" first-line \
-  "blocked: gh repo edit would make example/one public. Run the going-public checklist (seyag:going-public) for it first; on pass set SYG_PUBLISH_CHECKED=example/one (colon-list ok; any non-empty value for a gist)."
+  "blocked: gh repo edit would make example/one public. Run the going-public checklist (seyag:going-public) for it first; on pass set SYG_PUBLISH_CHECKED=example/one (colon-list ok; any non-empty value for a gist) (it is read from the session's environment at start: the owner restarts the session with it exported, or runs the command herself with \`!\`)."
 
 # =============================================================================
 # Unblock contract boundaries

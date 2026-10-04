@@ -21,7 +21,7 @@ Distill the SUB-PROBLEM and the minimal context needed to reason about it: the f
 
 ## Dispatch
 
-ONE subagent (the Agent tool's general-purpose type, or the session's equivalent), with **the strongest configured model (this fleet: glm-5.3), always passed explicitly, never defaulted by omission**. (This line deliberately pins a fleet value where delegation's name-roles-not-model-versions rule otherwise governs: the advisor's whole point is the strongest model whatever the role map says.) Ask for an answer: the reasoning, the recommendation, the checks that would falsify it.
+ONE subagent (the Agent tool's general-purpose type, or the session's equivalent), with **the strong-lane model, always passed explicitly as the Agent `model` (on the Anthropic lane `fable`, or `opus` when Fable is capped; on another gateway, that gateway's strong alias), never defaulted by omission**. (The strong lane, not the role map's worker pick: the advisor's whole point is the strongest model whatever the role map says.) Ask for an answer: the reasoning, the recommendation, the checks that would falsify it.
 
 > **The advisor ANSWERS; it never edits files, never spawns further agents, never commits — the CALLER stays driver and implements.**
 

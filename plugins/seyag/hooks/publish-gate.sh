@@ -19,7 +19,11 @@
 #   - `gh api` writes (explicit `-X PATCH`/`-X PUT`/`-X POST`, or implicit via
 #     `-f`/`-F`/`--field`/`--raw-field`/`--input`) to a `repos/OWNER/REPO`
 #     endpoint carrying a field `private=false` or `visibility=public`
-#     (attached, `=`-joined or separate field forms).
+#     (attached, `=`-joined or separate field forms), or carrying any
+#     `--input` while the WHOLE command text holds `"private": false` or
+#     `"visibility": "public"` (case-insensitive, quotes optional or
+#     backslash-escaped: the stdin body of a here-string, heredoc,
+#     `echo … |` or `jq -n '{private:false}' |` pipe).
 # WHERE COMMANDS ARE FOUND, in EXECUTION order: the splitter's top-level
 # pipelines; a wrapper's string (`bash -c '…'`, `eval "…"`, …) right after
 # the pipeline that runs it; a command substitution (`$(…)` or backticks,
@@ -66,9 +70,10 @@
 # prefix assignment on the gh command does NOT bypass). For repos, the
 # resolved target slug (case-insensitive) must be a colon-separated member of
 # the env's list, and EVERY target of the command must be covered. For a gist
-# (no repo target) any non-empty env value unblocks. No other bypass exists,
+# (no repo target) any non-empty env value unblocks. No other unblock exists,
 # by design — a gate is satisfied or escalated; the owner can always run the
-# command herself via `!`.
+# command herself via `!`. Known publish paths the gate does NOT see are
+# listed under KNOWN GAPS below.
 #
 # KNOWN GAPS (accepted, not fixed here):
 #   - `gh repo create three --public` with a BARE positional name blocks as
@@ -77,10 +82,14 @@
 #     `-R`/`--repo` value is still parsed for parity, but gh 2.101 rejects
 #     `-R` on the repo commands client-side — the positional is the real
 #     carrier.
-#   - `gh api -X PATCH repos/o/r --input body.json` (or any write whose field
-#     values are not visible in the command text) carries no inspectable
-#     `private`/`visibility` field and passes; so does an explicit
-#     `-X PATCH`/`-X PUT`/`-X POST` with no field flags.
+#   - `gh api -X PATCH repos/o/r --input body.json` (an `--input <file>`
+#     whose body is not in the command text, or any write whose field values
+#     are not visible there) carries no inspectable `private`/`visibility`
+#     field and passes; so does an explicit `-X PATCH`/`-X PUT`/`-X POST`
+#     with no field flags, and a field spelled `private=0`. An `--input -`
+#     body built so the literal never appears in the command text (a printf
+#     `%s` substitution, a key spelled with JSON unicode escapes, a variable or
+#     a file read) passes too.
 #   - `--public=false` (a pflag boolean spelled with a value) is read as a
 #     publish — an accepted over-block.
 #   - `gh api graphql` mutations are not inspected; a `GH_REPO` exported by
@@ -240,10 +249,11 @@ def flag_table(operands):
 def parse_gh_args(words):
     """words = argv[1:] of a (post-unwrap) gh invocation. Returns
     (repo_flag, operands, method, any_field, field_values, visibility,
-    public_bool), where any_field means a field-family flag of the current
-    subcommand's table was given, field_values lists the `-f`/`-F` k=v
-    values, visibility is the `--visibility` value, and public_bool means a
-    boolean `-p`/`--public` was given."""
+    public_bool, input_given), where any_field means a field-family flag of
+    the current subcommand's table was given, field_values lists the
+    `-f`/`-F` k=v values, visibility is the `--visibility` value, public_bool
+    means a boolean `-p`/`--public` was given, and input_given means an
+    `--input` (any value) was given."""
     repo_flag = None
     operands = []
     method = None
@@ -251,9 +261,10 @@ def parse_gh_args(words):
     field_values = []
     visibility = None
     public_bool = False
+    input_given = False
 
     def record(long_name, value):
-        nonlocal repo_flag, method, any_field, visibility
+        nonlocal repo_flag, method, any_field, visibility, input_given
         if long_name == "--repo":
             repo_flag = value
         elif long_name == "--method":
@@ -262,7 +273,9 @@ def parse_gh_args(words):
             visibility = value
         elif long_name in API_FIELD_FLAGS:
             any_field = True
-            if long_name != "--input" and value is not None:
+            if long_name == "--input":
+                input_given = True
+            elif value is not None:
                 field_values.append(value)
 
     i = 0
@@ -315,7 +328,8 @@ def parse_gh_args(words):
             continue
         operands.append(w)
         i += 1
-    return repo_flag, operands, method, any_field, field_values, visibility, public_bool
+    return (repo_flag, operands, method, any_field, field_values, visibility,
+            public_bool, input_given)
 
 
 def field_flips_public(value):
@@ -329,6 +343,19 @@ def field_flips_public(value):
     return (k == "private" and v == "false") or (k == "visibility" and v == "public")
 
 
+# The JSON form of the same flip, for an `--input` body visible in the command
+# text (case-insensitive, like the field form). Quotes around the key and the
+# value are optional and may be backslash-escaped, so a double-quoted shell
+# string (`echo "{\"private\": false}"`) and a jq object literal
+# (`jq -n '{private:false}'`) both match. The word guards keep `isprivate` /
+# `falsehood` out.
+INPUT_BODY_FLIP_RE = re.compile(
+    r'(?<!\w)\\*"?private\\*"?\s*:\s*false(?!\w)'
+    r'|(?<!\w)\\*"?visibility\\*"?\s*:\s*\\*"?public(?!\w)',
+    re.IGNORECASE,
+)
+
+
 def gh_publication(unwrapped_argv):
     """Return a dict describing the publish, or None (not a publish)."""
     # Redirections (`2>&1`, `>out.txt 2>&1`, …) belong to the shell, never to
@@ -338,9 +365,8 @@ def gh_publication(unwrapped_argv):
     # TRACKED_ENV assignments are stripped separately (by unwrap_runners) and
     # stay untouched.
     words = strip_redirections(unwrapped_argv[1:])
-    repo_flag, operands, method, any_field, field_values, visibility, public = (
-        parse_gh_args(words)
-    )
+    (repo_flag, operands, method, any_field, field_values, visibility, public,
+     input_given) = parse_gh_args(words)
     if not operands:
         return None
     head = operands[0]
@@ -377,7 +403,13 @@ def gh_publication(unwrapped_argv):
             is_write = any_field
         if not is_write:
             return None
-        if not any(field_flips_public(v) for v in field_values):
+        # An `--input` body fed on stdin (here-string, heredoc, `echo … |`)
+        # sits in the command text, not in a field flag: with any `--input`,
+        # the WHOLE command text is scanned for the JSON flip as well.
+        flips = any(field_flips_public(v) for v in field_values) or (
+            input_given and INPUT_BODY_FLIP_RE.search(cmd) is not None
+        )
+        if not flips:
             return None
         meth_label = explicit_method or "POST"
         return {
@@ -922,7 +954,7 @@ else
 fi
 
 {
-echo "blocked: $KIND would make $DISPLAYS public. Run the going-public checklist (seyag:going-public) for it first; on pass set SYG_PUBLISH_CHECKED=$SLUG_HINT (colon-list ok; any non-empty value for a gist)."
+echo "blocked: $KIND would make $DISPLAYS public. Run the going-public checklist (seyag:going-public) for it first; on pass set SYG_PUBLISH_CHECKED=$SLUG_HINT (colon-list ok; any non-empty value for a gist) (it is read from the session's environment at start: the owner restarts the session with it exported, or runs the command herself with \`!\`)."
 if [ "$UNRESOLVABLE" = 1 ]; then
 cat <<'EOF'
 The target can't be read from the command text (a variable, a substitution,

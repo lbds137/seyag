@@ -19,7 +19,7 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 HOOK="$SCRIPT_DIR/context-size-reminder.sh"
 
 # The defaults are pinned below; an ambient override must not skew them.
-unset SYG_CONTEXT_THRESHOLD SYG_CONTEXT_COOLDOWN_MIN
+unset SYG_CONTEXT_THRESHOLD SYG_CONTEXT_THRESHOLD_FABLE SYG_CONTEXT_COOLDOWN_MIN
 
 command -v jq >/dev/null 2>&1 || {
     echo "FATAL: jq is required — the hook parses its stdin envelope with it" >&2
@@ -215,14 +215,18 @@ T="$TMPDIR_PROBE/postboundary.jsonl"
 run_hook postboundary "$T"
 assert_fires "usage entry after the boundary fires again" "~600k tokens"
 
-# ---- Case 13: the fired banner offers refresh as an alternative ------------
+# ---- Case 13: the fired banner asks for the /clear, /compact or keep pick ---
 T="$TMPDIR_PROBE/refresh.jsonl"
 {
     user_line
     assistant_line 1 600000 0
 } >"$T"
 run_hook refresh "$T"
-assert_fires "banner names the refresh alternative" "Handoff/Next"
+assert_fires "banner names the handoff (Handoff/Next)" "Handoff/Next"
+assert_fires "banner asks for the pick with its reason" "name the
+pick and its reason: /clear (next unit unrelated), /compact (it continues
+this thread) or keep (her next message is due within the hour, so the
+cache is warm)."
 
 # ---- Case 14: SYG_CONTEXT_THRESHOLD lowers the threshold ----------------
 T="$TMPDIR_PROBE/envthr.jsonl"
@@ -252,5 +256,33 @@ SYG_CONTEXT_COOLDOWN_MIN=60 run_hook envcool "$T"
 assert_silent "SYG_CONTEXT_COOLDOWN_MIN=60 keeps a 45-minute stamp quiet"
 run_hook envcool "$T"
 assert_fires "default 30-minute cooldown lets the same stamp fire" "~600k tokens"
+
+# ---- Case 17: the threshold follows the LAST assistant entry's model -------
+# A model starting with claude-fable uses SYG_CONTEXT_THRESHOLD_FABLE
+# (default 200k); any other model keeps SYG_CONTEXT_THRESHOLD (default 500k).
+model_line() { # $1 model, $2 cache_read (input 1, creation 0)
+    jq -nc --arg m "$1" --argjson r "$2" \
+        '{type: "assistant", message: {model: $m, usage: {input_tokens: 1, cache_read_input_tokens: $r, cache_creation_input_tokens: 0, output_tokens: 100}}}'
+}
+T="$TMPDIR_PROBE/fable250.jsonl"
+{ user_line; model_line claude-fable-5-1 250000; } >"$T"
+run_hook fable250 "$T"
+assert_fires "Fable at 250k fires (Fable default 200k)" "threshold 200k, claude-fable-5-1"
+T="$TMPDIR_PROBE/opus250.jsonl"
+{ user_line; model_line claude-opus-5-5 250000; } >"$T"
+run_hook opus250 "$T"
+assert_silent "Opus at 250k stays silent (default 500k)"
+T="$TMPDIR_PROBE/opus550.jsonl"
+{ user_line; model_line claude-opus-5-5 550000; } >"$T"
+run_hook opus550 "$T"
+assert_fires "Opus at 550k fires" "threshold 500k, claude-opus-5-5"
+T="$TMPDIR_PROBE/fable250env.jsonl"
+{ user_line; model_line claude-fable-5-1 250000; } >"$T"
+SYG_CONTEXT_THRESHOLD_FABLE=300000 run_hook fable250env "$T"
+assert_silent "SYG_CONTEXT_THRESHOLD_FABLE=300000 silences Fable at 250k"
+T="$TMPDIR_PROBE/fablelast.jsonl"
+{ user_line; model_line claude-fable-5-1 250000; user_line; model_line claude-opus-5-5 250000; } >"$T"
+run_hook fablelast "$T"
+assert_silent "an earlier Fable entry does not pick the threshold; the last (Opus) one does"
 
 exit $fail

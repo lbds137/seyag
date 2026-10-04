@@ -23,11 +23,11 @@ SHA. Deletions are sequential, not atomic: a mid-loop git failure stops the
 run leaving already-deleted branches deleted; nothing is rolled back.
 
 Eligibility is tree identity only: a branch is ELIGIBLE when its tree exactly
-matches a commit on the base (fast path: base-vs-branch diff; then a capped
-walk over the newest 200 base commits — when the walk hits that cap, DIFFERS
-lines say `(walk capped)`, since a match may exist beyond it). DIFFERS
-branches are reported, never deleted; a tip-subject match on the base is a
-report hint only.
+matches a commit on the base (exact tree-hash equality; fast path: the base
+tip; then a capped walk over the newest 200 base commits — when the walk hits
+that cap, DIFFERS lines say `(walk capped)`, since a match may exist beyond
+it). DIFFERS branches are reported, never deleted; a tip-subject match on the
+base is a report hint only.
 
 Never eligible (listed as SKIP): the current branch, the base branch, main
 and master, and every branch checked out in any worktree. Upstream/[gone]
@@ -140,8 +140,8 @@ fi
 BASE_SUBJECTS=$(git log --max-count=200 --format='%h%x09%s' "$BASE_REF" 2>/dev/null || true)
 # Iterate full refnames and strip the prefix here: under a tag/branch name
 # collision %(refname:short) disambiguates to heads/<name>, which would miss
-# the skip set and break `git branch -D`. The candidate-side git calls (both
-# diffs and the subject lookup) use the full refname — same DWIM reason as the
+# the skip set and break `git branch -D`. The candidate-side git calls (the
+# tree lookup and the subject lookup) use the full refname — same DWIM reason as the
 # base side: a same-named tag would otherwise win them and misjudge the branch
 # against the tag's tree. Everything display-shaped (skip set, report lines,
 # `git branch -D`) keeps the bare name.
@@ -164,15 +164,21 @@ while IFS= read -r full; do
     continue
   fi
 
-  # Eligibility = tree identity. Fast path first, then the capped walk.
+  # Eligibility = tree identity: exact tree-hash equality, never `git diff
+  # --quiet`, which honors diff.ignoreSubmodules and would call a branch that
+  # differs only by a gitlink identical. An unresolvable tree (empty hash) is
+  # never a match. Fast path first, then the capped walk.
   match=""
-  if git diff --quiet "$BASE_REF" "$full" >/dev/null 2>&1; then
-    match=$(git rev-parse "$BASE_REF")
-  else
-    while IFS= read -r c; do
-      [ -n "$c" ] || continue
-      if git diff --quiet "$c" "$full" >/dev/null 2>&1; then match=$c; break; fi
-    done < <(printf '%s\n' "$WALK_COMMITS")
+  branch_tree=$(git rev-parse --verify -q "$full^{tree}" 2>/dev/null || true)
+  if [ -n "$branch_tree" ]; then
+    if [ "$(git rev-parse --verify -q "$BASE_REF^{tree}" 2>/dev/null || true)" = "$branch_tree" ]; then
+      match=$(git rev-parse "$BASE_REF")
+    else
+      while IFS= read -r c; do
+        [ -n "$c" ] || continue
+        if [ "$(git rev-parse --verify -q "$c^{tree}" 2>/dev/null || true)" = "$branch_tree" ]; then match=$c; break; fi
+      done < <(printf '%s\n' "$WALK_COMMITS")
+    fi
   fi
 
   if [ -n "$match" ]; then

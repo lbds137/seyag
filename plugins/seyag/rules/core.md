@@ -42,7 +42,7 @@ On the Anthropic lane she drives from her phone, often by voice (Remote Control)
 - Reading ~4+ files just for a conclusion goes to an `Explore` agent on a cheap `model`; your own diff reads and premise checks stay inline.
 - New or changed logic (code, rules, hooks, scripts) gets a fresh-context review agent before push; a typo or a one-line fix with a green gate doesn't.
 - Pass `model` on every non-fork Agent call: named agents default to their definition's model (`seyag:implementer`: the strongest tier), others to yours. Role split and budgets: memory "Model roles + usage posture".
-- Which model drives is the owner's `/model`. When the next unit's class (big-picture vs drain) doesn't match the current driver, or the usage meter's gap hint names a lane other than the current driver's, run the `driver-choice` skill at the next clean boundary and recommend; never switch yourself.
+- Her `/model` picks the driver. When the next unit's class (big-picture vs drain) mismatches it or the weekly meter crosses its wind-down threshold, run `driver-choice` at the next clean boundary and recommend; never switch yourself.
 - Where a project has adopted the `delegation` skill, implementation over ~5 lines goes through it; elsewhere, dispatch when the spec costs less than the edit.
 - Launch independent agents in parallel, in one message.
 
@@ -149,7 +149,7 @@ These add to the global ask-first list in `~/.claude/CLAUDE.md`.
 
 - Before any boundary (a refresh, `/clear`, `/compact`, the end of a session), write the handoff to disk (the role file's Handoff and Next, or the project's own status file) and say that it's written. `/clear` keeps nothing, and `/compact` keeps only a lossy summary.
 - Past about a week in one session, name it at a clean boundary and suggest a refresh; summaries of summaries drift from disk. This is hygiene, not the "don't suggest stopping" case, so never tie it to the clock or to her.
-- On the big-picture lane prefer `/clear` (a compact re-bills the whole context on the expensive model); on the orchestrator lane `/compact` is fine. The disk handoff makes either safe.
+- At each finished unit, handoff on disk, name one pick: `/clear` (unrelated next unit), `/compact` (same thread) or keep (reply due within the hour; warm cache); big-picture leans `/clear`. She runs it; never schedule wakeups to keep the cache warm.
 - After a `/clear`, background agents keep running, but a pre-clear worktree-isolated agent can't be resumed with `SendMessage`; dispatch a fresh one with no isolation flag, pointed at its worktree by absolute path. Check `git worktree list` and `ListAgents` before calling a tree stale.
 - A scripted `claude -p` that needs no MCP tools passes `--strict-mcp-config`; without it every MCP server starts, and parallel calls have wedged the TPM through council's key decrypt.
 
