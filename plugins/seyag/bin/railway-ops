@@ -1,0 +1,773 @@
+#!/usr/bin/env python3
+"""railway-ops: Railway variable, redeploy, secret-rotation and log operations that always
+name their environment explicitly and never print a variable value.
+
+Usage:
+  railway-ops [--config FILE] ids <env> [--service S]
+  railway-ops [--config FILE] vars list   <env> (--service S | --shared)
+  railway-ops [--config FILE] vars set    <env> (--service S | --shared) NAME (--from-env VAR | --from-stdin) [WRITE]
+  railway-ops [--config FILE] vars delete <env> (--service S | --shared) NAME [WRITE]
+  railway-ops [--config FILE] redeploy <env> <service> [WRITE]
+  railway-ops [--config FILE] rotate-secret <env> NAME [--length N] [WRITE]
+  railway-ops [--config FILE] logs <env> [<service>] [--lines N] [--grep RE] [--deployment ID]
+
+WRITE:    every write verb is a dry run by default and prints its plan; --yes executes. On a
+          protected env --yes alone is refused: pass --yes --confirm-protected <env>, typed exactly.
+<env>:    a short name from the config's "envs" map (e.g. dev, prod).
+
+Verbs:
+  ids            project, environment and service ids, resolved BY NAME from `railway status --json`.
+  vars list      variable NAMES at one scope, sorted. No verb ever prints a value.
+  vars set       upsert one variable with skipDeploys, then print which services need a redeploy
+                 (no automatic redeploy). The value comes only from an env var or stdin, never argv.
+  vars delete    delete one variable (the railway CLI cannot).
+  redeploy       GraphQL serviceInstanceRedeploy with explicitly resolved environment and service
+                 ids; never the CLI's `railway redeploy`, which acts on the LINKED environment.
+  rotate-secret  rotate an EXISTING shared variable: generate a value (secrets.token_urlsafe of
+                 --length random bytes, default 32), upsert it to the shared tier with skipDeploys,
+                 then redeploy each service that carries NAME. Refuses when no service carries it.
+  logs           `railway logs` with explicit --environment and --service; --lines is capped at
+                 5000 (above it the CLI returns zero rows); --grep is a Python regex applied locally.
+                 With no <service>, sweeps the config's "services" list.
+
+Config (JSON, no secrets): --config FILE, else .railway-ops.json searched upward from the
+current directory to the git root (only the current directory outside a git repo).
+  envs       {"dev": "development", "prod": "production"}   short name -> Railway environment name
+  protected  ["prod"]   default ["prod"] (needs a "prod" key); each entry must be a key of envs.
+             An alias of a protected env's Railway name is protected too. [] UNPROTECTS EVERY env.
+  token_env  {"dev": "MY_DEV_TOKEN"}   env var NAME holding that environment's project token;
+             default RAILWAY_PROJECT_TOKEN_<SHORT_UPPER>. RAILWAY_TOKEN and RAILWAY_API_TOKEN are
+             refused: they are the railway CLI's own login variables. Two envs may not share one.
+  services   ["api", "worker"]          default service list for `logs`
+
+Auth: one PROJECT-scoped token per environment (Railway mints them per environment), sent as the
+Project-Access-Token header to https://backboard.railway.app/graphql/v2 (30s timeout).
+
+Redirects are never followed, so a 3xx cannot carry the token elsewhere.
+
+Test seams (environment):
+  RAILWAY_OPS_ENDPOINT   overrides the GraphQL URL (https, or http to 127.0.0.1/localhost/::1 only)
+  RAILWAY_OPS_CLI        overrides the `railway` binary path
+
+Exit codes: 0 ok, 1 Railway or runtime failure, 2 usage or refused.
+"""
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+import urllib.parse
+
+# urllib.request, urllib.error, http.client and socket are imported inside gql(), and secrets in
+# rotate-secret: together about 60 ms per run, and most runs (dry runs, refusals, ids, logs) need none.
+
+DEFAULT_ENDPOINT = "https://backboard.railway.app/graphql/v2"
+TIMEOUT_S = 30
+MAX_LOG_LINES = 5000
+CLI_LOGIN_VARS = ("RAILWAY_TOKEN", "RAILWAY_API_TOKEN")
+CONFIG_NAME = ".railway-ops.json"
+CONFIG_KEYS = {"envs", "protected", "token_env", "services"}
+
+VARIABLES_QUERY = """
+  query Variables($projectId: String!, $environmentId: String!, $serviceId: String) {
+    variables(projectId: $projectId, environmentId: $environmentId, serviceId: $serviceId)
+  }
+"""
+VARIABLE_UPSERT_MUTATION = """
+  mutation VariableUpsert($input: VariableUpsertInput!) {
+    variableUpsert(input: $input)
+  }
+"""
+VARIABLE_DELETE_MUTATION = """
+  mutation VariableDelete($input: VariableDeleteInput!) {
+    variableDelete(input: $input)
+  }
+"""
+SERVICE_INSTANCE_REDEPLOY_MUTATION = """
+  mutation ServiceInstanceRedeploy($environmentId: String!, $serviceId: String!) {
+    serviceInstanceRedeploy(environmentId: $environmentId, serviceId: $serviceId)
+  }
+"""
+
+
+class UsageError(Exception):
+    """Operator-fixable; exit 2."""
+
+
+class OpsError(Exception):
+    """Railway or runtime failure; exit 1."""
+
+
+# ---------- config ----------
+
+def find_config(explicit):
+    if explicit:
+        if not os.path.isfile(explicit):
+            raise UsageError(f"config file not found: {explicit}")
+        return explicit
+    d = os.path.abspath(os.getcwd())
+    while True:
+        cand = os.path.join(d, CONFIG_NAME)
+        if os.path.isfile(cand):
+            return cand
+        if os.path.exists(os.path.join(d, ".git")):
+            break
+        parent = os.path.dirname(d)
+        if parent == d:
+            # not in a git repo: only the starting directory counts
+            cand = os.path.join(os.path.abspath(os.getcwd()), CONFIG_NAME)
+            return cand if os.path.isfile(cand) else None
+        d = parent
+    return None
+
+
+def load_config(explicit):
+    path = find_config(explicit)
+    if path is None:
+        raise UsageError(f"no {CONFIG_NAME} found (searched up to the git root); pass --config FILE")
+    try:
+        with open(path, encoding="utf-8") as f:
+            cfg = json.load(f)
+    except (OSError, ValueError) as e:
+        raise UsageError(f"cannot read config {path}: {e}")
+    if not isinstance(cfg, dict):
+        raise UsageError(f"config {path}: top level must be a JSON object")
+    unknown = sorted(set(cfg) - CONFIG_KEYS)
+    if unknown:
+        raise UsageError(f"config {path}: unknown key(s) {', '.join(unknown)} "
+                         f"(allowed: {', '.join(sorted(CONFIG_KEYS))}); a typo here could unprotect an env")
+    envs = cfg.get("envs")
+    if not isinstance(envs, dict) or not envs or not all(
+            isinstance(k, str) and isinstance(v, str) and k and v for k, v in envs.items()):
+        raise UsageError(f'config {path}: "envs" must be a non-empty map of short name -> Railway environment name')
+    if "protected" not in cfg and "prod" not in envs:
+        raise UsageError(f'config {path}: no "prod" env for the default "protected": ["prod"]; set "protected" '
+                         'explicitly ([] protects nothing)')
+    protected = cfg.get("protected", ["prod"])
+    if not isinstance(protected, list) or not all(isinstance(p, str) for p in protected):
+        raise UsageError(f'config {path}: "protected" must be a list of short names')
+    stray = sorted(p for p in protected if p not in envs)
+    if stray:
+        raise UsageError(f'config {path}: "protected" names {", ".join(stray)}, not a key in "envs" '
+                         f'({", ".join(sorted(envs))}); a misspelt entry would protect nothing')
+    token_env = cfg.get("token_env", {})
+    if not isinstance(token_env, dict) or not all(
+            isinstance(k, str) and isinstance(v, str) and v for k, v in token_env.items()):
+        raise UsageError(f'config {path}: "token_env" must be a map of short name -> env var name')
+    for short, var in token_env.items():
+        if var in CLI_LOGIN_VARS:
+            raise UsageError(
+                f'config {path}: token_env["{short}"] is {var}, the railway CLI\'s own login variable. '
+                "Setting it to a project token breaks `railway status` (and so id resolution). "
+                "Name a different variable, e.g. RAILWAY_PROJECT_TOKEN_" + token_var_suffix(short) + ".")
+    seen = {}
+    for short in sorted(envs):
+        var = token_env.get(short) or f"RAILWAY_PROJECT_TOKEN_{token_var_suffix(short)}"
+        if var in seen:
+            raise UsageError(f'config {path}: envs "{seen[var]}" and "{short}" both read their token from {var}; '
+                             "each environment needs its own token variable")
+        seen[var] = short
+    services = cfg.get("services", [])
+    if not isinstance(services, list) or not all(isinstance(s, str) and s for s in services):
+        raise UsageError(f'config {path}: "services" must be a list of service names')
+    return {"envs": envs, "protected": protected, "token_env": token_env, "services": services}
+
+
+def token_var_suffix(short):
+    return re.sub(r"[^A-Za-z0-9]", "_", short).upper()
+
+
+def env_name(cfg, short):
+    if short not in cfg["envs"]:
+        raise UsageError(f'unknown env "{short}"; configured: {", ".join(sorted(cfg["envs"]))}')
+    return cfg["envs"][short]
+
+
+def token_var(cfg, short):
+    return cfg["token_env"].get(short) or f"RAILWAY_PROJECT_TOKEN_{token_var_suffix(short)}"
+
+
+def require_token(cfg, short):
+    var = token_var(cfg, short)
+    tok = os.environ.get(var, "")
+    if not tok:
+        raise UsageError(f"{var} is not set. Mint a PROJECT-scoped token for this environment in the "
+                         "Railway dashboard (Project Settings -> Tokens) and export it.")
+    return tok
+
+
+def is_protected(cfg, short):
+    """Protected when its Railway environment NAME is that of any protected short name (aliases inherit)."""
+    name = env_name(cfg, short)
+    return any(cfg["envs"][p] == name for p in cfg["protected"])
+
+
+def confirm_suffix(cfg, short):
+    return f" --confirm-protected {short}" if is_protected(cfg, short) else ""
+
+
+def guard_write(cfg, short, args):
+    """Protected-env rule, checked before any id resolution or request."""
+    confirm = getattr(args, "confirm_protected", None)
+    if confirm is not None and confirm != short:
+        raise UsageError(f'--confirm-protected "{confirm}" does not match the target env "{short}"; refused.')
+    if args.yes and is_protected(cfg, short) and confirm != short:
+        raise UsageError(f'"{short}" is a protected env: --yes alone is refused. '
+                         f"Re-run with --yes --confirm-protected {short} once a human has read the plan.")
+
+
+# ---------- railway CLI (status, logs) ----------
+
+def cli_bin():
+    return os.environ.get("RAILWAY_OPS_CLI") or "railway"
+
+
+def railway_status():
+    try:
+        p = subprocess.run([cli_bin(), "status", "--json"], capture_output=True, text=True, timeout=TIMEOUT_S)
+    except FileNotFoundError:
+        raise UsageError(f"railway CLI not found ({cli_bin()}); install it or set RAILWAY_OPS_CLI")
+    except subprocess.TimeoutExpired:
+        raise OpsError("`railway status --json` timed out after 30s")
+    if p.returncode != 0:
+        raise UsageError('failed to run "railway status --json": is this checkout linked to a Railway '
+                         f'project? Run "railway link". ({p.stderr.strip()[:300] or f"exit {p.returncode}"})')
+    try:
+        raw = json.loads(p.stdout)
+    except ValueError:
+        raise UsageError('"railway status --json" did not return valid JSON')
+    problems = []
+
+    def nodes(key):
+        try:
+            edges = raw[key]["edges"]
+            out = []
+            for i, edge in enumerate(edges):
+                n = edge["node"]
+                if not isinstance(n.get("id"), str) or not isinstance(n.get("name"), str):
+                    problems.append(f"{key}.edges.{i}.node")
+                    continue
+                out.append({"id": n["id"], "name": n["name"]})
+            return out
+        except (KeyError, TypeError):
+            problems.append(key)
+            return []
+
+    if not isinstance(raw, dict):
+        raise UsageError('"railway status --json" returned an unexpected shape (not an object)')
+    if not isinstance(raw.get("id"), str):
+        problems.append("id")
+    envs, svcs = nodes("environments"), nodes("services")
+    if problems:
+        raise UsageError('"railway status --json" returned an unexpected shape (the Railway CLI output '
+                         f"format may have changed); problem field(s): {', '.join(problems)}")
+    return {"projectId": raw["id"], "projectName": raw.get("name") if isinstance(raw.get("name"), str) else "",
+            "environments": envs, "services": svcs}
+
+
+def resolve(cfg, short, service=None):
+    name = env_name(cfg, short)
+    st = railway_status()
+    env = next((e for e in st["environments"] if e["name"] == name), None)
+    if env is None:
+        raise UsageError(f'Railway environment "{name}" not found. Environments present: '
+                         f'{", ".join(e["name"] for e in st["environments"])}')
+    out = {"projectId": st["projectId"], "projectName": st["projectName"], "envName": name,
+           "environmentId": env["id"], "services": st["services"]}
+    if service is not None:
+        svc = next((s for s in st["services"] if s["name"] == service), None)
+        if svc is None:
+            raise UsageError(f'Railway service "{service}" not found. Services present: '
+                             f'{", ".join(s["name"] for s in st["services"])}')
+        out["serviceId"] = svc["id"]
+        out["serviceName"] = service
+    return out
+
+
+# ---------- GraphQL ----------
+
+def no_redirect_opener():
+    """An opener whose 3xx surfaces as an HTTPError instead of a second request carrying the token."""
+    import urllib.request
+
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            return None
+
+    return urllib.request.build_opener(NoRedirect)
+
+
+LOOPBACK = {"127.0.0.1", "localhost", "::1"}
+
+
+def endpoint():
+    url = os.environ.get("RAILWAY_OPS_ENDPOINT") or DEFAULT_ENDPOINT
+    parts = urllib.parse.urlsplit(url)
+    if parts.scheme == "https" and parts.hostname:
+        return url
+    if parts.scheme == "http" and parts.hostname in LOOPBACK:
+        return url
+    raise UsageError("RAILWAY_OPS_ENDPOINT must be https, or http only to 127.0.0.1, localhost or ::1; "
+                     "refusing to send a token there")
+
+
+def gql(cfg, short, query, variables):
+    """POST one operation; return data. Errors carry Railway's messages, never the token or body."""
+    import http.client
+    import socket
+    import urllib.error
+    import urllib.request
+    url = endpoint()
+    token = require_token(cfg, short)
+    req = urllib.request.Request(
+        url,
+        data=json.dumps({"query": query, "variables": variables}).encode(),
+        method="POST",
+        headers={"Content-Type": "application/json", "Project-Access-Token": token,
+                 "User-Agent": "railway-ops"})
+    try:
+        try:
+            with no_redirect_opener().open(req, timeout=TIMEOUT_S) as resp:
+                status, raw = resp.status, resp.read()
+        except urllib.error.HTTPError as e:
+            if 300 <= e.code < 400:
+                raise OpsError(f"Railway API answered with a redirect (HTTP {e.code}); not followed, "
+                               "so the token was not re-sent") from None
+            status, raw = e.code, e.read()
+    except OpsError:
+        raise
+    except (socket.timeout, TimeoutError):
+        raise OpsError("Railway API request timed out after 30s") from None
+    except urllib.error.URLError as e:
+        if isinstance(e.reason, (socket.timeout, TimeoutError)):
+            raise OpsError("Railway API request timed out after 30s") from None
+        raise OpsError(f"Railway API request failed: {e.reason}") from None
+    except (OSError, http.client.HTTPException):
+        raise OpsError("Railway API connection failed (dropped connection or malformed response)") from None
+    try:
+        body = json.loads(raw)
+    except ValueError:
+        raise OpsError(f"Railway API returned a non-JSON body (status {status})")
+    if not isinstance(body, dict):
+        raise OpsError(f"Railway API returned an unexpected body (status {status})")
+    errors = body.get("errors")
+    if errors:
+        msgs = "; ".join((e.get("message") if isinstance(e, dict) and e.get("message") else "(no message)")
+                         for e in (errors if isinstance(errors, list) else [errors]))
+        raise OpsError(f"Railway API returned errors (status {status}): {msgs}")
+    if not 200 <= status < 300:
+        raise OpsError(f"Railway API request failed: HTTP {status}")
+    if body.get("data") is None:
+        raise OpsError("Railway API response carried no data")
+    return body["data"]
+
+
+def shape_error(label):
+    return OpsError(f"Railway API returned an unexpected shape for a {label} response "
+                    "(the operation return type may have changed)")
+
+
+def scope_vars(ids, service_id):
+    v = {"projectId": ids["projectId"], "environmentId": ids["environmentId"]}
+    if service_id is not None:
+        v["serviceId"] = service_id
+    return v
+
+
+def list_names(cfg, short, ids, service_id):
+    data = gql(cfg, short, VARIABLES_QUERY, scope_vars(ids, service_id))
+    if not isinstance(data, dict) or not isinstance(data.get("variables"), dict):
+        raise shape_error("variables")
+    return sorted(data["variables"])  # keys only; values are never read
+
+
+def upsert(cfg, short, ids, service_id, name, value):
+    inp = scope_vars(ids, service_id)
+    inp.update({"name": name, "value": value, "skipDeploys": True})
+    try:
+        data = gql(cfg, short, VARIABLE_UPSERT_MUTATION, {"input": inp})
+    except OpsError:
+        # Railway's error text can echo the submitted value in shapes no scrub recognises, so it is
+        # withheld entirely for this one operation; the variable NAME is not a secret.
+        raise OpsError(f'Railway API upsert failed for variable "{name}". Railway\'s own error text is '
+                       "withheld here because it can echo the submitted value; check the Railway "
+                       "dashboard for the detail.") from None
+    if not isinstance(data, dict) or not isinstance(data.get("variableUpsert"), bool):
+        raise shape_error("variable-upsert")
+    if data["variableUpsert"] is False:
+        raise OpsError(f'Railway rejected the upsert for variable "{name}"')
+
+
+def delete(cfg, short, ids, service_id, name):
+    inp = scope_vars(ids, service_id)
+    inp["name"] = name
+    data = gql(cfg, short, VARIABLE_DELETE_MUTATION, {"input": inp})
+    if not isinstance(data, dict) or not isinstance(data.get("variableDelete"), bool):
+        raise shape_error("variable-delete")
+    if data["variableDelete"] is False:
+        raise OpsError(f'Railway rejected the delete for variable "{name}"')
+
+
+def redeploy_service(cfg, short, environment_id, service_id, service_name):
+    data = gql(cfg, short, SERVICE_INSTANCE_REDEPLOY_MUTATION,
+               {"environmentId": environment_id, "serviceId": service_id})
+    if not isinstance(data, dict) or not isinstance(data.get("serviceInstanceRedeploy"), bool):
+        raise shape_error("service-redeploy")
+    if data["serviceInstanceRedeploy"] is False:
+        raise OpsError(f'Railway rejected the redeploy for service "{service_name}"')
+
+
+def carrying_services(cfg, short, ids, name):
+    """Services whose variable list carries NAME. Railway's per-service list cannot tell an
+    inherited shared value from a service-level override, so an override counts as carrying."""
+    out = []
+    for svc in ids["services"]:
+        try:
+            names = list_names(cfg, short, ids, svc["id"])
+        except OpsError as e:
+            raise OpsError(f'listing variables for service "{svc["name"]}" failed: {e}')
+        if name in names:
+            out.append(svc)
+    return out
+
+
+# ---------- verbs ----------
+
+def scope_of(args):
+    if bool(args.service) == bool(args.shared):
+        raise UsageError("pass exactly one of --service <name> or --shared")
+    return args.service
+
+
+def scope_label(service):
+    return "shared (project-level)" if service is None else f"service {service}"
+
+
+def print_head(title, ids, extra=()):
+    print(title)
+    print(f"  Environment: {ids['envName']} ({ids['environmentId']})")
+    for line in extra:
+        print(f"  {line}")
+
+
+def dry_run_footer(short, cfg):
+    flag = "--yes" + confirm_suffix(cfg, short)
+    print(f"\n[DRY RUN] No changes made. Re-run with {flag} to execute.")
+
+
+def cmd_ids(cfg, args):
+    ids = resolve(cfg, args.env, args.service)
+    print(f"project      {ids['projectName'] or '-'}  {ids['projectId']}")
+    print(f"environment  {ids['envName']}  {ids['environmentId']}")
+    if args.service is not None:
+        print(f"service      {ids['serviceName']}  {ids['serviceId']}")
+    return 0
+
+
+def cmd_vars_list(cfg, args):
+    service = scope_of(args)
+    require_token(cfg, args.env)
+    ids = resolve(cfg, args.env, service)
+    names = list_names(cfg, args.env, ids, ids.get("serviceId"))
+    for n in names:
+        print(n)
+    print(f"{len(names)} variable(s), {scope_label(service)}, {ids['envName']} (names only)", file=sys.stderr)
+    return 0
+
+
+def read_value(args):
+    if args.from_env is not None:
+        if args.from_env not in os.environ:
+            raise UsageError(f"--from-env {args.from_env}: that variable is not set")
+        value = os.environ[args.from_env]
+    else:
+        try:
+            value = sys.stdin.buffer.read().decode("utf-8")
+        except UnicodeDecodeError:
+            raise UsageError("stdin is not valid UTF-8; refusing (the value is not echoed)") from None
+        if value.endswith("\n"):
+            value = value[:-1]
+            if value.endswith("\r"):
+                value = value[:-1]
+    if value == "":
+        raise UsageError("the value is empty; refusing to set an empty variable")
+    return value
+
+
+def cmd_vars_set(cfg, args):
+    if args.extra:
+        raise UsageError("a value never comes from argv (it would sit in the process table and shell "
+                         "history); pass it with --from-env VAR or --from-stdin")
+    if (args.from_env is None) == (not args.from_stdin):
+        raise UsageError("pass exactly one of --from-env VAR or --from-stdin")
+    service = scope_of(args)
+    guard_write(cfg, args.env, args)
+    require_token(cfg, args.env)
+    value = read_value(args)
+    ids = resolve(cfg, args.env, service)
+    print_head(f'About to set Railway variable "{args.name}"', ids,
+               [f"Scope: {scope_label(service)}",
+                f"Value: from {'$' + args.from_env if args.from_env else 'stdin'} (never printed)",
+                "Deploys: skipDeploys=true (no implicit deploy; redeploy explicitly afterwards)"])
+    if not args.yes:
+        dry_run_footer(args.env, cfg)
+        return 0
+    upsert(cfg, args.env, ids, ids.get("serviceId"), args.name, value)
+    print(f'\nSet "{args.name}" ({scope_label(service)}) in Railway {ids["envName"]}; no deploy was triggered.')
+    if service is not None:
+        need = [service]
+    else:
+        need = [s["name"] for s in carrying_services(cfg, args.env, ids, args.name)]
+    if need:
+        print("Redeploy needed for the new value to take effect: " + ", ".join(need))
+        for s in need:
+            print(f"  railway-ops redeploy {args.env} {s} --yes"
+                  + confirm_suffix(cfg, args.env))
+    else:
+        print(f'No service carries "{args.name}" yet; share it to services in the dashboard, then redeploy them.')
+    return 0
+
+
+def cmd_vars_delete(cfg, args):
+    service = scope_of(args)
+    guard_write(cfg, args.env, args)
+    require_token(cfg, args.env)
+    ids = resolve(cfg, args.env, service)
+    print_head(f'About to delete Railway variable "{args.name}"', ids, [f"Scope: {scope_label(service)}"])
+    if not args.yes:
+        dry_run_footer(args.env, cfg)
+        return 0
+    delete(cfg, args.env, ids, ids.get("serviceId"), args.name)
+    print(f'\nDeleted "{args.name}" ({scope_label(service)}) from Railway {ids["envName"]}.')
+    print("Railway may deploy the affected services on a variable change; check the dashboard.")
+    return 0
+
+
+def cmd_redeploy(cfg, args):
+    guard_write(cfg, args.env, args)
+    require_token(cfg, args.env)
+    ids = resolve(cfg, args.env, args.service)
+    print_head(f'About to redeploy service "{args.service}"', ids,
+               [f"Service: {args.service} ({ids['serviceId']})",
+                "Via: GraphQL serviceInstanceRedeploy with these explicit ids (not the CLI's linked env)"])
+    if not args.yes:
+        dry_run_footer(args.env, cfg)
+        return 0
+    redeploy_service(cfg, args.env, ids["environmentId"], ids["serviceId"], args.service)
+    print(f'\nRedeploy requested for "{args.service}" in Railway {ids["envName"]}.')
+    return 0
+
+
+def cmd_rotate(cfg, args):
+    if args.length < 16:
+        raise UsageError("--length is the number of random bytes and must be at least 16")
+    guard_write(cfg, args.env, args)
+    require_token(cfg, args.env)
+    ids = resolve(cfg, args.env)
+    shared = list_names(cfg, args.env, ids, None)
+    if args.name not in shared:
+        raise UsageError(f'"{args.name}" is not a shared (project-level) variable in Railway {ids["envName"]}; '
+                         "rotate-secret ROTATES an existing shared variable, it does not create one.")
+    affected = carrying_services(cfg, args.env, ids, args.name)
+    print_head(f'About to rotate Railway variable "{args.name}"', ids,
+               ["Tier: shared (project-level)",
+                f"New value: token_urlsafe({args.length}) (never printed)",
+                "Affected services (carry the name): " + (", ".join(s["name"] for s in affected) or "(none)"),
+                "Note: a service-level override also carries the name and keeps its own value."])
+    if not affected:
+        msg = (f'No service in Railway {ids["envName"]} carries "{args.name}"; rotating it now would change '
+               "nothing until the next unrelated deploy, and surface as a surprise mismatch then.")
+        if not args.yes:
+            print(f"\nA real run would REFUSE: {msg}")
+            print("\n[DRY RUN] No changes made.")
+            return 0
+        raise UsageError(msg)
+    if not args.yes:
+        dry_run_footer(args.env, cfg)
+        return 0
+    try:
+        import secrets  # lazy, like the network modules: only rotation needs it
+        upsert(cfg, args.env, ids, None, args.name, secrets.token_urlsafe(args.length))
+    except OpsError as e:
+        raise OpsError(f"{e} No service was redeployed. Check the dashboard for whether the shared value "
+                       "changed before re-running.") from None
+    failures, done = [], []
+    for svc in affected:
+        try:
+            redeploy_service(cfg, args.env, ids["environmentId"], svc["id"], svc["name"])
+            done.append(svc["name"])
+        except OpsError as e:
+            failures.append((svc["name"], str(e)))
+        except Exception as e:  # after a good upsert, any failure takes the partial-failure path
+            failures.append((svc["name"], f"unexpected {type(e).__name__}"))
+    confirm = confirm_suffix(cfg, args.env)
+    if failures:
+        print(f'\nRotated "{args.name}" (shared) in Railway {ids["envName"]}, but '
+              f"{len(failures)} service(s) failed to redeploy")
+    else:
+        print(f'\nRotated "{args.name}" (shared) in Railway {ids["envName"]}')
+    print("  Upsert: done (skipDeploys=true)")
+    print("  Services redeployed: " + (", ".join(done) or "(none)"))
+    if failures:
+        print(f"\n{len(failures)} service(s) failed to redeploy:", file=sys.stderr)
+        for n, err in failures:
+            print(f"  - {n}: {err}", file=sys.stderr)
+        print("\nThe variable was rotated successfully; re-running would mint a THIRD value and widen the "
+              "split. Repair the lagging service(s) with `railway-ops redeploy " + args.env
+              + " <service> --yes" + confirm + "` or from the Railway dashboard. Do NOT re-run this command.",
+              file=sys.stderr)
+        return 1
+    return 0
+
+
+def cmd_logs(cfg, args):
+    if args.lines < 1 or args.lines > MAX_LOG_LINES:
+        raise UsageError(f"--lines {args.lines} is outside 1..{MAX_LOG_LINES}: above {MAX_LOG_LINES} the railway "
+                         "CLI fails its limit check and returns ZERO rows, which reads like 'no matching logs'. "
+                         "To reach further back, pass --deployment <id> for an earlier deployment.")
+    if args.deployment is not None and (args.deployment.startswith("-") or not args.deployment):
+        raise UsageError("--deployment must be a deployment id, not empty and not starting with '-' "
+                         "(it would be read as a flag)")
+    pattern = None
+    if args.grep is not None:
+        try:
+            pattern = re.compile(args.grep)
+        except re.error as e:
+            raise UsageError(f"--grep: invalid regex: {e}")
+    name = env_name(cfg, args.env)
+    services = [args.service] if args.service else list(cfg["services"])
+    if not services:
+        raise UsageError('name a <service>, or set a default "services" list in the config')
+    failed = 0
+    total_rows = total_matched = 0
+    for svc in services:
+        argv = [cli_bin(), "logs"]
+        if args.deployment:
+            argv.append(args.deployment)
+        argv += ["--environment", name, "--service", svc, "--lines", str(args.lines)]
+        try:
+            p = subprocess.run(argv, capture_output=True, text=True, timeout=120)
+        except FileNotFoundError:
+            raise UsageError(f"railway CLI not found ({cli_bin()}); install it or set RAILWAY_OPS_CLI")
+        except subprocess.TimeoutExpired:
+            print(f"railway-ops: logs for {svc} timed out after 120s", file=sys.stderr)
+            failed += 1
+            continue
+        if p.returncode != 0:
+            print(f"railway-ops: `railway logs` for {svc} failed (exit {p.returncode}): "
+                  f"{p.stderr.strip()[:500]}", file=sys.stderr)
+            failed += 1
+            continue
+        rows = [ln for ln in p.stdout.splitlines() if ln.strip()]
+        matched = [ln for ln in rows if pattern is None or pattern.search(ln)]
+        total_rows += len(rows)
+        total_matched += len(matched)
+        if len(services) > 1:
+            print(f"== {svc} ==")
+        for ln in matched:
+            print(ln)
+    summary = f"{total_matched} line(s) shown of {total_rows} fetched across {len(services)} service window(s) of up to {args.lines}"
+    print(summary + (f"; {failed} fetch(es) FAILED, so this is incomplete" if failed else ""), file=sys.stderr)
+    if total_rows == 0 and not failed:
+        print("zero rows: suspect the query (environment, service, deployment id) before concluding the logs are gone",
+              file=sys.stderr)
+    return 1 if failed else 0
+
+
+# ---------- argparse ----------
+
+class Parser(argparse.ArgumentParser):
+    def error(self, message):
+        self.print_usage(sys.stderr)
+        print(f"railway-ops: {message}", file=sys.stderr)
+        sys.exit(2)
+
+
+def add_write_flags(p):
+    p.add_argument("--yes", action="store_true", help="execute (default is a dry run)")
+    p.add_argument("--confirm-protected", metavar="ENV", help="required with --yes on a protected env")
+
+
+def add_scope(p):
+    p.add_argument("--service", metavar="S")
+    p.add_argument("--shared", action="store_true")
+
+
+def build_parser():
+    top = Parser(prog="railway-ops", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    top.add_argument("--config", metavar="FILE")
+    sub = top.add_subparsers(dest="verb", parser_class=Parser)
+
+    p = sub.add_parser("ids", help="resolve ids by name")
+    p.add_argument("env")
+    p.add_argument("--service", metavar="S")
+    p.set_defaults(fn=cmd_ids)
+
+    pv = sub.add_parser("vars", help="list, set or delete variables")
+    vs = pv.add_subparsers(dest="vverb", parser_class=Parser)
+    p = vs.add_parser("list")
+    p.add_argument("env")
+    add_scope(p)
+    p.set_defaults(fn=cmd_vars_list)
+    p = vs.add_parser("set")
+    p.add_argument("env")
+    p.add_argument("name")
+    p.add_argument("extra", nargs="*", help=argparse.SUPPRESS)
+    add_scope(p)
+    p.add_argument("--from-env", metavar="VAR")
+    p.add_argument("--from-stdin", action="store_true")
+    add_write_flags(p)
+    p.set_defaults(fn=cmd_vars_set)
+    p = vs.add_parser("delete")
+    p.add_argument("env")
+    p.add_argument("name")
+    add_scope(p)
+    add_write_flags(p)
+    p.set_defaults(fn=cmd_vars_delete)
+
+    p = sub.add_parser("redeploy", help="redeploy one service by explicit ids")
+    p.add_argument("env")
+    p.add_argument("service")
+    add_write_flags(p)
+    p.set_defaults(fn=cmd_redeploy)
+
+    p = sub.add_parser("rotate-secret", help="rotate an existing shared variable")
+    p.add_argument("env")
+    p.add_argument("name")
+    p.add_argument("--length", type=int, default=32, metavar="N", help="random bytes (default 32)")
+    add_write_flags(p)
+    p.set_defaults(fn=cmd_rotate)
+
+    p = sub.add_parser("logs", help="pull capped logs, grep locally")
+    p.add_argument("env")
+    p.add_argument("service", nargs="?")
+    p.add_argument("--lines", type=int, default=500, metavar="N")
+    p.add_argument("--grep", metavar="RE")
+    p.add_argument("--deployment", metavar="ID")
+    p.set_defaults(fn=cmd_logs)
+    return top, pv
+
+
+def main(argv):
+    top, pv = build_parser()
+    args = top.parse_args(argv)
+    if args.verb is None:
+        top.print_help(sys.stderr)
+        return 2
+    if args.verb == "vars" and getattr(args, "vverb", None) is None:
+        pv.print_help(sys.stderr)
+        return 2
+    try:
+        cfg = load_config(args.config)
+        return args.fn(cfg, args)
+    except UsageError as e:
+        print(f"railway-ops: {e}", file=sys.stderr)
+        return 2
+    except OpsError as e:
+        print(f"railway-ops: {e}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

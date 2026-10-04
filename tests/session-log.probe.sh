@@ -356,6 +356,16 @@ printf '{"type":"assistant","timestamp":"2026-10-01T16:00:01Z","requestId":"q1",
 CLAUDE_PROJECTS_DIR="$SHORT" run stats --since 2026-10-01 --until 2026-10-01 --by slug && hdr=$(sed -n 2p "$T/out") && row=$(sed -n 3p "$T/out") \
   && [ "${row:0:2}" = ab ] && h_pre=${hdr%%driver*} && r_pre=${row%%anthropic:*} && [ ${#h_pre} = ${#r_pre} ] \
   && ok "--by slug with a 2-char project keeps header and data aligned (min width = header word)" || bad "short-project alignment: $(cat "$T/out")"
+# The usage key is (gk(drv), message.id, requestId): one (id, requestId) pair under two drivers stays two entries.
+DUP="$T/stats-dup"; mkdir -p "$DUP/-home-deck-dup"
+cat > "$DUP/-home-deck-dup/$S_ID.jsonl" <<EOF
+{"type":"assistant","timestamp":"2026-10-01T16:00:01Z","requestId":"qdup","message":{"id":"msg_dup","model":"claude-opus-5-5",$U 7},"content":[]}}
+{"type":"assistant","timestamp":"2026-10-01T16:00:02Z","requestId":"qdup","message":{"id":"msg_dup","model":"glm-5.3-flash",$U 9},"content":[]}}
+EOF
+CLAUDE_PROJECTS_DIR="$DUP" run stats --since 2026-10-01 --until 2026-10-01 --json \
+  && [ "$(jq '[g.get(k, {}).get("output_tokens") for k in ("anthropic:claude-opus-5-5", "zai:glm-5.3-flash")]')" = "[7, 9]" ] \
+  && ok "a shared (message.id, requestId) under two drivers counts each driver's output_tokens separately (7 and 9)" \
+  || bad "usage key scoping: $(jq '[g.get(k, {}).get("output_tokens") for k in ("anthropic:claude-opus-5-5", "zai:glm-5.3-flash")]')"
 srun stats --since 2026-09-01 --until 2026-09-02; [ $rc = 1 ] && [ "$(tail -1 "$T/out")" = "0 groups, 0 transcripts" ] && ok "an empty window exits 1 with 0 groups, 0 transcripts" || bad "empty window rc=$rc: $(cat "$T/out")"
 srun list --since 2026-10-01 --until 2026-10-01 --paths-to "$T/paths.txt" --no-archive && [ "$(tail -1 "$T/out")" = "paths: 2 written to $T/paths.txt" ] && [ "$(cat "$T/paths.txt")" = "$(printf '%s\n%s' "$SDIR/$S_ID.jsonl" "$SDIR/$S2_ID.jsonl")" ] \
   && grep -q "^2 transcripts" "$T/out" && ok "list --paths-to writes the full paths, and prints the paths: line after the summary" || bad "paths-to: $(cat "$T/out" "$T/paths.txt")"

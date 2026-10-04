@@ -643,6 +643,8 @@ run $'git commit \\\n  -a -m x'
 check_fire "a -a after a backslash-newline continuation widens (continuation joined)" "always populated"
 run 'git commit -m "a & b" -a'
 check_silent "a separator inside a quoted message ends the segment early (accepted miss)"
+run 'git commit -m "flag -a is neat"'
+check_fire "a quoted -a in a one-line -m message widens the scan (accepted over-fire)" "always populated"
 git -C "$REPO" checkout -q -- src/tracked.ts >/dev/null 2>&1
 
 echo "---"
