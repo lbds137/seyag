@@ -177,7 +177,7 @@ RESTRICT_L=$(show_line "protection.restrictions")
   || fail "show matching: names the default branch"
 
 # --- 9. show against an off-preset UNPROTECTED repo: differs where it should ----
-FAKE_SETTINGS_FILE="$SETTINGS_DIFFERS" FAKE_PROTECTION_FILE= \
+FAKE_SETTINGS_FILE="$SETTINGS_DIFFERS" FAKE_PROTECTION_FILE='' \
   run "show, off-preset unprotected repo: exits 0" 0 show o/r
 SQUASH_L=$(show_line "allow_squash_merge"); WIKI_L=$(show_line "has_wiki")
 [[ "$SQUASH_L" == *"differs"* && "$WIKI_L" == *"differs"* ]] \

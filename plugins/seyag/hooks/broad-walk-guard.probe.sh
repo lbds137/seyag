@@ -103,7 +103,7 @@ run 0 'find ~/go/pkg/mod -maxdepth 3 -name errors.go'
 run 0 'find / -maxdepth 1 -type d'
 run 0 'find ~ -maxdepth 2 -name "*.md"'
 # -maxdepth 1 below the mount's top level is one readdir, like ls (the path need not exist).
-run 0 "find '$HOME/gdrive/Personal/Spiritual Purchases/Jackalope/Workings' -maxdepth 1 -type d | wc -l"
+run 0 "find '$HOME/gdrive/Shared/Project Files/Archive/Notes' -maxdepth 1 -type d | wc -l"
 run 0 'find ~/gdrive/Books -maxdepth 1'
 run 0 'find ~ -maxdepth 5 -maxdepth 1' # last -maxdepth wins: 1, so only one readdir at the mount root
 run 0 'du -sh /tmp/node-compile-cache'

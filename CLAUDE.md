@@ -18,3 +18,4 @@ The portable Claude Code process layer for every project on Lila's Steam Deck: h
 - `hooks/session-start.sh` prints `seyag plugin <version>` as its first line on every start; `deck-sessions` (dev-docs) reads it from session logs. Keep the prefix.
 - Session-mining corpora and reports under `~/.claude/projects/*/mined-corpus/` are private working material; only operationalized outcomes (a rule line, a skill step, a hook) enter this repo.
 - Local-only list: nothing here needs secrets, a database or live services.
+- Public repo, built for anyone's use: every feature is a generic, configurable mechanism (env var, config file, frontmatter field). New tracked text never names the owner's private sessions, private projects, personal paths or machine-only tools; that wiring lives in the machine's own config, and fixtures use invented names. Existing machine coupling is listed in `tests/coupling-allowlist.txt` and shrinks rather than grows.

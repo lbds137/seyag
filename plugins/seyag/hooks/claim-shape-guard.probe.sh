@@ -539,25 +539,25 @@ check_fire "extra spaces before -C still redirect (tail regex takes zero-or-more
 
 git -C "$REPO" reset -q; git -C "$OTHER" reset -q
 stage_other 'src/relative.ts' '// this field is always populated at boot'
-pushd / >/dev/null 2>&1
+pushd / >/dev/null 2>&1 || exit 1
 run "git -C other commit -m \"probe\"" "$EMPTY" "$REPO"
-popd >/dev/null 2>&1
+popd >/dev/null 2>&1 || exit 1
 check_fire "relative -C resolves against the payload cwd, not the hook's" "always populated"
 
 git -C "$REPO" reset -q; git -C "$OTHER" reset -q
 stage_fixture 'src/unreadable.ts' '// this field is always populated at boot'
-pushd "$REPO" >/dev/null 2>&1
+pushd "$REPO" >/dev/null 2>&1 || exit 1
 run 'git -C /nonexistent-csgc commit -m "probe"'
-popd >/dev/null 2>&1
+popd >/dev/null 2>&1 || exit 1
 check_silent "-C to an unreadable dir fails open silent"
 
 git -C "$REPO" reset -q; git -C "$OTHER" reset -q
 # Both indexes carry the claim: $OTHER catches a fall-through to the hook's own cwd, $REPO a fallback to CLAUDE_PROJECT_DIR; the correct fail-open exit stays silent against both.
 stage_other 'src/anchorfail.ts' '// this field is always populated at boot'
 stage_fixture 'src/anchorfail-project.ts' '// this field is always populated at boot'
-pushd "$REPO" >/dev/null 2>&1
+pushd "$REPO" >/dev/null 2>&1 || exit 1
 run "git -C other commit -m \"probe\"" "$REPO" "/nonexistent-csgc-anchor"
-popd >/dev/null 2>&1
+popd >/dev/null 2>&1 || exit 1
 check_silent "unreadable payload cwd anchor fails open silent"
 
 git -C "$REPO" reset -q; git -C "$OTHER" reset -q

@@ -98,9 +98,16 @@ jq -n --arg p "$TMP/inst" '{plugins: {"seyag@lbds137": [{installPath: $p}]}}' > 
 INSTALLED="$TMP/installed.json"
 run startup "$TMP/rules-linked"
 [ "$(ctx)" = "seyag plugin unknown" ] && ok "install matches source: no drift warning" || bad "matching install warned" "$OUT"
-echo '{"h":2}' > "$TMP/root/hooks/hooks.json"; mkdir "$TMP/root/skills/b"
+mkdir "$TMP/root/skills/b"
 run startup "$TMP/rules-linked"
-ctx | grep -q 'differs from its source in: hooks.json, skills' && ok "stale install: names hooks.json and skills" || bad "stale install: expected drift warning" "$OUT"
+[ "$(ctx)" = "seyag plugin unknown" ] && ok "only skills differ: no drift warning" || bad "skills-only difference warned" "$OUT"
+echo '{"h":2}' > "$TMP/root/hooks/hooks.json"
+run startup "$TMP/rules-linked"
+ctx | grep -q 'differs from its source in: hooks.json' && ! ctx | grep -q 'skills' && ok "stale install: names hooks.json, not skills" || bad "stale install: expected hooks.json drift only" "$OUT"
+echo '{"h":1}' > "$TMP/root/hooks/hooks.json"; mkdir "$TMP/root/agents/x"
+run startup "$TMP/rules-linked"
+ctx | grep -q 'differs from its source in: agents' && ok "only agents differ: names agents" || bad "agents-only difference: expected warning" "$OUT"
+echo '{"h":2}' > "$TMP/root/hooks/hooks.json"; rmdir "$TMP/root/agents/x"
 run resume "$TMP/rules-linked"
 [ -z "$OUT" ] && ok "drift check stays quiet on resume" || bad "drift warned on resume" "$OUT"
 jq -n --arg p "$TMP/root" '{plugins: {"seyag@lbds137": [{installPath: $p}]}}' > "$TMP/installed.json"
@@ -117,7 +124,9 @@ prune() { # $1 state dir, $2 max days ("" = unset), $3 PATH (optional) → runs 
 }
 old() { echo x >"$1"; touch -d '10 days ago' "$1"; }
 
-D="$TMP/deep"; mkdir -p -m 700 "$D/sub"; old "$D/sub/context-reminder-deep"
+D="$TMP/deep"
+# shellcheck disable=SC2174 # the mode applies to the deepest dir only, which is all the probe needs
+mkdir -p -m 700 "$D/sub"; old "$D/sub/context-reminder-deep"
 prune "$D"
 [ -e "$D/sub/context-reminder-deep" ] && ok "only prunes the top level (a deep match survives)" || bad "pruned inside a subdirectory"
 

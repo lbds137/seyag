@@ -28,7 +28,7 @@ description: 'Railway operations through the railway-ops CLI: explicit environme
 
 ## 3. Safe sequences
 
-Read the dry-run plan first, every time. On a protected env, `--yes` alone is refused and needs `--confirm-protected <env>` too. A human reads the plan before that flag is typed.
+Read the dry-run plan first, every time. A dry run needs no token except `rotate-secret`, so the plan can be read before the token is exported. On a protected env, `--yes` alone is refused and needs `--confirm-protected <env>` too. A human reads the plan before that flag is typed.
 
 **Set:**
 ```bash

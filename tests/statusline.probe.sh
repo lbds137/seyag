@@ -341,6 +341,7 @@ out=$(strip <<< "$(render "{\"context_window\":{\"current_usage\":{\"input_token
 grep -qF "${h}2/x/" <<< "$out" && ! grep -q '~' <<< "$out" \
     && ok "cwd: \$HOME-prefixed sibling (\$HOME + 2) keeps its full path, no ~" || bad "cwd sibling: $out"
 out=$(strip <<< "$(render "{\"context_window\":{\"current_usage\":{\"input_tokens\":1000}},\"model\":{\"display_name\":\"X\"},\"cwd\":\"$h/x\"}")")
+# shellcheck disable=SC2088 # the tilde is literal text in the output under test
 grep -qF '~/x/' <<< "$out" && ok "cwd: a path under \$HOME/ shortens to ~/x/" || bad "cwd under home: $out"
 
 # 29. Two-yellow join: CC nudge and SYG nudge both pending — both blocks

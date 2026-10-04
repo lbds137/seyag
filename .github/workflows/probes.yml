@@ -3,6 +3,14 @@ name: Probes
 # The probe suite is this repo's whole gate (tests/run-probes.sh: every
 # plugins/seyag/hooks/*.probe.sh and tests/*.probe.sh, one at a time).
 # Runtime deps are bash, jq, python3 and GNU grep, all on ubuntu-latest.
+#
+# Hygiene gates on top of the probes:
+# - shellcheck -S warning over the file set tests/shell-files.sh enumerates (the
+#   same enumeration tests/shell-syntax.probe.sh parses);
+# - tests/hook-wiring.probe.sh (hook/probe/hooks.json/bin-tool parity) and
+#   tests/shell-syntax.probe.sh run with the rest of the suite;
+# - fixup-check fails a pull request that still carries fixup!/squash!/amend!
+#   commits.
 
 on:
   pull_request:
@@ -14,5 +22,32 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - name: Install shellcheck if missing
+        run: command -v shellcheck >/dev/null || (sudo apt-get update && sudo apt-get install -y shellcheck)
+      - name: shellcheck
+        run: |
+          shellcheck --version
+          # shellcheck disable=SC2046 # the file list has no spaces and must split
+          shellcheck -S warning $(bash tests/shell-files.sh)
       - name: Run every probe
         run: bash tests/run-probes.sh
+
+  fixup-check:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Reject fixup!/squash!/amend! commits
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          bad=$(git log --no-merges --format='%h %s' "origin/$BASE_REF..HEAD" | grep -E '^[0-9a-f]+ (fixup|squash|amend)! ' || true)
+          if [ -n "$bad" ]; then
+            echo "::error::Unsquashed fixup commits in this pull request:"
+            echo "$bad"
+            echo "Fix: GIT_SEQUENCE_EDITOR=true git rebase --autosquash origin/$BASE_REF, then git push --force-with-lease"
+            exit 1
+          fi
+          echo "No fixup!/squash!/amend! commits."

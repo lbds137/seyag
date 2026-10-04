@@ -139,8 +139,8 @@ GIT_C_TAIL_RE='^[[:space:]]*-C[[:space:]]+([^[:space:]]+)'
 CMD_HEAD=$COMMAND
 CMD_TAIL=""
 if [[ $COMMAND =~ $GIT_COMMIT_RE ]]; then
-    CMD_HEAD=${COMMAND%%"$BASH_REMATCH"*}
-    CMD_TAIL=${COMMAND#*"$BASH_REMATCH"}
+    CMD_HEAD=${COMMAND%%"${BASH_REMATCH[0]}"*}
+    CMD_TAIL=${COMMAND#*"${BASH_REMATCH[0]}"}
 fi
 
 # Nothing is staged yet when the commit's content arrives in the SAME command:

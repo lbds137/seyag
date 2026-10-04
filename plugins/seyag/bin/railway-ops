@@ -13,6 +13,7 @@ Usage:
 
 WRITE:    every write verb is a dry run by default and prints its plan; --yes executes. On a
           protected env --yes alone is refused: pass --yes --confirm-protected <env>, typed exactly.
+          Dry runs need no token, except rotate-secret, whose plan reads the API.
 <env>:    a short name from the config's "envs" map (e.g. dev, prod).
 
 Verbs:
@@ -197,6 +198,14 @@ def require_token(cfg, short):
     return tok
 
 
+def token_line(cfg, short):
+    """Plan line for write verbs: whether the token variable is set. Never the value."""
+    var = token_var(cfg, short)
+    if os.environ.get(var, ""):
+        return f"Token: ${var} is set"
+    return f"Token: ${var} is NOT set (a --yes run needs it)"
+
+
 def is_protected(cfg, short):
     """Protected when its Railway environment NAME is that of any protected short name (aliases inherit)."""
     name = env_name(cfg, short)
@@ -228,6 +237,8 @@ def railway_status():
         p = subprocess.run([cli_bin(), "status", "--json"], capture_output=True, text=True, timeout=TIMEOUT_S)
     except FileNotFoundError:
         raise UsageError(f"railway CLI not found ({cli_bin()}); install it or set RAILWAY_OPS_CLI")
+    except OSError as e:
+        raise UsageError(f"could not run the railway CLI ({cli_bin()}): {e.strerror or e}")
     except subprocess.TimeoutExpired:
         raise OpsError("`railway status --json` timed out after 30s")
     if p.returncode != 0:
@@ -503,11 +514,13 @@ def cmd_vars_set(cfg, args):
         raise UsageError("pass exactly one of --from-env VAR or --from-stdin")
     service = scope_of(args)
     guard_write(cfg, args.env, args)
-    require_token(cfg, args.env)
+    if args.yes:
+        require_token(cfg, args.env)
     value = read_value(args)
     ids = resolve(cfg, args.env, service)
     print_head(f'About to set Railway variable "{args.name}"', ids,
                [f"Scope: {scope_label(service)}",
+                token_line(cfg, args.env),
                 f"Value: from {'$' + args.from_env if args.from_env else 'stdin'} (never printed)",
                 "Deploys: skipDeploys=true (no implicit deploy; redeploy explicitly afterwards)"])
     if not args.yes:
@@ -518,7 +531,12 @@ def cmd_vars_set(cfg, args):
     if service is not None:
         need = [service]
     else:
-        need = [s["name"] for s in carrying_services(cfg, args.env, ids, args.name)]
+        try:
+            need = [s["name"] for s in carrying_services(cfg, args.env, ids, args.name)]
+        except OpsError as e:
+            print(f'Could not determine which services carry "{args.name}" ({e}). List them with: '
+                  f"railway-ops vars list {args.env} --service <S>, then redeploy the ones that carry it.")
+            return 0
     if need:
         print("Redeploy needed for the new value to take effect: " + ", ".join(need))
         for s in need:
@@ -532,9 +550,11 @@ def cmd_vars_set(cfg, args):
 def cmd_vars_delete(cfg, args):
     service = scope_of(args)
     guard_write(cfg, args.env, args)
-    require_token(cfg, args.env)
+    if args.yes:
+        require_token(cfg, args.env)
     ids = resolve(cfg, args.env, service)
-    print_head(f'About to delete Railway variable "{args.name}"', ids, [f"Scope: {scope_label(service)}"])
+    print_head(f'About to delete Railway variable "{args.name}"', ids,
+               [f"Scope: {scope_label(service)}", token_line(cfg, args.env)])
     if not args.yes:
         dry_run_footer(args.env, cfg)
         return 0
@@ -546,10 +566,12 @@ def cmd_vars_delete(cfg, args):
 
 def cmd_redeploy(cfg, args):
     guard_write(cfg, args.env, args)
-    require_token(cfg, args.env)
+    if args.yes:
+        require_token(cfg, args.env)
     ids = resolve(cfg, args.env, args.service)
     print_head(f'About to redeploy service "{args.service}"', ids,
                [f"Service: {args.service} ({ids['serviceId']})",
+                token_line(cfg, args.env),
                 "Via: GraphQL serviceInstanceRedeploy with these explicit ids (not the CLI's linked env)"])
     if not args.yes:
         dry_run_footer(args.env, cfg)
@@ -650,6 +672,8 @@ def cmd_logs(cfg, args):
             p = subprocess.run(argv, capture_output=True, text=True, timeout=120)
         except FileNotFoundError:
             raise UsageError(f"railway CLI not found ({cli_bin()}); install it or set RAILWAY_OPS_CLI")
+        except OSError as e:
+            raise UsageError(f"could not run the railway CLI ({cli_bin()}): {e.strerror or e}")
         except subprocess.TimeoutExpired:
             print(f"railway-ops: logs for {svc} timed out after 120s", file=sys.stderr)
             failed += 1

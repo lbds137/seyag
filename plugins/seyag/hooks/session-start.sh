@@ -62,19 +62,17 @@ case "$SOURCE" in
     [ -n "$linked" ] || TEXT="${TEXT:+$TEXT
 }The seyag plugin's core rules are not loaded (no file in $RULES_DIR matches its rules/core.md). Tell the owner; the fix is in the seyag README under Install, and it takes effect in the next session."
 
-    # Claude Code registers hooks, skills and agents from the INSTALLED copy, while
-    # hook scripts run from the source tree, so a hook or skill added to the source
-    # stays inactive until the install is refreshed. Warn when the two differ.
+    # Skills register from the source tree (a skill added since the install is listed
+    # in a running session), so they are not compared. Whether hooks.json and agents
+    # do is unverified, so those two are still compared against the installed copy.
     INSTALLED_JSON="${SYG_INSTALLED_PLUGINS:-$HOME/.claude/plugins/installed_plugins.json}"
     install=$(jq -r '.plugins["seyag@lbds137"][0].installPath // empty' "$INSTALLED_JSON" 2>/dev/null)
     if [ -n "$install" ] && [ -d "$install" ] && [ "$(cd "$install" && pwd -P)" != "$(cd "$PLUGIN_ROOT" && pwd -P)" ]; then
       drift=""
       cmp -s "$install/hooks/hooks.json" "$PLUGIN_ROOT/hooks/hooks.json" || drift="hooks.json"
-      for part in skills agents; do
-        [ "$(ls "$install/$part" 2>/dev/null)" = "$(ls "$PLUGIN_ROOT/$part" 2>/dev/null)" ] || drift="${drift:+$drift, }$part"
-      done
+      [ "$(ls "$install/agents" 2>/dev/null)" = "$(ls "$PLUGIN_ROOT/agents" 2>/dev/null)" ] || drift="${drift:+$drift, }agents"
       [ -z "$drift" ] || TEXT="${TEXT:+$TEXT
-}The installed seyag plugin copy ($install) differs from its source in: $drift, so hooks or skills added since the install are not active. Tell the owner; the fix is the refresh in the seyag README under Install."
+}The installed seyag plugin copy ($install) differs from its source in: $drift, so hooks or agents added since the install may not be active. Tell the owner; the fix is the refresh in the seyag README under Install."
     fi
     ;;
   compact)

@@ -9,7 +9,7 @@ The blocking gates below run in order; a fail in any one stops the flip until it
 
 ## Blocking gates
 
-1. **Secrets, full history.** Secret-scan the full history — `gitleaks git <repo>` — never the working tree alone. The scanner is installed on this machine via `mise`; if it is absent, that is a stop, not a step to skip. Report findings redacted; the raw findings file stays local.
+1. **Secrets, full history.** Secret-scan the full history — `gitleaks git <repo>` — never the working tree alone. The scanner is installed on this machine via `mise`; if it is absent, that is a stop, not a step to skip. A Claude session link (`claude.ai/code/session_<id>`) in any commit message or file is a finding. Report findings redacted; the raw findings file stays local.
 2. **Personal data.** Author names and emails via `git log --format='%an <%ae>' | sort -u` — noreply addresses preferred, a real address is a finding. Also match the owner's deadname (by rule, against the shared memory note — never grep the literal), third parties' real names, chat or user IDs, tailnet hostnames, and home-directory paths naming the user. In file contents, LICENSE lines and git authors alike, the owner's names other than "Lila" → flag for her call.
 3. **Local-only material.** Files living only in gitignored paths, `.git/info/exclude` entries, and `docs/local/`-style folders: nothing public-bound references them, and nothing load-bearing exists ONLY unpushed.
 4. **LICENSE and attribution.** LICENSE present and matching upstream — AGPL forks stay AGPL; upstream and donor attribution kept and visible.
