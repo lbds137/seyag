@@ -138,6 +138,9 @@ if [ "$(grep -c . <<<"$WALK_ALL")" -eq 201 ] 2>/dev/null; then
   WALK_CAPPED=true
 fi
 BASE_SUBJECTS=$(git log --max-count=200 --format='%h%x09%s' "$BASE_REF" 2>/dev/null || true)
+# The base tree for the fast path, also once; empty when unresolvable, and an
+# empty hash never matches (the loop only compares a non-empty branch tree).
+BASE_TREE=$(git rev-parse --verify -q "$BASE_REF^{tree}" 2>/dev/null || true)
 # Iterate full refnames and strip the prefix here: under a tag/branch name
 # collision %(refname:short) disambiguates to heads/<name>, which would miss
 # the skip set and break `git branch -D`. The candidate-side git calls (the
@@ -171,7 +174,7 @@ while IFS= read -r full; do
   match=""
   branch_tree=$(git rev-parse --verify -q "$full^{tree}" 2>/dev/null || true)
   if [ -n "$branch_tree" ]; then
-    if [ "$(git rev-parse --verify -q "$BASE_REF^{tree}" 2>/dev/null || true)" = "$branch_tree" ]; then
+    if [ "$BASE_TREE" = "$branch_tree" ]; then
       match=$(git rev-parse "$BASE_REF")
     else
       while IFS= read -r c; do

@@ -158,6 +158,7 @@ fi
 # widened scan also shows tracked changes the add leaves out of the commit.
 # ACCEPTED MISS: the cut is not quote-aware, so a separator inside a quoted
 # message ends the segment early — `git commit -m "a & b" -a` is not widened.
+# ACCEPTED OVER-FIRE, the inverse: `git commit -m "flag -a is neat"` widens.
 SCAN_WORKTREE=0
 GIT_ADD_RE='(^|[[:space:]&|;(`])git[[:space:]]([^&|;]*[[:space:]])?(add|stage)([[:space:]]|$)'
 COMMIT_ALL_RE='(^|[[:space:]])(--all|-[[:alpha:]]*a[[:alpha:]]*)([[:space:]]|$)'
