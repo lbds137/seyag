@@ -276,6 +276,90 @@ SESSION_LEDGER="$LEDGER6" run mark --lens owner "$ARCH_CLOUD" start end && grep 
 SESSION_LEDGER="$LEDGER6" run ledger --app cse_01BBBBBBBB && grep -q "owner: mined" "$T/out" && ! grep -q "no local transcript" "$T/out" \
   && ok "the cse mark is applied as coverage, not shown as an orphan" || bad "post-mark cloud ledger: $(cat "$T/out")"
 
+# 5c. stats and list --paths-to (own projects root, so no earlier count moves)
+S_ID=bbbbbbbb-5555-4000-8000-000000000005
+LEAKU=deadbeef-1234-4000-8000-000000000077
+STATS="$T/stats-projects"; SDIR="$STATS/-home-deck-Projects-statsproj"
+mkdir -p "$SDIR/$S_ID/subagents"
+U='"usage":{"input_tokens":10,"cache_creation_input_tokens":20,"cache_read_input_tokens":30,"output_tokens":'
+cat > "$SDIR/$S_ID.jsonl" <<EOF
+{"type":"assistant","timestamp":"2026-10-01T16:00:01Z","requestId":"q1","message":{"id":"msg_o1","model":"claude-opus-5-5",$U 2},"content":[{"type":"tool_use","id":"tu_h1","name":"Bash","input":{"command":"git status"}}]}}
+{"type":"user","timestamp":"2026-10-01T16:00:02Z","message":{"content":[{"type":"tool_result","tool_use_id":"tu_h1","is_error":true,"content":"PreToolUse:Bash hook error: [bash \"/h/run.sh\" python-heredoc-edit-guard]: blocked"}]}}
+{"type":"assistant","timestamp":"2026-10-01T16:00:03Z","requestId":"q2","message":{"id":"msg_o2","model":"claude-opus-5-5",$U 3},"content":[{"type":"tool_use","id":"tu_h1b","name":"Bash","input":{"command":"SYG_ALLOW_RM=1 rm x"}}]}}
+{"type":"assistant","timestamp":"2026-10-01T16:00:04Z","requestId":"q3","message":{"id":"msg_g1","model":"glm-5.3-flash",$U 11},"content":[{"type":"tool_use","id":"tu_h2","name":"Edit","input":{"file_path":"a"}}]}}
+EOF
+cat >> "$SDIR/$S_ID.jsonl" <<'EOF'
+{"type":"user","timestamp":"2026-10-01T16:00:05Z","message":{"content":[{"type":"tool_result","tool_use_id":"tu_h2","is_error":true,"content":[{"type":"text","text":"PreToolUse:Edit hook error: [cd \"${CLAUDE_PROJECT_DIR:-.}\" && .claude/hooks/pr-body-ref-gate.sh]: no"}]}]}}
+EOF
+cat >> "$SDIR/$S_ID.jsonl" <<EOF
+{"type":"assistant","timestamp":"2026-10-01T16:00:06Z","requestId":"q4","message":{"id":"msg_g2","model":"glm-5.3-flash",$U 2},"content":[{"type":"tool_use","id":"tu_r","name":"Read","input":{}}]}}
+{"type":"assistant","timestamp":"2026-10-01T16:00:07Z","requestId":"q5","message":{"id":"msg_o3","model":"claude-opus-5-5",$U 1},"content":[{"type":"tool_use","id":"tu_den","name":"Bash","input":{"command":"x"}},{"type":"tool_use","id":"tu_miss","name":"Edit","input":{"file_path":"b"}},{"type":"tool_use","id":"tu_den2","name":"Read","input":{"file_path":"c"}}]}}
+{"type":"assistant","timestamp":"2026-10-01T16:00:08Z","requestId":"q6","message":{"id":"gen-1","model":"z-ai/glm-5.3-flash",$U 5},"content":[{"type":"text","text":"thinking"}]}}
+{"type":"assistant","timestamp":"2026-10-01T16:00:09Z","requestId":"q6","message":{"id":"gen-1","model":"z-ai/glm-5.3-flash",$U 40},"content":[{"type":"tool_use","id":"tu_un","name":"Bash","input":{"command":"y"}},{"type":"tool_use","id":"tu_exit","name":"Bash","input":{"command":"z"}}]}}
+{"type":"assistant","timestamp":"2026-10-01T16:00:10Z","message":{"id":"synthetic-x","model":"<synthetic>","content":[{"type":"text","text":"No response requested."}]}}
+{"type":"user","timestamp":"2026-10-01T16:00:11Z","message":{"content":[{"type":"tool_result","tool_use_id":"tu_den","is_error":true,"content":"Permission denied by the Claude Code auto mode classifier. Reason: [Unauthorized Persistence] more"},{"type":"tool_result","tool_use_id":"tu_un","is_error":true,"content":"classifier is temporarily unavailable"},{"type":"tool_result","tool_use_id":"tu_miss","is_error":true,"content":"String to replace not found in file"},{"type":"tool_result","tool_use_id":"tu_den2","is_error":true,"content":"Permission denied by the Claude Code auto mode classifier. Reason: [User deny rule Read(/x/$LEAKU.jsonl)] end"},{"type":"tool_result","tool_use_id":"tu_exit","is_error":true,"content":"Exit code 1\nboom"}]}}
+{"type":"user","timestamp":"2026-10-01T16:00:12Z","message":{"content":"please continue"}}
+{"type":"user","timestamp":"2026-10-01T16:00:12Z","message":{"content":"<task-notification>auto</task-notification>"}}
+{"type":"user","timestamp":"2026-10-01T16:00:12Z","message":{"content":"<command-name>/effort</command-name>"}}
+{"type":"assistant","timestamp":"2026-10-01T16:00:13Z","requestId":"q7","message":{"id":"msg_g3","model":"glm-5.3-flash",$U 4},"content":[{"type":"text","text":"ok"}]}}
+{"type":"queue-operation","timestamp":"2026-10-01T16:00:14Z","operation":"enqueue","content":"<task-notification>done</task-notification>"}
+{"type":"queue-operation","timestamp":"2026-10-01T16:00:15Z","operation":"enqueue","content":"plain note"}
+{"type":"assistant","timestamp":"2026-10-01T16:00:16Z","requestId":"q8","message":{"id":"msg_o4","model":"claude-opus-5-5",$U 1},"content":[{"type":"text","text":"back"}]}}
+EOF
+cat > "$SDIR/$S_ID/subagents/agent-1.jsonl" <<EOF
+{"type":"assistant","timestamp":"2026-10-01T16:00:20Z","requestId":"q9","message":{"id":"msg_s1","model":"glm-5.3-flash",$U 6},"content":[{"type":"text","text":"sub"}]}}
+{"type":"user","isSidechain":true,"timestamp":"2026-10-01T16:00:19Z","message":{"content":"dispatch prompt from the orchestrator"}}
+EOF
+S2_ID=cccccccc-6666-4000-8000-000000000006
+cat > "$SDIR/$S2_ID.jsonl" <<EOF
+{"type":"assistant","timestamp":"2026-09-30T10:00:00Z","requestId":"qa","message":{"id":"mx-1","model":"mystery-1",$U 1},"content":[{"type":"tool_use","id":"tu_pre","name":"Bash","input":{"command":"p"}}]}}
+{"type":"assistant","timestamp":"2026-09-30T10:00:01Z","requestId":"qb","message":{"id":"msg_y1","model":"glm-5.3-flash",$U 1},"content":[{"type":"tool_use","name":"Bash","input":{"command":"noid"}}]}}
+{"type":"user","timestamp":"2026-10-01T17:00:00Z","message":{"content":[{"type":"tool_result","tool_use_id":"tu_pre","is_error":true,"content":"Exit code 2"}]}}
+{"type":"user","timestamp":"2026-10-01T17:00:01Z","message":"not a dict"}
+{"type":"assistant","timestamp":"2026-10-01T17:00:02Z","requestId":"qc","message":{"id":"mx-2","model":"mystery-1",$U 1},"content":[{"type":"tool_use","id":"tu_w1","name":"Write","input":{}},{"type":"tool_use","id":"tu_w2","name":"Write","input":{}}]}}
+{"type":"user","timestamp":"2026-10-01T17:00:03Z","message":{"content":[{"type":"tool_result","tool_use_id":"tu_w1","is_error":true,"content":"PreToolUse:Write hook error: [bash \"/h/run.sh\" x-gate]: no"}]}}
+{"type":"assistant","timestamp":"2026-10-01T17:00:04Z","requestId":"qd","message":{"id":"mx-3","model":"mystery-1",$U 1},"content":[{"type":"tool_use","id":"tu_rd","name":"Read","input":{}}]}}
+{"type":"user","timestamp":"2026-10-01T17:00:05Z","message":{"content":[{"type":"tool_result","is_error":true,"content":"boom2"}]}}
+{"type":"assistant","timestamp":"2026-10-05T10:00:00Z","requestId":"qe","message":{"id":"msg_y2","model":"glm-5.3-flash",$U 1},"content":[{"type":"text","text":"after the window"}]}}
+EOF
+srun() { CLAUDE_PROJECTS_DIR="$STATS" run "$@"; }
+srun stats --since 2026-10-01 --until 2026-10-01 --json && python3 -c 'import json,sys; json.load(sys.stdin)' < "$T/out" && ok "stats --json parses" || bad "stats --json: $(head -c 300 "$T/out" "$T/err")"
+jq() { python3 -c 'import json,sys; d=json.load(sys.stdin); g={"|".join(x["key"]):x for x in d["groups"]}; print(eval(sys.argv[1]))' "$1" < "$T/out"; }
+[ "$(jq 'sorted(g)')" = "['anthropic:claude-opus-5-5', 'openrouter:z-ai/glm-5.3-flash', 'unknown:mystery-1', 'zai:glm-5.3-flash']" ] \
+  && ok "four lanes keyed by (model, id prefix); <synthetic> and the subagent file are not groups" || bad "lanes: $(jq 'sorted(g)')"
+[ "$(jq '[g[k]["replies"] for k in sorted(g)]')" = "[4, 1, 2, 3]" ] && ok "replies per lane; the split gen- reply counts once; an assistant entry after --until is not counted" || bad "replies: $(jq '[g[k]["replies"] for k in sorted(g)]')"
+[ "$(jq 'g["openrouter:z-ai/glm-5.3-flash"]["output_tokens"]')" = 40 ] && ok "split reply tokens deduped by (id, requestId): out 40, not 45" || bad "dedupe: $(jq 'g["openrouter:z-ai/glm-5.3-flash"]["output_tokens"]')"
+[ "$(jq '[g["openrouter:z-ai/glm-5.3-flash"][k] for k in ("input_tokens","cache_read_input_tokens")]')" = "[10, 30]" ] && ok "input and cache fields are per-key maxima, not sums" || bad "input maxima"
+[ "$(jq '{k.replace(chr(8230),"~"):v for k,v in g["anthropic:claude-opus-5-5"]["error_classes"].items()}')" = "{'hook:python-heredoc-edit-guard': 1, 'classifier-denied:Unauthorized Persistence': 1, 'edit-miss': 1, 'classifier-denied:User deny rule Read(/x/deadbeef~.jsonl)': 1}" ] \
+  && ok "errors follow their tool_use's driver (run.sh-form hook, classifier denial, edit-miss on opus though an openrouter reply came last); a uuid in a classifier reason is masked to 8 chars" || bad "opus classes: $(jq 'g["anthropic:claude-opus-5-5"]["error_classes"]')"
+[ "$(jq 'g["openrouter:z-ai/glm-5.3-flash"]["error_classes"]')" = "{'classifier-unavailable': 1, 'exit-code': 1}" ] && ok "classifier-unavailable and Exit code land on the openrouter lane" || bad "openrouter classes: $(jq 'g["openrouter:z-ai/glm-5.3-flash"]["error_classes"]')"
+[ "$(jq 'g["zai:glm-5.3-flash"]["error_classes"]')" = "{'hook:pr-body-ref-gate': 1}" ] && ok "project-hook-form block names the hook (pr-body-ref-gate) on the zai lane" || bad "zai classes: $(jq 'g["zai:glm-5.3-flash"]["error_classes"]')"
+[ "$(jq 'g["unknown:mystery-1"]["error_classes"]')" = "{'exit-code': 1, 'hook:x-gate': 1, 'other': 1}" ] \
+  && ok "an error whose tool_use predates --since goes to that tool_use's driver (not the zai reply before it); a result with no tool_use_id is not matched to an id-less tool_use (previous driver)" || bad "mystery classes: $(jq 'g["unknown:mystery-1"]["error_classes"]')"
+[ "$(jq 'g["zai:glm-5.3-flash"]["owner_turns"]')" = 2 ] && [ "$(jq 'g["anthropic:claude-opus-5-5"]["owner_turns"]')" = 0 ] && ok "owner turns (text and a <command-name> slash command, not the <task-notification> user entry) count under the next reply's driver (glm)" || bad "owner turn attribution: $(jq 'g["zai:glm-5.3-flash"]["owner_turns"]')"
+[ "$(jq '[[g["anthropic:claude-opus-5-5"][k] for k in ("midturn_tagged","midturn_plain")], g["anthropic:claude-opus-5-5"]["midturn_tags"]]')" = "[[1, 1], {'task-notification': 1}]" ] && ok "task-notification enqueue is tagged, plain enqueue is plain" || bad "mid-turn"
+[ "$(jq 'g["anthropic:claude-opus-5-5"]["bypass"]')" = "{'SYG_ALLOW_RM': 1}" ] && ok "SYG_ALLOW_RM= prefix counted once under its driver" || bad "bypass: $(jq 'g["anthropic:claude-opus-5-5"]["bypass"]')"
+RETRIES="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["retries"])' < "$T/out")"
+[ "$RETRIES" = "{'python-heredoc-edit-guard': {'blocks': 1, 'retried': 1, 'moved_on': 0}, 'pr-body-ref-gate': {'blocks': 1, 'retried': 0, 'moved_on': 1}, 'x-gate': {'blocks': 1, 'retried': 0, 'moved_on': 1}}" ] \
+  && ok "hook block then the same tool in the next reply = retried; a different tool = moved_on (a same-name sibling call in the blocked message does not count); all three keys always present" || bad "retries: $RETRIES"
+srun stats --since 2026-10-01 --until 2026-10-01 --subagents --json && [ "$(jq 'sorted(g)')" = "['anthropic:claude-opus-5-5', 'openrouter:z-ai/glm-5.3-flash', 'unknown:mystery-1', 'zai:glm-5.3-flash', 'zai:glm-5.3-flash/sub']" ] \
+  && ok "--subagents adds the subagent file under a /sub key" || bad "subagents: $(jq 'sorted(g)')"
+[ "$(jq 'g["zai:glm-5.3-flash/sub"]["owner_turns"]')" = 0 ] && ok "a subagent file's user entries (dispatch prompts) are not owner turns" || bad "sub owner turns: $(jq 'g["zai:glm-5.3-flash/sub"]["owner_turns"]')"
+srun stats --since 2026-10-01 --until 2026-10-01 && grep -q "^anthropic:claude-opus-5-5  *4  *5  *4  *80.0  *0  *1/1" "$T/out" \
+  && grep -q "^classifier-denied:Unauthorized Persistence  anthropic:claude-opus-5-5=1  total=1$" "$T/out" && grep -q "^python-heredoc-edit-guard  blocks=1 retried=1 moved_on=0$" "$T/out" \
+  && [ "$(tail -1 "$T/out")" = "4 groups, 2 transcripts" ] && ok "text table: opus row, a class row, a retry row and the summary" || bad "text table: $(cat "$T/out")"
+srun stats --since 2026-10-01 --until 2026-10-01 --by session && grep -q "^bbbbbbbb  *anthropic:claude-opus-5-5  " "$T/out" && ! grep -q "$S_ID" "$T/out" \
+  && ok "--by session shows the 8-char id, never the full id" || bad "--by session: $(cat "$T/out")"
+srun stats --since 2026-10-01 --until 2026-10-01 --by slug && grep -q "^Projects-statsproj  *anthropic:claude-opus-5-5  " "$T/out" && ok "--by slug groups by project and driver" || bad "--by slug: $(cat "$T/out")"
+srun stats --since 2026-09-01 --until 2026-09-02; [ $rc = 1 ] && [ "$(tail -1 "$T/out")" = "0 groups, 0 transcripts" ] && ok "an empty window exits 1 with 0 groups, 0 transcripts" || bad "empty window rc=$rc: $(cat "$T/out")"
+srun list --since 2026-10-01 --until 2026-10-01 --paths-to "$T/paths.txt" --no-archive && [ "$(tail -1 "$T/out")" = "paths: 2 written to $T/paths.txt" ] && [ "$(cat "$T/paths.txt")" = "$(printf '%s\n%s' "$SDIR/$S_ID.jsonl" "$SDIR/$S2_ID.jsonl")" ] \
+  && grep -q "^2 transcripts" "$T/out" && ok "list --paths-to writes the full paths, and prints the paths: line after the summary" || bad "paths-to: $(cat "$T/out" "$T/paths.txt")"
+run list --paths-to "$T/paths2.txt" && n=$(grep -o "^[0-9]* transcripts" "$T/out" | cut -d' ' -f1) && [ "$(wc -l < "$T/paths2.txt")" = "$n" ] && [ "$n" -ge 1 ] \
+  && [ "$(grep -c 'archive' "$T/paths2.txt")" = 0 ] && ok "paths count matches the summary's transcript count (archive rows excluded)" || bad "paths count: $n / $(wc -l < "$T/paths2.txt")"
+run list --paths-to "$T/no-such-dir/p.txt"; [ $rc = 2 ] && [ "$(grep -c '^session-log: cannot write ' "$T/err")" = 1 ] && ! grep -q Traceback "$T/err" && ok "an unwritable --paths-to exits 2 with a one-line message, no traceback" || bad "unwritable paths-to rc=$rc: $(cat "$T/err")"
+grep -q -e "$S_ID" -e "$S2_ID" -e "msg_o1" -e "deadbeef-" "$ALL" && bad "stats leaked a full id, a message id or a partial uuid: $(grep -m1 -e "$S_ID" -e "$S2_ID" -e msg_o1 -e deadbeef- "$ALL")" || ok "no full transcript id, message id or uuid fragment past id8 in any stats output"
+grep -q "deadbeef…" "$ALL" && ok "(leak check positive control: the masked uuid does appear)" || bad "masked-uuid positive control"
+
 # 6. no full ids anywhere
 grep -q -e "$A_ID" -e "$B_ID" -e "$C_ID" -e "$D_ID" -e "$UNKNOWN" -e "$BRIDGE" -e "$CLOUD" -e "$ARCH_CLOUD" -e "$SKEW" "$ALL" \
   && bad "a full transcript or bridge id leaked: $(grep -m1 -e "$A_ID" -e "$B_ID" -e "$C_ID" -e "$D_ID" -e "$UNKNOWN" -e "$BRIDGE" -e "$CLOUD" -e "$ARCH_CLOUD" -e "$SKEW" "$ALL")" \
