@@ -595,6 +595,56 @@ stage_fixture 'src/doublec.ts' '// this field is always populated at boot'
 run "git -C \"$REPO\" -C \"$OTHER\" commit -m \"probe\""
 check_fire "successive -C pairs: the first dir wins here (accepted; git chdirs to the last)" "always populated"
 
+# --- same-command content: add-chains and commit -a scan `git diff HEAD` -----
+# The hook runs before the chain executes, so `git add X && git commit` and
+# `git commit -am` arrive with an empty index. A TRACKED file is committed
+# clean, then modified unstaged, for each case; the modification is reverted
+# after the section so no later case inherits it. The untracked-file case pins
+# the accepted loss: a brand-new file is not in `git diff HEAD`.
+git -C "$REPO" reset -q; git -C "$OTHER" reset -q
+mkdir -p "$REPO/src"
+printf '%s\n' 'const t = 0;' >"$REPO/src/tracked.ts"
+git -C "$REPO" add -- src/tracked.ts >/dev/null 2>&1
+git -C "$REPO" commit -q -m 'probe: tracked seed' >/dev/null 2>&1
+printf '%s\n' 'const t = 0; // this field is always populated at boot' >"$REPO/src/tracked.ts"
+
+run 'git add src/tracked.ts && git commit -m "probe"'
+check_fire "add-chain: git add X && git commit scans the tracked worktree change" "always populated"
+
+run 'git commit -am "probe"'
+check_fire "commit -am scans the tracked worktree change" "always populated"
+
+run 'git commit -m "probe"'
+check_silent "plain commit with the claim tracked-modified but unstaged stays silent"
+
+git -C "$REPO" add -- src/tracked.ts >/dev/null 2>&1
+run 'git add src/tracked.ts && git commit -m "probe"'
+LINES=$(printf '%s\n' "$CTX" | grep -cE '^  ' || true)
+if [ "$RC" -eq 0 ] && [[ "$CTX" == *"always populated"* ]] && [ "$LINES" -eq 1 ]; then
+    pass "add-chain over an already-staged change reports the line once (dedupe)"
+else
+    fail "add-chain over an already-staged change reports the line once (dedupe; got $LINES)"; printf '%s\n' "$CTX" | sed 's/^/      /'
+fi
+git -C "$REPO" reset -q >/dev/null 2>&1
+git -C "$REPO" checkout -q -- src/tracked.ts >/dev/null 2>&1
+
+printf '%s\n' '// this field is always populated at boot' >"$REPO/src/brandnew.ts"
+run 'git add src/brandnew.ts && git commit -m "probe"'
+check_silent "add-chain of a brand-new untracked file is not in git diff HEAD (accepted)"
+
+# The -a test reads only the commit's own line: a ` -a ` inside a heredoc
+# message body must not widen the scan; `-am` on the command line still does.
+printf '%s\n' 'const t = 0; // this field is always populated at boot' >"$REPO/src/tracked.ts"
+run $'git commit -F- <<EOF\nfix: stop passing -a to the tool\nEOF'
+check_silent "a -a inside a heredoc message body does not widen the scan"
+run 'git commit -am x'
+check_fire "commit -am x still widens after the newline cut" "always populated"
+run $'git commit \\\n  -a -m x'
+check_fire "a -a after a backslash-newline continuation widens (continuation joined)" "always populated"
+run 'git commit -m "a & b" -a'
+check_silent "a separator inside a quoted message ends the segment early (accepted miss)"
+git -C "$REPO" checkout -q -- src/tracked.ts >/dev/null 2>&1
+
 echo "---"
 echo "$FAILURES failed"
 [ "$FAILURES" -eq 0 ]

@@ -187,7 +187,7 @@ def cmd_apply():
         fh.write("\n")
     print(tmp)
     # -D: /etc/claude-code/ may not exist yet (it does not on this machine today).
-    print(f"! sudo install -D -m 644 {tmp} {MANAGED_FILE}")
+    print(f"! sudo install -D -m 644 {tmp} {managed_path()}")
 
 
 def parse_or_rate(v, mid, field):

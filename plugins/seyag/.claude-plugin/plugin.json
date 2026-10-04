@@ -1,7 +1,7 @@
 {
   "name": "seyag",
-  "version": "0.3.27",
-  "description": "Portable Claude Code process layer: shell-safety and turn-shape hooks, shared working rules, statusline, council, usage-audit, session-mining, doc-audit, bug-remediation, reuse-scout, delegation and driver-choice skills, implementer agent",
+  "version": "0.3.28",
+  "description": "Portable Claude Code process layer: shell-safety and turn-shape hooks, shared working rules, statusline, council, usage-audit, session-mining, doc-audit, bug-remediation, reuse-scout, delegation, driver-choice, going-public, review-response, advisor and discord-design-language skills, implementer agent",
   "author": { "name": "lbds137" },
   "license": "MIT"
 }

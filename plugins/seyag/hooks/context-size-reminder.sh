@@ -6,8 +6,9 @@
 # themselves — the assistant's "compact proactively at unit boundaries" rule
 # demonstrably does not self-execute at long context. This hook is the
 # mechanical trigger: when the LAST assistant turn began at or above the
-# threshold, it injects a one-line reminder to name the next clean compaction
-# boundary, throttled per session so it nags at most once per cooldown window.
+# threshold (per model; see Tunables), it injects a reminder to name the next
+# clean boundary and the pick there (/clear, /compact or keep, with the
+# reason), throttled per session so it nags at most once per cooldown window.
 #
 # Mechanism: Claude Code hands UserPromptSubmit hooks the session transcript
 # path; each assistant entry carries message.usage, whose input_tokens +
@@ -38,11 +39,17 @@ SESSION=$(jq -r '.session_id // empty' <<<"$INPUT" 2>/dev/null || echo "")
 [ -n "$SESSION" ] || exit 0
 
 # Tunables (env): SYG_CONTEXT_THRESHOLD (tokens, default 500000 — tuned for
-# a 1M-context model) and SYG_CONTEXT_COOLDOWN_MIN (minutes, default 30).
-# A non-numeric or empty value falls back to the default.
-THRESHOLD_TOKENS=${SYG_CONTEXT_THRESHOLD:-500000}
+# a 1M-context model), SYG_CONTEXT_THRESHOLD_FABLE (tokens, default 200000 —
+# used instead when the LAST assistant entry's model starts with
+# `claude-fable`, the lane that burns the week fastest; measured Fable
+# sessions peaked at p50 272K / p90 655K, so 500K caught them late) and
+# SYG_CONTEXT_COOLDOWN_MIN (minutes, default 30). A non-numeric or empty
+# value falls back to its default.
+THRESHOLD_DEFAULT=${SYG_CONTEXT_THRESHOLD:-500000}
+THRESHOLD_FABLE=${SYG_CONTEXT_THRESHOLD_FABLE:-200000}
 COOLDOWN_MIN=${SYG_CONTEXT_COOLDOWN_MIN:-30}
-case "$THRESHOLD_TOKENS" in '' | *[!0-9]*) THRESHOLD_TOKENS=500000 ;; esac
+case "$THRESHOLD_DEFAULT" in '' | *[!0-9]*) THRESHOLD_DEFAULT=500000 ;; esac
+case "$THRESHOLD_FABLE" in '' | *[!0-9]*) THRESHOLD_FABLE=200000 ;; esac
 case "$COOLDOWN_MIN" in '' | *[!0-9]*) COOLDOWN_MIN=30 ;; esac
 
 # The session id reaches a filesystem path, so anything outside the safe set is
@@ -77,13 +84,14 @@ fi
 # still counts (same pattern as queued-message-receipt.sh).
 #
 # Two event kinds matter and their ORDER is the whole decision, so both are
-# emitted into one stream rather than queried separately: `A <total>` for an
-# assistant turn's context size, `C` for a compaction boundary.
+# emitted into one stream rather than queried separately: `A <total> <model>`
+# for an assistant turn's context size and the model that ran it (the model
+# picks the threshold), `C` for a compaction boundary.
 LAST_EVENT=$(tail -c 4000000 "$TRANSCRIPT" 2>/dev/null \
     | jq -R -r 'fromjson?
              | if (.type? == "system" and .subtype? == "compact_boundary") then "C"
                elif (.type? == "assistant" and (.message.usage? != null))
-                 then "A \((.message.usage.input_tokens // 0) + (.message.usage.cache_read_input_tokens // 0) + (.message.usage.cache_creation_input_tokens // 0))"
+                 then "A \((.message.usage.input_tokens // 0) + (.message.usage.cache_read_input_tokens // 0) + (.message.usage.cache_creation_input_tokens // 0)) \(.message.model // "" | tostring)"
                else empty end' 2>/dev/null \
     | tail -1)
 
@@ -92,12 +100,20 @@ LAST_EVENT=$(tail -c 4000000 "$TRANSCRIPT" 2>/dev/null \
 # nags for a compaction that just happened.
 case "$LAST_EVENT" in
     C) exit 0 ;;
-    'A '*) TOTAL=${LAST_EVENT#A } ;;
+    'A '*) REST=${LAST_EVENT#A } ;;
     *) exit 0 ;;
 esac
+TOTAL=${REST%% *}
+MODEL=${REST#"$TOTAL"}
+MODEL=${MODEL# }
 
 case "$TOTAL" in
     '' | *[!0-9]*) exit 0 ;;
+esac
+
+case "$MODEL" in
+    claude-fable*) THRESHOLD_TOKENS=$THRESHOLD_FABLE ;;
+    *) THRESHOLD_TOKENS=$THRESHOLD_DEFAULT ;;
 esac
 
 [ "$TOTAL" -ge "$THRESHOLD_TOKENS" ] || exit 0
@@ -106,10 +122,12 @@ touch "$STAMP" 2>/dev/null
 
 KTOK=$((TOTAL / 1000))
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "CONTEXT SIZE: the last turn began at ~${KTOK}k tokens (threshold $((THRESHOLD_TOKENS / 1000))k)."
-echo "Proactively name the next clean compaction boundary (unit close, PR"
-echo "merge) in your reply instead of waiting for the user to ask — standing"
-echo "owner request. At that boundary, /compact — or refresh: rewrite your role"
-echo "file's Handoff/Next, then ask the owner to /clear."
+echo "CONTEXT SIZE: the last turn began at ~${KTOK}k tokens (threshold $((THRESHOLD_TOKENS / 1000))k${MODEL:+, $MODEL})."
+echo "Proactively name the next clean boundary (unit close, PR merge) in your"
+echo "reply instead of waiting for the user to ask — standing owner request."
+echo "There, with the handoff on disk (your role file's Handoff/Next), name the"
+echo "pick and its reason: /clear (next unit unrelated), /compact (it continues"
+echo "this thread) or keep (her next message is due within the hour, so the"
+echo "cache is warm). The owner runs it."
 echo "This reminder throttles for ${COOLDOWN_MIN} minutes."
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

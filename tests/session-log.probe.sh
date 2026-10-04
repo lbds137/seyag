@@ -351,6 +351,11 @@ srun stats --since 2026-10-01 --until 2026-10-01 && grep -q "^anthropic:claude-o
 srun stats --since 2026-10-01 --until 2026-10-01 --by session && grep -q "^bbbbbbbb  *anthropic:claude-opus-5-5  " "$T/out" && ! grep -q "$S_ID" "$T/out" \
   && ok "--by session shows the 8-char id, never the full id" || bad "--by session: $(cat "$T/out")"
 srun stats --since 2026-10-01 --until 2026-10-01 --by slug && grep -q "^Projects-statsproj  *anthropic:claude-opus-5-5  " "$T/out" && ok "--by slug groups by project and driver" || bad "--by slug: $(cat "$T/out")"
+SHORT="$T/stats-short"; mkdir -p "$SHORT/-home-deck-ab"   # project "ab": shorter than the 7-char "project" header
+printf '{"type":"assistant","timestamp":"2026-10-01T16:00:01Z","requestId":"q1","message":{"id":"msg_ab","model":"claude-opus-5-5","content":[]}}\n' > "$SHORT/-home-deck-ab/$S_ID.jsonl"
+CLAUDE_PROJECTS_DIR="$SHORT" run stats --since 2026-10-01 --until 2026-10-01 --by slug && hdr=$(sed -n 2p "$T/out") && row=$(sed -n 3p "$T/out") \
+  && [ "${row:0:2}" = ab ] && h_pre=${hdr%%driver*} && r_pre=${row%%anthropic:*} && [ ${#h_pre} = ${#r_pre} ] \
+  && ok "--by slug with a 2-char project keeps header and data aligned (min width = header word)" || bad "short-project alignment: $(cat "$T/out")"
 srun stats --since 2026-09-01 --until 2026-09-02; [ $rc = 1 ] && [ "$(tail -1 "$T/out")" = "0 groups, 0 transcripts" ] && ok "an empty window exits 1 with 0 groups, 0 transcripts" || bad "empty window rc=$rc: $(cat "$T/out")"
 srun list --since 2026-10-01 --until 2026-10-01 --paths-to "$T/paths.txt" --no-archive && [ "$(tail -1 "$T/out")" = "paths: 2 written to $T/paths.txt" ] && [ "$(cat "$T/paths.txt")" = "$(printf '%s\n%s' "$SDIR/$S_ID.jsonl" "$SDIR/$S2_ID.jsonl")" ] \
   && grep -q "^2 transcripts" "$T/out" && ok "list --paths-to writes the full paths, and prints the paths: line after the summary" || bad "paths-to: $(cat "$T/out" "$T/paths.txt")"

@@ -276,8 +276,8 @@ chmod +x "$PATH_NOSUDO/sudo"
 apout=$(PRICE_TABLE_MANAGED_FILE="$mg" PATH="$PATH_NOSUDO:$PATH" "$PT" --apply)
 line=$(echo "$apout" | tail -1)
 tmp=$(echo "$apout" | head -1)
-if [ "$line" = "! sudo install -D -m 644 $tmp /etc/claude-code/managed-settings.json" ]; then
-    ok "--apply: the ! sudo install -D line printed with the tmpfile path"
+if [ "$line" = "! sudo install -D -m 644 $tmp $mg" ]; then
+    ok "--apply: the ! sudo install -D line printed with the tmpfile path and the merged-from managed path"
 else
     bad "--apply: line shape wrong: $line"
 fi
@@ -291,8 +291,8 @@ rm "$tmp"
 apout2=$(PRICE_TABLE_MANAGED_FILE="$T/absent.json" PATH="$PATH_NOSUDO:$PATH" "$PT" --apply)
 line2=$(echo "$apout2" | tail -1)
 tmp2=$(echo "$apout2" | head -1)
-if [ "$line2" = "! sudo install -D -m 644 $tmp2 /etc/claude-code/managed-settings.json" ]; then
-    ok "--apply: absent managed file -> bare candidate, same ! line"
+if [ "$line2" = "! sudo install -D -m 644 $tmp2 $T/absent.json" ]; then
+    ok "--apply: absent managed file -> bare candidate, ! line names that same path"
 else
     bad "--apply: absent-file line shape wrong: $line2"
 fi

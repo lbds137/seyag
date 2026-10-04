@@ -7,7 +7,7 @@
   "plugins": [
     {
       "name": "seyag",
-      "description": "Portable Claude Code process layer: shell-safety and turn-shape hooks, shared working rules, council skill, implementer agent",
+      "description": "Portable Claude Code process layer: shell-safety and turn-shape hooks, shared working rules, statusline, skills (council, delegation, driver-choice, session-mining, usage-audit, review-response and more), implementer agent",
       "source": "./plugins/seyag"
     }
   ]

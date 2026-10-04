@@ -1,7 +1,8 @@
 #!/bin/bash
 # PreToolUse hook (matcher: Bash) — as a `git commit` is about to run, scan the
 # STAGED diff's added lines for claim-shaped assertions — "always populated",
-# "never null", "cannot happen", "guaranteed to", "only ever".
+# "never null", "cannot happen", "guaranteed to", "only ever". (An add-chain or
+# `commit -a` also scans `git diff HEAD`; see the note above SCAN_WORKTREE.)
 #
 # Those phrasings state what a field or value HOLDS at runtime, which is a
 # claim only the producer can settle (seyag core.md § Don't present
@@ -136,8 +137,34 @@ GIT_COMMIT_RE='(^|[[:space:]&|;(`=-])commit([[:space:]]|$)'
 GIT_BOUNDARY_RE='(^|.*[[:space:]&|;(`])git([[:space:]]|$)'
 GIT_C_TAIL_RE='^[[:space:]]*-C[[:space:]]+([^[:space:]]+)'
 CMD_HEAD=$COMMAND
+CMD_TAIL=""
 if [[ $COMMAND =~ $GIT_COMMIT_RE ]]; then
     CMD_HEAD=${COMMAND%%"$BASH_REMATCH"*}
+    CMD_TAIL=${COMMAND#*"$BASH_REMATCH"}
+fi
+
+# Nothing is staged yet when the commit's content arrives in the SAME command:
+# PreToolUse runs before the chain executes, so `git add X && git commit` and
+# `git commit -a/-am/--all` show an empty index here. For those two shapes the
+# scan ALSO reads `git diff HEAD` (tracked working-tree changes vs HEAD), with
+# the reported lines deduped. The add test is loose (a `git … add|stage` in the
+# head, not crossing a ;|& separator), and the -a test reads only the commit's
+# own segment (backslash-newline continuations joined first, then cut at the
+# first ;|& or newline, so a heredoc or multi-line message body never counts)
+# for `--all` or a short-flag cluster holding `a`; a `-a` quoted inside a
+# one-line -m message still widens the scan. Over-firing costs a glance.
+# ACCEPTED LOSS, pinned in the probe: a brand-new UNTRACKED file added in the
+# same command is not in `git diff HEAD`, so its claims pass unflagged; and the
+# widened scan also shows tracked changes the add leaves out of the commit.
+# ACCEPTED MISS: the cut is not quote-aware, so a separator inside a quoted
+# message ends the segment early — `git commit -m "a & b" -a` is not widened.
+SCAN_WORKTREE=0
+GIT_ADD_RE='(^|[[:space:]&|;(`])git[[:space:]]([^&|;]*[[:space:]])?(add|stage)([[:space:]]|$)'
+COMMIT_ALL_RE='(^|[[:space:]])(--all|-[[:alpha:]]*a[[:alpha:]]*)([[:space:]]|$)'
+CMD_TAIL_JOINED=${CMD_TAIL//$'\\\n'/ }
+COMMIT_SEG=${CMD_TAIL_JOINED%%[;&|$'\n']*}
+if [[ $CMD_HEAD =~ $GIT_ADD_RE ]] || [[ $COMMIT_SEG =~ $COMMIT_ALL_RE ]]; then
+    SCAN_WORKTREE=1
 fi
 if [[ $CMD_HEAD =~ $GIT_BOUNDARY_RE ]]; then
     GIT_TAIL=${CMD_HEAD:${#BASH_REMATCH[0]}}
@@ -170,7 +197,17 @@ fi
 # nonzero, and a fail-open `|| MATCHES=""` there would silently discard the
 # very matches it just found. The cap is COMMIT-wide, not per-file — the
 # banner is a pointer to the staged change, not an exhaustive report.
-MATCHES=$(git -c diff.mnemonicprefix=false -c core.quotepath=false diff --cached 2>/dev/null | awk '
+# With SCAN_WORKTREE set, `git diff HEAD` follows the staged diff in the same
+# awk pass; a line already reported (it is staged AND differs from HEAD) is
+# skipped by the seen[] dedupe, which also applies to the staged-only scan.
+scan_diffs() {
+    git -c diff.mnemonicprefix=false -c core.quotepath=false diff --cached 2>/dev/null
+    if [ "$SCAN_WORKTREE" -eq 1 ]; then
+        git -c diff.mnemonicprefix=false -c core.quotepath=false diff HEAD 2>/dev/null
+    fi
+    return 0
+}
+MATCHES=$(scan_diffs | awk '
 /^\+\+\+ /{
     path = substr($0, 5)
     sub(/^b\//, "", path)
@@ -181,7 +218,9 @@ MATCHES=$(git -c diff.mnemonicprefix=false -c core.quotepath=false diff --cached
     if (skip || n >= 3) next
     line = substr($0, 2)
     if (tolower(line) ~ /always (populated|set|non-null|present|returns)|never (null|empty|undefined|happens|fires)|cannot be (null|empty|undefined|unset|set|present|absent|missing|zero|negative|false|true|populated)([^a-z]|$)|cannot (happen|match|occur)|guaranteed to|(is|are) always|only ever/) {
-        print substr(line, 1, 100)
+        shown = substr(line, 1, 100)
+        if (seen[shown]++) next
+        print shown
         n++
     }
 }

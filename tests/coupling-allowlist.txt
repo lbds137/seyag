@@ -25,6 +25,7 @@ lbds137:plugins/seyag/bin/statusline
 lbds137:tests/statusline.probe.sh
 # Lila
 Lila:CLAUDE.md
+Lila:plugins/seyag/skills/going-public/SKILL.md
 # claude-usage
 claude-usage:README.md
 claude-usage:plugins/seyag/bin/usage-sweep

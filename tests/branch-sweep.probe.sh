@@ -143,6 +143,16 @@ grep -q "ELIGIBLE within (tree identical to" <<< "$outc" \
   && ok "capped walk still matches inside the newest 200" || bad "within ELIGIBLE (out: $(head -c 400 <<< "$outc"))"
 ! grep -q "(walk capped)" <<< "$out" && ok "no cap suffix when the base sits inside the walk" \
   || bad "cap suffix leaked into R1"
+# Gitlink fixture R3: main and gl differ ONLY by a gitlink pointer, under
+# diff.ignoreSubmodules=all (which `git diff --quiet` honors): tree hashes must decide.
+R3="$T/gitlink"; mkdir -p "$R3"; git -C "$R3" init -q -b main
+git -C "$R3" config user.email t@t; git -C "$R3" config user.name t; git -C "$R3" config diff.ignoreSubmodules all
+git -C "$R3" update-index --add --cacheinfo "160000,$(printf '1%.0s' $(seq 40)),sub" && git -C "$R3" commit -qm gl1
+git -C "$R3" checkout -qb gl && git -C "$R3" update-index --cacheinfo "160000,$(printf '2%.0s' $(seq 40)),sub"
+git -C "$R3" commit -qm gl2 && git -C "$R3" checkout -q main
+outg=$( (cd "$R3" && "$BS" --no-fetch) 2>&1 )
+grep -q "DIFFERS gl" <<< "$outg" && ! grep -q "ELIGIBLE gl" <<< "$outg" \
+  && ok "gitlink-only difference under diff.ignoreSubmodules=all: DIFFERS" || bad "gitlink tree identity (out: $(head -c 400 <<< "$outg"))"
 
 out2=$( (cd "$R" && "$BS" --apply) 2>&1 ); rc=$?
 [ $rc = 0 ] && ok "apply exits 0" || bad "apply exit $rc"

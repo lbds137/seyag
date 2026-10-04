@@ -143,7 +143,7 @@ render '{"context_window":{"current_usage":{"input_tokens":1000}},"model":{"disp
 render '{"context_window":{"current_usage":{"input_tokens":1000}},"model":{"display_name":"GLM-5.3-Flash"},"cwd":"/tmp"}' \
     | grep -q $'\x1b\\[38;2;215;255;130mG' && ok "gradient: glm flash opens lime" || bad "flash gradient: missing"
 
-# 18-20. Harness-plugin segment: reads the installed registry + the repo
+# 18-20. Seyag-plugin segment: reads the installed registry + the repo
 # manifest (both overridable for hermeticity). Yellow ⬆ ONLY when the
 # manifest is strictly newer (sort -V); plain gray when equal; the whole
 # segment hides when either side is unreadable — no opinion, never a fake
@@ -151,30 +151,30 @@ render '{"context_window":{"current_usage":{"input_tokens":1000}},"model":{"disp
 mkdir -p "$h/.claude/plugins"
 printf '{"plugins":{"harness@claude-harness":[{"installPath":"%s/.claude/plugins/cache/claude-harness/harness/0.3.18"}]}}' "$h" \
     > "$h/.claude/plugins/installed_plugins.json"
-hmanifest="$h/harness-manifest.json"
-export HARNESS_PLUGIN_MANIFEST="$hmanifest" CLAUDE_PLUGIN_REGISTRY="$h/.claude/plugins/installed_plugins.json"
-printf '{"version":"0.3.19"}' > "$hmanifest"
+smanifest="$h/syg-manifest.json"
+export HARNESS_PLUGIN_MANIFEST="$smanifest" CLAUDE_PLUGIN_REGISTRY="$h/.claude/plugins/installed_plugins.json"
+printf '{"version":"0.3.19"}' > "$smanifest"
 out=$(render '{"context_window":{"current_usage":{"input_tokens":1000}},"model":{"display_name":"X"},"cwd":"/tmp"}')
-grep -qF $'\x1b[33mSYG: 0.3.18⬆' <<< "$out" && ok "harness: newer manifest renders yellow ⬆" || bad "harness nudge: $out"
+grep -qF $'\x1b[33mSYG: 0.3.18⬆' <<< "$out" && ok "syg: newer manifest renders yellow ⬆" || bad "syg nudge: $out"
 # 20b. Seyag end state: the registry key renames to seyag@lbds137
 # (owner-named marketplace) and the segment must read it identically
 # (dual-key support).
 printf '{"plugins":{"seyag@lbds137":[{"installPath":"%s/.claude/plugins/cache/lbds137/seyag/0.3.21"}]}}' "$h" \
     > "$h/.claude/plugins/installed_plugins.json"
-printf '{"version":"0.3.22"}' > "$hmanifest"
+printf '{"version":"0.3.22"}' > "$smanifest"
 out=$(render '{"context_window":{"current_usage":{"input_tokens":1000}},"model":{"display_name":"X"},"cwd":"/tmp"}')
-grep -qF $'\x1b[33mSYG: 0.3.21⬆' <<< "$out" && ok "harness: seyag@lbds137 registry key reads (end state)" || bad "harness seyag-key: $out"
+grep -qF $'\x1b[33mSYG: 0.3.21⬆' <<< "$out" && ok "syg: seyag@lbds137 registry key reads (end state)" || bad "syg seyag-key: $out"
 printf '{"plugins":{"harness@claude-harness":[{"installPath":"%s/.claude/plugins/cache/claude-harness/harness/0.3.18"}]}}' "$h" \
     > "$h/.claude/plugins/installed_plugins.json"
-printf '{"version":"0.3.18"}' > "$hmanifest"
+printf '{"version":"0.3.18"}' > "$smanifest"
 out=$(render '{"context_window":{"current_usage":{"input_tokens":1000}},"model":{"display_name":"X"},"cwd":"/tmp"}')
 strip=$(printf '%s' "$out" | sed 's/\x1b\[[0-9;]*m//g')
 grep -q 'SYG: 0\.3\.18' <<< "$strip" && ! grep -q '⬆' <<< "$strip" \
-    && ok "harness: equal renders plain gray, no nudge" || bad "harness equal: $out"
-rm -f "$hmanifest"
+    && ok "syg: equal renders plain gray, no nudge" || bad "syg equal: $out"
+rm -f "$smanifest"
 out=$(render '{"context_window":{"current_usage":{"input_tokens":1000}},"model":{"display_name":"X"},"cwd":"/tmp"}')
-grep -q 'SYG: 0\.3\.18' <<< "$out" && bad "harness hidden: segment leaked: $out" \
-    || ok "harness: unreadable manifest hides the segment"
+grep -q 'SYG: 0\.3\.18' <<< "$out" && bad "syg hidden: segment leaked: $out" \
+    || ok "syg: unreadable manifest hides the segment"
 # 20c. Reload-era wiring: settings declares the lbds137 marketplace as a
 # DIRECTORY source — the running plugin is the repo tip, no install record
 # is written, and the stale old-identity record (0.3.19) must not trip the
@@ -183,11 +183,11 @@ printf '{"plugins":{"harness@claude-harness":[{"installPath":"%s/.claude/plugins
     > "$h/.claude/plugins/installed_plugins.json"
 jq --arg p "$h/Projects/seyag" '.extraKnownMarketplaces.lbds137.source = {"source":"directory","path":$p}' \
     "$h/.claude/settings.json" > "$h/.claude/settings.json.new" && mv "$h/.claude/settings.json.new" "$h/.claude/settings.json"
-printf '{"version":"0.3.21"}' > "$hmanifest"
+printf '{"version":"0.3.21"}' > "$smanifest"
 out=$(render '{"context_window":{"current_usage":{"input_tokens":1000}},"model":{"display_name":"X"},"cwd":"/tmp"}')
 strip=$(printf '%s' "$out" | sed 's/\x1b\[[0-9;]*m//g')
 grep -q 'SYG: 0\.3\.21' <<< "$strip" && ! grep -q '⬆' <<< "$strip" \
-    && ok "harness: directory-marketplace mode renders plain at repo version" || bad "harness dir-mode: $out"
+    && ok "syg: directory-marketplace mode renders plain at repo version" || bad "syg dir-mode: $out"
 
 # 21. Claude Code update nudge: a NEWER staged version in the versions dir
 # (downloaded, restart-pending) escalates the WHOLE CC block to yellow with
@@ -317,6 +317,31 @@ out=$(strip <<< "$(render '{"rate_limits":{"five_hour":{"used_percentage":83,"re
 grep -q '5h:' <<< "$out" \
     && ok "breadth: empty base_url falls through to the Anthropic windows" || bad "breadth empty-base: $out"
 route_anthropic
+
+# 33. Host normalization: :port and userinfo@ are stripped and the host is
+# lowercased before the vendor match; a credential never reaches the label.
+rl_in='{"rate_limits":{"five_hour":{"used_percentage":83,"resets_at":1790790548}},"context_window":{"current_usage":{"input_tokens":1000}},"model":{"display_name":"X"},"cwd":"/tmp"}'
+route_host "https://api.anthropic.com:443"
+out=$(strip <<< "$(render "$rl_in")")
+grep -q '5h:' <<< "$out" && ! grep -q 'anthropic\.com:443' <<< "$out" \
+    && ok "host: api.anthropic.com:443 routes to the Anthropic lane, plan segment present" || bad "host port: $out"
+route_host "HTTPS://API.Z.AI"
+out=$(strip <<< "$(render "$rl_in")")
+grep -q 'z\.ai 5h:' <<< "$out" && ! grep -q 'API\.Z\.AI' <<< "$out" \
+    && ok "host: HTTPS://API.Z.AI routes to the z.ai lane" || bad "host case: $out"
+route_host "https://user:tok@unknown.host"
+raw=$(render "$rl_in")
+grep -qF $'\x1b[90munknown.host' <<< "$raw" && ! grep -q 'tok' <<< "$raw" && ! grep -q '5h:' <<< "$(strip <<< "$raw")" \
+    && ok "host: userinfo stripped, label unknown.host, credential absent" || bad "host userinfo: $(strip <<< "$raw")"
+route_anthropic
+
+# 34. cwd tilde: only $HOME itself or a path under $HOME/ shortens; a sibling
+# sharing the prefix ($HOME + "2") renders as is.
+out=$(strip <<< "$(render "{\"context_window\":{\"current_usage\":{\"input_tokens\":1000}},\"model\":{\"display_name\":\"X\"},\"cwd\":\"${h}2/x\"}")")
+grep -qF "${h}2/x/" <<< "$out" && ! grep -q '~' <<< "$out" \
+    && ok "cwd: \$HOME-prefixed sibling (\$HOME + 2) keeps its full path, no ~" || bad "cwd sibling: $out"
+out=$(strip <<< "$(render "{\"context_window\":{\"current_usage\":{\"input_tokens\":1000}},\"model\":{\"display_name\":\"X\"},\"cwd\":\"$h/x\"}")")
+grep -qF '~/x/' <<< "$out" && ok "cwd: a path under \$HOME/ shortens to ~/x/" || bad "cwd under home: $out"
 
 # 29. Two-yellow join: CC nudge and SYG nudge both pending — both blocks
 # render yellow ⬆ in one line, joined by the single-space separator.

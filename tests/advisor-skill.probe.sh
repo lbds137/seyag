@@ -35,7 +35,7 @@ has "advisor is for ONE knot" "The advisor is for ONE knot, not for relocating a
 has "never-the-transcript" "The whole transcript is NEVER handed over"
 has "caller stays driver" "never edits files, never spawns further agents, never commits"
 has "non-goals" "no auto-trigger, no hook, no server dependency"
-has "model default (fleet value)" "the strongest configured model (this fleet: glm-5.3), always passed explicitly, never defaulted by omission"
+has "model default (strong-lane role)" "the strong-lane model, always passed explicitly as the Agent \`model\` (on the Anthropic lane \`fable\`, or \`opus\` when Fable is capped; on another gateway, that gateway's strong alias), never defaulted by omission"
 
 if [ "$fail" -ne 0 ]; then exit 1; fi
 ok "advisor skill: all guardrails pinned"
