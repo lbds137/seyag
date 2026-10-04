@@ -49,7 +49,7 @@ RC=$?
 check "no CLAUDE_PROJECT_DIR, project copy in PWD → yield" 0 "$RC" "" "$OUT" "" "$(cat "$TMP/err")"
 
 # --- 2. no project copy → passthrough of rc 2, stdout, stderr ------------------
-OUT=$(printf 'payload' | CLAUDE_PROJECT_DIR="$TMP/proj-without" PYTHONDONTWRITEBYTECODE= bash "$RUN" fake-guard 2>"$TMP/err")
+OUT=$(printf 'payload' | CLAUDE_PROJECT_DIR="$TMP/proj-without" PYTHONDONTWRITEBYTECODE='' bash "$RUN" fake-guard 2>"$TMP/err")
 RC=$?
 check "no project copy → exit 2, stdin/stdout/stderr pass through, PYTHONDONTWRITEBYTECODE=1" \
   2 "$RC" "stdout:payload:1" "$OUT" "BLOCKED by fake-guard" "$(cat "$TMP/err")"

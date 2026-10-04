@@ -314,7 +314,7 @@ assert_silent "prompt matching is whitespace-insensitive on both sides"
 # `from="…" hop-chain="c2abd56e9d98b2feadf64e46" from-name=…`, the delivered
 # prompt had no hop-chain, so the current message reported itself.
 XS_HEAD='<cross-session-message from="uds:/run/user/1000/cc-socks/4036067.sock"'
-XS_TAIL='from-name="Pyra emails" from-mode="prompting">
+XS_TAIL='from-name="Docs helper" from-mode="prompting">
 Got it: from now on I will open terminals with konsole --new-tab.
 </cross-session-message>'
 XS_PROMPT="$XS_HEAD $XS_TAIL"
@@ -329,7 +329,7 @@ assert_state "the hop-chain message still advances the state" 14c '2026-08-08T12
 
 # Dropping the attribute must not over-match: a DIFFERENT cross-session message
 # queued before the current one still reports, and only it.
-XS_OTHER="$XS_HEAD hop-chain=\"c2abd56e9d98b2feadf64e46\" from-name=\"Pyra emails\" from-mode=\"prompting\">
+XS_OTHER="$XS_HEAD hop-chain=\"c2abd56e9d98b2feadf64e46\" from-name=\"Docs helper\" from-mode=\"prompting\">
 A second, genuinely mid-turn message.
 </cross-session-message>"
 T13D="$TMPDIR_PROBE/case13d.jsonl"

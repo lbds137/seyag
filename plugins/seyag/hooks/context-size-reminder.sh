@@ -65,6 +65,7 @@ STAMP="$STATE_DIR/context-reminder-$SAFE_SESSION"
 # chmod on a dir we don't own would fail silently and the write would proceed
 # into hostile territory. Fail open instead. (Verbatim from
 # queued-message-receipt.sh, which hardened this exact directory first.)
+# shellcheck disable=SC2174 # only the leaf holds state; parents take the default mode
 mkdir -p -m 700 "$STATE_DIR" 2>/dev/null || exit 0
 [ ! -L "$STATE_DIR" ] || exit 0
 [ -O "$STATE_DIR" ] || exit 0

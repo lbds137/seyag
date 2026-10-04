@@ -360,6 +360,64 @@ reset; run logs dev api --deployment=-x
 [ $rc = 2 ] && grep -q "not starting with '-'" "$T/err" && [ ! -e "$T/cli-logs-args" ] \
   && ok "16c a --deployment value starting with - is refused before the CLI runs" || bad "16c: rc=$rc $(cat "$T/err")"
 
+# 17. no verb reports failure for a completed write; dry runs need no token; CLI launch failures are one line
+reset; over Variables:svc-api '{"errors": [{"message": "service is sleeping"}]}'
+run vars set dev --shared NEWKEY --from-env SRC_VALUE --yes
+[ $rc = 0 ] && grep -q '^Set "NEWKEY" (shared (project-level)) in Railway development; no deploy was triggered\.$' "$T/out" \
+  && grep -q 'Could not determine which services carry "NEWKEY" (listing variables for service "api" failed: .*service is sleeping' "$T/out" \
+  && grep -q 'railway-ops vars list dev --service <S>, then redeploy the ones that carry it\.' "$T/out" \
+  && ! grep -q Traceback "$T/err" \
+  && [ "$(reqs '"VariableUpsert" in [r["op"] for r in rows]')" = True ] \
+  && ok "17a shared vars set --yes whose post-write listing fails: exit 0, success line and Could-not-determine line printed, upsert in the request log" \
+  || bad "17a: rc=$rc reqs=$(reqs '[r["op"] for r in rows]') $(cat "$T/out" "$T/err")"
+# positive control: the same write with a working listing prints the none-carry line and not the fallback
+reset; run vars set dev --shared NEWKEY --from-env SRC_VALUE --yes
+[ $rc = 0 ] && ! grep -q "Could not determine" "$T/out" && grep -q 'No service carries "NEWKEY" yet' "$T/out" \
+  && ok "17a2 (positive control: with a working listing the fallback line is absent)" || bad "17a2: rc=$rc $(cat "$T/out" "$T/err")"
+
+# dry runs with the token variable unset: plan printed, NOT-set line, no GraphQL request
+run_nt() {
+  (cd "$T/proj/sub" && env -u RAILWAY_PROJECT_TOKEN_DEV -u RAILWAY_PROJECT_TOKEN_PROD \
+    RAILWAY_OPS_ENDPOINT="$ENDPOINT" RAILWAY_OPS_CLI="$T/bin/railway" SRC_VALUE=fixture-new-value-eee "$RO" "$@") >"$T/out" 2>"$T/err" <"${STDIN_FILE:-/dev/null}"
+  rc=$?
+  cat "$T/out" "$T/err" >> "$ALL"
+}
+n=0
+for verb in "vars set dev --shared NEWKEY --from-env SRC_VALUE" "vars delete dev --service api OLD_KEY" "redeploy dev api"; do
+  reset; run_nt $verb
+  [ $rc = 0 ] && grep -q "DRY RUN" "$T/out" && grep -q '^  Token: \$RAILWAY_PROJECT_TOKEN_DEV is NOT set (a --yes run needs it)$' "$T/out" \
+    && [ ! -s "$REQ" ] && n=$((n + 1)) || echo "17b miss: $verb rc=$rc $(cat "$T/out" "$T/err")"
+done
+[ $n = 3 ] && ok "17b vars set / vars delete / redeploy dry runs with the token unset: exit 0, NOT-set line, empty request log (3 of 3)" || bad "17b: $n of 3"
+reset; run_nt vars set dev --shared NEWKEY --from-env SRC_VALUE --yes
+[ $rc = 2 ] && grep -q "RAILWAY_PROJECT_TOKEN_DEV is not set" "$T/err" && [ ! -s "$REQ" ] \
+  && ok "17b2 (positive control: the same verb with --yes and no token is still refused, exit 2, no request)" || bad "17b2: rc=$rc $(cat "$T/err")"
+n=0
+for verb in "vars set dev --shared NEWKEY --from-env SRC_VALUE" "vars delete dev --service api OLD_KEY" "redeploy dev api"; do
+  reset; run $verb
+  [ $rc = 0 ] && grep -q '^  Token: \$RAILWAY_PROJECT_TOKEN_DEV is set$' "$T/out" && ! grep -q "NOT set" "$T/out" \
+    && ! grep -qF fake-dev-token "$T/out" "$T/err" && [ ! -s "$REQ" ] && n=$((n + 1)) || echo "17c miss: $verb rc=$rc $(cat "$T/out" "$T/err")"
+done
+[ $n = 3 ] && ok "17c the same three dry runs with the token set print the is-set line and never the token value (3 of 3)" || bad "17c: $n of 3"
+reset; run_nt rotate-secret dev ROT_KEY
+[ $rc = 2 ] && grep -q "RAILWAY_PROJECT_TOKEN_DEV is not set" "$T/err" && [ ! -s "$REQ" ] \
+  && ok "17d rotate-secret dry run with the token unset still refuses (exit 2, its plan reads the API)" || bad "17d: rc=$rc $(cat "$T/err")"
+
+# an existing non-executable CLI path: one-line usage error, never a traceback
+: > "$T/notexec"; chmod 644 "$T/notexec"
+n=0
+for verb in "ids dev" "logs dev api"; do
+  reset
+  (cd "$T/proj/sub" && RAILWAY_OPS_ENDPOINT="$ENDPOINT" RAILWAY_OPS_CLI="$T/notexec" RAILWAY_PROJECT_TOKEN_DEV=fake-dev-token "$RO" $verb) >"$T/out" 2>"$T/err"; rc=$?
+  cat "$T/out" "$T/err" >> "$ALL"
+  [ $rc = 2 ] && grep -q "could not run the railway CLI ($T/notexec): " "$T/err" && ! grep -q Traceback "$T/err" && n=$((n + 1)) || echo "17e miss: $verb rc=$rc $(cat "$T/err")"
+done
+[ $n = 2 ] && ok "17e RAILWAY_OPS_CLI at a non-executable file: ids and logs exit 2 with 'could not run the railway CLI', no traceback (2 of 2)" || bad "17e: $n of 2"
+reset
+(cd "$T/proj/sub" && RAILWAY_OPS_ENDPOINT="$ENDPOINT" RAILWAY_OPS_CLI="$T/no-such-cli" RAILWAY_PROJECT_TOKEN_DEV=fake-dev-token "$RO" ids dev) >"$T/out" 2>"$T/err"; rc=$?
+[ $rc = 2 ] && grep -q "railway CLI not found" "$T/err" \
+  && ok "17e2 (positive control: a missing CLI path keeps its own 'not found' message)" || bad "17e2: rc=$rc $(cat "$T/err")"
+
 # 11. no secret in any captured output
 if grep -qF -e fake-dev-token -e fake-prod-token "$ALL"; then bad "11 a fake token value appears in captured output"
 else ok "11 no fake token value appears in any captured stdout/stderr"; fi

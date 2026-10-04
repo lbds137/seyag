@@ -193,6 +193,7 @@ fi
 STATE_DIR="/tmp/claude-$(id -u)"
 ACK_FILE="${SYG_DISPATCH_ACK_FILE:-$STATE_DIR/dispatch-posture-ack}"
 if [ -z "${SYG_DISPATCH_ACK_FILE:-}" ]; then
+  # shellcheck disable=SC2174 # only the leaf holds state; parents take the default mode
   mkdir -p -m 700 "$STATE_DIR" 2>/dev/null || exit 0
   [ ! -L "$STATE_DIR" ] || exit 0
   [ -O "$STATE_DIR" ] || exit 0

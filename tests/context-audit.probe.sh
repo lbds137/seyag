@@ -39,8 +39,10 @@ printf -- '- [G](good-one.md)\n- [O](other_thing.md)\n- [S](stale_file.md)\n- [U
 for i in $(seq 1 205); do echo "- line $i" >> "$T/mem/MEMORY.md"; done
 
 W=$(run weigh "$T/work/proj")
+# shellcheck disable=SC2088 # the tilde is literal text in the output under test
 grep -q 'user CLAUDE.md' <<<"$W" && [ "$(grep -c '~/.claude/CLAUDE.md' <<<"$W")" = 1 ] && ok "user CLAUDE.md counted once" || bad "user CLAUDE.md" "$W"
 grep -q 'project CLAUDE.md .*~/work/CLAUDE.md' <<<"$W" && ok "walks up to a parent CLAUDE.md" || bad "parent walk" "$W"
+# shellcheck disable=SC2088 # the tilde is literal text in the output under test
 grep -q '~/work/proj/.claude/CLAUDE.md' <<<"$W" && ok "counts .claude/CLAUDE.md" || bad ".claude/CLAUDE.md" "$W"
 grep -q 'CLAUDE.local.md' <<<"$W" && ok "counts CLAUDE.local.md" || bad "CLAUDE.local.md" "$W"
 grep -q 'user rule .*sub/nested.md' <<<"$W" && ok "finds nested user rules (recursive)" || bad "nested rule" "$W"
@@ -51,8 +53,10 @@ sizes=$(grep -E '^ +[0-9]+ B ' <<<"$W" | grep -v TOTAL | awk '{print $1}')
 [ "$sizes" = "$(sort -rn <<<"$sizes")" ] && [ "$(wc -l <<<"$sizes")" -ge 5 ] && ok "sorts largest first" || bad "sort order" "$W"
 
 R=$(run refs)
+# shellcheck disable=SC2088 # the tilde is literal text in the output under test
 grep -q 'missing path .*other_thing.md: ~/nope/file.txt' <<<"$R" && ok "reports a missing path" || bad "missing path" "$R"
 grep -q 'missing path .*MEMORY.md: ~/index-missing/x' <<<"$R" && ok "scans MEMORY.md itself for paths" || bad "MEMORY.md paths" "$R"
+# shellcheck disable=SC2088 # the tilde is literal text in the output under test
 grep -q '~/exists' <<<"$R" && bad "reported an existing path" "$R" || ok "passes an existing path"
 grep -v 'memory files,' <<<"$R" | grep -q 'gdrive\|linked\|fakemount' && bad "looked into a mount (a stat there would fail and be reported)" "$R" \
   || ok "never stats into ~/gdrive, a mount-table rclone mount, or a symlink into one"

@@ -84,6 +84,7 @@ STATE_FILE="$STATE_DIR/queued-receipt-state-$SAFE_SESSION"
 # /tmp another user could pre-create it (dir squat / symlink plant, CWE-377) —
 # chmod on a dir we don't own would fail silently and the write would proceed
 # into hostile territory. Fail open instead.
+# shellcheck disable=SC2174 # only the leaf holds state; parents take the default mode
 mkdir -p -m 700 "$STATE_DIR" 2>/dev/null || exit 0
 [ ! -L "$STATE_DIR" ] || exit 0
 [ -O "$STATE_DIR" ] || exit 0

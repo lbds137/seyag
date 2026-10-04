@@ -137,7 +137,7 @@ run 0 - "(g) last assistant block is thinking → passes" "$FIX_G" false
 run 0 - "(h) a sidechain tool_use does not decide the turn" "$FIX_H" false
 
 # --- (i) empty transcript_path in the payload → passes ------------------------
-OUT_I=$(jq -n '{stop_hook_active:false}' | "$HOOK" 2>&1)
+jq -n '{stop_hook_active:false}' | "$HOOK" >/dev/null 2>&1
 ACTUAL_I=$?
 if [ "$ACTUAL_I" -eq 0 ]; then
   printf 'PASS  (exit %d)  %s\n' "$ACTUAL_I" "(i) no transcript_path key → passes"

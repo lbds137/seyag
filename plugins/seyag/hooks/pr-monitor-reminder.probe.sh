@@ -86,7 +86,6 @@ run_hook_cwd() {
 }
 
 cd "$REPO_ROOT" || exit 1
-CURRENT_BRANCH=$(git branch --show-current 2>/dev/null || echo "")
 SEEN1="$WORK/seen1"
 SEEN2="$WORK/seen2"
 
@@ -247,8 +246,8 @@ OUT12=$(cd "$REPO_ROOT" && run_hook "Bash" "cd $FIXTURE_WT && git push" \
 # --- 13. neither -C nor cd present -> the payload's own `.cwd` is used -----
 LOG13="$WORK/log13"
 : > "$LOG13"
-OUT13=$(run_hook_cwd "Bash" "git push" "$FIXTURE_WT" \
-  SYG_PR_MONITOR_SEEN_FILE="$WORK/seen13" FAKE_GH_PR_LIST_NUM=203 FAKE_GH_LOG="$LOG13")
+run_hook_cwd "Bash" "git push" "$FIXTURE_WT" \
+  SYG_PR_MONITOR_SEEN_FILE="$WORK/seen13" FAKE_GH_PR_LIST_NUM=203 FAKE_GH_LOG="$LOG13" >/dev/null
 [ "$(gh_log_used_branch "$LOG13")" = "fixture-branch" ] \
   && pass "no -C/cd: payload .cwd used for the fixture repo" \
   || fail "no -C/cd: payload .cwd used for the fixture repo (got '$(gh_log_used_branch "$LOG13")')"
@@ -256,8 +255,8 @@ OUT13=$(run_hook_cwd "Bash" "git push" "$FIXTURE_WT" \
 # --- 14. an unresolvable `cd "$X"` is ignored, falling back to payload .cwd -
 LOG14="$WORK/log14"
 : > "$LOG14"
-OUT14=$(run_hook_cwd "Bash" 'cd "$SOME_VAR" && git push' "$FIXTURE_WT" \
-  SYG_PR_MONITOR_SEEN_FILE="$WORK/seen14" FAKE_GH_PR_LIST_NUM=204 FAKE_GH_LOG="$LOG14")
+run_hook_cwd "Bash" 'cd "$SOME_VAR" && git push' "$FIXTURE_WT" \
+  SYG_PR_MONITOR_SEEN_FILE="$WORK/seen14" FAKE_GH_PR_LIST_NUM=204 FAKE_GH_LOG="$LOG14" >/dev/null
 [ "$(gh_log_used_branch "$LOG14")" = "fixture-branch" ] \
   && pass 'cd "$VAR" (unresolvable): ignored, falls back to payload .cwd' \
   || fail 'cd "$VAR" (unresolvable): ignored, falls back to payload .cwd (got '"'$(gh_log_used_branch "$LOG14")'"')'

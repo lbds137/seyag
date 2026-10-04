@@ -312,6 +312,7 @@ elif [ "$vendor_lane" = zai ]; then
     # zai-spend's --json so presentation stays in the statusline. Falls back to the plain
     # --line text (gray) when the json lacks percentages (local-est/uncal modes).
     zai_json=$("$HOME/.local/bin/zai-spend" --json 2>/dev/null)
+    # shellcheck disable=SC2154 # z5hr/zwk/zwkr are assigned by the eval on this line
     if [ -n "$zai_json" ] && eval "$(jq -r '@sh "z5h=\(.five_hour_pct // "") zwk=\(.week_pct // "") z5hr=\(.five_hour_reset_at // 0) zwkr=\(.week_reset_at // 0)"' <<< "$zai_json")" && [ -n "$z5h" ]; then
         output="$output${sep}${zai_brand}z.ai${reset} $(render_windows "$z5h" "$z5hr" "$zwk" "$zwkr")"
     else
