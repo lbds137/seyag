@@ -21,9 +21,11 @@ HOOK="$DIR/$NAME.sh"
 [ -f "$HOOK" ] || { echo "run.sh: no such seyag hook '$NAME'" >&2; exit 0; }
 
 # Turn-shape hooks (Stop, UserPromptSubmit) are about talking to a person. Headless
-# runs (`claude -p`, SDK scripts) have nobody attending, and a Stop hook there can
-# replace the script's real output, so skip them. The shell guards still run.
-if [ "${CLAUDE_CODE_SESSION_ATTENDED:-1}" = 0 ]; then
+# runs have nobody attending, and a Stop hook there can replace the script's real
+# output, so skip them: CLAUDE_CODE_ENTRYPOINT starting `sdk-` (`claude -p` reports
+# sdk-cli, SDK scripts sdk-*). CLAUDE_CODE_SESSION_ATTENDED is not consulted: a
+# background session a person drives live carries 0 too. The shell guards still run.
+if [[ "${CLAUDE_CODE_ENTRYPOINT:-}" == sdk-* ]]; then
   case "$NAME" in
     blocking-question-channel-check | turn-end-shape-gate | queued-message-receipt | \
       bare-token-binding-reminder | context-size-reminder | promise-ledger-check) exit 0 ;;

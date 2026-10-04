@@ -26,8 +26,7 @@ bad() { echo "FAIL: $1"; [ -n "${2:-}" ] && printf '      got: %s\n' "$2"; fail=
 
 run() { # $1 source, $2 user rules dir → sets OUT, RC
   OUT=$(jq -nc --arg s "$1" '{session_id: "probe", source: $s}' \
-    | CLAUDE_PLUGIN_ROOT="$TMP/root" SYG_USER_RULES_DIR="$2" SYG_STATE_DIR="$TMP/state" \
-      SYG_INSTALLED_PLUGINS="${INSTALLED:-$TMP/no-such-installed.json}" bash "$HOOK" 2>/dev/null)
+    | CLAUDE_PLUGIN_ROOT="$TMP/root" SYG_USER_RULES_DIR="$2" SYG_STATE_DIR="$TMP/state" bash "$HOOK" 2>/dev/null)
   RC=$?
 }
 ctx() { jq -r '.hookSpecificOutput.additionalContext' <<<"$OUT" 2>/dev/null; }
@@ -53,8 +52,7 @@ done
 REAL_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
 REAL_VERSION=$(jq -r '.version' "$REAL_ROOT/.claude-plugin/plugin.json")
 OUT=$(jq -nc '{session_id: "probe", source: "startup"}' \
-  | CLAUDE_PLUGIN_ROOT="$REAL_ROOT" SYG_USER_RULES_DIR="$TMP/rules-empty" SYG_STATE_DIR="$TMP/state" \
-    SYG_INSTALLED_PLUGINS="$TMP/no-such-installed.json" bash "$HOOK" 2>/dev/null)
+  | CLAUDE_PLUGIN_ROOT="$REAL_ROOT" SYG_USER_RULES_DIR="$TMP/rules-empty" SYG_STATE_DIR="$TMP/state" bash "$HOOK" 2>/dev/null)
 RC=$?
 if [ "$RC" = 0 ] && valid && [ "$(ctx | head -1)" = "seyag plugin $REAL_VERSION" ]; then
   ok "startup with the real PLUGIN_ROOT: version line matches the repo's plugin.json ($REAL_VERSION)"
@@ -91,31 +89,17 @@ run resume "$TMP/rules-linked"
 [ -L "$S/context-reminder-link" ] && [ -e "$TMP/target" ] && ok "leaves a symlink and its target alone" || bad "symlink touched"
 [ "$RC" = 0 ] && [ -z "$OUT" ] && ok "pruning adds no output" || bad "pruning produced output" "$OUT"
 
-# Install drift: the installed copy's hooks.json / skills / agents vs the source's.
-mkdir -p "$TMP/root/hooks" "$TMP/root/skills/a" "$TMP/root/agents"; echo '{"h":1}' > "$TMP/root/hooks/hooks.json"
-cp -r "$TMP/root" "$TMP/inst"
+# Install record: the installed copy's hooks.json differing from the source's no longer
+# warns (hooks, agents and skills load from the source tree), so only the version line shows.
+# SYG_INSTALLED_PLUGINS is set only so a reinserted drift block would read this fixture.
+mkdir -p "$TMP/root/hooks" "$TMP/inst/hooks"
+echo '{"h":2}' > "$TMP/root/hooks/hooks.json"; echo '{"h":1}' > "$TMP/inst/hooks/hooks.json"
 jq -n --arg p "$TMP/inst" '{plugins: {"seyag@lbds137": [{installPath: $p}]}}' > "$TMP/installed.json"
-INSTALLED="$TMP/installed.json"
-run startup "$TMP/rules-linked"
-[ "$(ctx)" = "seyag plugin unknown" ] && ok "install matches source: no drift warning" || bad "matching install warned" "$OUT"
-mkdir "$TMP/root/skills/b"
-run startup "$TMP/rules-linked"
-[ "$(ctx)" = "seyag plugin unknown" ] && ok "only skills differ: no drift warning" || bad "skills-only difference warned" "$OUT"
-echo '{"h":2}' > "$TMP/root/hooks/hooks.json"
-run startup "$TMP/rules-linked"
-ctx | grep -q 'differs from its source in: hooks.json' && ! ctx | grep -q 'skills' && ok "stale install: names hooks.json, not skills" || bad "stale install: expected hooks.json drift only" "$OUT"
-echo '{"h":1}' > "$TMP/root/hooks/hooks.json"; mkdir "$TMP/root/agents/x"
-run startup "$TMP/rules-linked"
-ctx | grep -q 'differs from its source in: agents' && ok "only agents differ: names agents" || bad "agents-only difference: expected warning" "$OUT"
-echo '{"h":2}' > "$TMP/root/hooks/hooks.json"; rmdir "$TMP/root/agents/x"
-run resume "$TMP/rules-linked"
-[ -z "$OUT" ] && ok "drift check stays quiet on resume" || bad "drift warned on resume" "$OUT"
-jq -n --arg p "$TMP/root" '{plugins: {"seyag@lbds137": [{installPath: $p}]}}' > "$TMP/installed.json"
-run startup "$TMP/rules-linked"
-[ "$(ctx)" = "seyag plugin unknown" ] && ok "install path is the source itself: no drift warning" || bad "self-install warned" "$OUT"
-run startup "$TMP/rules-empty"
-[ "$(ctx | grep -c .)" = 2 ] && ctx | grep -q 'core rules are not loaded' && ok "rules warning unaffected by the drift check" || bad "rules warning changed" "$OUT"
-INSTALLED=""
+OUT=$(jq -nc '{session_id: "probe", source: "startup"}' \
+  | CLAUDE_PLUGIN_ROOT="$TMP/root" SYG_USER_RULES_DIR="$TMP/rules-linked" SYG_STATE_DIR="$TMP/state" \
+    SYG_INSTALLED_PLUGINS="$TMP/installed.json" bash "$HOOK" 2>/dev/null)
+RC=$?
+[ "$RC" = 0 ] && valid && [ "$(ctx)" = "seyag plugin unknown" ] && ok "installed copy differs from source: version line only, no warning" || bad "differing install record: expected version-only output" "$OUT"
 
 prune() { # $1 state dir, $2 max days ("" = unset), $3 PATH (optional) → runs a resume start
   jq -nc '{session_id: "probe", source: "resume"}' >"$TMP/in.json"
