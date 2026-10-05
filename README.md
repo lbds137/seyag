@@ -59,7 +59,7 @@ claude plugin update seyag@lbds137 --scope user
 
 This pair keeps the install record, and so the statusline's SYG version, current; it is not what makes code reach sessions. The SessionStart hook prints `seyag plugin <version>` on every start (so a fleet tool can read each live session's version from its log).
 
-**Headless runs** (`CLAUDE_CODE_ENTRYPOINT` starting `sdk-`: `claude -p` reports `sdk-cli`, SDK scripts `sdk-*`) skip the turn-shape hooks, which are about talking to a person. Background sessions a person drives live (Remote Control, background jobs) keep them, even though they carry `CLAUDE_CODE_SESSION_ATTENDED=0`. The shell guards still run. The rules file still loads, at about 4.5k tokens per call.
+**Headless runs** (`CLAUDE_CODE_ENTRYPOINT` starting `sdk-`: `claude -p` reports `sdk-cli`, SDK scripts `sdk-*`) skip the `turn-shape` and `context` components (see Components and profiles), which are about talking to a person. Background sessions a person drives live (Remote Control, background jobs) keep them, even though they carry `CLAUDE_CODE_SESSION_ATTENDED=0`. The shell guards still run. The rules file still loads, at about 4.5k tokens per call.
 
 **Fail-open:** `run.sh` skips a hook that has a syntax error instead of letting bash's exit 2 block every Bash call.
 
@@ -68,6 +68,37 @@ This pair keeps the install record, and so the statusline's SYG version, current
 ## Project overrides
 
 If a project has its own copy of a hook under the same name, `.claude/hooks/<same-name>.sh`, the plugin's version stands down in that project and the project's version runs. This way Tzurot, which still carries its own copies, doesn't get every check twice. The same applies to the rules: `core.md` says project CLAUDE.md and `.claude/rules/` take precedence.
+
+## Components and profiles
+
+Every hook belongs to one component, and each component switches on its own, so a project that wants a subset sets an environment variable instead of copying hook wiring into its own settings. The registry is `plugins/seyag/hooks/components.tsv` (one `<hook><TAB><component>` line per hook, plus the profile lines); `tests/hook-wiring.probe.sh` pins that every wired hook appears in it exactly once.
+
+| Component | Hooks | What it is for |
+|---|---|---|
+| `session` | `session-start` | The version line other tools read, and aging out state files. Always runs; it cannot be disabled. |
+| `rules` | (none: gates parts of `session-start`) | The rules-link warning at startup/clear and the post-compaction checklist. |
+| `route` | `route-check` | Approved model route check at session start. |
+| `turn-shape` | `blocking-question-channel-check`, `turn-end-shape-gate`, `promise-ledger-check`, `queued-message-receipt`, `bare-token-binding-reminder` | Turn-end and prompt-time checks about talking to a person. |
+| `context` | `context-size-reminder` | The context-size reminder. |
+| `guards-shell` | `self-matching-pattern-guard`, `grep-escaped-dollar-guard`, `cache-rm-redirect`, `recursive-rm-guard`, `broad-walk-guard`, `python-heredoc-edit-guard`, `lossy-pipe-guard`, `cwd-drift-guard` | Shell-safety guards. |
+| `guards-outbound` | `upstream-submission-guard`, `publish-gate`, `session-url-gate`, `private-term-guard` | Guards on what a command sends off the machine. |
+| `guards-commit` | `claim-shape-guard`, `temporal-marker-guard` | Guards on what a commit carries. |
+| `pr-watch` | `pr-monitor-reminder` | The post-push CI watch reminder. |
+| `dispatch` | `dispatch-posture-gate` | The inline-edit gate that points at the `delegation` skill. |
+
+Three variables choose what runs, read in this order. Lists are separated by whitespace or commas, and unknown names are ignored.
+
+- `SYG_PROFILE` picks the base set: `full` (every component; the default, and what an unset or empty value means), `guards` (`guards-shell guards-outbound guards-commit context dispatch route session`) or `none` (`session` only). Surrounding whitespace in the value is trimmed. An unknown name falls back to `full`, so a typo leaves the guards on. `guards` and `none` omit `rules`, so under them the rules-link warning and the post-compaction checklist are off too.
+- `SYG_ENABLE` adds components or individual hook names to that set.
+- `SYG_DISABLE` removes them, and wins over `SYG_ENABLE`. A request to disable `session` is ignored.
+
+A project sets them in its `.claude/settings.json`, for example `"env": {"SYG_PROFILE": "guards"}`. A missing `components.tsv`, a resolver that will not load, or a hook the registry does not list leaves that hook enabled.
+
+**Headless:** in a headless run (`CLAUDE_CODE_ENTRYPOINT` starting `sdk-`) `turn-shape` and `context` are removed after the variables are applied, so `SYG_ENABLE` cannot bring them back.
+
+**Opt-in hooks:** `dispatch-posture-gate` stays inert until `SYG_DISPATCH_SRC_RE` is set, `private-term-guard` until `SYG_PRIVATE_TERMS_FILE` names a file (and the repo is marked public), and `route-check` until a route is required (`SYG_ROUTE_REQUIRED` or the marker-file variables). Their component being on is necessary but not sufficient.
+
+**Rules are not a component you can unload.** The core rules load as a user-level rule file, not through a hook, so plugin toggles and profiles cannot unload them. A project that must not see them lists that file in `claudeMdExcludes` in its `.claude/settings.json`, for example `"claudeMdExcludes": ["**/seyag-core.md"]` (the name of the link Install creates). `claudeMdExcludes` does not expand `~`, so a `~/.claude/rules/seyag-core.md` entry leaves the rules loaded; use a glob like the one above or an absolute path. Checked by grepping a headless run's session log for the rules heading: with no key, 1 hit; with the absolute link path or the absolute target path, 0; with the glob, 0; with a `~` path, 1.
 
 ## Bypass tokens
 

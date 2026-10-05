@@ -1,0 +1,34 @@
+# Seyag component registry. Read by lib/components.sh (run.sh and session-start.sh).
+# Tab-separated. Hook lines: <hook-name><TAB><component>. Every hook in hooks.json
+# appears exactly once (tests/hook-wiring.probe.sh pins it).
+# Profile lines: @profile<TAB><name><TAB><space-separated components>.
+# "rules" is not a hook: it gates the rules-link warning and the post-compaction
+# checklist in session-start. "session" always runs.
+# Env: SYG_PROFILE (base set, default full), SYG_ENABLE, SYG_DISABLE (DISABLE wins).
+session-start	session
+route-check	route
+blocking-question-channel-check	turn-shape
+turn-end-shape-gate	turn-shape
+promise-ledger-check	turn-shape
+queued-message-receipt	turn-shape
+bare-token-binding-reminder	turn-shape
+context-size-reminder	context
+self-matching-pattern-guard	guards-shell
+grep-escaped-dollar-guard	guards-shell
+cache-rm-redirect	guards-shell
+recursive-rm-guard	guards-shell
+broad-walk-guard	guards-shell
+python-heredoc-edit-guard	guards-shell
+lossy-pipe-guard	guards-shell
+cwd-drift-guard	guards-shell
+upstream-submission-guard	guards-outbound
+publish-gate	guards-outbound
+session-url-gate	guards-outbound
+private-term-guard	guards-outbound
+claim-shape-guard	guards-commit
+temporal-marker-guard	guards-commit
+pr-monitor-reminder	pr-watch
+dispatch-posture-gate	dispatch
+@profile	full	session rules route turn-shape context guards-shell guards-outbound guards-commit pr-watch dispatch
+@profile	guards	guards-shell guards-outbound guards-commit context dispatch route session
+@profile	none	session

@@ -23,7 +23,7 @@ shebang_kind() {
 }
 
 if [ "$mode" = shell ]; then
-  for f in plugins/seyag/hooks/*.sh tests/*.sh; do
+  for f in plugins/seyag/hooks/*.sh plugins/seyag/hooks/lib/*.sh tests/*.sh; do
     printf '%s\n' "$f"
   done
   for f in plugins/seyag/bin/*; do

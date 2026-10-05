@@ -55,6 +55,50 @@ check_root() {
     [ -n "$name" ] || continue
     [ -e "$hooks/$name.sh" ] || report "hooks.json names $name but $name.sh is missing"
   done <<<"$wired"
+  # Components: every wired hook has exactly one line in components.tsv, every
+  # tsv hook line names an existing hook script, and every component a hook line
+  # uses is in the `full` profile (else the default would switch that hook off).
+  local tsv="$hooks/components.tsv" tsv_hooks="" kind a rest n full=""
+  if [ ! -r "$tsv" ]; then
+    report "components.tsv is missing or unreadable"
+  else
+    while IFS=$'\t' read -r kind a rest || [ -n "$kind" ]; do
+      case "$kind" in
+        '' | '#'*) ;;
+        @profile) [ "$a" = full ] && full=" $rest " ;;
+        *) tsv_hooks+="$kind"$'\n' ;;
+      esac
+    done <"$tsv"
+    while IFS= read -r name; do
+      [ -n "$name" ] || continue
+      n=$(grep -cxF "$name" <<<"$tsv_hooks")
+      [ "$n" -eq 1 ] || report "hook $name appears $n times in components.tsv (want 1)"
+    done <<<"$wired"
+    while IFS= read -r name; do
+      [ -n "$name" ] || continue
+      [ -e "$hooks/$name.sh" ] || report "components.tsv names $name but $name.sh is missing"
+    done <<<"$tsv_hooks"
+    while IFS=$'\t' read -r kind a rest || [ -n "$kind" ]; do
+      case "$kind" in '' | '#'*) continue ;; @profile) continue ;; esac
+      case "$full" in *" $a "*) ;; *) report "components.tsv: $kind uses component $a, which the full profile lacks" ;; esac
+    done <"$tsv"
+    # The resolver's headless fallback list must equal the registry's hooks of the
+    # headless-off components, or a missing registry would change headless behavior.
+    local lib="$hooks/lib/components.sh" off_comps off_hooks want_hooks
+    off_comps=$(sed -n 's/^SYG_HEADLESS_OFF="\(.*\)"$/\1/p' "$lib" 2>/dev/null)
+    off_hooks=$(sed -n 's/^SYG_HEADLESS_OFF_HOOKS="\(.*\)"$/\1/p' "$lib" 2>/dev/null)
+    if [ -z "$off_comps" ] || [ -z "$off_hooks" ]; then
+      report "lib/components.sh lacks SYG_HEADLESS_OFF or SYG_HEADLESS_OFF_HOOKS"
+    else
+      want_hooks=$(while IFS=$'\t' read -r kind a rest || [ -n "$kind" ]; do
+        a=${a%$'\r'}
+        case "$kind" in '' | '#'*) continue ;; @profile) continue ;; esac
+        case " $off_comps " in *" $a "*) printf '%s\n' "$kind" ;; esac
+      done <"$tsv" | sort)
+      [ "$(tr ' ' '\n' <<<"$off_hooks" | sort)" = "$want_hooks" ] \
+        || report "SYG_HEADLESS_OFF_HOOKS differs from the components.tsv hooks of: $off_comps"
+    fi
+  fi
   for f in "$root"/plugins/seyag/bin/*; do
     [ -f "$f" ] && [ -x "$f" ] || continue
     name=$(basename "$f")
@@ -105,5 +149,26 @@ expect no-bin-probe "bin tool safe-clean has no tests/safe-clean.probe.sh"
 
 mutant missing-script; rm "$TMP/missing-script/plugins/seyag/hooks/publish-gate.sh" "$TMP/missing-script/plugins/seyag/hooks/publish-gate.probe.sh"
 expect missing-script "hooks.json names publish-gate but publish-gate.sh is missing"
+
+mutant tsv-unlisted;   grep -v '^publish-gate	' "$REPO/plugins/seyag/hooks/components.tsv" > "$TMP/tsv-unlisted/plugins/seyag/hooks/components.tsv"
+expect tsv-unlisted "hook publish-gate appears 0 times in components.tsv (want 1)"
+
+mutant tsv-duplicate;  printf 'publish-gate\tguards-outbound\n' >> "$TMP/tsv-duplicate/plugins/seyag/hooks/components.tsv"
+expect tsv-duplicate "hook publish-gate appears 2 times in components.tsv (want 1)"
+
+mutant tsv-ghost;      printf 'ghost-guard\tguards-shell\n' >> "$TMP/tsv-ghost/plugins/seyag/hooks/components.tsv"
+expect tsv-ghost "components.tsv names ghost-guard but ghost-guard.sh is missing"
+
+mutant tsv-missing;    rm "$TMP/tsv-missing/plugins/seyag/hooks/components.tsv"
+expect tsv-missing "components.tsv is missing or unreadable"
+
+mutant tsv-off-full;   sed 's/^publish-gate\t.*/publish-gate\tghost-component/' "$REPO/plugins/seyag/hooks/components.tsv" > "$TMP/tsv-off-full/plugins/seyag/hooks/components.tsv"
+expect tsv-off-full "publish-gate uses component ghost-component, which the full profile lacks"
+
+mutant headless-drift; sed 's/ context-size-reminder"$/"/' "$REPO/plugins/seyag/hooks/lib/components.sh" > "$TMP/headless-drift/plugins/seyag/hooks/lib/components.sh"
+expect headless-drift "SYG_HEADLESS_OFF_HOOKS differs from the components.tsv hooks of: turn-shape context"
+
+mutant headless-moved; sed 's/^turn-end-shape-gate\tturn-shape/turn-end-shape-gate\tguards-shell/' "$REPO/plugins/seyag/hooks/components.tsv" > "$TMP/headless-moved/plugins/seyag/hooks/components.tsv"
+expect headless-moved "SYG_HEADLESS_OFF_HOOKS differs from the components.tsv hooks of: turn-shape context"
 
 [ "$fail" -eq 0 ]

@@ -7,10 +7,10 @@
 # see the README). This hook only:
 # - startup / clear: prints "seyag plugin <version>" (deck-sessions
 #   greps it from session logs),
-#   then warns in one line if that rules link is missing.
+#   then warns in one line if that rules link is missing (component `rules`).
 # - compact: adds the post-compaction recovery checklist (the failure class
 #   where re-suggested settings, dropped promises and lost work-stack pointers
-#   keep recurring). Adapted from Tzurot's session-start.sh.
+#   keep recurring; component `rules`). Adapted from Tzurot's session-start.sh.
 # - resume: outputs nothing.
 # - every source: deletes prompt-hook state files older than 7 days (below).
 #
@@ -42,6 +42,18 @@ command -v jq >/dev/null 2>&1 || exit 0
 INPUT=$(cat)
 SOURCE=$(jq -r '.source // empty' <<<"$INPUT" 2>/dev/null || echo "")
 
+# Components: the rules-link warning and the compact checklist belong to the
+# `rules` component (SYG_PROFILE / SYG_DISABLE); the version line never does. A
+# resolver that will not load leaves everything on.
+HOOK_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=lib/components.sh
+if [ -r "$HOOK_DIR/lib/components.sh" ] && source "$HOOK_DIR/lib/components.sh" 2>/dev/null \
+  && declare -F syg_enabled >/dev/null; then
+  :
+else
+  syg_enabled() { return 0; }
+fi
+
 PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 RULES_DIR="${SYG_USER_RULES_DIR:-$HOME/.claude/rules}"
 
@@ -59,10 +71,11 @@ case "$SOURCE" in
     for f in "$RULES_DIR"/*.md; do
       [ -e "$f" ] && cmp -s "$f" "$PLUGIN_ROOT/rules/core.md" && linked=1 && break
     done
-    [ -n "$linked" ] || TEXT="${TEXT:+$TEXT
+    [ -n "$linked" ] || ! syg_enabled rules || TEXT="${TEXT:+$TEXT
 }The seyag plugin's core rules are not loaded (no file in $RULES_DIR matches its rules/core.md). Tell the owner; the fix is in the seyag README under Install, and it takes effect in the next session."
     ;;
   compact)
+    syg_enabled rules || exit 0
     TEXT=$(cat <<'EOF'
 POST-COMPACTION RECOVERY (structural checklist — act before new work):
 0. Undelivered reports FIRST: if the compaction summary names a user-facing
