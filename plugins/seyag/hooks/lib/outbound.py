@@ -76,9 +76,9 @@ Item = namedtuple("Item", "label text directory kind sha")
 MAX_FILE = 4 * 1024 * 1024
 FILE_SUBCOMMANDS = ("commit", "tag", "notes")
 
-# git global options that take a separate value word.
-GIT_VALUE_OPTS = {"-C", "-c", "--git-dir", "--work-tree", "--namespace",
-                  "--super-prefix", "--config-env"}
+# git global options that take a separate value word: commit_diff's set, so
+# both parsers find the same subcommand.
+GIT_VALUE_OPTS = {"-C"} | commit_diff.GIT_VAL_GLOBAL
 
 
 def join_dir(base, rel):
