@@ -122,10 +122,10 @@ expect_banner "{project} with & in the dir name" "exited 3" "$TPL" SYG_ROUTE_MAR
 # --- HOME unset with a ~/ template ------------------------------------------
 OUT=$(printf '{}' | env -i PATH="$PATH" SYG_ROUTE_MARKER_FILE="~/markers/t.md" SYG_ROUTE_MARKER_FIELD=route "${FAILING[@]}" "$BASH_BIN" "$HOOK" 2>/dev/null)
 RC=$?
-banner "HOME is not set" && ok "~/ template with HOME unset: misconfig banner" || bad "HOME unset: expected a misconfig banner" "$OUT"
+banner "HOME is not set" && ok "tilde-slash template with HOME unset: misconfig banner" || bad "HOME unset: expected a misconfig banner" "$OUT"
 OUT=$(printf '{}' | env -i PATH="$PATH" HOME= SYG_ROUTE_MARKER_FILE="~/markers/t.md" SYG_ROUTE_MARKER_FIELD=route "${FAILING[@]}" "$BASH_BIN" "$HOOK" 2>/dev/null)
 RC=$?
-banner "HOME is not set" && ok "~/ template with HOME empty: misconfig banner" || bad "HOME empty: expected a misconfig banner" "$OUT"
+banner "HOME is not set" && ok "tilde-slash template with HOME empty: misconfig banner" || bad "HOME empty: expected a misconfig banner" "$OUT"
 
 # --- project dir missing: fail closed, command not run ----------------------
 rm -f "$TMP/ran"
