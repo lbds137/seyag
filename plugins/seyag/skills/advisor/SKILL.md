@@ -5,7 +5,7 @@ description: 'One strong-lane opinion for a knot the current lane can''t crack: 
 
 # Advisor
 
-A knot too hard for the session's current lane gets ONE opinion from the strongest configured model, in one dispatch. This is the fleet's gateway-agnostic take on Claude Code's native /advisor pattern, which is Anthropic-API-only and unusable on the z.ai lanes this Deck runs.
+A knot too hard for the session's current lane gets ONE opinion from the strongest configured model, in one dispatch. This is the fleet's gateway-agnostic take on Claude Code's native /advisor pattern, which is Anthropic-API-only and unusable on routed gateway lanes.
 
 ## When to escalate
 
@@ -21,7 +21,7 @@ Distill the SUB-PROBLEM and the minimal context needed to reason about it: the f
 
 ## Dispatch
 
-ONE subagent (the Agent tool's general-purpose type, or the session's equivalent), with **the strong-lane model, always passed explicitly as the Agent `model` (on the Anthropic lane `fable`, or `opus` when Fable is capped; on another gateway, that gateway's strong alias), never defaulted by omission**. (The strong lane, not the role map's worker pick: the advisor's whole point is the strongest model whatever the role map says.) Ask for an answer: the reasoning, the recommendation, the checks that would falsify it.
+ONE subagent (the Agent tool's general-purpose type, or the session's equivalent), with **the strong-lane model, always passed explicitly as the Agent `model` (on the Anthropic lane `fable`, or `opus` when Fable is capped; on a routed gateway, the alias whose `ANTHROPIC_DEFAULT_<ALIAS>_MODEL` names that gateway's strongest model: `env | grep '^ANTHROPIC_DEFAULT_.*_MODEL='` lists them, and no output means the aliases mean what they say), never defaulted by omission**. (The strong lane, not the role map's worker pick: the advisor's whole point is the strongest model whatever the role map says.) Ask for an answer: the reasoning, the recommendation, the checks that would falsify it.
 
 > **The advisor ANSWERS; it never edits files, never spawns further agents, never commits — the CALLER stays driver and implements.**
 

@@ -26,6 +26,7 @@ Every single-hop dispatch passes `subagent_type: "seyag:implementer"`, `isolatio
 
 - **Worker tier (`model: "sonnet"`)** is the default for units whose spec describes the edit precisely: renames, sweeps, fixture updates, applying a settled pattern.
 - **Strongest tier (`model: "opus"`)** for semantic or risky units: design judgment inside the diff, concurrency, security, data migrations.
+- **On a routed gateway the tier names lie.** Aliases resolve through `ANTHROPIC_DEFAULT_<ALIAS>_MODEL`, so any alias, `opus` included, can reach a smaller or different model. Run `env | grep '^ANTHROPIC_DEFAULT_.*_MODEL='` once per session (no output: the aliases mean what they say) and pass the alias that reaches the tier you mean.
 - **Nested** (one `general-purpose` strongest-tier orchestrator in the worktree that hands the edits to a worker-tier agent with NO isolation flag, editing the orchestrator's tree) only for large multi-step units. Single hop is the default: it is cheaper, and the driver's read is the gate either way.
 
 Name roles, not model versions, in project docs: a new tier slots in without rewriting. The owner's current role split and budget targets (which model drives, which works, how much of each weekly cap to use) are machine-local policy in the shared memory, not in this skill; read them there.

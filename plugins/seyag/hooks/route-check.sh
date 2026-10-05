@@ -169,7 +169,7 @@ fi
 
 BANNER="ROUTE CHECK FAILED — do not start work in this session.
 $REASON
-Tell the owner now through the formal channel (AskUserQuestion or PushNotification) and do nothing else until they rule. The check judges this session's own environment; fixing the route needs a session restart."
+Tell the owner now through the formal channel (AskUserQuestion, or PushNotification where the toolset has it) and do nothing else until they rule. The check judges this session's own environment; fixing the route needs a session restart."
 
 if command -v jq >/dev/null 2>&1; then
   jq -n --arg msg "Route check failed: $REASON. This session should not work until the route is fixed." --arg ctx "$BANNER" \
