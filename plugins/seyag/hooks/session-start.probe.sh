@@ -13,7 +13,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 # Hermetic: the fixtures below set the SYG_ knobs explicitly, so an ambient
 # SYG_ variable must not override them.
-unset SYG_STATE_DIR SYG_STATE_MAX_DAYS SYG_USER_RULES_DIR SYG_INSTALLED_PLUGINS
+unset SYG_STATE_DIR SYG_STATE_MAX_DAYS SYG_USER_RULES_DIR SYG_INSTALLED_PLUGINS SYG_PROFILE SYG_ENABLE SYG_DISABLE
 
 mkdir -p "$TMP/root/rules" "$TMP/rules-linked" "$TMP/rules-empty"
 printf '# Core\nfixture\n' > "$TMP/root/rules/core.md"
@@ -72,6 +72,34 @@ run resume "$TMP/rules-empty"
 
 run "" "$TMP/rules-empty"
 [ "$RC" = 0 ] && [ -z "$OUT" ] && ok "missing source: no output" || bad "missing source: expected empty" "$OUT"
+
+# Components: SYG_DISABLE=rules (or a profile without `rules`) drops the checklist and
+# the rules-link warning; the version line never goes. An unset env keeps both.
+runenv() { # $1 source, $2 user rules dir, rest = NAME=value env → sets OUT, RC
+  local src=$1 dir=$2
+  shift 2
+  OUT=$(jq -nc --arg s "$src" '{session_id: "probe", source: $s}' \
+    | env CLAUDE_PLUGIN_ROOT="$TMP/root" SYG_USER_RULES_DIR="$dir" SYG_STATE_DIR="$TMP/state" "$@" bash "$HOOK" 2>/dev/null)
+  RC=$?
+}
+runenv compact "$TMP/rules-linked" SYG_DISABLE=rules
+[ "$RC" = 0 ] && [ -z "$OUT" ] && ok "SYG_DISABLE=rules, compact: no checklist, exit 0" || bad "SYG_DISABLE=rules compact: expected empty output" "$OUT"
+runenv compact "$TMP/rules-linked" SYG_PROFILE=none
+[ "$RC" = 0 ] && [ -z "$OUT" ] && ok "SYG_PROFILE=none, compact: no checklist" || bad "profile none compact: expected empty output" "$OUT"
+runenv compact "$TMP/rules-linked" SYG_PROFILE=none SYG_ENABLE=rules
+[ "$RC" = 0 ] && valid && ctx | grep -q 'POST-COMPACTION RECOVERY' && ok "SYG_PROFILE=none SYG_ENABLE=rules, compact: checklist back" || bad "enable rules compact: expected the checklist" "$OUT"
+runenv startup "$TMP/rules-empty" SYG_DISABLE=rules
+if [ "$RC" = 0 ] && valid && [ "$(ctx)" = "seyag plugin unknown" ]; then
+  ok "SYG_DISABLE=rules, startup, link missing: version line present, warning absent"
+else
+  bad "SYG_DISABLE=rules startup: expected the version line alone" "$OUT"
+fi
+runenv startup "$TMP/rules-empty" SYG_PROFILE=guards
+[ "$RC" = 0 ] && valid && [ "$(ctx)" = "seyag plugin unknown" ] && ok "SYG_PROFILE=guards, startup, link missing: version line only" || bad "profile guards startup: expected the version line alone" "$OUT"
+runenv startup "$TMP/rules-empty" SYG_PROFILE=none SYG_DISABLE=session
+[ "$RC" = 0 ] && valid && [ "$(ctx)" = "seyag plugin unknown" ] && ok "SYG_DISABLE=session is ignored: version line stays" || bad "disable session: version line must stay" "$OUT"
+runenv startup "$TMP/rules-empty" SYG_PROFILE=bogus
+[ "$RC" = 0 ] && valid && ctx | grep -q 'core rules are not loaded' && ok "SYG_PROFILE=bogus behaves as full: warning present" || bad "bogus profile: expected the warning" "$OUT"
 
 # Output must stay far below Claude Code's ~10 KB hook-output preview cliff.
 run compact "$TMP/rules-linked"

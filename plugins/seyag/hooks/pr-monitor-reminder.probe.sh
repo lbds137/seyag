@@ -138,7 +138,7 @@ PROJ="$WORK/proj-with-copy"
 mkdir -p "$PROJ/.claude/hooks"
 echo '#!/bin/bash' > "$PROJ/.claude/hooks/pr-monitor-reminder.sh"
 PAYLOAD7=$(jq -n '{tool_name:"Bash", tool_input:{command:"git push"}}')
-OUT7=$(printf '%s' "$PAYLOAD7" | env PATH="$FAKE_BIN:$PATH" CLAUDE_PROJECT_DIR="$PROJ" \
+OUT7=$(printf '%s' "$PAYLOAD7" | env -u SYG_PROFILE -u SYG_ENABLE -u SYG_DISABLE -u CLAUDE_CODE_ENTRYPOINT PATH="$FAKE_BIN:$PATH" CLAUDE_PROJECT_DIR="$PROJ" \
   bash "$SCRIPT_DIR/run.sh" pr-monitor-reminder 2>&1)
 RC7=$?
 [ "$RC7" -eq 0 ] && [ -z "$OUT7" ] && pass "project-local copy present -> run.sh yields silently" \
