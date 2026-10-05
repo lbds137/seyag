@@ -104,13 +104,17 @@ FIX_H="$TMPDIR_PROBE/sidechain-tool-last.jsonl"
       message:{role:"assistant",content:[$u]}}'
 } >"$FIX_H"
 
-# run <expected-exit> <expect-message-substring|-> <label> <transcript> <active>
+# run <expected-exit> <expect-message-substring|-> <label> <transcript> <active> [<lam-json>|-]
+# The optional last arg is the payload's `last_assistant_message` as a JSON
+# string literal (e.g. '"text"'); `-` or omitted leaves the field absent.
 run() {
-  local expected="$1" needle="$2" label="$3" path="$4" active="$5"
+  local expected="$1" needle="$2" label="$3" path="$4" active="$5" lam="${6:--}"
   local out actual
   out=$(
-    jq -n --arg p "$path" --argjson a "$active" '{transcript_path:$p,stop_hook_active:$a}' \
-      | "$HOOK" 2>&1
+    jq -n --arg p "$path" --argjson a "$active" --arg l "$lam" \
+      '{transcript_path:$p,stop_hook_active:$a}
+       + (if $l == "-" then {} else {last_assistant_message:($l | fromjson)} end)' \
+      | ${PROBE_TIMEOUT:+timeout "$PROBE_TIMEOUT"} "$HOOK" 2>&1
   )
   actual=$?
   if [ "$actual" -ne "$expected" ]; then
@@ -177,5 +181,119 @@ FIX_L="$TMPDIR_PROBE/malformed-line-then-tool.jsonl"
   user_tool_result
 } >"$FIX_L"
 run 2 "Edit" "(l) a non-JSON line before the tool_use entry still blocks" "$FIX_L" false
+
+# --- payload field `last_assistant_message` (Claude Code 2.1.289+) -----------
+# The Stop payload carries the turn's final assistant text, which can exist
+# before the transcript flushes it. Labels are prefixed "payload" because (l)
+# above is already taken by the malformed-line case.
+
+# split shape: two entries sharing one message.id (text, then tool_use)
+msg_block() {
+  jq -cn --arg id "$1" --argjson b "$2" \
+    '{type:"assistant",isSidechain:false,uuid:"u",timestamp:"t",
+      message:{id:$id,role:"assistant",content:[$b]}}'
+}
+CHECKING='{"type":"text","text":"Checking."}'
+LONGTEXT_STR="A long closing paragraph that precedes the tool call."
+LONGTEXT=$(jq -cn --arg t "$LONGTEXT_STR" '{type:"text",text:$t}')
+LAM_MARKER="… [+99 chars]"
+
+FIX_N="$TMPDIR_PROBE/split-same-id.jsonl"
+{
+  user_text "do the unit"
+  msg_block m1 "$CHECKING"
+  msg_block m1 "$TOOLUSE"
+  user_tool_result
+} >"$FIX_N"
+
+FIX_E2="$TMPDIR_PROBE/multiblock-checking-tool-last.jsonl"
+{
+  user_text "do the unit"
+  jq -cn --argjson t "$CHECKING" --argjson u "$TOOLUSE" \
+    '{type:"assistant",isSidechain:false,uuid:"u",timestamp:"t",
+      message:{role:"assistant",content:[$t,$u]}}'
+} >"$FIX_E2"
+
+FIX_P="$TMPDIR_PROBE/split-same-id-long.jsonl"
+{
+  user_text "do the unit"
+  msg_block m1 "$LONGTEXT"
+  msg_block m1 "$TOOLUSE"
+  user_tool_result
+} >"$FIX_P"
+
+# the real shape: SendMessage tool_use, its tool_result, final text not on disk
+FIX_Q="$TMPDIR_PROBE/sendmessage-then-result.jsonl"
+{
+  user_text "do the unit"
+  msg_block m1 '{"type":"tool_use","id":"tu","name":"SendMessage","input":{}}'
+  user_tool_result
+} >"$FIX_Q"
+
+run 0 - "(payload-l) tool-ending transcript + LAM naming other text → passes" "$FIX_B" false '"Final report text."'
+run 2 "Edit" "(payload-m) LAM equals the tool-ending message's own text → blocks" "$FIX_E2" false '"Checking."'
+run 2 "Edit" "(payload-n) split same-id entries, LAM equals their text → blocks" "$FIX_N" false '"Checking."'
+run 2 "Edit" "(payload-o) empty LAM keeps the old behavior → blocks" "$FIX_B" false '""'
+run 2 "Edit" "(payload-p) truncated LAM that is a prefix of own text → blocks" "$FIX_P" false \
+  "$(jq -cn --arg t "${LONGTEXT_STR:0:20}$LAM_MARKER" '$t')"
+run 0 - "(payload-q) SendMessage-ending shape, final text unflushed → passes" "$FIX_Q" false '"Seyag 0.3.31 is merged."'
+run 0 - "(payload-r) non-matching LAM with stop_hook_active=true → passes" "$FIX_B" true '"Final report text."'
+
+# --- hardening cases: whitespace, multi-block joins, odd lines, locale, speed -
+FIX_S="$TMPDIR_PROBE/whitespace-text.jsonl"
+{
+  user_text "do the unit"
+  msg_block m1 '{"type":"text","text":"  \n Checking.\n"}'
+  msg_block m1 "$TOOLUSE"
+  user_tool_result
+} >"$FIX_S"
+run 2 "Edit" "(payload-s) own text trimmed of surrounding whitespace → blocks" "$FIX_S" false '"Checking."'
+
+FIX_T="$TMPDIR_PROBE/two-text-blocks.jsonl"
+{
+  user_text "do the unit"
+  jq -cn --argjson u "$TOOLUSE" \
+    '{type:"assistant",isSidechain:false,uuid:"u",timestamp:"t",
+      message:{id:"m1",role:"assistant",content:[{type:"text",text:"A"},{type:"text",text:"B"},$u]}}'
+  user_tool_result
+} >"$FIX_T"
+run 2 "Edit" "(payload-t) two text blocks join with newline, LAM equals the join → blocks" "$FIX_T" false '"A\nB"'
+
+FIX_U="$TMPDIR_PROBE/non-object-line.jsonl"
+{
+  user_text "do the unit"
+  echo 5
+  msg_block m1 "$CHECKING"
+  msg_block m1 "$TOOLUSE"
+  user_tool_result
+} >"$FIX_U"
+run 2 "Edit" "(payload-u) a bare-number line in the tail does not blind the own-text read → blocks" "$FIX_U" false '"Checking."'
+
+FIX_V="$TMPDIR_PROBE/no-id-thinking-text-tool.jsonl"
+{
+  user_text "do the unit"
+  jq -cn --argjson t "$THINK" --argjson x "$CHECKING" --argjson u "$TOOLUSE" \
+    '{type:"assistant",isSidechain:false,uuid:"u",timestamp:"t",
+      message:{role:"assistant",content:[$t,$x,$u]}}'
+  user_tool_result
+} >"$FIX_V"
+run 2 "Edit" "(payload-v) an entry with no message.id uses its own text → blocks" "$FIX_V" false '"Checking."'
+
+run 0 - "(payload-w) non-matching truncated LAM → passes" "$FIX_P" false '"Other text… [+9 chars]"'
+
+LC_ALL=C run 2 "Edit" "(payload-x) truncated-prefix match under LC_ALL=C → blocks" "$FIX_P" false \
+  "$(jq -cn --arg t "${LONGTEXT_STR:0:20}$LAM_MARKER" '$t')"
+
+FIX_Y="$TMPDIR_PROBE/long-space-run.jsonl"
+{
+  user_text "do the unit"
+  # --rawfile: a 200 KB --arg would exceed the argv limit and silently empty the fixture
+  { printf 'a'; printf '%200000s' ''; printf 'b'; } >"$TMPDIR_PROBE/spaces.txt"
+  jq -cn --rawfile s "$TMPDIR_PROBE/spaces.txt" --argjson u "$TOOLUSE" \
+    '{type:"assistant",isSidechain:false,uuid:"u",timestamp:"t",
+      message:{id:"m1",role:"assistant",content:[{type:"text",text:$s},$u]}}'
+  user_tool_result
+} >"$FIX_Y"
+PROBE_TIMEOUT=5 run 0 - "(payload-y) a 200000-space text run finishes inside 5 s → passes" "$FIX_Y" false '"x"'
 
 exit $FAILURES
