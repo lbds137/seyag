@@ -149,22 +149,28 @@ render '{"context_window":{"current_usage":{"input_tokens":1000}},"model":{"disp
 # segment hides when either side is unreadable — no opinion, never a fake
 # nudge.
 mkdir -p "$h/.claude/plugins"
-printf '{"plugins":{"harness@claude-harness":[{"installPath":"%s/.claude/plugins/cache/claude-harness/harness/0.3.18"}]}}' "$h" \
+printf '{"plugins":{"seyag@example-market":[{"installPath":"%s/.claude/plugins/cache/example-market/seyag/0.3.18"}]}}' "$h" \
     > "$h/.claude/plugins/installed_plugins.json"
 smanifest="$h/syg-manifest.json"
-export HARNESS_PLUGIN_MANIFEST="$smanifest" CLAUDE_PLUGIN_REGISTRY="$h/.claude/plugins/installed_plugins.json"
+export SYG_PLUGIN_MANIFEST="$smanifest" CLAUDE_PLUGIN_REGISTRY="$h/.claude/plugins/installed_plugins.json"
 printf '{"version":"0.3.19"}' > "$smanifest"
 out=$(render '{"context_window":{"current_usage":{"input_tokens":1000}},"model":{"display_name":"X"},"cwd":"/tmp"}')
 grep -qF $'\x1b[33mSYG: 0.3.18⬆' <<< "$out" && ok "syg: newer manifest renders yellow ⬆" || bad "syg nudge: $out"
-# 20b. Seyag end state: the registry key renames to seyag@lbds137
-# (owner-named marketplace) and the segment must read it identically
-# (dual-key support).
-printf '{"plugins":{"seyag@lbds137":[{"installPath":"%s/.claude/plugins/cache/lbds137/seyag/0.3.21"}]}}' "$h" \
+# 20b. The marketplace name is the installer's choice: any registry key
+# starting with seyag@ reads identically.
+printf '{"plugins":{"seyag@other-market":[{"installPath":"%s/.claude/plugins/cache/other-market/seyag/0.3.21"}]}}' "$h" \
     > "$h/.claude/plugins/installed_plugins.json"
 printf '{"version":"0.3.22"}' > "$smanifest"
 out=$(render '{"context_window":{"current_usage":{"input_tokens":1000}},"model":{"display_name":"X"},"cwd":"/tmp"}')
-grep -qF $'\x1b[33mSYG: 0.3.21⬆' <<< "$out" && ok "syg: seyag@lbds137 registry key reads (end state)" || bad "syg seyag-key: $out"
-printf '{"plugins":{"harness@claude-harness":[{"installPath":"%s/.claude/plugins/cache/claude-harness/harness/0.3.18"}]}}' "$h" \
+grep -qF $'\x1b[33mSYG: 0.3.21⬆' <<< "$out" && ok "syg: any seyag@<marketplace> registry key reads" || bad "syg seyag-key: $out"
+# 20b2. A record under a key that is not seyag@... is not this plugin's
+# identity: the segment hides.
+printf '{"plugins":{"harness@old-market":[{"installPath":"%s/.claude/plugins/cache/old-market/harness/0.3.18"}]}}' "$h" \
+    > "$h/.claude/plugins/installed_plugins.json"
+out=$(render '{"context_window":{"current_usage":{"input_tokens":1000}},"model":{"display_name":"X"},"cwd":"/tmp"}')
+grep -q 'SYG:' <<< "$out" && bad "syg foreign key: segment leaked: $out" \
+    || ok "syg: a registry holding only a non-seyag key hides the segment"
+printf '{"plugins":{"seyag@example-market":[{"installPath":"%s/.claude/plugins/cache/example-market/seyag/0.3.18"}]}}' "$h" \
     > "$h/.claude/plugins/installed_plugins.json"
 printf '{"version":"0.3.18"}' > "$smanifest"
 out=$(render '{"context_window":{"current_usage":{"input_tokens":1000}},"model":{"display_name":"X"},"cwd":"/tmp"}')
@@ -175,19 +181,84 @@ rm -f "$smanifest"
 out=$(render '{"context_window":{"current_usage":{"input_tokens":1000}},"model":{"display_name":"X"},"cwd":"/tmp"}')
 grep -q 'SYG: 0\.3\.18' <<< "$out" && bad "syg hidden: segment leaked: $out" \
     || ok "syg: unreadable manifest hides the segment"
-# 20c. Reload-era wiring: settings declares the lbds137 marketplace as a
-# DIRECTORY source — the running plugin is the repo tip, no install record
-# is written, and the stale old-identity record (0.3.19) must not trip the
-# nudge. Expect plain SYG 0.3.21, no arrow.
-printf '{"plugins":{"harness@claude-harness":[{"installPath":"%s/.claude/plugins/cache/claude-harness/harness/0.3.19"}]}}' "$h" \
+# 20c. Directory-marketplace wiring: settings declares a marketplace named
+# example-market as a DIRECTORY source whose path contains the manifest.
+# The running plugin is then the repo tip, no install record is written,
+# and a stale record (0.3.19) must not trip the nudge. Expect plain SYG
+# 0.3.21, no arrow. The manifest sits under the marketplace path.
+syg_set_dirmarket() {  # $1 = marketplace path
+    jq --arg p "$1" '.extraKnownMarketplaces = {"example-market":{"source":{"source":"directory","path":$p}}}' \
+        "$h/.claude/settings.json" > "$h/.claude/settings.json.new" && mv "$h/.claude/settings.json.new" "$h/.claude/settings.json"
+}
+printf '{"plugins":{"seyag@example-market":[{"installPath":"%s/.claude/plugins/cache/example-market/seyag/0.3.19"}]}}' "$h" \
     > "$h/.claude/plugins/installed_plugins.json"
-jq --arg p "$h/Projects/seyag" '.extraKnownMarketplaces.lbds137.source = {"source":"directory","path":$p}' \
-    "$h/.claude/settings.json" > "$h/.claude/settings.json.new" && mv "$h/.claude/settings.json.new" "$h/.claude/settings.json"
+mkdir -p "$h/Projects/plug/plugins/seyag/.claude-plugin"
+smanifest="$h/Projects/plug/plugins/seyag/.claude-plugin/plugin.json"
+export SYG_PLUGIN_MANIFEST="$smanifest"
 printf '{"version":"0.3.21"}' > "$smanifest"
+syg_set_dirmarket "$h/Projects/plug"
 out=$(render '{"context_window":{"current_usage":{"input_tokens":1000}},"model":{"display_name":"X"},"cwd":"/tmp"}')
 strip=$(printf '%s' "$out" | sed 's/\x1b\[[0-9;]*m//g')
 grep -q 'SYG: 0\.3\.21' <<< "$strip" && ! grep -q '⬆' <<< "$strip" \
     && ok "syg: directory-marketplace mode renders plain at repo version" || bad "syg dir-mode: $out"
+# A trailing slash on the marketplace path compares the same.
+syg_set_dirmarket "$h/Projects/plug/"
+out=$(render '{"context_window":{"current_usage":{"input_tokens":1000}},"model":{"display_name":"X"},"cwd":"/tmp"}')
+strip=$(printf '%s' "$out" | sed 's/\x1b\[[0-9;]*m//g')
+grep -q 'SYG: 0\.3\.21' <<< "$strip" && ! grep -q '⬆' <<< "$strip" \
+    && ok "syg: directory-marketplace path with a trailing slash still matches" || bad "syg dir-mode slash: $out"
+# A string-valued source entry beside a matching directory entry must not
+# abort the scan (a github-style marketplace is a plain string here).
+jq --arg p "$h/Projects/plug" '.extraKnownMarketplaces = {"y":{"source":"github"},"x":{"source":{"source":"directory","path":$p}}}' \
+    "$h/.claude/settings.json" > "$h/.claude/settings.json.new" && mv "$h/.claude/settings.json.new" "$h/.claude/settings.json"
+out=$(render '{"context_window":{"current_usage":{"input_tokens":1000}},"model":{"display_name":"X"},"cwd":"/tmp"}')
+strip=$(printf '%s' "$out" | sed 's/\x1b\[[0-9;]*m//g')
+grep -q 'SYG: 0\.3\.21' <<< "$strip" && ! grep -q '⬆' <<< "$strip" \
+    && ok "syg: a string-valued source entry does not break directory mode" || bad "syg dir-mode string source: $out"
+# A symlinked marketplace path resolves to the plug dir.
+ln -sfn "$h/Projects/plug" "$h/Projects/plug-link"
+syg_set_dirmarket "$h/Projects/plug-link"
+out=$(render '{"context_window":{"current_usage":{"input_tokens":1000}},"model":{"display_name":"X"},"cwd":"/tmp"}')
+strip=$(printf '%s' "$out" | sed 's/\x1b\[[0-9;]*m//g')
+grep -q 'SYG: 0\.3\.21' <<< "$strip" && ! grep -q '⬆' <<< "$strip" \
+    && ok "syg: a symlinked marketplace path matches" || bad "syg dir-mode symlink: $out"
+# A path with a .. segment that resolves to the plug dir.
+mkdir -p "$h/Projects/elsewhere"
+syg_set_dirmarket "$h/Projects/elsewhere/../plug"
+out=$(render '{"context_window":{"current_usage":{"input_tokens":1000}},"model":{"display_name":"X"},"cwd":"/tmp"}')
+strip=$(printf '%s' "$out" | sed 's/\x1b\[[0-9;]*m//g')
+grep -q 'SYG: 0\.3\.21' <<< "$strip" && ! grep -q '⬆' <<< "$strip" \
+    && ok "syg: a marketplace path with a .. segment matches" || bad "syg dir-mode dotdot: $out"
+# 20d. A string prefix without a / boundary (.../pl vs .../plug) is not a
+# path prefix: the nudge stays.
+syg_set_dirmarket "$h/Projects/pl"
+out=$(render '{"context_window":{"current_usage":{"input_tokens":1000}},"model":{"display_name":"X"},"cwd":"/tmp"}')
+grep -qF $'\x1b[33mSYG: 0.3.19⬆' <<< "$out" \
+    && ok "syg: string-prefix directory marketplace (no / boundary) keeps the nudge" || bad "syg dir-mode boundary: $out"
+# 20d2. An unrelated directory marketplace (a sibling dir) keeps the nudge.
+syg_set_dirmarket "$h/Projects/elsewhere"
+out=$(render '{"context_window":{"current_usage":{"input_tokens":1000}},"model":{"display_name":"X"},"cwd":"/tmp"}')
+grep -qF $'\x1b[33mSYG: 0.3.19⬆' <<< "$out" \
+    && ok "syg: unrelated directory marketplace keeps the nudge" || bad "syg dir-mode unrelated: $out"
+# 20e. No override: the manifest resolves next to the script, so the
+# segment renders the repo's real version. The installed record equals it,
+# so no arrow; the fixture settings carry no directory marketplace.
+unset SYG_PLUGIN_MANIFEST
+jq 'del(.extraKnownMarketplaces)' "$h/.claude/settings.json" > "$h/.claude/settings.json.new" \
+    && mv "$h/.claude/settings.json.new" "$h/.claude/settings.json"
+repo_version=$(jq -r '.version' "$REPO/plugins/seyag/.claude-plugin/plugin.json")
+printf '{"plugins":{"seyag@example-market":[{"installPath":"%s/.claude/plugins/cache/example-market/seyag/%s"}]}}' "$h" "$repo_version" \
+    > "$h/.claude/plugins/installed_plugins.json"
+out=$(render '{"context_window":{"current_usage":{"input_tokens":1000}},"model":{"display_name":"X"},"cwd":"/tmp"}')
+strip=$(printf '%s' "$out" | sed 's/\x1b\[[0-9;]*m//g')
+[ -n "$repo_version" ] && grep -qF "SYG: $repo_version" <<< "$strip" && ! grep -q '⬆' <<< "$strip" \
+    && ok "syg: no override resolves the manifest next to the script" || bad "syg script-relative: $out"
+# Restore the override, the directory marketplace and the 0.3.19 record
+# for the later cases (21-29), which expect the state 20c left behind.
+export SYG_PLUGIN_MANIFEST="$smanifest"
+syg_set_dirmarket "$h/Projects/plug"
+printf '{"plugins":{"seyag@example-market":[{"installPath":"%s/.claude/plugins/cache/example-market/seyag/0.3.19"}]}}' "$h" \
+    > "$h/.claude/plugins/installed_plugins.json"
 
 # 21. Claude Code update nudge: a NEWER staged version in the versions dir
 # (downloaded, restart-pending) escalates the WHOLE CC block to yellow with
@@ -352,5 +423,23 @@ jq 'del(.extraKnownMarketplaces)' "$h/.claude/settings.json" > "$h/.claude/setti
 out=$(render '{"version":"2.1.286","context_window":{"current_usage":{"input_tokens":1000}},"model":{"display_name":"X"},"cwd":"/tmp"}')
 grep -qF $'\x1b[33mCC: 2.1.286⬆\x1b[0m \x1b[33mSYG: 0.3.19⬆' <<< "$out" \
     && ok "join: CC and SYG nudges render yellow ⬆ in one line" || bad "join: $out"
+
+# 30. Read-only git: the statusline never takes index.lock. A fake git first
+# on PATH records GIT_OPTIONAL_LOCKS per call; at least one call must be
+# recorded and every value must be 0.
+mkdir -p "$h/fakebin" "$h/lockcwd"
+cat > "$h/fakebin/git" <<'EOF'
+#!/bin/bash
+echo "${GIT_OPTIONAL_LOCKS-unset}" >> "$GIT_LOCKS_LOG"
+exit 0
+EOF
+chmod +x "$h/fakebin/git"
+: > "$h/git-locks.log"
+env -u GIT_OPTIONAL_LOCKS GIT_LOCKS_LOG="$h/git-locks.log" PATH="$h/fakebin:$PATH" \
+    bash "$SL" <<< "{\"context_window\":{\"current_usage\":{\"input_tokens\":1000}},\"model\":{\"display_name\":\"X\"},\"cwd\":\"$h/lockcwd\"}" >/dev/null 2>&1
+git_calls=$(wc -l < "$h/git-locks.log"); git_nonzero=$(grep -vxc '0' "$h/git-locks.log")
+[ "$git_calls" -ge 1 ] && [ "$git_nonzero" = 0 ] \
+    && ok "git: statusline exports GIT_OPTIONAL_LOCKS=0 ($git_calls git calls recorded)" \
+    || bad "git locks: calls=$git_calls non-zero=$git_nonzero: $(tr '\n' ' ' < "$h/git-locks.log")"
 
 exit $fail

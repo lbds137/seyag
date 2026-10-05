@@ -108,4 +108,28 @@ printf 'x' | CLAUDE_PROJECT_DIR="$TMP/proj-without" runsh CLAUDE_CODE_ENTRYPOINT
 RC=$?
 [ "$RC" = 2 ] && echo "ok   [2]: route-check is not on the sdk skip list (a headless run on the wrong route is still wrong)" || { echo "FAIL [$RC]: route-check must run under sdk-cli"; fail=1; }
 
+# --- 6. GIT_OPTIONAL_LOCKS=0 reaches every git call a hook makes ---------------
+# A fake git first on PATH records the variable per call. The real
+# temporal-marker-guard runs (a worktree `git diff` on git add / commit), via the
+# real run.sh next to this probe.
+mkdir -p "$TMP/fakebin" "$TMP/scratch-repo"
+cat > "$TMP/fakebin/git" <<'EOF'
+#!/bin/bash
+echo "${GIT_OPTIONAL_LOCKS-unset}" >> "$GIT_LOCKS_LOG"
+exit 0
+EOF
+chmod +x "$TMP/fakebin/git"
+: > "$TMP/git-locks.log"
+EV=$(jq -n --arg d "$TMP/scratch-repo" '{tool_name:"Bash",tool_input:{command:"git add f && git commit -m x"},cwd:$d}')
+printf '%s' "$EV" | env -u GIT_OPTIONAL_LOCKS GIT_LOCKS_LOG="$TMP/git-locks.log" PATH="$TMP/fakebin:$PATH" \
+  CLAUDE_PROJECT_DIR="$TMP/proj-without" bash "$SCRIPT_DIR/run.sh" temporal-marker-guard >/dev/null 2>&1
+calls=$(wc -l < "$TMP/git-locks.log")
+nonzero=$(grep -vxc '0' "$TMP/git-locks.log")
+if [ "$calls" -ge 1 ] && [ "$nonzero" = 0 ]; then
+  echo "ok   [0]: hook git calls all see GIT_OPTIONAL_LOCKS=0 ($calls recorded)"
+else
+  echo "FAIL [calls $calls, non-zero values $nonzero: $(tr '\n' ' ' < "$TMP/git-locks.log")]: hook git calls must see GIT_OPTIONAL_LOCKS=0"
+  fail=1
+fi
+
 exit $fail

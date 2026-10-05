@@ -7,6 +7,10 @@
 # and OAuth usage segments are Deck-tuned and verified on that machine only —
 # elsewhere they degrade to the plain render.
 
+# git status would otherwise take index.lock to refresh the index; a render
+# killed mid-refresh leaves a stale lock, and the statusline only reads.
+export GIT_OPTIONAL_LOCKS=0
+
 # Read JSON from stdin
 json=$(cat)
 
@@ -456,34 +460,40 @@ if [ -n "$version" ]; then
     fi
 fi
 
-# Seyag version + update nudge. The marketplace IS the local repo, so
-# "update available" = the repo manifest version is NEWER than the
-# installed cache dir — two tiny local reads, no network. The segment
-# hides when either side is unreadable (no opinion). Override points
-# exist for the hermetic probe.
+# Seyag version + update nudge. The statusline runs from the plugin's repo
+# checkout, so the manifest next to this script is the repo tip, and
+# "update available" = that manifest version is NEWER than the installed
+# cache dir's version — two tiny local reads, no network. Run from an
+# installed cache the manifest IS the install, so it never nudges. The
+# segment hides when either side is unreadable (no opinion).
+# SYG_PLUGIN_MANIFEST overrides the manifest path (the hermetic probe).
 syg_reg="${CLAUDE_PLUGIN_REGISTRY:-$HOME/.claude/plugins/installed_plugins.json}"
-# The Seyag rename moves the repo dir, the plugin dir, AND the registry
-# key (harness@claude-harness -> seyag@lbds137); probe candidates
-# newest-first so the segment survives every stage of the migration.
-syg_manifest="${HARNESS_PLUGIN_MANIFEST:-}"
-if [ -z "$syg_manifest" ]; then
-    for cand in "$HOME/Projects/seyag/plugins/seyag/.claude-plugin/plugin.json" \
-                "$HOME/Projects/seyag/plugins/harness/.claude-plugin/plugin.json" \
-                "$HOME/Projects/claude-harness/plugins/seyag/.claude-plugin/plugin.json" \
-                "$HOME/Projects/claude-harness/plugins/harness/.claude-plugin/plugin.json"; do
-        [ -r "$cand" ] && syg_manifest="$cand" && break
-    done
-fi
-syg_installed=$(jq -r '[(.plugins["harness@claude-harness"][0].installPath // empty), (.plugins["seyag@lbds137"][0].installPath // empty)] | map(select(length > 0)) | last // empty' "$syg_reg" 2>/dev/null | awk -F/ '{print $NF}')
+syg_manifest="${SYG_PLUGIN_MANIFEST:-$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../.claude-plugin/plugin.json}"
+# The marketplace name is the installer's choice, so any registry key
+# starting with seyag@ is this plugin; the last non-empty installPath wins.
+syg_installed=$(jq -r '[.plugins // {} | to_entries[] | select(.key | startswith("seyag@")) | (.value[0].installPath // empty)] | map(select(length > 0)) | last // empty' "$syg_reg" 2>/dev/null | awk -F/ '{print $NF}')
 syg_repo=$(jq -r '.version // empty' "$syg_manifest" 2>/dev/null)
-# Directory-marketplace wiring (extraKnownMarketplaces.lbds137 -> a local
-# checkout): the running plugin IS the repo tip — /reload-plugins loads it
-# straight from the tree and no install record is written, so the recorded
-# install (old identity) says nothing about staleness. In this mode the
-# nudge can never be true; render plain at the repo version.
-if jq -e '.extraKnownMarketplaces.lbds137.source.source == "directory"' \
-    "$HOME/.claude/settings.json" >/dev/null 2>&1; then
-    syg_installed="$syg_repo"
+# Directory-marketplace wiring (a settings.json extraKnownMarketplaces
+# entry with a "directory" source containing the manifest): the running
+# plugin IS the repo tip — /reload-plugins loads it straight from the tree
+# and no install record is written, so a recorded install says nothing
+# about staleness. In this mode the nudge can never be true; render plain
+# at the repo version. Both the manifest and each marketplace path are
+# resolved with readlink -f (symlinks, ..), and the marketplace must be a
+# path-prefix of the manifest at a / boundary, so an unrelated directory
+# marketplace does not switch the nudge off. jq only emits candidate paths
+# (string-valued source entries and non-string paths are skipped there, not
+# fatal); the comparison is bash.
+syg_real=$(readlink -f "$syg_manifest" 2>/dev/null)
+if [ -n "$syg_real" ]; then
+    while IFS= read -r syg_mp; do
+        syg_mp=$(readlink -f "$syg_mp" 2>/dev/null)
+        [ -n "$syg_mp" ] || continue
+        case "$syg_real/" in
+            "${syg_mp%/}"/*) syg_installed="$syg_repo"; break ;;
+        esac
+    done < <(jq -r '(.extraKnownMarketplaces | objects | .[]) | objects | .source | objects | select(.source == "directory") | .path | strings' \
+        "$HOME/.claude/settings.json" 2>/dev/null)
 fi
 if [ -n "$syg_installed" ] && [ -n "$syg_repo" ]; then
     syg_sep="$sep"; [ "$cc_shown" = 1 ] && syg_sep=" "
