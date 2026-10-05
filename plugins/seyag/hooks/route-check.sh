@@ -91,14 +91,14 @@ if [ -n "$FILE_T" ] || [ -n "$FIELD" ]; then
     misconfig "misconfigured: SYG_ROUTE_MARKER_FILE and SYG_ROUTE_MARKER_FIELD must be set together"
   elif ! [[ "$FIELD" =~ ^[A-Za-z0-9_-]+$ ]]; then
     misconfig "misconfigured: SYG_ROUTE_MARKER_FIELD must match [A-Za-z0-9_-]+"
-  elif [[ "$FILE_T" == '~/'* ]] && [ -z "${HOME:-}" ]; then
+  elif [[ "$FILE_T" == \~/* ]] && [ -z "${HOME:-}" ]; then
     misconfig "misconfigured: SYG_ROUTE_MARKER_FILE starts with ~/ but HOME is not set"
   else
     P="${PROJ%/}"
     # Quoted replacement: bash 5.2 turns a bare & in it into the match.
     name="${P##*/}"
     FILE="${FILE_T//\{project\}/"$name"}"
-    case "$FILE" in '~/'*) FILE="$HOME/${FILE#\~/}" ;; esac
+    case "$FILE" in \~/*) FILE="$HOME/${FILE#\~/}" ;; esac
     if [ -e "$FILE" ] && { [ -d "$FILE" ] || ! ( : <"$FILE" ) 2>/dev/null; }; then
       misconfig "the marker file $FILE exists but cannot be read"
     elif [ -f "$FILE" ]; then
