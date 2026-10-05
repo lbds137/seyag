@@ -40,4 +40,7 @@ if ! bash -n "$HOOK" 2>/dev/null; then
 fi
 
 export PYTHONDONTWRITEBYTECODE=1
+# Hooks only read git; a hook killed mid-index-refresh, or one racing the
+# session's own git command, would leave or collide with index.lock.
+export GIT_OPTIONAL_LOCKS=0
 exec bash "$HOOK"
