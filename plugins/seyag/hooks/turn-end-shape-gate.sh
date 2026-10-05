@@ -24,6 +24,16 @@
 # split shape and a multi-block shape, which is why it is written that way
 # rather than as "the last entry's only block".
 #
+# Primary signal: the Stop payload's `last_assistant_message` (the turn's final
+# assistant text, absent when empty). The transcript can lag the payload — the
+# final text entry may be flushed after this hook runs — so when the transcript
+# ends on a tool_use and the payload names text that is NOT that tool-ending
+# message's own, the final text exists and the stop passes. The transcript poll
+# below is the fallback for payloads without the field. Residual: if the field
+# ever named an EARLIER message's text on a tool-ending turn, the gate would
+# miss that turn, and any failure computing the tool-ending message's text also
+# passes the stop (fail-open, like every other external doubt here).
+#
 # Every external failure — no jq, no transcript, an entry with no content
 # array — exits 0: a missed reminder is cheaper than blocking every turn end.
 #
@@ -36,6 +46,10 @@ INPUT=$(cat)
 # Already blocked once this turn-end → allow the stop (no infinite loop).
 ACTIVE=$(jq -r '.stop_hook_active // false' <<<"$INPUT" 2>/dev/null || echo "false")
 [ "$ACTIVE" = "true" ] && exit 0
+
+# The turn's final assistant text, when the Stop payload carries it (Claude
+# Code 2.1.289+); empty or absent on older versions.
+LAM=$(jq -r '.last_assistant_message // empty' <<<"$INPUT" 2>/dev/null || echo "")
 
 TRANSCRIPT=$(jq -r '.transcript_path // empty' <<<"$INPUT" 2>/dev/null || echo "")
 [ -z "$TRANSCRIPT" ] || [ ! -f "$TRANSCRIPT" ] && exit 0
@@ -60,18 +74,60 @@ read_last_content() {
     | tail -n 1
 }
 
+# text_of_tool_ending_message: the text blocks of every main-chain assistant
+# entry in the tail that shares the last assistant entry's `.message.id`
+# (or of that entry alone when it has no id), joined with "\n" and trimmed.
+text_of_tool_ending_message() {
+  tail -n 2000 "$TRANSCRIPT" 2>/dev/null \
+    | jq -Rrs '[split("\n")[] | (fromjson? // empty) | select(type == "object" and .type == "assistant" and .isSidechain != true)]
+        | if length == 0 then "" else
+            .[-1] as $l
+            | (if $l.message.id then [.[] | select(.message.id == $l.message.id)] else [$l] end)
+            | [.[].message.content | arrays | .[] | objects | select(.type == "text") | .text]
+            | join("\n")
+          end' 2>/dev/null
+}
+
+# True when LAM (the payload's last_assistant_message) describes the
+# tool-ending message itself. A truncated LAM ends in "… [+N chars]"; the
+# stripped value then only has to be a prefix. An empty OWN never matches.
+# OWN is trimmed here in bash (a jq regex trim is quadratic on long space
+# runs) and computed once per run: the loop exits as soon as the transcript
+# stops ending on a tool_use, so a cached value is never read stale.
+OWN="" OWN_DONE=""
+lam_is_own_message() {
+  local own stripped
+  if [ -z "$OWN_DONE" ]; then
+    OWN=$(text_of_tool_ending_message)
+    OWN=${OWN#"${OWN%%[![:space:]]*}"}
+    OWN=${OWN%"${OWN##*[![:space:]]}"}
+    OWN_DONE=1
+  fi
+  own=$OWN
+  [ -n "$own" ] || return 1
+  [ "$LAM" = "$own" ] && return 0
+  if [[ "$LAM" =~ …\ \[\+[0-9]+\ chars\]$ ]]; then
+    stripped=${LAM%"${BASH_REMATCH[0]}"}
+    [[ "$own" == "$stripped"* ]] && return 0
+  fi
+  return 1
+}
+
 # The read is retried rather than taken once. Observed premise: Claude Code can
 # flush the turn's final TEXT entry after this hook has already started, so one
 # immediate read can see the turn's last tool call as the last assistant entry
 # and block a turn that did end on text. Observed on two of three text-ending
 # turn ends (naming Bash once and SendMessage once as the supposed last block);
 # in one, the text entry's timestamp preceded the hook's own feedback entry by
-# ~180 ms. The flush window itself was not measured, so the five reads are a
-# hedge, not a derived bound.
+# ~180 ms, and in another (text stamped ~1.6 s before the feedback entry) the
+# hook still blocked after the whole poll window. The flush window itself was
+# not measured, so the five reads are a hedge, not a derived bound.
 #
-# Residual, stated plainly: a flush slower than the whole poll window still
-# produces a false block. The `stop_hook_active` guard above bounds that to a
-# single retry, after which the stop proceeds.
+# The payload's `last_assistant_message` is the primary defense (see the header
+# paragraph); this poll is the fallback for payloads without it. Residual,
+# stated plainly: on such a payload a flush slower than the whole poll window
+# still produces a false block. The `stop_hook_active` guard above bounds that
+# to a single retry, after which the stop proceeds.
 #
 # Only the BLOCK path pays for the waiting: a turn that already reads as
 # text-ended returns on the first read.
@@ -85,6 +141,10 @@ for attempt in 1 2 3 4 5; do
 
   LAST_TYPE=$(jq -r 'if type == "array" and length > 0 then (.[-1].type // "") else "" end' <<<"$LAST_CONTENT" 2>/dev/null || echo "")
   [ "$LAST_TYPE" = "tool_use" ] || exit 0
+
+  # The payload says the turn's final text exists, and it is not the text of
+  # the tool-ending message itself → it simply has not been flushed yet.
+  if [ -n "$LAM" ] && ! lam_is_own_message; then exit 0; fi
 done
 
 TOOL=$(jq -r 'if type == "array" and length > 0 then (.[-1].name // "a tool") else "a tool" end' <<<"$LAST_CONTENT" 2>/dev/null || echo "a tool")
