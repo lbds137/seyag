@@ -100,6 +100,30 @@ A project sets them in its `.claude/settings.json`, for example `"env": {"SYG_PR
 
 **Rules are not a component you can unload.** The core rules load as a user-level rule file, not through a hook, so plugin toggles and profiles cannot unload them. A project that must not see them lists that file in `claudeMdExcludes` in its `.claude/settings.json`, for example `"claudeMdExcludes": ["**/seyag-core.md"]` (the name of the link Install creates). `claudeMdExcludes` does not expand `~`, so a `~/.claude/rules/seyag-core.md` entry leaves the rules loaded; use a glob like the one above or an absolute path. Checked by grepping a headless run's session log for the rules heading: with no key, 1 hit; with the absolute link path or the absolute target path, 0; with the glob, 0; with a `~` path, 1.
 
+### Using the hooks without enabling the plugin
+
+A project that keeps the plugin disabled, so that its skills and agents do not load, can still run the hooks. It wires one dispatcher entry per event in its `.claude/settings.json`, with no matcher; `run.sh --event` reads the plugin's own `hooks.json` and runs every hook it wires for that event:
+
+```json
+{
+  "env": {"SYG_PROFILE": "guards"},
+  "hooks": {
+    "SessionStart": [{"hooks": [{"type": "command", "command": "bash /path/to/seyag/plugins/seyag/hooks/run.sh --event SessionStart"}]}],
+    "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "bash /path/to/seyag/plugins/seyag/hooks/run.sh --event UserPromptSubmit"}]}],
+    "PreToolUse": [{"hooks": [{"type": "command", "command": "bash /path/to/seyag/plugins/seyag/hooks/run.sh --event PreToolUse"}]}],
+    "PostToolUse": [{"hooks": [{"type": "command", "command": "bash /path/to/seyag/plugins/seyag/hooks/run.sh --event PostToolUse"}]}],
+    "Stop": [{"hooks": [{"type": "command", "command": "bash /path/to/seyag/plugins/seyag/hooks/run.sh --event Stop"}]}]
+  }
+}
+```
+
+- Replace `/path/to/seyag` with the absolute path of the checkout. `${CLAUDE_PLUGIN_ROOT}` is unset when the plugin is off, so it cannot be used here. Any profile works in `env`, and so do `SYG_ENABLE` and `SYG_DISABLE`.
+- Don't wire event mode in a project that also has the plugin enabled; every check would run twice.
+- New hooks arrive with the checkout: nothing in the project's settings changes when `hooks.json` gains a hook. No skills or agents load.
+- The dispatcher applies each hook's `hooks.json` matcher itself, runs the selected hooks in parallel, and merges their results in `hooks.json` order. Any block wins: every blocker's text goes to stderr with exit 2, followed by the other hooks' context and messages under `Also from seyag hooks:`. Otherwise the context pieces join into one `additionalContext`, the messages into one `systemMessage`, and a PreToolUse `ask` is passed on with its reasons. Output a direct hook could not give for that event (plain stdout outside SessionStart and UserPromptSubmit, context on Stop) goes to stderr instead, and anything the merge does not forward is named there. Project overrides apply per hook, as above.
+- Matchers, as read from Claude Code's code but not verified against it: empty or `*` matches every tool, a plain list such as `Edit|Write|MultiEdit` matches those exact names, and anything else is treated as an unanchored regex. A payload without a `tool_name` runs every entry of its event. Only plain matchers appear in `hooks.json` today.
+- Cost: every call of a wired event starts the dispatcher, including tool calls no hook matches. When nothing matches, it exits right after one `jq` call. One slow hook can delay the event by up to `SYG_EVENT_HOOK_TIMEOUT` seconds (default 45), after which it is stopped and ignored.
+
 ## Bypass tokens
 
 To get one command past a blocking guard on purpose, put an env prefix on that command:
