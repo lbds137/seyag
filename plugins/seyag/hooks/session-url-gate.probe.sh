@@ -2,7 +2,8 @@
 # Fixture check for session-url-gate.sh — run after ANY edit to the hook.
 # Builds throwaway git repos under a mktemp dir (removed on exit) and asserts:
 # a Claude session link in a git commit/tag/notes/gh command, in a body file
-# those read, or in the message of a commit about to be pushed, blocks
+# those read, in the message of a commit about to be pushed, or in an added
+# file line of the commit being made or of a pushed commit, blocks
 # (exit 2, id masked in the message); prose naming the bare prefix, commands
 # that do not publish, commits already on a remote and an own-prefix bypass
 # pass (exit 0).
@@ -329,6 +330,64 @@ rm -f "$TMP/spawned"
 run 0 "prefilter positive control: any gh word runs python" "$WORK" PATH="$SHIM:$PATH" -- \
   "gh pr list"
 spawn_check spawned "gh pr list spawned python"
+
+# =============================================================================
+# Group 7: added file lines of the commit being made and of pushed commits
+# =============================================================================
+STAGED="$TMP/staged_repo"
+git init -q "$STAGED"
+git -C "$STAGED" commit -q --allow-empty -m "base"
+printf 'notes\nsee %s\n' "$LINK" >"$STAGED/notes.md"
+git -C "$STAGED" add notes.md
+run 2 "staged file holding a link, git commit -m clean" "$STAGED" "${NOENV[@]}" -- \
+  "git commit -m clean"
+assert_out "message names the staged path" present "staged notes.md"
+assert_out "staged-line message never echoes the id" absent "$ID"
+run 0 "bypass: staged link with the own-prefix token" "$STAGED" "${NOENV[@]}" -- \
+  "SYG_ALLOW_SESSION_URL=1 git commit -m clean"
+
+LOOSE="$TMP/loose_repo"
+git init -q "$LOOSE"
+git -C "$LOOSE" commit -q --allow-empty -m "base"
+printf 'see %s\n' "$LINK" >"$LOOSE/scratch.md"
+run 0 "near-miss: link only in an unstaged, un-added file" "$LOOSE" "${NOENV[@]}" -- \
+  "git commit -m clean"
+run 2 "same file added in the same command blocks" "$LOOSE" "${NOENV[@]}" -- \
+  "git add scratch.md && git commit -m clean"
+
+PUSHED="$TMP/pushed_repo"
+PUSHED_REMOTE="$TMP/pushed_remote.git"
+git init -q --bare "$PUSHED_REMOTE"
+git init -q "$PUSHED"
+git -C "$PUSHED" remote add origin "$PUSHED_REMOTE"
+git -C "$PUSHED" commit -q --allow-empty -m "base"
+git -C "$PUSHED" branch -M main
+git -C "$PUSHED" push -q origin main 2>/dev/null
+printf 'see %s\n' "$LINK" >"$PUSHED/doc.md"
+git -C "$PUSHED" add doc.md
+git -C "$PUSHED" commit -q -m "add doc"
+DOC_SHA=$(git -C "$PUSHED" rev-parse --short HEAD)
+run 2 "push of a commit whose added line holds a link" "$PUSHED" "${NOENV[@]}" -- \
+  "git push origin main"
+assert_out "message names the commit and path" present "commit $DOC_SHA doc.md"
+assert_out "pushed-line message never echoes the id" absent "$ID"
+git -C "$PUSHED" push -q origin main 2>/dev/null
+run 0 "near-miss: the same commit once it is on the remote" "$PUSHED" "${NOENV[@]}" -- \
+  "git push origin main"
+
+# =============================================================================
+# Group 8: directory tracking for body-file reads
+# =============================================================================
+run 2 "cd <dir> >/dev/null then relative -F" "$TMP/plain" "${NOENV[@]}" -- \
+  "cd $TMP/files >/dev/null && git commit -F leaky.txt"
+run 2 "cd -P <dir> then relative -F" "$TMP/plain" "${NOENV[@]}" -- \
+  "cd -P $TMP/files && git commit -F leaky.txt"
+run 2 "pushd <dir> >/dev/null then relative -F" "$TMP/plain" "${NOENV[@]}" -- \
+  "pushd $TMP/files >/dev/null && git commit -F leaky.txt"
+run 2 "git -C ~/dir then relative -F (HOME expanded)" "$TMP/plain" HOME="$TMP" -- \
+  "git -C ~/files commit -F leaky.txt"
+run 0 "near-miss: cd - is still not followed" "$TMP/plain" "${NOENV[@]}" -- \
+  "cd - && git commit -F leaky.txt"
 
 if [ "$FAILURES" -ne 0 ]; then
   printf '\n%d probe case(s) FAILED\n' "$FAILURES"

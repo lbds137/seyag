@@ -27,6 +27,8 @@ Repo settings (issues, wiki), stale branch names, pinned issues. Advisory by def
 
 Findings go to the owner as a list with severities. Before the flip, each blocking finding has a disposition: fixed, ruled out with reason, or accepted for flip by the owner. Mechanical gates elsewhere may key on `SYG_PUBLISH_CHECKED=<repo>`, set only after this checklist passes (it is read from the session's environment at start: the owner restarts the session with it exported, or runs the command herself with `!`).
 
+After the flip, mark every local clone public with `git config seyag.publicRepo true`: it arms `private-term-guard`, which blocks the owner's listed private terms from that repo's outbound text. A repo flipped back to private gets `git config --unset seyag.publicRepo`.
+
 ## Rename is not publish
 
 A repo may rename while private; publishing is its own gate and its own decision.
