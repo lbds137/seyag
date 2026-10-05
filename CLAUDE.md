@@ -3,7 +3,7 @@
 The portable Claude Code process layer for every project on Lila's Steam Deck: hooks, rules, skills, the implementer agent. The "Seyag" session (role file `roles/seyag.md` in claude-memory) is the plugin's author. The "Deck management" session installs releases and coordinates reloads.
 
 ## Gate
-`bash tests/run-probes.sh` from the repo root, every probe PASS, before any push. A new or changed hook is also replayed against local session logs first, and its blocked set sampled: `tests/replay-hook.sh <hook> --since 7` for a Bash-matching hook, `tests/replay-stop-hook.sh <hook> --since 7` for a Stop hook.
+`bash tests/run-probes.sh` from the repo root, every probe PASS, before any push. A new or changed hook is also replayed against local session logs first, and its blocked set sampled: `tests/replay-hook.sh <hook> --since 7` for a Bash-matching hook, `tests/replay-stop-hook.sh <hook> --since 7` for a Stop hook. CI also runs shellcheck, so run it locally before pushing: `uvx --from shellcheck-py shellcheck -S warning $(bash tests/shell-files.sh)`, no output.
 
 ## How changes ship
 - Branch, PR, CI probes plus Claude review. A non-draft PR rebase-merges itself once the review passes and probes are green; a draft is held for Lila; a PR that changes the review workflow merges by hand. No direct pushes to main.
