@@ -390,8 +390,8 @@ BACKGROUND mode (run_in_background — a foreground Bash call is killed at its
      cd $Q_TOPLEVEL && pr-ci-wait $PR_NUM --sha \$(git rev-parse HEAD)
 
    There is no persistent flag here; the same guard applies — one watcher
-   per PR (stop the stale one first), and act on the sentinel as soon as
-   the task exits instead of leaving it armed.
+   per PR (stop the stale one first: TaskStop with its task id), and act
+   on the sentinel as soon as the task exits instead of leaving it armed.
 2. When the task completes, read which sentinel printed in its task output:
    CI_COMPLETE (released), CI_GATE_TIMEOUT, CI_GATE_STARTUP_FAILURE,
    CI_GATE_REVIEW_MISSING — or none at all; re-arm.

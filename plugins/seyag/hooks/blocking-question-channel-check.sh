@@ -150,6 +150,9 @@ phone and the session stalls until the owner opens the terminal.
 Re-surface the pending ask now, then end the turn normally:
   - AskUserQuestion  — the ask fits structured options (pick one of N)
   - PushNotification — open-ended asks that no option list captures
+    (no PushNotification in this toolset? AskUserQuestion with the
+    open question as its prompt and your two likeliest answers as
+    options; anything else comes back in Other)
 
 If the question was rhetorical, already answered, or not actually
 blocking, say so in one line and stop again (this gate fires only
