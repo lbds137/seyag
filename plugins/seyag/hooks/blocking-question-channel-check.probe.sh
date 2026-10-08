@@ -3,7 +3,9 @@
 # the hook. Asserts the exit-code table over synthetic transcripts: a turn that
 # ends on a question fires unless AskUserQuestion or PushNotification was used
 # in the same turn. Statements, the stop_hook_active re-stop, and a missing
-# transcript all stay silent.
+# transcript all stay silent. Also pins the banner: a firing quotes the tripped
+# closing line on stderr, and on lanes matched by SYG_BQ_NO_RC_LANES (a broken
+# regex fails open) the advice routes through SendMessage instead.
 #
 # Colocated with the hook — the transcript-parsing python is the fragile part;
 # this probe pins its behavior on hook edits.
@@ -30,11 +32,25 @@ mktx() { # $1=out $2=text $3=tool_name(optional)
 }
 
 fail=0
-check() { # $1=expected_exit $2=label $3=transcript $4=stop_active
-  echo "{\"stop_hook_active\":${4:-false},\"transcript_path\":\"$3\"}" | "$HOOK" >/dev/null 2>&1
-  local got=$?
-  if [ "$got" != "$1" ]; then echo "FAIL [$got≠$1]: $2"; fail=1; else echo "ok   [$got]: $2"; fi
+check() { # $1=expected_exit $2=label $3=transcript $4=stop_active $5+=stderr regexes
+  # Each regex must match the captured stderr; a regex prefixed with "!" must NOT.
+  echo "{\"stop_hook_active\":${4:-false},\"transcript_path\":\"$3\"}" | "$HOOK" >/dev/null 2>"$TMP/stderr.out"
+  local got=$? pat
+  if [ "$got" != "$1" ]; then echo "FAIL [$got≠$1]: $2"; fail=1; return; fi
+  for pat in "${@:5}"; do
+    if [ "${pat#!}" != "$pat" ]; then
+      if grep -qE "${pat#!}" "$TMP/stderr.out"; then
+        echo "FAIL [stderr matches /${pat#!}/ but must not]: $2"; fail=1; return
+      fi
+    elif ! grep -qE "$pat" "$TMP/stderr.out"; then
+      echo "FAIL [stderr misses /$pat/]: $2"; fail=1; return
+    fi
+  done
+  echo "ok   [$got]: $2"
 }
+
+# Hermetic: ambient lane vars must not flip the legacy cases' advice.
+unset SYG_BQ_NO_RC_LANES ANTHROPIC_BASE_URL
 
 # --- 1. the core fire case ---------------------------------------------------
 mktx "$TMP/a.jsonl" "Both approaches work here. Should I use X or Y?"
@@ -123,5 +139,27 @@ check 0 "no turn boundary + formal channel anywhere — lenient scan credits it"
     "$(jsonstr "Truncated transcript. Which option did you want?")"
 } > "$TMP/i2.jsonl"
 check 2 "no turn boundary + no formal channel — still fires" "$TMP/i2.jsonl"
+
+# --- 10. the banner quotes the tripped closing line ---------------------------
+check 2 "fire banner quotes the tripped line" "$TMP/a.jsonl" "" \
+  'Your closing message ends with:' 'Should I use X or Y\?'
+
+# --- 11. lane routing: no-RC lanes get SendMessage advice ---------------------
+export SYG_BQ_NO_RC_LANES='z\.ai' ANTHROPIC_BASE_URL='https://api.z.ai/api/anthropic'
+check 2 "no-RC lane routes the ask through SendMessage" "$TMP/a.jsonl" "" \
+  'no Remote Control' 'SendMessage'
+unset SYG_BQ_NO_RC_LANES ANTHROPIC_BASE_URL
+
+check 2 "lane vars unset keeps the default advice" "$TMP/a.jsonl" "" \
+  'AskUserQuestion' 'the ask fits structured options' '!SendMessage'
+
+export SYG_BQ_NO_RC_LANES='[' ANTHROPIC_BASE_URL='https://api.z.ai/api/anthropic'
+check 2 "broken lane regex fails open to the default advice" "$TMP/a.jsonl" "" \
+  '!no Remote Control' 'broken ERE'
+unset SYG_BQ_NO_RC_LANES ANTHROPIC_BASE_URL
+
+export SYG_BQ_NO_RC_LANES='z\.ai' ANTHROPIC_BASE_URL='https://api.z.ai/api/anthropic'
+check 0 "statement close with lane vars set — silent stays silent" "$TMP/d.jsonl" "" '!.'
+unset SYG_BQ_NO_RC_LANES ANTHROPIC_BASE_URL
 
 [ "$fail" = 0 ] && echo "ALL PASS" || { echo "FAILURES"; exit 1; }
