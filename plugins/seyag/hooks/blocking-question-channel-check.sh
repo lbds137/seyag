@@ -26,6 +26,11 @@
 #
 # The seyag rules (rules/core.md): blocking questions go through a formal
 # channel.
+#
+# Lane routing: on lanes whose ANTHROPIC_BASE_URL matches SYG_BQ_NO_RC_LANES
+# (an ERE; a broken regex fails open to the default advice, with a note on
+# stderr), there is no Remote Control, so the banner routes the ask through
+# SendMessage to the coordinating session instead of the formal channel tools.
 
 set -uo pipefail
 
@@ -132,11 +137,25 @@ if not lines_out:
 # are the same ask as "…right?".
 last_line = re.sub(r"[*_`\s]+$", "", lines_out[-1])
 
-print("ask" if last_line.endswith("?") else "ok")
+print(("ask\t" + last_line) if last_line.endswith("?") else "ok")
 PYEOF
 ) || exit 0
 
-[ "$VERDICT" != "ask" ] && exit 0
+case $VERDICT in
+  ask|ask$'\t'*) ;;
+  *) exit 0 ;;
+esac
+TRIPPED=${VERDICT#*$'\t'}
+
+LANE_NO_RC=0
+LANE_BAD=0
+if [ -n "${SYG_BQ_NO_RC_LANES:-}" ] && [ -n "${ANTHROPIC_BASE_URL:-}" ]; then
+  if printf '%s' "$ANTHROPIC_BASE_URL" | grep -qE "$SYG_BQ_NO_RC_LANES" 2>/dev/null; then
+    LANE_NO_RC=1
+  elif [ "$?" -eq 2 ]; then
+    LANE_BAD=1  # grep rejected the pattern: invalid ERE, not just no match
+  fi
+fi
 
 cat >&2 << 'MSG'
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -146,6 +165,27 @@ Your closing message ends on a question, but this turn used neither
 AskUserQuestion nor PushNotification. Remote control surfaces only
 formal tool decision points, so a prose-only ask is invisible on the
 phone and the session stalls until the owner opens the terminal.
+MSG
+[ -n "$TRIPPED" ] && printf >&2 '\nYour closing message ends with:\n  %s\n' "$TRIPPED"
+[ "$LANE_BAD" = 1 ] && printf >&2 '\nnote: SYG_BQ_NO_RC_LANES looks like a broken ERE (grep rejected it), so lane routing is OFF this turn.\n'
+if [ "$LANE_NO_RC" = 1 ]; then
+cat >&2 << 'MSG'
+
+Re-surface the pending ask now, then end the turn normally:
+  - This lane has no Remote Control: the owner cannot see
+    AskUserQuestion or PushNotification from here.
+  - SendMessage the ask to your coordinating session (one
+    question, your recommendation, the exact command if there
+    is one) so it can reach her.
+  - Or end with the prose ask for her return.
+
+If the question was rhetorical, already answered, or not actually
+blocking, say so in one line and stop again (this gate fires only
+once per turn — the next stop proceeds).
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+MSG
+else
+cat >&2 << 'MSG'
 
 Re-surface the pending ask now, then end the turn normally:
   - AskUserQuestion  — the ask fits structured options (pick one of N)
@@ -159,4 +199,5 @@ blocking, say so in one line and stop again (this gate fires only
 once per turn — the next stop proceeds).
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 MSG
+fi
 exit 2
