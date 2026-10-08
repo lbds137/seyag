@@ -26,7 +26,8 @@ Everything is configured by environment variables; nothing is hardcoded.
   SYG_CREDIT_FORCE=1 record regardless of the route rule (tests).
   SYG_CREDIT_PRICE_TABLE_CMD   replaces the sibling price-table program (a
                      command string, split like a shell would; --json is
-                     appended). For tests.
+                     appended). Tokens of the command that are existing files
+                     are watched, so a change to one re-prices. For tests.
   SYG_CREDIT_NOW     ISO-8601 UTC "now" override (tests).
 
 Metered route test (with SYG_CREDIT_WHEN unset or empty): ANTHROPIC_API_KEY is
@@ -51,7 +52,7 @@ that day's requests), cost_usd, requests, request_ids (sorted), models
 cache_write_5m_tokens, cache_write_1h_tokens, web_search_requests,
 web_fetch_requests, fast_requests, cost_usd}}), unpriced_models (sorted),
 transcript_path, sources_sig (sorted [path, size, mtime_ns] of the transcript
-files read), updated_ts. The ledger file keeps its mode across rewrites (a new
+files read and of the price source), updated_ts. The ledger file keeps its mode across rewrites (a new
 one gets 0644 less the umask). Keys are sorted inside each line and lines are
 sorted by (day, first_ts, session_id). Unparsable lines are preserved verbatim
 on rewrite and ignored for the math. Entries written by older versions (no
@@ -65,8 +66,8 @@ requestId) the line with the largest output_tokens is the request. Unparsable
 lines are skipped (counted on stderr); <synthetic> models and requests with no
 tokens are skipped. Token counts are exact per request. All of this runs under
 the ledger lock. When every entry of the session carries a sources_sig equal to
-the files' current one (os.stat only), the call returns without reading
-transcripts or pricing. Otherwise values are recomputed from the transcripts
+the files' current one (os.stat only; a price-table change also triggers a
+recompute), the call returns without reading transcripts or pricing. Otherwise values are recomputed from the transcripts
 and replace that session's entries wholesale, so re-running is idempotent; an
 unchanged result is not rewritten, and a missing transcript_path is a no-op
 (recorded entries are never replaced by nothing). A requestId already held by
@@ -348,13 +349,28 @@ def extract(paths):
 
 # ---------------------------------------------------------------- pricing
 
-def load_prices():
-    """{model: rates} from the sibling price-table --json. Raises on failure."""
+def price_command():
+    """The price-table argv without --json: SYG_CREDIT_PRICE_TABLE_CMD split when
+    set, else the sibling price-table program."""
     override = os.environ.get("SYG_CREDIT_PRICE_TABLE_CMD", "")
     if override:
-        cmd = shlex.split(override)
-    else:
-        cmd = [sys.executable, os.path.join(os.path.dirname(os.path.realpath(__file__)), "price-table")]
+        return shlex.split(override)
+    return [sys.executable, os.path.join(os.path.dirname(os.path.realpath(__file__)), "price-table")]
+
+
+def price_source_paths():
+    """The files whose change means new prices: every token of the override
+    command that is an existing file (so `python3 /x/pt` and `env X=1 /x/pt` both
+    watch the script), else the sibling price-table file."""
+    cmd = price_command()
+    if os.environ.get("SYG_CREDIT_PRICE_TABLE_CMD", ""):
+        return [t for t in cmd if os.path.isfile(t)]
+    return [cmd[1]]
+
+
+def load_prices():
+    """{model: rates} from the sibling price-table --json. Raises on failure."""
+    cmd = price_command()
     res = subprocess.run(cmd + ["--json"], stdin=subprocess.DEVNULL, capture_output=True,
                          text=True, timeout=30, check=True)
     table = json.loads(res.stdout).get("table")
@@ -394,11 +410,12 @@ def request_cost(r, rates):
 
 # ---------------------------------------------------------------- hook
 
-def sources_sig(paths):
-    """Sorted [path, size, mtime_ns] of the transcript files that exist (os.stat
-    only), stored in each entry so an unchanged session is not re-read."""
+def sources_sig(paths, price_paths=()):
+    """Sorted [path, size, mtime_ns] of the transcript files and the price source
+    files that exist (os.stat only), stored in each entry so an unchanged session
+    is not re-read; the price source is included so a table change re-prices."""
     out = []
-    for p in paths:
+    for p in list(paths) + list(price_paths):
         try:
             st = os.stat(p)
         except OSError:
@@ -472,7 +489,7 @@ def hook(payload):
         fcntl.flock(lock, fcntl.LOCK_EX)
         entries, garbage = read_ledger(ledger)
         paths = transcript_sources(sid, tpath)
-        sig = sources_sig(paths)
+        sig = sources_sig(paths, price_source_paths())
         old = [e for e in entries if e["session_id"] == sid]
         if old and all(e.get("sources_sig") == sig for e in old):
             return  # no transcript changed since these entries were computed
