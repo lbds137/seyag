@@ -239,4 +239,46 @@ expect headless-drift "SYG_HEADLESS_OFF_HOOKS differs from the components.tsv ho
 mutant headless-moved; sed 's/^turn-end-shape-gate\tturn-shape/turn-end-shape-gate\tguards-shell/' "$REPO/plugins/seyag/hooks/components.tsv" > "$TMP/headless-moved/plugins/seyag/hooks/components.tsv"
 expect headless-moved "SYG_HEADLESS_OFF_HOOKS differs from the components.tsv hooks of: turn-shape context"
 
+# Event-mode degradations. A stub tree in which the first PreToolUse hook asks
+# with no reason and every other hook is silent.
+hooks="$REPO/plugins/seyag/hooks"
+em="$TMP/event-mode"
+mkdir -p "$em/hooks/lib" "$em/proj"
+cp "$hooks/run.sh" "$hooks/hooks.json" "$em/hooks/"
+cp "$hooks/lib/components.sh" "$em/hooks/lib/" 2>/dev/null
+cp "$hooks/components.tsv" "$em/hooks/" 2>/dev/null
+asker=$(jq -r '.hooks.PreToolUse[].hooks[].command? // empty' "$hooks/hooks.json" | parse_names | head -n 1)
+for f in "$hooks"/*.sh; do
+  name=$(basename "$f" .sh)
+  case "$name" in run | *.probe) continue ;; esac
+  printf '#!/bin/bash\nexit 0\n' > "$em/hooks/$name.sh"
+done
+printf '#!/bin/bash\necho %s\nexit 0\n' \
+  "'{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"ask\"}}'" > "$em/hooks/$asker.sh"
+em_run() { env -u SYG_PROFILE -u SYG_ENABLE -u SYG_DISABLE -u CLAUDE_CODE_ENTRYPOINT CLAUDE_PROJECT_DIR="$em/proj" \
+  bash "$em/hooks/run.sh" --event PreToolUse <<<'{}'; }
+
+# A reason-less ask is merged with a filled reason, as a reason-less block is.
+out=$(em_run 2>/dev/null)
+[ "$(jq -r '.hookSpecificOutput.permissionDecision' <<<"$out" 2>/dev/null)" = ask ] \
+  && jq -e '.hookSpecificOutput.permissionDecisionReason | strings | contains("asked without a reason")' <<<"$out" >/dev/null 2>&1 \
+  && ok "event mode: an ask hook with no reason is merged with a filled reason" \
+  || bad "event mode reason-less ask: $out"
+
+# No timeout binary: one stderr note, and the event still runs unbounded.
+nb="$TMP/no-timeout-bin"
+mkdir -p "$nb"
+for t in bash jq cat mktemp rm dirname kill sed grep tr sort head wc env; do
+  p=$(command -v "$t") && ln -sf "$p" "$nb/$t"
+done
+if PATH="$nb" command -v timeout >/dev/null 2>&1; then
+  bad "event mode no-timeout: the fixture PATH still has a timeout binary"
+else
+  err=$(PATH="$nb" em_run 2>&1 >"$TMP/no-timeout.out")
+  [ "$(grep -cF 'no timeout binary on PATH' <<<"$err")" -eq 1 ] \
+    && jq -e '.hookSpecificOutput.permissionDecision == "ask"' "$TMP/no-timeout.out" >/dev/null 2>&1 \
+    && ok "event mode: no timeout binary -> one stderr note, the event still runs" \
+    || bad "event mode no-timeout: stderr [$err] stdout [$(cat "$TMP/no-timeout.out")]"
+fi
+
 [ "$fail" -eq 0 ]

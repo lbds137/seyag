@@ -65,7 +65,13 @@ route_zai() { jq '.env.ANTHROPIC_BASE_URL = "https://api.z.ai/api/anthropic"' "$
 route_anthropic() { jq '.env.ANTHROPIC_BASE_URL = "https://api.anthropic.com"' "$h/.claude/settings.json" > "$h/.claude/settings.json.new" && mv "$h/.claude/settings.json.new" "$h/.claude/settings.json"; }
 route_or() { jq '.env.ANTHROPIC_BASE_URL = "https://openrouter.ai/api/v1"' "$h/.claude/settings.json" > "$h/.claude/settings.json.new" && mv "$h/.claude/settings.json.new" "$h/.claude/settings.json"; }
 route_host() { jq --arg u "$1" '.env.ANTHROPIC_BASE_URL = $u' "$h/.claude/settings.json" > "$h/.claude/settings.json.new" && mv "$h/.claude/settings.json.new" "$h/.claude/settings.json"; }
-render() { printf '%s' "$1" | env -u ANTHROPIC_BASE_URL -u ANTHROPIC_API_KEY -u SYG_CREDIT_LEDGER -u SYG_CREDIT_GRANTS -u SYG_CREDIT_FORCE bash "$SL"; }
+render() {
+  local env_args=(-u ANTHROPIC_BASE_URL -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u SYG_CREDIT_LEDGER -u SYG_CREDIT_GRANTS -u SYG_CREDIT_FORCE)
+  if [ -n "${PROBE_AUTH_TOKEN:-}" ]; then
+    env_args+=("ANTHROPIC_AUTH_TOKEN=$PROBE_AUTH_TOKEN")
+  fi
+  printf '%s' "$1" | env "${env_args[@]}" bash "$SL"
+}
 strip() { sed 's/\x1b\[[0-9;]*m//g'; }
 
 # 1-2. Routed: the z.ai segment comes from the quota API, colored and with reset arrows.
@@ -362,8 +368,11 @@ grep -qF $'\x1b[90mopenrouter.ai' <<< "$raw" && ! grep -Eq 'openrouter\.ai \$' <
 # 30. OpenRouter, token removed: an empty ANTHROPIC_AUTH_TOKEN with a warm
 # cache must degrade the same as cold — a stale balance rendered without a
 # token is a lie about the lane's currency. (Keep the OR base_url: only the
-# token is emptied.)
+# token is emptied; own $15 cache: a sub-cent cache degrades with or without a
+# token, which made this case vacuous.)
 printf '{"env":{"ANTHROPIC_BASE_URL":"https://openrouter.ai/api/v1"}}' > "$h/.claude/settings.json"
+printf '{"data":{"total_credits":20,"total_usage":5}}' > "$h/cache/claude-statusline/or-credits.json"
+touch "$h/cache/claude-statusline/or-credits.json"
 raw=$(OPENROUTER_CREDITS_URL="file://$h/missing-credits.json" render '{"context_window":{"current_usage":{"input_tokens":1000}},"model":{"display_name":"X"},"cwd":"/tmp"}')
 out=$(strip <<< "$raw")
 grep -qF $'\x1b[90mopenrouter.ai' <<< "$raw" && ! grep -Eq 'openrouter\.ai \$' <<< "$out" \
@@ -505,7 +514,7 @@ grep -qF 'platform.claude.com ~$48.00' <<< "$out" && ! grep -qF '(exp' <<< "$out
 # 40-44. Lane routing, each with rate_limits in the input. The process env decides.
 lane_in='{"rate_limits":{"five_hour":{"used_percentage":83,"resets_at":1790790548},"seven_day":{"used_percentage":56,"resets_at":1791093600}},"context_window":{"current_usage":{"input_tokens":1000}},"model":{"display_name":"X"},"cwd":"/tmp"}'
 lane() { # VAR=value ...: render lane_in under exactly these env vars
-    env -u ANTHROPIC_BASE_URL -u ANTHROPIC_API_KEY -u SYG_CREDIT_LEDGER -u SYG_CREDIT_GRANTS -u SYG_CREDIT_FORCE "$@" bash "$SL" <<< "$lane_in"
+    env -u ANTHROPIC_BASE_URL -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u SYG_CREDIT_LEDGER -u SYG_CREDIT_GRANTS -u SYG_CREDIT_FORCE "$@" bash "$SL" <<< "$lane_in"
 }
 route_anthropic
 jq 'del(.env.ANTHROPIC_BASE_URL)' "$h/.claude/settings.json" > "$h/.claude/settings.json.new" && mv "$h/.claude/settings.json.new" "$h/.claude/settings.json"
@@ -599,5 +608,27 @@ touch -d '-120 seconds' "$cr_cache"
 out4=$(strip <<< "$(fleet "$h/credit/grants.json")")
 grep -qF 'platform.claude.com $187.50 est' <<< "$out4" \
     && ok "balance cache: older than 60s -> recomputed despite a matching key" || bad "balance cache TTL: '$out4'"
+
+# 49. Precedence: settings.json says z.ai, the process env says OpenRouter, no
+# rate_limits in the input. Both set and conflicting: the env must win.
+route_zai
+lane_in_save=$lane_in
+lane_in='{"context_window":{"current_usage":{"input_tokens":1000}},"model":{"display_name":"X"},"cwd":"/tmp"}'
+raw=$(OPENROUTER_CREDITS_URL="file://$h/missing-credits.json" lane ANTHROPIC_BASE_URL=https://openrouter.ai/api/v1); out=$(strip <<< "$raw")
+lane_in=$lane_in_save
+grep -q 'openrouter\.ai' <<< "$out" && ! grep -q 'z\.ai' <<< "$out" && ! grep -q '5h:' <<< "$out" \
+    && ok "precedence: env OpenRouter URL beats settings.json z.ai with both set, no rate_limits" || bad "precedence: $out"
+
+# 50. Env token: the OpenRouter balance renders from a process-env
+# ANTHROPIC_AUTH_TOKEN when settings.json carries none (a --settings overlay
+# session). Warm cache, so no network.
+printf '{"env":{"ANTHROPIC_BASE_URL":"https://openrouter.ai/api/v1"}}' > "$h/.claude/settings.json"
+printf '{"data":{"total_credits":20,"total_usage":5}}' > "$h/cache/claude-statusline/or-credits.json"
+touch "$h/cache/claude-statusline/or-credits.json"
+raw=$(PROBE_AUTH_TOKEN=dummy-probe-token OPENROUTER_CREDITS_URL="file://$h/missing-credits.json" render '{"context_window":{"current_usage":{"input_tokens":1000}},"model":{"display_name":"X"},"cwd":"/tmp"}')
+out=$(strip <<< "$raw")
+grep -Eq 'openrouter\.ai \$15\.00' <<< "$out" \
+    && ok "env token: OpenRouter balance renders from the process-env token" || bad "env token: $out"
+printf '{"env":{"ANTHROPIC_AUTH_TOKEN":"dummy-probe-token"},"modelSettings":{"glm-5.3":{"effortLevel":"high"},"glm-5.3-flash":{"effortLevel":"max"},"claude-opus-5-5":{"effortLevel":"high"}}}' > "$h/.claude/settings.json"
 
 exit $fail
