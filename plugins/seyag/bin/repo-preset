@@ -43,6 +43,10 @@ of the script):
 
 apply REPLACES the default branch's entire protection with the minimal preset — run show first.
 --strict additionally requires the 'probes' check to pass before merge.
+Free-plan private repos: branch protection is unavailable there. apply
+still applies the repo settings, reports "protection unavailable (free
+plan): skipped" and exits 0 (--strict dies instead); show reports the
+same skip and exits 0.
 
 Exit codes: 0 ok; 1 usage error or api failure.
 EOF
@@ -95,19 +99,35 @@ DEFAULT_BRANCH=$(printf '%s' "$SETTINGS" | jq -r .default_branch)
 # api path — raw it would 404
 BRANCH_ENC=$(jq -rn --arg b "$DEFAULT_BRANCH" '$b|@uri')
 
+free_plan_wall() { # free_plan_wall <gh stderr> — 0 when it is the
+  # free-plan-private protection 403 ("Upgrade to GitHub Pro or make this
+  # repository public to enable this feature." with "(HTTP 403)"), else 1.
+  # Any OTHER 403 (token permissions, SSO) must keep failing loudly, so the
+  # message is the discriminator, never the status code.
+  local err=$1
+  case $err in
+    *"Upgrade to GitHub Pro"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # apply never reads protection; only show does. A 404 means protection is
-# absent and reads as unset; any other api failure (403, 5xx, network) must
-# NOT read as absent — show reports the protection keys as "unknown (api
-# error)" and exits 1 instead of a reassuring false-negative.
+# absent and reads as unset; the free-plan wall reads as skipped (protection
+# is unavailable there, not unknown); any other api failure (403, 5xx,
+# network) must NOT read as absent — show reports the protection keys as
+# "unknown (api error)" and exits 1 instead of a reassuring false-negative.
 PROTECTION=""
 PROTECTION_ERROR=""
+PROTECTION_SKIPPED=false
 if [ "$cmd" = show ]; then
   if out=$(gh api "repos/$REPO/branches/$BRANCH_ENC/protection" 2>&1); then
     PROTECTION=$out
   else
     case $out in
       *404*) : ;;  # absent
-      *) PROTECTION_ERROR=$(printf '%s' "$out" | head -n 1) ;;
+      *) if free_plan_wall "$out"; then PROTECTION_SKIPPED=true
+         else PROTECTION_ERROR=$(printf '%s' "$out" | head -n 1)
+         fi ;;
     esac
   fi
 fi
@@ -148,25 +168,29 @@ case "$cmd" in
     report_key allow_merge_commit  "$(printf '%s' "$SETTINGS" | jq -r .allow_merge_commit)"  "$PRESET_ALLOW_MERGE_COMMIT"
     report_key allow_update_branch "$(printf '%s' "$SETTINGS" | jq -r .allow_update_branch)" "$PRESET_ALLOW_UPDATE_BRANCH"
     report_key has_wiki            "$(printf '%s' "$SETTINGS" | jq -r .has_wiki)"            "$PRESET_HAS_WIKI"
-    if [ -n "$PROTECTION_ERROR" ]; then
-      for key in "protection.allow_force_pushes" "protection.allow_deletions" \
-                 "protection.enforce_admins" \
-                 "protection.required_pull_request_reviews" \
-                 "protection.required_status_checks" \
-                 "protection.restrictions"; do
-        printf '%-42s %s\n' "$key" "unknown (api error)"
-      done
-      die "could not read branch protection of $REPO: $PROTECTION_ERROR"
+    if [ "$PROTECTION_SKIPPED" = true ]; then
+      echo "protection unavailable (free plan): skipped"
+    else
+      if [ -n "$PROTECTION_ERROR" ]; then
+        for key in "protection.allow_force_pushes" "protection.allow_deletions" \
+                   "protection.enforce_admins" \
+                   "protection.required_pull_request_reviews" \
+                   "protection.required_status_checks" \
+                   "protection.restrictions"; do
+          printf '%-42s %s\n' "$key" "unknown (api error)"
+        done
+        die "could not read branch protection of $REPO: $PROTECTION_ERROR"
+      fi
+      if [ -z "$PROTECTION" ]; then
+        echo "branch has NO protection rule — force pushes and deletions are unrestricted"
+      fi
+      report_key "protection.allow_force_pushes" "$(cur_prot_bool .allow_force_pushes.enabled)" "$PRESET_ALLOW_FORCE_PUSHES"
+      report_key "protection.allow_deletions"    "$(cur_prot_bool .allow_deletions.enabled)"    "$PRESET_ALLOW_DELETIONS"
+      report_key "protection.enforce_admins"     "$(cur_prot .enforce_admins.enabled)"     "$PRESET_ENFORCE_ADMINS"
+      report_key "protection.required_pull_request_reviews" "$(prot_state .required_pull_request_reviews)" "$(null_state "$PRESET_REQUIRED_REVIEWS")"
+      report_key "protection.required_status_checks"        "$(prot_state .required_status_checks)"        "$(null_state "$PRESET_REQUIRED_CHECKS")"
+      report_key "protection.restrictions"                  "$(prot_state .restrictions)"                  "$(null_state "$PRESET_RESTRICTIONS")"
     fi
-    if [ -z "$PROTECTION" ]; then
-      echo "branch has NO protection rule — force pushes and deletions are unrestricted"
-    fi
-    report_key "protection.allow_force_pushes" "$(cur_prot_bool .allow_force_pushes.enabled)" "$PRESET_ALLOW_FORCE_PUSHES"
-    report_key "protection.allow_deletions"    "$(cur_prot_bool .allow_deletions.enabled)"    "$PRESET_ALLOW_DELETIONS"
-    report_key "protection.enforce_admins"     "$(cur_prot .enforce_admins.enabled)"     "$PRESET_ENFORCE_ADMINS"
-    report_key "protection.required_pull_request_reviews" "$(prot_state .required_pull_request_reviews)" "$(null_state "$PRESET_REQUIRED_REVIEWS")"
-    report_key "protection.required_status_checks"        "$(prot_state .required_status_checks)"        "$(null_state "$PRESET_REQUIRED_CHECKS")"
-    report_key "protection.restrictions"                  "$(prot_state .restrictions)"                  "$(null_state "$PRESET_RESTRICTIONS")"
     ;;
   apply)
     echo "+ gh api --method PATCH repos/$REPO (repo settings: 5 preset fields)"
@@ -193,14 +217,24 @@ case "$cmd" in
       CHECKS_NOTE="required check: $PRESET_REQUIRED_CHECKS"
     fi
     echo "+ gh api --method PUT repos/$REPO/branches/$BRANCH_ENC/protection (minimal protection: the two false flags, reviews null, $CHECKS_NOTE)"
-    gh api --method PUT "repos/$REPO/branches/$BRANCH_ENC/protection" \
+    # stderr is captured (stdout discarded) so the free-plan wall can be told
+    # apart from every other failure; other failures get it echoed back
+    if ! err=$(gh api --method PUT "repos/$REPO/branches/$BRANCH_ENC/protection" \
       "${CHECKS_FLAGS[@]}" \
       -F required_pull_request_reviews="$PRESET_REQUIRED_REVIEWS" \
       -F restrictions="$PRESET_RESTRICTIONS" \
       -F enforce_admins="$PRESET_ENFORCE_ADMINS" \
       -F allow_force_pushes="$PRESET_ALLOW_FORCE_PUSHES" \
-      -F allow_deletions="$PRESET_ALLOW_DELETIONS" >/dev/null \
-      || die "branch protection api call failed for $REPO"
+      -F allow_deletions="$PRESET_ALLOW_DELETIONS" 2>&1 >/dev/null); then
+      if free_plan_wall "$err"; then
+        # strict's contract (merges require the probes check) needs protection
+        [ "$STRICT" = false ] || die "strict requires branch protection, unavailable on the free plan: $REPO"
+        echo "protection unavailable (free plan): skipped — repo settings were applied"
+        exit 0
+      fi
+      [ -z "$err" ] || echo "$err" >&2
+      die "branch protection api call failed for $REPO"
+    fi
     echo "applied: $REPO now matches the house preset (default branch: $DEFAULT_BRANCH)"
     if [ "$STRICT" = true ]; then
       echo "strict: merges additionally require the '$PRESET_REQUIRED_CHECKS' check"

@@ -33,6 +33,8 @@ mkdir -p "$FAKE_BIN"
 #                         unset/empty -> exit 1 (the 404 shape: protection absent)
 #   FAKE_PROTECTION_ERROR set -> the protection read fails with a NON-404
 #                         error (the 500 shape: api error, not absence)
+#   FAKE_PROTECTION_ERROR_TEXT  set -> the protection read AND the protection
+#                         PUT fail with this text on stderr (the 403 shapes)
 #   FAKE_GH_LOG           every write call's argv appended here, one line per call
 #   FAKE_GH_FAIL_WRITE    set -> every write call is logged but FAILS (exit 1):
 #                         the gh-write-failure shape
@@ -41,6 +43,10 @@ cat > "$FAKE_BIN/gh" <<'SHIM'
 if [ "${1:-}" = api ]; then
   if [ "${2:-}" = "--method" ]; then
     printf '%s\n' "$*" >> "${FAKE_GH_LOG:?FAKE_GH_LOG unset}"
+    if [ -n "${FAKE_PROTECTION_ERROR_TEXT:-}" ] && [[ "${4:-}" == */protection ]]; then
+      echo "$FAKE_PROTECTION_ERROR_TEXT" >&2
+      exit 1
+    fi
     if [ -n "${FAKE_GH_FAIL_WRITE:-}" ]; then
       echo "gh: api error (500) on write" >&2
       exit 1
@@ -50,6 +56,10 @@ if [ "${1:-}" = api ]; then
   fi
   case "${2:-}" in
     */protection)
+      if [ -n "${FAKE_PROTECTION_ERROR_TEXT:-}" ]; then
+        echo "$FAKE_PROTECTION_ERROR_TEXT" >&2
+        exit 1
+      fi
       if [ -n "${FAKE_PROTECTION_ERROR:-}" ]; then
         echo "gh: api error (500)" >&2
         exit 1
@@ -116,6 +126,7 @@ run() {
     FAKE_SETTINGS_FILE="${FAKE_SETTINGS_FILE:-}" \
     FAKE_PROTECTION_FILE="${FAKE_PROTECTION_FILE:-}" \
     FAKE_PROTECTION_ERROR="${FAKE_PROTECTION_ERROR:-}" \
+    FAKE_PROTECTION_ERROR_TEXT="${FAKE_PROTECTION_ERROR_TEXT:-}" \
     FAKE_GH_LOG="${FAKE_GH_LOG:-}" \
     FAKE_GH_FAIL_WRITE="${FAKE_GH_FAIL_WRITE:-}" \
     "$BIN" "$@" 2>&1)
@@ -339,6 +350,55 @@ FAKE_SETTINGS_FILE="$SETTINGS_MATCHING" FAKE_PROTECTION_ERROR=1 \
 [[ "$OUT" == *"applied: o/r now matches the house preset"* ]] \
   && pass "apply: succeeds even when the protection read would error" \
   || { fail "apply: succeeds even when the protection read would error"; printf '%s\n' "$OUT" | sed 's/^/      /'; }
+
+# --- 18. the free-plan wall: skipped, exit 0; any other 403 keeps failing -------
+FREE_PLAN_403="gh: Upgrade to GitHub Pro or make this repository public to enable this feature. (HTTP 403)"
+PERMISSION_403="gh: Must have admin rights to Repository. (HTTP 403)"
+SKIPPED="protection unavailable (free plan): skipped"
+
+FAKE_SETTINGS_FILE="$SETTINGS_MATCHING" FAKE_PROTECTION_ERROR_TEXT="$FREE_PLAN_403" \
+  FAKE_GH_LOG="$WORK/free-plan.log" \
+  run "apply on the free-plan wall: exits 0" 0 apply o/r
+[[ "$OUT" == *"$SKIPPED — repo settings were applied"* && "$OUT" != *"applied: o/r now matches"* ]] \
+  && pass "free-plan apply: reports skipped, not applied" \
+  || { fail "free-plan apply: reports skipped, not applied"; printf '%s\n' "$OUT" | sed 's/^/      /'; }
+grep -q -- '--method PATCH' "$WORK/free-plan.log" \
+  && pass "free-plan apply: the settings PATCH still went out" \
+  || fail "free-plan apply: the settings PATCH still went out"
+
+FAKE_SETTINGS_FILE="$SETTINGS_MATCHING" FAKE_PROTECTION_ERROR_TEXT="$FREE_PLAN_403" \
+  FAKE_GH_LOG="$WORK/free-plan-strict.log" \
+  run "apply --strict on the free-plan wall: exits 1" 1 apply --strict o/r
+[[ "$OUT" == *"strict requires branch protection, unavailable on the free plan: o/r"* \
+   && "$OUT" != *"$SKIPPED"* ]] \
+  && pass "free-plan strict: dies naming strict, never skips" \
+  || { fail "free-plan strict: dies naming strict, never skips"; printf '%s\n' "$OUT" | sed 's/^/      /'; }
+
+FAKE_SETTINGS_FILE="$SETTINGS_MATCHING" FAKE_PROTECTION_ERROR_TEXT="$FREE_PLAN_403" \
+  run "show on the free-plan wall: exits 0" 0 show o/r
+[[ "$OUT" == *"$SKIPPED"* && "$OUT" != *"unknown (api error)"* && "$OUT" != *"protection."* \
+   && "$(printf '%s\n' "$OUT" | grep -cF "$SKIPPED")" -eq 1 ]] \
+  && pass "free-plan show: one skipped line, no unknown rows, no protection rows" \
+  || { fail "free-plan show: one skipped line, no unknown rows, no protection rows"; printf '%s\n' "$OUT" | sed 's/^/      /'; }
+[[ "$(show_line allow_rebase_merge)" == *" ok "* ]] \
+  && pass "free-plan show: the repo-settings rows still print" \
+  || fail "free-plan show: the repo-settings rows still print"
+
+# claim canary: a permissions 403 is NOT the free-plan wall
+FAKE_SETTINGS_FILE="$SETTINGS_MATCHING" FAKE_PROTECTION_ERROR_TEXT="$PERMISSION_403" \
+  FAKE_GH_LOG="$WORK/perm-403.log" \
+  run "apply on a permissions 403: exits 1" 1 apply o/r
+[[ "$OUT" == *"branch protection api call failed for o/r"* && "$OUT" != *"$SKIPPED"* ]] \
+  && pass "permissions-403 apply: still dies, not skipped" \
+  || { fail "permissions-403 apply: still dies, not skipped"; printf '%s\n' "$OUT" | sed 's/^/      /'; }
+[[ "$OUT" == *"Must have admin rights"* ]] \
+  && pass "permissions-403 apply: the gh stderr is echoed back" \
+  || { fail "permissions-403 apply: the gh stderr is echoed back"; printf '%s\n' "$OUT" | sed 's/^/      /'; }
+FAKE_SETTINGS_FILE="$SETTINGS_MATCHING" FAKE_PROTECTION_ERROR_TEXT="$PERMISSION_403" \
+  run "show on a permissions 403: exits 1" 1 show o/r
+[[ "$OUT" == *"protection.allow_force_pushes"*"unknown (api error)"* && "$OUT" != *"$SKIPPED"* ]] \
+  && pass "permissions-403 show: still unknown (api error), not skipped" \
+  || { fail "permissions-403 show: still unknown (api error), not skipped"; printf '%s\n' "$OUT" | sed 's/^/      /'; }
 
 echo "---"
 echo "$FAILURES failed"
