@@ -36,7 +36,7 @@ if python3 - "$emit" <<'PY'
 import json, sys
 o = json.loads(sys.argv[1])["modelPricing"]["overrides"]
 rows = list(o.items())
-assert len(rows) == 31, f"row count {len(rows)}"
+assert len(rows) == 34, f"row count {len(rows)}"
 for k, v in rows:
     assert set(v) == {"input", "output", "cacheRead", "cacheWrite"}, f"{k}: fields {sorted(v)}"
     assert all(isinstance(v[f], (int, float)) and 0 <= v[f] <= 10000 for f in v), f"{k}: {v}"
@@ -44,9 +44,9 @@ assert "~z-ai/glm-flash-latest:nitro" in o, "nitro key missing"
 assert "~z-ai/glm-flash-latest" in o, "bare alias key missing"
 assert "glm-5.3-flash[1m]" in o, "bracket-suffix key missing"
 assert "google/gemini-3.1-flash-lite" in o, "gemini-lite key missing"
-# corrected rates (OR live 2026-10-02 evening) pinned
-assert o["~z-ai/glm-flash-latest"]["output"] == 0.928749, "alias output not the live rate"
-assert o["~z-ai/glm-flash-latest:nitro"]["output"] == 0.928749, "nitro output not the live rate"
+# corrected rates (the table's current OR values) pinned
+assert o["~z-ai/glm-flash-latest"]["output"] == 3.032682, "alias output not the live rate"
+assert o["~z-ai/glm-flash-latest:nitro"]["output"] == 3.032682, "nitro output not the live rate"
 assert o["~openai/gpt-astra-latest"]["cacheWrite"] == 12.5, "astra cacheWrite"
 assert o["~openai/gpt-sol-latest"]["cacheWrite"] == 2.5, "sol cacheWrite"
 assert o["~openai/gpt-luna-latest"]["cacheWrite"] == 0.125, "luna cacheWrite"
@@ -55,7 +55,7 @@ assert o["~google/gemini-flash-latest"]["cacheWrite"] == 0.0416666666666667, "ge
 assert o["google/gemini-3.1-flash-lite"]["cacheWrite"] == 0.0833333333333333, "gemini-lite cacheWrite"
 assert o["~anthropic/claude-fable-latest"]["cacheWrite"] == 12.5, "anthropic alias cacheWrite changed"
 PY
-then ok "--emit: 31 rows, four fields each in range, positive-control keys + corrected rates"
+then ok "--emit: 34 rows, four fields each in range, positive-control keys + corrected rates"
 else bad "--emit: candidate shape"; fi
 if echo "$emit" | python3 -c '
 import json,sys
@@ -69,12 +69,17 @@ if python3 - "$PT" <<'PY'
 import json, subprocess, sys
 o = json.loads(subprocess.run([sys.argv[1], "--json"], capture_output=True, text=True).stdout)
 assert set(o) == {"table", "or_keys"}, f"keys {sorted(o)}"
-assert len(o["table"]) == 31, "row count"
-assert len(o["or_keys"]) == 16, f"or_keys count {len(o['or_keys'])}"
+assert len(o["table"]) == 34, "row count"
+assert len(o["or_keys"]) == 18, f"or_keys count {len(o['or_keys'])}"
 assert "~z-ai/glm-flash-latest:nitro" in o["or_keys"], "nitro not an or_key"
 assert "glm-5.3-flash" not in o["or_keys"], "z.ai-direct key is not an or_key"
 PY
-then ok "--json: table + or_keys, 31 rows, 16 OR keys"; else bad "--json: shape"; fi
+then ok "--json: table + or_keys, 34 rows, 18 OR keys"; else bad "--json: shape"; fi
+"$PT" --json | jq -e '.table["claude-haiku-5-5"] == {input:0.1,output:0.5,cacheRead:0.01,cacheWrite:0.125}' >/dev/null \
+  && ok "--json: claude-haiku-5-5 priced (0.1 / 0.5 / 0.01 / 0.125)" || bad "--json: claude-haiku-5-5 row"
+"$PT" --json | jq -e '.table["google/gemini-3.8-flash"].input == 0.75 and .table["google/gemini-3.1-pro-preview"] == {input:2,output:12,cacheRead:0.2,cacheWrite:0.375}
+    and (.or_keys | index("google/gemini-3.8-flash")) != null and (.or_keys | index("google/gemini-3.1-pro-preview")) != null' >/dev/null \
+  && ok "--json: gemini-3.8-flash and gemini-3.1-pro-preview priced and OR-checked" || bad "--json: new gemini rows"
 
 # --merge: foreign key survives, modelPricing replaced wholesale
 mg="$T/managed.json"
@@ -85,7 +90,7 @@ import json, sys
 m = json.load(open(sys.argv[1]))
 assert m["permissions"] == {"deny": ["Bash(rm)"]}, "foreign key lost"
 assert "stale" not in m["modelPricing"]["overrides"], "stale row survived"
-assert len(m["modelPricing"]["overrides"]) == 31, "merge did not replace wholesale"
+assert len(m["modelPricing"]["overrides"]) == 34, "merge did not replace wholesale"
 PY
 then ok "--merge: foreign key kept, stale modelPricing replaced wholesale"; else bad "--merge"; fi
 if PRICE_TABLE_MANAGED_FILE="$T/absent.json" "$PT" --merge | python3 -c '
@@ -199,7 +204,7 @@ fi
 
 # --sync: fixture OR models JSON. z-ai/glm-5.3-flash output drifts (9.99);
 # ~openai/gpt-luna-latest cacheWrite drifts (0.125 -> 0.225); ~z-ai alias rows
-# carry the live 0.000000928749 completion (no drift); :nitro absent from the
+# carry the live 0.000003032682 completion (no drift); :nitro absent from the
 # feed and resolved via its bare alias; the z-ai rows publish no cache-write
 # field (their cacheWrite is never checked).
 models="$T/models.json"
@@ -207,9 +212,9 @@ python3 - "$models" <<'PY'
 import json, sys
 rows = [
     ("z-ai/glm-5.3-flash", "0.00000015", "0.00000999", "0.00000003", None),
-    ("z-ai/glm-5.3", "0.0000014", "0.0000044", "0.00000014", None),
-    ("~z-ai/glm-flash-latest", "0.00000002625", "0.000000928749", "0.00000001125", None),
-    ("~z-ai/glm-latest", "0.00000012", "0.000004", "0.00000008", None),
+    ("z-ai/glm-5.3", "0.000000049", "0.00000339", "0.000000048", None),
+    ("~z-ai/glm-flash-latest", "0.000000032", "0.000003032682", "0.00000002", None),
+    ("~z-ai/glm-latest", "0.000000036", "0.000012", "0.0000000335", None),
     ("~anthropic/claude-fable-latest", "0.00001", "0.00005", "0.00000025", "0.0000125"),
     ("~openai/gpt-sol-latest", "0.000002", "0.00001", "0.0000001", "0.0000025"),
     ("~openai/gpt-luna-latest", "0.0000001", "0.0000005", "0.00000001", "0.000000225"),
@@ -245,7 +250,7 @@ c = json.loads(out[out.index("{"):])["modelPricing"]["overrides"]
 assert abs(c["z-ai/glm-5.3-flash"]["output"] - 9.99) < 1e-9, "output drift not in candidate"
 assert abs(c["~openai/gpt-luna-latest"]["cacheWrite"] - 0.225) < 1e-9, "cacheWrite drift not in candidate"
 assert c["z-ai/glm-5.3-flash"]["cacheWrite"] == 0.15, "sync touched unpublished cacheWrite"
-assert c["~z-ai/glm-flash-latest"]["output"] == 0.928749, "non-drift row changed"
+assert c["~z-ai/glm-flash-latest"]["output"] == 3.032682, "non-drift row changed"
 PY
 then ok "--sync: updated candidate has the drifts, untouched rows and unpublished cacheWrite intact"
 else bad "--sync: updated candidate wrong"; fi
@@ -282,7 +287,7 @@ else
     bad "--apply: line shape wrong: $line"
 fi
 [ -f "$tmp" ] || bad "--apply: tmpfile missing"
-if jq -e '.permissions == {"deny":["Bash(rm)"]} and (.modelPricing.overrides | length == 31)' "$tmp" >/dev/null 2>&1; then
+if jq -e '.permissions == {"deny":["Bash(rm)"]} and (.modelPricing.overrides | length == 34)' "$tmp" >/dev/null 2>&1; then
     ok "--apply: existing managed file's foreign keys survive into the tmpfile"
 else
     bad "--apply: tmpfile did not merge the existing managed content: $(cat "$tmp")"
@@ -296,7 +301,7 @@ if [ "$line2" = "! sudo install -D -m 644 $tmp2 $T/absent.json" ]; then
 else
     bad "--apply: absent-file line shape wrong: $line2"
 fi
-if jq -e 'keys == ["modelPricing"] and (.modelPricing.overrides | length == 31)' "$tmp2" >/dev/null 2>&1; then
+if jq -e 'keys == ["modelPricing"] and (.modelPricing.overrides | length == 34)' "$tmp2" >/dev/null 2>&1; then
     ok "--apply: absent managed file -> bare candidate in tmpfile"
 else
     bad "--apply: absent-file tmpfile wrong: $(cat "$tmp2")"

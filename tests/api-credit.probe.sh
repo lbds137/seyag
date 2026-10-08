@@ -200,12 +200,27 @@ uline msg-c1 req-c1 m-a ${D1}T10:00:00Z $M 0 > "$P/C.jsonl"
 : > "$T/pt-calls"
 hk C "$T/c/l.jsonl"; n1=$(nlines "$T/pt-calls")
 hk C "$T/c/l.jsonl"; n2=$(nlines "$T/pt-calls")
+touch -d '+2 seconds' "$T/pt.sh"
+hk C "$T/c/l.jsonl"; n2b=$(nlines "$T/pt-calls")
 uline msg-c2 req-c2 m-a ${D1}T10:05:00Z $M 0 >> "$P/C.jsonl"
 hk C "$T/c/l.jsonl"; n3=$(nlines "$T/pt-calls")
-if [ "$n1" = 1 ] && [ "$n2" = 1 ] && [ "$n3" = 2 ] && near "$(jq .cost_usd "$T/c/l.jsonl")" 2 \
-  && jq -e '(.sources_sig|length)==1 and .sources_sig[0][0]==$tp' --arg tp "$P/C.jsonl" "$T/c/l.jsonl" > /dev/null; then
-  ok "sources_sig: unchanged files -> price-table not run (1, 1); after an append -> run again (2), cost 2.00"
-else bad "sources_sig: calls $n1/$n2/$n3 $(cat "$T/c/l.jsonl")"; fi
+if [ "$n1" = 1 ] && [ "$n2" = 1 ] && [ "$n2b" = 2 ] && [ "$n3" = 3 ] && near "$(jq .cost_usd "$T/c/l.jsonl")" 2 \
+  && jq -e '(.sources_sig|length)==2 and ([.sources_sig[][0]]|sort)==([$tp,$pt]|sort)' --arg tp "$P/C.jsonl" --arg pt "$T/pt.sh" "$T/c/l.jsonl" > /dev/null; then
+  ok "sources_sig: unchanged files -> price-table not run (1, 1); price stub touched -> run again (2); after an append -> run again (3), cost 2.00"
+else bad "sources_sig: calls $n1/$n2/$n2b/$n3 $(cat "$T/c/l.jsonl")"; fi
+
+# 8c2. A multi-token override ("sh SCRIPT"): the script token is watched, not just "sh".
+printf 'echo x >> %q\ncat %q\n' "$T/pt2-calls" "$T/prices.json" > "$T/pt2.sh"
+: > "$T/pt2-calls"
+uline msg-m1 req-m1 m-a ${D1}T10:00:00Z $M 0 > "$P/MT.jsonl"
+hk MT "$T/mt/l.jsonl" SYG_CREDIT_PRICE_TABLE_CMD="sh $T/pt2.sh"; m1=$(nlines "$T/pt2-calls")
+hk MT "$T/mt/l.jsonl" SYG_CREDIT_PRICE_TABLE_CMD="sh $T/pt2.sh"; m2=$(nlines "$T/pt2-calls")
+touch -d '+2 seconds' "$T/pt2.sh"
+hk MT "$T/mt/l.jsonl" SYG_CREDIT_PRICE_TABLE_CMD="sh $T/pt2.sh"; m3=$(nlines "$T/pt2-calls")
+if [ "$m1" = 1 ] && [ "$m2" = 1 ] && [ "$m3" = 2 ] \
+  && jq -e '[.sources_sig[][0]] | index($pt) != null' --arg pt "$T/pt2.sh" "$T/mt/l.jsonl" > /dev/null; then
+  ok "sources_sig: override \"sh SCRIPT\" -> script watched: unchanged -> not run (1, 1); touched -> run again (2)"
+else bad "sources_sig multi-token: calls $m1/$m2/$m3 $(cat "$T/mt/l.jsonl")"; fi
 
 # 8d. A rewrite keeps the ledger's mode; a new ledger gets 0644 less the umask.
 want=$(printf '%o' $(( 0644 & ~0$(umask) )))

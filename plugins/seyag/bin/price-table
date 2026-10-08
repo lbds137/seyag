@@ -60,29 +60,31 @@ TABLE = {
     # stamped limitation: if the promo ends the audit cannot see it. --sync leaves
     # these rows' cacheWrite table-specified (OR publishes no cache-write field
     # for them); verification plan item 3 checks it via a real generation record.
-    "glm-5.3-flash[1m]":    (0.15, 0.50, 0.03, 0),    # z.ai page 2026-10-02
-    "glm-5.3-flash":        (0.15, 0.50, 0.03, 0),    # z.ai page 2026-10-02
-    "glm-5.3[1m]":          (1.40, 4.40, 0.26, 0),    # z.ai page 2026-10-02
-    "glm-5.3":              (1.40, 4.40, 0.26, 0),    # z.ai page 2026-10-02
+    "glm-5.3-flash[1m]":    (0.15, 0.50, 0.03, 0),    # z.ai page 2026-10-02, re-verified 2026-10-08
+    "glm-5.3-flash":        (0.15, 0.50, 0.03, 0),    # z.ai page 2026-10-02, re-verified 2026-10-08
+    "glm-5.3[1m]":          (1.40, 4.40, 0.26, 0),    # z.ai page 2026-10-02, re-verified 2026-10-08
+    "glm-5.3":              (1.40, 4.40, 0.26, 0),    # z.ai page 2026-10-02, re-verified 2026-10-08
     # OpenRouter ids. z-ai rows: OR's /api/v1/models pricing block, fetched
     # 2026-10-02; no input_cache_write published — cacheWrite = prompt-rate
     # assumption on cache_creation (pending the generation-record check).
     "z-ai/glm-5.3-flash":   (0.15, 0.50, 0.03, 0.15),     # OR models 2026-10-02
-    "z-ai/glm-5.3":         (1.40, 4.40, 0.14, 1.40),     # OR models 2026-10-02; note OR cacheRead 0.14 != z.ai's 0.26 — per-id rows keep both true on their lane
+    "z-ai/glm-5.3":         (0.049, 3.39, 0.048, 0.049),  # OR models live 2026-10-08 (z.ai direct stays 1.40/4.40/0.26 on its own rows)
     # OR glm-flash alias: OR models live 2026-10-02 evening (output drifted from
     # 0.60 the same day — the drift --sync exists for). No input_cache_write
     # published; cacheWrite stays the prompt-rate assumption. :nitro is the same
     # alias via OR's nitro variant (the feed lists no :nitro entry; --sync checks
     # it against the bare alias).
-    "~z-ai/glm-flash-latest:nitro": (0.02625, 0.928749, 0.01125, 0.02625),
-    "~z-ai/glm-flash-latest":       (0.02625, 0.928749, 0.01125, 0.02625),
-    "~z-ai/glm-latest":     (0.12, 4.00, 0.08, 0.12),     # OR alias 2026-10-02
+    "~z-ai/glm-flash-latest:nitro": (0.032, 3.032682, 0.02, 0.032),  # OR models live 2026-10-08
+    "~z-ai/glm-flash-latest":       (0.032, 3.032682, 0.02, 0.032),  # OR models live 2026-10-08
+    "~z-ai/glm-latest":     (0.036, 12, 0.0335, 0.036),   # OR models live 2026-10-08
     # Anthropic direct ids: list price (claude-api skill cache 2026-09-25).
     # cacheWrite = the 5-min 1.25x rate (the setting cannot express the TTL split).
+    # Haiku 5.5 has two rate cards split at a 100K-token prompt ($0.50/$2.50 above, cache rates scaling with input); the table carries the <=100K card only.
     "claude-fable-5-1":     (10, 50, 0.25, 12.5),     # list price 2026-09-25
     "claude-opus-5-5":      (4, 20, 0.20, 5),         # list price 2026-09-25
     "claude-sonnet-5-5":    (2, 10, 0.20, 2.5),       # list price 2026-09-25
     "claude-haiku-4-5":     (1, 5, 0.10, 1.25),       # list price 2026-09-25
+    "claude-haiku-5-5":     (0.10, 0.50, 0.01, 0.125),  # list price 2026-10-06 (<=100K-token prompts)
     # Anthropic direct ids, current-model generation: platform.claude.com pricing
     # page, fetched 2026-10-02 (cacheRead = the page's "Cache hits and refreshes",
     # cacheWrite = its 5m column).
@@ -97,8 +99,8 @@ TABLE = {
     # match Anthropic list exactly, including the published input_cache_write.
     "~anthropic/claude-fable-latest":  (10, 50, 0.25, 12.5),  # OR models live 2026-10-02 evening
     "~anthropic/claude-opus-latest":   (4, 20, 0.20, 5),       # OR models live 2026-10-02 evening
-    "~anthropic/claude-sonnet-latest": (2, 10, 0.20, 2.5),     # OR models live 2026-10-02 evening
-    "~anthropic/claude-haiku-latest":  (1, 5, 0.10, 1.25),     # OR models live 2026-10-02 evening
+    "~anthropic/claude-sonnet-latest": (2, 10, 0.10, 2.5),     # OR models live 2026-10-08 (cacheRead 0.20 -> 0.10)
+    "~anthropic/claude-haiku-latest":  (0.1, 0.5, 0.01, 0.125),  # OR models live 2026-10-08: alias now resolves to Haiku 5.5; >100K card 0.5/2.5 not expressible
     # OR GPT aliases (cc-route `or-chatgpt` preset), OR models live 2026-10-02
     # evening (cacheWrite = OR's published input_cache_write).
     "~openai/gpt-astra-latest": (10, 50, 1, 12.5),      # OR models live 2026-10-02 evening
@@ -110,6 +112,8 @@ TABLE = {
     "~google/gemini-pro-latest":    (2, 12, 0.2, 0.375),             # OR models live 2026-10-02 evening
     "~google/gemini-flash-latest":  (0.75, 3.75, 0.075, 0.0416666666666667),  # OR models live 2026-10-02 evening
     "google/gemini-3.1-flash-lite": (0.25, 1.5, 0.025, 0.0833333333333333),   # OR models live 2026-10-02 evening
+    "google/gemini-3.8-flash":      (0.75, 3.75, 0.075, 0.0416666666666667),  # OR models live 2026-10-08
+    "google/gemini-3.1-pro-preview": (2, 12, 0.2, 0.375),  # OR models live 2026-10-08; OR lists a >200K-prompt card (4 / 18 / cacheRead 0.4) the table cannot express; <=200K card kept
 }
 # fmt: on
 
