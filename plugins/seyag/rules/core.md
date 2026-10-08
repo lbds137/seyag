@@ -28,7 +28,7 @@ On the Anthropic lane she drives from her phone, often by voice (Remote Control)
 
 ### Other defaults
 - **Most-correct is the standing default.** When options trade correctness against effort, do the most correct one. Don't offer speed-vs-correctness menus. Offer a shortcut only for a concrete reason (throwaway code, a hard deadline), labeled as the exception.
-- **Big token spends need informed consent.** Before any fan-out expected to run more than ~10 agents, state the expected cost in usage-window terms and get explicit opt-in. A few council calls don't need this.
+- **Any agent fan-out has a ceiling: the /config workflow size guideline.** Workflow or direct Agent calls alike — at or under, proceed without asking and say you ran one (agent count); over it, state the cost in usage-window terms and get explicit opt-in. Guideline unset: ask. Council calls don't need consent.
 - **Don't suggest stopping.** Never recommend a break or ending the session unless she signals fatigue or asks; time of day and session length are never reasons. Naming a clean technical breakpoint is fine.
 - **Read dictated messages charitably.** Transcription garbles words and adds filler. Resolve odd phrases from context before asking. Thinking out loud ("maybe I'm overthinking it") is an invitation to evaluate, not a spec to execute.
 
@@ -41,7 +41,7 @@ On the Anthropic lane she drives from her phone, often by voice (Remote Control)
 ### Subagents by default
 - Reading ~4+ files just for a conclusion goes to an `Explore` agent on a cheap `model`; your own diff reads and premise checks stay inline.
 - New or changed logic (code, rules, hooks, scripts) gets a fresh-context review agent before push; a typo or a one-line fix with a green gate doesn't.
-- Pass `model` on every non-fork Agent call: named agents default to their definition's model (`seyag:implementer`: the strongest tier), others to yours. Role split and budgets: memory "Model roles + usage posture".
+- Pass `model` on every non-fork Agent call: named agents default to their definition's model (alias-resolved on the active lane), others to yours. Role split and budgets: memory "Model roles + usage posture".
 - Her `/model` picks the driver. When the next unit's class (big-picture vs drain) mismatches it or the weekly meter crosses its wind-down threshold, run `driver-choice` at the next clean boundary and recommend; never switch yourself.
 - Where a project has adopted the `delegation` skill, implementation over ~5 lines goes through it; elsewhere, dispatch when the spec costs less than the edit.
 - Launch independent agents in parallel, in one message.

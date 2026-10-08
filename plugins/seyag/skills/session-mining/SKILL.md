@@ -77,7 +77,7 @@ Positive-control it: without `--subagents`, the top-level `tool_errors` total sh
 
 ## Step 2: mine (parallel reader agents)
 
-Mining a delta costs one agent per corpus file per lens: two per session plus one procedure miner per run. Before a fan-out of more than ~10 agents, state the expected cost in usage-window terms and get the owner's opt-in (core rules § Big token spends). Each miner writes its own report file (two miners on one file is a write race): `reports/<session-prefix>-<daterange>-report.md` and `...-agent-report.md`.
+Mining a delta costs one agent per corpus file per lens: two per session plus one procedure miner per run. Before a fan-out over the ceiling (core rules § Any agent fan-out has a ceiling), state the expected cost in usage-window terms and get the owner's opt-in. Each miner writes its own report file (two miners on one file is a write race): `reports/<session-prefix>-<daterange>-report.md` and `...-agent-report.md`.
 
 **Owner-lens taxonomy** (every item in exactly one):
 
