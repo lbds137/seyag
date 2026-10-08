@@ -1,0 +1,710 @@
+#!/usr/bin/env python3
+"""api-credit: a persistent spend ledger for metered API-key sessions, and an
+estimate of the prepaid credit left.
+
+Usage:
+  api-credit hook                read a Stop/SessionEnd hook JSON on stdin and
+                                 recompute that session's ledger entries from its
+                                 transcripts; prints nothing, never fails the hook
+  api-credit statusline [--json] read-only: one line (or, with --json, the balance
+                                 object) for a statusline; nothing when
+                                 SYG_CREDIT_LEDGER is unset
+  api-credit balance [--json]    live grants minus ledger spend (an estimate)
+  api-credit daily [--json]      per UTC day: sessions, spend, models (reconcile
+                                 these rows against the provider console)
+
+Everything is configured by environment variables; nothing is hardcoded.
+  SYG_CREDIT_LEDGER  ledger path (JSONL). Unset or empty: hook and statusline
+                     do nothing and exit 0; balance and daily exit 2.
+  SYG_CREDIT_GRANTS  grants JSON path. Unset, missing or unparsable: the balance
+                     is "spend only" (no remaining figure; one is never invented).
+  SYG_CREDIT_ROUTE   route label written into each entry (default anthropic-api).
+  SYG_CREDIT_WHEN    NAME=value: the hook records only when the process env var
+                     NAME equals value exactly (e.g. MY_ROUTE=metered; NAME= matches
+                     a var that is set but empty; a value without "=" matches
+                     nothing). Unset or empty: the metered route test below.
+  SYG_CREDIT_FORCE=1 record regardless of the route rule (tests).
+  SYG_CREDIT_PRICE_TABLE_CMD   replaces the sibling price-table program (a
+                     command string, split like a shell would; --json is
+                     appended). For tests.
+  SYG_CREDIT_NOW     ISO-8601 UTC "now" override (tests).
+
+Metered route test (with SYG_CREDIT_WHEN unset or empty): ANTHROPIC_API_KEY is
+non-empty in the process environment AND ANTHROPIC_BASE_URL is empty or its host
+is api.anthropic.com or ends in .anthropic.com. An empty ANTHROPIC_API_KEY (what
+gateway presets set) is not metered.
+
+Grants file (extra fields are ignored):
+  {"currency":"USD","grants":[{"amount":200,"granted":"2026-10-08",
+    "expires":"2026-10-21","tz":"UTC","kind":"promotional","note":"..."}]}
+amount is a number > 0 (other grants are skipped); granted is required, expires
+is optional. Each is a date YYYY-MM-DD, meaning 00:00 of that day in the grant's
+tz (default UTC; an unknown tz skips the grant), or a full ISO-8601 timestamp
+with offset or Z. A date-only expiry therefore lapses at the START of that day
+(conservative).
+
+Ledger: one JSON object per line, one per (session_id, day) where day is the UTC
+date of each request's timestamp, so a session's spend is split by UTC day.
+Fields: session_id, day, route, source ("transcript"), first_ts and last_ts (of
+that day's requests), cost_usd, requests, request_ids (sorted), models
+({model: {requests, input_tokens, output_tokens, cache_read_input_tokens,
+cache_write_5m_tokens, cache_write_1h_tokens, web_search_requests,
+web_fetch_requests, fast_requests, cost_usd}}), unpriced_models (sorted),
+transcript_path, sources_sig (sorted [path, size, mtime_ns] of the transcript
+files read), updated_ts. The ledger file keeps its mode across rewrites (a new
+one gets 0644 less the umask). Keys are sorted inside each line and lines are
+sorted by (day, first_ts, session_id). Unparsable lines are preserved verbatim
+on rewrite and ignored for the math. Entries written by older versions (no
+source field) still count for balance and daily.
+
+Spend accounting (the hook): the session's transcript_path plus every *.jsonl
+under <its dir>/<session_id>/subagents/ is read. Each assistant line with a
+message.usage object is one content block of a reply, and the reply's usage
+repeats on each block with output_tokens growing, so per (message.id,
+requestId) the line with the largest output_tokens is the request. Unparsable
+lines are skipped (counted on stderr); <synthetic> models and requests with no
+tokens are skipped. Token counts are exact per request. All of this runs under
+the ledger lock. When every entry of the session carries a sources_sig equal to
+the files' current one (os.stat only), the call returns without reading
+transcripts or pricing. Otherwise values are recomputed from the transcripts
+and replace that session's entries wholesale, so re-running is idempotent; an
+unchanged result is not rewritten, and a missing transcript_path is a no-op
+(recorded entries are never replaced by nothing). A requestId already held by
+another session's entry (a resume or fork copies earlier messages into the new
+transcript) is not counted again.
+
+Pricing (cost is an estimate at the table's rates): `price-table --json` (same
+bin dir) supplies USD per million tokens per model (exact id, else the id with a
+trailing [...] suffix stripped, else with a trailing -YYYYMMDD date stripped,
+after the bracket strip too). Cost = input*input + output*output +
+cache_read*cacheRead + 5m writes*cacheWrite + 1h writes*(2*input). The 1h write
+rate (2x input) is an assumption from the provider's published multipliers, not
+a table field. Not priced: the fast-mode premium (fast requests are counted and
+priced at standard rates), server tool requests (web search, web fetch: counted
+only), long-context premiums for requests over 200k input tokens (transcripts do
+not mark them), and models with no table row (tokens recorded, no cost added,
+listed in unpriced_models). A failing price table aborts the call (no write), so
+a transient failure cannot zero recorded spend.
+
+Balance (an estimate): each ledger entry is a spend event at its last_ts. Events
+are replayed in time order against the grants, drawing from the soonest-expiring
+live grant first; a grant's unused remainder is forfeited when it expires. The
+provider's real drawdown order is not documented; first-to-expire-first is an
+assumption. Spend that no live grant covers is overage.
+Each (session, UTC day) entry's spend is dated at its last_ts, so a grant that
+expires mid-UTC-day (a non-UTC tz or a timestamp expiry) can see earlier
+same-day spend replayed after its expiry; date-only UTC expiries align with the
+day split and are exact.
+"""
+import argparse
+import fcntl
+import glob
+import json
+import math
+import os
+import re
+import shlex
+import stat
+import subprocess
+import sys
+import tempfile
+from datetime import date, datetime, timedelta, timezone
+from urllib.parse import urlparse
+
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:  # pragma: no cover
+    ZoneInfo = None
+
+DEFAULT_ROUTE = "anthropic-api"
+MODEL_FIELDS = ("requests", "input_tokens", "output_tokens", "cache_read_input_tokens",
+                "cache_write_5m_tokens", "cache_write_1h_tokens", "web_search_requests",
+                "web_fetch_requests", "fast_requests")
+TOKEN_FIELDS = ("input_tokens", "output_tokens", "cache_read_input_tokens",
+                "cache_write_5m_tokens", "cache_write_1h_tokens")
+EPS = 1e-9
+
+
+# ---------------------------------------------------------------- time helpers
+
+def utcnow():
+    raw = os.environ.get("SYG_CREDIT_NOW", "").strip()
+    if raw:
+        return parse_ts(raw)
+    return datetime.now(timezone.utc)
+
+
+def parse_ts(s):
+    s = s.strip()
+    if s.endswith("Z") or s.endswith("z"):
+        s = s[:-1] + "+00:00"
+    dt = datetime.fromisoformat(s)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def iso(dt):
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def money(x):
+    return "{:.2f}".format(x)
+
+
+# ---------------------------------------------------------------- route test
+
+def host_of(url):
+    url = url.strip()
+    if "://" not in url:
+        url = "//" + url
+    try:
+        return (urlparse(url).hostname or "").lower()
+    except ValueError:
+        return ""
+
+
+def is_metered():
+    if os.environ.get("SYG_CREDIT_FORCE") == "1":
+        return True
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        return False
+    base = os.environ.get("ANTHROPIC_BASE_URL", "").strip()
+    if not base:
+        return True
+    host = host_of(base)
+    return host == "api.anthropic.com" or host.endswith(".anthropic.com")
+
+
+def route_matches():
+    """SYG_CREDIT_FORCE=1, else SYG_CREDIT_WHEN (NAME=value, exact match of a
+    set var; no "=" matches nothing), else the metered route test."""
+    if os.environ.get("SYG_CREDIT_FORCE") == "1":
+        return True
+    spec = os.environ.get("SYG_CREDIT_WHEN", "")
+    if spec:
+        if "=" not in spec:
+            return False
+        name, value = spec.split("=", 1)
+        return bool(name) and os.environ.get(name) == value
+    return is_metered()
+
+
+# ---------------------------------------------------------------- ledger io
+
+def is_num(x):
+    return isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x)
+
+
+def valid_entry(e):
+    return (
+        isinstance(e, dict)
+        and isinstance(e.get("session_id"), str)
+        and isinstance(e.get("day"), str)
+        and isinstance(e.get("last_ts"), str)
+        and is_num(e.get("cost_usd"))
+    )
+
+
+def read_ledger(path):
+    """Return (entries, garbage_lines). Missing file: empty."""
+    entries, garbage = [], []
+    try:
+        with open(path, encoding="utf-8", errors="surrogateescape") as f:
+            for line in f:
+                line = line.rstrip("\n")
+                if not line.strip():
+                    continue
+                try:
+                    e = json.loads(line)
+                except ValueError:
+                    garbage.append(line)
+                    continue
+                if valid_entry(e):
+                    entries.append(e)
+                else:
+                    garbage.append(line)
+    except FileNotFoundError:
+        pass
+    return entries, garbage
+
+
+def write_ledger(path, entries, garbage):
+    entries = sorted(entries, key=lambda e: (e["day"], e.get("first_ts", ""), e["session_id"]))
+    lines = [json.dumps(e, sort_keys=True, ensure_ascii=False) for e in entries] + garbage
+    d = os.path.dirname(os.path.abspath(path))
+    # Keep an existing ledger's mode (mkstemp creates 0600); a new one gets 0644 & ~umask.
+    try:
+        mode = stat.S_IMODE(os.stat(path).st_mode)
+    except FileNotFoundError:
+        umask = os.umask(0)
+        os.umask(umask)
+        mode = 0o644 & ~umask
+    fd, tmp = tempfile.mkstemp(prefix=".api-credit.", suffix=".tmp", dir=d)
+    try:
+        os.fchmod(fd, mode)
+        with os.fdopen(fd, "w", encoding="utf-8", errors="surrogateescape") as f:
+            for ln in lines:
+                f.write(ln + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+# ---------------------------------------------------------------- transcripts
+
+def transcript_sources(sid, tpath):
+    """The session transcript plus its subagent transcripts (missing ones are
+    skipped by the reader)."""
+    sub = os.path.join(os.path.dirname(tpath), sid, "subagents")
+    return [tpath] + sorted(glob.glob(os.path.join(glob.escape(sub), "**", "*.jsonl"), recursive=True))
+
+
+def count(x):
+    return int(x) if is_num(x) and x > 0 else 0
+
+
+def request_of(e):
+    """One transcript line -> a request dict, or None when it is not a usage line."""
+    if not isinstance(e, dict) or e.get("type") != "assistant":
+        return None
+    msg = e.get("message")
+    if not isinstance(msg, dict) or not isinstance(msg.get("usage"), dict):
+        return None
+    u = msg["usage"]
+    cc = u.get("cache_creation")
+    if isinstance(cc, dict):
+        w5m = count(cc.get("ephemeral_5m_input_tokens"))
+        w1h = count(cc.get("ephemeral_1h_input_tokens"))
+    else:
+        w5m, w1h = count(u.get("cache_creation_input_tokens")), 0
+    stu = u.get("server_tool_use")
+    stu = stu if isinstance(stu, dict) else {}
+    model = msg.get("model")
+    rid = e.get("requestId")
+    return {
+        "model": model if isinstance(model, str) and model else "?",
+        "message_id": msg.get("id") if isinstance(msg.get("id"), str) else None,
+        "request_id": rid if isinstance(rid, str) and rid else None,
+        "timestamp": e.get("timestamp"),
+        "input_tokens": count(u.get("input_tokens")),
+        "output_tokens": count(u.get("output_tokens")),
+        "cache_read_input_tokens": count(u.get("cache_read_input_tokens")),
+        "cache_write_5m_tokens": w5m,
+        "cache_write_1h_tokens": w1h,
+        "web_search_requests": count(stu.get("web_search_requests")),
+        "web_fetch_requests": count(stu.get("web_fetch_requests")),
+        "fast": u.get("speed") == "fast",
+    }
+
+
+def extract(paths):
+    """(requests, skipped_lines). A reply's usage repeats on each content-block
+    line with output_tokens growing: per (message.id, requestId) keep the line
+    with the largest output_tokens (the rule usage-sweep uses)."""
+    replies, skipped, anon = {}, 0, 0
+    for p in paths:
+        try:
+            fh = open(p, encoding="utf-8", errors="replace")
+        except FileNotFoundError:
+            continue
+        with fh:
+            for raw in fh:
+                if '"usage"' not in raw:
+                    continue
+                try:
+                    e = json.loads(raw)
+                except ValueError:
+                    skipped += 1
+                    continue
+                r = request_of(e)
+                if r is None:
+                    continue
+                if r["message_id"] is None:
+                    anon += 1
+                    key = ("line", anon)
+                else:
+                    key = (r["message_id"], r["request_id"])
+                prev = replies.get(key)
+                if prev is None or r["output_tokens"] > prev["output_tokens"]:
+                    replies[key] = r
+    out = []
+    for r in replies.values():
+        if r["model"] == "<synthetic>" or not any(r[k] for k in TOKEN_FIELDS):
+            continue
+        try:
+            r["ts"] = parse_ts(r["timestamp"])
+        except (AttributeError, TypeError, ValueError):
+            continue  # no day to attribute it to
+        out.append(r)
+    return out, skipped
+
+
+# ---------------------------------------------------------------- pricing
+
+def load_prices():
+    """{model: rates} from the sibling price-table --json. Raises on failure."""
+    override = os.environ.get("SYG_CREDIT_PRICE_TABLE_CMD", "")
+    if override:
+        cmd = shlex.split(override)
+    else:
+        cmd = [sys.executable, os.path.join(os.path.dirname(os.path.realpath(__file__)), "price-table")]
+    res = subprocess.run(cmd + ["--json"], stdin=subprocess.DEVNULL, capture_output=True,
+                         text=True, timeout=30, check=True)
+    table = json.loads(res.stdout).get("table")
+    if not isinstance(table, dict):
+        raise ValueError("price-table --json has no table object")
+    return table
+
+
+def rates_for(prices, model):
+    """Rates for a model id: the exact id, else with a trailing [...] suffix
+    stripped, else with a trailing -YYYYMMDD date stripped (after the bracket
+    strip too)."""
+    base = re.sub(r"\[[^\]]*\]$", "", model)
+    row = None
+    for cand in (model, base, re.sub(r"-\d{8}$", "", model), re.sub(r"-\d{8}$", "", base)):
+        row = prices.get(cand)
+        if row is not None:
+            break
+    if not isinstance(row, dict):
+        return None
+    try:
+        return {k: float(row[k]) for k in ("input", "output", "cacheRead", "cacheWrite")}
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def request_cost(r, rates):
+    """USD, an estimate. 1h cache writes at 2x the input rate (an assumption from
+    the provider's published multipliers; the table carries the 5m rate only).
+    Not priced: server tool requests, the fast-mode premium (standard rates are
+    used), and long-context premiums over 200k input tokens."""
+    return (r["input_tokens"] * rates["input"] + r["output_tokens"] * rates["output"]
+            + r["cache_read_input_tokens"] * rates["cacheRead"]
+            + r["cache_write_5m_tokens"] * rates["cacheWrite"]
+            + r["cache_write_1h_tokens"] * 2 * rates["input"]) / 1e6
+
+
+# ---------------------------------------------------------------- hook
+
+def sources_sig(paths):
+    """Sorted [path, size, mtime_ns] of the transcript files that exist (os.stat
+    only), stored in each entry so an unchanged session is not re-read."""
+    out = []
+    for p in paths:
+        try:
+            st = os.stat(p)
+        except OSError:
+            continue
+        out.append([p, st.st_size, st.st_mtime_ns])
+    return sorted(out)
+
+
+def build_entries(sid, requests, prices, tpath, now, sig):
+    """The ledger entries for one session: one per UTC day of its requests."""
+    route = os.environ.get("SYG_CREDIT_ROUTE", "") or DEFAULT_ROUTE
+    days = {}
+    for r in requests:
+        days.setdefault(r["ts"].strftime("%Y-%m-%d"), []).append(r)
+    out = []
+    for day, rs in sorted(days.items()):
+        models, total = {}, 0.0
+        for r in rs:
+            rates = rates_for(prices, r["model"])
+            m = models.get(r["model"])
+            if m is None:
+                # An unpriced model's cost_usd is null: unknown, not zero.
+                m = models[r["model"]] = dict(dict.fromkeys(MODEL_FIELDS, 0),
+                                              cost_usd=None if rates is None else 0.0)
+            m["requests"] += 1
+            for k in TOKEN_FIELDS + ("web_search_requests", "web_fetch_requests"):
+                m[k] += r[k]
+            m["fast_requests"] += 1 if r["fast"] else 0
+            if rates is not None:
+                c = request_cost(r, rates)
+                m["cost_usd"] += c
+                total += c
+        for m in models.values():
+            if m["cost_usd"] is not None:
+                m["cost_usd"] = round(m["cost_usd"], 10)
+        unpriced = [name for name, m in models.items() if m["cost_usd"] is None]
+        out.append({
+            "session_id": sid, "day": day, "route": route, "source": "transcript",
+            "first_ts": iso(min(r["ts"] for r in rs)), "last_ts": iso(max(r["ts"] for r in rs)),
+            "cost_usd": round(total, 10), "requests": len(rs),
+            "request_ids": sorted({r["request_id"] for r in rs if r["request_id"]}),
+            "models": models, "unpriced_models": sorted(unpriced),
+            "transcript_path": tpath, "sources_sig": sig, "updated_ts": iso(now),
+        })
+    return out
+
+
+def comparable(entries):
+    """Entries as canonical JSON, updated_ts dropped, for the no-rewrite check."""
+    return sorted(json.dumps({k: v for k, v in e.items() if k != "updated_ts"}, sort_keys=True)
+                  for e in entries)
+
+
+def hook(payload):
+    """Recompute one session's entries from its transcripts and upsert them."""
+    ledger = os.environ.get("SYG_CREDIT_LEDGER", "")
+    if not ledger or not route_matches() or not isinstance(payload, dict):
+        return
+    sid, tpath = payload.get("session_id"), payload.get("transcript_path")
+    if not isinstance(sid, str) or not sid or not isinstance(tpath, str) or not tpath:
+        return
+    if not os.path.isfile(tpath):
+        # No transcript (moved, cleaned up, or never kept): computing from nothing
+        # would replace this session's recorded entries with none.
+        return
+    d = os.path.dirname(os.path.abspath(ledger))
+    os.makedirs(d, exist_ok=True)
+    # Everything from here runs under the lock, transcripts read included, so an
+    # older snapshot can never overwrite a newer one.
+    with open(ledger + ".lock", "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        entries, garbage = read_ledger(ledger)
+        paths = transcript_sources(sid, tpath)
+        sig = sources_sig(paths)
+        old = [e for e in entries if e["session_id"] == sid]
+        if old and all(e.get("sources_sig") == sig for e in old):
+            return  # no transcript changed since these entries were computed
+        requests, skipped = extract(paths)
+        if skipped:
+            print("api-credit: skipped %d unparsable transcript line(s)" % skipped, file=sys.stderr)
+        prices = load_prices()
+        now = utcnow()
+        taken = set()
+        for e in entries:
+            if e["session_id"] != sid and isinstance(e.get("request_ids"), list):
+                taken.update(x for x in e["request_ids"] if isinstance(x, str))
+        mine = [r for r in requests if r["request_id"] is None or r["request_id"] not in taken]
+        new = build_entries(sid, mine, prices, tpath, now, sig)
+        if comparable(old) == comparable(new):
+            return
+        write_ledger(ledger, [e for e in entries if e["session_id"] != sid] + new, garbage)
+
+
+# ---------------------------------------------------------------- grants and balance
+
+def parse_when(val, tz):
+    if not isinstance(val, str) or not val.strip():
+        raise ValueError("bad time")
+    val = val.strip()
+    if len(val) == 10:
+        d = date.fromisoformat(val)
+        return datetime(d.year, d.month, d.day, tzinfo=tz).astimezone(timezone.utc)
+    s = val[:-1] + "+00:00" if val[-1] in "Zz" else val
+    dt = datetime.fromisoformat(s)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=tz)
+    return dt.astimezone(timezone.utc)
+
+
+def load_grants():
+    """(currency, [grant dicts]) or None when there is no usable grants config."""
+    path = os.environ.get("SYG_CREDIT_GRANTS", "")
+    if not path:
+        return None
+    try:
+        with open(path, encoding="utf-8") as f:
+            cfg = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(cfg, dict) or not isinstance(cfg.get("grants"), list):
+        return None
+    out = []
+    for g in cfg["grants"]:
+        if not isinstance(g, dict) or not is_num(g.get("amount")) or g["amount"] <= 0:
+            continue
+        try:
+            tzname = g.get("tz") or "UTC"
+            tz = timezone.utc if tzname == "UTC" else ZoneInfo(tzname)
+            granted = parse_when(g.get("granted"), tz)
+            expires = parse_when(g["expires"], tz) if g.get("expires") else None
+        except Exception:  # unknown tz, bad date, missing granted: skip this grant
+            continue
+        out.append({"amount": float(g["amount"]), "granted": granted, "expires": expires,
+                    "remaining": float(g["amount"]), "lapsed": False})
+    currency = cfg.get("currency") if isinstance(cfg.get("currency"), str) else "USD"
+    return currency, out
+
+
+FAR = datetime.max.replace(tzinfo=timezone.utc)
+
+
+def balance(entries, grants_cfg, now):
+    spent = sum(e["cost_usd"] for e in entries)
+    result = {"estimate": True, "currency": "USD", "spent_usd": round(spent, 6),
+              "remaining_usd": None, "overage_usd": 0.0, "lapsed_usd": 0.0,
+              "live_grants": 0, "next_expiry": None, "days_left": None,
+              "granted_total_live": 0.0}
+    if grants_cfg is None:
+        return result
+    currency, grants = grants_cfg
+    grants.sort(key=lambda g: (g["expires"] or FAR, g["granted"]))
+    events = []
+    for e in entries:
+        try:
+            events.append((parse_ts(e["last_ts"]), e["cost_usd"]))
+        except ValueError:
+            continue
+    events.sort(key=lambda ev: ev[0])
+    overage = lapsed = 0.0
+
+    def lapse_upto(t):
+        nonlocal lapsed
+        for g in grants:
+            if not g["lapsed"] and g["expires"] is not None and g["expires"] <= t:
+                lapsed += g["remaining"]
+                g["remaining"] = 0.0
+                g["lapsed"] = True
+
+    for t, amount in events:
+        lapse_upto(t)
+        left = amount
+        for g in grants:
+            if left <= 0:
+                break
+            if g["lapsed"] or g["granted"] > t or g["remaining"] <= 0:
+                continue
+            take = min(left, g["remaining"])
+            g["remaining"] -= take
+            left -= take
+        if left > EPS:
+            overage += left
+    lapse_upto(now)
+    live = [g for g in grants if not g["lapsed"] and g["granted"] <= now]
+    remaining = sum(g["remaining"] for g in live)
+    exps = [g["expires"] for g in live if g["remaining"] > EPS and g["expires"] is not None]
+    nxt = min(exps) if exps else None
+    result.update({
+        "currency": currency,
+        "remaining_usd": round(remaining, 6),
+        "overage_usd": round(overage, 6),
+        "lapsed_usd": round(lapsed, 6),
+        "live_grants": len(live),
+        "granted_total_live": round(sum(g["amount"] for g in live), 6),
+        "next_expiry": iso(nxt) if nxt else None,
+        "days_left": max(0, int((nxt - now) // timedelta(days=1))) if nxt else None,
+    })
+    return result
+
+
+def balance_text(b):
+    """The one-line statusline text for a balance object."""
+    if b["remaining_usd"] is None:
+        return "api ~$%s spent" % money(b["spent_usd"])
+    if b["remaining_usd"] > EPS:
+        s = "api credit ~$%s" % money(b["remaining_usd"])
+        if b["next_expiry"]:
+            s += " (exp %s, %dd)" % (b["next_expiry"][5:10], b["days_left"])
+        return s
+    if b["overage_usd"] > EPS:
+        return "api credit over ~$%s" % money(b["overage_usd"])
+    return "api credit ~$0.00"
+
+
+# ---------------------------------------------------------------- daily
+
+def daily(entries):
+    days = {}
+    for e in entries:
+        row = days.setdefault(e["day"], {"day": e["day"], "sids": set(), "cost_usd": 0.0, "models": set()})
+        row["sids"].add(e["session_id"])
+        row["cost_usd"] += e["cost_usd"]
+        row["models"].update(e.get("models") or [])
+    rows = [{"day": r["day"], "sessions": len(r["sids"]), "cost_usd": round(r["cost_usd"], 6),
+             "models": sorted(r["models"])} for _, r in sorted(days.items())]
+    total = {"sessions": len({e["session_id"] for e in entries}),
+             "cost_usd": round(sum(e["cost_usd"] for e in entries), 6)}
+    return rows, total
+
+
+# ---------------------------------------------------------------- commands
+
+def read_payload():
+    try:
+        return json.loads(sys.stdin.read())
+    except ValueError:
+        return None
+
+
+def safe_hook(payload):
+    try:
+        hook(payload)
+    except Exception as exc:  # a hook must never block the session
+        print("api-credit: hook failed: %s" % exc, file=sys.stderr)
+
+
+def need_ledger():
+    path = os.environ.get("SYG_CREDIT_LEDGER", "")
+    if not path:
+        print("api-credit: SYG_CREDIT_LEDGER is not set", file=sys.stderr)
+        sys.exit(2)
+    return path
+
+
+def current_balance():
+    entries, _ = read_ledger(need_ledger())
+    return balance(entries, load_grants(), utcnow())
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(prog="api-credit", description="API spend ledger and credit estimate")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("hook")
+    sp = sub.add_parser("statusline")
+    sp.add_argument("--json", action="store_true")
+    bp = sub.add_parser("balance")
+    bp.add_argument("--json", action="store_true")
+    dp = sub.add_parser("daily")
+    dp.add_argument("--json", action="store_true")
+    args = ap.parse_args(argv)
+
+    if args.cmd == "hook":
+        if os.environ.get("SYG_CREDIT_LEDGER") and route_matches():
+            safe_hook(read_payload())
+        return 0
+    if args.cmd == "statusline":
+        # Read-only: recording is the hook's job.
+        if not os.environ.get("SYG_CREDIT_LEDGER"):
+            return 0
+        try:
+            b = current_balance()
+        except Exception as exc:
+            print("api-credit: balance failed: %s" % exc, file=sys.stderr)
+            return 0
+        print(json.dumps(b, sort_keys=True) if args.json else balance_text(b))
+        return 0
+    if args.cmd == "balance":
+        b = current_balance()
+        if args.json:
+            print(json.dumps(b, sort_keys=True))
+        else:
+            print(balance_text(b))
+            print("spent ~$%s, lapsed ~$%s, overage ~$%s (estimate)"
+                  % (money(b["spent_usd"]), money(b["lapsed_usd"]), money(b["overage_usd"])))
+        return 0
+    if args.cmd == "daily":
+        entries, _ = read_ledger(need_ledger())
+        rows, total = daily(entries)
+        if args.json:
+            print(json.dumps({"days": rows, "total": total}, sort_keys=True))
+        else:
+            for r in rows:
+                print("%s  $%s  %d sessions  %s" % (r["day"], money(r["cost_usd"]), r["sessions"], ",".join(r["models"])))
+            print("total       $%s  %d sessions" % (money(total["cost_usd"]), total["sessions"]))
+        return 0
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

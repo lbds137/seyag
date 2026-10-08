@@ -50,6 +50,8 @@ fi
 printf '{"env":{"ANTHROPIC_AUTH_TOKEN":"dummy-probe-token"},"modelSettings":{"glm-5.3":{"effortLevel":"high"},"glm-5.3-flash":{"effortLevel":"max"},"claude-opus-5-5":{"effortLevel":"high"}}}' > "$h/.claude/settings.json"
 export HOME="$h" XDG_CACHE_HOME="$h/cache" XDG_STATE_HOME="$h/state" XDG_STATE_HOME="$h/state"
 export ZAI_SPEND_PROJECTS="$h/projects/empty" ZAI_SPEND_PEAK_UTC="0-24"
+# The API-credit segments read these from the process env; a caller's values must not leak in.
+unset SYG_CREDIT_LEDGER SYG_CREDIT_GRANTS SYG_CREDIT_WHEN SYG_CREDIT_FORCE SYG_CREDIT_NOW SYG_CREDIT_ROUTE
 
 cat > "$h/quota.json" <<'EOF'
 {"code":200,"success":true,"data":{"limits":[
@@ -63,7 +65,7 @@ route_zai() { jq '.env.ANTHROPIC_BASE_URL = "https://api.z.ai/api/anthropic"' "$
 route_anthropic() { jq '.env.ANTHROPIC_BASE_URL = "https://api.anthropic.com"' "$h/.claude/settings.json" > "$h/.claude/settings.json.new" && mv "$h/.claude/settings.json.new" "$h/.claude/settings.json"; }
 route_or() { jq '.env.ANTHROPIC_BASE_URL = "https://openrouter.ai/api/v1"' "$h/.claude/settings.json" > "$h/.claude/settings.json.new" && mv "$h/.claude/settings.json.new" "$h/.claude/settings.json"; }
 route_host() { jq --arg u "$1" '.env.ANTHROPIC_BASE_URL = $u' "$h/.claude/settings.json" > "$h/.claude/settings.json.new" && mv "$h/.claude/settings.json.new" "$h/.claude/settings.json"; }
-render() { printf '%s' "$1" | bash "$SL"; }
+render() { printf '%s' "$1" | env -u ANTHROPIC_BASE_URL -u ANTHROPIC_API_KEY -u SYG_CREDIT_LEDGER -u SYG_CREDIT_GRANTS -u SYG_CREDIT_FORCE bash "$SL"; }
 strip() { sed 's/\x1b\[[0-9;]*m//g'; }
 
 # 1-2. Routed: the z.ai segment comes from the quota API, colored and with reset arrows.
@@ -441,5 +443,161 @@ git_calls=$(wc -l < "$h/git-locks.log"); git_nonzero=$(grep -vxc '0' "$h/git-loc
 [ "$git_calls" -ge 1 ] && [ "$git_nonzero" = 0 ] \
     && ok "git: statusline exports GIT_OPTIONAL_LOCKS=0 ($git_calls git calls recorded)" \
     || bad "git locks: calls=$git_calls non-zero=$git_nonzero: $(tr '\n' ' ' < "$h/git-locks.log")"
+
+# 35-39. API-credit segment (opt-in via SYG_CREDIT_LEDGER; the metered route is read
+# from the process env). Fixtures: an invented grants file and a per-case ledger,
+# seeded with one entry (the statusline only reads; the hook records).
+mkdir -p "$h/credit"
+cat > "$h/credit/grants.json" <<'EOF'
+{"currency":"USD","grants":[{"amount":200,"granted":"2026-10-01","expires":"2026-10-21"}]}
+EOF
+cr_render() { # ledger-name now [grants-path]; stdin: the cost of the one ledger entry, dated now
+    local cost; cost=$(cat)
+    printf '{"session_id":"cr-%s","day":"%s","first_ts":"%s","last_ts":"%s","cost_usd":%s,"source":"transcript"}\n' \
+        "$1" "${2:0:10}" "$2" "$2" "$cost" > "$h/credit/$1.jsonl"
+    env -u ANTHROPIC_BASE_URL -u SYG_CREDIT_FORCE -u SYG_CREDIT_GRANTS ANTHROPIC_API_KEY=sk-probe \
+        SYG_CREDIT_LEDGER="$h/credit/$1.jsonl" SYG_CREDIT_NOW="$2" ${3:+SYG_CREDIT_GRANTS="$3"} \
+        bash "$SL" <<< "{\"session_id\":\"cr-$1\",\"cost\":{\"total_cost_usd\":$cost},\"rate_limits\":{\"five_hour\":{\"used_percentage\":83,\"resets_at\":1790790548}},\"context_window\":{\"current_usage\":{\"input_tokens\":1000}},\"model\":{\"id\":\"m\",\"display_name\":\"X\"},\"cwd\":\"/tmp\"}"
+}
+anth_label=$'\x1b[38;2;240;238;230mplatform.claude.com\x1b[0m'
+plan_label=$'\x1b[38;2;240;238;230mclaude.ai\x1b[0m'
+# 35. Ledger var unset on the API-key lane: the label alone, no credit text, no ledger, no meters.
+raw=$(env -u SYG_CREDIT_LEDGER -u ANTHROPIC_BASE_URL -u SYG_CREDIT_FORCE ANTHROPIC_API_KEY=sk-probe SYG_CREDIT_GRANTS="$h/credit/grants.json" \
+    bash "$SL" <<< '{"session_id":"cr-off","cost":{"total_cost_usd":1},"model":{"display_name":"X"},"cwd":"/tmp"}')
+out=$(strip <<< "$raw")
+grep -qF "$anth_label" <<< "$raw" && ! grep -qE 'platform.claude.com ~|spent|over' <<< "$out" \
+    && [ -z "$(find "$h/credit" -type f ! -name grants.json)" ] \
+    && ok "api-key lane: SYG_CREDIT_LEDGER unset -> 'platform.claude.com' label alone, no ledger" || bad "api-key lane off: $out"
+# 36. Metered with grants: remaining after the session's spend, expiry date and days; no plan meters.
+raw=$(cr_render ok 2026-10-08T00:00:00Z "$h/credit/grants.json" <<< 1.00)
+out=$(strip <<< "$raw")
+grep -qF 'platform.claude.com ~$199.00 (exp 10-21, 13d)' <<< "$out" && grep -qF "$anth_label"$' \x1b[32m~$199.00' <<< "$raw" \
+    && ! grep -qE '5h:|wk:| est' <<< "$out" \
+    && ok "api-key lane: grants -> ivory label, green '~\$199.00 (exp 10-21, 13d)', no meters, no fleet segment" || bad "api-key credit: $out"
+# 37. Two days or fewer: the Nd part turns red.
+raw=$(cr_render soon 2026-10-19T12:00:00Z "$h/credit/grants.json" <<< 1.00)
+grep -qF $'\x1b[31m1d\x1b[0m' <<< "$raw" && grep -qF '(exp 10-21, 1d)' <<< "$(strip <<< "$raw")" \
+    && ok "api-key lane: <=2 days left -> '1d' in red" || bad "api-key red days: $(strip <<< "$raw")"
+# 38. No grants file: spend only.
+raw=$(cr_render nogrants 2026-10-08T00:00:00Z <<< 12.30)
+grep -qF 'platform.claude.com ~$12.30 spent' <<< "$(strip <<< "$raw")" && grep -qF $'\x1b[90m~$12.30 spent' <<< "$raw" \
+    && ok "api-key lane: no grants -> gray 'platform.claude.com ~\$12.30 spent'" || bad "api-key spent-only: $(strip <<< "$raw")"
+# 39. Overage: magenta.
+cat > "$h/credit/small.json" <<'EOF'
+{"grants":[{"amount":5,"granted":"2026-10-01"}]}
+EOF
+raw=$(cr_render over 2026-10-08T00:00:00Z "$h/credit/small.json" <<< 8.00)
+grep -qF $'\x1b[35mover ~$3.00' <<< "$raw" && grep -qF 'platform.claude.com over ~$3.00' <<< "$(strip <<< "$raw")" \
+    && ok "api-key lane: spend beyond grants -> magenta 'over ~\$3.00'" || bad "api-key overage: $(strip <<< "$raw")"
+# 39b. A grant with no expiry: credit shown, no "(exp" text.
+echo '{"grants":[{"amount":50,"granted":"2026-10-01"}]}' > "$h/credit/noexp.json"
+raw=$(cr_render noexp 2026-10-08T00:00:00Z "$h/credit/noexp.json" <<< 2.00)
+out=$(strip <<< "$raw")
+grep -qF 'platform.claude.com ~$48.00' <<< "$out" && ! grep -qF '(exp' <<< "$out" \
+    && ok "api-key lane: grant without expiry -> '~\$48.00', no (exp text" || bad "api-key no-expiry: $out"
+# 39c. Mixed: the expiring grant is fully spent, the non-expiring one has credit -> no "(exp".
+echo '{"grants":[{"amount":10,"granted":"2026-10-01","expires":"2026-10-21"},{"amount":50,"granted":"2026-10-01"}]}' > "$h/credit/mixed.json"
+raw=$(cr_render mixed 2026-10-08T00:00:00Z "$h/credit/mixed.json" <<< 12.00)
+out=$(strip <<< "$raw")
+grep -qF 'platform.claude.com ~$48.00' <<< "$out" && ! grep -qF '(exp' <<< "$out" \
+    && ok "api-key lane: exhausted expiring grant + non-expiring remainder -> no (exp text" || bad "api-key mixed: $out"
+
+# 40-44. Lane routing, each with rate_limits in the input. The process env decides.
+lane_in='{"rate_limits":{"five_hour":{"used_percentage":83,"resets_at":1790790548},"seven_day":{"used_percentage":56,"resets_at":1791093600}},"context_window":{"current_usage":{"input_tokens":1000}},"model":{"display_name":"X"},"cwd":"/tmp"}'
+lane() { # VAR=value ...: render lane_in under exactly these env vars
+    env -u ANTHROPIC_BASE_URL -u ANTHROPIC_API_KEY -u SYG_CREDIT_LEDGER -u SYG_CREDIT_GRANTS -u SYG_CREDIT_FORCE "$@" bash "$SL" <<< "$lane_in"
+}
+route_anthropic
+jq 'del(.env.ANTHROPIC_BASE_URL)' "$h/.claude/settings.json" > "$h/.claude/settings.json.new" && mv "$h/.claude/settings.json.new" "$h/.claude/settings.json"
+raw=$(lane ANTHROPIC_API_KEY=sk-probe); out=$(strip <<< "$raw")
+grep -qF "$anth_label" <<< "$raw" && ! grep -qE '5h:|wk:' <<< "$out" \
+    && ok "lane: API key, no base URL -> ivory 'platform.claude.com', no plan meters" || bad "lane api-key: $out"
+raw=$(lane); out=$(strip <<< "$raw")
+grep -qF "$plan_label 5h:" <<< "$raw" && grep -qF 'claude.ai 5h:' <<< "$out" && ! grep -q 'platform.claude.com' <<< "$out" \
+    && ok "lane: no API key -> ivory 'claude.ai' label then plan meters" || bad "lane plan: $out"
+lane_in_save=$lane_in
+lane_in='{"context_window":{"current_usage":{"input_tokens":1000}},"model":{"display_name":"X"},"cwd":"/tmp"}'
+raw=$(lane); out=$(strip <<< "$raw")
+lane_in=$lane_in_save
+grep -qF "$plan_label" <<< "$raw" && ! grep -qE '5h:|wk:|platform.claude.com' <<< "$out" \
+    && ok "lane: plan lane without rate_limits -> the 'claude.ai' label alone" || bad "lane plan no-limits: $out"
+raw=$(lane ANTHROPIC_BASE_URL=https://openrouter.ai/api/v1 ANTHROPIC_API_KEY=); out=$(strip <<< "$raw")
+grep -q 'openrouter.ai' <<< "$out" && ! grep -qE 'platform.claude.com|claude.ai|5h:|wk:' <<< "$out" \
+    && ok "lane: env OpenRouter URL + empty API key -> openrouter label, no Anthropic labels, no meters" || bad "lane or: $out"
+route_zai
+raw=$(lane ANTHROPIC_BASE_URL=https://openrouter.ai/api/v1 ANTHROPIC_API_KEY=); out=$(strip <<< "$raw")
+grep -q 'openrouter.ai' <<< "$out" && ! grep -q 'z.ai' <<< "$out" \
+    && ok "lane: process-env base URL (openrouter) wins over settings.json (z.ai)" || bad "lane env-over-settings: $out"
+raw=$(lane ANTHROPIC_BASE_URL=https://api.z.ai/api/anthropic ANTHROPIC_API_KEY=sk-probe); out=$(strip <<< "$raw")
+grep -q 'z.ai' <<< "$out" && ! grep -qE 'platform.claude.com|claude.ai' <<< "$out" \
+    && ok "lane: API key set but env base URL is z.ai -> z.ai lane, no Anthropic label" || bad "lane key+zai: $out"
+
+# 45. z.ai lane with zai-spend silent (no quota, empty --line): the label alone.
+mv "$h/.local/bin/zai-spend" "$h/.local/bin/zai-spend.keep"
+printf '#!/bin/bash\nexit 0\n' > "$h/.local/bin/zai-spend"; chmod +x "$h/.local/bin/zai-spend"
+route_zai
+raw=$(render "$lane_in"); out=$(strip <<< "$raw")
+grep -qF $'\x1b[38;2;11;127;255mz.ai\x1b[0m' <<< "$raw" && ! grep -qE '5h:|claude' <<< "$out" \
+    && ok "z.ai lane: zai-spend silent -> the z.ai label alone" || bad "zai silent: $out"
+mv "$h/.local/bin/zai-spend.keep" "$h/.local/bin/zai-spend"
+route_anthropic
+
+# 46. SYG_CREDIT_WHEN decides the API-key lane when set: match -> platform.claude.com
+# (no key needed); mismatch -> the plan lane even with a non-empty key.
+jq 'del(.env.ANTHROPIC_BASE_URL)' "$h/.claude/settings.json" > "$h/.claude/settings.json.new" && mv "$h/.claude/settings.json.new" "$h/.claude/settings.json"
+raw=$(lane SYG_CREDIT_WHEN=MY_ROUTE=metered MY_ROUTE=metered); out=$(strip <<< "$raw")
+grep -qF "$anth_label" <<< "$raw" && ! grep -qE '5h:|wk:|claude\.ai 5h' <<< "$out" \
+    && ok "lane: SYG_CREDIT_WHEN matches -> 'platform.claude.com', no plan meters" || bad "lane WHEN match: $out"
+raw=$(lane SYG_CREDIT_WHEN=MY_ROUTE=metered MY_ROUTE=other ANTHROPIC_API_KEY=sk-probe); out=$(strip <<< "$raw")
+grep -qF "$plan_label 5h:" <<< "$raw" && ! grep -q 'platform.claude.com' <<< "$out" \
+    && ok "lane: SYG_CREDIT_WHEN mismatch with a non-empty key -> plan lane 'claude.ai'" || bad "lane WHEN mismatch: $out"
+
+# 47. Fleet credit segment on non-API-key lanes: needs both vars and a live grant.
+printf '{"session_id":"f1","day":"2026-10-07","first_ts":"2026-10-07T10:00:00Z","last_ts":"2026-10-07T10:00:00Z","cost_usd":12.5,"source":"transcript"}\n' > "$h/credit/fleet.jsonl"
+echo '{"grants":[{"amount":200,"granted":"2026-10-01","expires":"2026-10-05"}]}' > "$h/credit/expired.json"
+echo '{"grants":[{"amount":12.5,"granted":"2026-10-01","expires":"2026-10-21"}]}' > "$h/credit/spent.json"
+fleet() { # grants-path-or-empty: render the plan-lane input with the fleet vars
+    lane SYG_CREDIT_LEDGER="$h/credit/fleet.jsonl" ${1:+SYG_CREDIT_GRANTS="$1"} SYG_CREDIT_NOW=2026-10-08T00:00:00Z
+}
+raw=$(fleet "$h/credit/grants.json"); out=$(strip <<< "$raw")
+grep -qE 'claude\.ai 5h:.* · platform\.claude\.com \$187\.50 est · session ' <<< "$out" \
+    && grep -qF "$anth_label"$' \x1b[90m$187.50 est\x1b[0m' <<< "$raw" \
+    && ok "fleet: plan lane + ledger + grants -> gray 'platform.claude.com \$187.50 est' after claude.ai, before session" || bad "fleet plan: $out"
+raw=$(fleet "$h/credit/expired.json"); out=$(strip <<< "$raw")
+! grep -qE 'platform\.claude\.com| est' <<< "$out" && grep -q 'claude.ai 5h:' <<< "$out" \
+    && ok "fleet: expired-only grants -> no segment" || bad "fleet expired: $out"
+raw=$(fleet ""); out=$(strip <<< "$raw")
+! grep -qE 'platform\.claude\.com| est' <<< "$out" && grep -q 'claude.ai 5h:' <<< "$out" \
+    && ok "fleet: SYG_CREDIT_GRANTS unset -> no segment" || bad "fleet no grants: $out"
+raw=$(fleet "$h/credit/spent.json"); out=$(strip <<< "$raw")
+grep -qF 'platform.claude.com $0.00 est' <<< "$out" && grep -qF $'\x1b[31m$0.00 est' <<< "$raw" \
+    && ok "fleet: live grant fully spent -> red '\$0.00 est'" || bad "fleet zero: $out"
+route_zai
+raw=$(fleet "$h/credit/grants.json"); out=$(strip <<< "$raw")
+grep -qE 'z\.ai .* · platform\.claude\.com \$187\.50 est · session ' <<< "$out" \
+    && ok "fleet: z.ai lane + both vars -> segment after the z.ai segment" || bad "fleet zai: $out"
+route_anthropic
+
+# 48. Balance cache: a matching key under 60s is reused (a sentinel planted in the
+# cache shows); a ledger mtime change or a cache older than 60s is a miss.
+jq 'del(.env.ANTHROPIC_BASE_URL)' "$h/.claude/settings.json" > "$h/.claude/settings.json.new" && mv "$h/.claude/settings.json.new" "$h/.claude/settings.json"
+cr_cache="$h/cache/claude-statusline/api-credit-balance.json"
+plant() { { head -n 1 "$cr_cache"; echo '{"live_grants":1,"remaining_usd":123.45}'; } > "$cr_cache.new" && mv "$cr_cache.new" "$cr_cache"; }
+rm -f "$cr_cache"
+out1=$(strip <<< "$(fleet "$h/credit/grants.json")")
+lines=$(wc -l < "$cr_cache" 2>/dev/null | tr -d ' ')
+plant
+out2=$(strip <<< "$(fleet "$h/credit/grants.json")")
+touch -d '+2 seconds' "$h/credit/fleet.jsonl"
+out3=$(strip <<< "$(fleet "$h/credit/grants.json")")
+grep -qF 'platform.claude.com $187.50 est' <<< "$out1" && [ "$lines" = 2 ] \
+    && grep -qF 'platform.claude.com $123.45 est' <<< "$out2" && grep -qF 'platform.claude.com $187.50 est' <<< "$out3" \
+    && ok "balance cache: written on a miss, reused on a key match, missed after the ledger mtime changes" \
+    || bad "balance cache: '$out1' / lines=$lines / '$out2' / '$out3'"
+plant
+touch -d '-120 seconds' "$cr_cache"
+out4=$(strip <<< "$(fleet "$h/credit/grants.json")")
+grep -qF 'platform.claude.com $187.50 est' <<< "$out4" \
+    && ok "balance cache: older than 60s -> recomputed despite a matching key" || bad "balance cache TTL: '$out4'"
 
 exit $fail

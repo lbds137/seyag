@@ -5,7 +5,12 @@
 # Ships with the seyag plugin; the Deck wires it via settings.json statusLine
 # (plugins cannot contribute a main statusline). The z.ai, OpenRouter credits
 # and OAuth usage segments are Deck-tuned and verified on that machine only —
-# elsewhere they degrade to the plain render.
+# elsewhere they degrade to the plain render. Every lane
+# with a host renders its vendor label; the plan lane's is followed by the plan windows, the
+# API-key lane's by (opt-in, SYG_CREDIT_LEDGER) estimated prepaid credit and no
+# plan meters; other lanes add that credit as its own segment while a live grant
+# exists (opt-in, SYG_CREDIT_LEDGER plus SYG_CREDIT_GRANTS). The statusline only
+# reads the ledger; the api-credit-ledger hook records it.
 
 # git status would otherwise take index.lock to refresh the index; a render
 # killed mid-refresh leaves a stale lock, and the statusline only reads.
@@ -168,6 +173,14 @@ or_brand="\033[38;2;252;187;60m"
 # z.ai wears its own dark-mode accent (measured token blue #0B7FFF) — NOT the
 # ANSI-33 escalation yellow, which means "update pending".
 zai_brand="\033[38;2;11;127;255m"
+# Anthropic's wordmark ivory, measured from anthropic.com's brand stylesheet
+# (--swatch--ivory-medium:#f0eee6). Its accent/clay swatches (#c6613f, #d97757)
+# are rejected: they read as cc_brand's Claude coral.
+anth_brand="\033[38;2;240;238;230m"
+# The vendor label always renders; one constant per Anthropic label, so a
+# rename is one line.
+anth_api_label="platform.claude.com"
+anth_plan_label="claude.ai"
 
 # Separator shorthand
 sep="${gray} · ${reset}"
@@ -283,22 +296,54 @@ fi
 # sends nothing, and the account's own quota is visible only in z.ai's web console — so the
 # pacing signal is zai-spend's locally measured GLM usage (dev-docs bin/zai-spend; it sweeps
 # transcripts in the background when its cache is stale and never blocks the
-# render). On OpenRouter: the remaining credits balance from /api/v1/credits,
+# render). On an API key (anthropic-api lane): no plan meters, just the credit estimate.
+# On OpenRouter: the remaining credits balance from /api/v1/credits,
 # cached and fetched in the background the same way.
 # Position: right after the identity cluster — the line reads as a volatility gradient
 # (volatile left, stable right), and this block changes every render and drives the
 # usage-gate decisions.
-base_url=$(jq -r '.env.ANTHROPIC_BASE_URL // empty' "$HOME/.claude/settings.json" 2>/dev/null)
+# Sessions are routed per session by an env overlay, so the process env is the
+# truth when it sets ANTHROPIC_BASE_URL (even to empty); settings.json is the
+# fallback.
+if [ -n "${ANTHROPIC_BASE_URL+x}" ]; then
+    base_url=$ANTHROPIC_BASE_URL
+else
+    base_url=$(jq -r '.env.ANTHROPIC_BASE_URL // empty' "$HOME/.claude/settings.json" 2>/dev/null)
+fi
 # Vendor routing is anchored on the base_url HOST (scheme, path, userinfo@ and
 # :port stripped, then lowercased), end-anchored so a lookalike like
 # api.anthropic.com.evil.com can't borrow another lane's quota segment. The
 # userinfo strip also keeps a credential out of the unknown-lane label.
-# Empty/absent base_url = the Anthropic lane (no override configured). The
-# z.ai and Anthropic segments below are unchanged; the OpenRouter segment is
-# new.
+# Empty/absent base_url = the Anthropic lane (no override configured); with an
+# ANTHROPIC_API_KEY it is the anthropic-api lane (label + credit, no plan meters).
 vendor_host=$(printf '%s' "$base_url" \
     | sed -E 's#^[a-zA-Z]+://##; s#/.*$##; s#^.*@##; s#:[0-9]*$##' \
     | tr '[:upper:]' '[:lower:]')
+
+# credit_balance_json: `api-credit statusline --json`, cached so a render does not
+# start python every time. Cache file: line 1 the key (ns mtime and size of the
+# ledger and of the grants file, `0 0` when missing, plus both paths and
+# SYG_CREDIT_NOW), line 2 the JSON. Reused while the key matches and the file is
+# under 60s old (so expiry and days_left still move). Cache errors never fail the
+# render; an empty answer is not cached.
+credit_balance_json() {
+    local cache key k="" j="" age tmp
+    cache="${XDG_CACHE_HOME:-$HOME/.cache}/claude-statusline/api-credit-balance.json"
+    # Nanosecond mtimes: two ledger writes within one second can leave the size equal.
+    key="$(stat -c '%.9Y %s' "${SYG_CREDIT_LEDGER:-}" 2>/dev/null || echo 0 0) $(stat -c '%.9Y %s' "${SYG_CREDIT_GRANTS:-}" 2>/dev/null || echo 0 0)${SYG_CREDIT_LEDGER:-} ${SYG_CREDIT_GRANTS:-} ${SYG_CREDIT_NOW:-}"
+    age=$(( $(date +%s) - $(stat -c %Y "$cache" 2>/dev/null || echo 0) ))
+    if [ "$age" -ge 0 ] && [ "$age" -lt 60 ] && { IFS= read -r k && IFS= read -r j; } 2>/dev/null < "$cache" \
+        && [ "$k" = "$key" ] && [ -n "$j" ]; then
+        printf '%s\n' "$j"
+        return 0
+    fi
+    j=$("$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/api-credit" statusline --json </dev/null 2>/dev/null)
+    [ -n "$j" ] || return 0
+    tmp="$cache.tmp.$$"
+    { mkdir -p "${cache%/*}" && printf '%s\n%s\n' "$key" "$j" > "$tmp" && mv -f "$tmp" "$cache"; } 2>/dev/null || rm -f "$tmp" 2>/dev/null
+    printf '%s\n' "$j"
+}
+
 vendor_lane=unknown
 case "$vendor_host" in
     z.ai|*.z.ai)                              vendor_lane=zai ;;
@@ -306,9 +351,27 @@ case "$vendor_host" in
     openrouter.ai|*.openrouter.ai)            vendor_lane=or ;;
     '') [ -z "$base_url" ] &&                 vendor_lane=anthropic ;;
 esac
+# A first-party host or no override is the metered API-key lane when the route
+# rule api-credit uses matches: SYG_CREDIT_WHEN (NAME=value) when it is set and
+# non-empty (the var NAME is set and equals value; no "=" matches nothing), else
+# a non-empty API key in the process env. An empty key (gateway presets) stays put.
+api_lane=0
+if [ -n "${SYG_CREDIT_WHEN:-}" ]; then
+    if [[ "$SYG_CREDIT_WHEN" == *=* ]]; then
+        cw_name=${SYG_CREDIT_WHEN%%=*} cw_value=${SYG_CREDIT_WHEN#*=}
+        # A name that is not a valid identifier would make ${!name} an error: no match.
+        if [[ "$cw_name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] && [ -n "${!cw_name+x}" ] && [ "${!cw_name-}" = "$cw_value" ]; then
+            api_lane=1
+        fi
+    fi
+elif [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+    api_lane=1
+fi
+[ "$vendor_lane" = anthropic ] && [ "$api_lane" = 1 ] && vendor_lane=anthropic-api
 if [ "$vendor_lane" = unknown ]; then
     # Unknown third vendor: label the lane from the base_url host so the
-    # segment stays honest — no z.ai branding, no borrowed quota data.
+    # segment stays honest — no z.ai branding, no borrowed quota data. A
+    # malformed base_url has no host to label, so it renders no label.
     vendor=$(printf '%s' "$vendor_host" | sed 's/^api\.//')
     [ -n "$vendor" ] && output="$output${sep}${gray}${vendor}${reset}"
 elif [ "$vendor_lane" = zai ]; then
@@ -321,7 +384,12 @@ elif [ "$vendor_lane" = zai ]; then
         output="$output${sep}${zai_brand}z.ai${reset} $(render_windows "$z5h" "$z5hr" "$zwk" "$zwkr")"
     else
         zai=$("$HOME/.local/bin/zai-spend" --line 2>/dev/null)
-        [ -n "$zai" ] && output="$output${sep}${zai_brand}z.ai${reset} ${gray}${zai}${reset}"
+        if [ -n "$zai" ]; then
+            output="$output${sep}${zai_brand}z.ai${reset} ${gray}${zai}${reset}"
+        else
+            # zai-spend absent or silent: the label alone.
+            output="$output${sep}${zai_brand}z.ai${reset}"
+        fi
     fi
 elif [ "$vendor_lane" = or ]; then
     # OpenRouter segment: brand-yellow label + remaining credits from
@@ -367,7 +435,49 @@ elif [ "$vendor_lane" = or ]; then
     else
         output="$output${sep}${gray}openrouter.ai${reset}"
     fi
-elif [ -n "$rl_5h" ] || [ -n "$rl_7d" ]; then
+elif [ "$vendor_lane" = anthropic-api ]; then
+    # API-key lane: metered, no plan windows. Label plus (opt-in, SYG_CREDIT_LEDGER)
+    # the estimated prepaid credit: api-credit reads its ledger (the api-credit-ledger
+    # hook records it from transcripts; the statusline only reads) and answers with
+    # the balance as JSON. Label alone when it is unset or prints nothing.
+    output="$output${sep}${anth_brand}${anth_api_label}${reset}"
+    if [ -n "${SYG_CREDIT_LEDGER:-}" ]; then
+        credit_json=$(credit_balance_json)
+    else
+        credit_json=""
+    fi
+    if [ -n "$credit_json" ]; then
+        cr_remaining="" cr_spent=0 cr_over=0 cr_total=0 cr_exp="" cr_days=""
+        eval "$(jq -r '
+            @sh "cr_remaining=\(.remaining_usd // "")",
+            @sh "cr_spent=\(.spent_usd // 0)",
+            @sh "cr_over=\(.overage_usd // 0)",
+            @sh "cr_total=\(.granted_total_live // 0)",
+            @sh "cr_exp=\((.next_expiry // "")[5:10])",
+            @sh "cr_days=\(.days_left // "")"
+        ' <<< "$credit_json" 2>/dev/null)"
+        # LC_ALL=C: a comma-decimal locale would make printf reject "1.5" (see the OpenRouter block).
+        if [ -z "${cr_remaining:-}" ]; then
+            output="$output ${gray}~\$$(LC_ALL=C printf '%.2f' "$cr_spent") spent${reset}"
+        elif LC_ALL=C awk -v r="$cr_remaining" 'BEGIN{exit !(r > 0.000001)}'; then
+            cr_used=$(LC_ALL=C awk -v r="$cr_remaining" -v t="$cr_total" 'BEGIN{ if (t > 0) printf "%d", 100 - 100*r/t + 0.5; else print 100 }')
+            output="$output $(pct_color "$cr_used")~\$$(LC_ALL=C printf '%.2f' "$cr_remaining")${reset}"
+            if [ -n "$cr_exp" ]; then
+                cr_dcolor="$gray"
+                [ "${cr_days:-99}" -le 2 ] 2>/dev/null && cr_dcolor="$red"
+                output="$output ${gray}(exp ${cr_exp}, ${reset}${cr_dcolor}${cr_days}d${reset}${gray})${reset}"
+            fi
+        elif LC_ALL=C awk -v o="$cr_over" 'BEGIN{exit !(o > 0.000001)}'; then
+            output="$output ${magenta}over ~\$$(LC_ALL=C printf '%.2f' "$cr_over")${reset}"
+        else
+            output="$output ${red}~\$0.00${reset}"
+        fi
+    fi
+elif [ -z "$rl_5h" ] && [ -z "$rl_7d" ]; then
+    # Plan lane without rate limits in the input: the label alone.
+    output="$output${sep}${anth_brand}${anth_plan_label}${reset}"
+else
+    # Plan lane: label, then the plan windows.
     rl_segment=$(render_windows "$rl_5h" "$rl_5h_reset" "$rl_7d" "$rl_7d_reset")
     # Per-model weekly windows (Fable) are not in the statusline input — only
     # /api/oauth/usage carries them, as limits[] kind=weekly_scoped. Read a
@@ -399,7 +509,22 @@ elif [ -n "$rl_5h" ] || [ -n "$rl_7d" ]; then
         c=$(pct_color "$rl_fable")
         rl_segment="$rl_segment ${gray}fable: ${reset}${c}${rl_fable}%${reset}"
     fi
-    output="$output${sep}${rl_segment}"
+    output="$output${sep}${anth_brand}${anth_plan_label}${reset} ${rl_segment}"
+fi
+
+# Fleet-wide prepaid API credit: on every lane but the API-key lane (which shows
+# it beside its own label), when both SYG_CREDIT_LEDGER and SYG_CREDIT_GRANTS are
+# set and a live (unexpired) grant exists, the remaining estimate follows the
+# vendor segment. Red at $0.00. Silent on any error or empty answer.
+if [ "$vendor_lane" != anthropic-api ] && [ -n "${SYG_CREDIT_LEDGER:-}" ] && [ -n "${SYG_CREDIT_GRANTS:-}" ]; then
+    fleet_json=$(credit_balance_json)
+    fleet_remaining=""
+    [ -n "$fleet_json" ] && fleet_remaining=$(jq -r 'if (.live_grants // 0) > 0 and (.remaining_usd | type) == "number" then .remaining_usd else empty end' <<< "$fleet_json" 2>/dev/null)
+    if [ -n "$fleet_remaining" ] && fleet_fmt=$(LC_ALL=C printf '%.2f' "$fleet_remaining" 2>/dev/null); then
+        fleet_color="$gray"
+        [ "$fleet_fmt" = "0.00" ] && fleet_color="$red"
+        output="$output${sep}${anth_brand}${anth_api_label}${reset} ${fleet_color}\$${fleet_fmt} est${reset}"
+    fi
 fi
 
 # Cost (session spend — sits at the edge of the vendor economy cluster:

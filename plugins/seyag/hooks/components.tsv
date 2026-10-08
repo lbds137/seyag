@@ -29,6 +29,7 @@ claim-shape-guard	guards-commit
 temporal-marker-guard	guards-commit
 pr-monitor-reminder	pr-watch
 dispatch-posture-gate	dispatch
-@profile	full	session rules route turn-shape context guards-shell guards-outbound guards-commit pr-watch dispatch
-@profile	guards	guards-shell guards-outbound guards-commit context dispatch route session
-@profile	none	session
+api-credit-ledger	api-credit
+@profile	full	session rules route turn-shape context guards-shell guards-outbound guards-commit pr-watch dispatch api-credit
+@profile	guards	guards-shell guards-outbound guards-commit context dispatch route session api-credit
+@profile	none	session api-credit
