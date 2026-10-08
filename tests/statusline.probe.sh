@@ -66,9 +66,15 @@ route_anthropic() { jq '.env.ANTHROPIC_BASE_URL = "https://api.anthropic.com"' "
 route_or() { jq '.env.ANTHROPIC_BASE_URL = "https://openrouter.ai/api/v1"' "$h/.claude/settings.json" > "$h/.claude/settings.json.new" && mv "$h/.claude/settings.json.new" "$h/.claude/settings.json"; }
 route_host() { jq --arg u "$1" '.env.ANTHROPIC_BASE_URL = $u' "$h/.claude/settings.json" > "$h/.claude/settings.json.new" && mv "$h/.claude/settings.json.new" "$h/.claude/settings.json"; }
 render() {
-  local env_args=(-u ANTHROPIC_BASE_URL -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u SYG_CREDIT_LEDGER -u SYG_CREDIT_GRANTS -u SYG_CREDIT_FORCE)
+  local env_args=(-u ANTHROPIC_BASE_URL -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u SYG_CREDIT_LEDGER -u SYG_CREDIT_GRANTS -u SYG_CREDIT_FORCE -u COLUMNS -u SYG_STATUSLINE_WRAP_COLUMNS)
   if [ -n "${PROBE_AUTH_TOKEN:-}" ]; then
     env_args+=("ANTHROPIC_AUTH_TOKEN=$PROBE_AUTH_TOKEN")
+  fi
+  if [ -n "${PROBE_COLUMNS:-}" ]; then
+    env_args+=("COLUMNS=$PROBE_COLUMNS")
+  fi
+  if [ -n "${PROBE_WRAP:-}" ]; then
+    env_args+=("SYG_STATUSLINE_WRAP_COLUMNS=$PROBE_WRAP")
   fi
   printf '%s' "$1" | env "${env_args[@]}" bash "$SL"
 }
@@ -514,7 +520,14 @@ grep -qF 'platform.claude.com ~$48.00' <<< "$out" && ! grep -qF '(exp' <<< "$out
 # 40-44. Lane routing, each with rate_limits in the input. The process env decides.
 lane_in='{"rate_limits":{"five_hour":{"used_percentage":83,"resets_at":1790790548},"seven_day":{"used_percentage":56,"resets_at":1791093600}},"context_window":{"current_usage":{"input_tokens":1000}},"model":{"display_name":"X"},"cwd":"/tmp"}'
 lane() { # VAR=value ...: render lane_in under exactly these env vars
-    env -u ANTHROPIC_BASE_URL -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u SYG_CREDIT_LEDGER -u SYG_CREDIT_GRANTS -u SYG_CREDIT_FORCE "$@" bash "$SL" <<< "$lane_in"
+    local env_args=(-u ANTHROPIC_BASE_URL -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u SYG_CREDIT_LEDGER -u SYG_CREDIT_GRANTS -u SYG_CREDIT_FORCE -u COLUMNS -u SYG_STATUSLINE_WRAP_COLUMNS)
+    if [ -n "${PROBE_COLUMNS:-}" ]; then
+        env_args+=("COLUMNS=$PROBE_COLUMNS")
+    fi
+    if [ -n "${PROBE_WRAP:-}" ]; then
+        env_args+=("SYG_STATUSLINE_WRAP_COLUMNS=$PROBE_WRAP")
+    fi
+    env "${env_args[@]}" "$@" bash "$SL" <<< "$lane_in"
 }
 route_anthropic
 jq 'del(.env.ANTHROPIC_BASE_URL)' "$h/.claude/settings.json" > "$h/.claude/settings.json.new" && mv "$h/.claude/settings.json.new" "$h/.claude/settings.json"
@@ -629,6 +642,45 @@ raw=$(PROBE_AUTH_TOKEN=dummy-probe-token OPENROUTER_CREDITS_URL="file://$h/missi
 out=$(strip <<< "$raw")
 grep -Eq 'openrouter\.ai \$15\.00' <<< "$out" \
     && ok "env token: OpenRouter balance renders from the process-env token" || bad "env token: $out"
+printf '{"env":{"ANTHROPIC_AUTH_TOKEN":"dummy-probe-token"},"modelSettings":{"glm-5.3":{"effortLevel":"high"},"glm-5.3-flash":{"effortLevel":"max"},"claude-opus-5-5":{"effortLevel":"high"}}}' > "$h/.claude/settings.json"
+
+# 51-56. Narrow-terminal wrap: under SYG_STATUSLINE_WRAP_COLUMNS the line re-flows
+# into rows at segment boundaries; wide, unset-setting and unset-width stay one
+# line. The width reaches the script only through the PROBE_* variables.
+route_anthropic
+jq 'del(.env.ANTHROPIC_BASE_URL)' "$h/.claude/settings.json" > "$h/.claude/settings.json.new" && mv "$h/.claude/settings.json.new" "$h/.claude/settings.json"
+out=$(strip <<< "$(PROBE_COLUMNS=90 PROBE_WRAP=120 render "$lane_in")")
+rest=$(tail -n +2 <<< "$out")
+wide=0
+while IFS= read -r r; do [ "${#r}" -le 90 ] || wide=1; done <<< "$out"
+[ "$(wc -l <<< "$out")" -ge 2 ] && grep -Eq '^[0-9]+%' <<< "$(head -n 1 <<< "$out")" \
+    && grep -qF '/tmp/' <<< "$rest" && ! grep -q '^$' <<< "$out" && [ "$wide" = 0 ] \
+    && ok "wrap W1: COLUMNS under the setting -> rows, context leads row 1, dir on a later row, none empty, rows fit the budget" || bad "wrap W1: $out"
+out=$(strip <<< "$(PROBE_COLUMNS=200 PROBE_WRAP=120 render "$lane_in")")
+[ "$(wc -l <<< "$out")" = 1 ] && ok "wrap W2: COLUMNS above the setting -> one line" || bad "wrap W2: $out"
+out=$(strip <<< "$(PROBE_COLUMNS=110 render "$lane_in")")
+[ "$(wc -l <<< "$out")" = 1 ] && ok "wrap W3: setting unset -> one line" || bad "wrap W3: $out"
+out=$(strip <<< "$(PROBE_WRAP=120 render "$lane_in")")
+[ "$(wc -l <<< "$out")" = 1 ] && ok "wrap W4: width unset -> one line" || bad "wrap W4: $out"
+# W5: the fixture line is 119 visible columns;
+# COLUMNS=125 is under the setting (150) yet above the line, so one line.
+out=$(strip <<< "$(PROBE_COLUMNS=125 PROBE_WRAP=150 render "$lane_in")")
+[ "$(wc -l <<< "$out")" = 1 ] && ok "wrap W5: width between the line and the setting -> one line" || bad "wrap W5: $out"
+# W6: segment widths are 7, 1, 58, 13, 5, 5, 12 (3 per separator), so the
+# cumulative row widths are 7, 11, 72, 88, 96, 104, 119. At 100 columns the
+# greedy fill takes row 1 through "/tmp/" (96); "▲0/▼0" (would be 104) opens row 2.
+out=$(strip <<< "$(PROBE_COLUMNS=100 PROBE_WRAP=120 render "$lane_in")")
+row1=$(head -n 1 <<< "$out"); row2=$(tail -n 1 <<< "$out")
+[ "$(wc -l <<< "$out")" = 2 ] && [[ "$row1" == *' · /tmp/' ]] && [[ "$row2" == '▲0/▼0'* ]] \
+    && [ "${#row1}" -le 100 ] && [ "${#row2}" -le 100 ] \
+    && ok "wrap W6: greedy split at 100 columns" || bad "wrap W6: $out"
+# W7: a cwd far wider than the budget keeps its own row, untruncated.
+long_dir=a-really-long-directory-name-that-exceeds-any-reasonable-budget
+long_cwd_in='{"context_window":{"current_usage":{"input_tokens":1000}},"model":{"display_name":"X"},"cwd":"/tmp/a-really-long-directory-name-that-exceeds-any-reasonable-budget"}'
+out=$(strip <<< "$(PROBE_COLUMNS=40 PROBE_WRAP=120 render "$long_cwd_in")")
+long_row=$(grep -F -- "$long_dir" <<< "$out" | head -n 1)
+[ "$(wc -l <<< "$out")" -ge 2 ] && grep -qF -- "$long_dir" <<< "$out" && [ "${#long_row}" -gt 40 ] \
+    && ok "wrap W7: a segment wider than the budget keeps its own overflowing row, untruncated" || bad "wrap W7: $out"
 printf '{"env":{"ANTHROPIC_AUTH_TOKEN":"dummy-probe-token"},"modelSettings":{"glm-5.3":{"effortLevel":"high"},"glm-5.3-flash":{"effortLevel":"max"},"claude-opus-5-5":{"effortLevel":"high"}}}' > "$h/.claude/settings.json"
 
 exit $fail

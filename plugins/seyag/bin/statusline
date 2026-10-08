@@ -197,6 +197,43 @@ pct_color() {
     fi
 }
 
+# wrap_rows <budget> — re-flow stdin's sep-joined segment line into rows that
+# fit <budget> visible columns, breaking only at segment boundaries. Visible
+# width counts codepoints (an emoji renders two cells; the threshold is a
+# setting, a few columns of slack is fine).
+# A single segment wider than the budget gets its own overflowing row — the
+# terminal's own hard wrap keeps it visible; truncating would lose content.
+# The strip matches the LITERAL \033
+# text the color variables carry: echo -e interprets escapes only after
+# wrap_rows has run. Rows stay escape-self-contained
+# (each segment carries its own resets), per the docs' multi-line-with-escapes
+# caveat.
+wrap_rows() {
+    local budget=$1 seg row="" roww=0 segw stripped out="" sep_stripped sepw
+    local -a segs=()
+    local all
+    all=$(cat)
+    all=${all//"$sep"/$'\n'}
+    mapfile -t segs <<< "$all"
+    sep_stripped=$(printf '%s' "$sep" | sed 's/\\033\[[0-9;]*m//g')
+    sepw=${#sep_stripped}
+    for seg in "${segs[@]}"; do
+        [ -n "$seg" ] || continue
+        stripped=$(printf '%s' "$seg" | sed 's/\\033\[[0-9;]*m//g')
+        segw=${#stripped}
+        if [ -z "$row" ]; then
+            row=$seg roww=$segw
+        elif [ $((roww + sepw + segw)) -le "$budget" ]; then
+            row+="$sep$seg" roww=$((roww + sepw + segw))
+        else
+            out+="${out:+$'\n'}$row"
+            row=$seg roww=$segw
+        fi
+    done
+    out+="${out:+$'\n'}$row"
+    printf '%s' "$out"
+}
+
 # render_windows 5H_PCT 5H_RESET_EPOCH WK_PCT WK_RESET_EPOCH — the one window-segment template
 # both providers use (her hybrid: colon + space, arrow parens). Empty pct omits that half; a
 # zero/missing epoch omits its arrow. Colors come from pct_color; formatting changes happen here
@@ -634,6 +671,17 @@ if [ -n "$syg_installed" ] && [ -n "$syg_repo" ]; then
         # Label pops in the SYG brand violet; version text stays gray.
         output="$output${syg_sep}${syg_brand}SYG:${reset} ${gray}${syg_installed}${reset}"
     fi
+fi
+
+# Narrow-terminal wrap: a setting (unset = never wrap) and a width (CC sets
+# COLUMNS before running this script; docs "Size output to the terminal").
+# Under the threshold the line re-flows into rows that fit, at segment
+# boundaries.
+if [ -n "${SYG_STATUSLINE_WRAP_COLUMNS:-}" ] && [ -n "${COLUMNS:-}" ] \
+    && [[ "$SYG_STATUSLINE_WRAP_COLUMNS" =~ ^[1-9][0-9]*$ ]] \
+    && [[ "$COLUMNS" =~ ^[0-9]+$ ]] \
+    && [ "$COLUMNS" -lt "$SYG_STATUSLINE_WRAP_COLUMNS" ]; then
+    output=$(printf '%s' "$output" | wrap_rows "$COLUMNS")
 fi
 
 echo -e "$output"
