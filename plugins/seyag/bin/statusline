@@ -393,14 +393,19 @@ elif [ "$vendor_lane" = zai ]; then
     fi
 elif [ "$vendor_lane" = or ]; then
     # OpenRouter segment: brand-yellow label + remaining credits from
-    # /api/v1/credits (the same settings.json token map the base_url is read
-    # from). Cache-first, 120s TTL, background curl, touch-first — the render
-    # itself only ever READS the cache, never awaits the network. Dollars
-    # only: the balance autoreloads $10 at a time, so a used-pct would sit at
+    # /api/v1/credits (the token comes from the same env-first read the
+    # base_url uses; settings.json is the fallback). Cache-first, 120s TTL,
+    # background curl, touch-first — the render itself only ever READS the
+    # cache, never awaits the network. Dollars only: the balance autoreloads
+    # $10 at a time, so a used-pct would sit at
     # ~98% forever — false urgency (owner ruling). Degrade to the plain gray
     # host label on cold/malformed cache, zero/negative or sub-cent remaining,
     # or a missing/empty token — never fake a balance.
-    or_tok=$(jq -r '.env.ANTHROPIC_AUTH_TOKEN // empty' "$HOME/.claude/settings.json" 2>/dev/null)
+    # The token follows the base_url's rule (the process env is the truth; a
+    # --settings overlay puts it there) with one difference: env-set-but-EMPTY
+    # falls through to settings.json — an empty key is a gateway-preset
+    # artifact, not a routing decision, unlike base_url's meaningful empty.
+    or_tok=${ANTHROPIC_AUTH_TOKEN:-$(jq -r '.env.ANTHROPIC_AUTH_TOKEN // empty' "$HOME/.claude/settings.json" 2>/dev/null)}
     or_cache="${XDG_CACHE_HOME:-$HOME/.cache}/claude-statusline/or-credits.json"
     or_ttl=120
     or_age=$(( $(date +%s) - $(stat -c %Y "$or_cache" 2>/dev/null || echo 0) ))

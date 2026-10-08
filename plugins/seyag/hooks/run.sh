@@ -73,7 +73,8 @@ fi
 # Selects every hook under .hooks[EVENT] in hooks.json whose matcher matches the
 # payload, applies syg_hook_ready to each, runs the survivors in parallel (each
 # with the payload on stdin, under a SYG_EVENT_HOOK_TIMEOUT-second limit, default
-# 45), and merges in hooks.json order:
+# 45) (a missing timeout binary degrades loudly: one stderr note, hooks unbounded),
+# and merges in hooks.json order:
 # - A hook blocks on exit 2 (text: its stderr), or on exit 0 with JSON holding
 #   hookSpecificOutput.permissionDecision "deny" or decision "block" (text: the
 #   permissionDecisionReason or reason). Any block: every blocker's text, then the
@@ -100,7 +101,7 @@ PAYLOAD=$(cat)
 # exceed the per-argument limit). The hook name is the word after `hooks/run.sh"`,
 # the parse tests/hook-wiring.probe.sh uses; that probe pins that they agree.
 HAVE_TOOL=0 TOOL="" MATCHERS=() NAMES=()
-SEL=$(printf '%s' "$PAYLOAD" | jq -rRs --arg ev "$EVENT" --slurpfile hj "$DIR/hooks.json" '
+if ! SEL=$(printf '%s' "$PAYLOAD" | jq -rRs --arg ev "$EVENT" --slurpfile hj "$DIR/hooks.json" '
   ((try fromjson catch null) as $p
    | if ($p | type) == "object" and ($p.tool_name | type) == "string"
      then @sh "HAVE_TOOL=1 TOOL=\($p.tool_name)" else "HAVE_TOOL=0" end),
@@ -109,10 +110,14 @@ SEL=$(printf '%s' "$PAYLOAD" | jq -rRs --arg ev "$EVENT" --slurpfile hj "$DIR/ho
    | (.hooks // [])[]
    | (((.command // "") | tostring | capture("hooks/run\\.sh\" *(?<n>[A-Za-z0-9._-]+)") | .n) // "") as $n
    | select($n != "")
-   | @sh "MATCHERS+=(\($m)) NAMES+=(\($n))")' 2>/dev/null) && eval "$SEL" || {
+   | @sh "MATCHERS+=(\($m)) NAMES+=(\($n))")' 2>/dev/null); then
   echo "run.sh: hooks.json unparsable; event mode ran nothing" >&2
   exit 0
-}
+fi
+if ! eval "$SEL"; then
+  echo "run.sh: could not apply the hook selection; event mode ran nothing" >&2
+  exit 0
+fi
 
 # Claude Code's matcher rule, as read from its code: empty or "*" matches
 # everything; a matcher of only [A-Za-z0-9_|] is a list of exact tool names; any
@@ -148,7 +153,11 @@ T=${SYG_EVENT_HOOK_TIMEOUT:-45}
 case "$T" in '' | *[!0-9]*) T=45 ;; esac
 [ "$T" -gt 0 ] || T=45
 TO=()
-command -v timeout >/dev/null 2>&1 && TO=(timeout -k 2 "$T")
+if command -v timeout >/dev/null 2>&1; then
+  TO=(timeout -k 2 "$T")
+else
+  echo "run.sh: no timeout binary on PATH; hooks run without a per-hook limit" >&2
+fi
 for name in "${SELECTED[@]}"; do
   syg_hook_ready "$name" 2>>"$WORK/notes" || continue
   n=${#RUN[@]}
@@ -192,7 +201,7 @@ MERGED=$(jq -rn "${ARGS[@]}" '
                   then (first([$hs.permissionDecisionReason, $j.reason][] | strings)
                         // "run.sh: seyag hook \($sq)\($name)\($sq) blocked without a reason")
                   else null end),
-          ask: (if $ask then (first($hs.permissionDecisionReason | strings) // "") else null end),
+          ask: (if $ask then (first($hs.permissionDecisionReason | strings) // "run.sh: seyag hook \($sq)\($name)\($sq) asked without a reason") else null end),
           ctx: (if $j == null
                 then (if $plain then (first(.out | chomp | select(length > 0)) // null) else null end)
                 else (first($hs.additionalContext | strings) // null) end),
