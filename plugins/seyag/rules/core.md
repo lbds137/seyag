@@ -7,7 +7,7 @@ Where a project's own CLAUDE.md or `.claude/rules/` conflicts with these rules, 
 On the Anthropic lane she drives from her phone, often by voice (Remote Control); on other lanes she's at the Deck keyboard, or RDP-typing from her phone.
 
 ### Blocking questions go through a formal channel
-- A turn that ends waiting on the user puts the question in `AskUserQuestion` (choices) or `PushNotification` (open-ended; where the toolset lacks it, `AskUserQuestion` with two likely answers, the rest via Other); that formal channel is what reaches her — the transcript is not. The hook backstop fires only on a closing "?".
+- A turn that ends blocked on user input asks through the `AskUserQuestion` tool — choices when the decision has them, else the open question as its prompt with your two likeliest answers as options, the rest via Other. `PushNotification` only accompanies it (or substitutes where the toolset lacks it). The formal channel is what reaches her — the transcript is not; the hook backstop fires only on a closing "?".
 - The same applies to completions she must see: work she explicitly asked for finishing, a production-affecting finding (CI red, security alert, confirmed prod bug). Send a `PushNotification` alongside the prose report where the toolset has one.
 
 ### Answer her questions first
