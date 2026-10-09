@@ -29,7 +29,10 @@ Everything is configured by environment variables; nothing is hardcoded.
   SYG_CREDIT_PRICE_TABLE_CMD   replaces the sibling price-table program (a
                      command string, split like a shell would; --json is
                      appended). Tokens of the command that are existing files
-                     are watched, so a change to one re-prices. For tests.
+                     are watched, so a change to one re-prices; a command
+                     resolved via PATH (no slash) is not an existing file and
+                     is not watched, so a change to it alone never re-prices.
+                     For tests.
   SYG_CREDIT_NOW     ISO-8601 UTC "now" override (tests).
   ANTHROPIC_ADMIN_API_KEY  an organization Admin API key: turns on the provider
                      balance below for balance and statusline. Unset or empty:
@@ -75,12 +78,12 @@ lines are skipped (counted on stderr); <synthetic> models and requests with no
 tokens are skipped. Token counts are exact per request. All of this runs under
 the ledger lock. When every entry of the session carries a sources_sig equal to
 the files' current one (os.stat only; a price-table change also triggers a
-recompute), the call returns without reading transcripts or pricing. Otherwise values are recomputed from the transcripts
-and replace that session's entries wholesale, so re-running is idempotent; an
-unchanged result is not rewritten, and a missing transcript_path is a no-op
-(recorded entries are never replaced by nothing). A requestId already held by
-another session's entry (a resume or fork copies earlier messages into the new
-transcript) is not counted again.
+recompute), the call returns without reading transcripts or pricing. Otherwise
+values are recomputed from the transcripts and replace that session's entries
+wholesale, so re-running is idempotent; an unchanged result is not rewritten,
+and a missing transcript_path is a no-op (recorded entries are never replaced
+by nothing). A requestId already held by another session's entry (a resume or
+fork copies earlier messages into the new transcript) is not counted again.
 
 Pricing (cost is an estimate at the table's rates): `price-table --json` (same
 bin dir) supplies USD per million tokens per model (exact id, else the id with a

@@ -68,15 +68,15 @@ TABLE = {
     # 2026-10-02; no input_cache_write published — cacheWrite = prompt-rate
     # assumption on cache_creation (pending the generation-record check).
     "z-ai/glm-5.3-flash":   (0.15, 0.50, 0.03, 0.15),     # OR models 2026-10-02
-    "z-ai/glm-5.3":         (0.049, 3.39, 0.048, 0.049),  # OR models live 2026-10-08 (z.ai direct stays 1.40/4.40/0.26 on its own rows)
-    # OR glm-flash alias: OR models live 2026-10-02 evening (output drifted from
-    # 0.60 the same day — the drift --sync exists for). No input_cache_write
-    # published; cacheWrite stays the prompt-rate assumption. :nitro is the same
-    # alias via OR's nitro variant (the feed lists no :nitro entry; --sync checks
-    # it against the bare alias).
-    "~z-ai/glm-flash-latest:nitro": (0.032, 3.032682, 0.02, 0.032),  # OR models live 2026-10-08
-    "~z-ai/glm-flash-latest":       (0.032, 3.032682, 0.02, 0.032),  # OR models live 2026-10-08
-    "~z-ai/glm-latest":     (0.036, 12, 0.0335, 0.036),   # OR models live 2026-10-08
+    "z-ai/glm-5.3":         (0.05, 6.00, 0.049, 0.05),    # OR models re-synced (OR repriced GLM output; the prior sync rates are stale) (z.ai direct stays 1.40/4.40/0.26 on its own rows)
+    # OR glm-flash alias: re-synced against the live OR models feed. The 0.083071 output is OR's
+    # own computed rate for the alias (what --sync records), not a rounded list
+    # price. No input_cache_write published; cacheWrite stays the prompt-rate
+    # assumption. :nitro is the same alias via OR's nitro variant (the feed lists
+    # no :nitro entry; --sync checks it against the bare alias).
+    "~z-ai/glm-flash-latest:nitro": (0.032, 0.083071, 0.01, 0.032),  # OR models re-synced (OR repriced GLM output; the prior sync rates are stale)
+    "~z-ai/glm-flash-latest":       (0.032, 0.083071, 0.01, 0.032),  # OR models re-synced (OR repriced GLM output; the prior sync rates are stale)
+    "~z-ai/glm-latest":     (0.05, 6.00, 0.049, 0.05),    # OR models re-synced (OR repriced GLM output; the prior sync rates are stale)
     # Anthropic direct ids: list price (claude-api skill cache 2026-09-25).
     # cacheWrite = the 5-min 1.25x rate (the setting cannot express the TTL split).
     # Haiku 5.5 has two rate cards split at a 100K-token prompt ($0.50/$2.50 above, cache rates scaling with input); the table carries the <=100K card only.
