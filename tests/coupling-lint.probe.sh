@@ -12,7 +12,7 @@ fail=0
 ok() { echo "ok:   $1"; }
 bad() { echo "FAIL: $1"; fail=1; }
 
-TOKENS=('/home/deck' 'gdrive' 'lbds137' 'Lila' 'claude-usage' 'claude-role' \
+TOKENS=('/home/deck' 'gdrive' 'lbds137' 'Lila' 'claude-role' \
   'deck-sessions' 'deck-doctor' 'claude-attach-cmd')
 PATHSPEC=(':(exclude)tests/coupling-lint.probe.sh' ":(exclude)$ALLOW")
 SEP=$'\x1f'   # token/path key separator; never occurs in a repo path

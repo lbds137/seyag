@@ -5,7 +5,7 @@
 # the shared render_windows template — colors, hybrid format, reset arrows and the fable cap.
 # Hermetic: HOME, caches, the token, both z.ai endpoints and zai-spend (stub) are
 # fixtures; nothing touches the network or the real caches. ZAI_SPEND_BIN overrides
-# the stub to integration-test against the real dev-docs binary.
+# the stub to integration-test against the real binary (plugins/seyag/bin/zai-spend).
 # Usage: tests/statusline.probe.sh
 
 set -uo pipefail
@@ -19,8 +19,8 @@ bad() { echo "FAIL: $1"; fail=1; }
 h=$(mktemp -d)
 trap 'rm -rf "$h"' EXIT
 mkdir -p "$h/.claude" "$h/.local/bin" "$h/cache/claude-statusline" "$h/projects/empty"
-# zai-spend: a fixture stub, not the real tool (the real one is a dev-docs
-# binary no CI runner or foreign checkout has — review finding on #24).
+# zai-spend: a fixture stub, not the real tool (plugins/seyag/bin/zai-spend, pinned by
+# tests/zai-spend.probe.sh), so this probe tests the statusline alone.
 # Same output shapes the statusline consumes: --json percentages from
 # $ZAI_SPEND_QUOTA_URL (file://, unit 3 = 5h window, unit 6 = week),
 # --line falls back to a 'local est' text when the quota is unreadable.

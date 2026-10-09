@@ -336,10 +336,10 @@ fi
 
 # Spend signal. On Anthropic: the plan's rate limits (5h window + weekly, from the statusline
 # input, plus Fable's own cap from the OAuth usage cache). Routed to z.ai: the plan is idle and
-# sends nothing, and the account's own quota is visible only in z.ai's web console — so the
-# pacing signal is zai-spend's locally measured GLM usage (dev-docs bin/zai-spend; it sweeps
-# transcripts in the background when its cache is stale and never blocks the
-# render). On an API key (anthropic-api lane): no plan meters, just the credit estimate.
+# sends nothing, so the pacing signal is zai-spend's z.ai quota reading, or its local
+# transcript estimate when the quota API is unreachable (the plugin's bin/zai-spend, run here
+# as ~/.local/bin/zai-spend; it refreshes in the background when its cache is stale and never
+# blocks the render). On an API key (anthropic-api lane): no plan meters, just the credit estimate.
 # On OpenRouter: the remaining credits balance from /api/v1/credits,
 # cached and fetched in the background the same way.
 # Position: right after the identity cluster — the line reads as a volatility gradient
