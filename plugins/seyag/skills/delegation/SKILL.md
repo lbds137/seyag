@@ -45,6 +45,7 @@ Every dispatch carries these sections by name; a missing one is a gap the worker
 <The design decisions already made. The worker executes; it never designs.>
 
 ## Premise ledger
+- A premise about a value's form or state at a pipeline stage cites the producer line that establishes it AT that stage, never a similar-looking site elsewhere — the form at the stage is exactly what the spec's next step consumes.
 - <each runtime premise the spec asserts> — <the read or probe that established it>
 - Already built? `<grep for the fix's own name>` → <result>
 - Already covered? `<grep/search for an existing task, PR or branch>` → <result>
