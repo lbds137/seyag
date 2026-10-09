@@ -4,6 +4,8 @@
 # reference is licensed by a line in tests/coupling-allowlist.txt; the probe
 # fails on a NEW reference with no entry, and on an entry whose reference
 # died. Usage: tests/coupling-lint.probe.sh   (from anywhere)
+# A machine's own home path is guarded machine-side (a staged-content terms
+# list), not by a hardcoded token here; TOKENS below are the portable ones.
 
 set -uo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -12,7 +14,7 @@ fail=0
 ok() { echo "ok:   $1"; }
 bad() { echo "FAIL: $1"; fail=1; }
 
-TOKENS=('/home/deck' 'gdrive' 'lbds137' 'Lila' 'claude-role' \
+TOKENS=('gdrive' 'lbds137' 'Lila' 'claude-role' \
   'deck-sessions' 'deck-doctor' 'claude-attach-cmd')
 PATHSPEC=(':(exclude)tests/coupling-lint.probe.sh' ":(exclude)$ALLOW")
 SEP=$'\x1f'   # token/path key separator; never occurs in a repo path

@@ -498,7 +498,7 @@ for _label, cmd, want in [
     ('returns a trap action behind builtin', "builtin trap 'rm -rf x' EXIT", ['rm -rf x']),
     ('returns an eval string behind builtin', "builtin eval 'rm -rf x'", ['rm -rf x']),
     # watch without -x/--exec joins its args and runs them via sh -c (seyag port only).
-    ('returns a quoted watch command', "watch 'rm -rf /home/deck/x'", ['rm -rf /home/deck/x']),
+    ('returns a quoted watch command', "watch 'rm -rf /home/example/x'", ['rm -rf /home/example/x']),
     ('returns a watch command after -n', "watch -n 5 'find / -name x'", ['find / -name x']),
     ('joins an unquoted watch command', 'watch -n5 rm -rf x', ['rm -rf x']),
     ('reads watch -x as argv, not a string', "watch -x 'rm -rf x'", []),
