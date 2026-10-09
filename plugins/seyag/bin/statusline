@@ -673,15 +673,29 @@ if [ -n "$syg_installed" ] && [ -n "$syg_repo" ]; then
     fi
 fi
 
+# The fit margin: CC indents the statusline (~2 columns) and some glyphs
+# render wider than their codepoint count (⚡), so a row packed to the full
+# COLUMNS can still be cut at the right edge. Measured on a phone SSH:
+# rows packed to 131 and to 128 were both cut at ~128 visible columns
+# (shortfall 3-4, plus 1 slack). Default 5; override with
+# SYG_STATUSLINE_FIT_MARGIN (a non-numeric value falls back to the default
+# rather than reaching the arithmetic).
+fit_margin=${SYG_STATUSLINE_FIT_MARGIN:-5}
+[[ "$fit_margin" =~ ^[0-9]+$ ]] || fit_margin=5
+fit_budget=""
+if [ -n "${COLUMNS:-}" ] && [[ "$COLUMNS" =~ ^[0-9]+$ ]]; then
+    fit_budget=$((COLUMNS - fit_margin))
+fi
+
 # Narrow-terminal wrap: a setting (unset = never wrap) and a width (CC sets
 # COLUMNS before running this script; docs "Size output to the terminal").
 # Under the threshold the line re-flows into rows that fit, at segment
 # boundaries.
-if [ -n "${SYG_STATUSLINE_WRAP_COLUMNS:-}" ] && [ -n "${COLUMNS:-}" ] \
+if [ -n "${SYG_STATUSLINE_WRAP_COLUMNS:-}" ] && [ -n "$fit_budget" ] \
     && [[ "$SYG_STATUSLINE_WRAP_COLUMNS" =~ ^[1-9][0-9]*$ ]] \
-    && [[ "$COLUMNS" =~ ^[0-9]+$ ]] \
+    && [ "$fit_budget" -ge 1 ] \
     && [ "$COLUMNS" -lt "$SYG_STATUSLINE_WRAP_COLUMNS" ]; then
-    output=$(printf '%s' "$output" | wrap_rows "$COLUMNS")
+    output=$(printf '%s' "$output" | wrap_rows "$fit_budget")
 fi
 
 # Debug aid (SYG_STATUSLINE_DEBUG=1): the wrap gate's two inputs, appended to
@@ -689,7 +703,7 @@ fi
 # terminal: a cols that never changes with the viewport is a stale pty size,
 # not a wrap bug.
 if [ "${SYG_STATUSLINE_DEBUG:-}" = "1" ]; then
-  output+="${sep}${gray}cols=${COLUMNS:-unset} wrap=${SYG_STATUSLINE_WRAP_COLUMNS:-off}${reset}"
+    output+="${sep}${gray}cols=${COLUMNS:-unset} fit=${fit_budget:-unset} wrap=${SYG_STATUSLINE_WRAP_COLUMNS:-off}${reset}"
 fi
 
 echo -e "$output"

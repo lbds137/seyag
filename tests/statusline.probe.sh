@@ -66,7 +66,7 @@ route_anthropic() { jq '.env.ANTHROPIC_BASE_URL = "https://api.anthropic.com"' "
 route_or() { jq '.env.ANTHROPIC_BASE_URL = "https://openrouter.ai/api/v1"' "$h/.claude/settings.json" > "$h/.claude/settings.json.new" && mv "$h/.claude/settings.json.new" "$h/.claude/settings.json"; }
 route_host() { jq --arg u "$1" '.env.ANTHROPIC_BASE_URL = $u' "$h/.claude/settings.json" > "$h/.claude/settings.json.new" && mv "$h/.claude/settings.json.new" "$h/.claude/settings.json"; }
 render() {
-  local env_args=(-u ANTHROPIC_BASE_URL -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u SYG_CREDIT_LEDGER -u SYG_CREDIT_GRANTS -u SYG_CREDIT_FORCE -u COLUMNS -u SYG_STATUSLINE_WRAP_COLUMNS -u SYG_STATUSLINE_DEBUG)
+  local env_args=(-u ANTHROPIC_BASE_URL -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u SYG_CREDIT_LEDGER -u SYG_CREDIT_GRANTS -u SYG_CREDIT_FORCE -u COLUMNS -u SYG_STATUSLINE_WRAP_COLUMNS -u SYG_STATUSLINE_DEBUG -u SYG_STATUSLINE_FIT_MARGIN)
   if [ -n "${PROBE_DEBUG:-}" ]; then
     env_args+=("SYG_STATUSLINE_DEBUG=$PROBE_DEBUG")
   fi
@@ -523,7 +523,7 @@ grep -qF 'platform.claude.com ~$48.00' <<< "$out" && ! grep -qF '(exp' <<< "$out
 # 40-44. Lane routing, each with rate_limits in the input. The process env decides.
 lane_in='{"rate_limits":{"five_hour":{"used_percentage":83,"resets_at":1790790548},"seven_day":{"used_percentage":56,"resets_at":1791093600}},"context_window":{"current_usage":{"input_tokens":1000}},"model":{"display_name":"X"},"cwd":"/tmp"}'
 lane() { # VAR=value ...: render lane_in under exactly these env vars
-    local env_args=(-u ANTHROPIC_BASE_URL -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u SYG_CREDIT_LEDGER -u SYG_CREDIT_GRANTS -u SYG_CREDIT_FORCE -u COLUMNS -u SYG_STATUSLINE_WRAP_COLUMNS -u SYG_STATUSLINE_DEBUG)
+    local env_args=(-u ANTHROPIC_BASE_URL -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u SYG_CREDIT_LEDGER -u SYG_CREDIT_GRANTS -u SYG_CREDIT_FORCE -u COLUMNS -u SYG_STATUSLINE_WRAP_COLUMNS -u SYG_STATUSLINE_DEBUG -u SYG_STATUSLINE_FIT_MARGIN)
     if [ -n "${PROBE_DEBUG:-}" ]; then
         env_args+=("SYG_STATUSLINE_DEBUG=$PROBE_DEBUG")
     fi
@@ -673,13 +673,14 @@ out=$(strip <<< "$(PROBE_WRAP=120 render "$lane_in")")
 out=$(strip <<< "$(PROBE_COLUMNS=125 PROBE_WRAP=150 render "$lane_in")")
 [ "$(wc -l <<< "$out")" = 1 ] && ok "wrap W5: width between the line and the setting -> one line" || bad "wrap W5: $out"
 # W6: segment widths are 7, 1, 58, 13, 5, 5, 12 (3 per separator), so the
-# cumulative row widths are 7, 11, 72, 88, 96, 104, 119. At 100 columns the
-# greedy fill takes row 1 through "/tmp/" (96); "▲0/▼0" (would be 104) opens row 2.
-out=$(strip <<< "$(PROBE_COLUMNS=100 PROBE_WRAP=120 render "$lane_in")")
+# cumulative row widths are 7, 11, 72, 88, 96, 104, 119. At a fit budget of
+# 98 (PROBE_COLUMNS 103 minus the default margin 5) the greedy fill takes
+# row 1 through "/tmp/" (96); "▲0/▼0" (would be 104) opens row 2.
+out=$(strip <<< "$(PROBE_COLUMNS=103 PROBE_WRAP=120 render "$lane_in")")
 row1=$(head -n 1 <<< "$out"); row2=$(tail -n 1 <<< "$out")
 [ "$(wc -l <<< "$out")" = 2 ] && [[ "$row1" == *' · /tmp/' ]] && [[ "$row2" == '▲0/▼0'* ]] \
-    && [ "${#row1}" -le 100 ] && [ "${#row2}" -le 100 ] \
-    && ok "wrap W6: greedy split at 100 columns" || bad "wrap W6: $out"
+    && [ "${#row1}" -le 98 ] && [ "${#row2}" -le 98 ] \
+    && ok "wrap W6: greedy split at a fit budget of 98 columns" || bad "wrap W6: $out"
 # W7: a cwd far wider than the budget keeps its own row, untruncated.
 long_dir=a-really-long-directory-name-that-exceeds-any-reasonable-budget
 long_cwd_in='{"context_window":{"current_usage":{"input_tokens":1000}},"model":{"display_name":"X"},"cwd":"/tmp/a-really-long-directory-name-that-exceeds-any-reasonable-budget"}'
@@ -694,8 +695,8 @@ out=$(strip <<< "$(PROBE_DEBUG=1 render "$lane_in")")
 grep -qF 'cols=' <<< "$out" && grep -qF 'wrap=off' <<< "$out" \
     && ok "debug D1: flag on, nothing set -> cols= and wrap=off" || bad "debug D1: $out"
 out=$(strip <<< "$(PROBE_DEBUG=1 PROBE_COLUMNS=110 PROBE_WRAP=120 render "$lane_in")")
-grep -qF 'cols=110 wrap=120' <<< "$out" \
-    && ok "debug D2: the suffix reports the values the layout saw" || bad "debug D2: $out"
+grep -qF 'cols=110 fit=105 wrap=120' <<< "$out" \
+    && ok "debug D2: the suffix reports cols, fit and the setting" || bad "debug D2: $out"
 out=$(strip <<< "$(render "$lane_in")")
 ! grep -qF 'cols=' <<< "$out" \
     && ok "debug D3: flag unset -> no suffix" || bad "debug D3: $out"
