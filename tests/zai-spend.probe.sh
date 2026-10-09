@@ -2,7 +2,8 @@
 # Fixture check for plugins/seyag/bin/zai-spend: the quota-API path (source=api, rounded pcts, the
 # "5h: N% (→HH:MM) wk: N%" line), which key reaches z.ai (key file, then a z.ai-routed env, then a
 # z.ai-routed settings.json; a key routed elsewhere never), the local-estimate fallback, the state
-# format bump that keeps console anchors, --calibrate, and the transcript scan's model buckets.
+# format bump that keeps console anchors, --calibrate (and its wait on the sweep lock), --models,
+# the transcript scan's model buckets, and the default peak window read in UTC+8.
 # Quota fixtures are file:// URLs; the key cases need to see the Authorization header, so they use a
 # loopback http.server that logs it.
 # Usage: tests/zai-spend.probe.sh   (from anywhere; never touches the real key file, settings, API or ~/.claude)
@@ -126,6 +127,19 @@ grep -q 'fixture-or' "$tmp/req.log" && bad "key: an openrouter token reached the
 kill "$SRV_PID" 2>/dev/null; wait "$SRV_PID" 2>/dev/null; SRV_PID=""
 echo '{}' > "$tmp/home/.claude/settings.json"
 
+# 2b. --models: per-model lines and the total line, from the same loopback server on a models body.
+jq -n '{success: true, data: {modelSummaryList: [{modelName: "glm-5.3", totalTokens: 12345678},
+        {modelName: "glm-5.3-flash", totalTokens: 3400000}],
+        totalUsage: {totalTokensUsage: 15745678, totalModelCallCount: 42}}}' > "$tmp/models.json"
+python3 -I "$tmp/srv.py" "$tmp/req.log" "$tmp/models.json" "$tmp/mport" &
+SRV_PID=$!
+for _ in $(seq 1 50); do [ -s "$tmp/mport" ] && break; sleep 0.1; done
+[ -s "$tmp/mport" ] || { echo "zai-spend.probe: models mock server did not start"; exit 2; }
+out=$(zs cm ZAI_SPEND_MODELS_URL="http://127.0.0.1:$(cat "$tmp/mport")/models" CC_ROUTE_KEYS="$tmp/keys.env" -- --models); rc=$?
+want=$'glm-5.3: 12M tok\nglm-5.3-flash: 3M tok\ntotal: 16M tok, 42 calls (7d, bucket tz UTC+8)'
+[ $rc = 0 ] && [ "$out" = "$want" ] && ok "--models: 'name: NM tok' per model, then the total line" || bad "--models (rc $rc): $out"
+kill "$SRV_PID" 2>/dev/null; wait "$SRV_PID" 2>/dev/null; SRV_PID=""
+
 # 3. Local fallback: quota URL unreachable, no transcripts, no state -> source=local, "local est", exit 0.
 out=$(zs c3 ZAI_SPEND_QUOTA_URL="$QDOWN" CC_ROUTE_KEYS="$tmp/keys.env" -- 2>&1); rc=$?
 j=$(cache c3)
@@ -176,6 +190,29 @@ zs c6 "${TR[@]}" ZAI_SPEND_PEAK_UTC=0-24 -- --sweep
 jq -e '.five_hour_winv == 7.2' <<< "$(cache c6)" >/dev/null \
     && ok "scan: peak weights 3.0/1.2 -> 7.2 winv" || bad "scan peak: $(cache c6)"
 
+# 6b. The default window (no override, so the weekday gate is live) is Mon-Fri 14-18 in UTC+8: one
+# glm-5.3 reply at the latest past Beijing-weekday 14:30 weighs 3.0; one at Beijing 22:00 (14:00
+# UTC, inside 14-18 if read as UTC) weighs 1.0. Assessed on week_winv: the instants can be days old.
+read -r pk_on pk_off < <(python3 -I -c '
+import time
+now = int(time.time())
+def last(hh, mm):  # the latest past instant whose UTC+8 wall clock is a weekday hh:mm
+    t = (now + 8 * 3600) // 86400 * 86400 + hh * 3600 + mm * 60 - 8 * 3600
+    while t > now or time.gmtime(t + 8 * 3600).tm_wday >= 5:
+        t -= 86400
+    return t
+print(last(14, 30), last(22, 0))')
+peak_case() { # peak_case <case dir> <epoch> <want week_winv> <name>
+    mkdir -p "$tmp/$1-projects/slugP"
+    jq -cn --arg t "$(date -u -d "@$2" +%Y-%m-%dT%H:%M:%S.000Z)" '{type: "assistant", timestamp: $t,
+        message: {model: "glm-5.3", usage: {input_tokens: 1}}}' > "$tmp/$1-projects/slugP/s.jsonl"
+    zs "$1" ZAI_SPEND_PROJECTS="$tmp/$1-projects" ZAI_SPEND_QUOTA_URL="$QDOWN" -- --sweep
+    jq -e --argjson w "$3" '.week_winv == $w and .week_inv == 1' <<< "$(cache "$1")" >/dev/null \
+        && ok "peak: $4 -> $3 winv" || bad "peak: $4 (epoch $2): $(cache "$1")"
+}
+peak_case p1 "$pk_on" 3 "Beijing weekday 14:30 is peak"
+peak_case p2 "$pk_off" 1 "Beijing weekday 22:00 (14:00 UTC) is off-peak"
+
 # 5. --calibrate: anchors take the current winv, so the baked pcts equal the anchored numbers.
 zs c5 "${TR[@]}" ZAI_SPEND_PEAK_UTC=0-0 -- --calibrate 40 20 --reset "2099-01-01 00:00" >/dev/null; rc=$?
 want_reset=$(date -d "2099-01-01 00:00" +%s)
@@ -185,5 +222,24 @@ jq -e --argjson r "$want_reset" '.calW.pct == 40 and .calW.winv == 2.4 and .cal5
 jq -e --argjson r "$want_reset" '.week_pct == 40 and .five_hour_pct == 20 and .week_reset_at == $r and .source == "local"' \
     <<< "$(cache c5)" >/dev/null \
     && ok "calibrate: cache gains week_pct/five_hour_pct derived from winv" || bad "calibrate cache: $(cache c5)"
+
+# 7. --calibrate waits for the sweep lock before its state write: held externally, no calW lands;
+# released, calibrate finishes and calW does. (The holder gives up after 10 s on its own.)
+lockf="$tmp/c7/state/zai-spend/.sweep.lock"
+mkdir -p "${lockf%/*}"
+flock "$lockf" -c "for _ in \$(seq 1 100); do [ -e '$tmp/c7-release' ] && exit 0; sleep 0.1; done" &
+HOLD_PID=$!
+for _ in $(seq 1 50); do flock -n "$lockf" true || break; sleep 0.1; done
+zs c7 "${TR[@]}" ZAI_SPEND_PEAK_UTC=0-0 -- --calibrate 40 >/dev/null &
+CAL_PID=$!
+held_ok=1
+for _ in $(seq 1 20); do grep -q calW <<< "$(state c7)" && held_ok=0; sleep 0.1; done
+[ $held_ok = 1 ] && kill -0 "$CAL_PID" 2>/dev/null && ok "calibrate: no calW while another holder has the sweep lock" \
+    || bad "calibrate wrote state under a held lock: $(state c7)"
+touch "$tmp/c7-release"
+wait "$HOLD_PID"
+wait "$CAL_PID"; rc=$?
+[ $rc = 0 ] && jq -e '.calW.pct == 40' <<< "$(state c7)" >/dev/null \
+    && ok "calibrate: lock released -> calibrate completes, calW lands" || bad "calibrate after release (rc $rc): $(state c7)"
 
 exit $fail

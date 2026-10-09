@@ -130,14 +130,13 @@ if [ ! -s "$cache" ]; then
 fi
 
 # resets_at looks like 2026-09-25T06:09:59.682848+00:00; fromdateiso8601 wants ...:59Z
-# The last field is the per-model weekly caps ("Fable 8%"), which can contain spaces.
-read -r five five_reset week week_reset scoped < <(jq -r '
+read -r five five_reset week week_reset < <(jq -r '
     def epoch: (. // "") | sub("\\.[0-9]+"; "") | sub("\\+00:00$"; "Z")
         | if . == "" then 0 else (fromdateiso8601? // 0) end;
     [ (.five_hour.utilization // 0 | round), (.five_hour.resets_at | epoch),
-      (.seven_day.utilization // 0 | round), (.seven_day.resets_at | epoch),
-      ([ .limits[]? | select(.kind == "weekly_scoped" and .scope.model.display_name != null)
-         | "\(.scope.model.display_name) \(.percent)%" ] | join(", ")) ] | @tsv' "$cache" 2>/dev/null)
+      (.seven_day.utilization // 0 | round), (.seven_day.resets_at | epoch) ] | @tsv' "$cache" 2>/dev/null)
+# Per-model weekly caps ("Fable 8%"), read on their own: @tsv would double a backslash in a name.
+scoped=$(jq -r '[ .limits[]? | select(.kind == "weekly_scoped" and .scope.model.display_name != null) | "\(.scope.model.display_name) \(.percent)%" ] | join(", ")' "$cache" 2>/dev/null)
 
 now=$(date +%s)
 to_reset=$(( five_reset > now ? five_reset - now : 0 ))
@@ -187,8 +186,8 @@ case "${1:-}" in
         exit 0
         ;;
     --json)
-        printf '{"five_hour_pct":%d,"five_hour_resets_at":%d,"seconds_to_reset":%d,"weekly_pct":%d,"weekly_resets_at":%d,"scoped":"%s","routed":%d}\n' \
-            "$five" "$five_reset" "$to_reset" "$week" "$week_reset" "$scoped" "$routed"
+        printf '{"five_hour_pct":%d,"five_hour_resets_at":%d,"seconds_to_reset":%d,"weekly_pct":%d,"weekly_resets_at":%d,"scoped":%s,"routed":%d}\n' \
+            "$five" "$five_reset" "$to_reset" "$week" "$week_reset" "$(jq -rn --arg s "$scoped" '$s | @json')" "$routed"
         ;;
     "")
         five_line="5h ${five}%"
