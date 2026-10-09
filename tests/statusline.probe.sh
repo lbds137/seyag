@@ -1,10 +1,13 @@
 #!/bin/bash
 # Fixture check for plugins/seyag/bin/statusline — the plugin's copy (override with
-# STATUSLINE_BIN, e.g. to test the deployed ~/.claude/statusline.sh). Covers the provider split: routing decides
+# STATUSLINE_BIN, e.g. to test the deployed ~/.claude/statusline.sh; a copy needs zai-usage
+# beside it, or case 45a fails by design). Covers the provider split: routing decides
 # the data backend (z.ai quota API vs harness stdin rate_limits), while rendering goes through
 # the shared render_windows template — colors, hybrid format, reset arrows and the fable cap.
 # Hermetic: HOME, caches, the token, both z.ai endpoints and zai-usage (stub) are
-# fixtures; nothing touches the network or the real caches. ZAI_SPEND_BIN overrides
+# fixtures — except case 45a, which runs the real sibling under the fixture HOME
+# (file:// quota, missing key file, cache and state under the tmp dir); nothing
+# touches the network or the real caches. ZAI_SPEND_BIN overrides
 # the stub to integration-test against the real binary (plugins/seyag/bin/zai-usage).
 # Usage: tests/statusline.probe.sh
 
@@ -20,7 +23,8 @@ h=$(mktemp -d)
 trap 'rm -rf "$h"' EXIT
 mkdir -p "$h/.claude" "$h/.local/bin" "$h/cache/claude-statusline" "$h/projects/empty"
 # zai-usage: a fixture stub, not the real tool (plugins/seyag/bin/zai-usage, pinned by
-# tests/zai-usage.probe.sh), so this probe tests the statusline alone.
+# tests/zai-usage.probe.sh), so this probe tests the statusline alone — except
+# case 45a, which runs the real sibling under the fixture HOME.
 # Same output shapes the statusline consumes: --json percentages from
 # $ZAI_SPEND_QUOTA_URL (file://, unit 3 = 5h window, unit 6 = week),
 # --line falls back to a 'local est' text when the quota is unreadable.
@@ -47,6 +51,9 @@ esac
 STUB
     chmod +x "$h/.local/bin/zai-usage"
 fi
+# The statusline runs its sibling zai-usage by default; the override hands it the stub (and
+# replaces any ambient value, so a caller's override can't leak in).
+export SYG_STATUSLINE_ZAI_USAGE="$h/.local/bin/zai-usage"
 printf '{"env":{"ANTHROPIC_AUTH_TOKEN":"dummy-probe-token"},"modelSettings":{"glm-5.3":{"effortLevel":"high"},"glm-5.3-flash":{"effortLevel":"max"},"claude-opus-5-5":{"effortLevel":"high"}}}' > "$h/.claude/settings.json"
 export HOME="$h" XDG_CACHE_HOME="$h/cache" XDG_STATE_HOME="$h/state" XDG_STATE_HOME="$h/state"
 export ZAI_SPEND_PROJECTS="$h/projects/empty" ZAI_SPEND_PEAK_UTC="0-24"
@@ -577,6 +584,35 @@ route_zai
 raw=$(render "$lane_in"); out=$(strip <<< "$raw")
 grep -qF $'\x1b[38;2;11;127;255mz.ai\x1b[0m' <<< "$raw" && ! grep -qE '5h:|claude' <<< "$out" \
     && ok "z.ai lane: zai-usage silent -> the z.ai label alone" || bad "zai silent: $out"
+mv "$h/.local/bin/zai-usage.keep" "$h/.local/bin/zai-usage"
+route_anthropic
+
+# 45a. No override: the statusline runs zai-usage from its own bin dir, never $HOME/.local/bin.
+# A decoy sits at the old path; the real sibling runs under the fixture HOME (key file pointed
+# at a missing fixture, quota from the file:// fixture, cache and state under $h), so no network.
+mv "$h/.local/bin/zai-usage" "$h/.local/bin/zai-usage.keep"
+printf '#!/bin/bash\necho HOME-PATH-STUB\n' > "$h/.local/bin/zai-usage"; chmod +x "$h/.local/bin/zai-usage"
+rm -f "$h/cache/claude-statusline/zai-usage.json"
+unset SYG_STATUSLINE_ZAI_USAGE
+route_zai
+raw=$(CC_ROUTE_KEYS="$h/missing-keys.env" render "$lane_in"); out=$(strip <<< "$raw")
+grep -qF $'\x1b[38;2;11;127;255mz.ai\x1b[0m' <<< "$raw" && grep -q 'z\.ai 5h: 95%.* wk: 59%' <<< "$out" \
+    && ! grep -q 'HOME-PATH-STUB' <<< "$out" \
+    && ok "z.ai lane, no override: the sibling zai-usage runs, not \$HOME/.local/bin's" || bad "zai sibling default: $out"
+export SYG_STATUSLINE_ZAI_USAGE="$h/.local/bin/zai-usage"
+rm -f "$h/cache/claude-statusline/zai-usage.json"
+mv "$h/.local/bin/zai-usage.keep" "$h/.local/bin/zai-usage"
+
+# 45b. The override decides when set: $HOME/.local/bin has no zai-usage, the override's stub
+# percentages render.
+route_zai
+mkdir -p "$h/override"
+printf '#!/bin/bash\n[ "$1" = --json ] && echo %s\nexit 0\n' "'{\"five_hour_pct\":12,\"week_pct\":34}'" > "$h/override/zai-usage"
+chmod +x "$h/override/zai-usage"
+mv "$h/.local/bin/zai-usage" "$h/.local/bin/zai-usage.keep"
+raw=$(SYG_STATUSLINE_ZAI_USAGE="$h/override/zai-usage" render "$lane_in"); out=$(strip <<< "$raw")
+grep -q 'z\.ai 5h: 12%.* wk: 34%' <<< "$out" \
+    && ok "z.ai lane: SYG_STATUSLINE_ZAI_USAGE decides which zai-usage runs" || bad "zai override: $out"
 mv "$h/.local/bin/zai-usage.keep" "$h/.local/bin/zai-usage"
 route_anthropic
 
