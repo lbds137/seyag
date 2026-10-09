@@ -282,6 +282,12 @@ case "${model,,}" in
     *haiku*) model_display="$(gradient "$model" 95 255 175 0 200 190)" ;;   # spring green → teal
     *glm*flash*) model_display="$(gradient "$model" 215 255 130 0 185 160)" ;; # lime → teal (workhorse)
     *glm*)  model_display="$(gradient "$model" 255 210 100 230 120 30)" ;;  # gold → amber (strong lane)
+    *sonnet*) model_display="$(gradient "$model" 223 120 90 235 95 130)" ;;  # coral → rose
+    *mistral*) model_display="$(gradient "$model" 255 112 0 210 80 20)" ;;   # Mistral orange
+    *gemini*) model_display="$(gradient "$model" 140 180 250 66 133 244)" ;; # Gemini blue
+    *gpt*)   model_display="$(gradient "$model" 16 163 127 110 225 175)" ;;  # emerald
+    *deepseek*) model_display="$(gradient "$model" 77 107 254 150 170 255)" ;; # blue → periwinkle
+    *kimi*|*qwen*) model_display="$(gradient "$model" 120 100 250 185 150 255)" ;; # violet
     *)       model_display="$(gradient "$model" 255 255 255 170 170 170)" ;; # silver fade
 esac
 output="$output${sep}${bold}${model_display}${reset}"
