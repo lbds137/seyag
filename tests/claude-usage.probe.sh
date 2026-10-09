@@ -113,13 +113,13 @@ line=$(run)
 
 # Routing: while settings.json points sessions at z.ai, the Anthropic plan's numbers don't gate;
 # z.ai's own quota does (a stub zai-usage stands in for the live API), and the line says so.
-# The stub sits where the statusline looks for it too ($HOME/.local/bin).
+# Both tools are handed the stub by their override (each defaults to its sibling zai-usage).
 zai_stub() { # zai_stub <source> <5h %> <week %> [<5h reset epoch> <week reset epoch>]
     printf '#!/bin/sh\n[ "$1" = --json ] && echo %s || echo "z.ai line"\n' \
         "'{\"source\":\"$1\",\"five_hour_pct\":$2,\"week_pct\":$3${4:+,\"five_hour_reset_at\":$4,\"week_reset_at\":$5}}'" > "$tmp/.local/bin/zai-usage"
     chmod +x "$tmp/.local/bin/zai-usage"
 }
-export CLAUDE_USAGE_ZAI_USAGE="$tmp/.local/bin/zai-usage"
+export CLAUDE_USAGE_ZAI_USAGE="$tmp/.local/bin/zai-usage" SYG_STATUSLINE_ZAI_USAGE="$tmp/.local/bin/zai-usage"
 route_zai
 fixture 10 99 100
 zai_stub api 10 74
