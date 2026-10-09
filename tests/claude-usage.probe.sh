@@ -5,7 +5,8 @@
 # z.ai the gate reads z.ai's quota instead of the plan's (OpenRouter passes). Also pins that
 # claude-usage classifies the base-URL host exactly as the statusline does (the Console-key lane
 # differs on purpose: CC_ROUTE_PRESET here, a non-empty ANTHROPIC_API_KEY there), and that
-# usage-sweep --points consumes the readings log it writes.
+# usage-sweep --points consumes the readings log it writes. Also: the caller's model read from its
+# session transcript, and --json's scoped string escaping.
 # Usage: tests/claude-usage.probe.sh   (from anywhere; never touches the real cache, settings or API)
 
 set -uo pipefail
@@ -71,6 +72,30 @@ out=$(timeout 5 env HOME="$tmp" XDG_CACHE_HOME="$tmp" CLAUDE_USAGE_MODEL=claude-
 fixture 10 50 100
 CLAUDE_USAGE_MODEL=claude-fable-5-1 HOME="$tmp" XDG_CACHE_HOME="$tmp" "$CU" --ok 90; [ $? = 1 ] && ok "Fable cap 100%: Fable session blocked" || bad "Fable cap: Fable should block"
 run --ok 90; [ $? = 0 ] && ok "Fable cap 100%: Opus session passes" || bad "Fable cap: Opus should pass"
+# No CLAUDE_USAGE_MODEL: the caller's model is the last assistant reply in its session transcript.
+mkdir -p "$tmp/.claude/projects/slugA"
+{
+    jq -cn '{type: "assistant", message: {model: "claude-opus-5-5"}}'
+    jq -cn '{type: "user", message: {content: "next"}}'
+    jq -cn '{type: "assistant", message: {model: "claude-fable-5-1"}}'
+    jq -cn '{type: "user", message: {content: "last"}}'
+} > "$tmp/.claude/projects/slugA/probe-session.jsonl"
+CLAUDE_CODE_SESSION_ID=probe-session HOME="$tmp" XDG_CACHE_HOME="$tmp" "$CU" --ok 90; [ $? = 1 ] \
+    && ok "transcript model (Fable), Fable cap 100%: blocked" || bad "transcript model, Fable cap 100%: should block"
+fixture 10 50 50
+CLAUDE_CODE_SESSION_ID=probe-session HOME="$tmp" XDG_CACHE_HOME="$tmp" "$CU" --ok 90; [ $? = 0 ] \
+    && ok "transcript model (Fable), Fable cap 50%: passes" || bad "transcript model, Fable cap 50%: should pass"
+# A display name with a quote, a backslash and a space round-trips exactly: --json and the plain line.
+jq -n '{five_hour: {utilization: 10}, seven_day: {utilization: 50},
+        limits: [{kind: "weekly_scoped", percent: 7, scope: {model: {display_name: "Q\"B\\x y"}}}]}' \
+    > "$tmp/claude-statusline/usage.json"
+want='Q"B\x y 7%'
+s=$(run --json | jq -re '.scoped'); rc=$?
+[ $rc = 0 ] && [ "$s" = "$want" ] \
+    && ok "--json: scoped round-trips a name with \", \\ and a space ($s)" || bad "--json scoped round-trip (rc $rc): got [$s], want [$want]"
+line=$(run)
+[[ $line == *"· $want of its own weekly cap"* ]] \
+    && ok "plain line: the scoped name renders with a single backslash" || bad "plain line scoped name: $line"
 
 # Routing: while settings.json points sessions at z.ai, the Anthropic plan's numbers don't gate;
 # z.ai's own quota does (a stub zai-spend stands in for the live API), and the line says so.

@@ -39,11 +39,13 @@ PROJECTS = os.environ.get("ZAI_SPEND_PROJECTS") or os.path.expanduser("~/.claude
 QUOTA_URL = os.environ.get("ZAI_SPEND_QUOTA_URL", "https://api.z.ai/api/monitor/usage/quota/limit")
 MODELS_URL = os.environ.get("ZAI_SPEND_MODELS_URL", "https://api.z.ai/api/monitor/usage/model-usage")
 TTL = 120
+SWEEP_LOCK = os.path.join(os.path.dirname(STATE), ".sweep.lock")
 STATE_VERSION = 4
 ROUTING_EPOCH = 1789900000  # 2026-09-20T10:26:40Z, safely before the z.ai flip (2026-09-30 UTC)
 TOK_FIELDS = ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens")
 # Weight table (main = glm-5.3 family, flash = glm-5.3-flash), from the plan's usage-revision
-# notice; peak window overridable for tests (test mode skips the weekday gate).
+# notice. The peak window is matched in UTC+8 (hour and weekday both Beijing-side); it is
+# overridable for tests (test mode skips the weekday gate).
 W = {"main": (1.0, 3.0), "flash": (0.4, 1.2)}  # (off-peak, peak)
 PEAK_UTC = os.environ.get("ZAI_SPEND_PEAK_UTC", "14-18")
 
@@ -55,7 +57,7 @@ def is_peak(epoch):
         return False
     if a == b:  # "0-0": never peak
         return False
-    g = time.gmtime(epoch)
+    g = time.gmtime(epoch + 8 * 3600)  # the window is UTC+8 wall-clock time
     h = g.tm_hour
     if not (a <= h < b or (a > b and (h >= a or h < b))):
         return False
@@ -303,7 +305,7 @@ def sweep_locked():
     """One refresher at a time: API first, transcript-scan fallback. A caller that loses the
     lock race keeps the old numbers."""
     os.makedirs(os.path.dirname(STATE), exist_ok=True)
-    lock = open(os.path.join(os.path.dirname(STATE), ".sweep.lock"), "w")
+    lock = open(SWEEP_LOCK, "w")
     try:
         flock(lock, LOCK_EX | LOCK_NB)
     except OSError:
@@ -332,15 +334,18 @@ def calibrate(args):
         print('usage: zai-spend --calibrate WEEK_PCT [5H_PCT] [--reset "YYYY-MM-DD HH:MM"]')
         return 2
     sweep_locked()  # fresh numbers before anchoring
-    state = load(STATE, {})
-    cache = load(CACHE, {})
-    now = int(time.time())
-    state["calW"] = {"pct": nums[0], "at": now, "winv": cache.get("week_winv", 0)}
-    if len(nums) > 1:
-        state["cal5"] = {"pct": nums[1], "at": now, "winv": cache.get("five_hour_winv", 0)}
-    if reset:
-        state["reset_at"] = int(reset)
-    write_json(STATE, state)
+    # The sweep's own lock, waited for: a concurrent detached --sweep must not lose its offsets.
+    with open(SWEEP_LOCK, "w") as lock:
+        flock(lock, LOCK_EX)
+        state = load(STATE, {})
+        cache = load(CACHE, {})
+        now = int(time.time())
+        state["calW"] = {"pct": nums[0], "at": now, "winv": cache.get("week_winv", 0)}
+        if len(nums) > 1:
+            state["cal5"] = {"pct": nums[1], "at": now, "winv": cache.get("five_hour_winv", 0)}
+        if reset:
+            state["reset_at"] = int(reset)
+        write_json(STATE, state)
     sweep_locked()  # bake the percentages into the cache
     cache = load(CACHE, {})
     caps = []
@@ -366,7 +371,10 @@ def report(mode):
         return 0
     if mode == "--sweep":
         return 0
-    pct = lambda k: f"{c[k]}%" if k in c else "uncal"
+
+    def pct(k):
+        return f"{c[k]}%" if k in c else "uncal"
+
     age = int(time.time() - c["as_of"])
     if c.get("source") == "api":
         # Anthropic-segment style ("5h:83% wk:56%", reset arrow when it matters) in the
