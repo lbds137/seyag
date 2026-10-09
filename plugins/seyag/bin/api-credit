@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """api-credit: a persistent spend ledger for metered API-key sessions, and an
-estimate of the prepaid credit left.
+estimate of the prepaid credit left (provider-exact with an admin key).
 
 Usage:
   api-credit hook                read a Stop/SessionEnd hook JSON on stdin and
@@ -9,7 +9,9 @@ Usage:
   api-credit statusline [--json] read-only: one line (or, with --json, the balance
                                  object) for a statusline; nothing when
                                  SYG_CREDIT_LEDGER is unset
-  api-credit balance [--json]    live grants minus ledger spend (an estimate)
+  api-credit balance [--json]    live grants minus spend: provider-exact with an
+                                 admin key (see Provider balance), else the
+                                 ledger estimate
   api-credit daily [--json]      per UTC day: sessions, spend, models (reconcile
                                  these rows against the provider console)
 
@@ -29,6 +31,12 @@ Everything is configured by environment variables; nothing is hardcoded.
                      appended). Tokens of the command that are existing files
                      are watched, so a change to one re-prices. For tests.
   SYG_CREDIT_NOW     ISO-8601 UTC "now" override (tests).
+  ANTHROPIC_ADMIN_API_KEY  an organization Admin API key: turns on the provider
+                     balance below for balance and statusline. Unset or empty:
+                     no request is made and the output is the ledger estimate,
+                     unchanged. Never printed, logged or passed in argv.
+  SYG_CREDIT_ADMIN_URL  replaces the Admin API origin (default
+                     https://api.anthropic.com; tests point it at a loopback mock).
 
 Metered route test (with SYG_CREDIT_WHEN unset or empty): ANTHROPIC_API_KEY is
 non-empty in the process environment AND ANTHROPIC_BASE_URL is empty or its host
@@ -96,10 +104,40 @@ Each (session, UTC day) entry's spend is dated at its last_ts, so a grant that
 expires mid-UTC-day (a non-UTC tz or a timestamp expiry) can see earlier
 same-day spend replayed after its expiry; date-only UTC expiries align with the
 day split and are exact.
+
+Provider balance (balance and statusline only; hook and daily never fetch):
+with ANTHROPIC_ADMIN_API_KEY set and a live grant, the Admin API's
+/v1/organizations/cost_report is read (curl, 10 s timeout) from 00:00 UTC of the
+earliest live grant's granted day up to the start of the current UTC day, so it
+covers closed UTC days only (no closed day yet: no request). Each page is
+fetched with &limit=31 (the Admin API's enforced max; the default is 7) and
+has_more/next_page pages are followed (up to MAX_PAGES: at 31 buckets a page,
+a 366-day window fits; a page size under the enforced max, a repeated token or
+exhausted pages are a failure that falls back to the labeled estimate); a
+repeated next_page is a failure. Only USD result rows count; each amount is a
+decimal string in cents. Spent is that sum plus the ledger's entries for every
+UTC day after the last provider bucket (the whole window when the response has
+no dated bucket); remaining is the live grants' total minus spent, clamped at 0
+with the rest as overage. The object then carries source "provider", estimate
+false, provider_as_of (the last bucket's UTC day, else the day before the
+window) and ledger_bridge_days (the number of distinct ledger days added); the
+text says "provider-exact as of <day>". lapsed_usd, next_expiry and days_left
+stay the ledger replay's. Any failure (curl error, timeout, HTTP >= 400,
+non-JSON, no data array, an unparsable USD amount, a repeated next_page, a
+non-finite sum) gives the ledger estimate labeled source "ledger", estimate
+true, provider_as_of and ledger_bridge_days null; it never fails the command.
+The new keys (source, provider_as_of, ledger_bridge_days) are absent, and
+estimate stays true, when no fetch is attempted: no key (or one containing CR
+or LF), no live grant, no closed day; a missing source means ledger. The sum is
+cached at ${XDG_CACHE_HOME:-~/.cache}/claude-statusline/api-credit-live.json
+(line 1: the key's SHA-256, the origin and the window; line 2: the numbers) and
+reused for 300 s; a failure is cached the same way (as "failed") for 300 s, so
+a broken endpoint is not re-asked on every render; a corrupt cache is refetched.
 """
 import argparse
 import fcntl
 import glob
+import hashlib
 import json
 import math
 import os
@@ -110,7 +148,8 @@ import subprocess
 import sys
 import tempfile
 from datetime import date, datetime, timedelta, timezone
-from urllib.parse import urlparse
+from decimal import Decimal, InvalidOperation
+from urllib.parse import quote, urlparse
 
 try:
     from zoneinfo import ZoneInfo
@@ -557,6 +596,11 @@ def load_grants():
 FAR = datetime.max.replace(tzinfo=timezone.utc)
 
 
+def live_of(grants, now):
+    """The grants live at now: granted by then and not lapsed by balance()'s replay."""
+    return [g for g in grants if not g["lapsed"] and g["granted"] <= now]
+
+
 def balance(entries, grants_cfg, now):
     spent = sum(e["cost_usd"] for e in entries)
     result = {"estimate": True, "currency": "USD", "spent_usd": round(spent, 6),
@@ -598,7 +642,7 @@ def balance(entries, grants_cfg, now):
         if left > EPS:
             overage += left
     lapse_upto(now)
-    live = [g for g in grants if not g["lapsed"] and g["granted"] <= now]
+    live = live_of(grants, now)
     remaining = sum(g["remaining"] for g in live)
     exps = [g["expires"] for g in live if g["remaining"] > EPS and g["expires"] is not None]
     nxt = min(exps) if exps else None
@@ -615,18 +659,193 @@ def balance(entries, grants_cfg, now):
     return result
 
 
+# ---------------------------------------------------------------- provider balance
+
+ADMIN_URL = "https://api.anthropic.com"
+LIVE_TTL = 300   # seconds a cached cost_report sum is reused (the statusline's render cadence)
+MAX_PAGES = 14   # ceil(366 daily buckets / 31 per page) + margin; page size live-verified
+
+
+def day_start(dt):
+    return dt.replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+def admin_origin():
+    return (os.environ.get("SYG_CREDIT_ADMIN_URL", "") or ADMIN_URL).rstrip("/")
+
+
+def parse_cost_page(doc):
+    """(USD spend as Decimal, last bucket day or None, has_more, next_page) for one
+    cost_report page. Raises ValueError on a shape that cannot be summed."""
+    data = doc.get("data") if isinstance(doc, dict) else None
+    if not isinstance(data, list):
+        raise ValueError("cost_report has no data array")
+    total, last, bad = Decimal(0), None, 0
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        try:
+            day = parse_ts(item.get("starting_at")).strftime("%Y-%m-%d")
+            last = day if last is None or day > last else last
+        except (AttributeError, TypeError, ValueError):
+            pass
+        results = item.get("results")
+        if not isinstance(results, list):
+            continue
+        for r in results:
+            if not isinstance(r, dict) or r.get("currency") != "USD":
+                continue
+            amount = r.get("amount")
+            try:
+                if isinstance(amount, bool) or not isinstance(amount, (str, int, float)):
+                    raise InvalidOperation
+                cents = Decimal(str(amount))
+                if not cents.is_finite():
+                    raise InvalidOperation
+            except InvalidOperation:
+                bad += 1
+                continue
+            total += cents / 100   # amounts are decimal strings in cents
+    if bad:
+        # An unknown amount makes the sum unknown: fall back rather than undercount.
+        raise ValueError("%d unparsable USD amount(s)" % bad)
+    nxt = doc.get("next_page")
+    more = doc.get("has_more") is True and isinstance(nxt, str) and bool(nxt)
+    return total, last, more, nxt
+
+
+def fetch_cost_report(key, start, end):
+    """{"spent": Decimal, "as_of": day} summed over the closed-day cost_report
+    buckets in [start, end), or None on any failure. as_of is the last bucket's
+    day, else the day before start (the whole window is then ledger-bridged). The
+    key reaches curl on stdin (a -K config), never in argv; -q keeps ~/.curlrc out."""
+    base = "%s/v1/organizations/cost_report?starting_at=%s&ending_at=%s&group_by[]=description&limit=31" % (
+        admin_origin(), quote(iso(start), safe=":"), quote(iso(end), safe=":"))
+    cfg = 'header = "x-api-key: %s"\n' % key.replace("\\", "\\\\").replace('"', '\\"')
+    total, as_of, page, seen = Decimal(0), None, None, set()
+    for _ in range(MAX_PAGES):
+        url = base + ("&page=%s" % quote(page, safe="") if page else "")
+        try:
+            res = subprocess.run(["curl", "-q", "-sfg", "-m", "10", "-K", "-",
+                                  "-H", "anthropic-version: 2023-06-01", url],
+                                 input=cfg, capture_output=True, text=True, timeout=15)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if res.returncode != 0:
+            return None   # transport failure, timeout or HTTP >= 400 (-f)
+        try:
+            spent, last, more, page = parse_cost_page(json.loads(res.stdout))
+        except ValueError:
+            return None
+        total += spent
+        if last is not None and (as_of is None or last > as_of):
+            as_of = last
+        if not more:
+            return {"spent": total, "as_of": as_of or (start - timedelta(days=1)).strftime("%Y-%m-%d")}
+        if page in seen:
+            return None   # a repeated next_page makes no progress: a failure, not a loop
+        seen.add(page)
+    return None   # more pages than MAX_PAGES: treat as a failure, not a partial sum
+
+
+def live_cache_path():
+    root = os.environ.get("XDG_CACHE_HOME", "") or os.path.join(os.path.expanduser("~"), ".cache")
+    return os.path.join(root, "claude-statusline", "api-credit-live.json")
+
+
+def provider_spend(key, start, end, now):
+    """The closed-day provider spend, from the TTL cache (line 1: the key's SHA-256,
+    the admin origin and the window; line 2: the numbers) when it is under LIVE_TTL
+    old, else fetched and cached. None on any fetch failure, and for LIVE_TTL
+    after one (a {"failed": true} record); cache errors are ignored (a corrupt
+    cache is refetched, never trusted)."""
+    path = live_cache_path()
+    ident = "%s %s %s %s" % (hashlib.sha256(key.encode("utf-8")).hexdigest(), admin_origin(),
+                             iso(start), iso(end))
+    try:
+        with open(path, encoding="utf-8") as f:
+            line1, line2 = f.readline().rstrip("\n"), f.readline()
+        if line1 == ident:
+            c = json.loads(line2)
+            age = (now - parse_ts(c["fetched_at"])).total_seconds()
+            if 0 <= age < LIVE_TTL and c.get("failed") is True:
+                return None
+            if 0 <= age < LIVE_TTL and isinstance(c["as_of"], str) and isinstance(c["spent"], str):
+                spent = Decimal(c["spent"])
+                if spent.is_finite():
+                    return {"spent": spent, "as_of": c["as_of"]}
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, InvalidOperation):
+        pass
+    got = fetch_cost_report(key, start, end)
+    if got is not None and not math.isfinite(float(got["spent"])):
+        got = None   # e.g. "1E+400" cents: a finite Decimal, an infinite float
+    record = ({"fetched_at": iso(now), "failed": True} if got is None else
+              {"fetched_at": iso(now), "spent": str(got["spent"]), "as_of": got["as_of"]})
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        fd, tmp = tempfile.mkstemp(prefix=".api-credit-live.", suffix=".tmp", dir=os.path.dirname(path))
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(ident + "\n" + json.dumps(record, sort_keys=True) + "\n")
+            os.replace(tmp, path)
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+    except OSError:
+        pass   # an unwritable cache only costs the next call a fetch
+    return got
+
+
+def with_provider(b, entries, grants_cfg, now):
+    """b with spent and remaining from the provider's closed-day cost_report plus
+    the ledger's spend after its last bucket, when ANTHROPIC_ADMIN_API_KEY is set
+    and a live grant exists; labeled ledger fallback on any failure; b untouched
+    without a fetch."""
+    key = os.environ.get("ANTHROPIC_ADMIN_API_KEY", "")
+    if not key or "\r" in key or "\n" in key or grants_cfg is None:
+        return b   # a CR/LF key could inject a curl -K directive: no usable key
+    # live_of reads the sort and "lapsed" flags balance() set on grants_cfg[1] in
+    # place; the window derives from that list, so a copying balance() breaks it.
+    live = live_of(grants_cfg[1], now)
+    if not live:
+        return b
+    start, end = day_start(min(g["granted"] for g in live)), day_start(now)
+    if start >= end:
+        return b   # no closed day since the earliest live grant: nothing to fetch
+    b.update({"source": "ledger", "estimate": True, "provider_as_of": None, "ledger_bridge_days": None})
+    try:
+        got = provider_spend(key, start, end, now)
+    except Exception:  # the balance must never fail on the live path
+        got = None
+    if got is None:
+        return b
+    bridged = [e for e in entries if e["day"] > got["as_of"]]
+    spent = float(got["spent"]) + sum(e["cost_usd"] for e in bridged)
+    left = sum(g["amount"] for g in live) - spent
+    b.update({"source": "provider", "estimate": False, "provider_as_of": got["as_of"],
+              "ledger_bridge_days": len({e["day"] for e in bridged}), "spent_usd": round(spent, 6),
+              "remaining_usd": round(max(left, 0.0), 6), "overage_usd": round(max(-left, 0.0), 6)})
+    return b
+
+
 def balance_text(b):
     """The one-line statusline text for a balance object."""
+    tag = ["provider-exact as of %s" % b["provider_as_of"]] if b.get("source") == "provider" else []
     if b["remaining_usd"] is None:
         return "api ~$%s spent" % money(b["spent_usd"])
     if b["remaining_usd"] > EPS:
         s = "api credit ~$%s" % money(b["remaining_usd"])
-        if b["next_expiry"]:
-            s += " (exp %s, %dd)" % (b["next_expiry"][5:10], b["days_left"])
+        parts = tag + (["exp %s, %dd" % (b["next_expiry"][5:10], b["days_left"])] if b["next_expiry"] else [])
+        if parts:
+            s += " (%s)" % ", ".join(parts)
         return s
+    suffix = " (%s)" % tag[0] if tag else ""
     if b["overage_usd"] > EPS:
-        return "api credit over ~$%s" % money(b["overage_usd"])
-    return "api credit ~$0.00"
+        return "api credit over ~$%s%s" % (money(b["overage_usd"]), suffix)
+    return "api credit ~$0.00" + suffix
 
 
 # ---------------------------------------------------------------- daily
@@ -670,8 +889,11 @@ def need_ledger():
 
 
 def current_balance():
+    """The balance for the read-only commands (balance, statusline): the ledger
+    estimate, replaced by the provider figures when the live path answers."""
     entries, _ = read_ledger(need_ledger())
-    return balance(entries, load_grants(), utcnow())
+    grants_cfg, now = load_grants(), utcnow()
+    return with_provider(balance(entries, grants_cfg, now), entries, grants_cfg, now)
 
 
 def main(argv=None):
@@ -707,8 +929,10 @@ def main(argv=None):
             print(json.dumps(b, sort_keys=True))
         else:
             print(balance_text(b))
-            print("spent ~$%s, lapsed ~$%s, overage ~$%s (estimate)"
-                  % (money(b["spent_usd"]), money(b["lapsed_usd"]), money(b["overage_usd"])))
+            basis = ("provider-exact as of %s; today and lapsed from the ledger" % b["provider_as_of"]
+                     if b.get("source") == "provider" else "estimate")
+            print("spent ~$%s, lapsed ~$%s, overage ~$%s (%s)"
+                  % (money(b["spent_usd"]), money(b["lapsed_usd"]), money(b["overage_usd"]), basis))
         return 0
     if args.cmd == "daily":
         entries, _ = read_ledger(need_ledger())

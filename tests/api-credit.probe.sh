@@ -4,7 +4,9 @@
 # dedupe, subagent transcripts, UTC day split, pricing incl. 1h vs 5m cache writes,
 # unpriced models, idempotence, cross-session dedupe, old-format entries, garbage
 # lines, concurrency), the read-only `statusline`, the FIFO-by-expiry balance
-# estimate and the daily view.
+# estimate and the daily view, and the provider balance (Admin API cost_report:
+# window, pagination, ledger bridge, TTL and failure caching, labeled fallback)
+# against a loopback mock server with a fixture admin key (SYG_CREDIT_ADMIN_URL).
 # Hermetic: HOME and every SYG_CREDIT_* / ANTHROPIC_* variable are set per call
 # (env -i); transcripts are invented fixtures; the price table is a stub script
 # (SYG_CREDIT_PRICE_TABLE_CMD); all paths are under one temp dir.
@@ -382,5 +384,243 @@ if [ "$(nlines "$T/par/l.jsonl")" = 20 ] && [ "$(jq -c . "$T/par/l.jsonl" | wc -
 else bad "concurrency: $(nlines "$T/par/l.jsonl") lines"; fi
 [ -z "$(find "$T" -name '*.tmp')" ] \
   && ok "no stray *.tmp files after the parallel and sequential writes" || bad "stray tmp files: $(find "$T" -name '*.tmp')"
+
+# 19. Provider balance: cost_report from a loopback mock (SYG_CREDIT_ADMIN_URL) with a
+#     fixture admin key. The mock serves $T/cr/<mode>.json (mode read from $T/cr/mode
+#     per request; "401" answers 401; "paged" serves paged1 then, for page=p2, paged2;
+#     "loop" always answers has_more with the same next_page), drops buckets before
+#     the request's starting_at, and logs path, x-api-key and anthropic-version.
+#     A curl wrapper first on PATH logs each argv, so the key's absence there is checked.
+mkdir -p "$T/cr" "$T/cbin"
+cat > "$T/cr/srv.py" <<'PY'
+import json, os, sys
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from urllib.parse import parse_qs, urlsplit
+d = sys.argv[1]
+class H(BaseHTTPRequestHandler):
+    def do_GET(self):
+        with open(os.path.join(d, "hits.log"), "a") as f:
+            f.write("%s\t%s\t%s\n" % (self.path, self.headers.get("x-api-key", "-"), self.headers.get("anthropic-version", "-")))
+        mode = open(os.path.join(d, "mode")).read().strip()
+        if mode == "401":
+            self.send_response(401); self.send_header("Content-Length", "0"); self.end_headers(); return
+        if mode == "paged":
+            mode = "paged2" if "page=p2" in self.path else "paged1"
+        data = open(os.path.join(d, mode + ".json"), "rb").read()
+        start = parse_qs(urlsplit(self.path).query).get("starting_at", [""])[0]
+        try:
+            doc = json.loads(data)
+            doc["data"] = [b for b in doc["data"] if b.get("starting_at", "") >= start]
+            data = json.dumps(doc).encode()
+        except (ValueError, KeyError, TypeError, AttributeError):
+            pass   # the malformed fixtures are served verbatim
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+    def log_message(self, *a):
+        pass
+s = HTTPServer(("127.0.0.1", 0), H)
+with open(os.path.join(d, "port.tmp"), "w") as f:
+    f.write(str(s.server_port))
+os.rename(os.path.join(d, "port.tmp"), os.path.join(d, "port"))
+s.serve_forever()
+PY
+echo ok > "$T/cr/mode"
+python3 -I "$T/cr/srv.py" "$T/cr" &
+SRV_PID=$!
+trap 'kill "$SRV_PID" 2>/dev/null; rm -rf "$T"' EXIT
+for _ in $(seq 1 50); do [ -s "$T/cr/port" ] && break; sleep 0.1; done
+[ -s "$T/cr/port" ] || { echo "api-credit.probe: mock server did not start"; exit 2; }
+CR="http://127.0.0.1:$(cat "$T/cr/port")"
+REAL_CURL=$(command -v curl)
+printf '#!/bin/bash\nprintf "%%s\\n" "$*" >> %q\nexec %q "$@"\n' "$T/cr/argv.log" "$REAL_CURL" > "$T/cbin/curl"
+chmod +x "$T/cbin/curl"
+: > "$T/cr/hits.log"; : > "$T/cr/argv.log"
+hits() { nlines "$T/cr/hits.log"; }
+# Closed days 10-05..10-08: USD 370.289 + 1000 cents (= 13.70289), a EUR row ignored,
+# a bucket without results and one with a non-list results skipped.
+cat > "$T/cr/ok.json" <<'EOF'
+{"data":[
+ {"starting_at":"2026-10-05T00:00:00Z","ending_at":"2026-10-06T00:00:00Z","results":[{"currency":"USD","amount":"370.289","description":"x"}]},
+ {"starting_at":"2026-10-06T00:00:00Z","ending_at":"2026-10-07T00:00:00Z"},
+ {"starting_at":"2026-10-07T00:00:00Z","ending_at":"2026-10-08T00:00:00Z","results":"nope"},
+ {"starting_at":"2026-10-08T00:00:00Z","ending_at":"2026-10-09T00:00:00Z","results":[{"currency":"USD","amount":"1000"},{"currency":"EUR","amount":"999"}]}
+],"has_more":false,"next_page":null}
+EOF
+echo '{"data":[{"starting_at":"2026-10-08T00:00:00Z","ending_at":"2026-10-09T00:00:00Z","results":[{"currency":"USD","amount":"1000000"}]}]}' > "$T/cr/big.json"
+echo 'not json' > "$T/cr/nonjson.json"
+echo '{"error":"x"}' > "$T/cr/nodata.json"
+echo '{"data":[{"starting_at":"2026-10-08T00:00:00Z","ending_at":"2026-10-09T00:00:00Z","results":[{"currency":"USD","amount":"12abc"}]}]}' > "$T/cr/badamount.json"
+echo '{"data":[{"starting_at":"2026-10-05T00:00:00Z","ending_at":"2026-10-06T00:00:00Z","results":[{"currency":"USD","amount":"370.289"}]}],"has_more":true,"next_page":"p2"}' > "$T/cr/paged1.json"
+echo '{"data":[{"starting_at":"2026-10-08T00:00:00Z","ending_at":"2026-10-09T00:00:00Z","results":[{"currency":"USD","amount":"1000"}]}],"has_more":false}' > "$T/cr/paged2.json"
+echo '{"data":[{"starting_at":"2026-10-05T00:00:00Z","ending_at":"2026-10-06T00:00:00Z","results":[{"currency":"USD","amount":"1"}]}],"has_more":true,"next_page":"same"}' > "$T/cr/loop.json"
+echo '{"data":[{"starting_at":"2026-10-07T00:00:00Z","ending_at":"2026-10-08T00:00:00Z","results":[{"currency":"USD","amount":"1000"}]}],"has_more":false}' > "$T/cr/lag.json"
+echo '{"data":[],"has_more":false}' > "$T/cr/nobucket.json"
+echo '{"data":[{"starting_at":"2026-10-08T00:00:00Z","ending_at":"2026-10-09T00:00:00Z","results":[{"currency":"USD","amount":"1E+400"}]}]}' > "$T/cr/inf.json"
+echo '{"grants":[{"amount":100,"granted":"2026-10-05","expires":"2026-10-21"}]}' > "$T/g-live.json"
+{ entry a 2026-10-06 2026-10-06T12:00:00Z 5; entry b 2026-10-09 2026-10-09T12:00:00Z 2.5; } > "$T/lv.jsonl"
+entry a 2026-10-06 2026-10-06T12:00:00Z 5 > "$T/lv-notoday.jsonl"
+LNOW=2026-10-09T15:00:00Z
+# lv CACHE-DIR CMD... [VAR=value ...]: balance/statusline with the fixture key against the mock.
+lv() {
+  local c=$1; shift
+  local args=()
+  while [ $# -gt 0 ] && [[ "$1" != *=* ]]; do args+=("$1"); shift; done
+  env -i PATH="$T/cbin:$PATH" HOME="$T" XDG_CACHE_HOME="$T/cache-$c" SYG_CREDIT_PRICE_TABLE_CMD="$T/pt.sh" \
+    SYG_CREDIT_LEDGER="$T/lv.jsonl" SYG_CREDIT_GRANTS="$T/g-live.json" SYG_CREDIT_NOW="$LNOW" \
+    ANTHROPIC_ADMIN_API_KEY=fixture-admin-key SYG_CREDIT_ADMIN_URL="$CR" "$@" python3 -B "$AC" "${args[@]}"
+}
+# The no-key reference: today's ledger estimate (spent 5 + 2.5, remaining 92.50).
+nk=$(ac SYG_CREDIT_LEDGER="$T/lv.jsonl" SYG_CREDIT_GRANTS="$T/g-live.json" SYG_CREDIT_NOW="$LNOW" -- balance --json)
+nkt=$(ac SYG_CREDIT_LEDGER="$T/lv.jsonl" SYG_CREDIT_GRANTS="$T/g-live.json" SYG_CREDIT_NOW="$LNOW" -- statusline < /dev/null)
+nkb=$(ac SYG_CREDIT_LEDGER="$T/lv.jsonl" SYG_CREDIT_GRANTS="$T/g-live.json" SYG_CREDIT_NOW="$LNOW" -- balance)
+nke=$(ac SYG_CREDIT_LEDGER="$T/lv.jsonl" SYG_CREDIT_GRANTS="$T/g-live.json" SYG_CREDIT_NOW="$LNOW" ANTHROPIC_ADMIN_API_KEY= SYG_CREDIT_ADMIN_URL="$CR" -- balance --json)
+if [ "$nk" = '{"currency": "USD", "days_left": 11, "estimate": true, "granted_total_live": 100.0, "lapsed_usd": 0.0, "live_grants": 1, "next_expiry": "2026-10-21T00:00:00Z", "overage_usd": 0.0, "remaining_usd": 92.5, "spent_usd": 7.5}' ] \
+  && [ "$nkt" = 'api credit ~$92.50 (exp 10-21, 11d)' ] \
+  && [ "$nkb" = $'api credit ~$92.50 (exp 10-21, 11d)\nspent ~$7.50, lapsed ~$0.00, overage ~$0.00 (estimate)' ] \
+  && [ "$nke" = "$nk" ] && [ "$(hits)" = 0 ]; then
+  ok "provider: no key (or an empty one) -> today's ledger output byte for byte, no new fields, no request"
+else bad "provider no-key: '$nk' / '$nkt' / '$nkb' / '$nke' / hits $(hits)"; fi
+
+# 19a. Live ok: spent and remaining from one family (13.70289 closed days + 2.50 today).
+b=$(lv ok balance --json)
+txt=$(lv ok statusline < /dev/null)
+if near "$(jq .spent_usd <<< "$b")" 16.20289 && near "$(jq .remaining_usd <<< "$b")" 83.79711 \
+  && jq -e '.source=="provider" and .estimate==false and .provider_as_of=="2026-10-08" and .ledger_bridge_days==1
+      and .overage_usd==0 and .next_expiry=="2026-10-21T00:00:00Z" and .days_left==11 and .live_grants==1' <<< "$b" > /dev/null; then
+  ok "provider: live ok -> spent 16.20289 (13.70289 provider + 2.50 today), remaining 83.79711, source provider, as of 2026-10-08"
+else bad "provider live ok: $b"; fi
+[ "$txt" = 'api credit ~$83.80 (provider-exact as of 2026-10-08, exp 10-21, 11d)' ] \
+  && ok "provider: text 'api credit ~\$83.80 (provider-exact as of 2026-10-08, exp 10-21, 11d)'" || bad "provider text: '$txt'"
+req=$(head -n 1 "$T/cr/hits.log")
+[ "$req" = $'/v1/organizations/cost_report?starting_at=2026-10-05T00:00:00Z&ending_at=2026-10-09T00:00:00Z&group_by[]=description&limit=31\tfixture-admin-key\t2023-06-01' ] \
+  && ok "provider: request window [earliest live grant day, start of today), group_by description, x-api-key and anthropic-version headers" || bad "provider request: '$req'"
+cf="$T/cache-ok/claude-statusline/api-credit-live.json"
+if [ "$(hits)" = 1 ] && ! grep -q fixture-admin-key "$T/cr/argv.log" && ! grep -q fixture-admin-key "$cf" \
+  && [ "$(head -n 1 "$cf" | cut -d' ' -f1)" = "$(printf '%s' fixture-admin-key | sha256sum | cut -d' ' -f1)" ] \
+  && ! grep -v "http://127.0.0.1:" "$T/cr/argv.log" | grep -q .; then
+  ok "provider: one request (the statusline call reused the cache); key absent from curl argv and from the cache (line 1 holds its SHA-256); every URL loopback"
+else bad "provider key hygiene: hits $(hits) / argv $(cat "$T/cr/argv.log") / cache $(cat "$cf")"; fi
+b=$(lv ok balance)
+[ "$b" = $'api credit ~$83.80 (provider-exact as of 2026-10-08, exp 10-21, 11d)\nspent ~$16.20, lapsed ~$0.00, overage ~$0.00 (provider-exact as of 2026-10-08; today and lapsed from the ledger)' ] \
+  && ok "provider: balance text second line names the provider basis" || bad "provider balance text: '$b'"
+
+# 19b. TTL: inside 300 s no second request; past it, a refetch; a corrupt cache is refetched.
+: > "$T/cr/hits.log"
+lv ttl balance --json > /dev/null; lv ttl balance --json SYG_CREDIT_NOW=2026-10-09T15:04:59Z > /dev/null; t1=$(hits)
+lv ttl balance --json SYG_CREDIT_NOW=2026-10-09T15:05:00Z > /dev/null; t2=$(hits)
+echo garbage > "$T/cache-ttl/claude-statusline/api-credit-live.json"
+b=$(lv ttl balance --json SYG_CREDIT_NOW=2026-10-09T15:05:00Z); t3=$(hits)
+[ "$t1" = 1 ] && [ "$t2" = 2 ] && [ "$t3" = 3 ] && jq -e '.source=="provider"' <<< "$b" > /dev/null \
+  && ok "provider TTL: second call at +299 s -> no request (1); at +300 s -> refetch (2); corrupt cache -> refetch (3)" \
+  || bad "provider TTL: hits $t1/$t2/$t3 $b"
+
+# 19b2. A failure is cached too: a 401, then +60 s -> no request, still the labeled
+#       fallback; past 300 s -> refetch, and a success overwrites the failed record.
+echo 401 > "$T/cr/mode"; : > "$T/cr/hits.log"
+lv neg balance --json > /dev/null; n1=$(hits)
+b=$(lv neg balance --json SYG_CREDIT_NOW=2026-10-09T15:01:00Z); n2=$(hits)
+txt=$(lv neg statusline SYG_CREDIT_NOW=2026-10-09T15:01:00Z < /dev/null); n3=$(hits)
+echo ok > "$T/cr/mode"
+b2=$(lv neg balance --json SYG_CREDIT_NOW=2026-10-09T15:05:00Z); n4=$(hits)
+lv neg balance --json SYG_CREDIT_NOW=2026-10-09T15:06:00Z > /dev/null; n5=$(hits)
+if [ "$n1" = 1 ] && [ "$n2" = 1 ] && [ "$n3" = 1 ] && [ "$n4" = 2 ] && [ "$n5" = 2 ] \
+  && [ "$(jq -c 'del(.source, .provider_as_of, .ledger_bridge_days)' <<< "$b")" = "$(jq -c . <<< "$nk")" ] \
+  && jq -e '.source=="ledger" and .estimate==true' <<< "$b" > /dev/null && [ "$txt" = "$nkt" ] \
+  && jq -e '.source=="provider"' <<< "$b2" > /dev/null; then
+  ok "provider failure cache: 401 then +60 s -> no request (hits 1), labeled ledger fallback; +300 s -> refetch, success overwrites (hits 2, then reused)"
+else bad "provider failure cache: hits $n1/$n2/$n3/$n4/$n5 / $b / '$txt' / $b2"; fi
+
+# 19c. Today bridge: without today's ledger entries, spent is the provider sum alone.
+b=$(lv nobridge balance --json SYG_CREDIT_LEDGER="$T/lv-notoday.jsonl")
+near "$(jq .spent_usd <<< "$b")" 13.70289 && near "$(jq .remaining_usd <<< "$b")" 86.29711 && jq -e '.ledger_bridge_days==0' <<< "$b" > /dev/null \
+  && ok "provider bridge: no ledger spend today -> spent 13.70289, bridge days 0 (today's 2.50 is added only when present)" || bad "provider bridge: $b"
+
+# 19c2. A lagging provider: every ledger day after the last bucket is bridged.
+{ entry a 2026-10-07 2026-10-07T12:00:00Z 4; entry b 2026-10-08 2026-10-08T12:00:00Z 5; entry c 2026-10-09 2026-10-09T12:00:00Z 2.5; } > "$T/lv-lag.jsonl"
+echo lag > "$T/cr/mode"
+b=$(lv lag balance --json SYG_CREDIT_LEDGER="$T/lv-lag.jsonl")
+near "$(jq .spent_usd <<< "$b")" 17.5 && jq -e '.source=="provider" and .provider_as_of=="2026-10-07" and .ledger_bridge_days==2' <<< "$b" > /dev/null \
+  && ok "provider bridge: last bucket 10-07 -> spent 10.00 + 10-08's 5.00 + 10-09's 2.50 (10-07's ledger 4.00 not added), bridge days 2" \
+  || bad "provider lag bridge: $b"
+echo nobucket > "$T/cr/mode"
+b=$(lv nobucket balance --json)
+near "$(jq .spent_usd <<< "$b")" 7.5 && jq -e '.source=="provider" and .provider_as_of=="2026-10-04" and .ledger_bridge_days==2' <<< "$b" > /dev/null \
+  && ok "provider bridge: no dated bucket -> as of 10-04 (the day before the window), the whole window bridged (spent 7.50, bridge days 2)" \
+  || bad "provider no-bucket bridge: $b"
+echo ok > "$T/cr/mode"
+
+# 19c3. The window starts at the earliest LIVE grant (a lapsed one is skipped), floored
+#       to 00:00 UTC whatever the grant's tz.
+echo '{"grants":[{"amount":50,"granted":"2026-10-01","expires":"2026-10-05"},{"amount":100,"granted":"2026-10-06","expires":"2026-10-21"}]}' > "$T/g-lapse.json"
+: > "$T/cr/hits.log"
+b=$(lv lapse balance --json SYG_CREDIT_GRANTS="$T/g-lapse.json")
+case "$(head -n 1 "$T/cr/hits.log")" in
+  *'starting_at=2026-10-06T00:00:00Z&'*) req_ok=1 ;; *) req_ok=0 ;; esac
+[ "$req_ok" = 1 ] && near "$(jq .spent_usd <<< "$b")" 12.5 && near "$(jq .remaining_usd <<< "$b")" 87.5 \
+  && jq -e '.source=="provider" and .live_grants==1' <<< "$b" > /dev/null \
+  && ok "provider window: lapsed 10-01..10-05 grant + live 10-06 grant -> starting_at 10-06, spent 10.00 + 2.50 (no 10-05 bucket), remaining 87.50 of the live 100" \
+  || bad "provider lapsed window: $(head -n 1 "$T/cr/hits.log") / $b"
+echo '{"grants":[{"amount":100,"granted":"2026-10-05","expires":"2026-10-21","tz":"America/New_York"}]}' > "$T/g-ny.json"
+: > "$T/cr/hits.log"
+lv ny balance --json SYG_CREDIT_GRANTS="$T/g-ny.json" > /dev/null
+case "$(head -n 1 "$T/cr/hits.log")" in
+  *'starting_at=2026-10-05T00:00:00Z&'*) ok "provider window: a 2026-10-05 America/New_York grant (04:00Z) -> starting_at floored to 2026-10-05T00:00:00Z" ;;
+  *) bad "provider tz floor: $(head -n 1 "$T/cr/hits.log")" ;; esac
+
+# 19c4. A key with CR or LF is no usable key: the no-key output, no request.
+: > "$T/cr/hits.log"
+b=$(lv crlf balance --json ANTHROPIC_ADMIN_API_KEY=$'bad\nkey')
+b2=$(lv crlf2 balance --json ANTHROPIC_ADMIN_API_KEY=$'bad\rkey')
+[ "$b" = "$nk" ] && [ "$b2" = "$nk" ] && [ "$(hits)" = 0 ] \
+  && ok "provider: a key containing LF or CR -> today's no-key output byte for byte, no request" || bad "provider crlf key: $b / $b2 / hits $(hits)"
+
+# 19d. Overage on the provider path: one family, clamped remaining.
+echo big > "$T/cr/mode"
+b=$(lv big balance --json); txt=$(lv big statusline < /dev/null)
+near "$(jq .spent_usd <<< "$b")" 10002.5 && near "$(jq .remaining_usd <<< "$b")" 0 && near "$(jq .overage_usd <<< "$b")" 9902.5 \
+  && [ "$txt" = 'api credit over ~$9902.50 (provider-exact as of 2026-10-08)' ] \
+  && ok "provider overage: spent 10002.50 against 100 -> remaining 0, overage 9902.50, labeled text" || bad "provider overage: $b / '$txt'"
+
+# 19e. Pages: has_more/next_page followed, both summed.
+echo paged > "$T/cr/mode"; : > "$T/cr/hits.log"
+b=$(lv paged balance --json)
+near "$(jq .spent_usd <<< "$b")" 16.20289 && [ "$(hits)" = 2 ] && grep -q 'page=p2' "$T/cr/hits.log" && jq -e '.provider_as_of=="2026-10-08"' <<< "$b" > /dev/null \
+  && ok "provider pages: next_page followed (2 requests), sum 13.70289 + 2.50" || bad "provider pages: $b / $(cat "$T/cr/hits.log")"
+echo loop > "$T/cr/mode"; : > "$T/cr/hits.log"
+b=$(lv loop balance --json)
+[ "$(hits)" -le 3 ] && jq -e '.source=="ledger" and .estimate==true and .spent_usd==7.5' <<< "$b" > /dev/null \
+  && ok "provider pages: the same next_page again -> stop after $(hits) requests (not 20), labeled ledger fallback" \
+  || bad "provider page loop: hits $(hits) / $b"
+
+# 19f. Every failure falls back to the ledger estimate, labeled; never a non-zero exit.
+fb=""
+for m in 401 nonjson nodata badamount inf; do
+  echo "$m" > "$T/cr/mode"
+  b=$(lv "fb-$m" balance --json); rc=$?
+  txt=$(lv "fb-$m" statusline < /dev/null)
+  if [ "$rc" = 0 ] && [ "$(jq -c 'del(.source, .provider_as_of, .ledger_bridge_days)' <<< "$b")" = "$(jq -c . <<< "$nk")" ] \
+    && jq -e '.source=="ledger" and .estimate==true and .provider_as_of==null and .ledger_bridge_days==null' <<< "$b" > /dev/null \
+    && [ "$txt" = "$nkt" ]; then :; else fb="$fb $m:$b:'$txt'"; fi
+done
+echo ok > "$T/cr/mode"
+b=$(lv fb-down balance --json SYG_CREDIT_ADMIN_URL=http://127.0.0.1:9); rc=$?
+[ "$rc" = 0 ] && jq -e '.source=="ledger" and .spent_usd==7.5 and .remaining_usd==92.5' <<< "$b" > /dev/null || fb="$fb refused:$b"
+[ -z "$fb" ] && ok "provider fallback: 401, non-JSON, no data array, bad amount, a non-finite sum, refused connection -> ledger estimate (spent 7.50, remaining 92.50), source ledger, exit 0" \
+  || bad "provider fallback:$fb"
+
+# 19g. No fetch: hook and daily never request; no live grant or no closed day -> unchanged output.
+: > "$T/cr/hits.log"
+payload R | lv hookx hook SYG_CREDIT_FORCE=1 SYG_CREDIT_LEDGER="$T/hookx/l.jsonl" > /dev/null 2>&1
+lv dailyx daily --json > /dev/null
+echo '{"grants":[{"amount":100,"granted":"2026-10-01","expires":"2026-10-05"}]}' > "$T/g-dead.json"
+nd=$(lv nolive balance --json SYG_CREDIT_GRANTS="$T/g-dead.json")
+echo '{"grants":[{"amount":100,"granted":"2026-10-09T08:00:00Z"}]}' > "$T/g-today.json"
+nt=$(lv notclosed balance --json SYG_CREDIT_GRANTS="$T/g-today.json")
+[ "$(hits)" = 0 ] && [ -s "$T/hookx/l.jsonl" ] && ! jq -e 'has("source")' <<< "$nd" > /dev/null && ! jq -e 'has("source")' <<< "$nt" > /dev/null \
+  && ok "provider: hook, daily, no live grant and a grant from today make no request and add no fields" \
+  || bad "provider no-fetch: hits $(hits) / $nd / $nt"
 
 exit $fail
