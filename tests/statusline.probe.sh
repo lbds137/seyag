@@ -160,6 +160,16 @@ render '{"context_window":{"current_usage":{"input_tokens":1000}},"model":{"disp
 render '{"context_window":{"current_usage":{"input_tokens":1000}},"model":{"display_name":"GLM-5.3-Flash"},"cwd":"/tmp"}' \
     | grep -q $'\x1b\\[38;2;215;255;130mG' && ok "gradient: glm flash opens lime" || bad "flash gradient: missing"
 
+# 17b. Other lanes' model families each open their own fade (matched on the
+# lowercased display name); an unlisted name keeps the silver fade.
+for fam in 'Sonnet 5.5|223;120;90|S' 'Mistral Large|255;112;0|M' 'gemini-2.5-pro|140;180;250|g' \
+    'GPT-5|16;163;127|G' 'deepseek-v3|77;107;254|d' 'kimi-k2|120;100;250|k' 'qwen-3|120;100;250|q' \
+    'SomeModel|255;255;255|S'; do
+    IFS='|' read -r fname frgb fch <<< "$fam"
+    render "{\"context_window\":{\"current_usage\":{\"input_tokens\":1000}},\"model\":{\"display_name\":\"$fname\"},\"cwd\":\"/tmp\"}" \
+        | grep -q $'\x1b\\[38;2;'"${frgb}m${fch}" && ok "gradient: $fname opens $frgb" || bad "gradient $fname: missing $frgb"
+done
+
 # 18-20. Seyag-plugin segment: reads the installed registry + the repo
 # manifest (both overridable for hermeticity). Yellow ⬆ ONLY when the
 # manifest is strictly newer (sort -V); plain gray when equal; the whole
