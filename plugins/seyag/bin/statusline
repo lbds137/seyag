@@ -684,4 +684,12 @@ if [ -n "${SYG_STATUSLINE_WRAP_COLUMNS:-}" ] && [ -n "${COLUMNS:-}" ] \
     output=$(printf '%s' "$output" | wrap_rows "$COLUMNS")
 fi
 
+# Debug aid (SYG_STATUSLINE_DEBUG=1): the wrap gate's two inputs, appended to
+# the last row after layout. Screenshot it while rotating/resizing the
+# terminal: a cols that never changes with the viewport is a stale pty size,
+# not a wrap bug.
+if [ "${SYG_STATUSLINE_DEBUG:-}" = "1" ]; then
+  output+="${sep}${gray}cols=${COLUMNS:-unset} wrap=${SYG_STATUSLINE_WRAP_COLUMNS:-off}${reset}"
+fi
+
 echo -e "$output"

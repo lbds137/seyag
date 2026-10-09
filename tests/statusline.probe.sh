@@ -66,7 +66,10 @@ route_anthropic() { jq '.env.ANTHROPIC_BASE_URL = "https://api.anthropic.com"' "
 route_or() { jq '.env.ANTHROPIC_BASE_URL = "https://openrouter.ai/api/v1"' "$h/.claude/settings.json" > "$h/.claude/settings.json.new" && mv "$h/.claude/settings.json.new" "$h/.claude/settings.json"; }
 route_host() { jq --arg u "$1" '.env.ANTHROPIC_BASE_URL = $u' "$h/.claude/settings.json" > "$h/.claude/settings.json.new" && mv "$h/.claude/settings.json.new" "$h/.claude/settings.json"; }
 render() {
-  local env_args=(-u ANTHROPIC_BASE_URL -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u SYG_CREDIT_LEDGER -u SYG_CREDIT_GRANTS -u SYG_CREDIT_FORCE -u COLUMNS -u SYG_STATUSLINE_WRAP_COLUMNS)
+  local env_args=(-u ANTHROPIC_BASE_URL -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u SYG_CREDIT_LEDGER -u SYG_CREDIT_GRANTS -u SYG_CREDIT_FORCE -u COLUMNS -u SYG_STATUSLINE_WRAP_COLUMNS -u SYG_STATUSLINE_DEBUG)
+  if [ -n "${PROBE_DEBUG:-}" ]; then
+    env_args+=("SYG_STATUSLINE_DEBUG=$PROBE_DEBUG")
+  fi
   if [ -n "${PROBE_AUTH_TOKEN:-}" ]; then
     env_args+=("ANTHROPIC_AUTH_TOKEN=$PROBE_AUTH_TOKEN")
   fi
@@ -520,7 +523,10 @@ grep -qF 'platform.claude.com ~$48.00' <<< "$out" && ! grep -qF '(exp' <<< "$out
 # 40-44. Lane routing, each with rate_limits in the input. The process env decides.
 lane_in='{"rate_limits":{"five_hour":{"used_percentage":83,"resets_at":1790790548},"seven_day":{"used_percentage":56,"resets_at":1791093600}},"context_window":{"current_usage":{"input_tokens":1000}},"model":{"display_name":"X"},"cwd":"/tmp"}'
 lane() { # VAR=value ...: render lane_in under exactly these env vars
-    local env_args=(-u ANTHROPIC_BASE_URL -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u SYG_CREDIT_LEDGER -u SYG_CREDIT_GRANTS -u SYG_CREDIT_FORCE -u COLUMNS -u SYG_STATUSLINE_WRAP_COLUMNS)
+    local env_args=(-u ANTHROPIC_BASE_URL -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u SYG_CREDIT_LEDGER -u SYG_CREDIT_GRANTS -u SYG_CREDIT_FORCE -u COLUMNS -u SYG_STATUSLINE_WRAP_COLUMNS -u SYG_STATUSLINE_DEBUG)
+    if [ -n "${PROBE_DEBUG:-}" ]; then
+        env_args+=("SYG_STATUSLINE_DEBUG=$PROBE_DEBUG")
+    fi
     if [ -n "${PROBE_COLUMNS:-}" ]; then
         env_args+=("COLUMNS=$PROBE_COLUMNS")
     fi
@@ -681,6 +687,18 @@ out=$(strip <<< "$(PROBE_COLUMNS=40 PROBE_WRAP=120 render "$long_cwd_in")")
 long_row=$(grep -F -- "$long_dir" <<< "$out" | head -n 1)
 [ "$(wc -l <<< "$out")" -ge 2 ] && grep -qF -- "$long_dir" <<< "$out" && [ "${#long_row}" -gt 40 ] \
     && ok "wrap W7: a segment wider than the budget keeps its own overflowing row, untruncated" || bad "wrap W7: $out"
+
+# D1-D3. Debug suffix (SYG_STATUSLINE_DEBUG=1): the wrap gate's two inputs
+# on the last row, after layout; off by default.
+out=$(strip <<< "$(PROBE_DEBUG=1 render "$lane_in")")
+grep -qF 'cols=' <<< "$out" && grep -qF 'wrap=off' <<< "$out" \
+    && ok "debug D1: flag on, nothing set -> cols= and wrap=off" || bad "debug D1: $out"
+out=$(strip <<< "$(PROBE_DEBUG=1 PROBE_COLUMNS=110 PROBE_WRAP=120 render "$lane_in")")
+grep -qF 'cols=110 wrap=120' <<< "$out" \
+    && ok "debug D2: the suffix reports the values the layout saw" || bad "debug D2: $out"
+out=$(strip <<< "$(render "$lane_in")")
+! grep -qF 'cols=' <<< "$out" \
+    && ok "debug D3: flag unset -> no suffix" || bad "debug D3: $out"
 printf '{"env":{"ANTHROPIC_AUTH_TOKEN":"dummy-probe-token"},"modelSettings":{"glm-5.3":{"effortLevel":"high"},"glm-5.3-flash":{"effortLevel":"max"},"claude-opus-5-5":{"effortLevel":"high"}}}' > "$h/.claude/settings.json"
 
 exit $fail
