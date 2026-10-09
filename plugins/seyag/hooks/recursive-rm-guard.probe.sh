@@ -201,4 +201,52 @@ for phrase in 'RECURSIVE-RM GUARD' 'rm -rf build-output' 'unrecoverable' 'NEW di
 done
 lines=$(printf '%s\n' "$msg" | wc -l)
 if [ "$lines" -le 15 ]; then echo "ok   message is $lines lines"; else echo "FAIL message is $lines lines (> 15)"; fail=1; fi
+case "$msg" in
+  *safe-worktree-clean*) echo "FAIL a non-worktree message names safe-worktree-clean"; fail=1 ;;
+  *) echo "ok   a non-worktree message leaves safe-worktree-clean out" ;;
+esac
+# A blocked delete under .claude/worktrees also names safe-worktree-clean.
+msg=$(jq -nc --arg c 'rm -rf .claude/worktrees/agent-x' '{tool_input: {command: $c}}' | CLAUDE_JOB_DIR="" bash "$HOOK" 2>&1 >/dev/null)
+case "$msg" in
+  *'safe-worktree-clean --repo <repo> [--apply] (it judges the seven SAFE criteria first)'*)
+    echo "ok   a worktree delete's message names safe-worktree-clean" ;;
+  *) echo "FAIL a worktree delete's message lacks the safe-worktree-clean line"; fail=1 ;;
+esac
+lines=$(printf '%s\n' "$msg" | wc -l)
+if [ "$lines" -le 16 ]; then echo "ok   worktree message is $lines lines"; else echo "FAIL worktree message is $lines lines (> 16)"; fail=1; fi
+# The hint follows the delete's TARGET, not the text: a cd into a worktree before an unrelated
+# scratch delete blocks without it.
+c='cd /srv/team/repo/.claude/worktrees/agent-x && T=$(mktemp -d) && rm -r "$T"'
+msg=$(jq -nc --arg c "$c" '{tool_input: {command: $c}}' | CLAUDE_JOB_DIR="" bash "$HOOK" 2>&1 >/dev/null)
+case "$msg" in
+  *safe-worktree-clean*) echo "FAIL a delete merely next to a worktree path names safe-worktree-clean: $c"; fail=1 ;;
+  RECURSIVE-RM*) echo "ok   blocks without the worktree line: $c" ;;
+  *) echo "FAIL not blocked: $c"; fail=1 ;;
+esac
+
+# Nudge: a forced `git worktree remove` passes (exit 0) with one line of additionalContext.
+nudge() { # $1 want "yes" or "no", $2 command
+  local out rc ctx
+  out=$(jq -nc --arg c "$2" '{tool_input: {command: $c}}' | CLAUDE_JOB_DIR="" bash "$HOOK" 2>/dev/null)
+  rc=$?
+  ctx=$(jq -r '.hookSpecificOutput.additionalContext // empty' <<<"$out" 2>/dev/null)
+  if [ "$1" = yes ] && [ "$rc" = 0 ] && [ "$(jq -r '.hookSpecificOutput.hookEventName' <<<"$out")" = PreToolUse ] \
+    && [ "$ctx" = "worktree removal is gated by safe-worktree-clean — run it first; it removes SAFE trees on --apply" ]; then
+    echo "ok   nudges, allows: $2"
+  elif [ "$1" = no ] && [ "$rc" = 0 ] && [ -z "$out" ]; then
+    echo "ok   no nudge: $2"
+  else
+    echo "FAIL [nudge want $1, rc $rc, out '$out']: $2"; fail=1
+  fi
+}
+nudge yes 'git worktree remove --force .claude/worktrees/agent-x'
+nudge yes 'git -C /srv/team/repo worktree remove -f .claude/worktrees/agent-x'
+nudge yes 'git -c core.x=1 worktree remove -ff locked-tree'
+nudge yes 'cd /srv/team/repo && sudo git worktree remove --force wt'
+nudge yes 'git worktree remove wt --force'
+nudge no 'git worktree remove wt'
+nudge no 'git worktree list --porcelain'
+nudge no 'echo "git worktree remove --force wt"'
+nudge no 'safe-worktree-clean --repo /srv/team/repo --apply'
+run 2 'git worktree remove --force wt && rm -rf /srv/team/other'   # a block still wins
 exit $fail

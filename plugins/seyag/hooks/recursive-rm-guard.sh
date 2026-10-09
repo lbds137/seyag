@@ -40,6 +40,14 @@
 # the hook sees only the Bash tool command. Also not seen: a command inside a QUOTED
 # substitution or a backtick span, and `find -exec sh -c '...rm -r...'`.
 #
+# When a blocked command's rm target or find root is a .claude/worktrees path (merely naming
+# one, e.g. in a cd, is not enough), the message also points at safe-worktree-clean, which judges
+# an agent worktree before removing it.
+#
+# Nudges, never blocks: a command that is not blocked but runs `git worktree remove` with -f or
+# --force (also behind git's global options or a runner prefix) passes with one line of
+# additionalContext pointing at safe-worktree-clean. Whoever insists simply proceeds.
+#
 # Bypass: put SYG_ALLOW_RM=1 in the command, ONLY for a deletion the owner
 # approved in this conversation.
 # Fail-open: no python3/jq, unparsable input or command, lib import failure → exit 0.
@@ -64,32 +72,67 @@ CWD=$(jq -r '.cwd // empty' <<<"$INPUT" 2>/dev/null) || CWD=""
 HOOK_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib"
 # The command goes to python on fd 3, never through the environment: Linux caps one env string
 # at 128 KiB (MAX_ARG_STRLEN), and python failing to exec would fail open.
+# Exit 10 (not 0) means "allow, with the worktree-removal nudge"; 11 means "block, and an rm target
+# or find root is in a .claude/worktrees path".
 HITS=$(CWD="$CWD" HOOK_LIB="$HOOK_LIB" PYTHONDONTWRITEBYTECODE=1 python3 - 3<<<"$CMD" <<'PYEOF'
-import os, sys
+import os, re, sys
 
 # An import failure exits non-zero, which the caller treats as allow (fail-open).
 sys.path.insert(0, os.environ["HOOK_LIB"])
-from delete_commands import analyze, cache_lines, cache_only, job_scratch
+from delete_commands import analyze, cache_lines, cache_only, job_scratch, worktree_target
+from shell_quotes import command_pipelines, unwrap_runners
 
-hits, dir_changed, relinked = analyze(os.fsdecode(open(3, "rb").read()).removesuffix("\n"))
+# git's global options that take the next word as their value.
+GIT_VALUE_OPTS = ("-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env")
+
+
+def forced_worktree_remove(argv):
+    if not argv or os.path.basename(argv[0]) != "git":
+        return False
+    i = 1
+    while i < len(argv) and argv[i].startswith("-"):
+        i += 2 if argv[i] in GIT_VALUE_OPTS else 1
+    rest = argv[i:]
+    return rest[:2] == ["worktree", "remove"] and any(
+        a == "--force" or re.fullmatch(r"-f+", a) for a in rest[2:])
+
+
+text = os.fsdecode(open(3, "rb").read()).removesuffix("\n")
+hits, dir_changed, relinked = analyze(text)
+try:  # the nudge must never cost the block below
+    ALLOW = 10 if any(forced_worktree_remove(unwrap_runners(raw)[0])
+                      for pipeline in command_pipelines(text) for raw in pipeline) else 0
+except Exception:
+    ALLOW = 0
 if not hits:
-    sys.exit(0)
+    sys.exit(ALLOW)
 if all(cache_only(h) for h in hits) and cache_lines(hits):
-    sys.exit(0)  # cache-rm-redirect blocks these with its safe-clean message
+    sys.exit(ALLOW)  # cache-rm-redirect blocks these with its safe-clean message
 # The session's job scratch dir. Claude Code sets CLAUDE_JOB_DIR in the hook's environment
 # (observed on live hook processes); an interactive session without a job dir gets no exemption.
 job_dir = os.environ.get("CLAUDE_JOB_DIR", "")
 cwd = os.environ.get("CWD", "")
 if not relinked and all(
         cache_only(h) or job_scratch(h, job_dir, cwd, dir_changed) for h in hits):
-    sys.exit(0)
+    sys.exit(ALLOW)
 for h in hits:
     line = h["line"]
     print(line if len(line) <= 160 else line[:157] + "...")
+sys.exit(11 if worktree_target(hits) else 0)
 PYEOF
-) || exit 0
+)
+PY_RC=$?
+if [ "$PY_RC" = 10 ]; then
+  jq -nc --arg ctx "worktree removal is gated by safe-worktree-clean — run it first; it removes SAFE trees on --apply" \
+    '{hookSpecificOutput: {hookEventName: "PreToolUse", additionalContext: $ctx}}'
+  exit 0
+fi
+[ "$PY_RC" = 0 ] || [ "$PY_RC" = 11 ] || exit 0
 
 [ -n "$HITS" ] || exit 0
+
+WORKTREE_HINT=""
+[ "$PY_RC" = 11 ] && WORKTREE_HINT=$'\n'"  - agent worktrees: safe-worktree-clean --repo <repo> [--apply] (it judges the seven SAFE criteria first)."
 
 cat >&2 <<EOF
 RECURSIVE-RM GUARD — a recursive or mass delete needs the owner's approval
@@ -102,7 +145,7 @@ owner's approval, scratch included. Instead:
   - put scratch under \$CLAUDE_JOB_DIR/tmp, removed with the job; rm -r there is allowed when
     each target is a literal \$CLAUDE_JOB_DIR/tmp/<name> path (not \$T, not \$(mktemp -d));
   - outside a job, leave scratch where it is or make a NEW directory rather than emptying one;
-  - regenerable caches: safe-clean <path> (safe-clean --dry-run shows what would go).
+  - regenerable caches: safe-clean <path> (safe-clean --dry-run shows what would go).${WORKTREE_HINT}
 Prefix SYG_ALLOW_RM=1 ONLY for a deletion the owner approved in this conversation
 (File Deletion Protocol: list what goes, check gitignored, wait for her yes).
 EOF

@@ -165,6 +165,13 @@ def cache_lines(hits):
     return lines
 
 
+def worktree_target(hits):
+    """True when an rm target or a find root lies in a .claude/worktrees path (the text of
+    the path only: a relative target is not resolved against a cd)."""
+    return any(re.search(r"(^|/)\.claude/worktrees(/|$)", p)
+               for h in hits for p in h.get("targets", []) + h.get("roots", []))
+
+
 def cache_only(hit):
     """True when this hit deletes only caches; cache_lines([hit]) is then non-empty."""
     if hit["kind"] == "rm":
