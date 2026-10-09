@@ -212,7 +212,7 @@ if [ "$n1" = 1 ] && [ "$n2" = 1 ] && [ "$n2b" = 2 ] && [ "$n3" = 3 ] && near "$(
 else bad "sources_sig: calls $n1/$n2/$n2b/$n3 $(cat "$T/c/l.jsonl")"; fi
 
 # 8c2. A multi-token override ("sh SCRIPT"): the script token is watched, not just "sh".
-printf 'echo x >> %q\ncat %q\n' "$T/pt2-calls" "$T/prices.json" > "$T/pt2.sh"
+printf '[ "$1" = --json ] || exit 9\necho x >> %q\ncat %q\n' "$T/pt2-calls" "$T/prices.json" > "$T/pt2.sh"
 : > "$T/pt2-calls"
 uline msg-m1 req-m1 m-a ${D1}T10:00:00Z $M 0 > "$P/MT.jsonl"
 hk MT "$T/mt/l.jsonl" SYG_CREDIT_PRICE_TABLE_CMD="sh $T/pt2.sh"; m1=$(nlines "$T/pt2-calls")

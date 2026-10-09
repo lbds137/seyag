@@ -45,8 +45,10 @@ assert "~z-ai/glm-flash-latest" in o, "bare alias key missing"
 assert "glm-5.3-flash[1m]" in o, "bracket-suffix key missing"
 assert "google/gemini-3.1-flash-lite" in o, "gemini-lite key missing"
 # corrected rates (the table's current OR values) pinned
-assert o["~z-ai/glm-flash-latest"]["output"] == 3.032682, "alias output not the live rate"
-assert o["~z-ai/glm-flash-latest:nitro"]["output"] == 3.032682, "nitro output not the live rate"
+assert o["~z-ai/glm-flash-latest"]["output"] == 0.083071, "alias output not the live rate"
+assert o["~z-ai/glm-flash-latest:nitro"]["output"] == 0.083071, "nitro output not the live rate"
+assert o["z-ai/glm-5.3"]["output"] == 6.00, "glm-5.3 output not the live rate"
+assert o["~z-ai/glm-latest"]["output"] == 6.00, "glm-latest output not the live rate"
 assert o["~openai/gpt-astra-latest"]["cacheWrite"] == 12.5, "astra cacheWrite"
 assert o["~openai/gpt-sol-latest"]["cacheWrite"] == 2.5, "sol cacheWrite"
 assert o["~openai/gpt-luna-latest"]["cacheWrite"] == 0.125, "luna cacheWrite"
@@ -204,7 +206,7 @@ fi
 
 # --sync: fixture OR models JSON. z-ai/glm-5.3-flash output drifts (9.99);
 # ~openai/gpt-luna-latest cacheWrite drifts (0.125 -> 0.225); ~z-ai alias rows
-# carry the live 0.000003032682 completion (no drift); :nitro absent from the
+# carry the live 0.000000083071 completion (no drift); :nitro absent from the
 # feed and resolved via its bare alias; the z-ai rows publish no cache-write
 # field (their cacheWrite is never checked).
 models="$T/models.json"
@@ -212,9 +214,9 @@ python3 - "$models" <<'PY'
 import json, sys
 rows = [
     ("z-ai/glm-5.3-flash", "0.00000015", "0.00000999", "0.00000003", None),
-    ("z-ai/glm-5.3", "0.000000049", "0.00000339", "0.000000048", None),
-    ("~z-ai/glm-flash-latest", "0.000000032", "0.000003032682", "0.00000002", None),
-    ("~z-ai/glm-latest", "0.000000036", "0.000012", "0.0000000335", None),
+    ("z-ai/glm-5.3", "0.00000005", "0.000006", "0.000000049", None),
+    ("~z-ai/glm-flash-latest", "0.000000032", "0.000000083071", "0.00000001", None),
+    ("~z-ai/glm-latest", "0.00000005", "0.000006", "0.000000049", None),
     ("~anthropic/claude-fable-latest", "0.00001", "0.00005", "0.00000025", "0.0000125"),
     ("~openai/gpt-sol-latest", "0.000002", "0.00001", "0.0000001", "0.0000025"),
     ("~openai/gpt-luna-latest", "0.0000001", "0.0000005", "0.00000001", "0.000000225"),
@@ -250,7 +252,7 @@ c = json.loads(out[out.index("{"):])["modelPricing"]["overrides"]
 assert abs(c["z-ai/glm-5.3-flash"]["output"] - 9.99) < 1e-9, "output drift not in candidate"
 assert abs(c["~openai/gpt-luna-latest"]["cacheWrite"] - 0.225) < 1e-9, "cacheWrite drift not in candidate"
 assert c["z-ai/glm-5.3-flash"]["cacheWrite"] == 0.15, "sync touched unpublished cacheWrite"
-assert c["~z-ai/glm-flash-latest"]["output"] == 3.032682, "non-drift row changed"
+assert c["~z-ai/glm-flash-latest"]["output"] == 0.083071, "non-drift row changed"
 PY
 then ok "--sync: updated candidate has the drifts, untouched rows and unpublished cacheWrite intact"
 else bad "--sync: updated candidate wrong"; fi
