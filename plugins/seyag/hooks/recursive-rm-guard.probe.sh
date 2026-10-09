@@ -55,10 +55,10 @@ run 2 "bash -c 'rm -rf x'"
 run 2 "sh -c 'cd /tmp && rm -rf x'"
 run 2 $'cat <<\'EOF\' | bash\nrm -rf x\nEOF'
 run 2 $'bash <<\'EOF\'\nrm -rf x\nEOF'
-run 2 "watch 'rm -rf /home/deck/x'"               # watch runs its joined args via sh -c
-run 2 'watch -n5 rm -rf /home/deck/x'
-run 2 "watch -q 3 'rm -rf /home/deck/x'"           # -q/--equexit take a value
-run 2 "watch --equexit 3 'rm -rf /home/deck/x'"
+run 2 "watch 'rm -rf /home/example/x'"               # watch runs its joined args via sh -c
+run 2 'watch -n5 rm -rf /home/example/x'
+run 2 "watch -q 3 'rm -rf /home/example/x'"           # -q/--equexit take a value
+run 2 "watch --equexit 3 'rm -rf /home/example/x'"
 run 2 "builtin trap 'rm -rf x' EXIT"
 run 2 "builtin eval 'rm -rf x'"
 # Blocked: find and xargs.
@@ -83,37 +83,37 @@ run 2 'find . -name node_modules -prune; ls ~ | xargs -n 1 rm -rf'  # that find 
 run 2 'xargs -a list.txt rm -rf'
 run 2 'find . -name node_modules; xargs rm -rf < list.txt'          # an earlier pipeline's find
 run 2 'find . -name node_modules | grep -v keep | xargs rm -rf'    # a filter sits between them
-run 2 $'# it\'s fine\nrm -rf /home/deck/x'                       # apostrophe in a comment
-run 2 $'echo hi # don\'t worry\nrm -rf /home/deck/x'
-run 2 "sudo bash -c 'rm -rf /home/deck/x'"
-run 2 "timeout 60 bash -c 'rm -rf /home/deck/x'"
-run 2 'eval rm -rf /home/deck/x'
-run 2 'echo "rm -rf /home/deck/x" | bash'
-run 2 'bash <<< "rm -rf /home/deck/x"'
-run 2 "rm \$'-rf' /home/deck/x"                                   # ANSI-C quoted flag
-run 2 'rm $"-rf" /home/deck/x'
-run 2 'rm --recu /home/deck/x'                                    # a prefix of --recursive
-run 2 'rm --r /home/deck/x'
-run 2 'rm -rf 2>&1 /home/deck/x'                                  # the & of a redirection
-run 2 'rm -rf &>/dev/null /home/deck/x'
-run 2 'r\m -rf /home/deck/x'                                      # prefilter vs escaped name
-run 2 "r''m -rf /home/deck/x"
-run 2 'setsid rm -rf /home/deck/x'
-run 2 'stdbuf -o L rm -rf /home/deck/x'
-run 2 'distrobox enter tools -- rm -rf /home/deck/x'
-run 2 'coproc rm -rf /home/deck/x'
+run 2 $'# it\'s fine\nrm -rf /home/example/x'                       # apostrophe in a comment
+run 2 $'echo hi # don\'t worry\nrm -rf /home/example/x'
+run 2 "sudo bash -c 'rm -rf /home/example/x'"
+run 2 "timeout 60 bash -c 'rm -rf /home/example/x'"
+run 2 'eval rm -rf /home/example/x'
+run 2 'echo "rm -rf /home/example/x" | bash'
+run 2 'bash <<< "rm -rf /home/example/x"'
+run 2 "rm \$'-rf' /home/example/x"                                   # ANSI-C quoted flag
+run 2 'rm $"-rf" /home/example/x'
+run 2 'rm --recu /home/example/x'                                    # a prefix of --recursive
+run 2 'rm --r /home/example/x'
+run 2 'rm -rf 2>&1 /home/example/x'                                  # the & of a redirection
+run 2 'rm -rf &>/dev/null /home/example/x'
+run 2 'r\m -rf /home/example/x'                                      # prefilter vs escaped name
+run 2 "r''m -rf /home/example/x"
+run 2 'setsid rm -rf /home/example/x'
+run 2 'stdbuf -o L rm -rf /home/example/x'
+run 2 'distrobox enter tools -- rm -rf /home/example/x'
+run 2 'coproc rm -rf /home/example/x'
 run 2 'ls | xargs --max-args 1 rm -rf'
 run 2 'ls | xargs --some-future-option 1 rm -rf'                   # unknown long option: value consumed
 # Blocked: shapes a reviewer showed passing (round 3).
 run 2 "${BIGDOC}rm -rf build"                                     # a command past 128 KiB
 run 2 $'trap \'rm -rf "$tmp"\' EXIT; tmp=$(mktemp -d)'            # a trap action is a command
 run 2 "trap -- 'rm -rf build' EXIT INT"
-run 2 'watch rm -rf /home/deck/x'
-run 2 'watch -n 5 rm -rf /home/deck/x'                            # -n takes a value
-run 2 'watch --interval 5 -d rm -rf /home/deck/x'
+run 2 'watch rm -rf /home/example/x'
+run 2 'watch -n 5 rm -rf /home/example/x'                            # -n takes a value
+run 2 'watch --interval 5 -d rm -rf /home/example/x'
 run 2 'pkexec rm -rf /opt/thing'
 run 2 'pkexec --user root rm -rf /opt/thing'
-run 2 'unbuffer rm -rf /home/deck/x'
+run 2 'unbuffer rm -rf /home/example/x'
 # Allowed: not a recursive or mass delete.
 run 0 'rm file.txt'
 run 0 'rm -f file.txt'
@@ -123,7 +123,7 @@ run 0 'rm -- -r build'                           # two files: -r and build
 run 0 'rm -f -- -rf notes'
 run 0 'find . -name "*.log"'
 run 0 'git rm -r --cached dir'                   # argv[0] is git
-run 0 '# rm -rf /home/deck/x'                    # a comment is not a command
+run 0 '# rm -rf /home/example/x'                    # a comment is not a command
 run 0 'echo a#b; echo $#'                        # mid-word # and $# are not comments
 run 0 'echo "rm -rf x"'                          # quoted text, not a command
 run 0 $'echo "cd /tmp\nrm -rf x"'                # a quoted newline is text
@@ -173,14 +173,14 @@ run 2 'rm -rf $(mktemp -d)'
 run 2 'rm -rf $CLAUDE_JOB_DIR/*/x'                      # the glob's folder is not under tmp
 run 2 'find $CLAUDE_JOB_DIR/tmp/x /tmp/y -delete'
 run 2 'ls | xargs rm -rf'
-run 2 'cd /home/deck && rm -rf Projects/x' "$TMP/job/tmp"             # cd before a relative target
-run 2 'env -C /home/deck rm -rf Projects/x' "$TMP/job/tmp"            # a runner that changes dir
-run 2 'sudo -D /home/deck rm -rf Projects/x' "$TMP/job/tmp"
+run 2 'cd /home/example && rm -rf Projects/x' "$TMP/job/tmp"             # cd before a relative target
+run 2 'env -C /home/example rm -rf Projects/x' "$TMP/job/tmp"            # a runner that changes dir
+run 2 'sudo -D /home/example rm -rf Projects/x' "$TMP/job/tmp"
 run 2 'rm -rf $CLAUDE_JOB_DIR/tmp/{a,../..}'                          # brace expansion
-run 2 'ln -s /home/deck $CLAUDE_JOB_DIR/tmp/l && rm -rf $CLAUDE_JOB_DIR/tmp/l/'
-run 2 'mv /home/deck/x $CLAUDE_JOB_DIR/tmp/x; rm -rf $CLAUDE_JOB_DIR/tmp/x'
-run 2 'CLAUDE_JOB_DIR=/home/deck; rm -rf $CLAUDE_JOB_DIR/tmp/x'
-run 2 'export CLAUDE_JOB_DIR=/home/deck; rm -rf $CLAUDE_JOB_DIR/tmp/x'
+run 2 'ln -s /home/example $CLAUDE_JOB_DIR/tmp/l && rm -rf $CLAUDE_JOB_DIR/tmp/l/'
+run 2 'mv /home/example/x $CLAUDE_JOB_DIR/tmp/x; rm -rf $CLAUDE_JOB_DIR/tmp/x'
+run 2 'CLAUDE_JOB_DIR=/home/example; rm -rf $CLAUDE_JOB_DIR/tmp/x'
+run 2 'export CLAUDE_JOB_DIR=/home/example; rm -rf $CLAUDE_JOB_DIR/tmp/x'
 JOBDIR="$TMP/no-such-job"                                # a job dir that does not exist
 run 2 'rm -rf $CLAUDE_JOB_DIR/tmp/scratch'
 JOBDIR=""                                                # no job at all (interactive session)

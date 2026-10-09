@@ -19,7 +19,7 @@ BIGDOC=$'git commit -F - <<\'EOF\'\n'"$(printf '%*s' 214000 '' | tr ' ' x)"$'\nE
 
 # Blocked: walks of /, /home, the home folder or the Drive mount.
 run 2 'find / -name errors.go'
-run 2 'find / -path /home/deck/gdrive -prune -o -name "*.go" -print 2>/dev/null | head'
+run 2 'find / -path /home/example/gdrive -prune -o -name "*.go" -print 2>/dev/null | head'
 run 2 'find ~ -name foo'
 run 2 'find $HOME -type f'
 run 2 'find "${HOME}/" -newer x'

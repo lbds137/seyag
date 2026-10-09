@@ -4,10 +4,6 @@
 # '#' comments and blank lines allowed). The probe enforces both directions:
 # a new coupling reference either becomes config or gets an entry here
 # deliberately, and an entry must be removed the day the reference dies.
-# /home/deck
-/home/deck:plugins/seyag/hooks/broad-walk-guard.probe.sh
-/home/deck:plugins/seyag/hooks/recursive-rm-guard.probe.sh
-/home/deck:tests/shell_quotes_cases.py
 # gdrive
 gdrive:README.md
 gdrive:plugins/seyag/bin/context-audit
