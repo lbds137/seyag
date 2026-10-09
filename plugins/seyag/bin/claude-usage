@@ -1,0 +1,224 @@
+#!/bin/bash
+# claude-usage: the Claude plan's usage windows, shared by every session on this machine.
+#
+#   claude-usage              one line: 5h window % and reset, weekly % and reset, per-model weekly caps
+#   claude-usage --ok [PCT]   exit 0 if the 5h window is below PCT% (default 90), the week is under 75% and
+#                             the calling session's model (Fable) has its own weekly cap left, else 1;
+#                             on the z.ai lane the same thresholds apply to z.ai's own quota, with the
+#                             5h one capped at 80% (Tzurot's guests get the band above it);
+#                             other routed lanes (OpenRouter, a Console API key) pass at once (see below)
+#   claude-usage --wait [PCT] block until --ok PCT (default 50, i.e. the 5h window reset) passes, checking
+#                             every 2 minutes, then print the line; run it in the background to pause a session
+#   claude-usage --json       {five_hour_pct, five_hour_resets_at, seconds_to_reset, weekly_pct, weekly_resets_at, scoped, routed}
+#
+# Reads the statusline's cache of /api/oauth/usage (~/.cache/claude-statusline/usage.json)
+# and refreshes it when it is older than 2 minutes, under a lock, so any number of polling
+# sessions make at most one request per 2 minutes. The token is sent on stdin, not argv.
+# Every run also appends the reading, if new, to ~/.local/state/claude-usage/readings.jsonl
+# (see log_reading; usage-sweep --points reads it).
+
+set -uo pipefail
+
+cache="${XDG_CACHE_HOME:-$HOME/.cache}/claude-statusline/usage.json"
+ttl=120
+# Fleet wind-down (2026-10-04): no new units from 75% of the week, so the rest stays for the owner
+# and GitHub claude-review. The 80% hard stop is the CLAUDE.md "Usage Windows" protocol's job.
+# CLAUDE_USAGE_WEEK_RESERVE overrides it; a non-integer value keeps the default.
+week_reserve=75
+[[ ${CLAUDE_USAGE_WEEK_RESERVE:-} =~ ^[0-9]+$ ]] && week_reserve=$((10#$CLAUDE_USAGE_WEEK_RESERVE))
+# z.ai's 5h window, capped below Tzurot's free-tier cutoff: Tzurot moves guests off GLM once the
+# HIGHER of z.ai's 5h and weekly meters reaches its zaiHeadroomPercent (90), so dev work stops
+# starting at 80% in either window and leaves guests a 10-15 point band.
+# CLAUDE_USAGE_ZAI_FIVE_CAP overrides it; a non-integer value keeps the default.
+zai_five_cap=80
+[[ ${CLAUDE_USAGE_ZAI_FIVE_CAP:-} =~ ^[0-9]+$ ]] && zai_five_cap=$((10#$CLAUDE_USAGE_ZAI_FIVE_CAP))
+
+refresh() {
+    local age tok tmp
+    age=$(( $(date +%s) - $(stat -c %Y "$cache" 2>/dev/null || echo 0) ))
+    [ "$age" -lt "$ttl" ] && return 0
+    mkdir -p "${cache%/*}"
+    exec 9>"$cache.lock"
+    flock -n 9 || return 0 # someone else is refreshing; use what's there
+    tok=$(jq -r '.claudeAiOauth.accessToken // empty' "$HOME/.claude/.credentials.json" 2>/dev/null)
+    [ -z "$tok" ] && return 0
+    tmp="$cache.tmp.$$"
+    if printf 'Authorization: Bearer %s\n' "$tok" |
+        curl -sf -m 10 -H @- -H "anthropic-beta: oauth-2025-04-20" \
+            https://api.anthropic.com/api/oauth/usage -o "$tmp" &&
+        jq -e '.five_hour' "$tmp" >/dev/null 2>&1; then
+        mv "$tmp" "$cache"
+    else
+        rm -f "$tmp"
+    fi
+}
+
+# The calling session's model: $CLAUDE_USAGE_MODEL, else the latest reply in its transcript
+# (Claude Code sets CLAUDE_CODE_SESSION_ID; a subagent reports its parent session's model).
+caller_model() {
+    local f
+    if [ -n "${CLAUDE_USAGE_MODEL:-}" ]; then
+        echo "$CLAUDE_USAGE_MODEL"
+        return
+    fi
+    [ -n "${CLAUDE_CODE_SESSION_ID:-}" ] || return 0
+    f=$(ls -t "$HOME"/.claude/projects/*/"$CLAUDE_CODE_SESSION_ID".jsonl 2>/dev/null | head -1)
+    [ -n "$f" ] || return 0
+    tac "$f" | jq -r 'select(.type == "assistant") | .message.model // empty' 2>/dev/null | head -1
+}
+
+if [ "${1:-}" = --wait ]; then
+    until "$0" --ok "${2:-50}"; do sleep 120; done
+    exec "$0"
+fi
+
+# Routing: the usage API below meters the Anthropic plan only, so while a session is routed
+# elsewhere its numbers are an idle plan's. The base-URL host is classified exactly as the
+# statusline classifies it; the Console-key lane is not (see below). The process env is the truth when it sets ANTHROPIC_BASE_URL, even to empty (a
+# session exports its own route to the commands it runs); otherwise settings.json decides, read
+# fresh each run. The match is on the base URL's HOST, end-anchored, so a lookalike such as
+# api.anthropic.com.evil.com can't borrow another lane; userinfo is stripped, so no credential
+# reaches a label. An empty or absent base URL is the plan lane.
+if [ -n "${ANTHROPIC_BASE_URL+x}" ]; then
+    base_url=$ANTHROPIC_BASE_URL
+else
+    base_url=$(jq -r '.env.ANTHROPIC_BASE_URL // empty' "$HOME/.claude/settings.json" 2>/dev/null)
+fi
+vendor_host=$(printf '%s' "$base_url" \
+    | sed -E 's#^[a-zA-Z]+://##; s#/.*$##; s#^.*@##; s#:[0-9]*$##' \
+    | tr '[:upper:]' '[:lower:]')
+vendor_lane=unknown
+case "$vendor_host" in
+    z.ai|*.z.ai)                       vendor_lane=zai ;;
+    api.anthropic.com|*.anthropic.com) vendor_lane=anthropic ;;
+    openrouter.ai|*.openrouter.ai)     vendor_lane=or ;;
+    '') [ -z "$base_url" ] &&          vendor_lane=anthropic ;;
+esac
+# A Console API key (the anthropic-api route preset) outranks the /login subscription: same
+# endpoint, but the bill is Console credits, so the plan meter is idle for that session, as on
+# OpenRouter. Keyed on the overlay's CC_ROUTE_PRESET marker, not the key: an ANTHROPIC_API_KEY
+# exported for some SDK script in a plan session must not switch the plan gate off. (The
+# statusline differs on purpose: it keys its API-key lane on a non-empty ANTHROPIC_API_KEY, or on
+# SYG_CREDIT_WHEN when set, because it only labels a render and never gates.)
+[ "$vendor_lane" = anthropic ] && [ "${CC_ROUTE_PRESET:-}" = anthropic-api ] && vendor_lane=console
+routed=1
+[ "$vendor_lane" = anthropic ] && routed=0
+zai_spend=${CLAUDE_USAGE_ZAI_SPEND:-$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/zai-spend}
+
+# The gate answers before refresh or the cache check: a routed session needs no plan request.
+# z.ai has its own 5h and weekly windows, read live from z.ai's quota API by zai-spend, so the same
+# thresholds apply there (2026-10-04: a pass-through let the fleet burn a whole z.ai week).
+# zai-spend's local fallback estimate is not account truth, so it never blocks. Other lanes
+# (OpenRouter) pass: their limit is a dollar cap the provider enforces itself.
+if [ "${1:-}" = --ok ] && [ "$routed" = 1 ]; then
+    [ "$vendor_lane" = zai ] || exit 0
+    zai=$("$zai_spend" --json 2>/dev/null)
+    if [ "$(jq -r '.source // empty' <<< "$zai" 2>/dev/null)" != api ]; then
+        echo "claude-usage: z.ai quota API unavailable (zai-spend has only a local estimate); gate passes" >&2
+        exit 0
+    fi
+    zfive=$(jq -r '.five_hour_pct // 0' <<< "$zai"); zweek=$(jq -r '.week_pct // 0' <<< "$zai")
+    zlimit=${2:-90}; [ "$zlimit" -gt "$zai_five_cap" ] && zlimit=$zai_five_cap
+    [ "$zfive" -lt "$zlimit" ] && [ "$zweek" -lt "$week_reserve" ]
+    exit
+fi
+
+refresh
+if [ ! -s "$cache" ]; then
+    echo "claude-usage: no usage data (no cache and the refresh failed)" >&2
+    exit 2
+fi
+
+# resets_at looks like 2026-09-25T06:09:59.682848+00:00; fromdateiso8601 wants ...:59Z
+# The last field is the per-model weekly caps ("Fable 8%"), which can contain spaces.
+read -r five five_reset week week_reset scoped < <(jq -r '
+    def epoch: (. // "") | sub("\\.[0-9]+"; "") | sub("\\+00:00$"; "Z")
+        | if . == "" then 0 else (fromdateiso8601? // 0) end;
+    [ (.five_hour.utilization // 0 | round), (.five_hour.resets_at | epoch),
+      (.seven_day.utilization // 0 | round), (.seven_day.resets_at | epoch),
+      ([ .limits[]? | select(.kind == "weekly_scoped" and .scope.model.display_name != null)
+         | "\(.scope.model.display_name) \(.percent)%" ] | join(", ")) ] | @tsv' "$cache" 2>/dev/null)
+
+now=$(date +%s)
+to_reset=$(( five_reset > now ? five_reset - now : 0 ))
+
+# Reading log for usage-sweep --points (2026-09-27): one JSON line per distinct reading, ts = when
+# the cache was fetched, raw (unrounded) percentages, per-model weekly caps as an object. A reading
+# identical to the previous line (same numbers) is skipped. Machine-local by design: usage figures
+# stay off every repo (usage-audit's privacy boundary). Never fails, blocks or prints to the
+# caller: all its stderr is dropped, and a busy lock skips this reading (the next call logs).
+log_reading() {
+    local log="${XDG_STATE_HOME:-$HOME/.local/state}/claude-usage/readings.jsonl" line last fetched
+    mkdir -p "${log%/*}" || return 0
+    fetched=$(stat -c %Y "$cache") || return 0
+    # -S sorts keys, so the dedup string comparison can't be fooled by the API's scope order.
+    line=$(jq -cS --argjson fetched "$fetched" '{
+        ts: ($fetched | todate), epoch: $fetched,
+        five_hour_pct: (.five_hour.utilization // null),
+        weekly_pct: (.seven_day.utilization // null),
+        scoped: ([ .limits[]? | select(.kind == "weekly_scoped" and .scope.model.display_name != null)
+                   | {key: .scope.model.display_name, value: .percent} ] | from_entries)
+    }' "$cache") || return 0
+    [ -n "$line" ] || return 0
+    (
+        flock -n 8 || exit 0
+        last=$(tail -n 1 "$log")
+        [ "$(jq -cS 'del(.ts, .epoch)' <<< "$last")" = "$(jq -cS 'del(.ts, .epoch)' <<< "$line")" ] && exit 0
+        printf '%s\n' "$line" >> "$log"
+    ) 8>"$log.lock"
+}
+log_reading 2>/dev/null
+
+case "${1:-}" in
+    --ok)
+        # A week at the reserve blocks everything, whatever the 5h window says: the last 25% is
+        # reserved for the owner and GitHub claude-review (2026-10-04). --wait then sleeps until
+        # the weekly reset instead of waking on each fresh 5h window.
+        [ "$five" -lt "${2:-90}" ] && [ "$week" -lt "$week_reserve" ] || exit 1
+        # A model's own weekly cap ("Fable 100%") blocks only sessions on that model.
+        model=$(caller_model)
+        [ -z "$model" ] && exit 0
+        while IFS= read -r cap; do
+            name=${cap% *}
+            pct=${cap##* }
+            pct=${pct%%.*} # truncate: 99.6 still has room
+            [[ ${model,,} == *"${name,,}"* ]] && [ "$pct" -ge 100 ] && exit 1
+        done < <(sed 's/, /\n/g; s/%//g' <<< "$scoped" | grep .)
+        exit 0
+        ;;
+    --json)
+        printf '{"five_hour_pct":%d,"five_hour_resets_at":%d,"seconds_to_reset":%d,"weekly_pct":%d,"weekly_resets_at":%d,"scoped":"%s","routed":%d}\n' \
+            "$five" "$five_reset" "$to_reset" "$week" "$week_reset" "$scoped" "$routed"
+        ;;
+    "")
+        five_line="5h ${five}%"
+        if [ "$five_reset" -gt 0 ]; then
+            five_line="$five_line (resets $(date -d "@$five_reset" +%H:%M), in $((to_reset / 3600))h$(( (to_reset % 3600) / 60 ))m)"
+        fi
+        week_line="week ${week}%"
+        # Date and countdown, not just a weekday: "Sun 02:00" read on a Sunday evening looks like tonight.
+        if [ "$week_reset" -gt 0 ]; then
+            to_week=$(( week_reset - $(date +%s) )); [ "$to_week" -lt 0 ] && to_week=0
+            week_line="$week_line (resets $(date -d "@$week_reset" '+%a %b %-d %H:%M'), in $((to_week / 86400))d$(( (to_week % 86400) / 3600 ))h)"
+        fi
+        [ -n "$scoped" ] && week_line="$week_line · $scoped of its own weekly cap"
+        # No Fable-vs-week target (usage parity dropped 2026-10-04): use the best and most
+        # cost-effective model for the job, and keep Fable, which burns the week fastest, low.
+        note=""
+        if [ "$vendor_lane" = zai ]; then
+            note="z.ai-routed (gate reads z.ai's quota; Anthropic plan idle) · "
+            # zai-spend's line: z.ai's live quota, or a local estimate tagged "local est".
+            glm=$("$zai_spend" --line 2>/dev/null)
+            [ -n "$glm" ] && week_line="$week_line · z.ai $glm"
+        elif [ "$routed" = 1 ]; then
+            case "$vendor_lane" in or) lane=OpenRouter ;; console) lane="Console API key" ;; *) lane=$vendor_host ;; esac
+            # A base URL with no host (e.g. "https://") has no label, as in the statusline: no note.
+            [ -n "$lane" ] && note="$lane-routed (gate passes; Anthropic plan idle) · "
+        fi
+        echo "$note$five_line · $week_line"
+        ;;
+    *)
+        sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'
+        exit 2
+        ;;
+esac

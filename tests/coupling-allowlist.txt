@@ -23,15 +23,6 @@ lbds137:CLAUDE.md
 # Lila
 Lila:CLAUDE.md
 Lila:plugins/seyag/skills/going-public/SKILL.md
-# claude-usage
-claude-usage:README.md
-claude-usage:plugins/seyag/bin/usage-sweep
-claude-usage:plugins/seyag/skills/advisor/SKILL.md
-claude-usage:plugins/seyag/skills/delegation/SKILL.md
-claude-usage:plugins/seyag/skills/driver-choice/SKILL.md
-claude-usage:plugins/seyag/skills/usage-audit/SKILL.md
-claude-usage:tests/advisor-skill.probe.sh
-claude-usage:tests/usage-sweep.probe.sh
 # claude-role
 claude-role:plugins/seyag/bin/context-audit
 claude-role:plugins/seyag/skills/doc-audit/SKILL.md
