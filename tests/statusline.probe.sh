@@ -58,7 +58,7 @@ printf '{"env":{"ANTHROPIC_AUTH_TOKEN":"dummy-probe-token"},"modelSettings":{"gl
 export HOME="$h" XDG_CACHE_HOME="$h/cache" XDG_STATE_HOME="$h/state" XDG_STATE_HOME="$h/state"
 export ZAI_SPEND_PROJECTS="$h/projects/empty" ZAI_SPEND_PEAK_UTC="0-24"
 # The API-credit segments read these from the process env; a caller's values must not leak in.
-unset SYG_CREDIT_LEDGER SYG_CREDIT_GRANTS SYG_CREDIT_WHEN SYG_CREDIT_FORCE SYG_CREDIT_NOW SYG_CREDIT_ROUTE
+unset SYG_CREDIT_LEDGER SYG_CREDIT_GRANTS SYG_CREDIT_WHEN SYG_CREDIT_FORCE SYG_CREDIT_NOW SYG_CREDIT_ROUTE SYG_CREDIT_ADMIN_URL ANTHROPIC_ADMIN_API_KEY
 
 cat > "$h/quota.json" <<'EOF'
 {"code":200,"success":true,"data":{"limits":[
