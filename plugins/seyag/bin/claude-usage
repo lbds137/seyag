@@ -9,7 +9,11 @@
 #                             other routed lanes (OpenRouter, a Console API key) pass at once (see below)
 #   claude-usage --wait [PCT] block until --ok PCT (default 50, i.e. the 5h window reset) passes, checking
 #                             every 2 minutes, then print the line; run it in the background to pause a session
-#   claude-usage --json       {five_hour_pct, five_hour_resets_at, seconds_to_reset, weekly_pct, weekly_resets_at, scoped, routed}
+#   claude-usage --json       {five_hour_pct, five_hour_resets_at, seconds_to_reset, weekly_pct, weekly_resets_at, scoped, routed,
+#                             lane (anthropic|zai|or|console|unknown)} plus the calling lane's numbers, null when unreadable:
+#                             zai_five_hour_pct, zai_week_pct (z.ai) | or_remaining_usd (OpenRouter, 2 dp as displayed) | api_credit_remaining_usd (Console)
+#   claude-usage --all        one line per lane on this machine (Anthropic plan, z.ai quota, API credit), whatever the
+#                             calling session's lane; always exits 0
 #
 # Reads the statusline's cache of /api/oauth/usage (~/.cache/claude-statusline/usage.json)
 # and refreshes it when it is older than 2 minutes, under a lock, so any number of polling
@@ -103,18 +107,60 @@ esac
 [ "$vendor_lane" = anthropic ] && [ "${CC_ROUTE_PRESET:-}" = anthropic-api ] && vendor_lane=console
 routed=1
 [ "$vendor_lane" = anthropic ] && routed=0
-zai_spend=${CLAUDE_USAGE_ZAI_SPEND:-$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/zai-spend}
+zai_usage=${CLAUDE_USAGE_ZAI_USAGE:-$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/zai-usage}
+api_credit=${CLAUDE_USAGE_API_CREDIT:-$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/api-credit}
+
+# zai-usage's --json when it holds z.ai's live quota (source "api"), else nothing.
+zai_api_json() {
+    local j
+    j=$("$zai_usage" --json 2>/dev/null)
+    [ "$(jq -r '.source // empty' <<< "$j" 2>/dev/null)" = api ] && printf '%s\n' "$j"
+}
+
+# api-credit's balance object (remaining_usd, spent_usd, next_expiry, days_left), else nothing.
+# Read-only: recording into the ledger is the api-credit-ledger hook's job.
+api_credit_json() {
+    local j
+    j=$("$api_credit" balance --json </dev/null 2>/dev/null) || return 0
+    jq -e 'type == "object"' <<< "$j" >/dev/null 2>&1 && printf '%s\n' "$j"
+}
+
+# OpenRouter's remaining dollars as X.XX, else nothing. The statusline's arithmetic and degrades,
+# copied (its OpenRouter block). Read-only: the statusline is the cache's only writer and fetcher,
+# so a cold or stale cache here just means no dollars, never a request.
+or_remaining() {
+    local or_tok or_cache rem or_fmt
+    or_tok=${ANTHROPIC_AUTH_TOKEN:-$(jq -r '.env.ANTHROPIC_AUTH_TOKEN // empty' "$HOME/.claude/settings.json" 2>/dev/null)}
+    or_cache="${XDG_CACHE_HOME:-$HOME/.cache}/claude-statusline/or-credits.json"
+    rem=$(jq -r '.data | if type == "object" and (.total_credits|type) == "number" and (.total_usage|type) == "number" and (.total_credits - .total_usage) > 0 then (.total_credits - .total_usage) else empty end' "$or_cache" 2>/dev/null)
+    or_fmt=""
+    if [ -n "$or_tok" ] && [ -n "$rem" ]; then
+        # LC_ALL=C: builtin printf honors LC_NUMERIC; a comma-decimal locale would garble it.
+        or_fmt=$(LC_ALL=C printf '%.2f' "$rem")
+        # A sub-cent balance formats to 0.00, not a balance to show honestly; degrade.
+        [ "$or_fmt" = "0.00" ] && or_fmt=""
+    fi
+    [ -n "$or_fmt" ] && printf '%s\n' "$or_fmt"
+}
+
+# reset_in <epoch>: " (resets HH:MM, in HhMm)" in local time, or nothing for an unknown (0) reset.
+reset_in() {
+    local left
+    [ "${1:-0}" -gt 0 ] 2>/dev/null || return 0
+    left=$(( $1 - $(date +%s) )); [ "$left" -lt 0 ] && left=0
+    printf ' (resets %s, in %dh%dm)' "$(date -d "@$1" +%H:%M)" $((left / 3600)) $(( (left % 3600) / 60 ))
+}
 
 # The gate answers before refresh or the cache check: a routed session needs no plan request.
-# z.ai has its own 5h and weekly windows, read live from z.ai's quota API by zai-spend, so the same
+# z.ai has its own 5h and weekly windows, read live from z.ai's quota API by zai-usage, so the same
 # thresholds apply there (2026-10-04: a pass-through let the fleet burn a whole z.ai week).
-# zai-spend's local fallback estimate is not account truth, so it never blocks. Other lanes
+# zai-usage's local fallback estimate is not account truth, so it never blocks. Other lanes
 # (OpenRouter) pass: their limit is a dollar cap the provider enforces itself.
 if [ "${1:-}" = --ok ] && [ "$routed" = 1 ]; then
     [ "$vendor_lane" = zai ] || exit 0
-    zai=$("$zai_spend" --json 2>/dev/null)
+    zai=$("$zai_usage" --json 2>/dev/null)
     if [ "$(jq -r '.source // empty' <<< "$zai" 2>/dev/null)" != api ]; then
-        echo "claude-usage: z.ai quota API unavailable (zai-spend has only a local estimate); gate passes" >&2
+        echo "claude-usage: z.ai quota API unavailable (zai-usage has only a local estimate); gate passes" >&2
         exit 0
     fi
     zfive=$(jq -r '.five_hour_pct // 0' <<< "$zai"); zweek=$(jq -r '.week_pct // 0' <<< "$zai")
@@ -124,7 +170,9 @@ if [ "${1:-}" = --ok ] && [ "$routed" = 1 ]; then
 fi
 
 refresh
-if [ ! -s "$cache" ]; then
+# --all reports a missing plan cache as one of its lines instead: the reads below then come up
+# empty (0 in arithmetic) and log_reading finds no cache to log.
+if [ ! -s "$cache" ] && [ "${1:-}" != --all ]; then
     echo "claude-usage: no usage data (no cache and the refresh failed)" >&2
     exit 2
 fi
@@ -168,6 +216,80 @@ log_reading() {
 }
 log_reading 2>/dev/null
 
+# The plan's two windows: "5h N% (resets …) · week N% (resets …)[ · <caps> of its own weekly cap]".
+plan_line() {
+    local five_line week_line to_week
+    five_line="5h ${five}%"
+    if [ "$five_reset" -gt 0 ]; then
+        five_line="$five_line (resets $(date -d "@$five_reset" +%H:%M), in $((to_reset / 3600))h$(( (to_reset % 3600) / 60 ))m)"
+    fi
+    week_line="week ${week}%"
+    # Date and countdown, not just a weekday: "Sun 02:00" read on a Sunday evening looks like tonight.
+    if [ "$week_reset" -gt 0 ]; then
+        to_week=$(( week_reset - $(date +%s) )); [ "$to_week" -lt 0 ] && to_week=0
+        week_line="$week_line (resets $(date -d "@$week_reset" '+%a %b %-d %H:%M'), in $((to_week / 86400))d$(( (to_week % 86400) / 3600 ))h)"
+    fi
+    [ -n "$scoped" ] && week_line="$week_line · $scoped of its own weekly cap"
+    echo "$five_line · $week_line"
+}
+
+# --all: one line per lane on this machine, whatever lane the caller is on (a plan session's fleet
+# check must see z.ai's windows too). Each line reuses its lane's own reader; none fetches twice.
+all_lanes() {
+    local j z5 zw z5r zwr line c_rem c_spent c_exp c_days
+    if [ -s "$cache" ]; then
+        echo "Anthropic plan: $(plan_line)"
+    else
+        echo "Anthropic plan: no data"
+    fi
+    j=$(zai_api_json)
+    if [ -n "$j" ]; then
+        IFS=$'\t' read -r z5 zw z5r zwr < <(jq -r '[.five_hour_pct, .week_pct, (.five_hour_reset_at // 0), (.week_reset_at // 0)] | @tsv' <<< "$j")
+        echo "z.ai: 5h ${z5}%$(reset_in "$z5r") · week ${zw}%$(reset_in "$zwr")"
+    else
+        # No live quota: zai-usage's own line (it tags a local estimate "local est"); "…" is its no-data mark.
+        line=$("$zai_usage" --line 2>/dev/null)
+        case "$line" in ""|"…") echo "z.ai: no data" ;; *) echo "z.ai: $line" ;; esac
+    fi
+    j=$(api_credit_json)
+    if [ -z "$j" ]; then
+        echo "api credit: not configured"
+        return 0
+    fi
+    IFS=$'\t' read -r c_rem c_spent c_exp c_days < <(jq -r '[(.remaining_usd // "null"), (.spent_usd // 0), ((.next_expiry // "")[5:10]), (.days_left // "")] | @tsv' <<< "$j")
+    if [ "$c_rem" = null ]; then
+        echo "api credit: ~\$$(LC_ALL=C printf '%.2f' "$c_spent") spent (no live grants)"
+    elif LC_ALL=C awk -v r="$c_rem" 'BEGIN{exit !(r > 0)}'; then
+        line="api credit: ~\$$(LC_ALL=C printf '%.2f' "$c_rem")"
+        [ -n "$c_exp" ] && line="$line (exp $c_exp, ${c_days}d)"
+        echo "$line"
+    else
+        echo "api credit: ~\$0.00"
+    fi
+}
+
+# --json's lane fields as one compact object: the lane plus the calling lane's numbers, null when
+# its reader has none (no live z.ai quota, no OpenRouter dollars, no numeric credit balance).
+lane_fields() {
+    local j
+    case "$vendor_lane" in
+        zai)
+            j=$(zai_api_json)
+            jq -cn --argjson z "${j:-null}" '{lane: "zai",
+                zai_five_hour_pct: ((($z // {}).five_hour_pct | numbers) // null),
+                zai_week_pct: ((($z // {}).week_pct | numbers) // null)}' ;;
+        or)
+            j=$(or_remaining)
+            jq -cn --argjson v "${j:-null}" '{lane: "or", or_remaining_usd: $v}' ;;
+        console)
+            j=$(api_credit_json)
+            jq -cn --argjson c "${j:-null}" '{lane: "console",
+                api_credit_remaining_usd: ((($c // {}).remaining_usd | numbers) // null)}' ;;
+        *)
+            jq -cn --arg l "$vendor_lane" '{lane: $l}' ;;
+    esac
+}
+
 case "${1:-}" in
     --ok)
         # A week at the reserve blocks everything, whatever the 5h window says: the last 25% is
@@ -186,38 +308,39 @@ case "${1:-}" in
         exit 0
         ;;
     --json)
-        printf '{"five_hour_pct":%d,"five_hour_resets_at":%d,"seconds_to_reset":%d,"weekly_pct":%d,"weekly_resets_at":%d,"scoped":%s,"routed":%d}\n' \
-            "$five" "$five_reset" "$to_reset" "$week" "$week_reset" "$(jq -rn --arg s "$scoped" '$s | @json')" "$routed"
+        # The lane fields ride after the original ones, which stay byte-for-byte as they were.
+        ext=$(lane_fields); ext=${ext#\{}; ext=${ext%\}}
+        [ -n "$ext" ] || ext="\"lane\":\"$vendor_lane\""
+        printf '{"five_hour_pct":%d,"five_hour_resets_at":%d,"seconds_to_reset":%d,"weekly_pct":%d,"weekly_resets_at":%d,"scoped":%s,"routed":%d,%s}\n' \
+            "$five" "$five_reset" "$to_reset" "$week" "$week_reset" "$(jq -rn --arg s "$scoped" '$s | @json')" "$routed" "$ext"
+        ;;
+    --all)
+        all_lanes
+        exit 0
         ;;
     "")
-        five_line="5h ${five}%"
-        if [ "$five_reset" -gt 0 ]; then
-            five_line="$five_line (resets $(date -d "@$five_reset" +%H:%M), in $((to_reset / 3600))h$(( (to_reset % 3600) / 60 ))m)"
-        fi
-        week_line="week ${week}%"
-        # Date and countdown, not just a weekday: "Sun 02:00" read on a Sunday evening looks like tonight.
-        if [ "$week_reset" -gt 0 ]; then
-            to_week=$(( week_reset - $(date +%s) )); [ "$to_week" -lt 0 ] && to_week=0
-            week_line="$week_line (resets $(date -d "@$week_reset" '+%a %b %-d %H:%M'), in $((to_week / 86400))d$(( (to_week % 86400) / 3600 ))h)"
-        fi
-        [ -n "$scoped" ] && week_line="$week_line · $scoped of its own weekly cap"
         # No Fable-vs-week target (usage parity dropped 2026-10-04): use the best and most
         # cost-effective model for the job, and keep Fable, which burns the week fastest, low.
-        note=""
+        note="" tail=""
         if [ "$vendor_lane" = zai ]; then
             note="z.ai-routed (gate reads z.ai's quota; Anthropic plan idle) · "
-            # zai-spend's line: z.ai's live quota, or a local estimate tagged "local est".
-            glm=$("$zai_spend" --line 2>/dev/null)
-            [ -n "$glm" ] && week_line="$week_line · z.ai $glm"
+            # zai-usage's line: z.ai's live quota, or a local estimate tagged "local est".
+            glm=$("$zai_usage" --line 2>/dev/null)
+            [ -n "$glm" ] && tail=" · z.ai $glm"
         elif [ "$routed" = 1 ]; then
             case "$vendor_lane" in or) lane=OpenRouter ;; console) lane="Console API key" ;; *) lane=$vendor_host ;; esac
             # A base URL with no host (e.g. "https://") has no label, as in the statusline: no note.
             [ -n "$lane" ] && note="$lane-routed (gate passes; Anthropic plan idle) · "
+            # OpenRouter: the remaining balance from the statusline's credits cache, when it has one.
+            if [ "$vendor_lane" = or ]; then
+                usd=$(or_remaining)
+                [ -n "$usd" ] && tail=" · \$$usd"
+            fi
         fi
-        echo "$note$five_line · $week_line"
+        echo "$note$(plan_line)$tail"
         ;;
     *)
-        sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'
+        sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'
         exit 2
         ;;
 esac

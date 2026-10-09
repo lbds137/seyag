@@ -3,9 +3,9 @@
 # STATUSLINE_BIN, e.g. to test the deployed ~/.claude/statusline.sh). Covers the provider split: routing decides
 # the data backend (z.ai quota API vs harness stdin rate_limits), while rendering goes through
 # the shared render_windows template — colors, hybrid format, reset arrows and the fable cap.
-# Hermetic: HOME, caches, the token, both z.ai endpoints and zai-spend (stub) are
+# Hermetic: HOME, caches, the token, both z.ai endpoints and zai-usage (stub) are
 # fixtures; nothing touches the network or the real caches. ZAI_SPEND_BIN overrides
-# the stub to integration-test against the real binary (plugins/seyag/bin/zai-spend).
+# the stub to integration-test against the real binary (plugins/seyag/bin/zai-usage).
 # Usage: tests/statusline.probe.sh
 
 set -uo pipefail
@@ -19,15 +19,15 @@ bad() { echo "FAIL: $1"; fail=1; }
 h=$(mktemp -d)
 trap 'rm -rf "$h"' EXIT
 mkdir -p "$h/.claude" "$h/.local/bin" "$h/cache/claude-statusline" "$h/projects/empty"
-# zai-spend: a fixture stub, not the real tool (plugins/seyag/bin/zai-spend, pinned by
-# tests/zai-spend.probe.sh), so this probe tests the statusline alone.
+# zai-usage: a fixture stub, not the real tool (plugins/seyag/bin/zai-usage, pinned by
+# tests/zai-usage.probe.sh), so this probe tests the statusline alone.
 # Same output shapes the statusline consumes: --json percentages from
 # $ZAI_SPEND_QUOTA_URL (file://, unit 3 = 5h window, unit 6 = week),
 # --line falls back to a 'local est' text when the quota is unreadable.
 if [ -n "${ZAI_SPEND_BIN:-}" ]; then
-    ln -sf "$(readlink -f "$ZAI_SPEND_BIN")" "$h/.local/bin/zai-spend"
+    ln -sf "$(readlink -f "$ZAI_SPEND_BIN")" "$h/.local/bin/zai-usage"
 else
-    cat > "$h/.local/bin/zai-spend" <<'STUB'
+    cat > "$h/.local/bin/zai-usage" <<'STUB'
 #!/bin/bash
 case "$1" in
 --json)
@@ -45,7 +45,7 @@ case "$1" in
     ;;
 esac
 STUB
-    chmod +x "$h/.local/bin/zai-spend"
+    chmod +x "$h/.local/bin/zai-usage"
 fi
 printf '{"env":{"ANTHROPIC_AUTH_TOKEN":"dummy-probe-token"},"modelSettings":{"glm-5.3":{"effortLevel":"high"},"glm-5.3-flash":{"effortLevel":"max"},"claude-opus-5-5":{"effortLevel":"high"}}}' > "$h/.claude/settings.json"
 export HOME="$h" XDG_CACHE_HOME="$h/cache" XDG_STATE_HOME="$h/state" XDG_STATE_HOME="$h/state"
@@ -96,7 +96,7 @@ grep -qF $'\x1b[38;2;11;127;255mz.ai' <<< "$out" \
 # 3. Routed, API dead: the gray local-est fallback, never silent. Drop the fresh cache first —
 # within the 120s TTL the case-1 poll would otherwise be served without a re-poll.
 export ZAI_SPEND_QUOTA_URL="file://$h/missing.json"
-rm -f "$h/cache/claude-statusline/zai-spend.json"
+rm -f "$h/cache/claude-statusline/zai-usage.json"
 strip <<< "$(render '{"context_window":{"current_usage":{"input_tokens":1000}},"model":{"display_name":"X"},"cwd":"/tmp"}')" \
     | grep -q 'local est' && ok "routed, api dead: local-est fallback renders" || bad "fallback: $out"
 export ZAI_SPEND_QUOTA_URL="file://$h/quota.json"
@@ -570,14 +570,14 @@ raw=$(lane ANTHROPIC_BASE_URL=https://api.z.ai/api/anthropic ANTHROPIC_API_KEY=s
 grep -q 'z.ai' <<< "$out" && ! grep -qE 'platform.claude.com|claude.ai' <<< "$out" \
     && ok "lane: API key set but env base URL is z.ai -> z.ai lane, no Anthropic label" || bad "lane key+zai: $out"
 
-# 45. z.ai lane with zai-spend silent (no quota, empty --line): the label alone.
-mv "$h/.local/bin/zai-spend" "$h/.local/bin/zai-spend.keep"
-printf '#!/bin/bash\nexit 0\n' > "$h/.local/bin/zai-spend"; chmod +x "$h/.local/bin/zai-spend"
+# 45. z.ai lane with zai-usage silent (no quota, empty --line): the label alone.
+mv "$h/.local/bin/zai-usage" "$h/.local/bin/zai-usage.keep"
+printf '#!/bin/bash\nexit 0\n' > "$h/.local/bin/zai-usage"; chmod +x "$h/.local/bin/zai-usage"
 route_zai
 raw=$(render "$lane_in"); out=$(strip <<< "$raw")
 grep -qF $'\x1b[38;2;11;127;255mz.ai\x1b[0m' <<< "$raw" && ! grep -qE '5h:|claude' <<< "$out" \
-    && ok "z.ai lane: zai-spend silent -> the z.ai label alone" || bad "zai silent: $out"
-mv "$h/.local/bin/zai-spend.keep" "$h/.local/bin/zai-spend"
+    && ok "z.ai lane: zai-usage silent -> the z.ai label alone" || bad "zai silent: $out"
+mv "$h/.local/bin/zai-usage.keep" "$h/.local/bin/zai-usage"
 route_anthropic
 
 # 46. SYG_CREDIT_WHEN decides the API-key lane when set: match -> platform.claude.com

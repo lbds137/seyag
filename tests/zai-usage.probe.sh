@@ -1,16 +1,16 @@
 #!/bin/bash
-# Fixture check for plugins/seyag/bin/zai-spend: the quota-API path (source=api, rounded pcts, the
+# Fixture check for plugins/seyag/bin/zai-usage: the quota-API path (source=api, rounded pcts, the
 # "5h: N% (→HH:MM) wk: N%" line), which key reaches z.ai (key file, then a z.ai-routed env, then a
 # z.ai-routed settings.json; a key routed elsewhere never), the local-estimate fallback, the state
 # format bump that keeps console anchors, --calibrate (and its wait on the sweep lock), --models,
 # the transcript scan's model buckets, and the default peak window read in UTC+8.
 # Quota fixtures are file:// URLs; the key cases need to see the Authorization header, so they use a
 # loopback http.server that logs it.
-# Usage: tests/zai-spend.probe.sh   (from anywhere; never touches the real key file, settings, API or ~/.claude)
+# Usage: tests/zai-usage.probe.sh   (from anywhere; never touches the real key file, settings, API or ~/.claude)
 
 set -uo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-ZS=${ZAI_SPEND_BIN:-"$REPO/plugins/seyag/bin/zai-spend"} # override: test another build
+ZS=${ZAI_SPEND_BIN:-"$REPO/plugins/seyag/bin/zai-usage"} # override: test another build
 fail=0
 ok() { echo "ok:   $1"; }
 bad() { echo "FAIL: $1"; fail=1; }
@@ -19,7 +19,7 @@ tmp=$(mktemp -d)
 SRV_PID=""
 cleanup() { [ -n "$SRV_PID" ] && kill "$SRV_PID" 2>/dev/null; rm -rf "$tmp"; }
 trap cleanup EXIT
-# Hermetic: drop every ambient var zai-spend reads, so a routed session can run this probe.
+# Hermetic: drop every ambient var zai-usage reads, so a routed session can run this probe.
 # shellcheck disable=SC2046 # word-splitting the variable-name list is the point
 unset $(compgen -v | grep -E '^(ANTHROPIC_|CC_ROUTE_|SYG_|ZAI_SPEND_|XDG_)')
 export TZ=UTC NO_PROXY=127.0.0.1,localhost no_proxy=127.0.0.1,localhost
@@ -44,7 +44,7 @@ zs() {
     env HOME="$tmp/home" XDG_CACHE_HOME="$d/cache" XDG_STATE_HOME="$d/state" \
         ZAI_SPEND_PROJECTS="$tmp/empty" CC_ROUTE_KEYS="$nokeys" "${vars[@]}" "$ZS" "$@"
 }
-cache() { cat "$tmp/$1/cache/claude-statusline/zai-spend.json" 2>/dev/null; }
+cache() { cat "$tmp/$1/cache/claude-statusline/zai-usage.json" 2>/dev/null; }
 state() { cat "$tmp/$1/state/zai-spend/state.json" 2>/dev/null; }
 settings() { # settings <base url> <token>
     jq -n --arg u "$1" --arg t "$2" '{env: {ANTHROPIC_BASE_URL: $u, ANTHROPIC_AUTH_TOKEN: $t}}' > "$tmp/home/.claude/settings.json"
@@ -62,6 +62,13 @@ jq -e '.source == "api" and .five_hour_pct == 43 and .week_pct == 17' <<< "$out"
 out=$(zs c1 ZAI_SPEND_QUOTA_URL="$QOK" CC_ROUTE_KEYS="$tmp/keys.env" -- --line)
 grep -qE '^5h: 43% \(→[0-9]{2}:[0-9]{2}\) wk: 17% \(→[A-Z][a-z]{2} [0-9]{2}:[0-9]{2}\)$' <<< "$out" \
     && ok "api: --line prints '5h: N% (→HH:MM) wk: N% (→Ddd HH:MM)'" || bad "api --line: $out"
+# The old name stays a committed alias (callers outside this repo run zai-spend by PATH name).
+alias_bin="$REPO/plugins/seyag/bin/zai-spend"
+alias_out=$(env HOME="$tmp/home" XDG_CACHE_HOME="$tmp/c1/cache" XDG_STATE_HOME="$tmp/c1/state" \
+    ZAI_SPEND_PROJECTS="$tmp/empty" CC_ROUTE_KEYS="$tmp/keys.env" ZAI_SPEND_QUOTA_URL="$QOK" "$alias_bin" --line)
+[ -L "$alias_bin" ] && [ "$(readlink "$alias_bin")" = zai-usage ] && [ "$alias_out" = "$out" ] \
+    && ok "alias: bin/zai-spend is a relative symlink to zai-usage and prints the same --line" \
+    || bad "alias: $(readlink "$alias_bin" 2>&1) -> $alias_out"
 
 # 2. Key precedence, observed at a loopback server that logs each request's Authorization header.
 cat > "$tmp/srv.py" <<'PY'
@@ -90,7 +97,7 @@ PY
 python3 -I "$tmp/srv.py" "$tmp/req.log" "$tmp/quota.json" "$tmp/port" &
 SRV_PID=$!
 for _ in $(seq 1 50); do [ -s "$tmp/port" ] && break; sleep 0.1; done
-[ -s "$tmp/port" ] || { echo "zai-spend.probe: mock server did not start"; exit 2; }
+[ -s "$tmp/port" ] || { echo "zai-usage.probe: mock server did not start"; exit 2; }
 QSRV="http://127.0.0.1:$(cat "$tmp/port")/quota"
 ZENV=(ANTHROPIC_BASE_URL=https://api.z.ai/api/anthropic ANTHROPIC_AUTH_TOKEN=fixture-env)
 # key_case <name> <want: token | none> [VAR=value ...]: a fresh case dir, then which token arrived.
@@ -134,7 +141,7 @@ jq -n '{success: true, data: {modelSummaryList: [{modelName: "glm-5.3", totalTok
 python3 -I "$tmp/srv.py" "$tmp/req.log" "$tmp/models.json" "$tmp/mport" &
 SRV_PID=$!
 for _ in $(seq 1 50); do [ -s "$tmp/mport" ] && break; sleep 0.1; done
-[ -s "$tmp/mport" ] || { echo "zai-spend.probe: models mock server did not start"; exit 2; }
+[ -s "$tmp/mport" ] || { echo "zai-usage.probe: models mock server did not start"; exit 2; }
 out=$(zs cm ZAI_SPEND_MODELS_URL="http://127.0.0.1:$(cat "$tmp/mport")/models" CC_ROUTE_KEYS="$tmp/keys.env" -- --models); rc=$?
 want=$'glm-5.3: 12M tok\nglm-5.3-flash: 3M tok\ntotal: 16M tok, 42 calls (7d, bucket tz UTC+8)'
 [ $rc = 0 ] && [ "$out" = "$want" ] && ok "--models: 'name: NM tok' per model, then the total line" || bad "--models (rc $rc): $out"
@@ -152,7 +159,7 @@ j=$(cache c3)
 mkdir -p "$tmp/c4/state/zai-spend" "$tmp/c4/cache/claude-statusline"
 jq -n '{v: 3, files: {"/gone/old.jsonl": {offset: 9, glm: true, hours: {"1": {"i": 1}}}},
         calW: {pct: 40, at: 123, winv: 50.0}}' > "$tmp/c4/state/zai-spend/state.json"
-echo '{"as_of": 1, "source": "local", "stale_marker": 1}' > "$tmp/c4/cache/claude-statusline/zai-spend.json"
+echo '{"as_of": 1, "source": "local", "stale_marker": 1}' > "$tmp/c4/cache/claude-statusline/zai-usage.json"
 zs c4 ZAI_SPEND_QUOTA_URL="$QDOWN" -- --sweep; rc=$?
 jq -e '.v == 4 and .calW.pct == 40 and .calW.winv == 50 and (.files | has("/gone/old.jsonl") | not)' <<< "$(state c4)" >/dev/null \
     && ok "state: v3 -> v4, calW anchor kept, old file entries dropped" || bad "state bump (rc $rc): $(state c4)"
