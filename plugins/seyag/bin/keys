@@ -1,0 +1,493 @@
+#!/usr/bin/env python3
+"""keys: read and write API keys in one encrypted systemd user credential.
+
+Usage:
+  <command that prints the key> | keys set NAME
+  keys set NAME          prompts; input is hidden
+  keys get NAME          prints the value to stdout, nothing else
+  keys names             one stored NAME per line (values never printed)
+  keys delete NAME       removes NAME from the store
+
+The store is one file holding NAME=value lines, encrypted with
+`systemd-creds encrypt --user --with-key=host+tpm2 --tpm2-pcrs=`: only this
+user on this machine can decrypt it, and it is not bound to firmware state, so
+a BIOS update doesn't lock it. One file, never one per key: a decrypt takes
+about 3 s on the TPM, which handles one at a time.
+
+NAME matches ^[A-Z][A-Z0-9_]*$. `set` takes the value from stdin when piped,
+else from a hidden prompt, never from argv; tabs, CR and LF are removed and
+surrounding whitespace stripped, and an empty value is an error. Setting a
+stored NAME replaces it and keeps the other keys. The new file must decrypt
+back to exactly the intended content before it replaces the old one.
+
+`get` resolves the effective value: the environment variable NAME (when
+non-empty), then the store, then the legacy plaintext file. A NAME found
+nowhere, or a store that fails to decrypt, is an error on stderr with exit 1
+and nothing on stdout. While the TPM is busy or stalled, or the store fails
+to decrypt, `get` does not fall back to the legacy file, so legacy-only keys
+are unavailable for that call: loud, by design, so a stale legacy value never
+shadows a newer stored one. The legacy file is only ever read, never written,
+and is read as bare NAME=value lines (no `export` prefix, unquoted values).
+
+Decrypts and encrypts take turns through a lock file in
+${XDG_RUNTIME_DIR:-/tmp}/seyag-keys/ (a directory that must be this user's,
+mode 0700). One that times out leaves a stall marker there, and calls in the
+next few minutes fail fast instead of queueing behind a stuck TPM; a reboot
+clears a stuck TPM. `set` and `delete` also hold a lock file beside the store
+(.<store name>.lock) from reading it to replacing it, so concurrent writers
+never drop each other's keys.
+
+Exit codes: 0 success; 1 a failure (not set, decrypt or encrypt failed, TPM
+busy or stalled); 2 a usage error.
+
+Environment:
+  SYG_KEYS_STORE        the encrypted store (default
+                        ${XDG_DATA_HOME:-~/.local/share}/keys/keys.cred)
+  SYG_KEYS_NAME         the credential name given to systemd-creds (default keys)
+  SYG_KEYS_LEGACY_FILE  a plaintext NAME=value file `get` falls back to
+                        (unset: no legacy source)
+  SYG_KEYS_WITH_KEY     the --with-key= value (default host+tpm2; a machine
+                        without a TPM sets e.g. host)
+  SYG_KEYS_CREDS_CMD    replaces the systemd-creds command (split like a shell
+                        line; tests point it at a mock)
+  SYG_KEYS_TIMEOUT_S    seconds one systemd-creds call may take (default 20)
+  SYG_KEYS_LOCK_WAIT_S  seconds to wait for the TPM lock (default 15)
+  SYG_KEYS_STALL_S      seconds a timeout keeps calls off the TPM (default 300)
+"""
+
+import argparse
+import fcntl
+import getpass
+import math
+import os
+import re
+import resource
+import shlex
+import stat
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+NAME_PATTERN = re.compile(r"^[A-Z][A-Z0-9_]*$")
+# A few calls queued together (about 3 s each) fit in the lock wait
+DEFAULT_TIMEOUT_S = 20
+DEFAULT_LOCK_WAIT_S = 15
+DEFAULT_STALL_S = 300
+
+
+class KeysError(Exception):
+    """A failure reported on stderr with exit 1. Messages never hold a value."""
+
+
+class UsageError(Exception):
+    """A usage error reported on stderr with exit 2."""
+
+
+class Parser(argparse.ArgumentParser):
+    def error(self, message):
+        raise UsageError(message)
+
+
+def env_seconds(var, default):
+    raw = os.environ.get(var, "")
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        raise UsageError(f"{var}={raw!r} is not a number of seconds")
+    if not math.isfinite(value) or value < 0:
+        raise UsageError(f"{var}={raw!r} is not a finite, non-negative number of seconds")
+    return value
+
+
+def store_path():
+    explicit = os.environ.get("SYG_KEYS_STORE", "")
+    if explicit:
+        return Path(explicit)
+    data = os.environ.get("XDG_DATA_HOME", "") or os.path.join(os.path.expanduser("~"), ".local", "share")
+    return Path(data) / "keys" / "keys.cred"
+
+
+def credential_name():
+    return os.environ.get("SYG_KEYS_NAME", "") or "keys"
+
+
+def creds_command():
+    override = os.environ.get("SYG_KEYS_CREDS_CMD", "")
+    return shlex.split(override) if override else ["systemd-creds"]
+
+
+def check_name(name):
+    if not NAME_PATTERN.match(name):
+        raise UsageError(f"NAME must match ^[A-Z][A-Z0-9_]*$ (like OPENROUTER_API_KEY); got {len(name)} characters")
+
+
+def parse_lines(text):
+    """(name, value) per well-formed NAME=value line, split on the first `=`.
+    Blank and malformed lines are skipped; a malformed line is never printed,
+    since it may hold a key."""
+    pairs = []
+    for line in text.splitlines():
+        name, separator, value = line.partition("=")
+        if separator and NAME_PATTERN.match(name):
+            pairs.append((name, value.strip()))
+    return pairs
+
+
+# ---------------------------------------------------------------- locks
+
+def open_lock(path):
+    """A lock file's fd: created 0600, never truncated, never through a symlink."""
+    return os.open(path, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+
+
+def flock_wait(fd, wait_s):
+    """True once the exclusive flock is held, False after wait_s seconds."""
+    deadline = time.monotonic() + wait_s
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return True
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.1)
+
+
+def prepare_store_dir(directory):
+    """Create the store dir 0700, or check an existing one is ours and tighten it."""
+    try:
+        if not directory.is_dir():
+            directory.mkdir(mode=0o700, parents=True)
+        st = directory.stat()
+        if st.st_uid != os.getuid():
+            raise KeysError(f"refusing {directory}: it is owned by uid {st.st_uid}, not this user")
+        if stat.S_IMODE(st.st_mode) != 0o700:
+            os.chmod(directory, 0o700)
+    except OSError as e:
+        raise KeysError(f"cannot prepare {directory}: {e.strerror}")
+
+
+class StoreLock:
+    """Exclusive turn on the store for a read-modify-write, held beside the
+    store so writers serialize whatever runtime dir each one has."""
+
+    def __init__(self, path):
+        self.lock = path.parent / f".{path.name}.lock"
+        self.wait_s = env_seconds("SYG_KEYS_LOCK_WAIT_S", DEFAULT_LOCK_WAIT_S)
+        self.fd = None
+
+    def __enter__(self):
+        prepare_store_dir(self.lock.parent)
+        try:
+            self.fd = open_lock(self.lock)
+            held = flock_wait(self.fd, self.wait_s)
+        except OSError as e:
+            if self.fd is not None:
+                os.close(self.fd)
+            raise KeysError(f"cannot lock the store with {self.lock}: {e.strerror}; nothing changed")
+        if not held:
+            os.close(self.fd)
+            raise KeysError(
+                f"another keys process held the store lock {self.lock} for {int(self.wait_s)} s; "
+                f"nothing changed. Retry later."
+            )
+        return self
+
+    def __exit__(self, *exc):
+        os.close(self.fd)  # releases the flock
+
+
+# ---------------------------------------------------------------- the TPM
+
+class TpmLock:
+    """Exclusive turn on the TPM, shared by every keys process on the machine.
+    Fails fast while a recent timeout's stall marker stands."""
+
+    def __init__(self):
+        base = os.environ.get("XDG_RUNTIME_DIR", "") or tempfile.gettempdir()
+        self.state = Path(base) / "seyag-keys"
+        self.marker = self.state / "tpm-stalled"
+        self.wait_s = env_seconds("SYG_KEYS_LOCK_WAIT_S", DEFAULT_LOCK_WAIT_S)
+        self.stall_s = env_seconds("SYG_KEYS_STALL_S", DEFAULT_STALL_S)
+        self.fd = None
+
+    def __enter__(self):
+        try:
+            self.state.mkdir(mode=0o700, parents=True, exist_ok=True)
+            st = os.lstat(self.state)
+        except OSError as e:
+            raise KeysError(f"cannot create the TPM lock dir {self.state}: {e.strerror}")
+        if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid() or st.st_mode & 0o077:
+            raise KeysError(
+                f"refusing the TPM lock dir {self.state}: it must be a real directory owned by "
+                f"this user with mode 0700 (fix or remove it)"
+            )
+        try:
+            self.fd = open_lock(self.state / "tpm.lock")
+            # Checked again after the wait: the holder may have timed out meanwhile
+            ready = not self.stalled() and flock_wait(self.fd, self.wait_s) and not self.stalled()
+        except OSError as e:
+            if self.fd is not None:
+                os.close(self.fd)
+            raise KeysError(f"cannot open the TPM lock in {self.state}: {e.strerror}")
+        if not ready:
+            os.close(self.fd)
+            raise KeysError(
+                f"the TPM is busy or stuck: a systemd-creds call timed out in the last "
+                f"{int(self.stall_s)} s, or another keys process held the TPM for "
+                f"{int(self.wait_s)} s. Retry later; a reboot clears a stuck TPM "
+                f"(the marker is {self.marker})."
+            )
+        return self
+
+    def __exit__(self, *exc):
+        os.close(self.fd)  # releases the flock
+
+    def stalled(self):
+        try:
+            return time.time() - self.marker.stat().st_mtime < self.stall_s
+        except OSError:
+            return False
+
+    def mark(self, stalled):
+        try:
+            if stalled:
+                self.marker.touch()
+            else:
+                self.marker.unlink(missing_ok=True)
+        except OSError as e:
+            print(f"keys: could not update {self.marker}: {e.strerror}", file=sys.stderr)
+
+    def run(self, verb, args, data, what):
+        """One systemd-creds call; `data` is the child's stdin (None: /dev/null,
+        so the child never reads the caller's stdin). Returns stdout bytes."""
+        argv = creds_command() + [verb] + args
+        timeout = env_seconds("SYG_KEYS_TIMEOUT_S", DEFAULT_TIMEOUT_S)
+        try:
+            result = subprocess.run(
+                argv,
+                input=data,
+                stdin=subprocess.DEVNULL if data is None else None,
+                capture_output=True,
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired:
+            self.mark(stalled=True)
+            raise KeysError(
+                f"systemd-creds {verb} of {what} timed out after {timeout:g} s; the TPM may be "
+                f"stuck. Calls in the next {int(self.stall_s)} s fail fast; a reboot clears it."
+            )
+        except FileNotFoundError:
+            raise KeysError(
+                f"{argv[0]} not found: keys needs systemd-creds (systemd 250 or later), "
+                f"or SYG_KEYS_CREDS_CMD naming a replacement"
+            )
+        except OSError as e:
+            raise KeysError(f"cannot run {argv[0]}: {e.strerror}")
+        self.mark(stalled=False)
+        if result.returncode != 0:
+            detail = result.stderr.decode(errors="replace").strip() or "no message"
+            if verb == "encrypt":
+                hint = "Without a TPM, set SYG_KEYS_WITH_KEY=host and re-store the keys."
+            else:
+                hint = (
+                    "Likely causes: SYG_KEYS_NAME differs from the name used when it was encrypted, "
+                    "the TPM is unavailable or was reset, or the file was written by another user "
+                    "or machine."
+                )
+            raise KeysError(f"systemd-creds {verb} of {what} failed (exit {result.returncode}): {detail}. {hint}")
+        return result.stdout
+
+    def decrypt(self, path):
+        return self.run("decrypt", ["--user", f"--name={credential_name()}", str(path), "-"], None, path)
+
+    def encrypt(self, content, path):
+        with_key = os.environ.get("SYG_KEYS_WITH_KEY", "") or "host+tpm2"
+        # --tpm2-pcrs= explicitly empty: bound to the TPM but not to firmware state
+        args = ["--user", f"--with-key={with_key}", "--tpm2-pcrs=", f"--name={credential_name()}", "-", str(path)]
+        self.run("encrypt", args, content, path)
+
+
+def read_store(tpm, path):
+    """The store's text, or "" when it doesn't exist yet."""
+    if not path.exists():
+        return ""
+    raw = tpm.decrypt(path)
+    try:
+        return raw.decode()
+    except UnicodeDecodeError:
+        raise KeysError(f"{path} decrypted to text that is not UTF-8; nothing read")
+
+
+def write_store(tpm, path, lines):
+    """Encrypt `lines` to a temp file beside the store, check it decrypts back
+    to exactly that content, then rename it over the store."""
+    content = "".join(line + "\n" for line in lines).encode()
+    directory = path.parent  # prepared by StoreLock
+    tmp = directory / f".{path.name}.tmp.{os.getpid()}"
+    try:
+        tpm.encrypt(content, tmp)
+        if tpm.decrypt(tmp) != content:
+            raise KeysError(f"the new {path.name} did not decrypt back to the same content; nothing stored")
+        os.chmod(tmp, 0o600)
+        fsync_path(tmp, os.O_RDONLY)
+        os.replace(tmp, path)
+        fsync_path(directory, os.O_RDONLY | os.O_DIRECTORY)
+    except OSError as e:
+        raise KeysError(f"cannot write {path}: {e.strerror}; nothing stored")
+    finally:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def fsync_path(path, flags):
+    fd = os.open(path, flags)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+# ---------------------------------------------------------------- verbs
+
+def read_value(name):
+    if sys.stdin is None:
+        raise KeysError(f"no value given for {name} (stdin is closed); nothing stored")
+    if sys.stdin.isatty():
+        try:
+            raw = getpass.getpass(f"Paste {name} (input hidden): ")
+        except (EOFError, KeyboardInterrupt):
+            raise KeysError(f"no value given for {name}; nothing stored")
+    else:
+        try:
+            raw = sys.stdin.buffer.read().decode("utf-8")
+        except UnicodeDecodeError:
+            raise KeysError(f"the value for {name} is not UTF-8 text; nothing stored")
+    value = re.sub(r"[\t\r\n]", "", raw).strip()
+    if not value:
+        raise KeysError(f"no value given for {name}; nothing stored")
+    return value
+
+
+def cmd_set(args):
+    name = args.name
+    value = read_value(name)  # all input before the lock
+    path = store_path()
+    with StoreLock(path), TpmLock() as tpm:
+        current = read_store(tpm, path)
+        lines = [line for line in current.splitlines() if line.strip() and line.partition("=")[0] != name]
+        lines.append(f"{name}={value}")
+        write_store(tpm, path, lines)
+    stored = ", ".join(n for n, _ in parse_lines("\n".join(lines)))
+    print(f"Stored {name} ({len(value)} characters) in {path}; it now holds: {stored}")
+    return 0
+
+
+def legacy_value(name):
+    path = os.environ.get("SYG_KEYS_LEGACY_FILE", "")
+    if not path or not os.path.exists(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+    except OSError as e:
+        raise KeysError(f"cannot read the legacy file {path}: {e.strerror}")
+    except UnicodeDecodeError:
+        raise KeysError(f"the legacy file {path} is not UTF-8 text")
+    for n, v in parse_lines(text):
+        if n == name and v:
+            return v
+    return None
+
+
+def cmd_get(args):
+    name = args.name
+    value = os.environ.get(name, "").strip()
+    if not value:
+        path = store_path()
+        if path.exists():
+            with TpmLock() as tpm:
+                text = read_store(tpm, path)
+            value = next((v for n, v in parse_lines(text) if n == name and v), "")
+    if not value:
+        value = legacy_value(name) or ""
+    if not value:
+        raise KeysError(f"{name} is not set (no env var, no stored key, no legacy file)")
+    sys.stdout.write(value + "\n")
+    return 0
+
+
+def cmd_names(args):
+    path = store_path()
+    if not path.exists():
+        print(f"keys: no store at {path} yet", file=sys.stderr)
+        return 0
+    with TpmLock() as tpm:
+        text = read_store(tpm, path)
+    for n, _ in parse_lines(text):
+        print(n)
+    return 0
+
+
+def cmd_delete(args):
+    name = args.name
+    path = store_path()
+    if not path.exists():
+        raise KeysError(f"{name} is not stored (no store at {path}); nothing deleted")
+    with StoreLock(path), TpmLock() as tpm:
+        lines = [line for line in read_store(tpm, path).splitlines() if line.strip()]
+        kept = [line for line in lines if line.partition("=")[0] != name]
+        if len(kept) == len(lines):
+            raise KeysError(f"{name} is not stored in {path}; nothing deleted")
+        write_store(tpm, path, kept)
+    print(f"Deleted {name} from {path}")
+    return 0
+
+
+def build_parser():
+    top = Parser(prog="keys", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = top.add_subparsers(dest="verb", parser_class=Parser)
+    for verb, fn, help_text in (
+        ("set", cmd_set, "store NAME (value from stdin or a hidden prompt)"),
+        ("get", cmd_get, "print NAME's effective value"),
+        ("delete", cmd_delete, "remove NAME from the store"),
+    ):
+        p = sub.add_parser(verb, help=help_text)
+        p.add_argument("name", metavar="NAME")
+        p.set_defaults(fn=fn)
+    p = sub.add_parser("names", help="list the stored NAMEs")
+    p.set_defaults(fn=cmd_names)
+    return top
+
+
+def main(argv):
+    try:
+        resource.setrlimit(resource.RLIMIT_CORE, (0, 0))  # a crash never dumps a value
+    except (OSError, ValueError):
+        pass  # hardening only, never a new failure
+    os.umask(0o077)
+    top = build_parser()
+    try:
+        args = top.parse_args(argv)
+        if args.verb is None:
+            top.print_help(sys.stderr)
+            return 2
+        if hasattr(args, "name"):
+            check_name(args.name)
+        return args.fn(args)
+    except UsageError as e:
+        print(f"keys: {e} (keys --help for usage)", file=sys.stderr)
+        return 2
+    except KeysError as e:
+        print(f"keys: {e}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
