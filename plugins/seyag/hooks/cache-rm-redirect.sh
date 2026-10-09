@@ -8,6 +8,8 @@
 #   - pipes `find ... -name <cache>` straight into `xargs rm -r...`,
 # and names the safe-clean command to use instead. safe-clean checks each target is inside a git
 # repo, isn't a symlink, and holds no tracked file; improvised `rm -rf` checks none of that.
+# When a flagged delete's target is a .claude/worktrees path, the message also names
+# safe-worktree-clean.
 #
 # Bypass: put SYG_ALLOW_CACHE_RM=1 in the command (the owner approved this
 # specific rm).
@@ -31,20 +33,27 @@ esac
 HOOK_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib"
 # The command goes to python on fd 3, never through the environment: Linux caps one env string
 # at 128 KiB (MAX_ARG_STRLEN), and python failing to exec would fail open.
+# Exit 11 (not 0) means a flagged delete's rm target or find root is in a .claude/worktrees path.
 HITS=$(HOOK_LIB="$HOOK_LIB" PYTHONDONTWRITEBYTECODE=1 python3 - 3<<<"$CMD" <<'PYEOF'
 import os, sys
 
 # An import failure exits non-zero, which the caller treats as allow (fail-open).
 sys.path.insert(0, os.environ["HOOK_LIB"])
-from delete_commands import analyze, cache_lines
+from delete_commands import analyze, cache_lines, worktree_target
 
 # The analysis is shared with recursive-rm-guard, which defers only on what cache_lines flags.
 hits, _, _ = analyze(os.fsdecode(open(3, "rb").read()).removesuffix("\n"))
 print("\n".join(cache_lines(hits)))
+sys.exit(11 if worktree_target([h for h in hits if cache_lines([h])]) else 0)
 PYEOF
-) || exit 0
+)
+PY_RC=$?
+[ "$PY_RC" = 0 ] || [ "$PY_RC" = 11 ] || exit 0
 
 [ -n "$HITS" ] || exit 0
+
+WORKTREE_HINT=""
+[ "$PY_RC" = 11 ] && WORKTREE_HINT=$'\n'"  agent worktrees: safe-worktree-clean --repo <repo> [--apply] (it judges the seven SAFE criteria first)."
 
 cat >&2 <<EOF
 CACHE-RM REDIRECT — use safe-clean for regenerable caches
@@ -56,7 +65,7 @@ Use the checked command instead. It refuses symlinks, anything outside a git rep
 folder holding git-tracked files, and it can't touch gitignored data:
   safe-clean <path>...             # e.g. safe-clean node_modules .pytest_cache
   safe-clean --find __pycache__ .  # every __pycache__ under a folder
-  safe-clean --dry-run ...         # show what would go
+  safe-clean --dry-run ...         # show what would go${WORKTREE_HINT}
 If the owner approved this exact rm, prefix the command with SYG_ALLOW_CACHE_RM=1.
 EOF
 exit 2

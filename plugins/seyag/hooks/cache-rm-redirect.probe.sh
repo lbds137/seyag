@@ -62,4 +62,22 @@ run 0 'find . -name __pycache__ -type d'
 run 0 'SYG_ALLOW_CACHE_RM=1 rm -rf node_modules'
 run 0 'echo "rm -rf node_modules is risky"'
 run 0 ''
+# A blocked delete targeting a .claude/worktrees path also names safe-worktree-clean; others don't.
+hint() { # $1 want "yes" or "no", $2 command
+  local msg got=no
+  msg=$(jq -nc --arg c "$2" '{tool_input: {command: $c}}' | bash "$HOOK" 2>&1 >/dev/null)
+  case "$msg" in
+    CACHE-RM*) ;;
+    *) echo "FAIL not blocked: $2"; fail=1; return ;;
+  esac
+  case "$msg" in
+    *'  agent worktrees: safe-worktree-clean --repo <repo> [--apply] (it judges the seven SAFE criteria first)'*) got=yes ;;
+    *safe-worktree-clean*) got=garbled ;;
+  esac
+  if [ "$got" = "$1" ]; then echo "ok   hint $1: $2"; else echo "FAIL hint $got want $1: $2"; fail=1; fi
+}
+hint yes 'rm -rf .claude/worktrees/agent-x/node_modules'
+hint yes 'find /srv/repo/.claude/worktrees/agent-x -name __pycache__ -exec rm -rf {} +'
+hint no 'rm -rf node_modules'
+hint no 'cd .claude/worktrees/agent-x && rm -rf node_modules'
 exit $fail

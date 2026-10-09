@@ -157,6 +157,8 @@ Tested: it stops on a non-agent branch and otherwise removes the tree and delete
 
 Claude Code never removes an agent worktree, its lock or its `worktree-agent-*` branch after the owning session ends.
 
+Post-session cleanup is one command: `safe-worktree-clean --repo <repo>` (dry run), then `--apply` to remove the trees it judged SAFE. The manual steps below stay as the fallback and as the definition of its gates.
+
 - **After the session ends**, a dead lock pid gates removal: run `git -C <wt> status --porcelain` (edits never transferred) and `git -C <wt> log --oneline HEAD --not --remotes` (unpushed commits), stderr attached (a `2>/dev/null` check has reported 0 falsely); anything listed is the owner's call. Then `git worktree unlock <wt> && git worktree remove --force <wt> && git worktree prune`.
 - **In-session, the only removal gate is the transfer pair** (byte-identical patch, no worker commits). The lock's pid is the session's own pid, shared by every tree it cut, so a liveness check on it reports alive for all of them and gates nothing (after a `/clear`: core rules § Sessions and handoffs).
 - **Orphan branches outnumber trees, and `git branch -d` refusing is no signal**: a rebase-merge rewrites SHAs, so an equivalent commit is never an ancestor and `-d` refuses nearly everything. After `git fetch`, the gate is `git cherry origin/<base> <branch>`: no `+` lines means every commit has an equivalent on the base, delete with `-D`. Verify each `+` commit by subject (`git log origin/<base> --fixed-strings --grep=<subject>`, usually a pre-rebase copy of merged work); an unmatched one is the owner's call. A squash-merged base matches no patch-id, so every commit prints `+` and the subject check is the whole gate.

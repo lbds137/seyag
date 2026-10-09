@@ -1,0 +1,445 @@
+#!/bin/bash
+# safe-worktree-clean - judge agent worktrees for safe removal; remove the SAFE ones on --apply
+#
+# Usage:
+#   safe-worktree-clean [--apply] [--repo DIR] [--locks] [--locks-apply] [--json]
+#
+# Judges every worktree under <repo>/.claude/worktrees/ (--repo DIR, default: the current
+# repo) and prints SAFE or HOLD:<reason> for each; HOLD trees go into one batched report.
+# Dry run by default. --apply removes each SAFE tree on its own (unlock, git worktree remove
+# --force, git branch -D, then one git worktree prune); a HOLD never blocks another tree.
+# A tree is SAFE only when ALL hold, and any check that cannot run is a HOLD:
+#   1 lock      no lock, or the first "pid <N>" in the lock reason is a dead process
+#               (a lock reason without a pid is HOLD:lock-unparsable)
+#   2 cwd       no process has its cwd inside the tree (/proc walk)
+#   3 commits   `git cherry <base> <branch>` shows no +, or every + subject is found on <base>
+#               by `git log <base> --fixed-strings --grep=<subject>`
+#   4 files     every dirty, staged or untracked file equals <base>'s version of that path;
+#               an untracked path that <base> lacks is HOLD
+#   5 ignored   ignored files are only safe-clean cache names (read from safe-clean itself)
+#   6 branch    the branch matches SYG_WORKTREE_BRANCH_RE (extended regex; unset or empty:
+#               ^worktree-agent-); a detached HEAD instead needs check 7
+#   7 detached  HEAD's commit is reachable from <base> or a local branch
+# <base> is origin/<default branch> (origin/HEAD, else origin/main), compared as the local ref
+# stands (fetch first for a fresh verdict); with no such ref every tree is HOLD:no-base.
+# --locks also lists index.lock files in the repo's .git and every worktree's git dir; a lock
+# is stale when it is 0 bytes, older than SYG_WORKTREE_LOCK_AGE_MIN minutes (integer, default
+# 10), and no live git process works in the repo. --locks-apply deletes exactly the stale ones.
+# --json prints one JSON object instead of text.
+# Exit: 0 done; 1 --apply found no SAFE tree (nothing removed); 2 usage or not a git repo;
+# 3 a removal or lock deletion failed.
+
+set -uo pipefail
+
+usage() { sed -n '2,/^[^#]/s/^# \{0,1\}//p' "$0"; }
+
+APPLY=false LOCKS=false LOCKS_APPLY=false JSON=false REPO=.
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h | --help) usage; exit 0 ;;
+    --apply) APPLY=true ;;
+    --locks) LOCKS=true ;;
+    --locks-apply) LOCKS=true; LOCKS_APPLY=true ;;
+    --json) JSON=true ;;
+    --repo) [ $# -ge 2 ] || { usage >&2; exit 2; }; REPO=$2; shift ;;
+    --repo=*) REPO=${1#--repo=} ;;
+    *) echo "safe-worktree-clean: unknown argument: $1" >&2; usage >&2; exit 2 ;;
+  esac
+  shift
+done
+
+SELF_DIR=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
+COMMON=$(git -C "$REPO" rev-parse --path-format=absolute --git-common-dir 2>&1) || {
+  echo "safe-worktree-clean: not a git repo: $REPO ($COMMON)" >&2; exit 2; }
+PORCELAIN=$(git -C "$REPO" worktree list --porcelain -z | tr '\0' '\036') || {
+  echo "safe-worktree-clean: git worktree list failed in $REPO" >&2; exit 2; }
+COMMON=$(realpath -e -- "$COMMON")
+# Every later command names its directory, and no process of this tool may sit in a tree.
+cd / || exit 2
+
+# Worktrees: records of key-value fields, one blank field between worktrees.
+WT_PATH=() WT_HEAD=() WT_BRANCH=() WT_LOCKED=() WT_LOCK_REASON=() WT_PRUNABLE=()
+cur=-1
+while IFS= read -r -d $'\036' f; do
+  case "$f" in
+    "worktree "*) cur=$((cur + 1)); WT_PATH[cur]=${f#worktree }; WT_HEAD[cur]=""
+      WT_BRANCH[cur]=""; WT_LOCKED[cur]=false; WT_LOCK_REASON[cur]=""; WT_PRUNABLE[cur]="" ;;
+    "HEAD "*) WT_HEAD[cur]=${f#HEAD } ;;
+    "branch "*) WT_BRANCH[cur]=${f#branch refs/heads/} ;;
+    locked) WT_LOCKED[cur]=true ;;
+    "locked "*) WT_LOCKED[cur]=true; WT_LOCK_REASON[cur]=${f#locked } ;;
+    prunable*) WT_PRUNABLE[cur]=${f#prunable}; WT_PRUNABLE[cur]=${WT_PRUNABLE[cur]# }
+      [ -n "${WT_PRUNABLE[cur]}" ] || WT_PRUNABLE[cur]="prunable" ;;
+  esac
+done <<<"$PORCELAIN"
+[ "$cur" -ge 0 ] || { echo "safe-worktree-clean: no worktrees listed in $REPO" >&2; exit 2; }
+MAIN=$(realpath -m -- "${WT_PATH[0]}")
+WT_ROOT="$MAIN/.claude/worktrees"
+
+BASE_REF=$(git -C "$MAIN" symbolic-ref -q refs/remotes/origin/HEAD 2>/dev/null)
+BASE=${BASE_REF#refs/remotes/}
+[ -n "$BASE" ] || BASE=origin/main
+git -C "$MAIN" rev-parse -q --verify "$BASE^{commit}" >/dev/null || BASE=""
+
+# Source of truth for cache names: safe-clean's CACHE_NAMES line, read, never copied.
+CACHE_NAMES=()
+if [ -r "$SELF_DIR/safe-clean" ]; then
+  read -ra CACHE_NAMES <<<"$(sed -n 's/^CACHE_NAMES=(\(.*\))$/\1/p' "$SELF_DIR/safe-clean")"
+fi
+
+BRANCH_RE=${SYG_WORKTREE_BRANCH_RE:-}
+[ -n "$BRANCH_RE" ] || BRANCH_RE='^worktree-agent-'
+AGE_MIN=${SYG_WORKTREE_LOCK_AGE_MIN:-}
+[[ $AGE_MIN =~ ^[0-9]+$ ]] || AGE_MIN=10
+
+# /proc scan. Mode cwd: prints "path NUL pid NUL" for each given path some process has its cwd
+# inside. Mode git: prints "pid NUL" for each process whose argv[0] is git (or git-*) and whose
+# cwd or any argument lies inside a given path. Unreadable foreign pids are skipped; exit 3 when
+# /proc itself cannot be read, which callers turn into HOLD.
+proc_scan() {
+  python3 - "$@" <<'PYEOF'
+import os, sys
+
+mode, paths = sys.argv[1], [os.path.realpath(p) for p in sys.argv[2:]]
+try:
+    os.readlink("/proc/self/cwd")
+except OSError:
+    sys.exit(3)
+
+
+def inside(p, root):
+    return p == root or p.startswith(root.rstrip("/") + "/")
+
+
+out = sys.stdout.buffer
+for d in os.listdir("/proc"):
+    if not d.isdigit():
+        continue
+    try:
+        cwd = os.readlink(f"/proc/{d}/cwd")
+    except OSError:
+        continue
+    if mode == "cwd":
+        for p in paths:
+            if inside(cwd, p):
+                out.write(os.fsencode(p) + b"\0" + d.encode() + b"\0")
+        continue
+    try:
+        with open(f"/proc/{d}/cmdline", "rb") as f:
+            argv = [os.fsdecode(a) for a in f.read().split(b"\0") if a]
+    except OSError:
+        continue
+    prog = os.path.basename(argv[0]) if argv else ""
+    if prog != "git" and not prog.startswith("git-"):
+        continue
+    words = [cwd] + [a for a in argv[1:] if a.startswith("/")]
+    if any(inside(os.path.realpath(w), p) for w in words for p in paths):
+        out.write(d.encode() + b"\0")
+PYEOF
+}
+
+# True when $1's blob equals the given path's state on BASE (both absent counts as equal).
+# $1: a blob sha or "" for absent; $2 the path.
+same_as_base() {
+  local base_blob
+  base_blob=$(git -C "$MAIN" rev-parse -q --verify "$BASE:$2" 2>/dev/null) || base_blob=""
+  [ "$1" = "$base_blob" ]
+}
+
+is_cache_path() { # any component of the path is a safe-clean cache name
+  local comp n
+  local -a comps
+  IFS=/ read -ra comps <<<"${1%/}"
+  for comp in "${comps[@]}"; do
+    for n in "${CACHE_NAMES[@]}"; do [ "$comp" = "$n" ] && return 0; done
+  done
+  return 1
+}
+
+# Fill the array named $1 with the NUL-separated output of the command after it; return
+# nonzero when the command fails (a bare `mapfile < <(cmd)` would hide that).
+z_list() {
+  local -n z_arr=$1
+  shift
+  mapfile -d '' z_arr < <("$@"; printf '\001rc=%s\0' "$?")
+  local last=${z_arr[-1]:-}
+  unset 'z_arr[-1]'
+  [ "$last" = $'\001rc=0' ]
+}
+
+REASONS=()
+hold() { REASONS+=("$1"$'\t'"$2"); }
+
+# Criteria 3-7 for tree index $1; criteria 1-2 are judged by the caller.
+judge_git() {
+  local i=$1 t=${WT_PATH[$1]} b=${WT_BRANCH[$1]} head=${WT_HEAD[$1]}
+  local out p blob wt_blob idx line sha subj n_unmerged=0 first=""
+  if [ -z "$BASE" ]; then
+    hold no-base "no origin/HEAD or origin/main ref to compare against"
+    return
+  fi
+  # 6 + 7: what removal would delete or orphan.
+  if [ -n "$b" ]; then
+    local re_rc
+    [[ $b =~ $BRANCH_RE ]] 2>/dev/null
+    # shellcheck disable=SC2319 # the condition's own status is wanted: 2 means an invalid regex
+    re_rc=$?
+    case $re_rc in
+      0) ;;
+      1) hold branch-name "branch $b does not match $BRANCH_RE" ;;
+      *) hold branch-name "SYG_WORKTREE_BRANCH_RE is not a valid extended regex: $BRANCH_RE" ;;
+    esac
+    # 3: commits on the branch with no equivalent on the base.
+    if ! out=$(git -C "$MAIN" cherry "$BASE" "refs/heads/$b" 2>&1); then
+      hold git-error "git cherry $BASE $b failed: ${out//$'\n'/ }"
+    else
+      while IFS= read -r line; do
+        [ "${line:0:1}" = + ] || continue
+        sha=${line#+ }
+        subj=$(git -C "$MAIN" log -1 --format=%s "$sha" 2>/dev/null) || subj=""
+        if [ -n "$subj" ] && [ -n "$(git -C "$MAIN" log "$BASE" --fixed-strings --grep="$subj" -n 1 --format=%H 2>/dev/null)" ]; then
+          continue
+        fi
+        n_unmerged=$((n_unmerged + 1))
+        [ -n "$first" ] || first="${sha:0:12} ${subj:-<empty subject>}"
+      done <<<"$out"
+      [ "$n_unmerged" -eq 0 ] || hold unmerged "$n_unmerged commit(s) not on $BASE, first: $first"
+    fi
+  else
+    if ! out=$(git -C "$MAIN" rev-list -n 1 "$head" --not "$BASE" --branches 2>&1); then
+      hold git-error "git rev-list for detached HEAD ${head:0:12} failed: ${out//$'\n'/ }"
+    elif [ -n "$out" ]; then
+      hold detached-unreferenced "detached HEAD ${head:0:12} has commits on neither $BASE nor any branch"
+    fi
+  fi
+  # 4: tracked files whose worktree content differs from HEAD, and staged files whose index
+  # content differs from HEAD: that content must equal the base's (absent on both counts).
+  local -a changed=() staged=() untracked=() ignored=() status=()
+  if ! z_list changed git -C "$t" diff --name-only -z --no-renames HEAD ||
+    ! z_list staged git -C "$t" diff --cached --name-only -z --no-renames HEAD; then
+    hold git-error "git diff in the tree failed"
+  fi
+  for p in "${changed[@]}"; do
+    if [ -e "$t/$p" ] || [ -L "$t/$p" ]; then
+      wt_blob=$(git -C "$t" hash-object -- "$p" 2>/dev/null) || wt_blob="unreadable"
+    else
+      wt_blob=""
+    fi
+    same_as_base "$wt_blob" "$p" || hold dirty "$p differs from $BASE"
+  done
+  for p in "${staged[@]}"; do
+    idx=$(git -C "$t" ls-files -s -- "$p" 2>/dev/null)
+    case "$idx" in
+      "") blob="" ;;
+      *$'\n'*) blob="conflicted" ;;
+      *) blob=$(cut -d' ' -f2 <<<"$idx") ;;
+    esac
+    same_as_base "$blob" "$p" || hold dirty "$p (staged) differs from $BASE"
+  done
+  # 4: untracked files: equal to the base's blob, never a path the base lacks.
+  if ! z_list untracked git -C "$t" ls-files -z --others --exclude-standard; then
+    hold git-error "git ls-files --others in the tree failed"
+  fi
+  for p in "${untracked[@]}"; do
+    if ! git -C "$MAIN" rev-parse -q --verify "$BASE:${p%/}" >/dev/null 2>&1; then
+      hold untracked-new "$p is untracked and not on $BASE"
+    elif [ "${p%/}" != "$p" ] || ! same_as_base "$(git -C "$t" hash-object -- "$p" 2>/dev/null)" "$p"; then
+      hold untracked-differs "$p is untracked and differs from $BASE"
+    fi
+  done
+  # 5: ignored files: only safe-clean cache names. --ignored=matching lists each path an ignore
+  # rule matched (pkg/__pycache__/), where ls-files --directory would collapse it into pkg/.
+  # --no-renames: a rename record's extra NUL field would read as an entry.
+  if ! z_list status git -C "$t" status --porcelain=v1 -z --no-renames --ignored=matching --untracked-files=all; then
+    hold git-error "git status --ignored in the tree failed"
+  fi
+  for p in "${status[@]}"; do
+    case "$p" in "!! "*) ignored+=("${p#!! }") ;; esac
+  done
+  for p in "${ignored[@]}"; do
+    if [ ${#CACHE_NAMES[@]} -eq 0 ]; then
+      hold ignored "$p is ignored, and safe-clean's cache list could not be read"
+    elif ! is_cache_path "$p"; then
+      hold ignored "$p is ignored and not a safe-clean cache name"
+    fi
+  done
+}
+
+# Agent trees and their cwd scan.
+TREES=()
+for i in $(seq 1 "$cur"); do
+  case "$(realpath -m -- "${WT_PATH[$i]}")/" in "$WT_ROOT"/?*) TREES+=("$i") ;; esac
+done
+declare -A CWD_PID=()
+CWD_SCAN_OK=true
+if [ ${#TREES[@]} -gt 0 ]; then
+  tree_paths=()
+  for i in "${TREES[@]}"; do tree_paths+=("$(realpath -m -- "${WT_PATH[$i]}")"); done
+  scan=$(proc_scan cwd "${tree_paths[@]}" | tr '\0' '\036') || CWD_SCAN_OK=false
+  while IFS= read -r -d $'\036' p && IFS= read -r -d $'\036' pid; do
+    CWD_PID[$p]=$pid
+  done <<<"$scan"
+fi
+
+# Judge every tree; record the verdict.
+V_IDX=() V_VERDICT=() V_REASONS=() V_ACTION=()
+for i in "${TREES[@]}"; do
+  REASONS=()
+  t=${WT_PATH[$i]}
+  if [ -n "${WT_PRUNABLE[$i]}" ]; then
+    hold prunable "${WT_PRUNABLE[$i]}; the tree is gone, its branch is the owner's call"
+  else
+    # 1: the lock.
+    if ${WT_LOCKED[$i]}; then
+      if [[ ${WT_LOCK_REASON[$i]} =~ [Pp][Ii][Dd][\ :=]*([0-9]+) ]]; then
+        pid=${BASH_REMATCH[1]}
+        [ -d "/proc/$pid" ] && hold locked-live "lock pid $pid is alive"
+      else
+        hold lock-unparsable "lock reason names no pid: '${WT_LOCK_REASON[$i]}'"
+      fi
+    fi
+    # 2: a live cwd.
+    if ! $CWD_SCAN_OK; then
+      hold proc-unreadable "cannot read /proc to check for processes inside the tree"
+    elif [ -n "${CWD_PID[$(realpath -m -- "$t")]:-}" ]; then
+      hold live-cwd "pid ${CWD_PID[$(realpath -m -- "$t")]} has its cwd inside the tree"
+    fi
+    judge_git "$i"
+  fi
+  V_IDX+=("$i")
+  if [ ${#REASONS[@]} -eq 0 ]; then V_VERDICT+=(SAFE); V_REASONS+=(""); else
+    V_VERDICT+=(HOLD); V_REASONS+=("$(printf '%s\n' "${REASONS[@]}")"); fi
+  V_ACTION+=("")
+done
+
+# Apply: each SAFE tree independently; a failed step stops that tree only.
+rc=0
+removed=0
+if $APPLY; then
+  for k in "${!V_IDX[@]}"; do
+    [ "${V_VERDICT[$k]}" = SAFE ] || continue
+    i=${V_IDX[$k]} t=${WT_PATH[${V_IDX[$k]}]} b=${WT_BRANCH[${V_IDX[$k]}]}
+    if ${WT_LOCKED[$i]} && ! err=$(git -C "$MAIN" worktree unlock "$t" 2>&1); then
+      V_ACTION[k]="failed: unlock: ${err//$'\n'/ }"; rc=3; continue
+    fi
+    if ! err=$(git -C "$MAIN" worktree remove --force "$t" 2>&1); then
+      V_ACTION[k]="failed: remove: ${err//$'\n'/ }"; rc=3; continue
+    fi
+    removed=$((removed + 1))
+    if [ -n "$b" ] && ! err=$(git -C "$MAIN" branch -D "$b" 2>&1); then
+      V_ACTION[k]="removed; branch delete failed: ${err//$'\n'/ }"; rc=3; continue
+    fi
+    V_ACTION[k]="removed${b:+, branch $b deleted}"
+  done
+  [ "$removed" -eq 0 ] || git -C "$MAIN" worktree prune >/dev/null 2>&1 || rc=3
+  [ "$removed" -gt 0 ] || [ "$rc" -ne 0 ] || rc=1
+fi
+
+# Locks: the main .git and every worktree's git dir.
+L_PATH=() L_VERDICT=() L_DETAIL=() L_ACTION=()
+if $LOCKS; then
+  repo_paths=("$MAIN" "$COMMON")
+  for i in $(seq 1 "$cur"); do repo_paths+=("$(realpath -m -- "${WT_PATH[$i]}")"); done
+  git_live=$(proc_scan git "${repo_paths[@]}" | tr '\0' ' ')
+  git_scan_rc=$?
+  now=$(date +%s)
+  shopt -s nullglob
+  for l in "$COMMON/index.lock" "$COMMON"/worktrees/*/index.lock; do
+    [ -e "$l" ] || continue
+    L_PATH+=("$l")
+    L_ACTION+=("")
+    mtime=$(stat -c %Y -- "$l" 2>/dev/null) || mtime=$now
+    age=$(((now - mtime) / 60))
+    if [ -s "$l" ]; then
+      L_VERDICT+=(HOLD:nonempty); L_DETAIL+=("$(stat -c %s -- "$l") bytes")
+    elif [ $((now - mtime)) -le $((AGE_MIN * 60)) ]; then
+      L_VERDICT+=(HOLD:fresh); L_DETAIL+=("${age} min old, stale after $AGE_MIN")
+    elif [ "$git_scan_rc" -ne 0 ]; then
+      L_VERDICT+=(HOLD:proc-unreadable); L_DETAIL+=("cannot read /proc to check for live git")
+    elif [ -n "$git_live" ]; then
+      L_VERDICT+=(HOLD:git-live); L_DETAIL+=("live git pid(s) in the repo: ${git_live% }")
+    else
+      L_VERDICT+=(STALE); L_DETAIL+=("0 bytes, ${age} min old, no live git")
+    fi
+  done
+  shopt -u nullglob
+  if $LOCKS_APPLY; then
+    for k in "${!L_PATH[@]}"; do
+      [ "${L_VERDICT[$k]}" = STALE ] || continue
+      if err=$(rm -f -- "${L_PATH[$k]}" 2>&1); then L_ACTION[k]=deleted; else
+        L_ACTION[k]="failed: ${err//$'\n'/ }"; rc=3; fi
+    done
+  fi
+fi
+
+rel() { local p; p=$(realpath -m -- "$1"); printf '%s' "${p#"$MAIN"/}"; }
+
+if $JSON; then
+  {
+    printf '%s\0%s\0%s\0%s\0%s\0' "$MAIN" "$BASE" "$APPLY" "$LOCKS" "${#V_IDX[@]}"
+    for k in "${!V_IDX[@]}"; do
+      i=${V_IDX[$k]}
+      printf '%s\0%s\0%s\0%s\0%s\0' "${WT_PATH[$i]}" "${WT_BRANCH[$i]}" "${V_VERDICT[$k]}" \
+        "${V_REASONS[$k]}" "${V_ACTION[$k]}"
+    done
+    for k in "${!L_PATH[@]}"; do
+      printf '%s\0%s\0%s\0%s\0' "${L_PATH[$k]}" "${L_VERDICT[$k]}" "${L_DETAIL[$k]}" "${L_ACTION[$k]}"
+    done
+  } | python3 -c '
+import json, sys
+f = sys.stdin.buffer.read().decode("utf-8", "surrogateescape").split("\0")[:-1]
+repo, base, apply_, locks, n = f[:5]
+f = f[5:]
+trees = []
+for k in range(int(n)):
+    path, branch, verdict, reasons, action = f[5 * k:5 * k + 5]
+    trees.append({"path": path, "branch": branch or None, "verdict": verdict,
+                  "reasons": [dict(zip(("code", "detail"), r.split("\t", 1)))
+                              for r in reasons.splitlines()],
+                  "action": action or None})
+f = f[5 * int(n):]
+lks = [{"path": f[i], "verdict": f[i + 1], "detail": f[i + 2], "action": f[i + 3] or None}
+       for i in range(0, len(f), 4)]
+out = {"repo": repo, "base": base or None, "apply": apply_ == "true", "worktrees": trees}
+if locks == "true":
+    out["locks"] = lks
+print(json.dumps(out, indent=2))
+'
+  exit $rc
+fi
+
+echo "repo: $MAIN  base: ${BASE:-none}  agent worktrees: ${#V_IDX[@]}$($APPLY || echo '  (dry run; --apply removes the SAFE ones)')"
+nhold=0
+for k in "${!V_IDX[@]}"; do
+  i=${V_IDX[$k]}
+  if [ "${V_VERDICT[$k]}" = SAFE ]; then
+    printf 'SAFE  %s  [%s]%s\n' "$(rel "${WT_PATH[$i]}")" "${WT_BRANCH[$i]:-detached}" \
+      "${V_ACTION[$k]:+  ${V_ACTION[$k]}}"
+  else
+    nhold=$((nhold + 1))
+  fi
+done
+if [ "$nhold" -gt 0 ]; then
+  echo "HOLD report: $nhold tree(s) left in place"
+  for k in "${!V_IDX[@]}"; do
+    [ "${V_VERDICT[$k]}" = HOLD ] || continue
+    i=${V_IDX[$k]}
+    printf '  %s  [%s]\n' "$(rel "${WT_PATH[$i]}")" "${WT_BRANCH[$i]:-detached}"
+    while IFS=$'\t' read -r code detail; do
+      printf '    HOLD:%s  %s\n' "$code" "$detail"
+    done <<<"${V_REASONS[$k]}"
+  done
+fi
+if $APPLY && [ "$removed" -eq 0 ] && [ "$rc" -eq 1 ]; then echo "nothing removed: no SAFE tree"; fi
+if $LOCKS; then
+  if [ ${#L_PATH[@]} -eq 0 ]; then
+    echo "locks: no index.lock files"
+  else
+    echo "locks (stale = 0 bytes, older than $AGE_MIN min, no live git in the repo):"
+    for k in "${!L_PATH[@]}"; do
+      printf '  %s  %s  (%s)%s\n' "${L_VERDICT[$k]}" "${L_PATH[$k]}" "${L_DETAIL[$k]}" \
+        "${L_ACTION[$k]:+  ${L_ACTION[$k]}}"
+    done
+  fi
+fi
+exit $rc
