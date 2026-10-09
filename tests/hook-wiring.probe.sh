@@ -10,8 +10,10 @@ set -uo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # Exemptions: "<kind>:<name>  reason", one per entry. Kinds: hook-probe,
-# hook-wired, bin-probe. None are needed today; an entry needs a reason.
-EXEMPT=()
+# hook-wired, bin-probe. An entry needs a reason.
+EXEMPT=(
+  "bin-probe:zai-spend  alias symlink to zai-usage, kept for PATH callers; tests/zai-usage.probe.sh pins both"
+)
 
 fail=0
 ok() { echo "ok:   $1"; }

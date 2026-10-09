@@ -6,7 +6,8 @@
 # claude-usage classifies the base-URL host exactly as the statusline does (the Console-key lane
 # differs on purpose: CC_ROUTE_PRESET here, a non-empty ANTHROPIC_API_KEY there), and that
 # usage-sweep --points consumes the readings log it writes. Also: the caller's model read from its
-# session transcript, and --json's scoped string escaping.
+# session transcript, and --json's scoped string escaping. Also: --all's three lane lines and their
+# degrades, --json's lane fields, and OpenRouter dollars read-only from the statusline's credits cache.
 # Usage: tests/claude-usage.probe.sh   (from anywhere; never touches the real cache, settings or API)
 
 set -uo pipefail
@@ -33,6 +34,18 @@ route_zai()       { route_url https://api.z.ai/api/anthropic; }
 route_anthropic
 # Every run logs its reading: keep the fixtures out of the real ~/.local/state log.
 export XDG_STATE_HOME="$tmp/state"
+# api-credit: a fixture stub, never the real ledger. It answers only `balance --json` (the plain
+# text is not the shape claude-usage reads); "fail" exits 2 like api-credit without a ledger.
+credit_stub() { # credit_stub <balance json | fail>
+    if [ "$1" = fail ]; then
+        printf '#!/bin/sh\necho "api-credit: SYG_CREDIT_LEDGER is not set" >&2\nexit 2\n' > "$tmp/api-credit"
+    else
+        printf '#!/bin/sh\n[ "$1 $2" = "balance --json" ] && { echo %s; exit 0; }\necho "api plain text"\n' "'$1'" > "$tmp/api-credit"
+    fi
+    chmod +x "$tmp/api-credit"
+}
+credit_stub fail
+export CLAUDE_USAGE_API_CREDIT="$tmp/api-credit"
 log="$tmp/state/claude-usage/readings.jsonl"
 
 # fixture <5h %> <week %> <fable %>: a fresh cache (mtime now), so the script never refreshes.
@@ -58,6 +71,7 @@ CLAUDE_USAGE_WEEK_RESERVE=lots run --ok 90 2>/dev/null; [ $? = 1 ] && ok "week 8
 # Any non-flag argument prints the usage block from the script's own header lines.
 out=$(run --help); rc=$?
 [ $rc = 2 ] && grep -q '^ *claude-usage --ok \[PCT\]' <<< "$out" && grep -q '^ *claude-usage --json' <<< "$out" \
+    && grep -q '^ *claude-usage --all' <<< "$out" && grep -q 'api_credit_remaining_usd' <<< "$out" \
     && ok "--help: exit 2 with the header's usage block" || bad "--help (rc $rc): $out"
 
 # The reported bug: at 95-99% of the week, --wait returned at once. It must block now.
@@ -98,14 +112,14 @@ line=$(run)
     && ok "plain line: the scoped name renders with a single backslash" || bad "plain line scoped name: $line"
 
 # Routing: while settings.json points sessions at z.ai, the Anthropic plan's numbers don't gate;
-# z.ai's own quota does (a stub zai-spend stands in for the live API), and the line says so.
+# z.ai's own quota does (a stub zai-usage stands in for the live API), and the line says so.
 # The stub sits where the statusline looks for it too ($HOME/.local/bin).
-zai_stub() { # zai_stub <source> <5h %> <week %>
+zai_stub() { # zai_stub <source> <5h %> <week %> [<5h reset epoch> <week reset epoch>]
     printf '#!/bin/sh\n[ "$1" = --json ] && echo %s || echo "z.ai line"\n' \
-        "'{\"source\":\"$1\",\"five_hour_pct\":$2,\"week_pct\":$3}'" > "$tmp/.local/bin/zai-spend"
-    chmod +x "$tmp/.local/bin/zai-spend"
+        "'{\"source\":\"$1\",\"five_hour_pct\":$2,\"week_pct\":$3${4:+,\"five_hour_reset_at\":$4,\"week_reset_at\":$5}}'" > "$tmp/.local/bin/zai-usage"
+    chmod +x "$tmp/.local/bin/zai-usage"
 }
-export CLAUDE_USAGE_ZAI_SPEND="$tmp/.local/bin/zai-spend"
+export CLAUDE_USAGE_ZAI_USAGE="$tmp/.local/bin/zai-usage"
 route_zai
 fixture 10 99 100
 zai_stub api 10 74
@@ -230,6 +244,120 @@ equiv "https://weird.example.org/v1" unknown:weird.example.org https://weird.exa
 route_url https://weird.example.org/v1
 fixture 10 99 0
 run --ok 90; [ $? = 0 ] && ok "weird.example.org: unknown lane, gate passes" || bad "weird.example.org: --ok should pass"
+route_anthropic
+
+# --all: one line per lane (plan, z.ai, api credit), whatever lane the caller is on, exit 0.
+fixture 10 50 0
+# Resets 2m30s past a whole hour: the countdown floors to "…h2m" for the first 30 s of the run.
+nowe=$(date +%s); r5=$((nowe + 3600 + 150)); rw=$((nowe + 30 * 3600 + 150))
+zai_stub api 42 17 "$r5" "$rw"
+credit_stub '{"remaining_usd":128.557512,"spent_usd":21.44,"next_expiry":"2026-10-21T00:00:00Z","days_left":11}'
+out=$(run --all); rc=$?
+want_z="z.ai: 5h 42% (resets $(date -d "@$r5" +%H:%M), in 1h2m) · week 17% (resets $(date -d "@$rw" +%H:%M), in 30h2m)"
+[ $rc = 0 ] && [ "$(wc -l <<< "$out")" = 3 ] \
+    && [[ $(sed -n 1p <<< "$out") == "Anthropic plan: 5h 10% (resets "*" · week 50% (resets "*" · Fable 0% of its own weekly cap" ]] \
+    && ok "--all: plan line first, composed like the plain line" || bad "--all plan line (rc $rc): $out"
+[ "$(sed -n 2p <<< "$out")" = "$want_z" ] && ok "--all: z.ai line from zai-usage --json (api), local reset times + countdowns" \
+    || bad "--all z.ai line: got [$(sed -n 2p <<< "$out")], want [$want_z]"
+[ "$(sed -n 3p <<< "$out")" = 'api credit: ~$128.56 (exp 10-21, 11d)' ] && ok "--all: api credit line from balance --json" \
+    || bad "--all credit line: $(sed -n 3p <<< "$out")"
+# The calling lane doesn't matter: a z.ai-routed caller still sees the plan line.
+route_zai
+out=$(run --all); rc=$?
+[ $rc = 0 ] && grep -q '^Anthropic plan: 5h 10%' <<< "$out" && grep -q '^z\.ai: 5h 42%' <<< "$out" \
+    && ok "--all: a z.ai-routed caller sees the plan line too" || bad "--all from z.ai (rc $rc): $out"
+route_anthropic
+zai_stub api 42 17
+[ "$(run --all | sed -n 2p)" = "z.ai: 5h 42% · week 17%" ] && ok "--all: a 0 reset renders without the parenthetical" \
+    || bad "--all z.ai no resets: $(run --all | sed -n 2p)"
+zai_stub local 10 308
+[ "$(run --all | sed -n 2p)" = "z.ai: z.ai line" ] && ok "--all: no live quota -> zai-usage's own --line text" \
+    || bad "--all z.ai local: $(run --all | sed -n 2p)"
+printf '#!/bin/sh\nexit 0\n' > "$tmp/.local/bin/zai-usage"
+[ "$(run --all | sed -n 2p)" = "z.ai: no data" ] && ok "--all: zai-usage silent -> z.ai: no data" \
+    || bad "--all z.ai silent: $(run --all | sed -n 2p)"
+printf '#!/bin/sh\n[ "$1" = --line ] && echo "…"\nexit 0\n' > "$tmp/.local/bin/zai-usage"
+[ "$(run --all | sed -n 2p)" = "z.ai: no data" ] && ok "--all: zai-usage's '…' (no cache yet) -> z.ai: no data" \
+    || bad "--all z.ai ellipsis: $(run --all | sed -n 2p)"
+credit_stub '{"remaining_usd":null,"spent_usd":3.5,"next_expiry":null,"days_left":null}'
+[ "$(run --all | sed -n 3p)" = 'api credit: ~$3.50 spent (no live grants)' ] && ok "--all: no grants config -> spent" \
+    || bad "--all credit spent: $(run --all | sed -n 3p)"
+credit_stub '{"remaining_usd":0,"spent_usd":200,"next_expiry":null,"days_left":null}'
+[ "$(run --all | sed -n 3p)" = 'api credit: ~$0.00' ] && ok "--all: remaining 0 -> ~\$0.00" \
+    || bad "--all credit zero: $(run --all | sed -n 3p)"
+credit_stub '{"remaining_usd":5,"spent_usd":1,"next_expiry":null,"days_left":null}'
+[ "$(run --all | sed -n 3p)" = 'api credit: ~$5.00' ] && ok "--all: no expiry -> no parenthetical" \
+    || bad "--all credit no expiry: $(run --all | sed -n 3p)"
+credit_stub fail
+[ "$(run --all | sed -n 3p)" = 'api credit: not configured' ] && ok "--all: api-credit exits 2 -> not configured" \
+    || bad "--all credit fail: $(run --all | sed -n 3p)"
+# No plan cache and nothing to refresh with: a line of its own, still exit 0 (never the exit 2 path).
+mv "$tmp/claude-statusline/usage.json" "$tmp/usage.json.keep"
+out=$(run --all 2>&1); rc=$?
+[ $rc = 0 ] && [ "$(sed -n 1p <<< "$out")" = "Anthropic plan: no data" ] && [ "$(wc -l <<< "$out")" = 3 ] \
+    && ok "--all: no plan cache -> 'Anthropic plan: no data', exit 0" || bad "--all no cache (rc $rc): $out"
+mv "$tmp/usage.json.keep" "$tmp/claude-statusline/usage.json"
+
+# --json: the original fields byte-for-byte, then the calling lane and its numbers.
+fixture 10 50 0
+old_prefix='{"five_hour_pct":10,"five_hour_resets_at":4070908800,"seconds_to_reset":'
+j=$(run --json)
+[[ $j == "$old_prefix"* ]] && [[ $j == *',"routed":0,"lane":"anthropic"}' ]] \
+    && ok "--json anthropic: original fields unchanged, then lane, no extra numbers" || bad "--json anthropic: $j"
+route_zai
+zai_stub api 42 17
+j=$(run --json)
+jq -e '.lane == "zai" and .zai_five_hour_pct == 42 and .zai_week_pct == 17 and .routed == 1 and .weekly_pct == 50' <<< "$j" >/dev/null \
+    && ok "--json z.ai lane: lane + zai_five_hour_pct/zai_week_pct from the live quota" || bad "--json zai: $j"
+zai_stub local 10 308
+j=$(run --json)
+jq -e '.lane == "zai" and .zai_five_hour_pct == null and .zai_week_pct == null and has("zai_week_pct")' <<< "$j" >/dev/null \
+    && ok "--json z.ai lane, local estimate only: both null" || bad "--json zai local: $j"
+route_anthropic
+credit_stub '{"remaining_usd":128.557512,"spent_usd":21.44,"next_expiry":"2026-10-21T00:00:00Z","days_left":11}'
+j=$(CC_ROUTE_PRESET=anthropic-api run --json)
+jq -e '.lane == "console" and .api_credit_remaining_usd == 128.557512' <<< "$j" >/dev/null \
+    && ok "--json Console lane: api_credit_remaining_usd from balance --json" || bad "--json console: $j"
+credit_stub '{"remaining_usd":null,"spent_usd":3.5,"next_expiry":null,"days_left":null}'
+j=$(CC_ROUTE_PRESET=anthropic-api run --json)
+jq -e '.lane == "console" and .api_credit_remaining_usd == null and has("api_credit_remaining_usd")' <<< "$j" >/dev/null \
+    && ok "--json Console lane, no grants: null" || bad "--json console null: $j"
+credit_stub fail
+j=$(CC_ROUTE_PRESET=anthropic-api run --json)
+jq -e '.api_credit_remaining_usd == null' <<< "$j" >/dev/null && ok "--json Console lane, api-credit fails: null" || bad "--json console fail: $j"
+j=$(ANTHROPIC_BASE_URL=https://weird.example.org/v1 run --json)
+jq -e '.lane == "unknown" and (keys | length) == 8' <<< "$j" >/dev/null && ok "--json unknown lane: lane only" || bad "--json unknown: $j"
+
+# OpenRouter: the remaining dollars come from the statusline's credits cache, read-only.
+orc="$tmp/claude-statusline/or-credits.json"
+or_settings() { jq -n '{env: {ANTHROPIC_BASE_URL: "https://openrouter.ai/api", ANTHROPIC_AUTH_TOKEN: "dummy-or-token"}}' > "$tmp/.claude/settings.json"; }
+or_settings
+echo '{"data":{"total_credits":780,"total_usage":762.456759698}}' > "$orc"
+out=$(run)
+[[ $out == "OpenRouter-routed (gate passes; Anthropic plan idle) · 5h 10% "*' · $17.54' ]] \
+    && ok "OpenRouter line: remaining dollars appended from the credits cache" || bad "OpenRouter dollars: $out"
+run --json | jq -e '.lane == "or" and .or_remaining_usd == 17.54' >/dev/null \
+    && ok "--json OpenRouter lane: or_remaining_usd" || bad "--json or: $(run --json)"
+# A stale cache (a day old) still renders, and nothing refreshes it: no fetch path here.
+touch -d '@1000000000' "$orc"; before=$(stat -c '%Y %s' "$orc")
+out=$(run)
+[[ $out == *' · $17.54' ]] && [ "$(stat -c '%Y %s' "$orc")" = "$before" ] \
+    && ok "OpenRouter line: stale cache still renders, left untouched (read-only)" || bad "OpenRouter stale: $out ($(stat -c '%Y %s' "$orc") vs $before)"
+echo '{"data":{"total_credits":780,"total_usage":779.999}}' > "$orc"
+out=$(run); [[ $out != *'$'* ]] && ok "OpenRouter line: sub-cent balance -> no dollars" || bad "OpenRouter sub-cent: $out"
+echo '{"data":{"total_credits":780,"total_usage":762.456759698}}' > "$orc"
+out=$(ANTHROPIC_AUTH_TOKEN='' run); route_url https://openrouter.ai/api; out2=$(run)
+[[ $out == *' · $17.54' ]] && [[ $out2 != *'$'* ]] \
+    && ok "OpenRouter line: no token anywhere -> no dollars (the statusline's degrade)" || bad "OpenRouter token gate: [$out] [$out2]"
+run --json | jq -e '.or_remaining_usd == null and has("or_remaining_usd")' >/dev/null \
+    && ok "--json OpenRouter lane, no token anywhere: null" || bad "--json or no token: $(run --json)"
+or_settings
+rm -f "$orc"
+out=$(run)
+[[ $out == "OpenRouter-routed (gate passes; Anthropic plan idle) · 5h 10% "* ]] && [[ $out != *'$'* ]] && [ ! -e "$orc" ] \
+    && ok "OpenRouter line: cold cache -> label without dollars, no cache file created" || bad "OpenRouter cold: $out"
+run --json | jq -e '.or_remaining_usd == null and has("or_remaining_usd")' >/dev/null \
+    && ok "--json OpenRouter lane, cold cache: null" || bad "--json or cold: $(run --json)"
 route_anthropic
 
 # Reading log: one line per distinct reading, raw percentages, scoped caps as an object.
