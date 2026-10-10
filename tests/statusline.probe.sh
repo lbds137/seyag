@@ -108,6 +108,9 @@ rm -f "$h/cache/claude-statusline/zai-usage.json"
 strip <<< "$(render '{"context_window":{"current_usage":{"input_tokens":1000}},"model":{"display_name":"X"},"cwd":"/tmp"}')" \
     | grep -q 'local est' && ok "routed, api dead: local-est fallback renders" || bad "fallback: $out"
 export ZAI_SPEND_QUOTA_URL="file://$h/quota.json"
+# Drop the cache again: the real zai-usage's failed poll cached its local-estimate zeros (120s TTL),
+# which a later z.ai-lane render would otherwise be served. A no-op with the stub.
+rm -f "$h/cache/claude-statusline/zai-usage.json"
 
 # 4-5. Unrouted: the Anthropic segment from stdin rate_limits through the SAME template —
 # hybrid format, both reset arrows, same traffic lights. Plus the fable cap from a fresh cache.
