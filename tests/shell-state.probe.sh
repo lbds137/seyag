@@ -91,9 +91,26 @@ check("cd to a backtick word resets to payload_cwd", cwd_of_last("cd `pwd`; true
 check("cd to a glob word resets to payload_cwd", cwd_of_last("cd a*; true", started()), BASE)
 check("cd ~/sub expands to $HOME/sub (no reset)", cwd_of_last("cd ~/sub; true", started()), HOME + "/sub")
 check("cd ~ expands to $HOME", cwd_of_last("cd ~; true", started()), HOME)
-del os.environ["HOME"]  # this one case only: bare cd with HOME unset
+check("cd ~other with no literal ~other dir resets to payload_cwd", cwd_of_last("cd ~other; true", started()), BASE)
+_, _, st = run("cd ~+", started())
+check("cd ~+ stays at the current dir, oldpwd set", (st.cwd, st.oldpwd), (START, START))
+check("cd ~- after a prior cd returns to the oldpwd", cwd_of_last("cd a; cd ~-; true", started()), START)
+# bash: with OLDPWD unset `~-` stays literal and cd fails, changing nothing.
+_, _, st = run("cd ~-", started())
+check("cd ~- with no prior cd is a known failure: nothing moves", (st.cwd, st.oldpwd), (START, None))
+# `cd .` moves nothing but sets OLDPWD (bash does on every successful cd).
+check("cd . updates the oldpwd: cd a; cd .; cd - stays in a", cwd_of_last("cd a; cd .; cd -; true", started()), START + "/a")
+# bash leaves a ~user word for no such user literal, and cd enters a literal
+# directory of that name in the cwd (a crafted repo).
+os.makedirs(START + "/~other")
+check("cd ~other with a literal ~other dir moves there", cwd_of_last("cd ~other; true", started()), START + "/~other")
+del os.environ["HOME"]  # these cases only: bare cd with HOME unset
 try:
-    check("bare cd with HOME unset resets to payload_cwd", cwd_of_last("cd; true", started()), BASE)
+    # bash: "cd: HOME not set"; the cd fails and touches neither PWD nor OLDPWD.
+    _, _, st = run("cd", started())
+    check("bare cd with HOME unset is a known failure: nothing moves", (st.cwd, st.oldpwd), (START, None))
+    # The failed bare cd leaves OLDPWD at the start, so `cd -` goes back there.
+    check("cd a; bare cd with HOME unset; cd - returns to the start", cwd_of_last("cd a; cd; cd -; true", started()), START)
 finally:
     os.environ["HOME"] = HOME
 
@@ -113,6 +130,9 @@ for flagged in ("pushd -n a", "pushd +1", "pushd a b"):
     check(f"{flagged} resets to payload_cwd, stack unchanged", (st.cwd, st.stack), (BASE, [START]))
 _, _, st = run("cd a; pushd -")
 check("pushd - moves to the oldpwd and stacks the old dir", (st.cwd, st.stack), (BASE, [BASE + "/a"]))
+# bash: with OLDPWD unset `pushd ~-` fails like `cd ~-` and pushes nothing.
+_, _, st = run("pushd ~-; true", started())
+check("pushd ~- with no prior cd is a known failure: no move, no stack entry", (st.cwd, st.stack), (START, []))
 _, _, st = run("pushd a; popd +1", started())
 check("popd +1 resets to payload_cwd, stack unchanged", (st.cwd, st.stack), (BASE, [START]))
 
@@ -146,9 +166,9 @@ check(
     [True] * 5,
 )
 check(
-    "unresolvable_cd_target passes literal and ~ words",
-    [unresolvable_cd_target(w) for w in ("a/b", "../c", "~", "~/d", "~other")],
-    [False] * 5,
+    "unresolvable_cd_target passes literal and ~-words (chdir judges ~-words)",
+    [unresolvable_cd_target(w) for w in ("a/b", "../c", "~", "~/d", "~other", "~+", "~-")],
+    [False] * 7,
 )
 
 # --- pipelines_of ----------------------------------------------------------------
@@ -196,9 +216,9 @@ check(
 )
 recs, ctx, _ = run('echo "$(cd a)"; bash -c "cd b"', depth=MAX_WRAPPER_DEPTH)
 check(
-    "at MAX_WRAPPER_DEPTH substitutions and wrappers are not walked (nor left over)",
+    "at MAX_WRAPPER_DEPTH a substitution is left over (not walked); wrappers are not walked",
     ([n for n, _, _ in recs], ctx.leftovers),
-    (["echo", "bash"], []),
+    (["echo", "bash"], [("cd a", MAX_WRAPPER_DEPTH + 1)]),
 )
 _, ctx, _ = run("cd a; true")
 check(

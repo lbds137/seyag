@@ -183,6 +183,18 @@ run 2 "backtick capture blocks" "$FIX" -- \
   'x=`gh repo edit -R example/one --visibility=public`'
 run 0 "quoted mention does not block" "$FIX" -- \
   'echo "gh repo create --public"'
+# A substitution inside nested `bash -c` strings, judged in the dir it cds to
+# (TWO; the env covers only FIX's example/one). Two wrappers: walked inline
+# below MAX_WRAPPER_DEPTH (control); three: the span sits at the cap and is
+# judged through the leftover replay.
+run 2 "substitution under two bash -c wrappers blocks (below-cap control)" "$FIX" \
+  SYG_PUBLISH_CHECKED=example/one -- \
+  'bash -c "bash -c \"echo \\\"\\\$(cd ../two; gh repo edit --visibility=public)\\\"\""'
+run 2 "substitution under three bash -c wrappers (at the cap) blocks" "$FIX" \
+  SYG_PUBLISH_CHECKED=example/one -- \
+  'bash -c "bash -c \"bash -c \\\"echo \\\\\\\"\\\\\\\$(cd ../two; gh repo edit --visibility=public)\\\\\\\"\\\"\""'
+assert_out "at-cap substitution judged in the dir it cds to" present \
+  "would make other/two public"
 
 # =============================================================================
 # Group 6: case-insensitivity of the enum value
@@ -319,6 +331,15 @@ run 2 "export GH_REPO earlier in the text" "$FIX" -- \
   "export GH_REPO=example/one; gh repo create --public"
 run 2 "cd into the fixture then publish" "$NOTGIT" -- \
   "cd $FIX && gh repo edit --visibility=public"
+# A repo literally named `~other` inside FIX: with no such user bash leaves
+# `~other` literal and cd enters FIX/~other, so the gh is judged there, where
+# other/two blocks (example/one, the payload cwd's target, is checked).
+TILDE_DIR="$FIX/~other"
+mk_repo "$TILDE_DIR"
+git -C "$TILDE_DIR" remote add origin https://github.com/other/two.git
+run 2 "cd ~other enters a literal FIX/~other repo (bash's fallback)" "$FIX" \
+  SYG_PUBLISH_CHECKED=example/one -- \
+  "cd ~other && gh repo edit --visibility=public"
 run 2 "unresolvable -R \"\$r\" blocks, never bypassable" "$FIX" -- \
   'gh repo edit -R "$r" --visibility=public'
 assert_out "unresolvable line names the fix" present \

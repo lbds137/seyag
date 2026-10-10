@@ -386,8 +386,34 @@ run 2 "pushd <dir> >/dev/null then relative -F" "$TMP/plain" "${NOENV[@]}" -- \
   "pushd $TMP/files >/dev/null && git commit -F leaky.txt"
 run 2 "git -C ~/dir then relative -F (HOME expanded)" "$TMP/plain" HOME="$TMP" -- \
   "git -C ~/files commit -F leaky.txt"
-run 0 "near-miss: cd - is still not followed" "$TMP/plain" "${NOENV[@]}" -- \
+run 0 "near-miss: cd - with no prior cd stays put" "$TMP/plain" "${NOENV[@]}" -- \
   "cd - && git commit -F leaky.txt"
+run 0 "cd <leaky dir> then cd - returns before the relative -F" "$TMP/plain" "${NOENV[@]}" -- \
+  "cd $TMP/files && cd - && git commit -F leaky.txt"
+run 2 "cd <other dir> then cd - returns to the leaky cwd" "$TMP/files" "${NOENV[@]}" -- \
+  "cd $TMP/plain && cd - >/dev/null && git commit -F leaky.txt"
+run 2 "unfollowed cd \$VAR still moves OLDPWD: cd - returns to the leaky dir" "$TMP/plain" UNSET="$TMP/plain" -- \
+  "cd $TMP/files && cd \$UNSET && cd - && git commit -F leaky.txt"
+run 2 "bare cd goes to \$HOME (the leaky dir)" "$TMP/plain" HOME="$TMP/files" -- \
+  "cd && git commit -F leaky.txt"
+run 0 "near-miss: bare cd leaves the leaky cwd for \$HOME" "$TMP/files" HOME="$TMP/plain" -- \
+  "cd && git commit -F leaky.txt"
+# With HOME unset bash's bare cd fails and leaves OLDPWD at the start, so
+# `cd -` returns there (plain), not to the leaky dir.
+run 0 "bare cd with HOME unset moves nothing: cd - returns to the start" "$TMP/plain" -u HOME "${NOENV[@]}" -- \
+  "cd $TMP/files && cd && cd - && git commit -F leaky.txt"
+# `cd ~-` is not followed, so the directory stays (files). Not discriminating
+# across the known-fail change (the hook's start is the payload cwd); coverage.
+run 2 "cd ~- is not followed: the leaky cwd stays" "$TMP/files" "${NOENV[@]}" -- \
+  "cd ~- && git commit -F leaky.txt"
+# With no such user bash leaves `~other` literal and cd enters a directory of
+# that name in the cwd: here a crafted one holding the leaky body.
+mkdir -p "$TMP/tilde/~other"
+cp "$TMP/files/leaky.txt" "$TMP/tilde/~other/leaky.txt"
+run 2 "cd ~other enters a literal ~other dir before the relative -F" "$TMP/tilde" "${NOENV[@]}" -- \
+  "cd ~other && git commit -F leaky.txt"
+run 0 "near-miss: cd ~other with no literal ~other dir stays put" "$TMP/plain" "${NOENV[@]}" -- \
+  "cd ~other && git commit -F leaky.txt"
 
 if [ "$FAILURES" -ne 0 ]; then
   printf '\n%d probe case(s) FAILED\n' "$FAILURES"

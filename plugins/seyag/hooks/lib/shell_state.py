@@ -38,6 +38,8 @@ CD_OPTION_RE = re.compile(r"^-[LPe@]+$")
 
 
 def unresolvable_cd_target(word):
+    # `~`-words other than `~` and `~/…` are judged in chdir, which has the
+    # state the decision needs.
     return "$" in word or "`" in word or any(c in GLOB_CHARS for c in word)
 
 
@@ -82,13 +84,38 @@ class State:
 
 def chdir(state, word):
     """Move to a literal directory word; None or an unresolvable word resets
-    to the payload cwd (not a directory the hook can reason about)."""
+    to the payload cwd (not a directory the hook can reason about). Returns
+    True when the move happened (resolved or reset), False for a known
+    failure that leaves the state as it is."""
+    if word is not None and word.startswith("~") and word != "~" \
+            and not word.startswith("~/"):
+        # bash always expands `~+` to PWD and `~-` to OLDPWD; with no OLDPWD
+        # `~-` stays literal and cd fails, changing nothing: a known failure,
+        # so the state stays as it is and False tells the caller.
+        if word == "~+":
+            chdir(state, state.cwd)
+            return True
+        if word == "~-":
+            if state.oldpwd is None:
+                return False
+            chdir(state, state.oldpwd)
+            return True
+        # `~user`/`~N`: when bash can't expand the word it stays literal and
+        # cd enters a literal directory of that name in the cwd (a crafted
+        # `~other` repo), so one that exists is followed. Without one, bash
+        # went to a home (`~user`) or a dirstack entry (`~N`) the hook can't
+        # know, or failed and stayed: reset. Accepted edge: a user that exists
+        # AND a literal directory of the same name; bash goes home, the model
+        # follows the literal one.
+        if not posixpath.isdir(posixpath.join(state.cwd, word)):
+            word = None
     before = state.cwd
     if word is None or unresolvable_cd_target(word):
         state.cwd = state.payload_cwd
     else:
         state.cwd = resolve_cd(state.cwd, word)
     state.oldpwd = before
+    return True
 
 
 def do_cd(state, args):
@@ -102,7 +129,10 @@ def do_cd(state, args):
     if len(args) > 1:
         return  # too many arguments: bash errors out, the directory stays
     if not args:
-        chdir(state, os.environ.get("HOME") or None)  # bare cd: $HOME
+        home = os.environ.get("HOME")  # bare cd: $HOME
+        if home:
+            chdir(state, home)
+        # else: no HOME, bash's cd fails and nothing moves
     elif args[0] == "-":
         chdir(state, state.oldpwd)  # cd -: OLDPWD (unknown at start → reset)
     else:
@@ -125,8 +155,8 @@ def do_pushd(state, args):
     if len(args) > 1 or (args[0].startswith(("-", "+")) and args[0] != "-"):
         chdir(state, None)  # -n, +N/-N rotations: not modelled, reset
         return
-    chdir(state, state.oldpwd if args[0] == "-" else args[0])
-    state.stack.insert(0, before)
+    if chdir(state, state.oldpwd if args[0] == "-" else args[0]):
+        state.stack.insert(0, before)  # a failed pushd pushes nothing
 
 
 def do_popd(state, args):
@@ -159,12 +189,14 @@ def walk(text, depth, state, ctx, run_command):
     """Walk `text`'s commands in EXECUTION order, updating `state`. A command
     substitution runs just before the command whose word holds it; a
     wrapper's string (`bash -c`, `eval`, …) runs as the pipeline does. Both
-    run in a child shell, so each walks a COPY of the state."""
+    run in a child shell, so each walks a COPY of the state. At
+    MAX_WRAPPER_DEPTH a substitution is not walked inline but left over, so
+    the caller's replay still judges it."""
     pipelines, scan_text = pipelines_of(text)
-    pending = list(substitution_spans(scan_text)) if depth < MAX_WRAPPER_DEPTH else []
+    pending = list(substitution_spans(scan_text))
     for pipeline in pipelines:
         for argv in pipeline:
-            if pending:
+            if pending and depth < MAX_WRAPPER_DEPTH:
                 joined = " ".join(argv)
                 for span in list(pending):
                     forms = (f"$({span})", f"`{span}`")

@@ -256,6 +256,29 @@ run 2 "tracking: cd <public repo> >/dev/null && git commit" "$PLAIN" "${T[@]}" -
   "cd $PUB >/dev/null && git commit -m 'add zorbleflux'"
 run 2 "tracking: pushd <public repo> >/dev/null && git commit" "$PLAIN" "${T[@]}" -- \
   "pushd $PUB >/dev/null && git commit -m 'add zorbleflux'"
+# The shared outbound cd rules (session-url-gate's cd group), judged by
+# directory: the body file's path is absolute, so only the directory decides.
+run 2 "tracking: cd <public repo> && git commit -F <file with the term>" "$PLAIN" "${T[@]}" -- \
+  "cd $PUB && git commit -F $TMP/files/body.txt"
+run 2 "tracking: cd <public>; cd <private>; cd - returns to the public repo" "$PLAIN" "${T[@]}" -- \
+  "cd $PUB; cd $PRIV; cd - >/dev/null && git commit -F $TMP/files/body.txt"
+run 2 "tracking: unfollowed cd \$VAR still moves OLDPWD: cd - returns to the public repo" "$PLAIN" "${T[@]}" UNSET="$PRIV" -- \
+  "cd $PUB && cd \$UNSET && cd - && git commit -F $TMP/files/body.txt"
+run 2 "tracking: bare cd goes to \$HOME (the public repo)" "$PLAIN" "${T[@]}" HOME="$PUB" -- \
+  "cd && git commit -F $TMP/files/body.txt"
+run 0 "near-miss: bare cd leaves the public cwd for \$HOME (a private repo)" "$PUB" "${T[@]}" HOME="$PRIV" -- \
+  "cd && git commit -F $TMP/files/body.txt"
+# With HOME unset bash's bare cd fails and leaves OLDPWD at the start, so
+# `cd -` returns there (a non-repo dir), not to the public repo.
+run 0 "tracking: bare cd with HOME unset moves nothing: cd - returns to the start" "$PLAIN" -u HOME "${T[@]}" -- \
+  "cd $PUB && cd && cd - && git commit -F $TMP/files/body.txt"
+# With no such user bash leaves `~other` literal and cd enters a directory of
+# that name in the cwd: here a crafted public repo.
+mkdir -p "$TMP/tilde"; mkrepo "$TMP/tilde/~other" true
+run 2 "tracking: cd ~other enters a literal ~other public repo" "$TMP/tilde" "${T[@]}" -- \
+  "cd ~other && git commit -F $TMP/files/body.txt"
+run 0 "near-miss: cd ~other with no literal ~other dir stays put" "$PLAIN" "${T[@]}" -- \
+  "cd ~other && git commit -F $TMP/files/body.txt"
 run 2 "fail closed: unresolvable directory judged by the public cwd" "$PUB" "${T[@]}" -- \
   "git -C $TMP/missing commit -m 'add zorbleflux'"
 run 0 "near-miss: unresolvable directory with a private cwd" "$PRIV" "${T[@]}" -- \
