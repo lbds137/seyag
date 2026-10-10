@@ -33,8 +33,8 @@
 # the command whose word holds it. Wrapper and substitution commands run in a
 # child shell, so their `cd`/`export` don't leak back out. A substitution
 # the walk can't place at a command (its text survives into no word, e.g. a
-# quoted `"$(gh … --title "x y")"` whose inner quotes bash removes) is
-# judged against EVERY state the text passes
+# quoted `"$(gh … --title "x y")"` whose inner quotes bash removes, or one
+# nested at MAX_WRAPPER_DEPTH) is judged against EVERY state the text passes
 # through (each directory and exported value), blocking if any is non-own.
 # FLAG PARSING: which flags take a value word is looked up in a table PER
 # (group, subcommand), built from gh 2.101.0's own `--help` output — a short
@@ -85,12 +85,15 @@
 # target resolves against the CURRENT effective directory, so `cd a && cd b`
 # lands in `a/b`). Read the way bash does: options `-P`/`-L`/`-e`/`-@` and
 # `--` before the target, `builtin cd`/`command cd`, bare `cd` → `$HOME`,
-# `cd -` → the previous directory, `pushd DIR` (cd, pushing the old one),
-# bare `pushd` (swap), `popd` (pop back); an invalid option or two operands
-# is bash's own error and changes nothing. An unresolvable form resets the
-# effective directory to the payload cwd: a target holding `$`, a backtick or
-# a glob char, `cd -` with no earlier directory, `popd`/bare `pushd` on a
-# stack this text didn't build, and `pushd`/`popd` `-n`/`+N`/`-N`.
+# `cd -` → the previous directory, `~+`/`~-` → PWD/OLDPWD, `pushd DIR` (cd,
+# pushing the old one), bare `pushd` (swap), `popd` (pop back); an invalid
+# option, two operands, bare `cd` with HOME unset or `~-` with no OLDPWD is
+# bash's own error and changes nothing (a failed `pushd` pushes nothing). An
+# unresolvable form resets the effective directory to the payload cwd: a
+# target holding `$`, a backtick or a glob char, `~user` (unless a literal
+# directory of that name exists in the cwd), `~N`, `cd -` with no earlier
+# directory, `popd`/bare `pushd` on a stack this text didn't build,
+# and `pushd`/`popd` `-n`/`+N`/`-N`.
 #
 # REMOTES: for each remote of the effective directory, `git remote get-url`
 # (so a `url.<base>.insteadOf` rewrite is honored) is parsed for its host and
@@ -146,12 +149,15 @@
 #     creates (`gh repo fork --clone && cd x`) — remotes are read as they are
 #     before the command runs.
 #   - a URL operand held in a variable (`gh pr comment "$u"`), a program name
-#     built at run time (`$(which gh)`), gh aliases, nesting past
-#     MAX_WRAPPER_DEPTH.
+#     built at run time (`$(which gh)`), gh aliases, a wrapper nested past
+#     MAX_WRAPPER_DEPTH (a substitution there is still judged; see WHERE
+#     COMMANDS ARE FOUND).
 #   - `env -C DIR` and `sudo -D DIR` change the directory a wrapped command
 #     runs in; this hook does not read either.
 #   - a `cd` target that isn't a single literal word (a variable, `$(...)`,
-#     a backtick, a glob) is unresolvable; see EFFECTIVE DIRECTORY above.
+#     a backtick, a glob, `~user` unless a literal directory of that name
+#     exists in the cwd, `~N`) is unresolvable; see EFFECTIVE DIRECTORY
+#     above.
 #   - operands fed on stdin or by `xargs` (`echo URL | xargs gh pr comment
 #     -b hi`) aren't seen: with no visible URL or `-R`, the local remotes
 #     decide the target.

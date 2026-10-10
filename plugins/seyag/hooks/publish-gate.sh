@@ -29,7 +29,8 @@
 # the pipeline that runs it; a command substitution (`$(…)` or backticks,
 # quoted or not: `url="$(gh repo create --public)"`, `echo "$(gh …)"`) right
 # before the command whose word holds it. A substitution the walk can't place
-# at a command is judged against EVERY state the text passes through. Same
+# at a command (including one nested at MAX_WRAPPER_DEPTH) is judged against
+# EVERY state the text passes through. Same
 # mechanism as `upstream-submission-guard`, which shares the lib.
 # FLAG PARSING: which flags take a value word is looked up in a table PER
 # (group, subcommand), built from gh 2.101.0's own `--help` output (`gh repo

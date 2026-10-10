@@ -197,6 +197,14 @@ run 0 "cd ~/nonexistent-literal resolves without crashing" "$OWN" \
   "cd ~/nonexistent-literal && gh pr create --fill"
 run 2 "chained literal cds compound (cd TMP && cd fork)" "$OWN" -- \
   "cd $TMP && cd fork && gh pr create --fill"
+# A repo literally named `~other` inside OWN: with no such user bash leaves
+# `~other` literal and cd enters OWN/~other, so the gh is judged there, where
+# the non-own origin other/x blocks.
+TILDE_DIR="$OWN/~other"
+mk_repo "$TILDE_DIR"
+git -C "$TILDE_DIR" remote add origin https://github.com/other/x.git
+run 2 "cd ~other enters a literal OWN/~other repo (bash's fallback)" "$OWN" -- \
+  "cd ~other && gh pr create --fill"
 
 # --- own-owners source ----------------------------------------------------------
 run 0 "SYG_OWN_OWNERS covers the fork's upstream owner" "$FORK" \
@@ -404,6 +412,13 @@ run 2 "r3: cd inside a quoted substitution applies within it" "$OWN" -- \
   'echo "$(cd ../fork && gh pr create --fill)"'
 run 0 "r3: cd inside a substitution doesn't leak out" "$OWN" -- \
   'echo "$(cd ../fork)"; gh pr create --fill'
+# A substitution inside nested `bash -c` strings: two wrappers walk it inline
+# below MAX_WRAPPER_DEPTH (control); three put it at the cap, where it is
+# judged through the leftover replay.
+run 2 "substitution under two bash -c wrappers, cd fork (below-cap control)" "$OWN" -- \
+  'bash -c "bash -c \"echo \\\"\\\$(cd ../fork; gh pr create --fill)\\\"\""'
+run 2 "substitution under three bash -c wrappers (at the cap), cd fork" "$OWN" -- \
+  'bash -c "bash -c \"bash -c \\\"echo \\\\\\\"\\\\\\\$(cd ../fork; gh pr create --fill)\\\\\\\"\\\"\""'
 
 # --- URL operand spellings gh accepts ----------------------------------------
 run 2 "r3: http://www. URL" "$OWN" -- "gh pr comment http://www.github.com/other/x/pull/3 -b hi"

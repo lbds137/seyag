@@ -9,9 +9,14 @@ commit subject, a path); `kind` (`text`, `file`, `staged`, `commit-message`,
 directory the command producing the item runs in (the event cwd moved by
 `cd`/`pushd` words and git's `-C`, `~` expanded), for a hook that judges the
 target repo. `cd`/`pushd` are followed with redirection words dropped and
-`-P`/`-L`/`--` before the one target; `cd -` and a target holding `$` or a
-backtick are not followed. When `dir_filter(directory)` returns False, the
-items of that directory are not built (no file read, diff or log run).
+`-P`/`-L`/`--` before the one target; a bare `cd` moves to `$HOME` (with
+HOME unset or empty bash's cd fails and nothing moves), `cd -` to the
+directory the last move, followed or not, left (kept when none was), and a
+target holding `$` or a backtick is not followed. A `~user` word that
+doesn't expand is followed into the literal directory of that name when one
+exists. When
+`dir_filter(directory)` returns False, the items of that directory are not
+built (no file read, diff or log run).
 
 Commands are found with the shared splitter (lib/shell_quotes.py): top-level
 pipelines, wrapper strings such as `bash -c '…'`, and command substitutions
@@ -310,13 +315,17 @@ def all_pipelines(text, depth=0):
 
 
 
-def cd_target(argv):
-    """The directory a `cd`/`pushd` argv moves to (HOME expanded), or None
-    when it is not followed: redirection words are dropped, `-P`/`-L` (cd
-    only) and `--` may precede the one target; `cd -`, a second operand, any
-    other option and a target holding `$` or a backtick are not followed."""
-    args = strip_redirections(argv[1:])
-    opts = ("-P", "-L") if argv[0].rsplit("/", 1)[-1] == "cd" else ()
+def cd_target(prog, args, base=None):
+    """The directory a `cd`/`pushd` moves to (HOME expanded), or None when it
+    is not followed. `args` are its words after the program, redirection
+    words already dropped; `-P`/`-L` (cd only) and `--` may precede the one
+    target; `cd -`, a second operand, any other option and a target holding
+    `$` or a backtick are not followed. A `~user` word that doesn't expand
+    is followed into the literal directory of that name under `base` (bash
+    leaves the word literal and enters it) when one exists, else not
+    followed. `~+`/`~-` are not followed: this walker keeps no PWD/OLDPWD
+    for them (lib/shell_state.py, which does, resolves both)."""
+    opts = ("-P", "-L") if prog == "cd" else ()
     while args and args[0] in opts:
         args = args[1:]
     if args and args[0] == "--":
@@ -324,7 +333,12 @@ def cd_target(argv):
     if len(args) != 1 or re.search(r"[$`]|^-", args[0]):
         return None
     target = os.path.expanduser(args[0])
-    return None if target.startswith("~") else target
+    if not target.startswith("~"):
+        return target
+    if target in ("~+", "~-") or base is None:
+        return None
+    literal = os.path.join(base, target)
+    return literal if os.path.isdir(literal) else None
 
 
 def _push_items(sources, directory):
@@ -342,6 +356,7 @@ def outbound_items(cmd, cwd, bypass_assignment, dir_filter=None):
     text_dirs = set()
     adds = []
     directory = cwd or "."
+    oldpwd = None  # the directory the last cd/pushd left, followed or not
     verdicts = {}
 
     def wanted(d):
@@ -371,9 +386,19 @@ def outbound_items(cmd, cwd, bypass_assignment, dir_filter=None):
             bypassed = bypass_assignment in prefix
             prog = argv[0].rsplit("/", 1)[-1]
             if prog in ("cd", "pushd"):
-                target = cd_target(argv)
+                args = strip_redirections(argv[1:])
+                if prog == "cd" and not args:
+                    target = os.environ.get("HOME")  # bare cd: $HOME
+                    if not target:
+                        continue  # no HOME: bash's cd fails, nothing moves
+                elif prog == "cd" and args == ["-"]:
+                    target = oldpwd  # cd -: None (no move yet) keeps
+                else:
+                    target = cd_target(prog, args, directory)
                 if target is not None:
-                    directory = join_dir(directory, target)
+                    oldpwd, directory = directory, join_dir(directory, target)
+                else:
+                    oldpwd = directory  # unfollowed: it left the believed dir
                 continue
             if prog == "gh":
                 if bypassed:
