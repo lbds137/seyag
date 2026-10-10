@@ -7,7 +7,8 @@
 # Hermetic: HOME, caches, the token, both z.ai endpoints and zai-usage (stub) are
 # fixtures — except case 45a, which runs the real sibling under the fixture HOME
 # (file:// quota, missing key file, cache and state under the tmp dir); nothing
-# touches the network or the real caches. ZAI_SPEND_BIN overrides
+# touches the network or the real caches (cases 48a-48d use a 127.0.0.1-only
+# Admin API mock and an invented admin key). ZAI_SPEND_BIN overrides
 # the stub to integration-test against the real binary (plugins/seyag/bin/zai-usage).
 # Usage: tests/statusline.probe.sh
 
@@ -73,7 +74,7 @@ route_anthropic() { jq '.env.ANTHROPIC_BASE_URL = "https://api.anthropic.com"' "
 route_or() { jq '.env.ANTHROPIC_BASE_URL = "https://openrouter.ai/api/v1"' "$h/.claude/settings.json" > "$h/.claude/settings.json.new" && mv "$h/.claude/settings.json.new" "$h/.claude/settings.json"; }
 route_host() { jq --arg u "$1" '.env.ANTHROPIC_BASE_URL = $u' "$h/.claude/settings.json" > "$h/.claude/settings.json.new" && mv "$h/.claude/settings.json.new" "$h/.claude/settings.json"; }
 render() {
-  local env_args=(-u ANTHROPIC_BASE_URL -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u SYG_CREDIT_LEDGER -u SYG_CREDIT_GRANTS -u SYG_CREDIT_FORCE -u COLUMNS -u SYG_STATUSLINE_WRAP_COLUMNS -u SYG_STATUSLINE_DEBUG -u SYG_STATUSLINE_FIT_MARGIN)
+  local env_args=(-u ANTHROPIC_BASE_URL -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u SYG_CREDIT_LEDGER -u SYG_CREDIT_GRANTS -u SYG_CREDIT_FORCE -u COLUMNS -u SYG_STATUSLINE_WRAP_COLUMNS -u SYG_STATUSLINE_DEBUG -u SYG_STATUSLINE_FIT_MARGIN -u ANTHROPIC_ADMIN_API_KEY -u SYG_CREDIT_ADMIN_URL)
   if [ -n "${PROBE_DEBUG:-}" ]; then
     env_args+=("SYG_STATUSLINE_DEBUG=$PROBE_DEBUG")
   fi
@@ -486,12 +487,12 @@ mkdir -p "$h/credit"
 cat > "$h/credit/grants.json" <<'EOF'
 {"currency":"USD","grants":[{"amount":200,"granted":"2026-10-01","expires":"2026-10-21"}]}
 EOF
-cr_render() { # ledger-name now [grants-path]; stdin: the cost of the one ledger entry, dated now
+cr_render() { # ledger-name now [grants-path [VAR=value ...]]; stdin: the cost of the one ledger entry, dated now
     local cost; cost=$(cat)
     printf '{"session_id":"cr-%s","day":"%s","first_ts":"%s","last_ts":"%s","cost_usd":%s,"source":"transcript"}\n' \
         "$1" "${2:0:10}" "$2" "$2" "$cost" > "$h/credit/$1.jsonl"
-    env -u ANTHROPIC_BASE_URL -u SYG_CREDIT_FORCE -u SYG_CREDIT_GRANTS ANTHROPIC_API_KEY=sk-probe \
-        SYG_CREDIT_LEDGER="$h/credit/$1.jsonl" SYG_CREDIT_NOW="$2" ${3:+SYG_CREDIT_GRANTS="$3"} \
+    env -u ANTHROPIC_BASE_URL -u SYG_CREDIT_FORCE -u SYG_CREDIT_GRANTS -u ANTHROPIC_ADMIN_API_KEY -u SYG_CREDIT_ADMIN_URL ANTHROPIC_API_KEY=sk-probe \
+        SYG_CREDIT_LEDGER="$h/credit/$1.jsonl" SYG_CREDIT_NOW="$2" ${3:+SYG_CREDIT_GRANTS="$3"} "${@:4}" \
         bash "$SL" <<< "{\"session_id\":\"cr-$1\",\"cost\":{\"total_cost_usd\":$cost},\"rate_limits\":{\"five_hour\":{\"used_percentage\":83,\"resets_at\":1790790548}},\"context_window\":{\"current_usage\":{\"input_tokens\":1000}},\"model\":{\"id\":\"m\",\"display_name\":\"X\"},\"cwd\":\"/tmp\"}"
 }
 anth_label=$'\x1b[38;2;240;238;230mplatform.claude.com\x1b[0m'
@@ -540,7 +541,7 @@ grep -qF 'platform.claude.com ~$48.00' <<< "$out" && ! grep -qF '(exp' <<< "$out
 # 40-44. Lane routing, each with rate_limits in the input. The process env decides.
 lane_in='{"rate_limits":{"five_hour":{"used_percentage":83,"resets_at":1790790548},"seven_day":{"used_percentage":56,"resets_at":1791093600}},"context_window":{"current_usage":{"input_tokens":1000}},"model":{"display_name":"X"},"cwd":"/tmp"}'
 lane() { # VAR=value ...: render lane_in under exactly these env vars
-    local env_args=(-u ANTHROPIC_BASE_URL -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u SYG_CREDIT_LEDGER -u SYG_CREDIT_GRANTS -u SYG_CREDIT_FORCE -u COLUMNS -u SYG_STATUSLINE_WRAP_COLUMNS -u SYG_STATUSLINE_DEBUG -u SYG_STATUSLINE_FIT_MARGIN)
+    local env_args=(-u ANTHROPIC_BASE_URL -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u SYG_CREDIT_LEDGER -u SYG_CREDIT_GRANTS -u SYG_CREDIT_FORCE -u COLUMNS -u SYG_STATUSLINE_WRAP_COLUMNS -u SYG_STATUSLINE_DEBUG -u SYG_STATUSLINE_FIT_MARGIN -u ANTHROPIC_ADMIN_API_KEY -u SYG_CREDIT_ADMIN_URL)
     if [ -n "${PROBE_DEBUG:-}" ]; then
         env_args+=("SYG_STATUSLINE_DEBUG=$PROBE_DEBUG")
     fi
@@ -630,8 +631,8 @@ grep -qF "$plan_label 5h:" <<< "$raw" && ! grep -q 'platform.claude.com' <<< "$o
 printf '{"session_id":"f1","day":"2026-10-07","first_ts":"2026-10-07T10:00:00Z","last_ts":"2026-10-07T10:00:00Z","cost_usd":12.5,"source":"transcript"}\n' > "$h/credit/fleet.jsonl"
 echo '{"grants":[{"amount":200,"granted":"2026-10-01","expires":"2026-10-05"}]}' > "$h/credit/expired.json"
 echo '{"grants":[{"amount":12.5,"granted":"2026-10-01","expires":"2026-10-21"}]}' > "$h/credit/spent.json"
-fleet() { # grants-path-or-empty: render the plan-lane input with the fleet vars
-    lane SYG_CREDIT_LEDGER="$h/credit/fleet.jsonl" ${1:+SYG_CREDIT_GRANTS="$1"} SYG_CREDIT_NOW=2026-10-08T00:00:00Z
+fleet() { # grants-path-or-empty [VAR=value ...]: render the plan-lane input with the fleet vars
+    lane SYG_CREDIT_LEDGER="$h/credit/fleet.jsonl" ${1:+SYG_CREDIT_GRANTS="$1"} SYG_CREDIT_NOW=2026-10-08T00:00:00Z "${@:2}"
 }
 raw=$(fleet "$h/credit/grants.json"); out=$(strip <<< "$raw")
 grep -qE 'claude\.ai 5h:.* · platform\.claude\.com \$187\.50 est · session ' <<< "$out" \
@@ -673,6 +674,104 @@ touch -d '-120 seconds' "$cr_cache"
 out4=$(strip <<< "$(fleet "$h/credit/grants.json")")
 grep -qF 'platform.claude.com $187.50 est' <<< "$out4" \
     && ok "balance cache: older than 60s -> recomputed despite a matching key" || bad "balance cache TTL: '$out4'"
+
+# 48a-48d. Provider-exact balance: api-credit reads the Admin API cost_report from a
+# loopback mock (SYG_CREDIT_ADMIN_URL) with an invented fixture key. The mock serves
+# $h/cr/<mode>.json (mode read from $h/cr/mode per request; "401" answers 401) and
+# logs each request path to $h/cr/hits.log. Fixture: one closed-day bucket on
+# 2026-10-07 of 929 cents (USD 9.29), so the as-of day is 10-07.
+mkdir -p "$h/cr"
+cat > "$h/cr/srv.py" <<'PY'
+import os, sys
+from http.server import BaseHTTPRequestHandler, HTTPServer
+d = sys.argv[1]
+class H(BaseHTTPRequestHandler):
+    def do_GET(self):
+        with open(os.path.join(d, "hits.log"), "a") as f:
+            f.write(self.path + "\n")
+        mode = open(os.path.join(d, "mode")).read().strip()
+        if mode == "401":
+            self.send_response(401); self.send_header("Content-Length", "0"); self.end_headers(); return
+        data = open(os.path.join(d, mode + ".json"), "rb").read()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+    def log_message(self, *a):
+        pass
+s = HTTPServer(("127.0.0.1", 0), H)
+with open(os.path.join(d, "port.tmp"), "w") as f:
+    f.write(str(s.server_port))
+os.rename(os.path.join(d, "port.tmp"), os.path.join(d, "port"))
+s.serve_forever()
+PY
+echo '{"data":[{"starting_at":"2026-10-07T00:00:00Z","ending_at":"2026-10-08T00:00:00Z","results":[{"currency":"USD","amount":"929"}]}],"has_more":false}' > "$h/cr/ok.json"
+echo ok > "$h/cr/mode"
+: > "$h/cr/hits.log"
+PYTHONDONTWRITEBYTECODE=1 python3 -I "$h/cr/srv.py" "$h/cr" &
+SRV_PID=$!
+trap 'kill "$SRV_PID" 2>/dev/null; rm -rf "$h"' EXIT
+for _ in $(seq 1 50); do [ -s "$h/cr/port" ] && break; sleep 0.1; done
+[ -s "$h/cr/port" ] || { echo "statusline.probe: mock server did not start"; exit 2; }
+CR="http://127.0.0.1:$(cat "$h/cr/port")"
+px_key=(ANTHROPIC_ADMIN_API_KEY=fixture-admin-key SYG_CREDIT_ADMIN_URL="$CR")
+# 48a. Fleet, keyed: 200 granted - 9.29 provider spend (the ledger's 10-07 entry is
+# not after the as-of day, so nothing is bridged) -> '$190.71 px 10-07', no est.
+raw=$(fleet "$h/credit/grants.json" "${px_key[@]}"); out=$(strip <<< "$raw")
+grep -qE 'claude\.ai 5h:.* · platform\.claude\.com \$190\.71 px 10-07 · session ' <<< "$out" \
+    && grep -qF "$anth_label"$' \x1b[90m$190.71 px 10-07\x1b[0m' <<< "$raw" && ! grep -qF ' est' <<< "$out" \
+    && [ "$(wc -l < "$h/cr/hits.log")" -ge 1 ] \
+    && ok "fleet provider-exact: admin key in the render env -> gray 'platform.claude.com \$190.71 px 10-07', no est" \
+    || bad "fleet provider-exact: $out / hits $(wc -l < "$h/cr/hits.log")"
+# 48b. Cache-key separation, seconds after 48a cached the provider JSON: keyless ->
+# the ledger estimate (not the cached provider figure); keyed again -> provider again.
+# Only the key differs (SYG_CREDIT_ADMIN_URL stays), so this pins the key-presence field.
+out_nokey=$(strip <<< "$(fleet "$h/credit/grants.json" SYG_CREDIT_ADMIN_URL="$CR")")
+out_key=$(strip <<< "$(fleet "$h/credit/grants.json" "${px_key[@]}")")
+grep -qF 'platform.claude.com $187.50 est' <<< "$out_nokey" && ! grep -qF ' px ' <<< "$out_nokey" \
+    && grep -qF 'platform.claude.com $190.71 px 10-07' <<< "$out_key" && ! grep -qF ' est' <<< "$out_key" \
+    && ok "balance cache: keyed and keyless renders keep separate entries (keyless -> '\$187.50 est', keyed -> '\$190.71 px 10-07')" \
+    || bad "balance cache key separation: keyless '$out_nokey' / keyed '$out_key'"
+# 48b2. Same key, another origin (a closed loopback port, so the fetch fails): its own entry,
+# the estimate, not the cached provider figure.
+out_origin=$(strip <<< "$(fleet "$h/credit/grants.json" ANTHROPIC_ADMIN_API_KEY=fixture-admin-key SYG_CREDIT_ADMIN_URL=http://127.0.0.1:1)")
+grep -qF 'platform.claude.com $187.50 est' <<< "$out_origin" && ! grep -qF ' px ' <<< "$out_origin" \
+    && ok "balance cache: another SYG_CREDIT_ADMIN_URL keeps a separate entry" || bad "balance cache origin separation: '$out_origin'"
+# 48c. API-key lane, keyed: 200 - (9.29 provider + 1.00 bridged from 10-08) -> green
+# '$189.71 (px 10-07, exp 10-21, 13d)', no tilde.
+raw=$(cr_render px-ok 2026-10-08T00:00:00Z "$h/credit/grants.json" "${px_key[@]}" <<< 1.00)
+out=$(strip <<< "$raw")
+grep -qF 'platform.claude.com $189.71 (px 10-07, exp 10-21, 13d)' <<< "$out" && grep -qF "$anth_label"$' \x1b[32m$189.71' <<< "$raw" \
+    && ! grep -qF '~' <<< "$out" \
+    && ok "api-key lane provider-exact: '\$189.71 (px 10-07, exp 10-21, 13d)', no tilde" || bad "api-key provider-exact: $out"
+# 48c2. API-key lane, keyed, overage: 5 granted - (9.29 + 8.00 bridged) -> magenta 'over $12.29 (px 10-07)'.
+raw=$(cr_render px-over 2026-10-08T00:00:00Z "$h/credit/small.json" "${px_key[@]}" <<< 8.00)
+out=$(strip <<< "$raw")
+grep -qF 'platform.claude.com over $12.29 (px 10-07)' <<< "$out" && grep -qF $'\x1b[35mover $12.29' <<< "$raw" \
+    && ! grep -qF '~' <<< "$out" \
+    && ok "api-key lane provider-exact overage: magenta 'over \$12.29 (px 10-07)', no tilde" || bad "api-key provider-exact overage: $out"
+# 48c3. API-key lane, keyed, exactly spent: 9.29 granted - (9.29 provider + 0 bridged
+# from 10-08) = 0 -> red '$0.00 (px 10-07)', no tilde.
+echo '{"grants":[{"amount":9.29,"granted":"2026-10-01","expires":"2026-10-21"}]}' > "$h/credit/zero.json"
+raw=$(cr_render px-zero 2026-10-08T00:00:00Z "$h/credit/zero.json" "${px_key[@]}" <<< 0)
+out=$(strip <<< "$raw")
+grep -qF 'platform.claude.com $0.00 (px 10-07)' <<< "$out" && grep -qF $'\x1b[31m$0.00' <<< "$raw" \
+    && ! grep -qF '~' <<< "$out" \
+    && ok "api-key lane provider-exact zero: red '\$0.00 (px 10-07)', no tilde" || bad "api-key provider-exact zero: $out"
+# 48d. Provider failure (the mock answers 401): the estimate shapes return. A fresh
+# cache dir, so neither api-credit's live-sum cache nor the balance cache answers.
+echo 401 > "$h/cr/mode"
+hits0=$(wc -l < "$h/cr/hits.log")
+out_f=$(strip <<< "$(fleet "$h/credit/grants.json" "${px_key[@]}" XDG_CACHE_HOME="$h/cache-fail")")
+out_c=$(strip <<< "$(cr_render px-fail 2026-10-08T00:00:00Z "$h/credit/grants.json" "${px_key[@]}" XDG_CACHE_HOME="$h/cache-fail" <<< 1.00)")
+hits1=$(wc -l < "$h/cr/hits.log")
+grep -qF 'platform.claude.com $187.50 est' <<< "$out_f" && ! grep -qF ' px ' <<< "$out_f" \
+    && grep -qF 'platform.claude.com ~$199.00 (exp 10-21, 13d)' <<< "$out_c" && ! grep -qF 'px ' <<< "$out_c" \
+    && [ "$hits1" -gt "$hits0" ] \
+    && ok "provider failure: the fetch is attempted and both lanes fall back to the estimate ('\$187.50 est', '~\$199.00 (exp 10-21, 13d)')" \
+    || bad "provider failure fallback: fleet '$out_f' / api-key '$out_c' / hits $hits0 -> $hits1"
+echo ok > "$h/cr/mode"
 
 # 49. Precedence: settings.json says z.ai, the process env says OpenRouter, no
 # rate_limits in the input. Both set and conflicting: the env must win.
