@@ -29,6 +29,10 @@ if [ "$mode" = shell ]; then
   for f in plugins/seyag/bin/*; do
     [ -f "$f" ] && [ "$(shebang_kind "$f")" = shell ] && printf '%s\n' "$f"
   done
+  # git-hooks: the scripts themselves, not the hook-name symlinks to them.
+  for f in plugins/seyag/git-hooks/*; do
+    [ -f "$f" ] && [ ! -L "$f" ] && [ "$(shebang_kind "$f")" = shell ] && printf '%s\n' "$f"
+  done
 else
   for f in plugins/seyag/hooks/lib/*.py tests/*.py; do
     printf '%s\n' "$f"

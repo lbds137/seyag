@@ -1,0 +1,418 @@
+#!/bin/bash
+# seyag-git-hooks: report, install, relink and uninstall the seyag git hooks:
+# a stable dispatcher dir (one small /bin/sh stub per hook name plus a
+# `plugin-root` file) set as the global core.hooksPath, which runs the
+# plugin's pre-push (the private-term and session-link scan) and every repo's
+# own hooks.
+
+set -uo pipefail
+
+usage() {
+  cat <<'EOF'
+seyag-git-hooks: report, install, relink and uninstall the seyag git hooks (a
+pre-push that refuses private terms and session links in a public repo's
+push, with every repo's own .git/hooks still running).
+
+Usage:
+  seyag-git-hooks status [<repo dir>]   (default: the current directory)
+  seyag-git-hooks install --global
+  seyag-git-hooks relink
+  seyag-git-hooks uninstall --global
+  seyag-git-hooks -h|--help
+
+The global core.hooksPath points at a dispatcher dir; install writes it at
+${XDG_DATA_HOME:-~/.local/share}/seyag/git-hooks (XDG_DATA_HOME only when it
+is absolute). It holds one stub per hook name (client and server side), a
+`plugin-root` file naming the plugin root, a marker and a stamp. The pre-push
+stub runs the plugin's pre-push when it is there; every other stub, and the
+pre-push stub without the plugin, runs the repo's own
+<git common dir>/hooks/<name>, so a missing or moved plugin never silences a
+repo's own hooks. A missing plugin pre-push refuses pushes from a repo marked
+public (seyag.publicRepo) until relinked. The push-to-checkout stub does git's
+own updateInstead when the repo has no hook of that name.
+
+status prints the dispatcher dir in use (the one the global core.hooksPath
+names when it holds the marker, else the install path) and its plugin root,
+the global core.hooksPath and whether it points there (BROKEN when its dir is
+missing, or when the plugin root's git-hooks dir is; RELATIVE, with a
+warning, when it is a relative path, which git resolves per repo and this
+command never counts as the dispatcher dir), the terms file the hook
+would use (SYG_PRIVATE_TERMS_FILE, else the GLOBAL git config
+seyag.privateTermsFile; a repo-local value is ignored, with a warning), and
+for the repo: its effective core.hooksPath (a repo-local value, as husky sets,
+overrides the global one), whether the seyag pre-push is ACTIVE, whether the
+repo is marked public, any alias that skips the hook, whether the pre-push
+ENFORCES there (active, public, no such alias), and warnings for a
+pre-commit-framework config or git-lfs. Read-only.
+
+install --global writes the dispatcher dir (refusing a dir that is not one it
+wrote), then runs `git config --global core.hooksPath <dir>`; with
+SYG_PRIVATE_TERMS_FILE set it also records
+`git config --global seyag.privateTermsFile <abs path>`. It refuses when a
+different global core.hooksPath is set (a relative one included).
+
+relink rewrites the stubs, plugin-root and stamp for this plugin (each file
+through a temp file and `mv -f`, so none is ever missing) and prints what
+changed. It returns at once when the stamp already matches; it recreates the
+dir when the global core.hooksPath names the install path and the dir is
+gone; it prints nothing when all is current, or when nothing is installed or
+the dir is not one it wrote.
+
+uninstall --global unsets the global core.hooksPath when it names the
+dispatcher dir, then removes that dir's own files and the dir when it holds
+the marker; it prints what it did.
+
+Exit codes: 0 ok; 1 refused or a git failure; 2 usage error.
+EOF
+}
+
+die() { echo "seyag-git-hooks: $*" >&2; exit 1; }
+
+for a in "$@"; do
+  case $a in -h | --help) usage; exit 0 ;; esac
+done
+
+SELF=$(readlink -f "${BASH_SOURCE[0]}")
+HOOKS_DIR=$(cd "$(dirname "$SELF")/../git-hooks" 2>/dev/null && pwd -P) \
+  || die "hooks directory not found next to $SELF"
+PLUGIN_ROOT=${HOOKS_DIR%/*}
+LIB="$PLUGIN_ROOT/hooks/lib"
+DATA=${XDG_DATA_HOME:-}
+case $DATA in /*) ;; *) DATA="$HOME/.local/share" ;; esac
+STABLE="$DATA/seyag/git-hooks"   # where install writes the dispatcher dir
+MARKER=".seyag-git-hooks"
+STAMP=".stamp"
+# Bump whenever stub_text's output changes, so relink rewrites the stubs.
+STUB_VERSION=1
+# Hooks the plugin implements itself; every other stub only runs the repo's own.
+REAL_HOOKS="pre-push"
+# Server-side hooks: no plugin file, but a repo receiving a push keeps its own.
+SERVER_HOOKS="pre-receive update post-receive post-update proc-receive"
+
+global_value() { git config --global --type=path --get core.hooksPath 2>/dev/null; }
+
+# A relative core.hooksPath is resolved by git in the directory each hook runs
+# in (a work tree's top level), not this script's cwd, so neither helper
+# judges one by the cwd: a relative <a> is never the same dir, never ours.
+same_dir() { # same_dir <a> <b>: <a> is absolute and both resolve to one existing directory
+  case $1 in /*) ;; *) return 1 ;; esac
+  [ -d "$1" ] && [ "$(readlink -f "$1" 2>/dev/null)" = "$(readlink -f "$2" 2>/dev/null)" ]
+}
+
+is_ours() {
+  case $1 in /*) ;; *) return 1 ;; esac
+  [ -d "$1" ] && [ ! -L "$1" ] && [ -f "$1/$MARKER" ]
+}
+
+GLOBAL=$(global_value)
+# The dispatcher dir in use: the one the global core.hooksPath names when it
+# holds the marker, else the install path.
+if [ -n "$GLOBAL" ] && is_ours "$GLOBAL"; then DIR=$GLOBAL; else DIR=$STABLE; fi
+
+hook_names() { # every hook name the dispatcher dir gets a stub for
+  local f n
+  for f in "$HOOKS_DIR"/*; do
+    [ "${f##*/}" = passthrough ] || printf '%s\n' "${f##*/}"
+  done
+  for n in $SERVER_HOOKS; do printf '%s\n' "$n"; done
+}
+
+stub_head() { # the part every stub shares: resolve the repo's own hook
+  cat <<EOF
+#!/bin/sh
+# seyag git hook dispatcher for $1, written by seyag-git-hooks (relink
+# rewrites it; do not edit). It never lets a broken plugin silence a repo's
+# own hook: <git common dir>/hooks/$1 runs whenever the plugin's is absent.
+name=$1
+EOF
+  cat <<'EOF'
+# The common dir, resolved in shell as git does: GIT_COMMON_DIR; GIT_DIR (its
+# commondir file when present); a .git dir; a .git file's gitdir: and that
+# dir's commondir; else rev-parse.
+common=""
+if [ -n "${GIT_COMMON_DIR:-}" ]; then
+  common=$GIT_COMMON_DIR
+elif [ -n "${GIT_DIR:-}" ]; then
+  common=$GIT_DIR
+  if [ -f "$GIT_DIR/commondir" ] && read -r c <"$GIT_DIR/commondir"; then
+    case $c in /*) common=$c ;; *) common=$GIT_DIR/$c ;; esac
+  fi
+elif [ -d .git ]; then
+  common=.git
+elif [ -f .git ] && read -r line <.git; then
+  gd=${line#gitdir: }
+  case $gd in /*) ;; *) gd=$PWD/$gd ;; esac
+  common=$gd
+  if [ -f "$gd/commondir" ] && read -r c <"$gd/commondir"; then
+    case $c in /*) common=$c ;; *) common=$gd/$c ;; esac
+  fi
+else
+  common=$(git rev-parse --git-common-dir 2>/dev/null) || common=""
+fi
+own=""
+[ -n "$common" ] && own=$common/hooks/$name
+run_own() { # exec the repo's own hook when it is a runnable file (not this stub)
+  if [ -n "$own" ] && [ -f "$own" ] && [ -x "$own" ] && ! [ "$own" -ef "$0" ]; then
+    exec "$own" "$@"
+  fi
+}
+EOF
+}
+
+stub_text() { # stub_text <name>: the dispatcher script for one hook name
+  local name=$1 kind=cheap
+  case " $REAL_HOOKS " in *" $name "*) kind=real ;; esac
+  [ "$name" = push-to-checkout ] && kind=push-to-checkout
+  stub_head "$name"
+  case $kind in
+    real)
+      cat <<'EOF'
+root=""
+[ -f "${0%/*}/plugin-root" ] && read -r root <"${0%/*}/plugin-root"
+target=$root/git-hooks/$name
+if [ -n "$root" ] && [ -x "$target" ]; then exec "$target" "$@"; fi
+# The plugin's pre-push is missing: refuse in a public repo (an invalid
+# seyag.publicRepo counts as public), else run the repo's own hook.
+if git config --get seyag.publicRepo >/dev/null 2>&1 \
+  && [ "$(git config --type=bool --get seyag.publicRepo 2>/dev/null)" != false ]; then
+  echo "seyag pre-push: the seyag pre-push hook is missing at $target; run seyag-git-hooks relink. Refusing the push to a public repo." >&2
+  exit 1
+fi
+run_own "$@"
+exit 0
+EOF
+      ;;
+    push-to-checkout)
+      cat <<'EOF'
+run_own "$@"
+# No repo hook: do git's own updateInstead (push_to_deploy in receive-pack),
+# since a present push-to-checkout hook replaces it. $1 is the pushed commit.
+git update-index -q --ignore-submodules --refresh \
+  || { echo "Up-to-date check failed" >&2; exit 1; }
+git diff-files --quiet --ignore-submodules -- \
+  || { echo "Working directory has unstaged changes" >&2; exit 1; }
+head=HEAD
+git rev-parse --verify -q HEAD >/dev/null || head=$(git hash-object -t tree /dev/null)
+git diff-index --quiet --cached --ignore-submodules "$head" -- \
+  || { echo "Working directory has staged changes" >&2; exit 1; }
+git read-tree -u -m "$1" || { echo "Could not update working tree to new HEAD" >&2; exit 1; }
+exit 0
+EOF
+      ;;
+    *)
+      cat <<'EOF'
+# Cheap path: the plugin adds nothing to this hook.
+run_own "$@"
+exit 0
+EOF
+      ;;
+  esac
+}
+
+CHANGED=0
+put() { # put <path> <mode> <content>: through a temp file + mv -f; sets CHANGED
+  local path=$1 mode=$2 tmp
+  CHANGED=0
+  if [ -f "$path" ] && [ "$(cat "$path")" = "$3" ]; then
+    return 0
+  fi
+  tmp=$(mktemp "$DIR/.tmp.XXXXXX") || die "cannot write in $DIR"
+  printf '%s\n' "$3" >"$tmp" || { rm -f "$tmp"; die "cannot write $tmp"; }
+  chmod "$mode" "$tmp" || { rm -f "$tmp"; die "cannot chmod $tmp"; }
+  mv -f "$tmp" "$path" || { rm -f "$tmp"; die "cannot replace $path"; }
+  CHANGED=1
+}
+
+stamp_current() { # stamp and plugin-root say this STUB_VERSION and root (no fork)
+  local v="" r="" p=""
+  [ -f "$DIR/$STAMP" ] && [ -f "$DIR/plugin-root" ] || return 1
+  { IFS= read -r v && IFS= read -r r; } <"$DIR/$STAMP" || return 1
+  IFS= read -r p <"$DIR/plugin-root" || return 1
+  [ "$v" = "$STUB_VERSION" ] && [ "$r" = "$PLUGIN_ROOT" ] && [ "$p" = "$PLUGIN_ROOT" ]
+}
+
+write_dispatcher() { # (re)write marker, stubs, plugin-root, stamp; prints what changed
+  local old="" name changed=0
+  [ -f "$DIR/plugin-root" ] && read -r old <"$DIR/plugin-root"
+  mkdir -p "$DIR" || die "cannot create $DIR"
+  put "$DIR/$MARKER" 644 "seyag git hooks dispatcher dir (seyag-git-hooks)"
+  while IFS= read -r name; do
+    put "$DIR/$name" 755 "$(stub_text "$name")"
+    changed=$((changed + CHANGED))
+  done < <(hook_names)
+  put "$DIR/plugin-root" 644 "$PLUGIN_ROOT"
+  local root_changed=$CHANGED
+  put "$DIR/$STAMP" 644 "$STUB_VERSION
+$PLUGIN_ROOT"
+  if [ "$root_changed" = 1 ]; then
+    echo "relinked $DIR: plugin root ${old:-(none)} -> $PLUGIN_ROOT"
+  elif [ "$changed" -gt 0 ]; then
+    echo "relinked $DIR: rewrote $changed hook stubs (plugin root $PLUGIN_ROOT)"
+  fi
+}
+
+terms_source() {
+  local repo=$1 cfg
+  if [ -n "${SYG_PRIVATE_TERMS_FILE:-}" ]; then
+    echo "terms file: $SYG_PRIVATE_TERMS_FILE (from SYG_PRIVATE_TERMS_FILE)"
+  elif cfg=$(git config --global --type=path --get seyag.privateTermsFile 2>/dev/null) && [ -n "$cfg" ]; then
+    echo "terms file: $cfg (from the global git config seyag.privateTermsFile)"
+  else
+    echo "terms file: none (no term check; the session-link check still runs)"
+  fi
+  if cfg=$(git -C "$repo" config --local --get seyag.privateTermsFile 2>/dev/null) && [ -n "$cfg" ]; then
+    echo "warning: the repo-local seyag.privateTermsFile ($cfg) is ignored; the hook reads the global value only"
+  fi
+}
+
+repo_warnings() { # tools that do not work under a global core.hooksPath
+  local top
+  top=$(git -C "$1" rev-parse --show-toplevel 2>/dev/null) || return 0
+  [ -f "$top/.pre-commit-config.yaml" ] \
+    && echo "warning: this repo uses the pre-commit framework (.pre-commit-config.yaml); it refuses to install while core.hooksPath is set"
+  if [ -f "$top/.gitattributes" ] && grep -q 'filter=lfs' "$top/.gitattributes" 2>/dev/null; then
+    echo "warning: this repo uses git-lfs (.gitattributes filter=lfs); LFS's own hooks are not in the dispatcher dir, only the repo's .git/hooks ones run"
+  fi
+}
+
+cmd_status() {
+  local repo=$1 root state
+  echo "hooks dir: $HOOKS_DIR"
+  if is_ours "$DIR"; then
+    root=""; read -r root <"$DIR/plugin-root" 2>/dev/null
+    echo "dispatcher dir: $DIR (plugin root ${root:-(none)})"
+  elif [ -e "$DIR" ] || [ -L "$DIR" ]; then
+    echo "dispatcher dir: $DIR is NOT one seyag-git-hooks wrote"
+  else
+    echo "dispatcher dir: $DIR (absent)"
+  fi
+  if [ -z "$GLOBAL" ]; then
+    echo "global core.hooksPath: (unset) -> not installed"
+  elif [ "${GLOBAL#/}" = "$GLOBAL" ]; then
+    echo "global core.hooksPath: $GLOBAL -> RELATIVE: git resolves it in each repo's hook directory; not the seyag dispatcher dir"
+    echo "warning: the global core.hooksPath ($GLOBAL) is relative; set an absolute path"
+  elif [ ! -d "$GLOBAL" ]; then
+    echo "global core.hooksPath: $GLOBAL -> BROKEN: git runs no hooks (missing directory; seyag-git-hooks relink recreates the install path)"
+  elif is_ours "$GLOBAL"; then
+    root=""; read -r root <"$GLOBAL/plugin-root" 2>/dev/null
+    if [ -n "$root" ] && [ -d "$root/git-hooks" ]; then
+      echo "global core.hooksPath: $GLOBAL -> points at the seyag dispatcher dir"
+    else
+      echo "global core.hooksPath: $GLOBAL -> BROKEN: the plugin root's git-hooks dir is missing (${root:-?}/git-hooks); repos' own hooks still run, pushes from public repos are refused; run seyag-git-hooks relink"
+    fi
+  elif same_dir "$GLOBAL" "$HOOKS_DIR"; then
+    echo "global core.hooksPath: $GLOBAL -> points at the hooks dir directly (install --global moves it to the dispatcher dir)"
+  else
+    echo "global core.hooksPath: $GLOBAL -> points ELSEWHERE"
+  fi
+  terms_source "$repo"
+  repo_warnings "$repo"
+  state=$(python3 -I -B - "$LIB" "$repo" <<'PYEOF'
+import sys
+sys.path.insert(0, sys.argv[1])
+import prepush_state
+
+d = sys.argv[2]
+s = prepush_state.hooks_state(d)
+if not s["repo"]:
+    print(f"repo {d}: not a git repository")
+    sys.exit(0)
+yn = {True: "yes", False: "no"}
+value = f"{s['value']} ({s['scope']})" if s["value"] else "(unset)"
+print(f"repo {d}: core.hooksPath {value}")
+print(f"  seyag pre-push ACTIVE: {yn[s['active']]}")
+print(f"  marked public (seyag.publicRepo): {yn[s['public']]}")
+for line in s["bad_aliases"]:
+    print(f"  alias that skips the hook: {line}")
+print(f"  pre-push ENFORCES here: {yn[s['enforcing']]}")
+PYEOF
+) || die "python3 failed reading the repo state"
+  printf '%s\n' "$state"
+}
+
+cmd_install() {
+  local terms
+  DIR=$STABLE  # install always writes the install path
+  if [ -n "$GLOBAL" ] && [ "$GLOBAL" != "$STABLE" ] && ! same_dir "$GLOBAL" "$HOOKS_DIR"; then
+    die "a different global core.hooksPath is set ($GLOBAL); refusing to replace it"
+  fi
+  if { [ -e "$DIR" ] || [ -L "$DIR" ]; } && ! is_ours "$DIR"; then
+    die "$DIR exists and is not a dispatcher dir seyag-git-hooks wrote; refusing to touch it"
+  fi
+  write_dispatcher
+  if [ "$GLOBAL" = "$STABLE" ]; then
+    echo "global core.hooksPath already points at $STABLE"
+  else
+    git config --global core.hooksPath "$STABLE" || die "git config --global failed"
+    echo "global core.hooksPath set to $STABLE"
+  fi
+  if [ -n "${SYG_PRIVATE_TERMS_FILE:-}" ]; then
+    terms=$(readlink -f "$SYG_PRIVATE_TERMS_FILE" 2>/dev/null) || terms=$SYG_PRIVATE_TERMS_FILE
+    git config --global seyag.privateTermsFile "$terms" || die "git config --global failed"
+    echo "global seyag.privateTermsFile set to $terms"
+  fi
+}
+
+cmd_relink() {
+  if ! is_ours "$DIR"; then
+    # The global config names the install path but the dir is gone: it was
+    # ours, so recreate it. Anything else is not installed, or not ours.
+    if [ -n "$GLOBAL" ] && [ "$GLOBAL" = "$STABLE" ] && [ ! -e "$STABLE" ] && [ ! -L "$STABLE" ]; then
+      DIR=$STABLE
+      write_dispatcher
+    fi
+    return 0
+  fi
+  stamp_current && return 0
+  write_dispatcher
+}
+
+cmd_uninstall() {
+  local name removed=0
+  if [ -n "$GLOBAL" ] && is_ours "$GLOBAL"; then DIR=$GLOBAL; fi
+  if [ -n "$GLOBAL" ] && { [ "$GLOBAL" = "$DIR" ] || [ "$GLOBAL" = "$STABLE" ]; }; then
+    git config --global --unset core.hooksPath || die "git config --global --unset failed"
+    echo "unset the global core.hooksPath ($GLOBAL)"
+  elif [ -n "$GLOBAL" ]; then
+    echo "left the global core.hooksPath alone ($GLOBAL is not the seyag dispatcher dir)"
+  else
+    echo "the global core.hooksPath was not set"
+  fi
+  if is_ours "$DIR"; then
+    while IFS= read -r name; do
+      [ -f "$DIR/$name" ] && rm -f "$DIR/$name" && removed=$((removed + 1))
+    done < <(hook_names)
+    rm -f "$DIR/plugin-root" "$DIR/$STAMP" "$DIR/$MARKER"
+    if rmdir "$DIR" 2>/dev/null; then
+      echo "removed the dispatcher dir $DIR ($removed stubs)"
+    else
+      echo "removed $removed stubs from $DIR; left the dir (it holds other files)"
+    fi
+  else
+    echo "no seyag dispatcher dir at $DIR; nothing removed"
+  fi
+}
+
+[ $# -ge 1 ] || { usage >&2; exit 2; }
+case $1 in
+  status)
+    [ $# -le 2 ] || { echo "seyag-git-hooks: unknown argument: $3" >&2; usage >&2; exit 2; }
+    repo=${2:-.}
+    case $repo in -*) echo "seyag-git-hooks: unknown argument: $repo" >&2; usage >&2; exit 2 ;; esac
+    cmd_status "$repo"
+    ;;
+  install | uninstall)
+    [ $# -eq 2 ] && [ "$2" = --global ] \
+      || { echo "seyag-git-hooks: $1 takes exactly --global" >&2; usage >&2; exit 2; }
+    "cmd_$1"
+    ;;
+  relink)
+    [ $# -eq 1 ] || { echo "seyag-git-hooks: unknown argument: $2" >&2; usage >&2; exit 2; }
+    cmd_relink
+    ;;
+  *)
+    echo "seyag-git-hooks: unknown argument: $1" >&2
+    usage >&2
+    exit 2
+    ;;
+esac

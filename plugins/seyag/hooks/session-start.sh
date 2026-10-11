@@ -12,7 +12,9 @@
 #   where re-suggested settings, dropped promises and lost work-stack pointers
 #   keep recurring; component `rules`). Adapted from Tzurot's session-start.sh.
 # - resume: outputs nothing.
-# - every source: deletes prompt-hook state files older than 7 days (below).
+# - every source: deletes prompt-hook state files older than 7 days (below),
+#   and runs `seyag-git-hooks relink` (adds one line only when it rewrote
+#   the git-hooks dispatcher dir after a plugin update).
 #
 # Output is built with jq (never hand-escaped). Fail-open: no jq, or nothing to
 # say, means a silent exit 0. A project's own .claude/hooks/session-start.sh
@@ -57,6 +59,21 @@ fi
 PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 RULES_DIR="${SYG_USER_RULES_DIR:-$HOME/.claude/rules}"
 
+# Point the git-hooks dispatcher dir (bin/seyag-git-hooks relink) at this
+# plugin version: a no-op unless installed, silent unless it changed
+# something, never fatal (capped at 2 s when `timeout` exists; a failure
+# adds one line naming `status`). Only when Claude Code runs this hook from
+# its own plugin root, so a probe or a worktree copy never re-points a real
+# install.
+RELINKED=""
+if [ -n "${CLAUDE_PLUGIN_ROOT:-}" ] && [ "$CLAUDE_PLUGIN_ROOT" -ef "$HOOK_DIR/.." ] \
+  && [ -x "$PLUGIN_ROOT/bin/seyag-git-hooks" ]; then
+  RELINK=("$PLUGIN_ROOT/bin/seyag-git-hooks" relink)
+  command -v timeout >/dev/null 2>&1 && RELINK=(timeout 2 "${RELINK[@]}")
+  RELINKED=$("${RELINK[@]}" 2>/dev/null) \
+    || RELINKED="relink failed (run seyag-git-hooks status)"
+fi
+
 TEXT=""
 case "$SOURCE" in
   startup | clear)
@@ -98,6 +115,9 @@ EOF
 )
     ;;
 esac
+
+[ -z "$RELINKED" ] || TEXT="${TEXT:+$TEXT
+}seyag git hooks: $RELINKED"
 
 [ -n "$TEXT" ] || exit 0
 

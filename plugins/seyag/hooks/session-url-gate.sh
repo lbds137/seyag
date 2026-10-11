@@ -7,9 +7,40 @@
 # a push, and the added file lines of the commit being made and of pushed
 # commits (see KNOWN GAPS for what it does not see).
 #
+# THE ADDED LAYER: git-hooks/pre-push (opt-in, `seyag-git-hooks install
+# --global`) also scans what a push from a public repo sends, however bash
+# built it. It adds to this hook and replaces nothing: rules 1-4 below run
+# as before in every repo.
+#
+# PRE-PUSH BYPASSES: where that pre-push is in force (lib/prepush_state.py's
+# `enforcing`: a public repo, the seyag hooks dir as its effective
+# core.hooksPath, no alias that skips it), the ways past it block (exit 2
+# naming the token) before any other check; elsewhere they pass.
+# lib/outbound.py's `prepush_bypasses` is the list (`git push --no-verify`
+# and its prefixes, a push argument holding `$` or a backtick, `HOME=`/`env
+# -i` on a push, a `-c`/`--config-env` or `git config` write of
+# core.hooksPath, an include, seyag.* or alias.*, `git config --edit`, a
+# core/seyag section removal, `git update-ref refs/remotes/…`, `git
+# send-pack`, GIT_CONFIG_* assignments; a `--global|--system` config write
+# is judged by the global install, a `--file <f>` one by f's repo). This
+# hook needs no private-terms file, so they block without one;
+# private-term-guard.sh blocks them too when it is on.
+# Waived by this hook's BYPASS in the command's own prefix; a GIT_CONFIG_*
+# assignment is waived only inside the prefix of the command carrying it
+# when that command runs a program (`SYG_ALLOW_SESSION_URL=1
+# GIT_CONFIG_GLOBAL=x git push`), never by a BYPASS on another command or
+# by text that only looks like one (quoted, a comment, a heredoc body), and
+# not for a command led by a shell keyword or grouping (`{`, `if`, `!`,
+# `time`, `for … do`) or one after `env -` (fail closed: move the
+# assignment onto a plain command). Not seen:
+# `.git/config` edited by a non-git tool, an earlier `export HOME=…`, `git
+# update-ref --stdin`.
+#
 # SECRET PATTERN: `claude.ai/code/session_` followed by an id character
 # [A-Za-z0-9] (host part case-insensitive, the rest case-sensitive). Prose
 # naming the bare prefix, followed by a space, backtick or quote, passes.
+# The pattern and its mask live in lib/session_link.py, shared with
+# git-hooks/pre-push.
 #
 # WHAT BLOCKS (the outbound text comes from lib/outbound.py, whose docstring
 # is the full list; commands are found with the shared splitter in lib/, the
@@ -17,10 +48,10 @@
 # `bash -c '…'`, and command substitutions):
 #   1. `git commit`, `git tag`, `git notes` (global options before the
 #      subcommand are skipped; `-C <dir>` is honored), or ANY `gh` command,
-#      when the WHOLE command text matches the pattern. That covers `-m`,
-#      heredoc and here-string bodies, `--body`, `--title` and
-#      `gh api -f body=…`. A link anywhere in the same text as such a command
-#      is an over-arm on purpose (the recoverable direction).
+#      when the WHOLE command text matches the pattern. That covers `-m`, heredoc and
+#      here-string bodies, `--body`, `--title` and `gh api -f body=…`. A link
+#      anywhere in the same text as such a command is an over-arm on purpose
+#      (the recoverable direction).
 #   2. A body read from a file, whose CONTENTS are matched: `git commit|tag|
 #      notes -F <f>` / `--file <f>` / `--file=<f>` (also inside a short
 #      cluster such as `-aF f`); for `gh`: `--body-file <f>`, `--notes-file
@@ -68,8 +99,9 @@
 # FAIL-OPEN: no jq/python3, unparsable JSON or command, or an internal python
 # error → exit 0. Prefilter, in bash, before python spawns: a `gh` word always
 # goes through; a `git` word goes through only with a word-bounded `commit`,
-# `tag`, `notes` or `push` in the text, so `git status` and the like never
-# start python.
+# `tag`, `notes`, `push` or `config`, or `hookspath`, `include`, `alias`,
+# `update-ref` or `send-pack` in any case, in the text, so `git status` and
+# the like never start python.
 #
 # The command goes to python on fd 3, never through the environment (Linux
 # caps one env string at 128 KiB). Python's stderr is discarded.
@@ -92,6 +124,9 @@ if [[ "$CMD" =~ (^|[^[:alnum:]_.-])gh([^[:alnum:]_-]|$) ]]; then
 elif [[ "$CMD" =~ (^|[^[:alnum:]_.-])git([^[:alnum:]_-]|$) ]] \
   && [[ "$CMD" =~ (^|[^[:alnum:]_-])(commit|tag|notes|push)([^[:alnum:]_-]|$) ]]; then
   :
+elif [[ "$CMD" =~ (^|[^[:alnum:]_.-])git([^[:alnum:]_-]|$) ]] \
+  && [[ "${CMD,,}" =~ hookspath|include|alias|update-ref|send-pack|(^|[^[:alnum:]_-])config([^[:alnum:]_-]|$) ]]; then
+  :
 else
   exit 0
 fi
@@ -101,23 +136,27 @@ CWD=$(jq -r '.cwd // empty' <<<"$INPUT" 2>/dev/null) || CWD=""
 HOOK_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib"
 RESULT=$(CWD="$CWD" HOOK_LIB="$HOOK_LIB" PYTHONDONTWRITEBYTECODE=1 python3 - 3<<<"$CMD" <<'PYEOF' 2>/dev/null
 import os
-import re
 import sys
 
 # An import failure exits non-zero, which the caller treats as allow (fail-open).
 sys.path.insert(0, os.environ["HOOK_LIB"])
-from outbound import outbound_items
+from outbound import bypass_block_message, outbound_items, prepush_bypasses
+from prepush_state import enforcing_judge, global_install_present
+from session_link import SECRET, mask
 
 cmd = os.fsdecode(open(3, "rb").read()).removesuffix("\n")
 payload_cwd = os.environ.get("CWD") or "."
 
-SECRET = re.compile(r"(?i:claude\.ai)/code/session_[A-Za-z0-9]")
-MASK = re.compile(r"(?i:claude\.ai)/code/session_[A-Za-z0-9_-]*")
 BYPASS = "SYG_ALLOW_SESSION_URL=1"
 
-
-def mask(text):
-    return MASK.sub("claude.ai/code/session_…", text)
+# The pre-push bypass shapes, where that hook is in force (this hook needs no
+# private-terms file, so they block with or without one).
+bypass_tokens = prepush_bypasses(cmd, payload_cwd, BYPASS,
+                                 dir_filter=enforcing_judge(payload_cwd),
+                                 global_filter=global_install_present)
+if bypass_tokens:
+    print(bypass_block_message(bypass_tokens, BYPASS))
+    sys.exit(0)
 
 
 findings = [mask(item.label) for item in outbound_items(cmd, payload_cwd, BYPASS)

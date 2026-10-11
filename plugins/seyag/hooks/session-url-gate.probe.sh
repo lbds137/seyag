@@ -20,6 +20,9 @@ HOOK="$SCRIPT_DIR/session-url-gate.sh"
 TMP=$(mktemp -d) || { echo "FAIL [setup]: mktemp"; exit 1; }
 trap 'rm -rf "$TMP"' EXIT
 export GIT_CEILING_DIRECTORIES="$TMP"
+# A scratch global config: the caller's global core.hooksPath must not decide
+# whether the pre-push "enforces" (lib/prepush_state.py).
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
 export GIT_AUTHOR_NAME=probe GIT_AUTHOR_EMAIL=probe@example.invalid
 export GIT_COMMITTER_NAME=probe GIT_COMMITTER_EMAIL=probe@example.invalid
 
@@ -414,6 +417,96 @@ run 2 "cd ~other enters a literal ~other dir before the relative -F" "$TMP/tilde
   "cd ~other && git commit -F leaky.txt"
 run 0 "near-miss: cd ~other with no literal ~other dir stays put" "$TMP/plain" "${NOENV[@]}" -- \
   "cd ~other && git commit -F leaky.txt"
+
+# =============================================================================
+# Group 9: the added pre-push layer
+# =============================================================================
+# The pre-push is in force in a repo marked public whose effective
+# core.hooksPath is the plugin's git-hooks dir. It is an added layer: rule 1
+# still matches git commit|tag|notes text there, exactly as base.
+HOOKS_DIR=$(cd "$SCRIPT_DIR/../git-hooks" && pwd)
+ACTIVE="$TMP/gactive"
+printf '[core]\n\thooksPath = %s\n' "$HOOKS_DIR" >"$ACTIVE"
+PUBW="$TMP/pubwork"
+git init -q "$PUBW"
+git -C "$PUBW" commit -q --allow-empty -m base
+git -C "$PUBW" config seyag.publicRepo true
+run 2 "in force (public + installed): the git commit text item stays" "$PUBW" GIT_CONFIG_GLOBAL="$ACTIVE" -- \
+  "git commit -m \"x ${LINK}\""
+assert_out "in force: the commit text matched" present "the command text"
+run 2 "in force: the git tag text item stays" "$PUBW" GIT_CONFIG_GLOBAL="$ACTIVE" -- \
+  "git tag -a v1 -m \"rel ${LINK}\""
+run 2 "active but not public: base (the pre-push checks public repos only)" "$WORK" GIT_CONFIG_GLOBAL="$ACTIVE" -- \
+  "git commit -m \"x ${LINK}\""
+run 2 "public, hook not installed: base" "$PUBW" "${NOENV[@]}" -- \
+  "git commit -m \"x ${LINK}\""
+git -C "$PUBW" config core.hooksPath .husky/_
+run 2 "public + global install, repo-local hooksPath (husky): base" "$PUBW" GIT_CONFIG_GLOBAL="$ACTIVE" -- \
+  "git commit -m \"x ${LINK}\""
+git -C "$PUBW" config --unset core.hooksPath
+run 2 "in force, a waived bypass token on the push: the commit text still blocks" "$PUBW" GIT_CONFIG_GLOBAL="$ACTIVE" -- \
+  "git commit -m \"x ${LINK}\" && SYG_ALLOW_SESSION_URL=1 git push --no-verify origin main"
+assert_out "the commit text matched" present "the command text"
+run 2 "enforcing: a body file still blocks" "$PUBW" GIT_CONFIG_GLOBAL="$ACTIVE" -- \
+  "git commit -F $TMP/files/leaky.txt"
+run 2 "enforcing: gh pr create keeps its item" "$PUBW" GIT_CONFIG_GLOBAL="$ACTIVE" -- \
+  "gh pr create --title t --body \"see ${LINK}\""
+
+# =============================================================================
+# Group 10: pre-push bypass tokens block where the hook is in force, with no
+# terms file
+# =============================================================================
+# This hook never reads SYG_PRIVATE_TERMS_FILE; each run unsets it to show the
+# blocks do not need it. NT also carries the install (the scratch global
+# hooksPath), so the hook is in force in the public PUBW.
+run 0 "public, no install: git push --no-verify passes" "$PUBW" -u SYG_PRIVATE_TERMS_FILE -- \
+  "git push --no-verify origin main"
+NT=(-u SYG_PRIVATE_TERMS_FILE GIT_CONFIG_GLOBAL="$ACTIVE")
+run 2 "public, installed, no terms file: git push --no-verify blocks" "$PUBW" "${NT[@]}" -- \
+  "git push --no-verify origin main"
+assert_out "names the token and this hook's bypass" present \
+  "blocked: --no-verify would get a push past the seyag pre-push"
+assert_out "the waiver is this hook's" present "SYG_ALLOW_SESSION_URL=1"
+run 2 "public: git push --no-veri (prefix)" "$PUBW" "${NT[@]}" -- "git push --no-veri origin main"
+run 0 "public: git push -n (--dry-run) passes" "$PUBW" "${NT[@]}" -- "git push -n origin main"
+run 2 "public: git -c core.hooksPath= blocks" "$PUBW" "${NT[@]}" -- "git -c core.hooksPath=/dev/null push"
+run 2 "public: git -c include.path= blocks" "$PUBW" "${NT[@]}" -- "git -c include.path=/x push"
+run 2 "public: git config --unset core.hooksPath blocks" "$PUBW" "${NT[@]}" -- \
+  "git config --unset core.hooksPath"
+run 0 "public, read twin: git config --get core.hooksPath" "$PUBW" "${NT[@]}" -- \
+  "git config --get core.hooksPath"
+run 2 "public: git config --edit blocks" "$PUBW" "${NT[@]}" -- "git config --edit"
+run 2 "public: GIT_CONFIG_GLOBAL= blocks" "$PUBW" "${NT[@]}" -- "GIT_CONFIG_GLOBAL=/dev/null git push"
+run 2 "public: HOME= on a push blocks" "$PUBW" "${NT[@]}" -- "HOME=/tmp/acme git push origin main"
+run 2 "public: git update-ref refs/remotes/ blocks" "$PUBW" "${NT[@]}" -- \
+  "git update-ref refs/remotes/origin/main HEAD"
+run 2 "public: git send-pack blocks" "$PUBW" "${NT[@]}" -- "git send-pack /tmp/acme.git main"
+run 2 "a --global hooksPath write from a non-public repo blocks (global install present)" "$WORK" "${NT[@]}" -- \
+  "git config --global core.hooksPath /tmp/elsewhere"
+run 0 "twin: the same write with no global install" "$WORK" -u SYG_PRIVATE_TERMS_FILE -- \
+  "git config --global core.hooksPath /tmp/elsewhere"
+run 0 "bypass: SYG_ALLOW_SESSION_URL=1 on the push" "$PUBW" "${NT[@]}" -- \
+  "SYG_ALLOW_SESSION_URL=1 git push --no-verify origin main"
+run 0 "bypass: SYG_ALLOW_SESSION_URL=1 GIT_CONFIG_GLOBAL= on the push itself is waived" "$PUBW" "${NT[@]}" -- \
+  "SYG_ALLOW_SESSION_URL=1 GIT_CONFIG_GLOBAL=/dev/null git push origin main"
+run 2 "a bypass on another command does not waive an export of GIT_CONFIG_GLOBAL" "$PUBW" "${NT[@]}" -- \
+  "SYG_ALLOW_SESSION_URL=1 true; export GIT_CONFIG_GLOBAL=/tmp/x; git push origin main"
+assert_out "names GIT_CONFIG_GLOBAL past another command's bypass" present "blocked: GIT_CONFIG_GLOBAL would get"
+run 2 "a bypass on another command does not waive a GIT_CONFIG_GLOBAL= prefix" "$PUBW" "${NT[@]}" -- \
+  "SYG_ALLOW_SESSION_URL=1 true; GIT_CONFIG_GLOBAL=/tmp/x git push origin main"
+run 2 "a bypassed-looking command inside double quotes is not waived" "$PUBW" "${NT[@]}" -- \
+  "echo \"x; SYG_ALLOW_SESSION_URL=1 GIT_CONFIG_GLOBAL=/tmp/x git push\""
+run 2 "a bypassed-looking command inside single quotes is not waived" "$PUBW" "${NT[@]}" -- \
+  "echo 'x; SYG_ALLOW_SESSION_URL=1 GIT_CONFIG_GLOBAL=/tmp/x git push'"
+run 2 "env --unset HOME on a push (space form) blocks" "$PUBW" "${NT[@]}" -- "env --unset HOME git push origin main"
+run 2 "env - on a push blocks" "$PUBW" "${NT[@]}" -- "env - git push origin main"
+run 2 "env --uns HOME on a push (abbreviated --unset) blocks" "$PUBW" "${NT[@]}" -- "env --uns HOME git push origin main"
+assert_out "names env -u HOME for --uns" present "blocked: env -u HOME on a push would get"
+run 0 "twin: env --uns FOO on a push passes" "$PUBW" "${NT[@]}" -- "env --uns FOO git push origin main"
+run 2 "env --ignore-e on a push (abbreviated --ignore-environment) blocks" "$PUBW" "${NT[@]}" -- \
+  "env --ignore-e git push origin main"
+run 0 "not public: git push --no-verify passes" "$WORK" "${NT[@]}" -- \
+  "git push --no-verify origin main"
 
 if [ "$FAILURES" -ne 0 ]; then
   printf '\n%d probe case(s) FAILED\n' "$FAILURES"

@@ -14,6 +14,13 @@ trap 'rm -rf "$TMP"' EXIT
 # Hermetic: the fixtures below set the SYG_ knobs explicitly, so an ambient
 # SYG_ variable must not override them.
 unset SYG_STATE_DIR SYG_STATE_MAX_DAYS SYG_USER_RULES_DIR SYG_INSTALLED_PLUGINS SYG_PROFILE SYG_ENABLE SYG_DISABLE
+# The git-hooks relink acts on ${XDG_DATA_HOME}/seyag/git-hooks: a scratch one,
+# so a run with the real plugin root never re-points a real install.
+export XDG_DATA_HOME="$TMP/xdg"
+# relink prefers the dir the GLOBAL core.hooksPath names: a scratch global
+# config, so a real install is never what it rewrites.
+export GIT_CONFIG_GLOBAL="$TMP/gitconfig"
+: >"$GIT_CONFIG_GLOBAL"
 
 mkdir -p "$TMP/root/rules" "$TMP/rules-linked" "$TMP/rules-empty"
 printf '# Core\nfixture\n' > "$TMP/root/rules/core.md"
@@ -58,6 +65,40 @@ if [ "$RC" = 0 ] && valid && [ "$(ctx | head -1)" = "seyag plugin $REAL_VERSION"
   ok "startup with the real PLUGIN_ROOT: version line matches the repo's plugin.json ($REAL_VERSION)"
 else
   bad "startup with real PLUGIN_ROOT: expected version line $REAL_VERSION" "$OUT"
+fi
+case "$(ctx)" in *"seyag git hooks"*) bad "startup, not installed: a relink line appeared" "$OUT" ;;
+  *) ok "startup, git hooks not installed: no relink line" ;; esac
+
+# An installed dispatcher dir left at an older plugin root: startup relinks
+# it, adds one line after the version line, and the version line stays first.
+D="$TMP/xdg/seyag/git-hooks"
+mkdir -p "$D"
+printf 'seyag git hooks dispatcher dir (seyag-git-hooks)\n' >"$D/.seyag-git-hooks"
+printf '%s\n' "$TMP/old-version" >"$D/plugin-root"
+OUT=$(jq -nc '{session_id: "probe", source: "startup"}' \
+  | CLAUDE_PLUGIN_ROOT="$REAL_ROOT" SYG_USER_RULES_DIR="$TMP/rules-empty" SYG_STATE_DIR="$TMP/state" bash "$HOOK" 2>/dev/null)
+if [ "$(cat "$D/plugin-root")" = "$(cd "$REAL_ROOT" && pwd -P)" ] && [ -x "$D/pre-push" ] \
+  && [ "$(ctx | head -1)" = "seyag plugin $REAL_VERSION" ] && ctx | grep -q '^seyag git hooks: relinked'; then
+  ok "startup relinks a stale dispatcher dir; the version line stays first"
+else
+  bad "startup relink of a stale dispatcher dir" "$OUT"
+fi
+OUT=$(jq -nc '{session_id: "probe", source: "startup"}' \
+  | CLAUDE_PLUGIN_ROOT="$REAL_ROOT" SYG_USER_RULES_DIR="$TMP/rules-empty" SYG_STATE_DIR="$TMP/state" bash "$HOOK" 2>/dev/null)
+case "$(ctx)" in *"seyag git hooks"*) bad "second startup: relink line again" "$OUT" ;;
+  *) ok "second startup: the link is current, no relink line" ;; esac
+# A relink that fails (a stale root in a dir it cannot write) says so in one line.
+printf '%s\n' "$TMP/old-version" >"$D/plugin-root"
+chmod 555 "$D"
+OUT=$(jq -nc '{session_id: "probe", source: "startup"}' \
+  | CLAUDE_PLUGIN_ROOT="$REAL_ROOT" SYG_USER_RULES_DIR="$TMP/rules-empty" SYG_STATE_DIR="$TMP/state" bash "$HOOK" 2>/dev/null)
+RC=$?
+chmod 755 "$D"
+if [ "$RC" = 0 ] && [ "$(ctx | head -1)" = "seyag plugin $REAL_VERSION" ] \
+  && ctx | grep -qx 'seyag git hooks: relink failed (run seyag-git-hooks status)'; then
+  ok "a failed relink adds one line naming status, and the hook still exits 0"
+else
+  bad "failed relink line" "$OUT"
 fi
 
 run compact "$TMP/rules-linked"

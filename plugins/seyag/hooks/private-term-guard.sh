@@ -3,12 +3,20 @@
 # text that holds a private term the owner listed locally: a name, a private
 # project, a personal path, anything that must not reach public history.
 #
+# THE ADDED LAYER: git-hooks/pre-push (opt-in, `seyag-git-hooks install
+# --global`) also scans what a push from a public repo sends (message,
+# author, committer, added paths and lines, tags, notes), however bash built
+# it. It adds to this hook and replaces nothing: every item below is checked
+# as before. Where that pre-push is in force (lib/prepush_state.py's
+# `enforcing`), this hook also blocks the ways past it (PRE-PUSH BYPASSES).
+#
 # TRIGGER: a command the shared splitter (`lib/shell_quotes.py`) finds running
-# `git commit|tag|notes|push` or any `gh` command, with the terms file
+# `git commit|tag|notes|push|config` or any `gh` command, with the terms file
 # configured and the target repo marked public. The bash prefilter is
 # session-url-gate's: a `gh` word always goes through; a `git` word only with
-# a word-bounded `commit`, `tag`, `notes` or `push` in the text, so `git
-# status` and the like never start python.
+# a word-bounded `commit`, `tag`, `notes`, `push` or `config`, or `hookspath`,
+# `include`, `alias`, `update-ref` or `send-pack` in any case, in the text,
+# so `git status` and the like never start python.
 #
 # CONFIG:
 #   - SYG_PRIVATE_TERMS_FILE names a local file, never tracked in this plugin:
@@ -18,10 +26,13 @@
 #     make it case-sensitive. Unset or empty, a missing or unreadable file, or
 #     a file with no term lines → the hook is off. A term line that does not
 #     compile blocks (only for a command that would be scanned) with its line
-#     number, never its text.
+#     number, never its text. Reading, matching and masking live in
+#     lib/private_terms.py, shared with git-hooks/pre-push.
 #   - A repo is public when `git -C <dir> config --type=bool --get
 #     seyag.publicRepo` prints `true` (`git config seyag.publicRepo true` in
-#     each local clone; the going-public skill says when). <dir> is the event
+#     each local clone; the going-public skill says when), or when the value
+#     is set but is not a boolean (fail closed, as git-hooks/pre-push reads
+#     it; lib/prepush_state.py's `public_flag`). <dir> is the event
 #     cwd moved by `cd`/`pushd` and git's `-C`, per command, as lib/outbound.py
 #     tracks it. A <dir> not inside a git work tree (a path the tracking got
 #     wrong, a missing directory) is judged by the event cwd's repo instead,
@@ -30,9 +41,36 @@
 #
 # WHAT IS SCANNED: every item `lib/outbound.py` returns (its docstring is the
 # list): the command text of a `git commit|tag|notes` or `gh` command, body
-# files (`-F`, `--body-file`, `@file`, gist files), the messages of pushed
-# commits, and the added lines of the commit being made and of pushed commits,
-# in every file.
+# files (`-F`,
+# `--body-file`, `@file`, gist files), the messages of pushed commits, and the
+# added lines of the commit being made and of pushed commits, in every file.
+#
+# PRE-PUSH BYPASSES: where the pre-push is in force (a public repo with the
+# seyag hooks dir as its effective core.hooksPath and no alias that skips
+# it), exit 2 naming the token, whatever the terms match: `git push
+# --no-verify` (or a prefix git accepts, down to `--no-v`), a push argument
+# holding `$` or a backtick, a `HOME=`/`XDG_CONFIG_HOME=`, `env -i` or `env
+# -u HOME` prefix on a push; `git -c`/`--config-env` setting core.hooksPath,
+# include.path, includeIf.*, seyag.publicRepo, seyag.privateTermsFile or
+# alias.*; a `git config` write of one of those keys (`set`, `unset`,
+# `--unset`, `--unset-all`, `--replace-all`, `--add`, `<key> <value>`, any
+# scope), `git config -e/--edit`, and a remove or rename of the core or seyag
+# section (a read passes); `git update-ref refs/remotes/…`; `git send-pack`;
+# an assignment or export of GIT_CONFIG_COUNT, GIT_CONFIG_PARAMETERS,
+# GIT_CONFIG_GLOBAL or GIT_CONFIG_SYSTEM anywhere in the text (the BYPASS
+# waives such an assignment only inside the prefix of the command that
+# carries it and runs a program, `SYG_ALLOW_PRIVATE_TERM=1
+# GIT_CONFIG_GLOBAL=x git push`; a BYPASS on another command, text that
+# only looks like one (quoted, a comment, a heredoc body), an export or a
+# `${…:=…}` waives nothing, nor does a command led by a shell keyword or
+# grouping (`{`, `if`, `!`, `time`, `for … do`) or one after `env -` (fail
+# closed: move the assignment onto a plain command); the
+# other tokens are waived per command, as below). Elsewhere (no
+# install, a husky repo) they pass. A `git config --global|--system` write
+# is judged by whether the global install is present (whatever the cwd), and
+# a `--file <f>` write by the repo that owns f. `prepush_bypasses` in
+# lib/outbound.py is the list. Here they need the terms file like everything else; session-url-gate.sh blocks
+# the same tokens with no terms file. Same BYPASS as below.
 #
 # BLOCK: exit 2, stderr names the lowest-numbered matching term (`#N`: its
 # 1-based index among the term lines, comments and blanks not counted) and
@@ -57,6 +95,11 @@
 # log output; outbound.py's gaps: a body read through a variable or
 # substitution, stdin redirects (`-F - < f`, `cat f | gh … --body-file -`),
 # content written earlier in the same command, annotated tag messages on push.
+# Where the pre-push is in force, it covers these for what a push sends. Ways
+# past the pre-push the bypass list does not see: editing `.git/config` (or a
+# file it includes) with a non-git tool; `HOME`, `XDG_CONFIG_HOME` or `PATH`
+# changed by an earlier `export` (only a push's own prefix is read); `git
+# update-ref --stdin`.
 #
 # FAIL-OPEN: no jq/python3/git, unparsable JSON or command, or an internal
 # python error → exit 0. The command goes to python on fd 3, never through the
@@ -85,6 +128,9 @@ if [[ "$CMD" =~ (^|[^[:alnum:]_.-])gh([^[:alnum:]_-]|$) ]]; then
 elif [[ "$CMD" =~ (^|[^[:alnum:]_.-])git([^[:alnum:]_-]|$) ]] \
   && [[ "$CMD" =~ (^|[^[:alnum:]_-])(commit|tag|notes|push)([^[:alnum:]_-]|$) ]]; then
   :
+elif [[ "$CMD" =~ (^|[^[:alnum:]_.-])git([^[:alnum:]_-]|$) ]] \
+  && [[ "${CMD,,}" =~ hookspath|include|alias|update-ref|send-pack|(^|[^[:alnum:]_-])config([^[:alnum:]_-]|$) ]]; then
+  :
 else
   exit 0
 fi
@@ -97,121 +143,50 @@ HOOK_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib"
 RESULT=$(CWD="$CWD" HOOK_LIB="$HOOK_LIB" TERMS_FILE="$TERMS_FILE" PYTHONDONTWRITEBYTECODE=1 \
   python3 - 3<<<"$CMD" <<'PYEOF' 2>/dev/null
 import os
-import re
 import signal
-import subprocess
 import sys
 
 # An import failure exits non-zero, which the caller treats as allow (fail-open).
 sys.path.insert(0, os.environ["HOOK_LIB"])
-from outbound import outbound_items
+from outbound import bypass_block_message, outbound_items, prepush_bypasses
+from prepush_state import enforcing_judge, global_install_present, public_judge
+from private_terms import compile_terms, context_line, masked, read_terms, spans
 
 cmd = os.fsdecode(open(3, "rb").read()).removesuffix("\n")
 payload_cwd = os.environ.get("CWD") or "."
 terms_file = os.environ["TERMS_FILE"]
 
 BYPASS = "SYG_ALLOW_PRIVATE_TERM=1"
-PLACEHOLDER = "[private term #"
 MAX_CONTEXT = 5
 MAX_LINE = 160
 MAX_LABELS = 8
 MATCH_SECONDS = 5
 
-try:
-    with open(terms_file, "rb") as fh:
-        raw = fh.read().decode("utf-8", "replace")
-except OSError:
-    sys.exit(0)
-
-terms = []  # (line number in the file, regex source)
-for lineno, line in enumerate(raw.splitlines(), 1):
-    line = line.rstrip()
-    if not line or line.lstrip().startswith("#"):
-        continue
-    terms.append((lineno, line))
+terms = read_terms(terms_file)  # [(line number in the file, regex source)]
 if not terms:
     sys.exit(0)
 
 
-def git_out(d, *args):
-    try:
-        r = subprocess.run(["git", "-C", d, *args], capture_output=True, timeout=10)
-    except (OSError, subprocess.SubprocessError):
-        return ""
-    if r.returncode != 0:
-        return ""
-    return r.stdout.decode("utf-8", "replace").strip()
+# The repo flag of a directory; one outside any git work tree is judged by the
+# event cwd's repo (fail closed on a tracking miss).
+is_public = public_judge(payload_cwd)
 
-
-_public = {}
-
-
-def flag_true(d):
-    return git_out(d, "config", "--type=bool", "--get", "seyag.publicRepo") == "true"
-
-
-def is_public(d):
-    """The repo flag of `d`; a `d` outside any git work tree is judged by the
-    event cwd's repo (fail closed on a tracking miss)."""
-    if d not in _public:
-        if git_out(d, "rev-parse", "--is-inside-work-tree") == "true":
-            _public[d] = flag_true(d)
-        else:
-            _public[d] = flag_true(payload_cwd)
-    return _public[d]
-
+# The ways past the pre-push block only where that hook is in force.
+bypass_tokens = prepush_bypasses(cmd, payload_cwd, BYPASS,
+                                 dir_filter=enforcing_judge(payload_cwd),
+                                 global_filter=global_install_present)
+if bypass_tokens:
+    print(bypass_block_message(bypass_tokens, BYPASS))
+    sys.exit(0)
 
 items = outbound_items(cmd, payload_cwd, BYPASS, dir_filter=is_public)
 if not items:
     sys.exit(0)
 
-compiled = []  # (term number, regex)
-for n, (lineno, src) in enumerate(terms, 1):
-    try:
-        compiled.append((n, re.compile(src, re.IGNORECASE)))
-    except Exception:
-        print(f"private-term-guard: {terms_file} line {lineno} is not a valid regex; fix it")
-        sys.exit(0)
-
-
-def spans(text):
-    found = []
-    for n, rx in compiled:
-        for m in rx.finditer(text):
-            if m.end() > m.start():
-                found.append((m.start(), m.end(), n))
-    return found
-
-
-def masked(text, found):
-    """`text` with every match replaced by its placeholder; overlapping
-    matches merge into one span named by the lowest term number, so no part
-    of any match survives."""
-    merged = []
-    for s, e, n in sorted(found):
-        if merged and s < merged[-1][1]:
-            ps, pe, pn = merged[-1]
-            merged[-1] = (ps, max(pe, e), min(pn, n))
-        else:
-            merged.append((s, e, n))
-    out, pos = [], 0
-    for s, e, n in merged:
-        out.append(text[pos:s])
-        out.append(f"{PLACEHOLDER}{n}]")
-        pos = e
-    out.append(text[pos:])
-    return "".join(out)
-
-
-def context_line(text):
-    """The first line of masked `text` holding a placeholder, windowed so the
-    placeholder shows."""
-    lines = text.split("\n")
-    line = next((ln for ln in lines if PLACEHOLDER in ln), lines[0]).strip()
-    i = line.find(PLACEHOLDER)
-    if i > 60:
-        line = "…" + line[i - 40:]
-    return line
+compiled, bad_line = compile_terms(terms)  # [(term number, regex)]
+if compiled is None:
+    print(f"private-term-guard: {terms_file} line {bad_line} is not a valid regex; fix it")
+    sys.exit(0)
 
 
 def kind_key(it):
@@ -245,7 +220,7 @@ signal.signal(signal.SIGALRM, on_alarm)
 signal.alarm(MATCH_SECONDS)
 try:
     for it in items:
-        found = spans(it.text)
+        found = spans(compiled, it.text)
         if not found:
             continue
         hit_terms.update(n for _s, _e, n in found)
