@@ -593,13 +593,14 @@ route_anthropic
 
 # 45a. No override: the statusline runs zai-usage from its own bin dir, never $HOME/.local/bin.
 # A decoy sits at the old path; the real sibling runs under the fixture HOME (key file pointed
-# at a missing fixture, quota from the file:// fixture, cache and state under $h), so no network.
+# at a missing fixture, the keys store pointed at a missing binary so the real TPM store is never
+# asked, quota from the file:// fixture, cache and state under $h), so no network.
 mv "$h/.local/bin/zai-usage" "$h/.local/bin/zai-usage.keep"
 printf '#!/bin/bash\necho HOME-PATH-STUB\n' > "$h/.local/bin/zai-usage"; chmod +x "$h/.local/bin/zai-usage"
 rm -f "$h/cache/claude-statusline/zai-usage.json"
 unset SYG_STATUSLINE_ZAI_USAGE
 route_zai
-raw=$(CC_ROUTE_KEYS="$h/missing-keys.env" render "$lane_in"); out=$(strip <<< "$raw")
+raw=$(CC_ROUTE_KEYS="$h/missing-keys.env" SEYAG_KEYS_BIN="$h/no-keys-bin" render "$lane_in"); out=$(strip <<< "$raw")
 grep -qF $'\x1b[38;2;11;127;255mz.ai\x1b[0m' <<< "$raw" && grep -q 'z\.ai 5h: 95%.* wk: 59%' <<< "$out" \
     && ! grep -q 'HOME-PATH-STUB' <<< "$out" \
     && ok "z.ai lane, no override: the sibling zai-usage runs, not \$HOME/.local/bin's" || bad "zai sibling default: $out"

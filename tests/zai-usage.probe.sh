@@ -129,6 +129,42 @@ key_case "key file beats the keys store" fixture-keyfile CC_ROUTE_KEYS="$tmp/key
 key_case "no key file: the keys store beats a z.ai env" fixture-store SEYAG_KEYS_BIN="$tmp/keys-ok" "${ZENV[@]}"
 key_case "no key file, no env: the keys store beats z.ai settings" fixture-store SEYAG_KEYS_BIN="$tmp/keys-ok"
 key_case "a failing keys store falls through to the z.ai env" fixture-env SEYAG_KEYS_BIN="$tmp/keys-fail" "${ZENV[@]}"
+printf '#!/bin/sh\nexit 0\n' > "$tmp/keys-empty"
+printf '#!/bin/sh\nsleep 5\necho fixture-late\n' > "$tmp/keys-slow"
+printf '#!/bin/sh\n[ -n "$SYG_KEYS_LOCK_WAIT_S" ] && [ -n "$SYG_KEYS_TIMEOUT_S" ] && echo fixture-budgeted && exit 0\nexit 1\n' > "$tmp/keys-budget"
+printf '#!/bin/sh\ntouch "%s/keys-called"\necho fixture-store\n' "$tmp" > "$tmp/keys-mark"
+chmod +x "$tmp/keys-empty" "$tmp/keys-slow" "$tmp/keys-budget" "$tmp/keys-mark"
+key_case "a keys store answering exit 0 with nothing falls through" fixture-env SEYAG_KEYS_BIN="$tmp/keys-empty" "${ZENV[@]}"
+key_case "a stalled keys store is killed and falls through" fixture-env SEYAG_KEYS_BIN="$tmp/keys-slow" ZAI_USAGE_KEYS_KILL_S=1 "${ZENV[@]}"
+# A stalled keys whose own child (systemd-creds stand-in) outlives it: the kill must take the group.
+printf '#!/bin/sh\nsleep 30 &\necho $! > "%s/grandchild.pid"\nwait\n' "$tmp" > "$tmp/keys-grandchild"
+printf '#!/bin/sh\nprintf "\\377\\376"\n' > "$tmp/keys-binary"
+chmod +x "$tmp/keys-grandchild" "$tmp/keys-binary"
+key_case "a stalled keys store's grandchild is killed with it" fixture-env SEYAG_KEYS_BIN="$tmp/keys-grandchild" ZAI_USAGE_KEYS_KILL_S=1 "${ZENV[@]}"
+gc=$(cat "$tmp/grandchild.pid" 2>/dev/null)
+[ -n "$gc" ] && ! kill -0 "$gc" 2>/dev/null && ok "key: no grandchild left running after the kill" \
+    || { bad "key: grandchild ${gc:-?} still running"; kill "$gc" 2>/dev/null; }
+key_case "a non-UTF-8 keys answer falls through" fixture-env SEYAG_KEYS_BIN="$tmp/keys-binary" "${ZENV[@]}"
+key_case "keys gets its own lock-wait and decrypt budgets" fixture-budgeted SEYAG_KEYS_BIN="$tmp/keys-budget"
+key_case "a malformed ZAI_USAGE_KEYS_KILL_S keeps the default" fixture-store SEYAG_KEYS_BIN="$tmp/keys-ok" ZAI_USAGE_KEYS_KILL_S=abc
+key_case "a nan ZAI_USAGE_KEYS_KILL_S keeps the default" fixture-store SEYAG_KEYS_BIN="$tmp/keys-ok" ZAI_USAGE_KEYS_KILL_S=nan
+# keys get prefers an ambient ZAI_AUTH_TOKEN over its store; zai-usage passes its env through, by design.
+printf '#!/bin/sh\n[ -n "$ZAI_AUTH_TOKEN" ] && echo "$ZAI_AUTH_TOKEN" && exit 0\necho fixture-store\n' > "$tmp/keys-envpref"
+chmod +x "$tmp/keys-envpref"
+key_case "an ambient ZAI_AUTH_TOKEN reaches keys get and wins there" fixture-ambient SEYAG_KEYS_BIN="$tmp/keys-envpref" ZAI_AUTH_TOKEN=fixture-ambient
+key_case "the PASTE- placeholder key file falls through to the store" fixture-store CC_ROUTE_KEYS="$tmp/placeholder.env" SEYAG_KEYS_BIN="$tmp/keys-ok"
+rm -f "$tmp/keys-called"
+key_case "key file present: the store is not asked" fixture-keyfile CC_ROUTE_KEYS="$tmp/keys.env" SEYAG_KEYS_BIN="$tmp/keys-mark"
+[ ! -e "$tmp/keys-called" ] && ok "key: the key file path never runs keys" || bad "key: keys ran although the key file answered"
+# Default resolution: with SEYAG_KEYS_BIN unset, zai-usage runs the `keys` beside its real path,
+# also when called through a symlink.
+mkdir -p "$tmp/plug" "$tmp/link"
+cp "$ZS" "$tmp/plug/zai-usage"; cp "$tmp/keys-ok" "$tmp/plug/keys"; ln -s "$tmp/plug/zai-usage" "$tmp/link/zai-usage"
+: > "$tmp/req.log"
+env HOME="$tmp/home" XDG_CACHE_HOME="$tmp/kd/cache" XDG_STATE_HOME="$tmp/kd/state" ZAI_SPEND_PROJECTS="$tmp/empty" \
+    CC_ROUTE_KEYS="$nokeys" SEYAG_KEYS_BIN= ZAI_SPEND_QUOTA_URL="$QSRV" "$tmp/link/zai-usage" --sweep
+[ "$(cut -f2 "$tmp/req.log" | sort -u)" = "Bearer fixture-store" ] && ok "key: default keys path resolves beside the real script through a symlink" \
+    || bad "key: default keys resolution sent '$(cut -f2 "$tmp/req.log" | sort -u)'"
 key_case "no key file: a z.ai-routed env beats settings" fixture-env "${ZENV[@]}"
 key_case "no key file, no env: z.ai settings" fixture-settings
 key_case "an env token routed to openrouter.ai is not sent; z.ai settings' is" fixture-settings \
