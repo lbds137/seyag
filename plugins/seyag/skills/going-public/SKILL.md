@@ -29,6 +29,8 @@ Findings go to the owner as a list with severities. Before the flip, each blocki
 
 After the flip, mark every local clone public with `git config seyag.publicRepo true`: it arms `private-term-guard`, which blocks the owner's listed private terms from that repo's outbound text. A repo flipped back to private gets `git config --unset seyag.publicRepo`.
 
+Then run `seyag-git-hooks status` in the clone: the pre-push enforcement (the private-term and session-link scan of what a push sends) is active only under the global install (`seyag-git-hooks install --global`) and without a repo-local `core.hooksPath`.
+
 ## Rename is not publish
 
 A repo may rename while private; publishing is its own gate and its own decision.

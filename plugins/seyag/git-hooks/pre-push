@@ -1,0 +1,170 @@
+#!/bin/bash
+# git pre-push hook — an added layer under the PreToolUse text guards: in a
+# repo marked public, refuses a push that would send a private term (the
+# list hooks/private-term-guard.sh reads) or a Claude session link, whatever
+# command built the commit. The text guards (hooks/private-term-guard.sh,
+# hooks/session-url-gate.sh) keep every check they had; this hook adds the
+# check on what git itself sends.
+#
+# INSTALL: `seyag-git-hooks install --global` points the global
+# `core.hooksPath` at a stable dispatcher dir,
+# `${XDG_DATA_HOME:-~/.local/share}/seyag/git-hooks`: one stub per hook name
+# plus a `plugin-root` file. The pre-push stub execs this file; if it is
+# missing, the stub refuses pushes from a public repo and runs the repo's own
+# pre-push elsewhere. `seyag-git-hooks relink` (run by the SessionStart hook)
+# rewrites the dir after a plugin update. `seyag-git-hooks status` says
+# whether the hook is in force in a repo: a repo-local core.hooksPath, as
+# husky sets, wins.
+#
+# TERMS: SYG_PRIVATE_TERMS_FILE, else the GLOBAL `git config --global --get
+# seyag.privateTermsFile` (install records it), so a push from a terminal
+# outside a session is checked too. A repo-local value is ignored.
+#
+# PUBLIC: `git config --type=bool --get seyag.publicRepo` prints `true`, or
+# the value is set but is not a boolean (fail closed, with a message naming
+# it). Unset or false: this hook checks nothing and goes straight to the
+# chain step.
+#
+# WHAT IS SCANNED: lib/prepush_scan.py's docstring is the list: each pushed
+# commit's message, author, committer, added or renamed paths and added
+# lines, an annotated tag being pushed, and the notes a pushed refs/notes/*
+# adds; commits any remote-tracking ref of the remote already reaches are
+# skipped. Replace refs are ignored, binary files are read as text, and a
+# ref that peels to a tree or blob is refused. Terms and masking come from
+# lib/private_terms.py, the link pattern from lib/session_link.py (the
+# guards' own code).
+#
+# BLOCK: exit 1; stderr names each hit by kind (message, author, committer,
+# path, added line, tag, note), object sha and the masked text: every term
+# match reads `[private term #N]`, a link `claude.ai/code/session_…`.
+#
+# FAIL MODE: a missing or empty terms file means no term check (the session
+# link check still runs). In a public repo an internal error (no python3, a
+# git failure, an invalid term line, matching over 5 s) refuses the push
+# (exit 1, the error on stderr); in any other repo nothing is checked.
+#
+# KNOWN GAPS (accepted):
+#   - The range trusts the remote-tracking refs: a stale or forged
+#     `refs/remotes/<remote>/…` (one the remote does not really have) hides
+#     the commits it reaches; a remote whose pushurl differs from its url is
+#     judged by the fetch side's refs; a remote name holding `/` matches
+#     other remotes' refs too (`--remotes=<name>` is a glob).
+#   - Git LFS: only the pointer files are scanned, not the LFS content.
+#   - A submodule is its own repo: its pushes are judged by its own
+#     seyag.publicRepo flag, not the superproject's.
+#   - A push run before the install (or with no terms source) gets no term
+#     check; a terminal push uses the global seyag.privateTermsFile only if
+#     install recorded it.
+#   - A commit whose `encoding` header is not UTF-8 is read as UTF-8 with
+#     replacement.
+#   - Tools that manage .git/hooks themselves: the pre-commit framework
+#     refuses to install while core.hooksPath is set (the repo's existing
+#     .git/hooks still run through the dispatcher), and git-lfs's own hooks
+#     are not in the dispatcher dir (only what the repo's .git/hooks holds
+#     runs). `seyag-git-hooks status` warns about both;
+#     `seyag-git-hooks uninstall --global` removes the install.
+#   - A git hooks dir used directly as core.hooksPath (this directory,
+#     not the dispatcher dir) has no server-side stubs, so a local repo
+#     receiving a push loses its own pre-receive, update, post-receive,
+#     post-update and proc-receive; the dispatcher dir has stubs for them.
+#   - The plugin root may be a live checkout: uncommitted edits to this file
+#     go live at once, and a `git checkout` there of a commit without
+#     git-hooks/ makes the dispatcher's pre-push fail closed in public repos
+#     (other repos' own hooks keep running through its fallback) until the
+#     checkout returns or `seyag-git-hooks relink` runs from another root;
+#     `seyag-git-hooks status` reports it as BROKEN.
+#
+# CHAIN: after its own check passes (or when the repo is not public), runs
+# the repo's own `<git common dir>/hooks/pre-push` when it is executable,
+# with the same arguments and the same stdin bytes, and exits with its
+# status. The other hook names in this directory are passthrough stubs (the
+# dispatcher dir runs a repo's own hook for those names itself).
+#
+# Fixture check: run tests/git-hooks.probe.sh after ANY edit here.
+
+set -uo pipefail
+
+SELF=$(readlink -f "${BASH_SOURCE[0]}")
+LIB="$(dirname "$SELF")/../hooks/lib"
+
+own_hook() { # prints the repo's own pre-push when it should run
+  local common own
+  common=$(git rev-parse --git-common-dir 2>/dev/null) || return 1
+  own="$common/hooks/pre-push"
+  [ -f "$own" ] && [ -x "$own" ] || return 1
+  [ "$(readlink -f "$own")" != "$SELF" ] || return 1
+  printf '%s\n' "$own"
+}
+
+# Public unless seyag.publicRepo is unset or a valid false; a value that is
+# set but not a boolean counts as public (fail closed), with a message.
+if RAW=$(git config --get seyag.publicRepo 2>/dev/null); then
+  if ! PUBLIC=$(git config --type=bool --get seyag.publicRepo 2>/dev/null); then
+    printf 'seyag pre-push: seyag.publicRepo is %s, not a boolean; treating the repo as public.\n' \
+      "'$RAW'" >&2
+    PUBLIC=true
+  fi
+else
+  PUBLIC=false
+fi
+if [ "$PUBLIC" != "true" ]; then
+  own=$(own_hook) || exit 0
+  exec "$own" "$@"
+fi
+
+refuse() {
+  printf 'seyag pre-push: %s; refusing the push to a public repo.\n' "$1" >&2
+  exit 1
+}
+
+command -v python3 >/dev/null 2>&1 || refuse "python3 not found, so the private-term check cannot run"
+BUF=$(mktemp) || refuse "mktemp failed"
+trap 'rm -f "$BUF"' EXIT
+cat >"$BUF" || refuse "reading the pushed refs failed"
+
+TERMS=${SYG_PRIVATE_TERMS_FILE:-}
+# The global value only: a repo's own config must not point the check at an
+# empty list.
+[ -n "$TERMS" ] || TERMS=$(git config --global --type=path --get seyag.privateTermsFile 2>/dev/null)
+
+python3 -I -B - "$LIB" "$BUF" "${1:-}" "$TERMS" <<'PYEOF'
+import sys
+
+lib, buf, remote, terms_file = sys.argv[1:5]
+sys.path.insert(0, lib)
+try:
+    import prepush_scan
+except Exception as e:
+    print(f"seyag pre-push: internal error ({e}); refusing the push to a public repo.",
+          file=sys.stderr)
+    sys.exit(1)
+try:
+    with open(buf, "rb") as fh:
+        data = fh.read()
+    hits, terms_notice = prepush_scan.scan(data, remote, terms_file)
+except prepush_scan.Refusal as e:
+    print(f"seyag pre-push: refused: {e}.", file=sys.stderr)
+    sys.exit(1)
+except Exception as e:  # ScanError and anything unforeseen: fail closed
+    print(f"seyag pre-push: internal error ({e}); refusing the push to a public repo.",
+          file=sys.stderr)
+    sys.exit(1)
+if not hits:
+    sys.exit(0)
+what = [w for w, on in ((f"a private term ({terms_notice})", terms_notice),
+                        ("a Claude session link (claude.ai/code/session_…)",
+                         any("a session link" in h for h in hits))) if on]
+print(f"seyag pre-push: blocked: {' and '.join(what)} would go out to a public repo:",
+      file=sys.stderr)
+for h in hits:
+    print(h, file=sys.stderr)
+print("Rewrite what matched (amend or rebase the commit; recreate the tag or note) "
+      "and push again.", file=sys.stderr)
+sys.exit(1)
+PYEOF
+rc=$?
+[ "$rc" -eq 0 ] || exit 1
+
+own=$(own_hook) || exit 0
+"$own" "$@" <"$BUF"
+exit $?

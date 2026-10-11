@@ -1,0 +1,41 @@
+#!/bin/bash
+# Passthrough stub for every standard client git hook but pre-push: each hook
+# name in this directory is a symlink to this file. A global core.hooksPath
+# replaces each repo's own .git/hooks, so without these a repo's own
+# pre-commit, commit-msg, post-checkout... would silently stop running.
+#
+# Runs `<git common dir>/hooks/<name>` (name: the basename git invoked) when
+# it is executable, by exec: same arguments, same stdin, its exit status.
+# Else exits 0, except push-to-checkout, whose mere presence replaces git's
+# built-in updateInstead: with no repo hook of that name it does git's own
+# default (refuse a dirty tree, else `read-tree -u -m <new>`).
+#
+# Server-side hooks (pre-receive, update, post-receive, post-update,
+# proc-receive) get no stub.
+#
+# Fixture check: run tests/git-hooks.probe.sh after ANY edit here.
+
+set -uo pipefail
+
+name=$(basename "$0")
+self=$(readlink -f "${BASH_SOURCE[0]}")
+if common=$(git rev-parse --git-common-dir 2>/dev/null); then
+  own="$common/hooks/$name"
+  if [ -f "$own" ] && [ -x "$own" ] && [ "$(readlink -f "$own")" != "$self" ]; then
+    exec "$own" "$@"
+  fi
+fi
+
+if [ "$name" = push-to-checkout ]; then
+  # git's push_to_deploy(), run in the work tree; $1 is the pushed commit.
+  git update-index -q --ignore-submodules --refresh \
+    || { echo "Up-to-date check failed" >&2; exit 1; }
+  git diff-files --quiet --ignore-submodules -- \
+    || { echo "Working directory has unstaged changes" >&2; exit 1; }
+  head=HEAD
+  git rev-parse --verify -q HEAD >/dev/null || head=$(git hash-object -t tree /dev/null)
+  git diff-index --quiet --cached --ignore-submodules "$head" -- \
+    || { echo "Working directory has staged changes" >&2; exit 1; }
+  git read-tree -u -m "$1" || { echo "Could not update working tree to new HEAD" >&2; exit 1; }
+fi
+exit 0

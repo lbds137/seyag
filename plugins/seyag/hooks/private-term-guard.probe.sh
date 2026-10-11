@@ -397,6 +397,209 @@ run 2 "prefilter positive control: git commit runs python" "$PUB" "${T[@]}" PATH
   "git commit -m 'add zorbleflux'"
 spawn_check spawned "git commit spawned python (the shim sees spawns)"
 
+# =============================================================================
+# The added layer: with git-hooks/pre-push in force, every item stays (base)
+# =============================================================================
+# "In force" = the scratch global config's core.hooksPath is the plugin's
+# git-hooks dir (lib/prepush_state.py); the repos above are marked public.
+HOOKS_DIR=$(cd "$SCRIPT_DIR/../git-hooks" && pwd)
+ACTIVE="$TMP/gactive"
+printf '[core]\n\thooksPath = %s\n' "$HOOKS_DIR" >"$ACTIVE"
+AC=(GIT_CONFIG_GLOBAL="$ACTIVE")
+HUSKY="$TMP/husky"; mkrepo "$HUSKY" true
+git -C "$HUSKY" config core.hooksPath .husky/_
+run 2 "pre-push in force: git commit -m text item stays" "$PUB" "${T[@]}" "${AC[@]}" -- \
+  "git commit -m 'add zorbleflux'"
+assert_out "in force: the commit text matched" present "matched in: the command text"
+run 2 "pre-push in force: git tag -a -m text item stays" "$PUB" "${T[@]}" "${AC[@]}" -- \
+  "git tag -a v9 -m 'zorbleflux'"
+run 2 "pre-push in force: git notes add -m text item stays" "$PUB" "${T[@]}" "${AC[@]}" -- \
+  "git notes add -m 'zorbleflux'"
+run 2 "pre-push active: a body file still blocks" "$PUB" "${T[@]}" "${AC[@]}" -- \
+  "git commit -F $TMP/files/body.txt"
+run 2 "pre-push active: staged lines still block" "$STG" "${T[@]}" "${AC[@]}" -- \
+  "git commit -m clean"
+run 2 "pre-push active: pushed commit messages still block" "$PMSG" "${T[@]}" "${AC[@]}" -- \
+  "git push origin main"
+run 2 "husky-style repo-local hooksPath: base behaviour" "$HUSKY" "${T[@]}" "${AC[@]}" -- \
+  "git commit -m 'add zorbleflux'"
+assert_out "husky repo: the command text matched" present "matched in: the command text"
+run 2 "pre-push in force, a waived bypass token on the push: the commit text still blocks" "$PUB" "${T[@]}" "${AC[@]}" -- \
+  "git commit -m 'add zorbleflux' && SYG_ALLOW_PRIVATE_TERM=1 git push --no-verify origin main"
+assert_out "the commit text matched" present "matched in: the command text"
+run 0 "pre-push active in a repo not marked public: unchanged (not checked)" "$PRIV" "${T[@]}" "${AC[@]}" -- \
+  "git commit -m 'add zorbleflux'"
+
+# =============================================================================
+# Pre-push bypass tokens: blocks only where the hook is in force
+# =============================================================================
+run 0 "no install: git push --no-verify passes" "$PUB" "${T[@]}" -- "git push --no-verify origin main"
+run 0 "husky repo with the install: git push --no-verify passes" "$HUSKY" "${T[@]}" "${AC[@]}" -- \
+  "git push --no-verify origin main"
+# From here on T carries the install, so each case runs where the hook is in force.
+T=(SYG_PRIVATE_TERMS_FILE="$TERMS" GIT_CONFIG_GLOBAL="$ACTIVE")
+run 2 "block: git push --no-verify" "$PUB" "${T[@]}" -- "git push --no-verify origin main"
+assert_out "names the token" present "blocked: --no-verify would get a push past the seyag pre-push"
+run 2 "block: git push --no-verif (a prefix git accepts)" "$PUB" "${T[@]}" -- "git push --no-verif origin main"
+run 2 "block: git push --no-v (shortest prefix)" "$PUB" "${T[@]}" -- "git push --no-v origin main"
+run 0 "twin: git push -n (push's -n is --dry-run)" "$PUB" "${T[@]}" -- "git push -n origin main"
+run 0 "twin: git push -fn (cluster, still --dry-run)" "$PUB" "${T[@]}" -- "git push -fn origin main"
+run 0 "twin: git push origin main" "$PUB" "${T[@]}" -- "git push origin main"
+run 0 "twin: git commit -n (no-verify of commit hooks, not the push)" "$PUB" "${T[@]}" -- "git commit -n -m ok"
+run 0 "twin: git commit --no-verify (pre-push still runs)" "$PUB" "${T[@]}" -- "git commit --no-verify -m ok"
+run 2 "block: git -c core.hooksPath=/dev/null push" "$PUB" "${T[@]}" -- "git -c core.hooksPath=/dev/null push origin main"
+assert_out "names -c core.hooksPath" present "blocked: -c core.hooksPath would get"
+run 2 "block: git -c core.HOOKSPATH= (key case)" "$PUB" "${T[@]}" -- "git -c core.HOOKSPATH=x commit -m ok"
+run 2 "block: git --config-env=core.hooksPath=V" "$PUB" "${T[@]}" -- "git --config-env=core.hooksPath=V push"
+run 0 "twin: git -c user.name=x commit -m ok" "$PUB" "${T[@]}" -- "git -c user.name=x commit -m ok"
+run 2 "block: git -c include.path=" "$PUB" "${T[@]}" -- "git -c include.path=/tmp/acme.cfg push origin main"
+assert_out "names -c include.path" present "blocked: -c include.path would get"
+run 2 "block: git -c includeIf.*.path=" "$PUB" "${T[@]}" -- "git -c includeIf.gitdir:/x/.path=/tmp/acme.cfg push"
+run 0 "twin: git -c user.email= (not an include)" "$PUB" "${T[@]}" -- "git -c user.email=a@b.c commit -m ok"
+# git config: writes and edits block, reads pass.
+run 2 "block: git config core.hooksPath <value>" "$PUB" "${T[@]}" -- "git config core.hooksPath /tmp/elsewhere"
+assert_out "names the write" present "blocked: git config write of core.hooksPath would get"
+run 2 "block: git config --global core.hookspath <value>" "$PUB" "${T[@]}" -- "git config --global core.hookspath /x"
+run 2 "block: git config --worktree core.hooksPath <value>" "$PUB" "${T[@]}" -- "git config --worktree core.hooksPath /x"
+run 2 "block: git config --file f core.hooksPath <value>" "$PUB" "${T[@]}" -- "git config --file .git/config core.hooksPath /x"
+run 2 "block: git config --unset core.hooksPath" "$PUB" "${T[@]}" -- "git config --unset core.hooksPath"
+run 2 "block: git config --unset-all core.hooksPath" "$PUB" "${T[@]}" -- "git config --local --unset-all core.hooksPath"
+run 2 "block: git config --replace-all core.hooksPath" "$PUB" "${T[@]}" -- "git config --replace-all core.hooksPath /x"
+run 2 "block: git config --add core.hooksPath" "$PUB" "${T[@]}" -- "git config --add core.hooksPath /x"
+run 2 "block: git config set core.hooksPath (verb form)" "$PUB" "${T[@]}" -- "git config set --global core.hooksPath /x"
+run 2 "block: git config unset core.hooksPath (verb form)" "$PUB" "${T[@]}" -- "git config unset core.hooksPath"
+run 2 "block: git config --local include.path <file>" "$PUB" "${T[@]}" -- "git config --local include.path /tmp/acme.cfg"
+run 2 "block: git config -e" "$PUB" "${T[@]}" -- "git config -e"
+assert_out "names the edit" present "blocked: git config --edit would get"
+run 2 "block: git config --global --edit" "$PUB" "${T[@]}" -- "git config --global --edit"
+run 2 "block: git config edit (verb form)" "$PUB" "${T[@]}" -- "git config edit --local"
+run 0 "read twin: git config core.hooksPath" "$PUB" "${T[@]}" -- "git config core.hooksPath"
+run 0 "read twin: git config --get core.hooksPath" "$PUB" "${T[@]}" -- "git config --get core.hooksPath"
+run 0 "read twin: git config --show-origin --get-all core.hooksPath" "$PUB" "${T[@]}" -- \
+  "git config --show-origin --get-all core.hooksPath"
+run 0 "read twin: git config --type=path --get core.hooksPath" "$PUB" "${T[@]}" -- \
+  "git config --type=path --get core.hooksPath"
+run 0 "read twin: git config get core.hooksPath (verb form)" "$PUB" "${T[@]}" -- "git config get core.hooksPath"
+run 0 "read twin: git config --get include.path" "$PUB" "${T[@]}" -- "git config --get include.path"
+run 0 "read twin: git config --list" "$PUB" "${T[@]}" -- "git config --list"
+run 0 "twin: git config user.name probe" "$PUB" "${T[@]}" -- "git config user.name probe"
+run 2 "block: GIT_CONFIG_GLOBAL= prefix" "$PUB" "${T[@]}" -- "GIT_CONFIG_GLOBAL=/dev/null git push origin main"
+assert_out "names GIT_CONFIG_GLOBAL" present "blocked: GIT_CONFIG_GLOBAL would get"
+run 2 "block: export GIT_CONFIG_COUNT" "$PUB" "${T[@]}" -- \
+  "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/x; git push origin main"
+run 2 "block: GIT_CONFIG_PARAMETERS= in a commit's prefix" "$PUB" "${T[@]}" -- \
+  "GIT_CONFIG_PARAMETERS=\"'core.hookspath'='/x'\" git commit -m ok"
+run 2 "block: declare -x GIT_CONFIG_SYSTEM" "$PUB" "${T[@]}" -- "declare -x GIT_CONFIG_SYSTEM; git push origin main"
+run 0 "twin: reading \$GIT_CONFIG_GLOBAL" "$PUB" "${T[@]}" -- "echo \"\$GIT_CONFIG_GLOBAL\"; git commit -m ok"
+run 2 "block: HOME= on a push" "$PUB" "${T[@]}" -- "HOME=/tmp/acme git push origin main"
+assert_out "names HOME=" present "blocked: HOME= on a push would get"
+run 2 "block: XDG_CONFIG_HOME= on a push" "$PUB" "${T[@]}" -- "XDG_CONFIG_HOME=/tmp/acme git push origin main"
+run 2 "block: env -i on a push" "$PUB" "${T[@]}" -- "env -i git push origin main"
+run 2 "block: env -u HOME on a push" "$PUB" "${T[@]}" -- "env -u HOME git push origin main"
+run 0 "twin: HOME= on a commit (not a push)" "$PUB" "${T[@]}" -- "HOME=/tmp/acme git commit -m ok"
+run 0 "twin: env -u FOO on a push" "$PUB" "${T[@]}" -- "env -u FOO git push origin main"
+run 2 "block: git -c seyag.publicRepo=false push" "$PUB" "${T[@]}" -- "git -c seyag.publicRepo=false push origin main"
+run 2 "block: git config seyag.publicRepo false" "$PUB" "${T[@]}" -- "git config seyag.publicRepo false"
+run 0 "read twin: git config --get seyag.publicRepo" "$PUB" "${T[@]}" -- "git config --get seyag.publicRepo"
+run 2 "block: git config --global seyag.privateTermsFile <path>" "$PUB" "${T[@]}" -- \
+  "git config --global seyag.privateTermsFile /tmp/empty"
+run 2 "block: git -c alias.p= ... p" "$PUB" "${T[@]}" -- "git -c alias.p='push --no-verify' p origin main"
+assert_out "names -c alias.*" present "blocked: -c alias.* would get"
+run 2 "block: git config alias.p <value>" "$PUB" "${T[@]}" -- "git config alias.p 'push --no-verify'"
+run 0 "read twin: git config --get-regexp alias" "$PUB" "${T[@]}" -- "git config --get-regexp '^alias\\.'"
+run 2 "block: git config --remove-section core" "$PUB" "${T[@]}" -- "git config --remove-section core"
+assert_out "names the section" present "blocked: git config remove/rename of section core would get"
+run 2 "block: git config --rename-section seyag" "$PUB" "${T[@]}" -- "git config --rename-section seyag old"
+run 2 "block: git config remove-section core (verb form)" "$PUB" "${T[@]}" -- "git config remove-section --local core"
+run 0 "twin: git config --remove-section user" "$PUB" "${T[@]}" -- "git config --remove-section user"
+run 2 "block: git update-ref refs/remotes/…" "$PUB" "${T[@]}" -- "git update-ref refs/remotes/origin/main HEAD"
+run 0 "twin: git update-ref refs/heads/…" "$PUB" "${T[@]}" -- "git update-ref refs/heads/scratch HEAD"
+run 2 "block: a push argument holding \$" "$PUB" "${T[@]}" -- "git push origin \"\$BRANCH\""
+run 2 "block: a push argument holding a backtick" "$PUB" "${T[@]}" -- "git push origin \`cat ref\`"
+run 2 "block: git send-pack" "$PUB" "${T[@]}" -- "git send-pack ../pub.remote.git main"
+assert_out "names send-pack" present "blocked: git send-pack would get"
+run 0 "twin: git send-pack in a repo not marked public" "$PRIV" "${T[@]}" -- "git send-pack ../priv.remote.git main"
+# Global and --file config writes are judged where they land, not by the cwd.
+run 2 "block: --global hooksPath write from a private repo's cwd (global install present)" "$PRIV" "${T[@]}" -- \
+  "git config --global core.hooksPath /tmp/elsewhere"
+run 2 "block: --system alias write from a private repo's cwd" "$PRIV" "${T[@]}" -- \
+  "git config --system alias.p 'push --no-verify'"
+run 0 "twin: --global write of a plain key from a private repo's cwd" "$PRIV" "${T[@]}" -- \
+  "git config --global user.name probe"
+run 0 "twin: --global hooksPath write with no global install" "$PRIV" SYG_PRIVATE_TERMS_FILE="$TERMS" -- \
+  "git config --global core.hooksPath /tmp/elsewhere"
+run 2 "block: --file <public repo's config> from a private repo's cwd" "$PRIV" "${T[@]}" -- \
+  "git config --file $PUB/.git/config core.hooksPath /tmp/elsewhere"
+run 0 "twin: --file <private repo's config>" "$PUB" "${T[@]}" -- \
+  "git config --file $PRIV/.git/config core.hooksPath /tmp/elsewhere"
+run 2 "block: --file <the global config file> from a private repo's cwd" "$PRIV" "${T[@]}" -- \
+  "git config --file $ACTIVE core.hooksPath /tmp/elsewhere"
+run 0 "bypass: own-prefix token on the push" "$PUB" "${T[@]}" -- \
+  "SYG_ALLOW_PRIVATE_TERM=1 git push --no-verify origin main"
+run 0 "bypass: own-prefix token waives a GIT_CONFIG_ assignment" "$PUB" "${T[@]}" -- \
+  "SYG_ALLOW_PRIVATE_TERM=1 GIT_CONFIG_GLOBAL=/dev/null git push origin main"
+run 2 "block: a bypass on another command does not waive an export of GIT_CONFIG_GLOBAL" "$PUB" "${T[@]}" -- \
+  "SYG_ALLOW_PRIVATE_TERM=1 true; export GIT_CONFIG_GLOBAL=/tmp/x; git push origin main"
+assert_out "names GIT_CONFIG_GLOBAL past another command's bypass" present "blocked: GIT_CONFIG_GLOBAL would get"
+run 2 "block: a bypass on another command does not waive a GIT_CONFIG_GLOBAL= prefix" "$PUB" "${T[@]}" -- \
+  "SYG_ALLOW_PRIVATE_TERM=1 true; GIT_CONFIG_GLOBAL=/tmp/x git push origin main"
+run 2 "block: a bypassed push does not waive a later push's GIT_CONFIG_GLOBAL= prefix" "$PUB" "${T[@]}" -- \
+  "SYG_ALLOW_PRIVATE_TERM=1 GIT_CONFIG_GLOBAL=/tmp/x git push origin main; GIT_CONFIG_GLOBAL=/tmp/y git push origin main"
+run 0 "bypass: env BYPASS GIT_CONFIG_GLOBAL= on the push itself is waived" "$PUB" "${T[@]}" -- \
+  "env SYG_ALLOW_PRIVATE_TERM=1 GIT_CONFIG_GLOBAL=/dev/null git push origin main"
+# Text that only looks like a bypassed command (quoted, commented, a heredoc
+# body, a string another program runs) waives nothing; these block at base too.
+run 2 "block: a bypassed-looking command inside double quotes is not waived" "$PUB" "${T[@]}" -- \
+  "echo \"x; SYG_ALLOW_PRIVATE_TERM=1 GIT_CONFIG_GLOBAL=/tmp/x git push\""
+run 2 "block: a bypassed-looking command inside single quotes is not waived" "$PUB" "${T[@]}" -- \
+  "echo 'x; SYG_ALLOW_PRIVATE_TERM=1 GIT_CONFIG_GLOBAL=/tmp/x git push'"
+run 2 "block: a bypassed-looking command in a comment is not waived" "$PUB" "${T[@]}" -- \
+  "# note; SYG_ALLOW_PRIVATE_TERM=1 GIT_CONFIG_GLOBAL=/tmp/x git push"
+run 2 "block: a bypassed-looking command in a commit message is not waived" "$PUB" "${T[@]}" -- \
+  "git commit -m \"fix (SYG_ALLOW_PRIVATE_TERM=1 GIT_CONFIG_GLOBAL=/tmp/x git push)\""
+run 2 "block: a bypassed-looking line in a heredoc body is not waived" "$PUB" "${T[@]}" -- \
+  $'cat <<X; git push\nx\nSYG_ALLOW_PRIVATE_TERM=1 GIT_CONFIG_GLOBAL=/tmp/x foo\nX'
+PYSYS="python3 -c \"import os; os.system('x; SYG_ALLOW_PRIVATE_TERM=1 GIT_CONFIG_GLOBAL=/tmp/x git push')\""
+run 2 "block: a bypassed-looking command in a python string is not waived" "$PUB" "${T[@]}" -- "$PYSYS"
+run 2 "block: a bypassed prefix with only a redirection (no command) is not waived" "$PUB" "${T[@]}" -- \
+  "set -a; SYG_ALLOW_PRIVATE_TERM=1 GIT_CONFIG_GLOBAL=/tmp/x >/dev/null; git push origin main"
+run 2 "block: env --unset HOME on a push (space form)" "$PUB" "${T[@]}" -- "env --unset HOME git push origin main"
+assert_out "names env -u HOME" present "blocked: env -u HOME on a push would get"
+run 2 "block: env - on a push (GNU env's -i)" "$PUB" "${T[@]}" -- "env - git push origin main"
+assert_out "names env -i" present "blocked: env -i on a push would get"
+run 0 "twin: env --unset FOO on a push" "$PUB" "${T[@]}" -- "env --unset FOO git push origin main"
+run 2 "block: env --uns HOME on a push (abbreviated --unset)" "$PUB" "${T[@]}" -- "env --uns HOME git push origin main"
+assert_out "names env -u HOME for --uns" present "blocked: env -u HOME on a push would get"
+run 0 "twin: env --uns FOO on a push" "$PUB" "${T[@]}" -- "env --uns FOO git push origin main"
+run 2 "block: env --ignore-e on a push (abbreviated --ignore-environment)" "$PUB" "${T[@]}" -- \
+  "env --ignore-e git push origin main"
+# An abbreviated --unset before git: git is still read as the program (as at
+# base), so its own tokens still block.
+run 2 "block: env --un git push --no-verify (git stays the program)" "$PUB" "${T[@]}" -- \
+  "env --un git push --no-verify origin main"
+run 2 "block: env --u git push --no-verify" "$PUB" "${T[@]}" -- "env --u git push --no-verify"
+run 2 "block: env --uns git -c core.hooksPath= push" "$PUB" "${T[@]}" -- "env --uns git -c core.hooksPath=/x push"
+run 2 "block: env --un git config --global core.hooksPath" "$PUB" "${T[@]}" -- \
+  "env --un git config --global core.hooksPath /x"
+run 0 "not public: git push --no-verify in a repo not marked public" "$PRIV" "${T[@]}" -- \
+  "git push --no-verify origin main"
+run 0 "off without a terms file: git push --no-verify (session-url-gate blocks it)" "$PUB" \
+  GIT_CONFIG_GLOBAL="$ACTIVE" -- "git push --no-verify origin main"
+# An alias that skips the hook means it is not in force: status reports it,
+# and these blocks stand down (the text items still run).
+ALIASED="$TMP/aliased"; mkrepo "$ALIASED" true
+git -C "$ALIASED" config alias.yeet 'push --no-verify'
+run 0 "an alias holding --no-verify: hook not in force, the token passes" "$ALIASED" "${T[@]}" -- \
+  "git push --no-verify origin main"
+T=(SYG_PRIVATE_TERMS_FILE="$TERMS")
+
+# An invalid seyag.publicRepo counts as public (fail closed, as the pre-push
+# reads it); a valid false stays off (the "not public: flag false" case).
+INVAL="$TMP/inval"; mkrepo "$INVAL" yesplz
+run 2 "an invalid seyag.publicRepo (yesplz) counts as public" "$INVAL" "${T[@]}" -- \
+  "git commit -m 'add zorbleflux'"
+assert_out "invalid publicRepo: the commit text matched" present "matched in: the command text"
+
 if [ "$FAILURES" -ne 0 ]; then
   printf '\n%d probe case(s) FAILED\n' "$FAILURES"
   exit 1
