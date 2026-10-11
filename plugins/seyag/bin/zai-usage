@@ -228,7 +228,7 @@ def zai_token():
     """The z.ai key, never another lane's: the lane key file's ZAI_AUTH_TOKEN first, then the encrypted
     `keys` store (both hold it whether or not any route is on z.ai), then the calling session's env,
     then settings.json, each of the last two only when its base URL is z.ai (an OpenRouter key must
-    not go to z.ai)."""
+    not go to z.ai). `keys get` itself prefers a non-empty ZAI_AUTH_TOKEN env var over the store."""
     import subprocess
     keys = os.environ.get("CC_ROUTE_KEYS") or os.path.expanduser("~/.claude/lane-keys.env")
     try:
@@ -241,12 +241,34 @@ def zai_token():
     except OSError:
         pass
     # The store decrypts on the TPM (about 3 s); a failed or stalled decrypt falls through, never raises.
+    # keys gets its own lock-wait and decrypt budgets below our kill timeout, so it gives up cleanly
+    # (writing its stall marker, releasing the TPM) before we kill it. If it overruns anyway, the
+    # kill takes its whole process group, so no systemd-creds grandchild is left holding the TPM.
     keys_bin = os.environ.get("SEYAG_KEYS_BIN") or os.path.join(os.path.dirname(os.path.realpath(__file__)), "keys")
     try:
-        r = subprocess.run([keys_bin, "get", "ZAI_AUTH_TOKEN"], capture_output=True, text=True, timeout=15)
-        if r.returncode == 0 and r.stdout.strip():
-            return r.stdout.strip()
-    except (OSError, subprocess.TimeoutExpired):
+        kill_s = float(os.environ.get("ZAI_USAGE_KEYS_KILL_S") or 30)
+        if not 0 < kill_s < float("inf"):
+            raise ValueError
+    except ValueError:  # a typo'd or nan/inf override keeps the default rather than crashing the meter
+        kill_s = 30.0
+    child_env = dict(os.environ, SYG_KEYS_LOCK_WAIT_S=str(kill_s / 3), SYG_KEYS_TIMEOUT_S=str(kill_s / 3))
+    try:
+        p = subprocess.Popen([keys_bin, "get", "ZAI_AUTH_TOKEN"], stdout=subprocess.PIPE,
+                             stderr=subprocess.DEVNULL, env=child_env, start_new_session=True)
+        try:
+            out, _ = p.communicate(timeout=kill_s)
+        except subprocess.TimeoutExpired:
+            import signal
+            try:
+                os.killpg(p.pid, signal.SIGKILL)
+            except OSError:
+                pass
+            p.communicate()
+            out = b""
+        tok = out.decode("utf-8", errors="replace").strip()
+        if p.returncode == 0 and tok and "�" not in tok:  # a non-UTF-8 answer is no token
+            return tok
+    except OSError:
         pass
     if _routes_to_zai(os.environ.get("ANTHROPIC_BASE_URL")) and os.environ.get("ANTHROPIC_AUTH_TOKEN"):
         return os.environ["ANTHROPIC_AUTH_TOKEN"]
