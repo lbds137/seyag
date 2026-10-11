@@ -18,8 +18,9 @@ a floor, never confused with account truth.
   zai-usage --calibrate W [F] [--reset "YYYY-MM-DD HH:MM"]
                            offline mode: anchor the LOCAL scan to console readings
 
-Scope: machine-local by design — usage figures stay off every repo. The token is read from
-~/.claude/settings.json and sent by stdin, never argv, never printed.
+Scope: machine-local by design — usage figures stay off every repo. The token comes from the
+lane key file, the encrypted `keys` store, or a z.ai-routed env or settings.json (zai_token has
+the order), and is sent by stdin, never argv, never printed.
 """
 
 import calendar
@@ -224,9 +225,11 @@ def _routes_to_zai(base_url):
 
 
 def zai_token():
-    """The z.ai key, never another lane's: the lane key file's ZAI_AUTH_TOKEN first (set whether the global
-    route or a per-session overlay is on z.ai), then the calling session's env, then settings.json,
-    each of the last two only when its base URL is z.ai (an OpenRouter key must not go to z.ai)."""
+    """The z.ai key, never another lane's: the lane key file's ZAI_AUTH_TOKEN first, then the encrypted
+    `keys` store (both hold it whether or not any route is on z.ai), then the calling session's env,
+    then settings.json, each of the last two only when its base URL is z.ai (an OpenRouter key must
+    not go to z.ai)."""
+    import subprocess
     keys = os.environ.get("CC_ROUTE_KEYS") or os.path.expanduser("~/.claude/lane-keys.env")
     try:
         with open(keys) as f:
@@ -236,6 +239,14 @@ def zai_token():
                     if tok and not tok.startswith("PASTE-"):  # the template's PASTE- placeholder
                         return tok
     except OSError:
+        pass
+    # The store decrypts on the TPM (about 3 s); a failed or stalled decrypt falls through, never raises.
+    keys_bin = os.environ.get("SEYAG_KEYS_BIN") or os.path.join(os.path.dirname(os.path.realpath(__file__)), "keys")
+    try:
+        r = subprocess.run([keys_bin, "get", "ZAI_AUTH_TOKEN"], capture_output=True, text=True, timeout=15)
+        if r.returncode == 0 and r.stdout.strip():
+            return r.stdout.strip()
+    except (OSError, subprocess.TimeoutExpired):
         pass
     if _routes_to_zai(os.environ.get("ANTHROPIC_BASE_URL")) and os.environ.get("ANTHROPIC_AUTH_TOKEN"):
         return os.environ["ANTHROPIC_AUTH_TOKEN"]

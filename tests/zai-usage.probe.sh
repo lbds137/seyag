@@ -42,7 +42,7 @@ zs() {
     while [ "$1" != -- ]; do vars+=("$1"); shift; done
     shift
     env HOME="$tmp/home" XDG_CACHE_HOME="$d/cache" XDG_STATE_HOME="$d/state" \
-        ZAI_SPEND_PROJECTS="$tmp/empty" CC_ROUTE_KEYS="$nokeys" "${vars[@]}" "$ZS" "$@"
+        ZAI_SPEND_PROJECTS="$tmp/empty" CC_ROUTE_KEYS="$nokeys" SEYAG_KEYS_BIN="$tmp/no-keys-bin" "${vars[@]}" "$ZS" "$@"
 }
 cache() { cat "$tmp/$1/cache/claude-statusline/zai-usage.json" 2>/dev/null; }
 state() { cat "$tmp/$1/state/zai-spend/state.json" 2>/dev/null; }
@@ -121,6 +121,14 @@ settings https://api.z.ai/api/anthropic fixture-settings
 key_case "key file beats a z.ai env and z.ai settings" fixture-keyfile CC_ROUTE_KEYS="$tmp/keys.env" "${ZENV[@]}"
 printf 'ZAI_AUTH_TOKEN=PASTE-your-key-here\n' > "$tmp/placeholder.env"
 key_case "the template's PASTE- placeholder is skipped" fixture-env CC_ROUTE_KEYS="$tmp/placeholder.env" "${ZENV[@]}"
+# The keys store: a stub that answers `get ZAI_AUTH_TOKEN`, and one that fails like a stalled TPM.
+printf '#!/bin/sh\n[ "$1 $2" = "get ZAI_AUTH_TOKEN" ] && echo fixture-store && exit 0\nexit 1\n' > "$tmp/keys-ok"
+printf '#!/bin/sh\necho "keys: store failed to decrypt" >&2\nexit 1\n' > "$tmp/keys-fail"
+chmod +x "$tmp/keys-ok" "$tmp/keys-fail"
+key_case "key file beats the keys store" fixture-keyfile CC_ROUTE_KEYS="$tmp/keys.env" SEYAG_KEYS_BIN="$tmp/keys-ok" "${ZENV[@]}"
+key_case "no key file: the keys store beats a z.ai env" fixture-store SEYAG_KEYS_BIN="$tmp/keys-ok" "${ZENV[@]}"
+key_case "no key file, no env: the keys store beats z.ai settings" fixture-store SEYAG_KEYS_BIN="$tmp/keys-ok"
+key_case "a failing keys store falls through to the z.ai env" fixture-env SEYAG_KEYS_BIN="$tmp/keys-fail" "${ZENV[@]}"
 key_case "no key file: a z.ai-routed env beats settings" fixture-env "${ZENV[@]}"
 key_case "no key file, no env: z.ai settings" fixture-settings
 key_case "an env token routed to openrouter.ai is not sent; z.ai settings' is" fixture-settings \
@@ -131,6 +139,8 @@ key_case "openrouter.ai env and openrouter.ai settings" none \
 key_case "a lookalike z.ai.evil.invalid env" none \
     ANTHROPIC_BASE_URL=https://z.ai.evil.invalid/api ANTHROPIC_AUTH_TOKEN=fixture-or
 grep -q 'fixture-or' "$tmp/req.log" && bad "key: an openrouter token reached the server" || ok "key: no openrouter token in the last request log"
+echo '{}' > "$tmp/home/.claude/settings.json"
+key_case "anthropic-direct (no route env, empty settings): the keys store still answers" fixture-store SEYAG_KEYS_BIN="$tmp/keys-ok"
 kill "$SRV_PID" 2>/dev/null; wait "$SRV_PID" 2>/dev/null; SRV_PID=""
 echo '{}' > "$tmp/home/.claude/settings.json"
 
