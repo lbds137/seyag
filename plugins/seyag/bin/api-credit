@@ -14,12 +14,20 @@ Usage:
                                  ledger estimate
   api-credit daily [--json]      per UTC day: sessions, spend, models (reconcile
                                  these rows against the provider console)
+  api-credit calibrate AMOUNT [--at TIME]
+                                 record AMOUNT (USD, read in the provider console)
+                                 as the true balance at TIME (a full ISO-8601
+                                 timestamp with offset or Z; default now): the
+                                 balance becomes AMOUNT minus spend after it (see
+                                 Anchor)
 
 Everything is configured by environment variables; nothing is hardcoded.
   SYG_CREDIT_LEDGER  ledger path (JSONL). Unset or empty: hook and statusline
                      do nothing and exit 0; balance and daily exit 2.
   SYG_CREDIT_GRANTS  grants JSON path. Unset, missing or unparsable: the balance
                      is "spend only" (no remaining figure; one is never invented).
+  SYG_CREDIT_ANCHOR  anchor file path (see Anchor). Unset or empty:
+                     <SYG_CREDIT_LEDGER>.anchor.json.
   SYG_CREDIT_ROUTE   route label written into each entry (default anthropic-api).
   SYG_CREDIT_WHEN    NAME=value: the hook records only when the process env var
                      NAME equals value exactly (e.g. MY_ROUTE=metered; NAME= matches
@@ -124,18 +132,65 @@ no dated bucket); remaining is the live grants' total minus spent, clamped at 0
 with the rest as overage. The object then carries source "provider", estimate
 false, provider_as_of (the last bucket's UTC day, else the day before the
 window) and ledger_bridge_days (the number of distinct ledger days added); the
-text says "provider-exact as of <day>". lapsed_usd, next_expiry and days_left
+one-line text shows the bare figure (an estimate carries an "est" suffix) and
+the balance command's second line names the basis "provider through <day>".
+lapsed_usd, next_expiry and days_left
 stay the ledger replay's. Any failure (curl error, timeout, HTTP >= 400,
-non-JSON, no data array, an unparsable USD amount, a repeated next_page, a
-non-finite sum) gives the ledger estimate labeled source "ledger", estimate
+non-JSON, no data array, an unparsable USD amount, a bucket with USD amounts
+but no parsable starting_at, a repeated next_page, a non-finite sum) gives the ledger estimate labeled source "ledger", estimate
 true, provider_as_of and ledger_bridge_days null; it never fails the command.
 The new keys (source, provider_as_of, ledger_bridge_days) are absent, and
 estimate stays true, when no fetch is attempted: no key (or one containing CR
 or LF), no live grant, no closed day; a missing source means ledger. The sum is
 cached at ${XDG_CACHE_HOME:-~/.cache}/claude-statusline/api-credit-live.json
-(line 1: the key's SHA-256, the origin and the window; line 2: the numbers) and
+(line 1: the key's SHA-256, the origin and the window; line 2: the numbers: the
+sum, the as-of day and the per-UTC-day sums) and
 reused for 300 s; a failure is cached the same way (as "failed") for 300 s, so
-a broken endpoint is not re-asked on every render; a corrupt cache is refetched.
+a broken endpoint is not re-asked on every render; a corrupt cache, or one
+without a valid per-day map, is refetched.
+
+Anchor (calibrate): the ledger estimate is the grants minus ledger spend, blind
+to card top-ups and to anything the ledger misprices. `calibrate AMOUNT` records
+the balance read in the provider console as an anchor: it appends
+{"amount", "at", "pre_anchor_day_usd", "recorded"} to the anchor file's
+"anchors" list (history kept; rewritten atomically, mode kept) and prints the
+anchor and the new balance line. pre_anchor_day_usd is the spend on the
+anchor's UTC day before its instant, computed under the ledger lock: every
+session in the ledger (entries of any day) whose transcript, the
+transcript_path of its latest entry, was modified on or after 00:00 UTC of
+that day is read once, and its requests of that day timed before the instant
+count (those another session's entry holds excluded, the hook's rule, so a turn
+no entry holds yet counts), priced like the hook; older transcripts cannot hold
+that day's requests and are not read. That day's entries of the other sessions
+(a transcript gone or older than the day) count whole when their last_ts is
+before the instant, not at all when their first_ts is at or after it, and one
+that straddles the instant refuses the calibrate (exit 1, nothing written).
+AMOUNT is a finite number >= 0, --at a full timestamp no later than now (else
+exit 2); an unparsable anchor file is never overwritten (exit 1). Known limit:
+a session with no ledger entry at all at calibrate (its first turn not hooked
+yet) is invisible; its spend before the instant later counts as spend after
+it, so the balance reads low, never high.
+The governing anchor is the readable record with the latest "at" no later than
+now (an unparsable file or record is ignored for the balance; the balance
+command says so on stderr for a file). With one, the balance is: (1) the grants
+granted by the anchor are absorbed into AMOUNT: they are replayed to the
+instant (ledger days before its day plus the pre-anchor spend) to learn each
+one's remainder, and AMOUNT is allocated across them latest-expiring first (no
+expiry counts as latest), each capped at its remainder and keeping its expiry,
+the rest one cash pool without expiry; the drawdown assumption is
+soonest-to-expire first, so money that survived to the instant sits in the
+latest-expiring pools, and anything beyond the grants is a top-up; (2) grants
+granted after the anchor enter unchanged; (3) the spend events are every
+ledger entry after the anchor's day plus that day's ledger spend minus
+pre_anchor_day_usd (clamped at 0), dated at the later of the instant and that
+day's last request; (4) these are replayed as above, so spent_usd is the spend
+since the anchor, and the object gains anchor_at and anchor_usd. (5) With the
+admin key, the cost_report window runs from 00:00 UTC of the anchor's day to
+the start of today; each closed day up to the as-of day takes the provider's
+sum (the anchor's day minus pre_anchor_day_usd), later days the ledger's, and
+the replay is redone with source "provider"; a failure labels the ledger
+figure as above. The label stays "est" until a provider fetch covers the
+post-anchor days.
 """
 import argparse
 import fcntl
@@ -275,8 +330,14 @@ def read_ledger(path):
 def write_ledger(path, entries, garbage):
     entries = sorted(entries, key=lambda e: (e["day"], e.get("first_ts", ""), e["session_id"]))
     lines = [json.dumps(e, sort_keys=True, ensure_ascii=False) for e in entries] + garbage
+    write_atomic(path, lines)
+
+
+def write_atomic(path, lines):
+    """Replace path with lines (each newline-terminated) via a temp file in the
+    same dir and os.replace."""
     d = os.path.dirname(os.path.abspath(path))
-    # Keep an existing ledger's mode (mkstemp creates 0600); a new one gets 0644 & ~umask.
+    # Keep an existing file's mode (mkstemp creates 0600); a new one gets 0644 & ~umask.
     try:
         mode = stat.S_IMODE(os.stat(path).st_mode)
     except FileNotFoundError:
@@ -678,20 +739,24 @@ def admin_origin():
 
 
 def parse_cost_page(doc):
-    """(USD spend as Decimal, last bucket day or None, has_more, next_page) for one
-    cost_report page. Raises ValueError on a shape that cannot be summed."""
+    """(USD spend as Decimal, last bucket day or None, has_more, next_page,
+    {bucket day: USD Decimal}) for one cost_report page. Raises ValueError on a
+    shape that cannot be summed."""
     data = doc.get("data") if isinstance(doc, dict) else None
     if not isinstance(data, list):
         raise ValueError("cost_report has no data array")
-    total, last, bad = Decimal(0), None, 0
+    total, last, bad, days = Decimal(0), None, 0, {}
     for item in data:
         if not isinstance(item, dict):
             continue
+        day = None
         try:
             day = parse_ts(item.get("starting_at")).strftime("%Y-%m-%d")
             last = day if last is None or day > last else last
         except (AttributeError, TypeError, ValueError):
             pass
+        if day is not None:
+            days.setdefault(day, Decimal(0))
         results = item.get("results")
         if not isinstance(results, list):
             continue
@@ -708,24 +773,30 @@ def parse_cost_page(doc):
             except InvalidOperation:
                 bad += 1
                 continue
+            if day is None:
+                # Spend without a day could not be placed in the per-day sums: the
+                # whole page is unusable rather than a total the days disagree with.
+                raise ValueError("a bucket with USD amounts has no parsable starting_at")
             total += cents / 100   # amounts are decimal strings in cents
+            days[day] += cents / 100
     if bad:
         # An unknown amount makes the sum unknown: fall back rather than undercount.
         raise ValueError("%d unparsable USD amount(s)" % bad)
     nxt = doc.get("next_page")
     more = doc.get("has_more") is True and isinstance(nxt, str) and bool(nxt)
-    return total, last, more, nxt
+    return total, last, more, nxt, days
 
 
 def fetch_cost_report(key, start, end):
-    """{"spent": Decimal, "as_of": day} summed over the closed-day cost_report
-    buckets in [start, end), or None on any failure. as_of is the last bucket's
-    day, else the day before start (the whole window is then ledger-bridged). The
+    """{"spent": Decimal, "as_of": day, "days": {day: Decimal}} summed over the
+    closed-day cost_report buckets in [start, end), or None on any failure. as_of
+    is the last bucket's day, else the day before start (the whole window is then
+    ledger-bridged); days holds each bucket's USD sum by its starting day. The
     key reaches curl on stdin (a -K config), never in argv; -q keeps ~/.curlrc out."""
     base = "%s/v1/organizations/cost_report?starting_at=%s&ending_at=%s&group_by[]=description&limit=31" % (
         admin_origin(), quote(iso(start), safe=":"), quote(iso(end), safe=":"))
     cfg = 'header = "x-api-key: %s"\n' % key.replace("\\", "\\\\").replace('"', '\\"')
-    total, as_of, page, seen = Decimal(0), None, None, set()
+    total, as_of, page, seen, days = Decimal(0), None, None, set(), {}
     for _ in range(MAX_PAGES):
         url = base + ("&page=%s" % quote(page, safe="") if page else "")
         try:
@@ -737,14 +808,17 @@ def fetch_cost_report(key, start, end):
         if res.returncode != 0:
             return None   # transport failure, timeout or HTTP >= 400 (-f)
         try:
-            spent, last, more, page = parse_cost_page(json.loads(res.stdout))
+            spent, last, more, page, page_days = parse_cost_page(json.loads(res.stdout))
         except ValueError:
             return None
         total += spent
+        for day, amount in page_days.items():
+            days[day] = days.get(day, Decimal(0)) + amount
         if last is not None and (as_of is None or last > as_of):
             as_of = last
         if not more:
-            return {"spent": total, "as_of": as_of or (start - timedelta(days=1)).strftime("%Y-%m-%d")}
+            return {"spent": total, "as_of": as_of or (start - timedelta(days=1)).strftime("%Y-%m-%d"),
+                    "days": days}
         if page in seen:
             return None   # a repeated next_page makes no progress: a failure, not a loop
         seen.add(page)
@@ -775,15 +849,22 @@ def provider_spend(key, start, end, now):
                 return None
             if 0 <= age < LIVE_TTL and isinstance(c["as_of"], str) and isinstance(c["spent"], str):
                 spent = Decimal(c["spent"])
-                if spent.is_finite():
-                    return {"spent": spent, "as_of": c["as_of"]}
+                # A record without a valid per-day map (an older shape) is a miss.
+                raw_days = c.get("days")
+                if not isinstance(raw_days, dict) or not all(
+                        isinstance(k, str) and isinstance(v, str) for k, v in raw_days.items()):
+                    raise ValueError("no per-day map")
+                days = {k: Decimal(v) for k, v in raw_days.items()}
+                if spent.is_finite() and all(v.is_finite() for v in days.values()):
+                    return {"spent": spent, "as_of": c["as_of"], "days": days}
     except (OSError, ValueError, KeyError, TypeError, AttributeError, InvalidOperation):
         pass
     got = fetch_cost_report(key, start, end)
-    if got is not None and not math.isfinite(float(got["spent"])):
+    if got is not None and not all(math.isfinite(float(v)) for v in [got["spent"]] + list(got["days"].values())):
         got = None   # e.g. "1E+400" cents: a finite Decimal, an infinite float
     record = ({"fetched_at": iso(now), "failed": True} if got is None else
-              {"fetched_at": iso(now), "spent": str(got["spent"]), "as_of": got["as_of"]})
+              {"fetched_at": iso(now), "spent": str(got["spent"]), "as_of": got["as_of"],
+               "days": {k: str(v) for k, v in got["days"].items()}})
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         fd, tmp = tempfile.mkstemp(prefix=".api-credit-live.", suffix=".tmp", dir=os.path.dirname(path))
@@ -835,20 +916,284 @@ def with_provider(b, entries, grants_cfg, now):
 
 
 def balance_text(b):
-    """The one-line statusline text for a balance object."""
-    tag = ["provider-exact as of %s" % b["provider_as_of"]] if b.get("source") == "provider" else []
+    """The one-line statusline text for a balance object: the bare figure when it
+    is exact, followed by "est" when it is an estimate."""
+    est = "" if b.get("estimate") is False else " est"
     if b["remaining_usd"] is None:
-        return "api ~$%s spent" % money(b["spent_usd"])
+        return "api $%s spent%s" % (money(b["spent_usd"]), est)
     if b["remaining_usd"] > EPS:
-        s = "api credit ~$%s" % money(b["remaining_usd"])
-        parts = tag + (["exp %s, %dd" % (b["next_expiry"][5:10], b["days_left"])] if b["next_expiry"] else [])
-        if parts:
-            s += " (%s)" % ", ".join(parts)
+        s = "api credit $%s%s" % (money(b["remaining_usd"]), est)
+        if b["next_expiry"]:
+            s += " (exp %s, %dd)" % (b["next_expiry"][5:10], b["days_left"])
         return s
-    suffix = " (%s)" % tag[0] if tag else ""
     if b["overage_usd"] > EPS:
-        return "api credit over ~$%s%s" % (money(b["overage_usd"]), suffix)
-    return "api credit ~$0.00" + suffix
+        return "api credit over $%s%s" % (money(b["overage_usd"]), est)
+    return "api credit $0.00" + est
+
+
+# ---------------------------------------------------------------- anchor
+
+def anchor_path(ledger):
+    return os.environ.get("SYG_CREDIT_ANCHOR", "") or ledger + ".anchor.json"
+
+
+def read_anchor_doc(path):
+    """The anchor file as a dict with an "anchors" list ({"anchors": []} when the
+    file is missing). Raises ValueError when it exists but is unreadable."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            doc = json.load(f)
+    except FileNotFoundError:
+        return {"anchors": []}
+    except (OSError, ValueError) as exc:
+        raise ValueError(str(exc))
+    if not isinstance(doc, dict) or not isinstance(doc.get("anchors"), list):
+        raise ValueError("no anchors list")
+    return doc
+
+
+def anchor_of(rec):
+    """One anchor record -> {"amount", "at", "pre"}, or None when it is unusable."""
+    if not isinstance(rec, dict):
+        return None
+    amount, pre = rec.get("amount"), rec.get("pre_anchor_day_usd")
+    if not is_num(amount) or amount < 0 or not is_num(pre) or pre < 0 or not isinstance(rec.get("at"), str):
+        return None
+    try:
+        at = parse_ts(rec["at"])
+    except ValueError:
+        return None
+    return {"amount": float(amount), "at": at, "pre": float(pre)}
+
+
+def governing_anchor(ledger, now, warn=False):
+    """The usable anchor with the latest "at" no later than now (of equal ones, the
+    last recorded), or None. An unreadable file is ignored (one stderr line when
+    warn)."""
+    path = anchor_path(ledger)
+    try:
+        doc = read_anchor_doc(path)
+    except ValueError:
+        if warn:
+            print("api-credit: ignoring unreadable anchor file %s" % path, file=sys.stderr)
+        return None
+    best = None
+    for rec in doc["anchors"]:
+        a = anchor_of(rec)
+        if a is not None and a["at"] <= now and (best is None or a["at"] >= best["at"]):
+            best = a
+    return best
+
+
+def pool(amount, granted, expires):
+    return {"amount": amount, "granted": granted, "expires": expires, "remaining": amount, "lapsed": False}
+
+
+def anchor_pools(entries, grants, currency, anc):
+    """Fresh pool dicts carrying the anchor's amount: the grants granted by the
+    anchor are replayed to its instant (ledger days before its day plus the
+    pre-anchor spend) for their remainders; the amount fills them latest-expiring
+    first (no expiry = latest), each capped at its remainder, and the rest is one
+    cash pool without expiry, kept even at 0."""
+    t, day = anc["at"], anc["at"].strftime("%Y-%m-%d")
+    pre = [dict(g) for g in grants if g["granted"] <= t]
+    if pre:
+        replay = [e for e in entries if e["day"] < day] + [{"last_ts": iso(t), "cost_usd": anc["pre"]}]
+        balance(replay, (currency, pre), t)   # sets each copy's remaining and lapsed
+    left, pools = anc["amount"], []
+    for g in sorted(pre, key=lambda g: g["expires"] or FAR, reverse=True):
+        take = min(left, 0.0 if g["lapsed"] else max(g["remaining"], 0.0))
+        if take > EPS:
+            pools.append(pool(take, t, g["expires"]))
+            left -= take
+    pools.append(pool(left if left > EPS else 0.0, t, None))
+    return pools
+
+
+def anchor_day_event(day_entries, anc):
+    """The anchor day's ledger spend after the anchor: that day's total minus the
+    pre-anchor spend (clamped at 0), dated at the later of the anchor and the
+    day's last request."""
+    when, total = anc["at"], 0.0
+    for e in day_entries:
+        try:
+            when = max(when, parse_ts(e["last_ts"]))
+        except ValueError:
+            continue   # no instant to date it at (balance() and pre_anchor_spend skip it too)
+        total += e["cost_usd"]
+    return {"last_ts": iso(when), "cost_usd": max(0.0, total - anc["pre"])}
+
+
+def anchored_balance(entries, grants_cfg, now, anc):
+    """The balance from an anchor: its pools plus the grants granted after it,
+    minus the spend after it; provider figures for the closed days when the
+    admin key answers."""
+    currency, grants = grants_cfg if grants_cfg is not None else ("USD", [])
+    t = anc["at"]
+    day = t.strftime("%Y-%m-%d")
+
+    def cfg():
+        # balance() sorts and mutates its grant list: build a fresh one per call.
+        return currency, anchor_pools(entries, grants, currency, anc) + [dict(g) for g in grants if g["granted"] > t]
+
+    day_entries = [e for e in entries if e["day"] == day]
+    events = [e for e in entries if e["day"] > day] + [anchor_day_event(day_entries, anc)]
+    b = balance(events, cfg(), now)
+    b.update({"anchor_at": iso(t), "anchor_usd": round(anc["amount"], 6)})
+
+    key = os.environ.get("ANTHROPIC_ADMIN_API_KEY", "")
+    if not key or "\r" in key or "\n" in key:
+        return b   # a CR/LF key could inject a curl -K directive: no usable key
+    start, end = day_start(t), day_start(now)
+    if start >= end:
+        return b   # no closed day since the anchor's day: nothing to fetch
+    b.update({"source": "ledger", "estimate": True, "provider_as_of": None, "ledger_bridge_days": None})
+    try:
+        got = provider_spend(key, start, end, now)
+    except Exception:  # the balance must never fail on the live path
+        got = None
+    if got is None:
+        return b
+    as_of, events, d = got["as_of"], [], start
+    while d < end and d.strftime("%Y-%m-%d") <= as_of:
+        dk = d.strftime("%Y-%m-%d")
+        when = min(d + timedelta(days=1) - timedelta(seconds=1), now)
+        amount = float(got["days"].get(dk, 0))
+        if dk == day:
+            amount, when = max(0.0, amount - anc["pre"]), max(t, when)
+        events.append({"last_ts": iso(when), "cost_usd": amount})
+        d += timedelta(days=1)
+    bridged = [e for e in entries if e["day"] > as_of and e["day"] > day]
+    used = {e["day"] for e in bridged}
+    if day > as_of:
+        events.append(anchor_day_event(day_entries, anc))
+        used.update(e["day"] for e in day_entries)
+    b.update(balance(events + bridged, cfg(), now))
+    b.update({"source": "provider", "estimate": False, "provider_as_of": as_of, "ledger_bridge_days": len(used)})
+    return b
+
+
+class CalibrateError(Exception):
+    pass
+
+
+def usage_exit(msg):
+    print("api-credit: %s" % msg, file=sys.stderr)
+    sys.exit(2)
+
+
+def parse_instant(raw):
+    """A full ISO-8601 timestamp with an offset or Z -> UTC datetime; None for a
+    date-only value, a missing offset or garbage."""
+    s = raw.strip()
+    t = s[:-1] + "+00:00" if s[-1:] in ("Z", "z") else s
+    try:
+        dt = datetime.fromisoformat(t)
+    except ValueError:
+        return None
+    if dt.tzinfo is None or len(s) <= 10:
+        return None
+    return dt.astimezone(timezone.utc)
+
+
+def pre_anchor_spend(entries, t):
+    """The spend on t's UTC day before t (see Anchor). Every session in the ledger
+    (any day) whose transcript (its latest entry's transcript_path) was modified
+    on or after 00:00 UTC of that day is read once, so an unhooked turn counts
+    even for a session whose entries are all on earlier days; older transcripts
+    cannot hold that day's requests and are skipped unread. The day's entries of
+    the other sessions take the whole/zero rule. Raises CalibrateError for such an
+    entry whose requests straddle t."""
+    day, prices, total = t.strftime("%Y-%m-%d"), None, 0.0
+    since = day_start(t).timestamp()
+    # The hook's rule, built once: a request another session's entry holds is not
+    # this session's; one no entry holds yet (an unhooked turn) is.
+    owners, latest = {}, {}
+    for e in entries:
+        sid = e["session_id"]
+        if isinstance(e.get("request_ids"), list):
+            for x in e["request_ids"]:
+                if isinstance(x, str):
+                    owners.setdefault(x, set()).add(sid)
+        key = (e["day"], e["last_ts"])
+        if sid not in latest or key > latest[sid][0]:
+            latest[sid] = (key, e.get("transcript_path"))
+    read = set()
+    for sid, (_, tpath) in latest.items():
+        if not isinstance(tpath, str) or not tpath:
+            continue
+        try:
+            st = os.stat(tpath)
+        except OSError:
+            continue   # gone: the session's entries of the day take the whole/zero rule
+        if not stat.S_ISREG(st.st_mode) or st.st_mtime < since:
+            continue   # older than the day: no request of it inside
+        if prices is None:
+            prices = load_prices()
+        read.add(sid)
+        requests, _ = extract(transcript_sources(sid, tpath))
+        for r in requests:
+            if r["request_id"] is not None and any(o != sid for o in owners.get(r["request_id"], ())):
+                continue
+            if r["ts"].strftime("%Y-%m-%d") != day or r["ts"] >= t:
+                continue
+            rates = rates_for(prices, r["model"])
+            if rates is not None:   # unpriced: no cost, as the hook records it
+                total += request_cost(r, rates)
+    for e in entries:
+        sid = e["session_id"]
+        if e["day"] != day or sid in read:
+            continue
+        try:
+            last = parse_ts(e["last_ts"])
+            first = parse_ts(e["first_ts"]) if isinstance(e.get("first_ts"), str) else last
+        except ValueError:
+            continue   # no instant to compare (balance() skips it too)
+        if last < t:
+            total += e["cost_usd"]
+        elif first < t:
+            raise CalibrateError("cannot split session %s's %s spend at %s: its transcript is gone; "
+                                 "choose --at outside %s..%s" % (sid, day, iso(t), iso(first), iso(last)))
+    return total
+
+
+def calibrate(amount_raw, at_raw):
+    """Append an anchor record (see Anchor) and print it with the new balance."""
+    ledger = need_ledger()
+    try:
+        amount = float(amount_raw)
+    except ValueError:
+        amount = float("nan")
+    if not math.isfinite(amount) or amount < 0:
+        usage_exit("calibrate AMOUNT must be a finite number >= 0, got %r" % amount_raw)
+    amount += 0.0   # -0 -> +0.0, so it never stores or prints as -0
+    now = utcnow()
+    t = now if at_raw is None else parse_instant(at_raw)
+    if t is None:
+        usage_exit("--at needs a full ISO-8601 timestamp with an offset or Z (an anchor is a "
+                   "precise instant), got %r" % at_raw)
+    t = t.replace(microsecond=0)   # the stored instant has whole seconds; compute with that one
+    if t > now:
+        usage_exit("--at %s is later than now (%s)" % (iso(t), iso(now)))
+    path = anchor_path(ledger)
+    for p in (ledger, path):
+        os.makedirs(os.path.dirname(os.path.abspath(p)), exist_ok=True)
+    with open(ledger + ".lock", "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            doc = read_anchor_doc(path)
+        except ValueError:
+            raise CalibrateError("refusing to overwrite unreadable anchor file %s" % path)
+        entries, _ = read_ledger(ledger)
+        pre = pre_anchor_spend(entries, t)
+        doc["anchors"].append({"amount": amount, "at": iso(t), "pre_anchor_day_usd": round(pre, 6),
+                               "recorded": iso(now)})
+        write_atomic(path, [json.dumps(doc, sort_keys=True, ensure_ascii=False)])
+    print("anchored $%s at %s (same-day spend before it $%s)" % (money(amount), iso(t), money(pre)))
+    try:
+        print(balance_text(current_balance()))
+    except Exception as exc:  # the anchor is written: report, never fail the command
+        print("api-credit: balance failed: %s" % exc, file=sys.stderr)
 
 
 # ---------------------------------------------------------------- daily
@@ -891,11 +1236,17 @@ def need_ledger():
     return path
 
 
-def current_balance():
+def current_balance(warn=False):
     """The balance for the read-only commands (balance, statusline): the ledger
-    estimate, replaced by the provider figures when the live path answers."""
-    entries, _ = read_ledger(need_ledger())
+    estimate, replaced by the provider figures when the live path answers; from
+    the governing anchor when there is one (warn: say so on stderr when the
+    anchor file is unreadable)."""
+    ledger = need_ledger()
+    entries, _ = read_ledger(ledger)
     grants_cfg, now = load_grants(), utcnow()
+    anc = governing_anchor(ledger, now, warn)
+    if anc is not None:
+        return anchored_balance(entries, grants_cfg, now, anc)
     return with_provider(balance(entries, grants_cfg, now), entries, grants_cfg, now)
 
 
@@ -909,6 +1260,9 @@ def main(argv=None):
     bp.add_argument("--json", action="store_true")
     dp = sub.add_parser("daily")
     dp.add_argument("--json", action="store_true")
+    cp = sub.add_parser("calibrate")
+    cp.add_argument("amount")
+    cp.add_argument("--at")
     args = ap.parse_args(argv)
 
     if args.cmd == "hook":
@@ -927,15 +1281,27 @@ def main(argv=None):
         print(json.dumps(b, sort_keys=True) if args.json else balance_text(b))
         return 0
     if args.cmd == "balance":
-        b = current_balance()
+        b = current_balance(warn=True)
         if args.json:
             print(json.dumps(b, sort_keys=True))
         else:
             print(balance_text(b))
-            basis = ("provider-exact as of %s; today and lapsed from the ledger" % b["provider_as_of"]
+            basis = ("provider through %s; today and lapsed from the ledger" % b["provider_as_of"]
                      if b.get("source") == "provider" else "estimate")
-            print("spent ~$%s, lapsed ~$%s, overage ~$%s (%s)"
+            if "anchor_at" in b:
+                basis += "; anchored $%s at %s" % (money(b["anchor_usd"]), b["anchor_at"])
+            print("spent $%s, lapsed $%s, overage $%s (%s)"
                   % (money(b["spent_usd"]), money(b["lapsed_usd"]), money(b["overage_usd"]), basis))
+        return 0
+    if args.cmd == "calibrate":
+        try:
+            calibrate(args.amount, args.at)
+        except CalibrateError as exc:
+            print("api-credit: %s" % exc, file=sys.stderr)
+            return 1
+        except Exception as exc:  # e.g. a failing price table: nothing was written
+            print("api-credit: calibrate failed: %s" % exc, file=sys.stderr)
+            return 1
         return 0
     if args.cmd == "daily":
         entries, _ = read_ledger(need_ledger())

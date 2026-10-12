@@ -62,7 +62,7 @@ printf '{"env":{"ANTHROPIC_AUTH_TOKEN":"dummy-probe-token"},"modelSettings":{"gl
 export HOME="$h" XDG_CACHE_HOME="$h/cache" XDG_STATE_HOME="$h/state" XDG_STATE_HOME="$h/state"
 export ZAI_SPEND_PROJECTS="$h/projects/empty" ZAI_SPEND_PEAK_UTC="0-24"
 # The API-credit segments read these from the process env; a caller's values must not leak in.
-unset SYG_CREDIT_LEDGER SYG_CREDIT_GRANTS SYG_CREDIT_WHEN SYG_CREDIT_FORCE SYG_CREDIT_NOW SYG_CREDIT_ROUTE SYG_CREDIT_ADMIN_URL ANTHROPIC_ADMIN_API_KEY
+unset SYG_CREDIT_LEDGER SYG_CREDIT_GRANTS SYG_CREDIT_WHEN SYG_CREDIT_FORCE SYG_CREDIT_NOW SYG_CREDIT_ROUTE SYG_CREDIT_ADMIN_URL ANTHROPIC_ADMIN_API_KEY SYG_CREDIT_ANCHOR
 
 cat > "$h/quota.json" <<'EOF'
 {"code":200,"success":true,"data":{"limits":[
@@ -514,41 +514,41 @@ plan_label=$'\x1b[38;2;240;238;230mclaude.ai\x1b[0m'
 raw=$(env -u SYG_CREDIT_LEDGER -u ANTHROPIC_BASE_URL -u SYG_CREDIT_FORCE ANTHROPIC_API_KEY=sk-probe SYG_CREDIT_GRANTS="$h/credit/grants.json" \
     bash "$SL" <<< '{"session_id":"cr-off","cost":{"total_cost_usd":1},"model":{"display_name":"X"},"cwd":"/tmp"}')
 out=$(strip <<< "$raw")
-grep -qF "$anth_label" <<< "$raw" && ! grep -qE 'platform.claude.com ~|spent|over' <<< "$out" \
+grep -qF "$anth_label" <<< "$raw" && ! grep -qE 'platform\.claude\.com \$|spent|over' <<< "$out" \
     && [ -z "$(find "$h/credit" -type f ! -name grants.json)" ] \
     && ok "api-key lane: SYG_CREDIT_LEDGER unset -> 'platform.claude.com' label alone, no ledger" || bad "api-key lane off: $out"
 # 36. Metered with grants: remaining after the session's spend, expiry date and days; no plan meters.
 raw=$(cr_render ok 2026-10-08T00:00:00Z "$h/credit/grants.json" <<< 1.00)
 out=$(strip <<< "$raw")
-grep -qF 'platform.claude.com ~$199.00 (exp 10-21, 13d)' <<< "$out" && grep -qF "$anth_label"$' \x1b[32m~$199.00' <<< "$raw" \
-    && ! grep -qE '5h:|wk:| est' <<< "$out" \
-    && ok "api-key lane: grants -> ivory label, green '~\$199.00 (exp 10-21, 13d)', no meters, no fleet segment" || bad "api-key credit: $out"
+grep -qF 'platform.claude.com $199.00 est (exp 10-21, 13d)' <<< "$out" && grep -qF "$anth_label"$' \x1b[32m$199.00 est\x1b[0m' <<< "$raw" \
+    && ! grep -qE '5h:|wk:|px|~' <<< "$out" && [ "$(grep -o 'platform\.claude\.com' <<< "$out" | wc -l)" = 1 ] \
+    && ok "api-key lane: grants -> ivory label, green '\$199.00 est (exp 10-21, 13d)', no px, no meters, no fleet segment" || bad "api-key credit: $out"
 # 37. Two days or fewer: the Nd part turns red.
 raw=$(cr_render soon 2026-10-19T12:00:00Z "$h/credit/grants.json" <<< 1.00)
 grep -qF $'\x1b[31m1d\x1b[0m' <<< "$raw" && grep -qF '(exp 10-21, 1d)' <<< "$(strip <<< "$raw")" \
     && ok "api-key lane: <=2 days left -> '1d' in red" || bad "api-key red days: $(strip <<< "$raw")"
 # 38. No grants file: spend only.
 raw=$(cr_render nogrants 2026-10-08T00:00:00Z <<< 12.30)
-grep -qF 'platform.claude.com ~$12.30 spent' <<< "$(strip <<< "$raw")" && grep -qF $'\x1b[90m~$12.30 spent' <<< "$raw" \
-    && ok "api-key lane: no grants -> gray 'platform.claude.com ~\$12.30 spent'" || bad "api-key spent-only: $(strip <<< "$raw")"
+grep -qF 'platform.claude.com $12.30 spent est' <<< "$(strip <<< "$raw")" && grep -qF $'\x1b[90m$12.30 spent est\x1b[0m' <<< "$raw" \
+    && ok "api-key lane: no grants -> gray 'platform.claude.com \$12.30 spent est'" || bad "api-key spent-only: $(strip <<< "$raw")"
 # 39. Overage: magenta.
 cat > "$h/credit/small.json" <<'EOF'
 {"grants":[{"amount":5,"granted":"2026-10-01"}]}
 EOF
 raw=$(cr_render over 2026-10-08T00:00:00Z "$h/credit/small.json" <<< 8.00)
-grep -qF $'\x1b[35mover ~$3.00' <<< "$raw" && grep -qF 'platform.claude.com over ~$3.00' <<< "$(strip <<< "$raw")" \
-    && ok "api-key lane: spend beyond grants -> magenta 'over ~\$3.00'" || bad "api-key overage: $(strip <<< "$raw")"
+grep -qF $'\x1b[35mover $3.00 est\x1b[0m' <<< "$raw" && grep -qF 'platform.claude.com over $3.00 est' <<< "$(strip <<< "$raw")" \
+    && ok "api-key lane: spend beyond grants -> magenta 'over \$3.00 est'" || bad "api-key overage: $(strip <<< "$raw")"
 # 39b. A grant with no expiry: credit shown, no "(exp" text.
 echo '{"grants":[{"amount":50,"granted":"2026-10-01"}]}' > "$h/credit/noexp.json"
 raw=$(cr_render noexp 2026-10-08T00:00:00Z "$h/credit/noexp.json" <<< 2.00)
 out=$(strip <<< "$raw")
-grep -qF 'platform.claude.com ~$48.00' <<< "$out" && ! grep -qF '(exp' <<< "$out" \
-    && ok "api-key lane: grant without expiry -> '~\$48.00', no (exp text" || bad "api-key no-expiry: $out"
+grep -qF 'platform.claude.com $48.00 est' <<< "$out" && ! grep -qF '(exp' <<< "$out" \
+    && ok "api-key lane: grant without expiry -> '\$48.00 est', no (exp text" || bad "api-key no-expiry: $out"
 # 39c. Mixed: the expiring grant is fully spent, the non-expiring one has credit -> no "(exp".
 echo '{"grants":[{"amount":10,"granted":"2026-10-01","expires":"2026-10-21"},{"amount":50,"granted":"2026-10-01"}]}' > "$h/credit/mixed.json"
 raw=$(cr_render mixed 2026-10-08T00:00:00Z "$h/credit/mixed.json" <<< 12.00)
 out=$(strip <<< "$raw")
-grep -qF 'platform.claude.com ~$48.00' <<< "$out" && ! grep -qF '(exp' <<< "$out" \
+grep -qF 'platform.claude.com $48.00 est' <<< "$out" && ! grep -qF '(exp' <<< "$out" \
     && ok "api-key lane: exhausted expiring grant + non-expiring remainder -> no (exp text" || bad "api-key mixed: $out"
 
 # 40-44. Lane routing, each with rate_limits in the input. The process env decides.
@@ -699,12 +699,25 @@ touch -d '-120 seconds' "$cr_cache"
 out4=$(strip <<< "$(fleet "$h/credit/grants.json")")
 grep -qF 'platform.claude.com $187.50 est' <<< "$out4" \
     && ok "balance cache: older than 60s -> recomputed despite a matching key" || bad "balance cache TTL: '$out4'"
+# 48e. The anchor file is part of the key: writing one (what calibrate does) shows on the
+# next render, inside 60 s. Anchor 77 at 10-07 12:00 with the day's 12.50 before it.
+rm -f "$cr_cache"
+out1=$(strip <<< "$(fleet "$h/credit/grants.json")")
+printf '{"anchors":[{"amount":77,"at":"2026-10-07T12:00:00Z","pre_anchor_day_usd":12.5,"recorded":"2026-10-07T12:00:00Z"}]}\n' > "$h/credit/fleet.jsonl.anchor.json"
+out2=$(strip <<< "$(fleet "$h/credit/grants.json")")
+rm -f "$h/credit/fleet.jsonl.anchor.json"
+out3=$(strip <<< "$(fleet "$h/credit/grants.json")")
+grep -qF 'platform.claude.com $187.50 est' <<< "$out1" && grep -qF 'platform.claude.com $77.00 est' <<< "$out2" \
+    && grep -qF 'platform.claude.com $187.50 est' <<< "$out3" \
+    && ok "balance cache: an anchor file written or removed inside 60 s is a miss ('\$187.50 est' -> '\$77.00 est' -> '\$187.50 est')" \
+    || bad "balance cache anchor key: '$out1' / '$out2' / '$out3'"
 
 # 48a-48d. Provider-exact balance: api-credit reads the Admin API cost_report from a
 # loopback mock (SYG_CREDIT_ADMIN_URL) with an invented fixture key. The mock serves
 # $h/cr/<mode>.json (mode read from $h/cr/mode per request; "401" answers 401) and
 # logs each request path to $h/cr/hits.log. Fixture: one closed-day bucket on
-# 2026-10-07 of 929 cents (USD 9.29), so the as-of day is 10-07.
+# 2026-10-07 of 929 cents (USD 9.29). An exact balance shows the bare figure: no
+# "est", no as-of day.
 mkdir -p "$h/cr"
 cat > "$h/cr/srv.py" <<'PY'
 import os, sys
@@ -742,48 +755,48 @@ for _ in $(seq 1 50); do [ -s "$h/cr/port" ] && break; sleep 0.1; done
 CR="http://127.0.0.1:$(cat "$h/cr/port")"
 px_key=(ANTHROPIC_ADMIN_API_KEY=fixture-admin-key SYG_CREDIT_ADMIN_URL="$CR")
 # 48a. Fleet, keyed: 200 granted - 9.29 provider spend (the ledger's 10-07 entry is
-# not after the as-of day, so nothing is bridged) -> '$190.71 px 10-07', no est.
+# not after the as-of day, so nothing is bridged) -> the bare '$190.71', no est, no px.
 raw=$(fleet "$h/credit/grants.json" "${px_key[@]}"); out=$(strip <<< "$raw")
-grep -qE 'claude\.ai 5h:.* · platform\.claude\.com \$190\.71 px 10-07 · session ' <<< "$out" \
-    && grep -qF "$anth_label"$' \x1b[90m$190.71 px 10-07\x1b[0m' <<< "$raw" && ! grep -qF ' est' <<< "$out" \
+grep -qE 'claude\.ai 5h:.* · platform\.claude\.com \$190\.71 · session ' <<< "$out" \
+    && grep -qF "$anth_label"$' \x1b[90m$190.71\x1b[0m' <<< "$raw" && ! grep -qE ' est|px' <<< "$out" \
     && [ "$(wc -l < "$h/cr/hits.log")" -ge 1 ] \
-    && ok "fleet provider-exact: admin key in the render env -> gray 'platform.claude.com \$190.71 px 10-07', no est" \
+    && ok "fleet provider-exact: admin key in the render env -> gray 'platform.claude.com \$190.71', no est, no px" \
     || bad "fleet provider-exact: $out / hits $(wc -l < "$h/cr/hits.log")"
 # 48b. Cache-key separation, seconds after 48a cached the provider JSON: keyless ->
 # the ledger estimate (not the cached provider figure); keyed again -> provider again.
 # Only the key differs (SYG_CREDIT_ADMIN_URL stays), so this pins the key-presence field.
 out_nokey=$(strip <<< "$(fleet "$h/credit/grants.json" SYG_CREDIT_ADMIN_URL="$CR")")
 out_key=$(strip <<< "$(fleet "$h/credit/grants.json" "${px_key[@]}")")
-grep -qF 'platform.claude.com $187.50 est' <<< "$out_nokey" && ! grep -qF ' px ' <<< "$out_nokey" \
-    && grep -qF 'platform.claude.com $190.71 px 10-07' <<< "$out_key" && ! grep -qF ' est' <<< "$out_key" \
-    && ok "balance cache: keyed and keyless renders keep separate entries (keyless -> '\$187.50 est', keyed -> '\$190.71 px 10-07')" \
+grep -qF 'platform.claude.com $187.50 est' <<< "$out_nokey" \
+    && grep -qF 'platform.claude.com $190.71 · ' <<< "$out_key" && ! grep -qF ' est' <<< "$out_key" \
+    && ok "balance cache: keyed and keyless renders keep separate entries (keyless -> '\$187.50 est', keyed -> '\$190.71')" \
     || bad "balance cache key separation: keyless '$out_nokey' / keyed '$out_key'"
 # 48b2. Same key, another origin (a closed loopback port, so the fetch fails): its own entry,
 # the estimate, not the cached provider figure.
 out_origin=$(strip <<< "$(fleet "$h/credit/grants.json" ANTHROPIC_ADMIN_API_KEY=fixture-admin-key SYG_CREDIT_ADMIN_URL=http://127.0.0.1:1)")
-grep -qF 'platform.claude.com $187.50 est' <<< "$out_origin" && ! grep -qF ' px ' <<< "$out_origin" \
+grep -qF 'platform.claude.com $187.50 est' <<< "$out_origin" \
     && ok "balance cache: another SYG_CREDIT_ADMIN_URL keeps a separate entry" || bad "balance cache origin separation: '$out_origin'"
 # 48c. API-key lane, keyed: 200 - (9.29 provider + 1.00 bridged from 10-08) -> green
-# '$189.71 (px 10-07, exp 10-21, 13d)', no tilde.
+# '$189.71 (exp 10-21, 13d)', no est, no px.
 raw=$(cr_render px-ok 2026-10-08T00:00:00Z "$h/credit/grants.json" "${px_key[@]}" <<< 1.00)
 out=$(strip <<< "$raw")
-grep -qF 'platform.claude.com $189.71 (px 10-07, exp 10-21, 13d)' <<< "$out" && grep -qF "$anth_label"$' \x1b[32m$189.71' <<< "$raw" \
-    && ! grep -qF '~' <<< "$out" \
-    && ok "api-key lane provider-exact: '\$189.71 (px 10-07, exp 10-21, 13d)', no tilde" || bad "api-key provider-exact: $out"
-# 48c2. API-key lane, keyed, overage: 5 granted - (9.29 + 8.00 bridged) -> magenta 'over $12.29 (px 10-07)'.
+grep -qF 'platform.claude.com $189.71 (exp 10-21, 13d)' <<< "$out" && grep -qF "$anth_label"$' \x1b[32m$189.71\x1b[0m' <<< "$raw" \
+    && ! grep -qE '~|px| est' <<< "$out" \
+    && ok "api-key lane provider-exact: '\$189.71 (exp 10-21, 13d)', no est, no px" || bad "api-key provider-exact: $out"
+# 48c2. API-key lane, keyed, overage: 5 granted - (9.29 + 8.00 bridged) -> magenta 'over $12.29'.
 raw=$(cr_render px-over 2026-10-08T00:00:00Z "$h/credit/small.json" "${px_key[@]}" <<< 8.00)
 out=$(strip <<< "$raw")
-grep -qF 'platform.claude.com over $12.29 (px 10-07)' <<< "$out" && grep -qF $'\x1b[35mover $12.29' <<< "$raw" \
-    && ! grep -qF '~' <<< "$out" \
-    && ok "api-key lane provider-exact overage: magenta 'over \$12.29 (px 10-07)', no tilde" || bad "api-key provider-exact overage: $out"
+grep -qF 'platform.claude.com over $12.29 · ' <<< "$out" && grep -qF $'\x1b[35mover $12.29\x1b[0m' <<< "$raw" \
+    && ! grep -qE '~|px| est' <<< "$out" \
+    && ok "api-key lane provider-exact overage: magenta 'over \$12.29', no est, no px" || bad "api-key provider-exact overage: $out"
 # 48c3. API-key lane, keyed, exactly spent: 9.29 granted - (9.29 provider + 0 bridged
-# from 10-08) = 0 -> red '$0.00 (px 10-07)', no tilde.
+# from 10-08) = 0 -> red '$0.00', no est, no px.
 echo '{"grants":[{"amount":9.29,"granted":"2026-10-01","expires":"2026-10-21"}]}' > "$h/credit/zero.json"
 raw=$(cr_render px-zero 2026-10-08T00:00:00Z "$h/credit/zero.json" "${px_key[@]}" <<< 0)
 out=$(strip <<< "$raw")
-grep -qF 'platform.claude.com $0.00 (px 10-07)' <<< "$out" && grep -qF $'\x1b[31m$0.00' <<< "$raw" \
-    && ! grep -qF '~' <<< "$out" \
-    && ok "api-key lane provider-exact zero: red '\$0.00 (px 10-07)', no tilde" || bad "api-key provider-exact zero: $out"
+grep -qF 'platform.claude.com $0.00 · ' <<< "$out" && grep -qF $'\x1b[31m$0.00\x1b[0m' <<< "$raw" \
+    && ! grep -qE '~|px| est' <<< "$out" \
+    && ok "api-key lane provider-exact zero: red '\$0.00', no est, no px" || bad "api-key provider-exact zero: $out"
 # 48d. Provider failure (the mock answers 401): the estimate shapes return. A fresh
 # cache dir, so neither api-credit's live-sum cache nor the balance cache answers.
 echo 401 > "$h/cr/mode"
@@ -791,10 +804,10 @@ hits0=$(wc -l < "$h/cr/hits.log")
 out_f=$(strip <<< "$(fleet "$h/credit/grants.json" "${px_key[@]}" XDG_CACHE_HOME="$h/cache-fail")")
 out_c=$(strip <<< "$(cr_render px-fail 2026-10-08T00:00:00Z "$h/credit/grants.json" "${px_key[@]}" XDG_CACHE_HOME="$h/cache-fail" <<< 1.00)")
 hits1=$(wc -l < "$h/cr/hits.log")
-grep -qF 'platform.claude.com $187.50 est' <<< "$out_f" && ! grep -qF ' px ' <<< "$out_f" \
-    && grep -qF 'platform.claude.com ~$199.00 (exp 10-21, 13d)' <<< "$out_c" && ! grep -qF 'px ' <<< "$out_c" \
+grep -qF 'platform.claude.com $187.50 est' <<< "$out_f" \
+    && grep -qF 'platform.claude.com $199.00 est (exp 10-21, 13d)' <<< "$out_c" \
     && [ "$hits1" -gt "$hits0" ] \
-    && ok "provider failure: the fetch is attempted and both lanes fall back to the estimate ('\$187.50 est', '~\$199.00 (exp 10-21, 13d)')" \
+    && ok "provider failure: the fetch is attempted and both lanes fall back to the estimate ('\$187.50 est', '\$199.00 est (exp 10-21, 13d)')" \
     || bad "provider failure fallback: fleet '$out_f' / api-key '$out_c' / hits $hits0 -> $hits1"
 echo ok > "$h/cr/mode"
 
@@ -858,6 +871,27 @@ out=$(strip <<< "$(PROBE_COLUMNS=40 PROBE_WRAP=120 render "$long_cwd_in")")
 long_row=$(grep -F -- "$long_dir" <<< "$out" | head -n 1)
 [ "$(wc -l <<< "$out")" -ge 2 ] && grep -qF -- "$long_dir" <<< "$out" && [ "${#long_row}" -gt 40 ] \
     && ok "wrap W7: a segment wider than the budget keeps its own overflowing row, untruncated" || bad "wrap W7: $out"
+# W8-W10: wrap on overflow. COLUMNS 200 is above the setting (160), yet a line wider
+# than the fit budget (195) still wraps, so its tail (SYG, the last segment) is not
+# cut at the right edge; a short line stays one row; the setting unset never wraps.
+wide_in=$(jq -c --arg d "/tmp/a-directory-name-long-enough-to-push-the-whole-statusline-past-two-hundred-visible-columns" '.cwd = $d' <<< "$lane_in")
+one=$(strip <<< "$(render "$wide_in")")
+out=$(strip <<< "$(PROBE_COLUMNS=200 PROBE_WRAP=160 render "$wide_in")")
+wide=0
+while IFS= read -r r; do [ "${#r}" -le 195 ] || wide=1; done <<< "$out"
+[ "$(wc -l <<< "$one")" = 1 ] && [ "${#one}" -gt 195 ] && [ "$(wc -l <<< "$out")" -ge 2 ] \
+    && [[ "$(tail -n 1 <<< "$out")" == *'SYG: '* ]] && [ "$wide" = 0 ] \
+    && ok "wrap W8: a ${#one}-column line with COLUMNS 200 over the setting 160 -> rows within the 195 budget, SYG on the last row" \
+    || bad "wrap W8: width ${#one}: $out"
+out=$(strip <<< "$(PROBE_COLUMNS=200 PROBE_WRAP=160 render "$lane_in")")
+[ "$(wc -l <<< "$out")" = 1 ] && ok "wrap W9: a line within the budget, COLUMNS over the setting -> one line" || bad "wrap W9: $out"
+out=$(strip <<< "$(PROBE_COLUMNS=200 render "$wide_in")")
+[ "$(wc -l <<< "$out")" = 1 ] && ok "wrap W10: setting unset, line over the budget -> one line (opt-in kept)" || bad "wrap W10: $out"
+# W11: under a byte locale (LC_ALL=C through env), width still counts codepoints: the
+# 119-column fixture fits the 120 budget (COLUMNS 125 over the setting 100) as one row,
+# though its multibyte separators and arrows make it far more than 120 bytes.
+out=$(strip <<< "$(PROBE_COLUMNS=125 PROBE_WRAP=100 lane LC_ALL=C)")
+[ "$(wc -l <<< "$out")" = 1 ] && ok "wrap W11: LC_ALL=C, a fitting line -> one row (codepoints, not bytes)" || bad "wrap W11: $out"
 
 # D1-D3. Debug suffix (SYG_STATUSLINE_DEBUG=1): the wrap gate's two inputs
 # on the last row, after layout; off by default.
