@@ -179,6 +179,149 @@ out=$("$TOOL" --repo "$L" --locks-apply); rc=$?
 [ -e "$lc/worktrees/w1/index.lock" ] && grep -q "HOLD:git-live  $lc/worktrees/w1/index.lock" <<<"$out" \
   && ok "a live git process in the repo holds an otherwise stale lock" || { bad "live git lock (rc $rc)"; printf '%s\n' "$out"; }
 
+# --- Check 4 subsumption: the base already holds the tree's change plus later edits. ---
+# Trees start at c3 (f.txt = lines 1-9, bin.dat binary); the base then moves to c4: line 2 -> X,
+# line 9 -> driver, new u.txt, v.txt (no final newline) and w.bin (binary), bin.dat changed the
+# same way as f.txt.
+mk_repo sub
+S="$T/sub"
+seq 1 9 > "$S/f.txt"; printf '\0\n1\n2\n3\n4\n5\n6\n7\n8\n9\n' > "$S/bin.dat"
+git -C "$S" add . && git -C "$S" commit -qm third && git -C "$S" push -q origin main 2>/dev/null
+for n in subset extrahunk conflict stagedsubset stagedextra untrackedsubset untrackedinterleaved \
+  untrackedempty untrackedextra untrackedreorder untrackednlok untrackednl untrackedbinary \
+  deletion binary modechmod modestaged modetype hiddenassume hiddenskip untrackedexec modecontrol; do add_tree sub "$n"; done
+sed -i 's/^2$/X/; s/^9$/driver/' "$S/f.txt"; sed -i 's/^2$/X/; s/^9$/driver/' "$S/bin.dat"
+printf 'u1\nu2\nu3\n' > "$S/u.txt"; printf 'v1\nv2' > "$S/v.txt"; printf '\0\nw1\nw2\n' > "$S/w.bin"
+git -C "$S" add . && git -C "$S" commit -qm fourth && git -C "$S" push -q origin main 2>/dev/null
+W="$S/.claude/worktrees"
+sed -i 's/^2$/X/' "$W/subset/f.txt"                                 # base has X, plus line 9
+sed -i 's/^2$/X/; s/^5$/W/' "$W/extrahunk/f.txt"                    # line 5 -> W: base lacks it
+sed -i 's/^2$/Y/' "$W/conflict/f.txt"                               # base has X on the same line
+sed -i 's/^2$/X/' "$W/stagedsubset/f.txt"; git -C "$W/stagedsubset" add f.txt
+git -C "$W/stagedsubset" show HEAD:f.txt > "$W/stagedsubset/f.txt" # index only; worktree = HEAD
+sed -i 's/^5$/W/' "$W/stagedextra/f.txt"; git -C "$W/stagedextra" add f.txt
+git -C "$W/stagedextra" show HEAD:f.txt > "$W/stagedextra/f.txt"
+printf 'u1\nu2\n' > "$W/untrackedsubset/u.txt"                      # base = this + u3
+printf 'u1\nu3\n' > "$W/untrackedinterleaved/u.txt"                 # base adds u2 between
+: > "$W/untrackedempty/u.txt"
+printf 'u1\nzz\n' > "$W/untrackedextra/u.txt"
+printf 'u2\nu1\n' > "$W/untrackedreorder/u.txt"                     # base has them as u1, u2
+printf 'v1\n' > "$W/untrackednlok/v.txt"                            # base = this + v2 (no newline)
+printf 'v1\nv2\n' > "$W/untrackednl/v.txt"                          # base's v2 lacks the newline
+printf '\0\nw1\n' > "$W/untrackedbinary/w.bin"                      # base = this + w2, binary
+rm -f "$W/deletion/f.txt"                                           # base still has f.txt
+sed -i 's/^2$/X/' "$W/binary/bin.dat"                               # the subset change, binary
+chmod +x "$W/modechmod/f.txt"                                       # mode only; base edited f.txt
+git -C "$W/modestaged" update-index --chmod=+x f.txt                # staged mode only
+git -C "$W/modetype" update-index --cacheinfo "120000,$(git -C "$W/modetype" rev-parse HEAD:f.txt),f.txt"
+sed -i 's/^5$/W/' "$W/hiddenassume/f.txt"; git -C "$W/hiddenassume" update-index --assume-unchanged f.txt
+sed -i 's/^5$/W/' "$W/hiddenskip/f.txt"; git -C "$W/hiddenskip" update-index --skip-worktree f.txt
+cp "$S/u.txt" "$W/untrackedexec/u.txt"; chmod +x "$W/untrackedexec/u.txt"   # base's bytes, base 100644
+# Trees at the base itself (c4): a mode change with the blob still equal to base's.
+for n in modeonly modeonlystaged; do add_tree sub "$n"; done
+chmod +x "$W/modeonly/a.txt"
+git -C "$W/modeonlystaged" update-index --chmod=+x a.txt
+cp "$S/f.txt" "$W/modecontrol/f.txt"; git -C "$W/modecontrol" add f.txt   # base's bytes and mode
+J=$("$TOOL" --repo "$S" --json)
+expect "$J" subset SAFE "4: base subsumes the worker's edit plus a later driver edit"
+expect "$J" extrahunk HOLD:dirty "4: a worker hunk the base lacks"
+expect "$J" conflict HOLD:dirty "4: worker and base edit the same line differently"
+expect "$J" stagedsubset SAFE "4: staged-only subset of the base"
+expect "$J" stagedextra HOLD:dirty "4: staged-only hunk the base lacks"
+# Untracked: base must keep every tree line, in order (additions only).
+expect "$J" untrackedsubset SAFE "4: untracked prefix of base's file"
+expect "$J" untrackedinterleaved SAFE "4: untracked file, base adds a line between its lines"
+expect "$J" untrackedempty SAFE "4: an empty untracked file is subsumed by base's file"
+expect "$J" untrackedextra HOLD:untracked-differs "4: untracked file with a line base lacks"
+expect "$J" untrackedreorder HOLD:untracked-differs "4: untracked file, base has the same lines reordered"
+expect "$J" untrackednlok SAFE "4: untracked prefix of a base file without a final newline"
+expect "$J" untrackednl HOLD:untracked-differs "4: base's last shared line lacks the tree's trailing newline"
+expect "$J" untrackedbinary HOLD:untracked-differs "4: untracked binary prefix of base's file"
+expect "$J" deletion HOLD:dirty "4: a deletion the base doesn't have"
+expect "$J" binary HOLD:dirty "4: the subset change in a binary file"
+expect "$J" modechmod HOLD:dirty "4: a worktree mode change the base lacks (content subsumed)"
+expect "$J" modestaged HOLD:dirty "4: a staged mode change the base lacks (content subsumed)"
+expect "$J" modetype HOLD:dirty "4: a staged file-to-symlink type change, blob unchanged"
+expect "$J" hiddenassume HOLD:hidden "4: an edit hidden by assume-unchanged"
+expect "$J" hiddenskip HOLD:hidden "4: an edit hidden by skip-worktree"
+expect "$J" untrackedexec HOLD:untracked-differs "4: untracked file with base's bytes but the executable bit base lacks"
+expect "$J" modeonly HOLD:dirty "4: chmod +x at base, blob equal to base's"
+expect "$J" modeonlystaged HOLD:dirty "4: staged chmod +x at base, blob equal to base's"
+expect "$J" modecontrol SAFE "4: dirty and staged file equal to base's blob and mode"
+
+# --- Check 5: repo-declared regenerable ignored paths. ---
+mk_repo regen
+G="$T/regen"
+printf 'dist/\nother/\n.husky/_/\nfiles/\n.env\nsecrets.txt\n' >> "$G/.gitignore"
+git -C "$G" add . && git -C "$G" commit -qm ignores && git -C "$G" push -q origin main 2>/dev/null
+GW="$G/.claude/worktrees"
+add_tree regen nofile; mkdir -p "$GW/nofile/dist"; echo x > "$GW/nofile/dist/a.js"
+expect "$("$TOOL" --repo "$G" --json)" nofile HOLD:ignored "5: no .claude/worktree-regenerable on base: dist/ holds"
+mkdir -p "$G/.claude"
+printf '# build output\ndist\nbad =\n\n.husky/_\n = also-bad\n.env = .env.example\nsecrets.txt = secrets.example\n' \
+  > "$G/.claude/worktree-regenerable"
+printf 'API_KEY=\n' > "$G/.env.example"
+git -C "$G" add -f .claude/worktree-regenerable .env.example && git -C "$G" commit -qm regenerable \
+  && git -C "$G" push -q origin main 2>/dev/null
+echo other >> "$G/.claude/worktree-regenerable"                     # main's working copy widened: ignored
+add_tree regen plain
+add_tree regen regenok; mkdir -p "$GW/regenok/dist" "$GW/regenok/.husky/_"
+echo x > "$GW/regenok/dist/a.js"; echo h > "$GW/regenok/.husky/_/h"
+add_tree regen regenother; mkdir -p "$GW/regenother/other"; echo x > "$GW/regenother/other/a"
+add_tree regen widened; echo other >> "$GW/widened/.claude/worktree-regenerable"
+mkdir -p "$GW/widened/other"; echo x > "$GW/widened/other/a"
+add_tree regen envfiles; mkdir -p "$GW/envfiles/files"; echo x > "$GW/envfiles/files/a"
+add_tree regen envok; cp "$G/.env.example" "$GW/envok/.env"
+add_tree regen envdiff; echo 'API_KEY=SECRET-MARKER-7f3a' > "$GW/envdiff/.env"
+add_tree regen tmplmissing; echo s > "$GW/tmplmissing/secrets.txt"
+J=$("$TOOL" --repo "$G" --json 2>"$T/regen.err")
+expect "$J" nofile SAFE "5: the nofile twin once base lists dist"
+expect "$J" regenok SAFE "5: base lists dist and .husky/_ (after a malformed line)"
+expect "$J" regenother HOLD:ignored "5: other/ is not listed on base (main's working copy is not read)"
+expect "$J" widened HOLD:dirty,ignored "5: the tree's own widened list is not honoured"
+expect "$J" envfiles HOLD:ignored "5: files/ without the env"
+expect "$J" envok SAFE "5: .env byte-equal to base's .env.example"
+expect "$J" envdiff HOLD:ignored "5: .env differs from its template"
+expect "$J" tmplmissing HOLD:ignored "5: the declared template is absent on base"
+[ "$(grep -c 'line 3 of .claude/worktree-regenerable on origin/main is malformed' "$T/regen.err")" = 1 ] \
+  && [ "$(grep -c 'line 6 of .claude/worktree-regenerable on origin/main is malformed' "$T/regen.err")" = 1 ] \
+  && [ "$(grep -c . "$T/regen.err")" = 2 ] \
+  && ok "5: each malformed line warns once on stderr" || { bad "5: malformed-line warnings"; cat "$T/regen.err"; }
+expect "$(SYG_WORKTREE_REGENERABLE='files' "$TOOL" --repo "$G" --json 2>/dev/null)" envfiles SAFE "5: SYG_WORKTREE_REGENERABLE='files'"
+expect "$(SYG_WORKTREE_REGENERABLE=$'other\n  files' "$TOOL" --repo "$G" --json 2>/dev/null)" envfiles SAFE \
+  "5: SYG_WORKTREE_REGENERABLE entries after a newline are honoured"
+out=$("$TOOL" --repo "$G" 2>/dev/null; "$TOOL" --repo "$G" --json 2>/dev/null)
+grep -q '^    HOLD:ignored  ignored .env differs from its declared template .env.example$' <<<"$out" \
+  && grep -q '^    HOLD:ignored  ignored secrets.txt differs from its declared template secrets.example$' <<<"$out" \
+  && ! grep -q 'SECRET-MARKER' <<<"$out" \
+  && ok "5: the template reason names paths only, never the file's content" || { bad "5: template reason"; printf '%s\n' "$out"; }
+python3 -c '
+import json, sys
+d = {t["path"].rsplit("/", 1)[-1]: t for t in json.loads(sys.argv[1])["worktrees"]}
+a, b = d["regenok"], d["plain"]
+assert a["verdict"] == b["verdict"] == "SAFE" and sorted(a) == sorted(b)
+assert a["reasons"] == b["reasons"] == [] and a["action"] is b["action"] is None
+' "$J" && ok "5: --json for a regenerable-SAFE tree has the shape of a plain SAFE tree" || bad "5: --json shape"
+
+# A glob that matches every path would wave .env secrets through: refused with a warning.
+mk_repo broad
+B="$T/broad"
+printf '.env\n' >> "$B/.gitignore"; mkdir -p "$B/.claude"; printf '*\n.*\n**\n' > "$B/.claude/worktree-regenerable"
+git -C "$B" add . && git -C "$B" add -f .claude/worktree-regenerable && git -C "$B" commit -qm broad \
+  && git -C "$B" push -q origin main 2>/dev/null
+add_tree broad secret; echo 'API_KEY=SECRET-MARKER-7f3a' > "$B/.claude/worktrees/secret/.env"
+J=$("$TOOL" --repo "$B" --json 2>"$T/broad.err")
+expect "$J" secret HOLD:ignored "5: base lists *, .* and **: an ignored .env still holds"
+for g in '\*' '\.\*' '\*\*'; do
+  grep -q "^safe-worktree-clean: warning: line [0-9] of .claude/worktree-regenerable on origin/main: '$g' matches every path; ignored$" "$T/broad.err" \
+    || bad "5: no matches-every-path warning for $g"
+done
+[ "$(grep -c . "$T/broad.err")" = 3 ] && ok "5: each match-all glob warns once on stderr" || { bad "5: match-all warnings"; cat "$T/broad.err"; }
+J=$(SYG_WORKTREE_REGENERABLE='**' "$TOOL" --repo "$B" --json 2>"$T/broad.err")
+expect "$J" secret HOLD:ignored "5: SYG_WORKTREE_REGENERABLE='**' is refused too"
+grep -q "^safe-worktree-clean: warning: SYG_WORKTREE_REGENERABLE: '\*\*' matches every path; ignored$" "$T/broad.err" \
+  && ok "5: the env's match-all glob warns" || { bad "5: env match-all warning"; cat "$T/broad.err"; }
+
 # --- The rm guards pass the tool's own invocation untouched (exit 0, no output). ---
 for cmd in 'safe-worktree-clean --repo /srv/team/myrepo --apply' \
   'safe-worktree-clean --repo ~/src/node_modules-demo --apply' \
