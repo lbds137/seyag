@@ -505,6 +505,8 @@ assert_out "names env -u HOME for --uns" present "blocked: env -u HOME on a push
 run 0 "twin: env --uns FOO on a push passes" "$PUBW" "${NT[@]}" -- "env --uns FOO git push origin main"
 run 2 "env --ignore-e on a push (abbreviated --ignore-environment) blocks" "$PUBW" "${NT[@]}" -- \
   "env --ignore-e git push origin main"
+run 2 "env --i on a push (shortest abbreviation of --ignore-environment) blocks" "$PUBW" "${NT[@]}" -- \
+  "env --i git push origin main"
 run 0 "not public: git push --no-verify passes" "$WORK" "${NT[@]}" -- \
   "git push --no-verify origin main"
 

@@ -490,9 +490,10 @@ PUSH_ENV_KEYS = ("HOME", "XDG_CONFIG_HOME")
 def _push_env_tokens(prefix):
     """Tokens in a git push's own prefix that swap the global config out:
     a `HOME=`/`XDG_CONFIG_HOME=` assignment, `env -i` (`-`,
-    `--ignore-environment` or its `--ignore-e…` abbreviations; the shorter
-    `--ig…` forms GNU env rejects as ambiguous are matched too, fail
-    closed), or `env -u HOME`
+    `--ignore-environment` and any abbreviation down to `--i`; unambiguous
+    on coreutils before 9.1, while from 9.1 the forms shorter than
+    `--ignore-e` are ambiguous and rejected, matched anyway, fail closed),
+    or `env -u HOME`
     (`-uHOME`, `--unset HOME`, `--unset=HOME`, or a `--u…` abbreviation of
     `--unset` in either form)."""
     tokens = []
@@ -503,7 +504,7 @@ def _push_env_tokens(prefix):
         if any(w.startswith(k + "=") for k in PUSH_ENV_KEYS):
             tokens.append(f"{w.split('=', 1)[0]}= on a push")
         elif after_env and (w in ("-i", "-") or (
-                len(w) >= len("--ig") and "--ignore-environment".startswith(w))):
+                len(w) >= len("--i") and "--ignore-environment".startswith(w))):
             tokens.append("env -i on a push")
         elif after_env and (
                 (w == "-u" and nxt in PUSH_ENV_KEYS)

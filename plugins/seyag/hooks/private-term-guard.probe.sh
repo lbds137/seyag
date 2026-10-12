@@ -573,6 +573,8 @@ assert_out "names env -u HOME for --uns" present "blocked: env -u HOME on a push
 run 0 "twin: env --uns FOO on a push" "$PUB" "${T[@]}" -- "env --uns FOO git push origin main"
 run 2 "block: env --ignore-e on a push (abbreviated --ignore-environment)" "$PUB" "${T[@]}" -- \
   "env --ignore-e git push origin main"
+run 2 "block: env --i on a push (shortest abbreviation of --ignore-environment)" "$PUB" "${T[@]}" -- \
+  "env --i git push origin main"
 # An abbreviated --unset before git: git is still read as the program (as at
 # base), so its own tokens still block.
 run 2 "block: env --un git push --no-verify (git stays the program)" "$PUB" "${T[@]}" -- \

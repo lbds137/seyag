@@ -44,9 +44,10 @@ MARKER = ".seyag-git-hooks"  # in a dispatcher dir bin/seyag-git-hooks wrote
 # substrings: `--no-v` (`--no-verify` and its prefixes), `hookspath`,
 # `home=` (also `xdg_config_home=`) and `git_config` (GIT_CONFIG_*).
 # BAD_ALIAS_ENV covers the env shapes lib/outbound.py's `_push_env_tokens`
-# blocks on a push (`env -i`, `env -`, `--ignore-environment` and its
-# `--ignore-e…` abbreviations, plus the shorter `--ig…` forms GNU env rejects
-# as ambiguous, matched there fail closed; `env -u HOME`, `--unset[=]HOME`
+# blocks on a push (`env -i`, `env -`, `--ignore-environment` and any
+# abbreviation down to `--i`: unambiguous on coreutils before 9.1, while from
+# 9.1 the forms shorter than `--ignore-e` are ambiguous and rejected, matched
+# there anyway, fail closed; `env -u HOME`, `--unset[=]HOME`
 # and its `--u…` abbreviations): `env` (also as the end of a
 # longer word, such as `/usr/bin/env`; quotes or a backslash after it
 # allowed) followed, after any whitespace, by any option word (`-…`). Any
