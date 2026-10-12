@@ -7,7 +7,8 @@
 # and OAuth usage segments are Deck-tuned and verified on that machine only —
 # elsewhere they degrade to the plain render. Every lane
 # with a host renders its vendor label; the plan lane's is followed by the plan windows, the
-# API-key lane's by (opt-in, SYG_CREDIT_LEDGER) prepaid credit (estimated, or provider-exact) and no
+# API-key lane's by (opt-in, SYG_CREDIT_LEDGER) prepaid credit (the bare figure when provider-exact,
+# followed by `est` while it is an estimate) and no
 # plan meters; other lanes add that credit as its own segment while a live grant
 # exists (opt-in, SYG_CREDIT_LEDGER plus SYG_CREDIT_GRANTS). The statusline only
 # reads the ledger; the api-credit-ledger hook records it.
@@ -197,6 +198,19 @@ pct_color() {
     fi
 }
 
+# visible_width TEXT — TEXT's visible width as wrap_rows and the wrap gate count
+# it: the LITERAL \033[...m color text stripped, codepoints counted. ${#} counts
+# bytes under a non-UTF-8 locale (` · `, ⎇ and ▲ are multibyte), so the count
+# runs under C.UTF-8, scoped to this function; where that locale is missing,
+# bash's setlocale warning is silenced and the count falls back to the
+# inherited locale.
+visible_width() {
+    local stripped
+    stripped=$(printf '%s' "$1" | sed 's/\\033\[[0-9;]*m//g')
+    local LC_ALL=C.UTF-8
+    printf '%s' "${#stripped}"
+} 2>/dev/null
+
 # wrap_rows <budget> — re-flow stdin's sep-joined segment line into rows that
 # fit <budget> visible columns, breaking only at segment boundaries. Visible
 # width counts codepoints (an emoji renders two cells; the threshold is a
@@ -209,18 +223,16 @@ pct_color() {
 # (each segment carries its own resets), per the docs' multi-line-with-escapes
 # caveat.
 wrap_rows() {
-    local budget=$1 seg row="" roww=0 segw stripped out="" sep_stripped sepw
+    local budget=$1 seg row="" roww=0 segw out="" sepw
     local -a segs=()
     local all
     all=$(cat)
     all=${all//"$sep"/$'\n'}
     mapfile -t segs <<< "$all"
-    sep_stripped=$(printf '%s' "$sep" | sed 's/\\033\[[0-9;]*m//g')
-    sepw=${#sep_stripped}
+    sepw=$(visible_width "$sep")
     for seg in "${segs[@]}"; do
         [ -n "$seg" ] || continue
-        stripped=$(printf '%s' "$seg" | sed 's/\\033\[[0-9;]*m//g')
-        segw=${#stripped}
+        segw=$(visible_width "$seg")
         if [ -z "$row" ]; then
             row=$seg roww=$segw
         elif [ $((roww + sepw + segw)) -le "$budget" ]; then
@@ -365,17 +377,20 @@ vendor_host=$(printf '%s' "$base_url" \
 
 # credit_balance_json: `api-credit statusline --json`, cached so a render does not
 # start python every time. Cache file: line 1 the key (ns mtime and size of the
-# ledger and of the grants file, `0 0` when missing, plus both paths,
+# ledger, the grants file and the anchor file (SYG_CREDIT_ANCHOR, else
+# <ledger>.anchor.json), `0 0` when missing, plus the three paths,
 # SYG_CREDIT_NOW, whether ANTHROPIC_ADMIN_API_KEY is set and SYG_CREDIT_ADMIN_URL),
 # line 2 the JSON. The admin-key fields keep a keyed render's provider-exact
 # balance and a keyless render's estimate in separate entries. Reused while the
 # key matches and the file is under 60s old (so expiry and days_left still move).
 # Cache errors never fail the render; an empty answer is not cached.
 credit_balance_json() {
-    local cache key k="" j="" age tmp
+    local cache key anchor k="" j="" age tmp
     cache="${XDG_CACHE_HOME:-$HOME/.cache}/claude-statusline/api-credit-balance.json"
+    # The anchor file as api-credit resolves it, so a calibrate shows on the next render.
+    anchor=${SYG_CREDIT_ANCHOR:-${SYG_CREDIT_LEDGER:-}.anchor.json}
     # Nanosecond mtimes: two ledger writes within one second can leave the size equal.
-    key="$(stat -c '%.9Y %s' "${SYG_CREDIT_LEDGER:-}" 2>/dev/null || echo 0 0) $(stat -c '%.9Y %s' "${SYG_CREDIT_GRANTS:-}" 2>/dev/null || echo 0 0) ${SYG_CREDIT_LEDGER:-} ${SYG_CREDIT_GRANTS:-} ${SYG_CREDIT_NOW:-} admin-key=${ANTHROPIC_ADMIN_API_KEY:+set} admin-url=${SYG_CREDIT_ADMIN_URL:-}"
+    key="$(stat -c '%.9Y %s' "${SYG_CREDIT_LEDGER:-}" 2>/dev/null || echo 0 0) $(stat -c '%.9Y %s' "${SYG_CREDIT_GRANTS:-}" 2>/dev/null || echo 0 0) $(stat -c '%.9Y %s' "$anchor" 2>/dev/null || echo 0 0) ${SYG_CREDIT_LEDGER:-} ${SYG_CREDIT_GRANTS:-} $anchor ${SYG_CREDIT_NOW:-} admin-key=${ANTHROPIC_ADMIN_API_KEY:+set} admin-url=${SYG_CREDIT_ADMIN_URL:-}"
     age=$(( $(date +%s) - $(stat -c %Y "$cache" 2>/dev/null || echo 0) ))
     if [ "$age" -ge 0 ] && [ "$age" -lt 60 ] && { IFS= read -r k && IFS= read -r j; } 2>/dev/null < "$cache" \
         && [ "$k" = "$key" ] && [ -n "$j" ]; then
@@ -491,9 +506,9 @@ elif [ "$vendor_lane" = anthropic-api ]; then
     # API-key lane: metered, no plan windows. Label plus (opt-in, SYG_CREDIT_LEDGER)
     # the prepaid credit: api-credit reads its ledger (the api-credit-ledger
     # hook records it from transcripts; the statusline only reads) and answers with
-    # the balance as JSON. Label alone when it is unset or prints nothing. A `~`
-    # marks the estimate; a provider-exact balance (estimate false, the admin key in
-    # the render env) drops it and shows its as-of day as `px MM-DD`.
+    # the balance as JSON. Label alone when it is unset or prints nothing. An
+    # estimate is followed by ` est` inside the figure's color; a provider-exact
+    # balance (estimate false, the admin key in the render env) is the bare figure.
     output="$output${sep}${anth_brand}${anth_api_label}${reset}"
     if [ -n "${SYG_CREDIT_LEDGER:-}" ]; then
         credit_json=$(credit_balance_json)
@@ -501,7 +516,7 @@ elif [ "$vendor_lane" = anthropic-api ]; then
         credit_json=""
     fi
     if [ -n "$credit_json" ]; then
-        cr_remaining="" cr_spent=0 cr_over=0 cr_total=0 cr_exp="" cr_days="" cr_est=true cr_px=""
+        cr_remaining="" cr_spent=0 cr_over=0 cr_total=0 cr_exp="" cr_days="" cr_est=true
         eval "$(jq -r '
             @sh "cr_remaining=\(.remaining_usd // "")",
             @sh "cr_spent=\(.spent_usd // 0)",
@@ -509,35 +524,26 @@ elif [ "$vendor_lane" = anthropic-api ]; then
             @sh "cr_total=\(.granted_total_live // 0)",
             @sh "cr_exp=\((.next_expiry // "")[5:10])",
             @sh "cr_days=\(.days_left // "")",
-            @sh "cr_est=\(.estimate != false)",
-            @sh "cr_px=\((.provider_as_of // "")[5:10])"
+            @sh "cr_est=\(.estimate != false)"
         ' <<< "$credit_json" 2>/dev/null)"
-        # Estimate (or no fetch attempted, estimate absent): the `~` marker. Provider-exact:
-        # no marker, and the as-of day joins the parenthetical (cr_pxlead before the
-        # expiry) or follows the figure (cr_pxtail).
-        cr_tilde="~" cr_pxlead="" cr_pxtail=""
-        if [ "$cr_est" = false ]; then
-            cr_tilde=""
-            cr_pxlead="px ${cr_px}, "
-            cr_pxtail="${gray} (px ${cr_px})${reset}"
-        fi
+        # Estimate (or no fetch attempted, estimate absent): ` est` after the figure.
+        cr_esttag=""
+        [ "$cr_est" = false ] || cr_esttag=" est"
         # LC_ALL=C: a comma-decimal locale would make printf reject "1.5" (see the OpenRouter block).
         if [ -z "${cr_remaining:-}" ]; then
-            output="$output ${gray}${cr_tilde}\$$(LC_ALL=C printf '%.2f' "$cr_spent") spent${reset}${cr_pxtail}"
+            output="$output ${gray}\$$(LC_ALL=C printf '%.2f' "$cr_spent") spent${cr_esttag}${reset}"
         elif LC_ALL=C awk -v r="$cr_remaining" 'BEGIN{exit !(r > 0.000001)}'; then
             cr_used=$(LC_ALL=C awk -v r="$cr_remaining" -v t="$cr_total" 'BEGIN{ if (t > 0) printf "%d", 100 - 100*r/t + 0.5; else print 100 }')
-            output="$output $(pct_color "$cr_used")${cr_tilde}\$$(LC_ALL=C printf '%.2f' "$cr_remaining")${reset}"
+            output="$output $(pct_color "$cr_used")\$$(LC_ALL=C printf '%.2f' "$cr_remaining")${cr_esttag}${reset}"
             if [ -n "$cr_exp" ]; then
                 cr_dcolor="$gray"
                 [ "${cr_days:-99}" -le 2 ] 2>/dev/null && cr_dcolor="$red"
-                output="$output ${gray}(${cr_pxlead}exp ${cr_exp}, ${reset}${cr_dcolor}${cr_days}d${reset}${gray})${reset}"
-            else
-                output="$output${cr_pxtail}"
+                output="$output ${gray}(exp ${cr_exp}, ${reset}${cr_dcolor}${cr_days}d${reset}${gray})${reset}"
             fi
         elif LC_ALL=C awk -v o="$cr_over" 'BEGIN{exit !(o > 0.000001)}'; then
-            output="$output ${magenta}over ${cr_tilde}\$$(LC_ALL=C printf '%.2f' "$cr_over")${reset}${cr_pxtail}"
+            output="$output ${magenta}over \$$(LC_ALL=C printf '%.2f' "$cr_over")${cr_esttag}${reset}"
         else
-            output="$output ${red}${cr_tilde}\$0.00${reset}${cr_pxtail}"
+            output="$output ${red}\$0.00${cr_esttag}${reset}"
         fi
     fi
 elif [ -z "$rl_5h" ] && [ -z "$rl_7d" ]; then
@@ -583,22 +589,21 @@ fi
 # it beside its own label), when both SYG_CREDIT_LEDGER and SYG_CREDIT_GRANTS are
 # set and a live (unexpired) grant exists, the remaining balance follows the
 # vendor segment in one of two shapes: `$X.XX est` while it is the ledger estimate,
-# `$X.XX px MM-DD` when it is provider-exact (estimate false, the admin key in the
-# render env; MM-DD the as-of day). Red at $0.00. Silent on any error or empty answer.
+# the bare `$X.XX` when it is provider-exact (estimate false, the admin key in the
+# render env). Red at $0.00. Silent on any error or empty answer.
 if [ "$vendor_lane" != anthropic-api ] && [ -n "${SYG_CREDIT_LEDGER:-}" ] && [ -n "${SYG_CREDIT_GRANTS:-}" ]; then
     fleet_json=$(credit_balance_json)
-    fleet_remaining="" fleet_est=true fleet_px=""
+    fleet_remaining="" fleet_est=true
     [ -n "$fleet_json" ] && eval "$(jq -r '
         @sh "fleet_remaining=\(if (.live_grants // 0) > 0 and (.remaining_usd | type) == "number" then .remaining_usd else "" end)",
-        @sh "fleet_est=\(.estimate != false)",
-        @sh "fleet_px=\((.provider_as_of // "")[5:10])"
+        @sh "fleet_est=\(.estimate != false)"
     ' <<< "$fleet_json" 2>/dev/null)"
     if [ -n "$fleet_remaining" ] && fleet_fmt=$(LC_ALL=C printf '%.2f' "$fleet_remaining" 2>/dev/null); then
         fleet_color="$gray"
         [ "$fleet_fmt" = "0.00" ] && fleet_color="$red"
-        fleet_tag="est"
-        [ "$fleet_est" = false ] && fleet_tag="px ${fleet_px}"
-        output="$output${sep}${anth_brand}${anth_api_label}${reset} ${fleet_color}\$${fleet_fmt} ${fleet_tag}${reset}"
+        fleet_esttag=""
+        [ "$fleet_est" = false ] || fleet_esttag=" est"
+        output="$output${sep}${anth_brand}${anth_api_label}${reset} ${fleet_color}\$${fleet_fmt}${fleet_esttag}${reset}"
     fi
 fi
 
@@ -720,15 +725,19 @@ if [ -n "${COLUMNS:-}" ] && [[ "$COLUMNS" =~ ^[0-9]+$ ]]; then
     fit_budget=$((COLUMNS - fit_margin))
 fi
 
-# Narrow-terminal wrap: a setting (unset = never wrap) and a width (CC sets
-# COLUMNS before running this script; docs "Size output to the terminal").
-# Under the threshold the line re-flows into rows that fit, at segment
-# boundaries.
+# Wrap: a setting (unset = never wrap) and a width (CC sets COLUMNS before
+# running this script; docs "Size output to the terminal"). With the setting
+# on, the line re-flows into rows that fit, at segment boundaries, when either
+# COLUMNS is under the setting or the line's visible width exceeds the fit
+# budget (a line wider than the terminal would otherwise be cut at the right
+# edge, its tail lost).
 if [ -n "${SYG_STATUSLINE_WRAP_COLUMNS:-}" ] && [ -n "$fit_budget" ] \
     && [[ "$SYG_STATUSLINE_WRAP_COLUMNS" =~ ^[1-9][0-9]*$ ]] \
-    && [ "$fit_budget" -ge 1 ] \
-    && [ "$COLUMNS" -lt "$SYG_STATUSLINE_WRAP_COLUMNS" ]; then
-    output=$(printf '%s' "$output" | wrap_rows "$fit_budget")
+    && [ "$fit_budget" -ge 1 ]; then
+    if [ "$COLUMNS" -lt "$SYG_STATUSLINE_WRAP_COLUMNS" ] \
+        || [ "$(visible_width "$output")" -gt "$fit_budget" ]; then
+        output=$(printf '%s' "$output" | wrap_rows "$fit_budget")
+    fi
 fi
 
 # Debug aid (SYG_STATUSLINE_DEBUG=1): the wrap gate's two inputs, appended to

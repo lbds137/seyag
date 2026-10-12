@@ -257,15 +257,20 @@ all_lanes() {
         echo "api credit: not configured"
         return 0
     fi
-    IFS=$'\t' read -r c_rem c_spent c_exp c_days < <(jq -r '[(.remaining_usd // "null"), (.spent_usd // 0), ((.next_expiry // "")[5:10]), (.days_left // "")] | @tsv' <<< "$j")
+    # The estimate field leads: tab is IFS whitespace, so empty fields collapse and only
+    # the trailing ones (expiry, days) may be empty.
+    IFS=$'\t' read -r c_est c_rem c_spent c_exp c_days < <(jq -r '[(.estimate != false), (.remaining_usd // "null"), (.spent_usd // 0), ((.next_expiry // "")[5:10]), (.days_left // "")] | @tsv' <<< "$j")
+    # The balance's own rule: the bare figure when exact, followed by " est" otherwise.
+    c_tag=" est"
+    [ "$c_est" = false ] && c_tag=""
     if [ "$c_rem" = null ]; then
-        echo "api credit: ~\$$(LC_ALL=C printf '%.2f' "$c_spent") spent (no live grants)"
+        echo "api credit: \$$(LC_ALL=C printf '%.2f' "$c_spent") spent${c_tag} (no live grants)"
     elif LC_ALL=C awk -v r="$c_rem" 'BEGIN{exit !(r > 0)}'; then
-        line="api credit: ~\$$(LC_ALL=C printf '%.2f' "$c_rem")"
+        line="api credit: \$$(LC_ALL=C printf '%.2f' "$c_rem")${c_tag}"
         [ -n "$c_exp" ] && line="$line (exp $c_exp, ${c_days}d)"
         echo "$line"
     else
-        echo "api credit: ~\$0.00"
+        echo "api credit: \$0.00${c_tag}"
     fi
 }
 

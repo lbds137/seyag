@@ -259,7 +259,7 @@ want_z="z.ai: 5h 42% (resets $(date -d "@$r5" +%H:%M), in 1h2m) · week 17% (res
     && ok "--all: plan line first, composed like the plain line" || bad "--all plan line (rc $rc): $out"
 [ "$(sed -n 2p <<< "$out")" = "$want_z" ] && ok "--all: z.ai line from zai-usage --json (api), local reset times + countdowns" \
     || bad "--all z.ai line: got [$(sed -n 2p <<< "$out")], want [$want_z]"
-[ "$(sed -n 3p <<< "$out")" = 'api credit: ~$128.56 (exp 10-21, 11d)' ] && ok "--all: api credit line from balance --json" \
+[ "$(sed -n 3p <<< "$out")" = 'api credit: $128.56 est (exp 10-21, 11d)' ] && ok "--all: api credit line from balance --json (estimate: 'est' after the figure)" \
     || bad "--all credit line: $(sed -n 3p <<< "$out")"
 # The calling lane doesn't matter: a z.ai-routed caller still sees the plan line.
 route_zai
@@ -280,14 +280,17 @@ printf '#!/bin/sh\n[ "$1" = --line ] && echo "…"\nexit 0\n' > "$tmp/.local/bin
 [ "$(run --all | sed -n 2p)" = "z.ai: no data" ] && ok "--all: zai-usage's '…' (no cache yet) -> z.ai: no data" \
     || bad "--all z.ai ellipsis: $(run --all | sed -n 2p)"
 credit_stub '{"remaining_usd":null,"spent_usd":3.5,"next_expiry":null,"days_left":null}'
-[ "$(run --all | sed -n 3p)" = 'api credit: ~$3.50 spent (no live grants)' ] && ok "--all: no grants config -> spent" \
+[ "$(run --all | sed -n 3p)" = 'api credit: $3.50 spent est (no live grants)' ] && ok "--all: no grants config -> spent" \
     || bad "--all credit spent: $(run --all | sed -n 3p)"
 credit_stub '{"remaining_usd":0,"spent_usd":200,"next_expiry":null,"days_left":null}'
-[ "$(run --all | sed -n 3p)" = 'api credit: ~$0.00' ] && ok "--all: remaining 0 -> ~\$0.00" \
+[ "$(run --all | sed -n 3p)" = 'api credit: $0.00 est' ] && ok "--all: remaining 0 -> \$0.00 est" \
     || bad "--all credit zero: $(run --all | sed -n 3p)"
 credit_stub '{"remaining_usd":5,"spent_usd":1,"next_expiry":null,"days_left":null}'
-[ "$(run --all | sed -n 3p)" = 'api credit: ~$5.00' ] && ok "--all: no expiry -> no parenthetical" \
+[ "$(run --all | sed -n 3p)" = 'api credit: $5.00 est' ] && ok "--all: no expiry -> no parenthetical" \
     || bad "--all credit no expiry: $(run --all | sed -n 3p)"
+credit_stub '{"estimate":false,"remaining_usd":83.797,"spent_usd":16.2,"next_expiry":"2026-10-21T00:00:00Z","days_left":11}'
+[ "$(run --all | sed -n 3p)" = 'api credit: $83.80 (exp 10-21, 11d)' ] && ok "--all: exact balance (estimate false) -> the bare figure, no est" \
+    || bad "--all credit exact: $(run --all | sed -n 3p)"
 credit_stub fail
 [ "$(run --all | sed -n 3p)" = 'api credit: not configured' ] && ok "--all: api-credit exits 2 -> not configured" \
     || bad "--all credit fail: $(run --all | sed -n 3p)"
