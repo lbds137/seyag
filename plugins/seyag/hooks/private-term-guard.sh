@@ -69,8 +69,9 @@
 # install, a husky repo) they pass. A `git config --global|--system` write
 # is judged by whether the global install is present (whatever the cwd), and
 # a `--file <f>` write by the repo that owns f. `prepush_bypasses` in
-# lib/outbound.py is the list. Here they need the terms file like everything else; session-url-gate.sh blocks
-# the same tokens with no terms file. Same BYPASS as below.
+# lib/outbound.py is the list. This hook blocks them only when the terms
+# file is set; session-url-gate.sh blocks the same tokens without one. The
+# BYPASS is the one described under BYPASS below.
 #
 # BLOCK: exit 2, stderr names the lowest-numbered matching term (`#N`: its
 # 1-based index among the term lines, comments and blanks not counted) and
