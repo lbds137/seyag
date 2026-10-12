@@ -144,6 +144,20 @@ key_case "a stalled keys store's grandchild is killed with it" fixture-env SEYAG
 gc=$(cat "$tmp/grandchild.pid" 2>/dev/null)
 [ -n "$gc" ] && ! kill -0 "$gc" 2>/dev/null && ok "key: no grandchild left running after the kill" \
     || { bad "key: grandchild ${gc:-?} still running"; kill "$gc" 2>/dev/null; }
+# A descendant that escaped the group (its own session) and keeps the stdout pipe open: the kill
+# can't reach it, and zai-usage must not wait on the pipe (a bare communicate() would hang ~30 s).
+printf '#!/bin/sh\nsetsid sh -c '"'"'echo $$ > "%s/escaped.pid"; exec sleep 30'"'"' &\nwhile [ ! -s "%s/escaped.pid" ]; do sleep 0.05; done\nsleep 30\n' "$tmp" "$tmp" > "$tmp/keys-escaped"
+chmod +x "$tmp/keys-escaped"
+t0=$(date +%s%N)
+key_case "a grandchild escaping the kill and holding stdout does not hang the lookup" fixture-env \
+    SEYAG_KEYS_BIN="$tmp/keys-escaped" ZAI_USAGE_KEYS_KILL_S=1 "${ZENV[@]}"
+ms=$(( ($(date +%s%N) - t0) / 1000000 ))
+esc=$(cat "$tmp/escaped.pid" 2>/dev/null)
+[ -n "$esc" ] && kill -0 "$esc" 2>/dev/null && escaped_alive=1 || escaped_alive=0
+[ "$escaped_alive" = 1 ] && [ "$ms" -lt 8000 ] \
+    && ok "key: an escaped stdout-holder was alive yet zai-usage finished in ${ms} ms" \
+    || bad "key: escaped holder ${esc:-?} alive=$escaped_alive, took ${ms} ms (want alive and under 8000)"
+[ -n "$esc" ] && kill "$esc" 2>/dev/null
 key_case "a non-UTF-8 keys answer falls through" fixture-env SEYAG_KEYS_BIN="$tmp/keys-binary" "${ZENV[@]}"
 key_case "keys gets its own lock-wait and decrypt budgets" fixture-budgeted SEYAG_KEYS_BIN="$tmp/keys-budget"
 key_case "a malformed ZAI_USAGE_KEYS_KILL_S keeps the default" fixture-store SEYAG_KEYS_BIN="$tmp/keys-ok" ZAI_USAGE_KEYS_KILL_S=abc
@@ -179,6 +193,44 @@ echo '{}' > "$tmp/home/.claude/settings.json"
 key_case "anthropic-direct (no route env, empty settings): the keys store still answers" fixture-store SEYAG_KEYS_BIN="$tmp/keys-ok"
 kill "$SRV_PID" 2>/dev/null; wait "$SRV_PID" 2>/dev/null; SRV_PID=""
 echo '{}' > "$tmp/home/.claude/settings.json"
+
+# 2a. --json --bg never waits on the key lookup: with a stale cache and a slow keys store it prints
+# the cache at once and refreshes detached; plain --json refreshes in the foreground (the gate and
+# --all want fresh numbers), which pins that the --bg speed is caused by --bg.
+seed_stale() { # seed_stale <case dir>: an api-source cache aged ten minutes
+    mkdir -p "$tmp/$1/cache/claude-statusline"
+    echo '{"as_of": 1, "source": "api", "five_hour_pct": 77, "week_pct": 8, "five_hour_reset_at": 1, "week_reset_at": 1}' \
+        > "$tmp/$1/cache/claude-statusline/zai-usage.json"
+    touch -d '10 minutes ago' "$tmp/$1/cache/claude-statusline/zai-usage.json"
+}
+seed_stale bg
+t0=$(date +%s%N)
+out=$(zs bg ZAI_SPEND_QUOTA_URL="$QOK" SEYAG_KEYS_BIN="$tmp/keys-slow" -- --json --bg); rc=$?
+ms=$(( ($(date +%s%N) - t0) / 1000000 ))
+[ $rc = 0 ] && [ "$ms" -lt 2000 ] && jq -e '.five_hour_pct == 77' <<< "$out" >/dev/null \
+    && ok "--json --bg: a stale cache prints at once (${ms} ms), not waiting on a slow keys store" \
+    || bad "--json --bg (rc $rc, ${ms} ms): $out"
+# Reap the detached sweep (it finishes the slow keys call, then writes the cache) before $tmp goes.
+for _ in $(seq 1 100); do [ "$(cache bg | jq -r '.five_hour_pct')" = 43 ] && break; sleep 0.1; done
+flock -w 5 "$tmp/bg/state/zai-spend/.sweep.lock" true
+[ "$(cache bg | jq -r '.five_hour_pct')" = 43 ] && ok "--json --bg: the detached sweep refreshed the cache after printing" \
+    || bad "--json --bg: the detached sweep never refreshed: $(cache bg)"
+seed_stale bg2
+t0=$(date +%s%N)
+out=$(zs bg2 ZAI_SPEND_QUOTA_URL="$QOK" SEYAG_KEYS_BIN="$tmp/keys-slow" -- --bg --json); rc=$?
+ms=$(( ($(date +%s%N) - t0) / 1000000 ))
+[ $rc = 0 ] && [ "$ms" -lt 2000 ] && jq -e '.five_hour_pct == 77' <<< "$out" >/dev/null \
+    && ok "--bg --json: the flag works in either order (${ms} ms)" \
+    || bad "--bg --json (rc $rc, ${ms} ms): $out"
+for _ in $(seq 1 100); do [ "$(cache bg2 | jq -r '.five_hour_pct')" = 43 ] && break; sleep 0.1; done
+flock -w 5 "$tmp/bg2/state/zai-spend/.sweep.lock" true
+seed_stale fg
+t0=$(date +%s%N)
+out=$(zs fg ZAI_SPEND_QUOTA_URL="$QOK" SEYAG_KEYS_BIN="$tmp/keys-slow" ZAI_USAGE_KEYS_KILL_S=2 -- --json); rc=$?
+ms=$(( ($(date +%s%N) - t0) / 1000000 ))
+[ $rc = 0 ] && [ "$ms" -ge 1500 ] \
+    && ok "--json (no --bg): a stale cache refreshes in the foreground (${ms} ms)" \
+    || bad "--json foreground (rc $rc, ${ms} ms): $out"
 
 # 2b. --models: per-model lines and the total line, from the same loopback server on a models body.
 jq -n '{success: true, data: {modelSummaryList: [{modelName: "glm-5.3", totalTokens: 12345678},

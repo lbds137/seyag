@@ -158,6 +158,7 @@ reset_in() {
 # (OpenRouter) pass: their limit is a dollar cap the provider enforces itself.
 if [ "${1:-}" = --ok ] && [ "$routed" = 1 ]; then
     [ "$vendor_lane" = zai ] || exit 0
+    # No --bg: the gate refreshes in the foreground on purpose, bounded by ZAI_USAGE_KEYS_KILL_S.
     zai=$("$zai_usage" --json 2>/dev/null)
     if [ "$(jq -r '.source // empty' <<< "$zai" 2>/dev/null)" != api ]; then
         echo "claude-usage: z.ai quota API unavailable (zai-usage has only a local estimate); gate passes" >&2

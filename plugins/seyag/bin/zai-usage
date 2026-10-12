@@ -12,7 +12,9 @@ a floor, never confused with account truth.
 
   zai-usage                refresh if stale (API first), then print the one-line summary
   zai-usage --line         same line, refresh in the background when stale (statusline mode)
-  zai-usage --json         full cache: pcts, resets, source; + local scan numbers when fallback
+  zai-usage --json         full cache: pcts, resets, source; + local scan numbers when fallback;
+                           refreshes in the foreground when stale
+  zai-usage --json --bg    same json, refresh in the background when stale (statusline mode)
   zai-usage --sweep        force a refresh; silent
   zai-usage --models       per-model token totals for the last 7 days (monitor API)
   zai-usage --calibrate W [F] [--reset "YYYY-MM-DD HH:MM"]
@@ -263,7 +265,14 @@ def zai_token():
                 os.killpg(p.pid, signal.SIGKILL)
             except OSError:
                 pass
-            p.communicate()
+            # No bare communicate() here: a descendant that escaped the group (its own setsid)
+            # can still hold the pipe's write end, and communicate() would wait on it forever.
+            # Close our read end, reap the (killed) child for a bounded time, and move on.
+            p.stdout.close()
+            try:
+                p.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
             out = b""
         tok = out.decode("utf-8", errors="replace").strip()
         if p.returncode == 0 and tok and "�" not in tok:  # a non-UTF-8 answer is no token
@@ -429,21 +438,32 @@ def report(mode):
     return 0
 
 
+def refresh_detached():
+    """Fork a detached `--sweep` and return at once, so the caller never waits on a slow key
+    lookup or quota fetch (the --line and --json --bg modes)."""
+    if os.fork() == 0:
+        try:  # the child must never return into main()
+            os.setsid()
+            devnull = os.open(os.devnull, os.O_WRONLY)
+            for fd in (0, 1, 2):
+                os.dup2(devnull, fd)
+            os.execv(sys.executable, [sys.executable, os.path.realpath(__file__), "--sweep"])
+        finally:
+            os._exit(127)
+
+
 def main():
     argv = sys.argv[1:]
-    mode = argv[0] if argv else ""
+    bg = "--bg" in argv
+    rest = [a for a in argv if a != "--bg"]
+    mode = rest[0] if rest else ""
     if mode == "--models":
         return models()
     if mode == "--calibrate":
-        return calibrate(argv[1:])
-    if mode == "--line":
+        return calibrate(rest[1:])
+    if mode == "--line" or (mode == "--json" and bg):
         if stale():  # sweep detached; print from the (possibly absent) cache and return at once
-            if os.fork() == 0:
-                os.setsid()
-                devnull = os.open(os.devnull, os.O_WRONLY)
-                for fd in (0, 1, 2):
-                    os.dup2(devnull, fd)
-                os.execv(sys.executable, [sys.executable, os.path.realpath(__file__), "--sweep"])
+            refresh_detached()
         return report(mode)
     if mode == "--sweep" or stale():
         sweep_locked()

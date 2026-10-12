@@ -4,7 +4,8 @@
 # beside it, or case 45a fails by design). Covers the provider split: routing decides
 # the data backend (z.ai quota API vs harness stdin rate_limits), while rendering goes through
 # the shared render_windows template — colors, hybrid format, reset arrows and the fable cap.
-# Hermetic: HOME, caches, the token, both z.ai endpoints and zai-usage (stub) are
+# Hermetic: HOME, caches, the token, the keys store (a missing binary and key file), both
+# z.ai endpoints and zai-usage (stub) are
 # fixtures — except case 45a, which runs the real sibling under the fixture HOME
 # (file:// quota, missing key file, cache and state under the tmp dir); nothing
 # touches the network or the real caches (cases 48a-48d use a 127.0.0.1-only
@@ -55,6 +56,8 @@ fi
 # The statusline runs its sibling zai-usage by default; the override hands it the stub (and
 # replaces any ambient value, so a caller's override can't leak in).
 export SYG_STATUSLINE_ZAI_USAGE="$h/.local/bin/zai-usage"
+# A missing keys binary and key file: no case, the real-binary integration mode included, ever asks the real TPM store.
+export SEYAG_KEYS_BIN="$h/no-keys-bin" CC_ROUTE_KEYS="$h/missing-keys.env"
 printf '{"env":{"ANTHROPIC_AUTH_TOKEN":"dummy-probe-token"},"modelSettings":{"glm-5.3":{"effortLevel":"high"},"glm-5.3-flash":{"effortLevel":"max"},"claude-opus-5-5":{"effortLevel":"high"}}}' > "$h/.claude/settings.json"
 export HOME="$h" XDG_CACHE_HOME="$h/cache" XDG_STATE_HOME="$h/state" XDG_STATE_HOME="$h/state"
 export ZAI_SPEND_PROJECTS="$h/projects/empty" ZAI_SPEND_PEAK_UTC="0-24"
@@ -93,6 +96,11 @@ strip() { sed 's/\x1b\[[0-9;]*m//g'; }
 
 # 1-2. Routed: the z.ai segment comes from the quota API, colored and with reset arrows.
 route_zai
+# The statusline asks the real zai-usage for --json --bg: a cold cache refreshes detached and
+# renders the plain --line text that once. Against the real binary (ZAI_SPEND_BIN) the cases that
+# drop the cache therefore warm it synchronously after, so a detached sweep never races a render.
+warm() { [ -z "${ZAI_SPEND_BIN:-}" ] || "$SYG_STATUSLINE_ZAI_USAGE" --sweep; }
+warm
 out=$(render '{"context_window":{"current_usage":{"input_tokens":1000}},"model":{"display_name":"GLM-5.3-Flash"},"cwd":"/tmp"}')
 strip <<< "$out" | grep -Eq 'z\.ai 5h: 95% \(→[0-9:]+\) wk: 59% \(→[A-Za-z0-9 :]+\)' \
     && ok "routed: z.ai segment renders api pcts + reset arrows" || bad "routed text: $(strip <<< "$out" | grep -o 'z.ai.*')"
@@ -105,12 +113,14 @@ grep -qF $'\x1b[38;2;11;127;255mz.ai' <<< "$out" \
 # within the 120s TTL the case-1 poll would otherwise be served without a re-poll.
 export ZAI_SPEND_QUOTA_URL="file://$h/missing.json"
 rm -f "$h/cache/claude-statusline/zai-usage.json"
+warm
 strip <<< "$(render '{"context_window":{"current_usage":{"input_tokens":1000}},"model":{"display_name":"X"},"cwd":"/tmp"}')" \
     | grep -q 'local est' && ok "routed, api dead: local-est fallback renders" || bad "fallback: $out"
 export ZAI_SPEND_QUOTA_URL="file://$h/quota.json"
 # Drop the cache again: the real zai-usage's failed poll cached its local-estimate zeros (120s TTL),
 # which a later z.ai-lane render would otherwise be served. A no-op with the stub.
 rm -f "$h/cache/claude-statusline/zai-usage.json"
+warm
 
 # 4-5. Unrouted: the Anthropic segment from stdin rate_limits through the SAME template —
 # hybrid format, both reset arrows, same traffic lights. Plus the fable cap from a fresh cache.
@@ -594,13 +604,14 @@ route_anthropic
 # 45a. No override: the statusline runs zai-usage from its own bin dir, never $HOME/.local/bin.
 # A decoy sits at the old path; the real sibling runs under the fixture HOME (key file pointed
 # at a missing fixture, the keys store pointed at a missing binary so the real TPM store is never
-# asked, quota from the file:// fixture, cache and state under $h), so no network.
+# asked (both set for the whole probe), quota from the file:// fixture, cache and state under $h), so no network.
 mv "$h/.local/bin/zai-usage" "$h/.local/bin/zai-usage.keep"
 printf '#!/bin/bash\necho HOME-PATH-STUB\n' > "$h/.local/bin/zai-usage"; chmod +x "$h/.local/bin/zai-usage"
 rm -f "$h/cache/claude-statusline/zai-usage.json"
 unset SYG_STATUSLINE_ZAI_USAGE
 route_zai
-raw=$(CC_ROUTE_KEYS="$h/missing-keys.env" SEYAG_KEYS_BIN="$h/no-keys-bin" render "$lane_in"); out=$(strip <<< "$raw")
+"$(dirname "$(readlink -f "$SL")")/zai-usage" --sweep # warm the cache: the render's --json --bg never waits on a cold one
+raw=$(render "$lane_in"); out=$(strip <<< "$raw")
 grep -qF $'\x1b[38;2;11;127;255mz.ai\x1b[0m' <<< "$raw" && grep -q 'z\.ai 5h: 95%.* wk: 59%' <<< "$out" \
     && ! grep -q 'HOME-PATH-STUB' <<< "$out" \
     && ok "z.ai lane, no override: the sibling zai-usage runs, not \$HOME/.local/bin's" || bad "zai sibling default: $out"
@@ -619,6 +630,16 @@ raw=$(SYG_STATUSLINE_ZAI_USAGE="$h/override/zai-usage" render "$lane_in"); out=$
 grep -q 'z\.ai 5h: 12%.* wk: 34%' <<< "$out" \
     && ok "z.ai lane: SYG_STATUSLINE_ZAI_USAGE decides which zai-usage runs" || bad "zai override: $out"
 mv "$h/.local/bin/zai-usage.keep" "$h/.local/bin/zai-usage"
+
+# 45c. The render path asks for --json --bg, so a stalled key lookup never blocks a render: a
+# recording stub (own temp bin, this case only) logs its argv.
+mkdir -p "$h/argv-bin"
+printf '#!/bin/bash\necho "$*" >> "%s/argv.log"\n[ "$1" = --json ] && echo %s\nexit 0\n' "$h" "'{\"five_hour_pct\":12,\"week_pct\":34}'" > "$h/argv-bin/zai-usage"
+chmod +x "$h/argv-bin/zai-usage"
+: > "$h/argv.log"
+SYG_STATUSLINE_ZAI_USAGE="$h/argv-bin/zai-usage" render "$lane_in" >/dev/null
+grep -qxF -- '--json --bg' "$h/argv.log" \
+    && ok "z.ai lane: the statusline calls 'zai-usage --json --bg'" || bad "zai argv: $(tr '\n' '|' < "$h/argv.log")"
 route_anthropic
 
 # 46. SYG_CREDIT_WHEN decides the API-key lane when set: match -> platform.claude.com
