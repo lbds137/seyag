@@ -153,11 +153,13 @@ BR=$(git -C "$WT" branch --show-current); case "$BR" in worktree-agent-*) ;; *) 
 
 Tested: it stops on a non-agent branch and otherwise removes the tree and deletes its branch. That `--force` removal is sanctioned here, resting on both the byte-identical check and the no-commits check, and post-session under § Stale worktrees and branches. Then rebuild every edited package's build output (stale output lets gates pass on source they never compiled), run the main-tree gates one at a time, commit, push, and open the PR per the project's git workflow.
 
+Remove the tree right after the FINAL transfer, while the transfer pair is still its gate; a tree kept through later review rounds goes through `safe-worktree-clean` after the merge.
+
 ## Stale worktrees and branches
 
 Claude Code never removes an agent worktree, its lock or its `worktree-agent-*` branch after the owning session ends.
 
-Post-session cleanup is one command: `safe-worktree-clean --repo <repo>` (dry run), then `--apply` to remove the trees it judged SAFE. The manual steps below stay as the fallback and as the definition of its gates.
+Post-session cleanup is one command: `safe-worktree-clean --repo <repo>` (dry run), then `--apply` to remove the trees it judged SAFE. The tool's own header defines its gates; the manual steps below are the conservative fallback.
 
 - **After the session ends**, a dead lock pid gates removal: run `git -C <wt> status --porcelain` (edits never transferred) and `git -C <wt> log --oneline HEAD --not --remotes` (unpushed commits), stderr attached (a `2>/dev/null` check has reported 0 falsely); anything listed is the owner's call. Then `git worktree unlock <wt> && git worktree remove --force <wt> && git worktree prune`.
 - **In-session, the only removal gate is the transfer pair** (byte-identical patch, no worker commits). The lock's pid is the session's own pid, shared by every tree it cut, so a liveness check on it reports alive for all of them and gates nothing (after a `/clear`: core rules § Sessions and handoffs).

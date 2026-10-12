@@ -14,9 +14,19 @@
 #   2 cwd       no process has its cwd inside the tree (/proc walk)
 #   3 commits   `git cherry <base> <branch>` shows no +, or every + subject is found on <base>
 #               by `git log <base> --fixed-strings --grep=<subject>`
-#   4 files     every dirty, staged or untracked file equals <base>'s version of that path;
-#               an untracked path that <base> lacks is HOLD
-#   5 ignored   ignored files are only safe-clean cache names (read from safe-clean itself)
+#   4 files     every dirty, staged or untracked file has <base>'s mode for that path (both
+#               absent counts), and its content equals <base>'s or <base> subsumes it. Tracked:
+#               `git merge-file <base> <tree HEAD's blob> <tree content>` is clean and yields
+#               <base>'s bytes unchanged. Untracked: <base>'s file keeps every line of the tree's
+#               file, in order (additions only). An untracked path that <base> lacks is HOLD,
+#               and so is any assume-unchanged or skip-worktree entry (its edits are hidden)
+#   5 ignored   ignored files are only safe-clean cache names (read from safe-clean itself) or
+#               repo-declared regenerable paths: .claude/worktree-regenerable as committed on
+#               <base> (never a tree's copy) plus SYG_WORKTREE_REGENERABLE (whitespace-separated
+#               globs). One entry per line, # comments: `<glob>` (bash pattern, * crosses /) or
+#               `<path> = <template>`, where the ignored file must equal <base>'s <template>
+#               byte for byte. A malformed line, or a glob that matches every path (*, **, .*),
+#               is skipped with a warning on stderr.
 #   6 branch    the branch matches SYG_WORKTREE_BRANCH_RE (extended regex; unset or empty:
 #               ^worktree-agent-); a detached HEAD instead needs check 7
 #   7 detached  HEAD's commit is reachable from <base> or a local branch
@@ -87,6 +97,51 @@ if [ -r "$SELF_DIR/safe-clean" ]; then
   read -ra CACHE_NAMES <<<"$(sed -n 's/^CACHE_NAMES=(\(.*\))$/\1/p' "$SELF_DIR/safe-clean")"
 fi
 
+# Repo-declared regenerable ignored paths (check 5): the file as committed on BASE, never a
+# tree's or a working copy's version (a tree can't widen it), plus the env's globs.
+REGEN_FILE=.claude/worktree-regenerable
+REGEN_GLOBS=()
+declare -A REGEN_TEMPLATE=()
+trim() { local s=$1; s=${s#"${s%%[![:space:]]*}"}; printf '%s' "${s%"${s##*[![:space:]]}"}"; }
+# A glob of only *s, optionally after one dot (*, **, .*), matches every path or every dotfile,
+# .env secrets included: refused. $1 the glob, $2 where it came from (for the warning).
+add_glob() {
+  if [[ $1 =~ ^\.?\*+$ ]]; then
+    echo "safe-worktree-clean: warning: $2: '$1' matches every path; ignored" >&2
+  else
+    REGEN_GLOBS+=("$1")
+  fi
+}
+if [ -n "$BASE" ] && regen_text=$(git -C "$MAIN" cat-file blob "$BASE:$REGEN_FILE" 2>/dev/null); then
+  n=0
+  while IFS= read -r line || [ -n "$line" ]; do
+    n=$((n + 1))
+    line=$(trim "${line%$'\r'}")
+    case "$line" in "" | "#"*) continue ;; esac
+    if [[ $line == *=* ]]; then
+      key=$(trim "${line%%=*}") tmpl=$(trim "${line#*=}")
+      if [ -z "$key" ] || [ -z "$tmpl" ]; then
+        echo "safe-worktree-clean: warning: line $n of $REGEN_FILE on $BASE is malformed (an empty side of '='); line ignored" >&2
+        continue
+      fi
+      REGEN_TEMPLATE[$key]=$tmpl
+    else
+      add_glob "$line" "line $n of $REGEN_FILE on $BASE"
+    fi
+  done <<<"$regen_text"
+fi
+# Split on any whitespace, newlines included (-d '' reads to the end; its EOF status is moot).
+read -r -d '' -a env_globs <<<"${SYG_WORKTREE_REGENERABLE:-}"
+for g in "${env_globs[@]}"; do add_glob "$g" SYG_WORKTREE_REGENERABLE; done
+
+# Temp copies for check 4's merge-file and diff, made on first use; never under a tree. A
+# signal exits with the conventional status, which runs the EXIT cleanup.
+MF_TMP=""
+trap '[ -z "$MF_TMP" ] || rm -rf -- "$MF_TMP"' EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 BRANCH_RE=${SYG_WORKTREE_BRANCH_RE:-}
 [ -n "$BRANCH_RE" ] || BRANCH_RE='^worktree-agent-'
 AGE_MIN=${SYG_WORKTREE_LOCK_AGE_MIN:-}
@@ -138,12 +193,85 @@ for d in os.listdir("/proc"):
 PYEOF
 }
 
-# True when $1's blob equals the given path's state on BASE (both absent counts as equal).
-# $1: a blob sha or "" for absent; $2 the path.
+# True when mode $1 equals the given path's mode on BASE ("" for absent; both absent is equal).
+mode_as_base() {
+  local base_mode
+  base_mode=$(git -C "$MAIN" ls-tree "$BASE" -- "$2" 2>/dev/null) || return 1
+  [ "$1" = "${base_mode%% *}" ]
+}
+
+# True when $1's blob and $3's mode equal the given path's state on BASE (both absent counts
+# as equal). $1: a blob sha or "" for absent; $2 the path; $3 a git mode or "" for absent.
 same_as_base() {
   local base_blob
   base_blob=$(git -C "$MAIN" rev-parse -q --verify "$BASE:$2" 2>/dev/null) || base_blob=""
-  [ "$1" = "$base_blob" ]
+  [ "$1" = "$base_blob" ] && mode_as_base "$3" "$2"
+}
+
+# The git mode of the working file $1/$2 as the index would record it; "" when absent.
+wt_mode() {
+  if [ -L "$1/$2" ]; then echo 120000
+  elif [ ! -e "$1/$2" ]; then echo ""
+  elif [ -x "$1/$2" ]; then echo 100755
+  else echo 100644; fi
+}
+
+# True when BASE already holds the tree's change to a path (check 4, run only where
+# same_as_base failed). ours = BASE's blob; theirs = $4 "file" (the working file),
+# "blob:<sha>" (that blob) or "" (empty); the tree's mode $5 (wt_mode, or the index mode; ""
+# when absent) must equal BASE's mode for the path. $3 picks the content rule:
+#   head   a tracked path: `git merge-file -p ours <the tree's HEAD blob> theirs` exits 0 and
+#          prints BASE's bytes unchanged.
+#   empty  an untracked path: BASE keeps every line of the tree's file, in order (BASE = the
+#          tree's lines plus additions only), by GNU diff: exit 0 or 1 with no tree-only line.
+#          A trailing-newline difference on a shared line counts as a tree-only line.
+# An absent blob is an empty file; a binary file, a symlink or any failed step is false.
+# Contents go only to the private temp dir.
+subsumed_by_base() {
+  local t=$1 p=$2 anc=$3 theirs=$4 d f
+  mode_as_base "${5-}" "$p" || return 1
+  [ -n "$MF_TMP" ] || MF_TMP=$(mktemp -d) || return 1
+  d=$MF_TMP
+  { : >"$d/ours" && : >"$d/anc" && : >"$d/theirs"; } 2>/dev/null || return 1
+  if git -C "$MAIN" rev-parse -q --verify "$BASE:$p" >/dev/null 2>&1; then
+    git -C "$MAIN" cat-file blob "$BASE:$p" >"$d/ours" 2>/dev/null || return 1
+  fi
+  if [ "$anc" = head ] && git -C "$t" rev-parse -q --verify "HEAD:$p" >/dev/null 2>&1; then
+    git -C "$t" cat-file blob "HEAD:$p" >"$d/anc" 2>/dev/null || return 1
+  fi
+  case "$theirs" in
+    file) { [ -f "$t/$p" ] && [ ! -L "$t/$p" ] && cat -- "$t/$p" >"$d/theirs"; } 2>/dev/null || return 1 ;;
+    blob:*) git -C "$t" cat-file blob "${theirs#blob:}" >"$d/theirs" 2>/dev/null || return 1 ;;
+  esac
+  for f in ours anc theirs; do
+    [ ! -s "$d/$f" ] || LC_ALL=C grep -qI '' "$d/$f" || return 1
+  done
+  if [ "$anc" = empty ]; then
+    diff --unchanged-line-format= --old-line-format='%L' --new-line-format= \
+      "$d/theirs" "$d/ours" >"$d/out" 2>/dev/null
+    case $? in 0 | 1) [ ! -s "$d/out" ] ;; *) return 1 ;; esac
+    return
+  fi
+  git merge-file -p "$d/ours" "$d/anc" "$d/theirs" >"$d/out" 2>/dev/null && cmp -s "$d/out" "$d/ours"
+}
+
+# Check 5's repo-declared entries. Prints nothing; returns 0 when the ignored entry $2 (a
+# directory with a trailing /) in tree $1 passes, 1 when no entry names it, 2 when it is a
+# declared template path whose bytes differ from BASE's template (or the template is absent).
+regen_verdict() {
+  local t=$1 q=${2%/} g tmpl_blob file_blob
+  if [ -n "${REGEN_TEMPLATE[$q]+set}" ]; then
+    [ "$q" = "$2" ] || return 2
+    tmpl_blob=$(git -C "$MAIN" rev-parse -q --verify "$BASE:${REGEN_TEMPLATE[$q]}" 2>/dev/null) || return 2
+    file_blob=$(git -C "$t" hash-object --no-filters -- "$q" 2>/dev/null) || return 2
+    [ -n "$file_blob" ] && [ "$file_blob" = "$tmpl_blob" ] && return 0
+    return 2
+  fi
+  for g in "${REGEN_GLOBS[@]}"; do
+    # shellcheck disable=SC2053 # the entry is a pattern by design
+    [[ $q == $g ]] && return 0
+  done
+  return 1
 }
 
 is_cache_path() { # any component of the path is a safe-clean cache name
@@ -213,19 +341,37 @@ judge_git() {
     fi
   fi
   # 4: tracked files whose worktree content differs from HEAD, and staged files whose index
-  # content differs from HEAD: that content must equal the base's (absent on both counts).
+  # content differs from HEAD: that content must equal the base's (absent on both counts), or
+  # the base must subsume the change (subsumed_by_base).
   local -a changed=() staged=() untracked=() ignored=() status=()
+  local theirs rv entry
+  local -a flagged=()
   if ! z_list changed git -C "$t" diff --name-only -z --no-renames HEAD ||
     ! z_list staged git -C "$t" diff --cached --name-only -z --no-renames HEAD; then
     hold git-error "git diff in the tree failed"
   fi
+  # 4: assume-unchanged (lowercase tag) and skip-worktree (S, also every path outside a sparse
+  # checkout) entries hide their edits from the diffs above.
+  if ! z_list flagged git -C "$t" ls-files -v -z; then
+    hold git-error "git ls-files -v in the tree failed"
+  fi
+  for entry in "${flagged[@]}"; do
+    case "${entry:0:1}" in
+      [a-z]) hold hidden "${entry:2} is marked assume-unchanged; its edits are not visible" ;;
+      S) hold hidden "${entry:2} is marked skip-worktree; its edits are not visible" ;;
+    esac
+  done
+  local mode
   for p in "${changed[@]}"; do
     if [ -e "$t/$p" ] || [ -L "$t/$p" ]; then
       wt_blob=$(git -C "$t" hash-object -- "$p" 2>/dev/null) || wt_blob="unreadable"
+      theirs="file"
     else
-      wt_blob=""
+      wt_blob="" theirs=""
     fi
-    same_as_base "$wt_blob" "$p" || hold dirty "$p differs from $BASE"
+    mode=$(wt_mode "$t" "$p")
+    same_as_base "$wt_blob" "$p" "$mode" || subsumed_by_base "$t" "$p" head "$theirs" "$mode" ||
+      hold dirty "$p differs from $BASE"
   done
   for p in "${staged[@]}"; do
     idx=$(git -C "$t" ls-files -s -- "$p" 2>/dev/null)
@@ -234,21 +380,27 @@ judge_git() {
       *$'\n'*) blob="conflicted" ;;
       *) blob=$(cut -d' ' -f2 <<<"$idx") ;;
     esac
-    same_as_base "$blob" "$p" || hold dirty "$p (staged) differs from $BASE"
+    same_as_base "$blob" "$p" "${idx%% *}" ||
+      { [ "$blob" != conflicted ] && subsumed_by_base "$t" "$p" head "${blob:+blob:$blob}" "${idx%% *}"; } ||
+      hold dirty "$p (staged) differs from $BASE"
   done
-  # 4: untracked files: equal to the base's blob, never a path the base lacks.
+  # 4: untracked files: equal to (or subsumed by) the base's blob, with the base's mode (the
+  # executable bit, or a symlink), never a path the base lacks.
   if ! z_list untracked git -C "$t" ls-files -z --others --exclude-standard; then
     hold git-error "git ls-files --others in the tree failed"
   fi
   for p in "${untracked[@]}"; do
     if ! git -C "$MAIN" rev-parse -q --verify "$BASE:${p%/}" >/dev/null 2>&1; then
       hold untracked-new "$p is untracked and not on $BASE"
-    elif [ "${p%/}" != "$p" ] || ! same_as_base "$(git -C "$t" hash-object -- "$p" 2>/dev/null)" "$p"; then
+    elif mode=$(wt_mode "$t" "${p%/}"); [ "${p%/}" != "$p" ] ||
+      { ! same_as_base "$(git -C "$t" hash-object -- "$p" 2>/dev/null)" "$p" "$mode" &&
+        ! subsumed_by_base "$t" "$p" empty file "$mode"; }; then
       hold untracked-differs "$p is untracked and differs from $BASE"
     fi
   done
-  # 5: ignored files: only safe-clean cache names. --ignored=matching lists each path an ignore
-  # rule matched (pkg/__pycache__/), where ls-files --directory would collapse it into pkg/.
+  # 5: ignored files: only safe-clean cache names and repo-declared regenerable paths.
+  # --ignored=matching lists each path an ignore rule matched (pkg/__pycache__/, dist/), where
+  # ls-files --directory would collapse it into pkg/; a matched directory passes as a whole.
   # --no-renames: a rename record's extra NUL field would read as an entry.
   if ! z_list status git -C "$t" status --porcelain=v1 -z --no-renames --ignored=matching --untracked-files=all; then
     hold git-error "git status --ignored in the tree failed"
@@ -257,10 +409,16 @@ judge_git() {
     case "$p" in "!! "*) ignored+=("${p#!! }") ;; esac
   done
   for p in "${ignored[@]}"; do
-    if [ ${#CACHE_NAMES[@]} -eq 0 ]; then
+    regen_verdict "$t" "$p"
+    rv=$?
+    if [ "$rv" -eq 0 ]; then
+      continue
+    elif [ "$rv" -eq 2 ]; then
+      hold ignored "ignored ${p%/} differs from its declared template ${REGEN_TEMPLATE[${p%/}]}"
+    elif [ ${#CACHE_NAMES[@]} -eq 0 ]; then
       hold ignored "$p is ignored, and safe-clean's cache list could not be read"
     elif ! is_cache_path "$p"; then
-      hold ignored "$p is ignored and not a safe-clean cache name"
+      hold ignored "$p is ignored and not a safe-clean cache name or a declared regenerable path"
     fi
   done
 }
