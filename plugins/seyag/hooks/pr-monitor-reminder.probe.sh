@@ -171,7 +171,9 @@ check_contains 'gh api repos/{owner}/{repo}/pulls/7/comments'
 # substitution's own rev-parse. Only the SHA's `$(...)` stays
 # unresolved.
 REPO_BRANCH=$(git -C "$REPO_ROOT" rev-parse --abbrev-ref HEAD)
-check_contains "cd '$REPO_ROOT' && pr-ci-wait 7 --sha \$(git rev-parse 'refs/heads/$REPO_BRANCH')"
+# A detached checkout (CI checks out the PR's merge ref) prints HEAD.
+if [ "$REPO_BRANCH" = HEAD ]; then REPO_REV=HEAD; else REPO_REV="refs/heads/$REPO_BRANCH"; fi
+check_contains "cd '$REPO_ROOT' && pr-ci-wait 7 --sha \$(git rev-parse '$REPO_REV')"
 # No 40-hex SHA anywhere in the banner: the substitution must stay unresolved.
 if grep -qE '[0-9a-f]{40}' <<<"$CTX8"; then
   fail "banner: no resolved 40-hex SHA present"
