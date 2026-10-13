@@ -662,6 +662,20 @@ near "$(jq .remaining_usd <<< "$bc")" 10 && near "$(jq .remaining_usd <<< "$bd")
   && ok "SYG_CREDIT_ANCHOR: the anchor goes to that path (10 at 15:30, all 7 of the day's spend before it -> 10.00); the default file is untouched" \
   || bad "SYG_CREDIT_ANCHOR: $bc / $bd"
 
+# 20b. calibrate without --at defaults to now: records anchor at now, balance line.
+NATL="$T/anc/noat.jsonl"
+{ uline msg-nat1 req-nat1 m-a ${AD}T10:00:00Z $M 0; } > "$P/NAT.jsonl"
+hk NAT "$NATL" SYG_CREDIT_NOW=${AD}T10:30:00Z
+fresh "$P/NAT.jsonl"
+cal=$(ac SYG_CREDIT_LEDGER="$NATL" SYG_CREDIT_NOW=${AD}T12:00:00Z -- calibrate 50 2>&1); rc=$?
+b=$(ac SYG_CREDIT_LEDGER="$NATL" SYG_CREDIT_NOW=${AD}T12:00:00Z -- balance --json)
+if [ "$rc" = 0 ] && [ "$cal" = $'anchored $50.00 at 2026-10-15T12:00:00Z (same-day spend before it $1.00)\napi credit $50.00 est' ] \
+  && jq -e '(.anchors|length)==1 and .anchors[0].amount==50 and .anchors[0].at=="2026-10-15T12:00:00Z"
+      and .anchors[0].pre_anchor_day_usd==1 and .anchors[0].recorded=="2026-10-15T12:00:00Z"' "$NATL.anchor.json" > /dev/null \
+  && near "$(jq .remaining_usd <<< "$b")" 50 && near "$(jq .spent_usd <<< "$b")" 0; then
+  ok "calibrate without --at: defaults to now (records anchor at now, balance line 'api credit \$50.00 est')"
+else bad "calibrate without --at: rc=$rc '$cal' / $b / $(cat "$NATL.anchor.json" 2>&1)"; fi
+
 # 21. A top-up granted after the anchor adds its amount: 44 + 20.
 echo '{"grants":[{"amount":20,"granted":"2026-10-15T13:00:00Z"}]}' > "$T/g-topup.json"
 b=$(ac SYG_CREDIT_LEDGER="$KL" SYG_CREDIT_GRANTS="$T/g-topup.json" SYG_CREDIT_NOW=${AD}T16:00:00Z -- balance --json)

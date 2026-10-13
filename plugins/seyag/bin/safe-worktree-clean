@@ -56,8 +56,14 @@ while [ $# -gt 0 ]; do
     --json) JSON=true ;;
     --repo) [ $# -ge 2 ] || { usage >&2; exit 2; }; REPO=$2; shift ;;
     --repo=*) REPO=${1#--repo=} ;;
-    --base) [ $# -ge 2 ] || { usage >&2; exit 2; }; BASE_ARG=$2; BASE_SRC="--base"; shift ;;
-    --base=*) BASE_ARG=${1#--base=}; BASE_SRC="--base" ;;
+    --base)
+      [ $# -ge 2 ] || { usage >&2; exit 2; }
+      [ -n "$2" ] || { echo "safe-worktree-clean: --base needs a ref" >&2; usage >&2; exit 2; }
+      BASE_ARG=$2; BASE_SRC="--base"; shift ;;
+    --base=*)
+      BASE_ARG=${1#--base=}
+      [ -n "$BASE_ARG" ] || { echo "safe-worktree-clean: --base needs a ref" >&2; usage >&2; exit 2; }
+      BASE_SRC="--base" ;;
     *) echo "safe-worktree-clean: unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
   shift
@@ -112,8 +118,8 @@ else
   [ -n "$BASE" ] || BASE=origin/main
   if ! git -C "$MAIN" rev-parse -q --verify "$BASE^{commit}" >/dev/null; then
     BASE=""
+    NO_BASE_REASON="no origin/HEAD or origin/main ref to compare against"
   fi
-  NO_BASE_REASON="no origin/HEAD or origin/main ref to compare against"
 fi
 
 # Source of truth for cache names: safe-clean's CACHE_NAMES line, read, never copied.
@@ -258,6 +264,8 @@ wt_mode() {
 subsumed_by_base() {
   local t=$1 p=$2 anc=$3 theirs=$4 d f
   mode_as_base "${5-}" "$p" || return 1
+  # mktemp -d makes the dir mode 0700, the copies hold file contents, and a
+  # SIGKILL skips the trap, so they can be left behind in it.
   [ -n "$MF_TMP" ] || MF_TMP=$(mktemp -d) || return 1
   d=$MF_TMP
   { : >"$d/ours" && : >"$d/anc" && : >"$d/theirs"; } 2>/dev/null || return 1
@@ -385,6 +393,7 @@ judge_git() {
   fi
   for entry in "${flagged[@]}"; do
     case "${entry:0:1}" in
+      s) hold hidden "${entry:2} is marked skip-worktree and assume-unchanged; its edits are not visible" ;;
       [a-z]) hold hidden "${entry:2} is marked assume-unchanged; its edits are not visible" ;;
       S) hold hidden "${entry:2} is marked skip-worktree; its edits are not visible" ;;
     esac

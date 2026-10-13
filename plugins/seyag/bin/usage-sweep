@@ -42,7 +42,8 @@ are precise ticks; intervals join consecutive precise ticks within a chain
 (resets detected via resets_at shifts > 600 s or drops > 0.5%, or gaps > --max-span, split chains). For each interval,
 Δpoints = Σ_family rate_family × spend_family. Non-negative least squares (NNLS)
 over active families solves for rates, with a bootstrap CI (--boot N, default 1000);
-the fit refuses when intervals ≤ active families.
+the fit refuses when intervals ≤ active families. The fit reports `thin` (text: a
+"rates and ranges are rough" note) when there are fewer than 3 intervals per active family.
 --boot costs time linearly (about a few seconds at 1000 resamples for ~150 intervals);
 lower it for very long windows.
 A dense reading log keeps tick brackets tight: poller recipe
@@ -712,6 +713,7 @@ def main():
             "ticks_total": ticks_total,
             "ticks_precise": ticks_precise,
             "thin": thin,
+            "families": fit_k,
             "r2": r2,
             "unbilled_M": unbilled_M,
             "max_gap": a.max_gap,
