@@ -175,6 +175,71 @@ e=$(timeout 5 env -i HOME="$T/home" PATH=/usr/bin:/bin XDG_RUNTIME_DIR="$T/run" 
 [ $rc = 2 ] && [ "$e" = "keys: SYG_KEYS_LOCK_WAIT_S='nan' is not a finite, non-negative number of seconds (keys --help for usage)" ] \
   && ok "a non-finite lock wait is a usage error, not a hang" || bad "nan wait rc $rc: $e"
 
+# --- a timeout writes the stall marker before the kill, even if the reap hangs ---
+SLEEP_MOCK="$T/sleep-creds"
+cat > "$SLEEP_MOCK" <<'EOF'
+#!/bin/bash
+exec sleep 5
+EOF
+chmod +x "$SLEEP_MOCK"
+
+py_out=$(run SYG_KEYS_CREDS_CMD="$SLEEP_MOCK" SYG_KEYS_TIMEOUT_S=0.1 python3 - "$K" "$M" <<'PYEOF' 2>&1
+import importlib.machinery
+import importlib.util
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+keys_path = sys.argv[1]
+marker_path = Path(sys.argv[2])
+
+marker_path.unlink(missing_ok=True)
+
+# Load plugins/seyag/bin/keys as a module
+loader = importlib.machinery.SourceFileLoader("keys_mod", keys_path)
+spec = importlib.util.spec_from_loader(loader.name, loader)
+keys_mod = importlib.util.module_from_spec(spec)
+loader.exec_module(keys_mod)
+
+kill_called = []
+marker_existed_at_kill = []
+orig_kill = subprocess.Popen.kill
+
+def mock_kill(self):
+    kill_called.append(True)
+    marker_existed_at_kill.append(marker_path.exists())
+    try:
+        orig_kill(self)
+    except OSError:
+        pass
+
+wait_called = []
+def mock_wait(self, *args, **kwargs):
+    wait_called.append(True)
+    raise subprocess.TimeoutExpired(cmd=self.args, timeout=kwargs.get("timeout", 1))
+
+subprocess.Popen.kill = mock_kill
+subprocess.Popen.wait = mock_wait
+
+keys_error_raised = False
+try:
+    with keys_mod.TpmLock() as tpm:
+        tpm.run("decrypt", ["--user", f"--name={keys_mod.credential_name()}", "dummy", "-"], None, "dummy")
+except keys_mod.KeysError:
+    keys_error_raised = True
+
+assert keys_error_raised, "KeysError was not raised on timeout"
+assert len(kill_called) > 0, "Popen.kill was not called"
+assert all(marker_existed_at_kill), "Stall marker did not exist when proc.kill() was called"
+assert len(wait_called) > 0, "Popen.wait was not called"
+assert marker_path.exists(), "Stall marker does not exist after timeout"
+PYEOF
+)
+rc=$?
+[ $rc = 0 ] && ok "stall marker exists at kill time even if reap hangs" || bad "stall marker check rc $rc: $py_out"
+rm -f "$M"
+
 # --- the lock dirs resist tampering ---
 mkdir -p "$T/run2/seyag-keys"; chmod 700 "$T/run2/seyag-keys"; echo fixture-victim > "$T/victim"
 ln -s "$T/victim" "$T/run2/seyag-keys/tpm.lock"
