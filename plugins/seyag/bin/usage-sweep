@@ -41,7 +41,8 @@ precise meter ticks. claude-usage records prev_epoch to bracket each tick in
 are precise ticks; intervals join consecutive precise ticks within a chain
 (resets detected via resets_at shifts > 600 s or drops > 0.5%, or gaps > --max-span, split chains). For each interval,
 Δpoints = Σ_family rate_family × spend_family. Non-negative least squares (NNLS)
-over active families solves for rates, with a bootstrap CI (--boot N, default 1000).
+over active families solves for rates, with a bootstrap CI (--boot N, default 1000);
+the fit refuses when intervals ≤ active families.
 --boot costs time linearly (about a few seconds at 1000 resamples for ~150 intervals);
 lower it for very long windows.
 A dense reading log keeps tick brackets tight: poller recipe
@@ -341,6 +342,16 @@ def fit_meter_rates(intervals, boot_n=1000):
         sys.exit(1)
 
     active_families = [f for f in FITTED_FAMILIES if sum(iv["spend_M"][f] for iv in intervals) > 0]
+    k = len(active_families)
+    if m <= k:
+        names = ", ".join(active_families)
+        sys.stderr.write(
+            f"usage-sweep: --fit needs more tick intervals than active model families"
+            f" (found {m} intervals, {k} families: {names}); widen --since or poll the meter more densely\n"
+        )
+        sys.exit(1)
+
+    thin = m < 3 * k
     y = [iv["delta"] for iv in intervals]
     X = [[iv["spend_M"][f] for f in active_families] for iv in intervals]
 
@@ -378,7 +389,7 @@ def fit_meter_rates(intervals, boot_n=1000):
         else:
             ci90[f] = [0.0, 0.0]
 
-    return rates, ci90, r2, boot_samples
+    return rates, ci90, r2, boot_samples, thin, k
 
 
 def probe_window(start_str, end_str, readings, meter_field, replies, fit_rates, boot_samples, slug_filter=None):
@@ -584,6 +595,8 @@ def main():
         if is_report_folder:
             files_read += 1
         rel = f.relative_to(root / slug)
+        # A session is the first path segment under the project folder: s1.jsonl is
+        # s1, anything under s1/subagents/ is also s1.
         session = rel.parts[0] if len(rel.parts) > 1 else rel.stem
         with open(f, errors="replace") as fh:
             for raw in fh:
@@ -661,12 +674,13 @@ def main():
 
     fit_obj = None
     probe_obj = None
+    fit_k = None
     if a.fit:
         meter_field = "five_hour_pct" if a.meter == "5h" else "weekly_pct"
         intervals, ticks_total, ticks_precise = extract_ticks_and_intervals(
             readings, replies, meter_field, a.max_gap, a.max_span, since_ts, until_ts
         )
-        rates, ci90, r2, boot_samples = fit_meter_rates(intervals, boot_n=a.boot)
+        rates, ci90, r2, boot_samples, thin, fit_k = fit_meter_rates(intervals, boot_n=a.boot)
 
         all_reply_list = list(replies.values())
         window_replies = [r for r in all_reply_list if since_ts < r[5] < until_ts]
@@ -697,6 +711,7 @@ def main():
             "intervals": len(intervals),
             "ticks_total": ticks_total,
             "ticks_precise": ticks_precise,
+            "thin": thin,
             "r2": r2,
             "unbilled_M": unbilled_M,
             "max_gap": a.max_gap,
@@ -794,6 +809,8 @@ def main():
                 print(f"  {fam:<8} {rate:6.2f} pts/M (90% {lo:.2f}..{hi:.2f})  = {m_str:>6} per pt   spend {fdata['spend_M']:5.1f}M (window {fdata['window_spend_M']:5.1f}M)")
         r2_val = fit_obj["r2"]
         print(f"r2 {r2_val:.4f}" if r2_val is not None else "r2 null")
+        if fit_obj["thin"]:
+            print(f"note: only {fit_obj['intervals']} intervals for {fit_k} families; rates and ranges are rough")
         print("note: spend the local logs can't see (cloud sessions, GitHub reviews) inflates the rates")
 
     if probe_obj is not None:

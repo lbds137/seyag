@@ -175,6 +175,9 @@ awk -v o="$opus_rate" -v h="$haiku_rate" -v iv="$intervals" -v ub="$unbilled" -v
   'BEGIN { exit !(o >= 0.45 && o <= 0.55 && h >= 0.09 && h <= 0.11 && iv == 8 && ub == 1.0 && r > 0.99) }' \
   && ok "--fit synthetic truth: opus ~0.5, haiku ~0.1, 8 intervals, unbilled_M 1.0, r2 > 0.99" \
   || bad "--fit synthetic truth failed (opus $opus_rate, haiku $haiku_rate, intervals $intervals, unbilled $unbilled, r2 $r2)"
+[ "$(jq -r '.fit.thin' <<<"$jf")" = false ] \
+  && ok "--fit synthetic truth has thin: false (8 intervals, 2 families)" \
+  || bad "synthetic truth thin failed: $(jq -r '.fit.thin' <<<"$jf")"
 
 # --slug X --fit prints note and gives same fit
 out_slug=$(run_fit --since "$START_WIN" --until "$END_WIN" --slug slugA --fit)
@@ -324,6 +327,59 @@ err_out=$(env -i HOME="$T" PATH=/usr/bin:/bin CLAUDE_PROJECTS_DIR="$T/small-proj
 [ $rc = 1 ] && grep -q "usage-sweep: --fit needs at least 3 tick intervals, found 2" <<<"$err_out" \
   && ok "<3 intervals exits 1 with message" \
   || bad "<3 intervals exit message failed (rc $rc): $err_out"
+
+# --- Underdetermined fit: 3 intervals, 3 families (m <= k) exits 1 with message naming families ---
+mkdir -p "$T/under-state/claude-usage" "$T/under-projects/slugA"
+{ rd_fit 10.0 1000 10.0
+  rd_fit 11.0 1300 11.0 1240
+  rd_fit 12.0 1600 12.0 1540
+  rd_fit 13.0 1900 13.0 1840
+  rd_fit 14.0 2200 14.0 2140
+} > "$T/under-state/claude-usage/readings.jsonl"
+# The first reading is a baseline, not a tick: 4 ticks (midpoints 1270/1570/1870/2170) give 3 intervals.
+{ line o1 "$(iso 1400)" 1000000 0 0 text claude-opus-4-6
+  line s1 "$(iso 1450)" 1000000 0 0 text claude-sonnet-4-6
+  line h1 "$(iso 1500)" 1000000 0 0 text claude-haiku-4
+  line o2 "$(iso 1700)" 1000000 0 0 text claude-opus-4-6
+  line s2 "$(iso 1750)" 1000000 0 0 text claude-sonnet-4-6
+  line h2 "$(iso 1800)" 1000000 0 0 text claude-haiku-4
+  line o3 "$(iso 2000)" 1000000 0 0 text claude-opus-4-6
+  line s3 "$(iso 2050)" 1000000 0 0 text claude-sonnet-4-6
+  line h3 "$(iso 2100)" 1000000 0 0 text claude-haiku-4
+} > "$T/under-projects/slugA/s.jsonl"
+err_under=$(env -i HOME="$T" PATH=/usr/bin:/bin CLAUDE_PROJECTS_DIR="$T/under-projects" \
+                  XDG_STATE_HOME="$T/under-state" "$US" --since "$(iso 900)" --until "$(iso 2300)" --fit 2>&1); rc=$?
+[ $rc = 1 ] && grep -q "usage-sweep: --fit needs more tick intervals than active model families (found 3 intervals, 3 families: opus, sonnet, haiku); widen --since or poll the meter more densely" <<<"$err_under" \
+  && ok "underdetermined fit (3 intervals, 3 families) exits 1 with message naming families" \
+  || bad "underdetermined fit failed (rc $rc): $err_under"
+
+# --- Thin fit: 4 intervals, 2 families (4 < 6) succeeds with thin: true and note ---
+mkdir -p "$T/thin-state/claude-usage" "$T/thin-projects/slugA"
+{ rd_fit 10.0 1000 10.0
+  rd_fit 11.0 1300 11.0 1240
+  rd_fit 12.0 1600 12.0 1540
+  rd_fit 13.0 1900 13.0 1840
+  rd_fit 14.0 2200 14.0 2140
+  rd_fit 15.0 2500 15.0 2440
+} > "$T/thin-state/claude-usage/readings.jsonl"
+# 5 ticks after the baseline reading give 4 intervals (midpoints 1270 ... 2470).
+{ line o1 "$(iso 1400)" 2000000 0 0 text claude-opus-4-6
+  line h1 "$(iso 1700)" 10000000 0 0 text claude-haiku-4
+  line o2 "$(iso 2000)" 2000000 0 0 text claude-opus-4-6
+  line h2 "$(iso 2300)" 10000000 0 0 text claude-haiku-4
+} > "$T/thin-projects/slugA/s.jsonl"
+j_thin=$(env -i HOME="$T" PATH=/usr/bin:/bin CLAUDE_PROJECTS_DIR="$T/thin-projects" \
+               XDG_STATE_HOME="$T/thin-state" "$US" --since "$(iso 900)" --until "$(iso 2600)" --fit --json)
+[ "$(jq -r '.fit.intervals == 4 and .fit.thin == true' <<<"$j_thin")" = true ] \
+  && ok "thin fit: 4 intervals, 2 families has thin: true (4 < 6)" \
+  || bad "thin fit failed: $(jq -c '.fit | {intervals, thin}' <<<"$j_thin")"
+
+out_thin=$(env -i HOME="$T" PATH=/usr/bin:/bin CLAUDE_PROJECTS_DIR="$T/thin-projects" \
+                 XDG_STATE_HOME="$T/thin-state" "$US" --since "$(iso 900)" --until "$(iso 2600)" --fit)
+grep -q "note: only 4 intervals for 2 families; rates and ranges are rough" <<<"$out_thin" \
+  && ok "thin fit text output prints rough warning note" \
+  || bad "thin fit missing rough warning note: $out_thin"
+
 
 # --- --meter week fixture: precise weekly ticks, flat 5h meter, reset splits chain without spanning interval ---
 mkdir -p "$T/week-state/claude-usage" "$T/week-projects/slugA" "$T/week-pos-state/claude-usage"
