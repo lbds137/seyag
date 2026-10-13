@@ -2,7 +2,7 @@
 # safe-worktree-clean - judge agent worktrees for safe removal; remove the SAFE ones on --apply
 #
 # Usage:
-#   safe-worktree-clean [--apply] [--repo DIR] [--locks] [--locks-apply] [--json]
+#   safe-worktree-clean [--apply] [--repo DIR] [--base REF] [--locks] [--locks-apply] [--json]
 #
 # Judges every worktree under <repo>/.claude/worktrees/ (--repo DIR, default: the current
 # repo) and prints SAFE or HOLD:<reason> for each; HOLD trees go into one batched report.
@@ -23,15 +23,18 @@
 #   5 ignored   ignored files are only safe-clean cache names (read from safe-clean itself) or
 #               repo-declared regenerable paths: .claude/worktree-regenerable as committed on
 #               <base> (never a tree's copy) plus SYG_WORKTREE_REGENERABLE (whitespace-separated
-#               globs). One entry per line, # comments: `<glob>` (bash pattern, * crosses /) or
-#               `<path> = <template>`, where the ignored file must equal <base>'s <template>
-#               byte for byte. A malformed line, or a glob that matches every path (*, **, .*),
-#               is skipped with a warning on stderr.
+#               globs). One entry per line, # comments: `<glob>` (bash pattern, * crosses /,
+#               a trailing / dropped) or `<path> = <template>`, where the ignored file must
+#               equal <base>'s <template> byte for byte. A malformed line, or a glob that
+#               matches every path (*, **, .*), is skipped with a warning on stderr.
 #   6 branch    the branch matches SYG_WORKTREE_BRANCH_RE (extended regex; unset or empty:
 #               ^worktree-agent-); a detached HEAD instead needs check 7
 #   7 detached  HEAD's commit is reachable from <base> or a local branch
-# <base> is origin/<default branch> (origin/HEAD, else origin/main), compared as the local ref
-# stands (fetch first for a fresh verdict); with no such ref every tree is HOLD:no-base.
+# <base> is --base REF, else SYG_WORKTREE_BASE, else origin/<default branch> (origin/HEAD,
+# else origin/main), compared as the local ref stands (fetch first for a fresh verdict);
+# a configured ref that does not resolve, or no default ref, makes every tree HOLD:no-base;
+# for a repo whose integration branch is not its default branch (e.g. git-flow develop),
+# set it to that branch's remote-tracking ref. A configured ref starting with - exits 2.
 # --locks also lists index.lock files in the repo's .git and every worktree's git dir; a lock
 # is stale when it is 0 bytes, older than SYG_WORKTREE_LOCK_AGE_MIN minutes (integer, default
 # 10), and no live git process works in the repo. --locks-apply deletes exactly the stale ones.
@@ -43,7 +46,7 @@ set -uo pipefail
 
 usage() { sed -n '2,/^[^#]/s/^# \{0,1\}//p' "$0"; }
 
-APPLY=false LOCKS=false LOCKS_APPLY=false JSON=false REPO=.
+APPLY=false LOCKS=false LOCKS_APPLY=false JSON=false REPO=. BASE_ARG="" BASE_SRC=""
 while [ $# -gt 0 ]; do
   case "$1" in
     -h | --help) usage; exit 0 ;;
@@ -53,10 +56,20 @@ while [ $# -gt 0 ]; do
     --json) JSON=true ;;
     --repo) [ $# -ge 2 ] || { usage >&2; exit 2; }; REPO=$2; shift ;;
     --repo=*) REPO=${1#--repo=} ;;
+    --base) [ $# -ge 2 ] || { usage >&2; exit 2; }; BASE_ARG=$2; BASE_SRC="--base"; shift ;;
+    --base=*) BASE_ARG=${1#--base=}; BASE_SRC="--base" ;;
     *) echo "safe-worktree-clean: unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
   shift
 done
+if [ -z "$BASE_SRC" ] && [ -n "${SYG_WORKTREE_BASE:-}" ]; then
+  BASE_ARG=$SYG_WORKTREE_BASE
+  BASE_SRC="SYG_WORKTREE_BASE"
+fi
+# git would read a leading - as an option (and `--base --apply` would swallow the flag).
+case $BASE_ARG in -*)
+  echo "safe-worktree-clean: base ref from $BASE_SRC may not start with '-': $BASE_ARG" >&2; exit 2 ;;
+esac
 
 SELF_DIR=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
 COMMON=$(git -C "$REPO" rev-parse --path-format=absolute --git-common-dir 2>&1) || {
@@ -86,10 +99,22 @@ done <<<"$PORCELAIN"
 MAIN=$(realpath -m -- "${WT_PATH[0]}")
 WT_ROOT="$MAIN/.claude/worktrees"
 
-BASE_REF=$(git -C "$MAIN" symbolic-ref -q refs/remotes/origin/HEAD 2>/dev/null)
-BASE=${BASE_REF#refs/remotes/}
-[ -n "$BASE" ] || BASE=origin/main
-git -C "$MAIN" rev-parse -q --verify "$BASE^{commit}" >/dev/null || BASE=""
+NO_BASE_REASON=""
+if [ -n "$BASE_SRC" ]; then
+  BASE=$BASE_ARG
+  if ! git -C "$MAIN" rev-parse -q --verify "$BASE^{commit}" >/dev/null; then
+    NO_BASE_REASON="base ref $BASE (from $BASE_SRC) does not resolve to a commit"
+    BASE=""
+  fi
+else
+  BASE_REF=$(git -C "$MAIN" symbolic-ref -q refs/remotes/origin/HEAD 2>/dev/null)
+  BASE=${BASE_REF#refs/remotes/}
+  [ -n "$BASE" ] || BASE=origin/main
+  if ! git -C "$MAIN" rev-parse -q --verify "$BASE^{commit}" >/dev/null; then
+    BASE=""
+  fi
+  NO_BASE_REASON="no origin/HEAD or origin/main ref to compare against"
+fi
 
 # Source of truth for cache names: safe-clean's CACHE_NAMES line, read, never copied.
 CACHE_NAMES=()
@@ -105,11 +130,14 @@ declare -A REGEN_TEMPLATE=()
 trim() { local s=$1; s=${s#"${s%%[![:space:]]*}"}; printf '%s' "${s%"${s##*[![:space:]]}"}"; }
 # A glob of only *s, optionally after one dot (*, **, .*), matches every path or every dotfile,
 # .env secrets included: refused. $1 the glob, $2 where it came from (for the warning).
+# A trailing / (gitignore's directory form) is dropped: ignored paths are matched without it.
 add_glob() {
-  if [[ $1 =~ ^\.?\*+$ ]]; then
+  local g=$1
+  while [[ $g == */ ]]; do g=${g%/}; done
+  if [[ -z $g || $g =~ ^\.?\*+$ ]]; then
     echo "safe-worktree-clean: warning: $2: '$1' matches every path; ignored" >&2
   else
-    REGEN_GLOBS+=("$1")
+    REGEN_GLOBS+=("$g")
   fi
 }
 if [ -n "$BASE" ] && regen_text=$(git -C "$MAIN" cat-file blob "$BASE:$REGEN_FILE" 2>/dev/null); then
@@ -303,7 +331,7 @@ judge_git() {
   local i=$1 t=${WT_PATH[$1]} b=${WT_BRANCH[$1]} head=${WT_HEAD[$1]}
   local out p blob wt_blob idx line sha subj n_unmerged=0 first=""
   if [ -z "$BASE" ]; then
-    hold no-base "no origin/HEAD or origin/main ref to compare against"
+    hold no-base "$NO_BASE_REASON"
     return
   fi
   # 6 + 7: what removal would delete or orphan.

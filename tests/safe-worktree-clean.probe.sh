@@ -130,6 +130,101 @@ NB="$T/nobase"; git init -q -b main "$NB"; echo x > "$NB/x"; git -C "$NB" add x;
 git -C "$NB" worktree add -q -b worktree-agent-n "$NB/.claude/worktrees/n" 2>/dev/null
 expect "$("$TOOL" --repo "$NB" --json)" n HOLD:no-base "no origin: fails closed"
 
+# --- Configurable base ref (--base REF / SYG_WORKTREE_BASE) ---
+reason_msg() { # $1 json, $2 tree name -> first reason detail
+  python3 -c '
+import json, sys
+d = json.loads(sys.argv[1])
+for t in d["worktrees"]:
+    if t["path"].endswith("/" + sys.argv[2]):
+        print(t["reasons"][0]["detail"] if t["reasons"] else "")
+' "$1" "$2"
+}
+
+mk_repo flow
+F="$T/flow"
+git -C "$F" switch -q -c develop
+echo 'gen/' >> "$F/.gitignore"
+echo d > "$F/d.txt"
+git -C "$F" add .gitignore d.txt && git -C "$F" commit -qm "feature d"
+FEAT_D=$(git -C "$F" rev-parse HEAD)
+mkdir -p "$F/.claude"
+echo 'gen/' > "$F/.claude/worktree-regenerable"   # gitignore's directory form: the / is dropped
+git -C "$F" add -f .claude/worktree-regenerable && git -C "$F" commit -qm "regenerable"
+git -C "$F" push -q origin develop 2>/dev/null
+git -C "$F" switch -q main && git -C "$F" branch -q -D develop
+
+add_tree flow merged
+git -C "$F/.claude/worktrees/merged" cherry-pick "$FEAT_D" >/dev/null
+
+add_tree flow dirtydev
+echo d > "$F/.claude/worktrees/dirtydev/d.txt"
+
+add_tree flow regen origin/develop~1   # at "feature d", so detdev's tip (develop) is on no local branch
+mkdir -p "$F/.claude/worktrees/regen/gen"; echo x > "$F/.claude/worktrees/regen/gen/x"
+
+git -C "$F" worktree add -q --detach "$F/.claude/worktrees/detdev" origin/develop 2>/dev/null
+
+# 1. default (no knob)
+J=$("$TOOL" --repo "$F" --json)
+expect "$J" merged HOLD:unmerged "flow default: merged unmerged against origin/main"
+expect "$J" dirtydev HOLD:untracked-new "flow default: dirtydev untracked-new against origin/main"
+expect "$J" regen HOLD:unmerged,ignored "flow default: develop commits not on main, regenerable file only on develop"
+expect "$J" detdev HOLD:detached-unreferenced "flow default: detdev detached-unreferenced against origin/main"
+
+# 2. SYG_WORKTREE_BASE=origin/develop: all four SAFE
+J=$(SYG_WORKTREE_BASE=origin/develop "$TOOL" --repo "$F" --json)
+expect "$J" merged SAFE "flow SYG_WORKTREE_BASE: merged SAFE"
+expect "$J" dirtydev SAFE "flow SYG_WORKTREE_BASE: dirtydev SAFE"
+expect "$J" regen SAFE "flow SYG_WORKTREE_BASE: regen SAFE"
+expect "$J" detdev SAFE "flow SYG_WORKTREE_BASE: detdev SAFE"
+
+# 3. --base origin/develop: all four SAFE
+J=$("$TOOL" --repo "$F" --base origin/develop --json)
+expect "$J" merged SAFE "flow --base: merged SAFE"
+expect "$J" dirtydev SAFE "flow --base: dirtydev SAFE"
+expect "$J" regen SAFE "flow --base: regen SAFE"
+expect "$J" detdev SAFE "flow --base: detdev SAFE"
+
+# 4. --base=origin/develop with SYG_WORKTREE_BASE=origin/nope: merged SAFE (flag wins)
+J=$(SYG_WORKTREE_BASE=origin/nope "$TOOL" --repo "$F" --base=origin/develop --json)
+expect "$J" merged SAFE "flow --base= wins over SYG_WORKTREE_BASE"
+
+# 5. SYG_WORKTREE_BASE= (empty): merged HOLD:unmerged (empty = unset)
+J=$(SYG_WORKTREE_BASE='' "$TOOL" --repo "$F" --json)
+expect "$J" merged HOLD:unmerged "flow SYG_WORKTREE_BASE empty counts as unset"
+
+# 6. SYG_WORKTREE_BASE=origin/nope: merged HOLD:no-base with specific reason message
+J=$(SYG_WORKTREE_BASE=origin/nope "$TOOL" --repo "$F" --json)
+expect "$J" merged HOLD:no-base "SYG_WORKTREE_BASE unresolvable ref fails closed"
+want="base ref origin/nope (from SYG_WORKTREE_BASE) does not resolve to a commit"
+got=$(reason_msg "$J" merged)
+[ "$got" = "$want" ] && ok "reason message: $want" || bad "reason message: got '$got', want '$want'"
+
+# 7. --base origin/nope: HOLD:no-base with specific reason message
+J=$("$TOOL" --repo "$F" --base origin/nope --json)
+expect "$J" merged HOLD:no-base "--base unresolvable ref fails closed"
+want="base ref origin/nope (from --base) does not resolve to a commit"
+got=$(reason_msg "$J" merged)
+[ "$got" = "$want" ] && ok "reason message: $want" || bad "reason message: got '$got', want '$want'"
+
+# A ref git would read as an option is a usage error, whichever source gave it.
+"$TOOL" --repo "$F" --base --apply >/dev/null 2>&1; rc=$?
+[ "$rc" = 2 ] && ok "--base --apply exits 2 (the flag is not swallowed as the ref)" || bad "--base --apply exit $rc"
+SYG_WORKTREE_BASE=-x "$TOOL" --repo "$F" --json >/dev/null 2>&1; rc=$?
+[ "$rc" = 2 ] && ok "SYG_WORKTREE_BASE=-x exits 2" || bad "SYG_WORKTREE_BASE=-x exit $rc"
+
+# 8. --base as the last argument: exit 2
+"$TOOL" --repo "$F" --base >/dev/null 2>&1; rc=$?
+[ "$rc" = 2 ] && ok "--base as the last argument exits 2" || bad "--base as last argument exit $rc"
+
+# 9. Text mode with --base origin/develop: first line contains base: origin/develop
+out=$("$TOOL" --repo "$F" --base origin/develop)
+first_line=$(head -n 1 <<<"$out")
+grep -q 'base: origin/develop' <<<"$first_line" \
+  && ok "text mode with --base: first line contains base: origin/develop" \
+  || bad "text mode base line: got '$first_line'"
+
 # --- --apply: SAFE trees go, HOLD trees stay. ---
 mk_repo apply
 A="$T/apply"
@@ -321,6 +416,10 @@ J=$(SYG_WORKTREE_REGENERABLE='**' "$TOOL" --repo "$B" --json 2>"$T/broad.err")
 expect "$J" secret HOLD:ignored "5: SYG_WORKTREE_REGENERABLE='**' is refused too"
 grep -q "^safe-worktree-clean: warning: SYG_WORKTREE_REGENERABLE: '\*\*' matches every path; ignored$" "$T/broad.err" \
   && ok "5: the env's match-all glob warns" || { bad "5: env match-all warning"; cat "$T/broad.err"; }
+J=$(SYG_WORKTREE_REGENERABLE='*/' "$TOOL" --repo "$B" --json 2>"$T/broad.err")
+expect "$J" secret HOLD:ignored "5: '*/' is still match-all once its trailing / is dropped"
+grep -q "^safe-worktree-clean: warning: SYG_WORKTREE_REGENERABLE: '\*/' matches every path; ignored$" "$T/broad.err" \
+  && ok "5: '*/' warns" || { bad "5: '*/' warning"; cat "$T/broad.err"; }
 
 # --- The rm guards pass the tool's own invocation untouched (exit 0, no output). ---
 for cmd in 'safe-worktree-clean --repo /srv/team/myrepo --apply' \
