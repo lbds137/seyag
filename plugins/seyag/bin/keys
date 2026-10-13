@@ -268,15 +268,21 @@ class TpmLock:
         argv = creds_command() + [verb] + args
         timeout = env_seconds("SYG_KEYS_TIMEOUT_S", DEFAULT_TIMEOUT_S)
         try:
-            result = subprocess.run(
+            proc = subprocess.Popen(
                 argv,
-                input=data,
-                stdin=subprocess.DEVNULL if data is None else None,
-                capture_output=True,
-                timeout=timeout,
+                stdin=subprocess.DEVNULL if data is None else subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
             )
+            out, err = proc.communicate(input=data, timeout=timeout)
         except subprocess.TimeoutExpired:
+            # Mark before kill: reaping can block forever on a D-state child.
             self.mark(stalled=True)
+            proc.kill()
+            try:
+                proc.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                pass
             raise KeysError(
                 f"systemd-creds {verb} of {what} timed out after {timeout:g} s; the TPM may be "
                 f"stuck. Calls in the next {int(self.stall_s)} s fail fast; a reboot clears it."
@@ -289,8 +295,8 @@ class TpmLock:
         except OSError as e:
             raise KeysError(f"cannot run {argv[0]}: {e.strerror}")
         self.mark(stalled=False)
-        if result.returncode != 0:
-            detail = result.stderr.decode(errors="replace").strip() or "no message"
+        if proc.returncode != 0:
+            detail = err.decode(errors="replace").strip() or "no message"
             if verb == "encrypt":
                 hint = "Without a TPM, set SYG_KEYS_WITH_KEY=host and re-store the keys."
             else:
@@ -299,8 +305,8 @@ class TpmLock:
                     "the TPM is unavailable or was reset, or the file was written by another user "
                     "or machine."
                 )
-            raise KeysError(f"systemd-creds {verb} of {what} failed (exit {result.returncode}): {detail}. {hint}")
-        return result.stdout
+            raise KeysError(f"systemd-creds {verb} of {what} failed (exit {proc.returncode}): {detail}. {hint}")
+        return out
 
     def decrypt(self, path):
         return self.run("decrypt", ["--user", f"--name={credential_name()}", str(path), "-"], None, path)
