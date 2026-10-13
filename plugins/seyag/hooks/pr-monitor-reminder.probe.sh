@@ -168,9 +168,10 @@ check_contains 'gh api repos/{owner}/{repo}/pulls/7/comments'
 # carries no `.cwd`) FIRST — pr-ci-wait has no -C/--cwd flag of its own, so
 # every call it makes (gh api, git cat-file, review auto-detect) needs to
 # already be running from the right directory, not just the --sha
-# substitution's own `git rev-parse HEAD`. Only the SHA's `$(...)` stays
+# substitution's own rev-parse. Only the SHA's `$(...)` stays
 # unresolved.
-check_contains "cd '$REPO_ROOT' && pr-ci-wait 7 --sha \$(git rev-parse HEAD)"
+REPO_BRANCH=$(git -C "$REPO_ROOT" rev-parse --abbrev-ref HEAD)
+check_contains "cd '$REPO_ROOT' && pr-ci-wait 7 --sha \$(git rev-parse 'refs/heads/$REPO_BRANCH')"
 # No 40-hex SHA anywhere in the banner: the substitution must stay unresolved.
 if grep -qE '[0-9a-f]{40}' <<<"$CTX8"; then
   fail "banner: no resolved 40-hex SHA present"
@@ -184,6 +185,33 @@ OUT9=$(printf '%s' "$CREATE_PAYLOAD" | env PATH="$FAKE_BIN:$PATH" SYG_PR_MONITOR
   FAKE_GH_PR_LIST_NUM=999 "$HOOK" 2>&1)
 [[ "$OUT9" == *"PR #123"* ]] && pass "gh pr create: PR number parsed from stdout URL" \
   || { fail "gh pr create: PR number parsed from stdout URL"; printf '%s\n' "$OUT9" | sed 's/^/      /'; }
+
+# --- 9b. gh pr create with payload .cwd prints branch-pinned rev ------------
+CREATE_REPO="$WORK/create-repo"
+mkdir -p "$CREATE_REPO"
+git -C "$CREATE_REPO" init -q -b feat-x
+git -C "$CREATE_REPO" -c user.email=t@t -c user.name=t commit -q --allow-empty -m "create-init"
+CREATE_PAYLOAD_CWD=$(jq -n --arg cwd "$CREATE_REPO" \
+  '{tool_name:"Bash", tool_input:{command:"gh pr create --fill"}, cwd:$cwd, tool_response:{stdout:"https://github.com/o/r/pull/124\n"}}')
+OUT9B=$(printf '%s' "$CREATE_PAYLOAD_CWD" | env PATH="$FAKE_BIN:$PATH" SYG_PR_MONITOR_SEEN_FILE="$WORK/seen9b" \
+  FAKE_GH_PR_LIST_NUM=999 "$HOOK" 2>&1)
+CTX9B=$(jq -r '.hookSpecificOutput.additionalContext' <<<"$OUT9B" 2>/dev/null || echo "")
+[[ "$CTX9B" == *"git rev-parse 'refs/heads/feat-x'"* ]] \
+  && pass "gh pr create with payload .cwd: banner prints refs/heads/feat-x" \
+  || { fail "gh pr create with payload .cwd: banner prints refs/heads/feat-x"; printf '%s\n' "$OUT9B" | sed 's/^/      /'; }
+
+# --- 9c. detached-HEAD fixture prints HEAD rev ------------------------------
+DETACHED_REPO="$WORK/detached-repo"
+mkdir -p "$DETACHED_REPO"
+git -C "$DETACHED_REPO" init -q -b feat-detached
+git -C "$DETACHED_REPO" -c user.email=t@t -c user.name=t commit -q --allow-empty -m "detached-init"
+git -C "$DETACHED_REPO" checkout -q --detach HEAD
+OUT9C=$(run_hook_cwd "Bash" "git push" "$DETACHED_REPO" \
+  SYG_PR_MONITOR_SEEN_FILE="$WORK/seen9c" FAKE_GH_PR_LIST_NUM=88)
+CTX9C=$(jq -r '.hookSpecificOutput.additionalContext' <<<"$OUT9C" 2>/dev/null || echo "")
+[[ "$CTX9C" == *"git rev-parse 'HEAD'"* ]] \
+  && pass "detached-HEAD fixture: banner prints HEAD" \
+  || { fail "detached-HEAD fixture: banner prints HEAD"; printf '%s\n' "$OUT9C" | sed 's/^/      /'; }
 
 # --- 10. dedup keys on (PR, head SHA): a new SHA on the same PR re-prints --
 DEDUP_REPO="$WORK/dedup-repo"

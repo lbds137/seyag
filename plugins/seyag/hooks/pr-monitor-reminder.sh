@@ -279,6 +279,8 @@ DIR=$(printf '%s\n' "$SCAN" | sed -n 's/^DIR=//p')
 DIR="${DIR:-$PWD}"  # priority 4: nothing else resolved, fall back to the
                      # hook process's own cwd.
 
+BRANCH=$(git -C "$DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
+
 PR_NUM=""
 
 # `gh pr create` returns the PR URL on stdout — parsing it avoids the
@@ -296,7 +298,6 @@ fi
 # the tool call it fires after) on a network hang. A timeout kill (exit 124)
 # gets its own stderr note, same fail-open direction (PR_NUM stays empty).
 if [ -z "$PR_NUM" ]; then
-  BRANCH=$(git -C "$DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
   [ -z "$BRANCH" ] && exit 0
   GH_LIST_OUT=$(cd "$DIR" 2>/dev/null && timeout 2 gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number' 2>/dev/null)
   GH_LIST_RC=$?
@@ -332,18 +333,27 @@ chmod 600 "$SEEN_FILE" 2>/dev/null || true
 # quote itself escaped the standard way.
 Q_TOPLEVEL="'$(printf '%s' "$TOPLEVEL" | sed "s/'/'\\\\''/g")'"
 
+if [ -n "$BRANCH" ] && [ "$BRANCH" != "HEAD" ]; then
+  REV="refs/heads/$BRANCH"
+else
+  REV="HEAD"
+fi
+Q_REV="'$(printf '%s' "$REV" | sed "s/'/'\\\\''/g")'"
+
 # The `$(...)` below is printed UNRESOLVED, on purpose — copy the line
 # verbatim except for the already-resolved, single-quoted toplevel path.
-# Hand-transcribing a SHA has failed repeatedly (twice by completing an
-# abbreviated one with invented characters — see pr-ci-wait's own head-SHA
-# validation, which exists because of exactly that), and the substitution
-# resolves the SHA when the watcher actually runs rather than at arm time,
-# closing that window entirely. The toplevel path is baked in as a literal
-# because it's already known now — nothing is gained by re-deriving it in the
-# watcher's own (potentially different) cwd.
+# The rev is the branch checked out at push time, pinned as refs/heads/<branch>
+# so a later `git switch` cannot change what it resolves to; detached HEAD
+# falls back to HEAD. Hand-transcribing a SHA has failed repeatedly (twice by
+# completing an abbreviated one with invented characters — see pr-ci-wait's own
+# head-SHA validation, which exists because of exactly that), and the
+# substitution resolves the SHA when the watcher actually runs rather than at
+# arm time, closing that window entirely. The toplevel path is baked in as a
+# literal because it's already known now — nothing is gained by re-deriving it in
+# the watcher's own (potentially different) cwd.
 #
 # The command `cd`s into the toplevel FIRST, rather than only anchoring the
-# `--sha` substitution's own `git rev-parse HEAD`: pr-ci-wait itself has no
+# `--sha` substitution's own `git rev-parse`: pr-ci-wait itself has no
 # `-C`/`--cwd` flag, so its `gh api repos/{owner}/{repo}/...` calls, its
 # `git cat-file -e` existence check, and its `.github/workflows` review
 # auto-detect all resolve against whatever directory the MONITOR happens to
@@ -369,7 +379,7 @@ PATH A — your toolset includes Monitor:
    watcher cannot be cleaned up), and this command exactly, substitution
    included — do NOT resolve the SHA yourself and paste the result:
 
-     cd $Q_TOPLEVEL && pr-ci-wait $PR_NUM --sha \$(git rev-parse HEAD)
+     cd $Q_TOPLEVEL && pr-ci-wait $PR_NUM --sha \$(git rev-parse $Q_REV)
 
 3. When it fires, read which sentinel printed: CI_COMPLETE (released),
    CI_GATE_TIMEOUT, CI_GATE_STARTUP_FAILURE, CI_GATE_REVIEW_MISSING — or none
@@ -387,7 +397,7 @@ BACKGROUND mode (run_in_background — a foreground Bash call is killed at its
 1. Arm it with this command exactly, substitution included — do NOT resolve
    the SHA yourself and paste the result:
 
-     cd $Q_TOPLEVEL && pr-ci-wait $PR_NUM --sha \$(git rev-parse HEAD)
+     cd $Q_TOPLEVEL && pr-ci-wait $PR_NUM --sha \$(git rev-parse $Q_REV)
 
    There is no persistent flag here; the same guard applies — one watcher
    per PR (stop the stale one first: TaskStop with its task id), and act
