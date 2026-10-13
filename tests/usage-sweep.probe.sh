@@ -370,16 +370,15 @@ mkdir -p "$T/thin-state/claude-usage" "$T/thin-projects/slugA"
 } > "$T/thin-projects/slugA/s.jsonl"
 j_thin=$(env -i HOME="$T" PATH=/usr/bin:/bin CLAUDE_PROJECTS_DIR="$T/thin-projects" \
                XDG_STATE_HOME="$T/thin-state" "$US" --since "$(iso 900)" --until "$(iso 2600)" --fit --json)
-[ "$(jq -r '.fit.intervals == 4 and .fit.thin == true' <<<"$j_thin")" = true ] \
-  && ok "thin fit: 4 intervals, 2 families has thin: true (4 < 6)" \
-  || bad "thin fit failed: $(jq -c '.fit | {intervals, thin}' <<<"$j_thin")"
+[ "$(jq -r '.fit.intervals == 4 and .fit.thin == true and .fit.families == 2' <<<"$j_thin")" = true ] \
+  && ok "thin fit: 4 intervals, 2 families has thin: true, families: 2 (4 < 6)" \
+  || bad "thin fit failed: $(jq -c '.fit | {intervals, thin, families}' <<<"$j_thin")"
 
 out_thin=$(env -i HOME="$T" PATH=/usr/bin:/bin CLAUDE_PROJECTS_DIR="$T/thin-projects" \
                  XDG_STATE_HOME="$T/thin-state" "$US" --since "$(iso 900)" --until "$(iso 2600)" --fit)
 grep -q "note: only 4 intervals for 2 families; rates and ranges are rough" <<<"$out_thin" \
   && ok "thin fit text output prints rough warning note" \
   || bad "thin fit missing rough warning note: $out_thin"
-
 
 # --- --meter week fixture: precise weekly ticks, flat 5h meter, reset splits chain without spanning interval ---
 mkdir -p "$T/week-state/claude-usage" "$T/week-projects/slugA" "$T/week-pos-state/claude-usage"

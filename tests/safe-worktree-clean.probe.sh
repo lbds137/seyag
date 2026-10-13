@@ -218,6 +218,14 @@ SYG_WORKTREE_BASE=-x "$TOOL" --repo "$F" --json >/dev/null 2>&1; rc=$?
 "$TOOL" --repo "$F" --base >/dev/null 2>&1; rc=$?
 [ "$rc" = 2 ] && ok "--base as the last argument exits 2" || bad "--base as last argument exit $rc"
 
+# Empty --base / --base= is a usage error
+err=$("$TOOL" --repo "$F" --base= 2>&1 >/dev/null); rc=$?
+[ "$rc" = 2 ] && grep -q 'safe-worktree-clean: --base needs a ref' <<<"$err" \
+  && ok "--base= exits 2 with '--base needs a ref'" || bad "--base= (rc $rc, err '$err')"
+err=$("$TOOL" --repo "$F" --base '' 2>&1 >/dev/null); rc=$?
+[ "$rc" = 2 ] && grep -q 'safe-worktree-clean: --base needs a ref' <<<"$err" \
+  && ok "--base '' exits 2 with '--base needs a ref'" || bad "--base '' (rc $rc, err '$err')"
+
 # 9. Text mode with --base origin/develop: first line contains base: origin/develop
 out=$("$TOOL" --repo "$F" --base origin/develop)
 first_line=$(head -n 1 <<<"$out")
@@ -284,7 +292,7 @@ seq 1 9 > "$S/f.txt"; printf '\0\n1\n2\n3\n4\n5\n6\n7\n8\n9\n' > "$S/bin.dat"
 git -C "$S" add . && git -C "$S" commit -qm third && git -C "$S" push -q origin main 2>/dev/null
 for n in subset extrahunk conflict stagedsubset stagedextra untrackedsubset untrackedinterleaved \
   untrackedempty untrackedextra untrackedreorder untrackednlok untrackednl untrackedbinary \
-  deletion binary modechmod modestaged modetype hiddenassume hiddenskip untrackedexec modecontrol; do add_tree sub "$n"; done
+  deletion binary modechmod modestaged modetype hiddenassume hiddenskip hiddenboth untrackedexec modecontrol; do add_tree sub "$n"; done
 sed -i 's/^2$/X/; s/^9$/driver/' "$S/f.txt"; sed -i 's/^2$/X/; s/^9$/driver/' "$S/bin.dat"
 printf 'u1\nu2\nu3\n' > "$S/u.txt"; printf 'v1\nv2' > "$S/v.txt"; printf '\0\nw1\nw2\n' > "$S/w.bin"
 git -C "$S" add . && git -C "$S" commit -qm fourth && git -C "$S" push -q origin main 2>/dev/null
@@ -311,6 +319,7 @@ git -C "$W/modestaged" update-index --chmod=+x f.txt                # staged mod
 git -C "$W/modetype" update-index --cacheinfo "120000,$(git -C "$W/modetype" rev-parse HEAD:f.txt),f.txt"
 sed -i 's/^5$/W/' "$W/hiddenassume/f.txt"; git -C "$W/hiddenassume" update-index --assume-unchanged f.txt
 sed -i 's/^5$/W/' "$W/hiddenskip/f.txt"; git -C "$W/hiddenskip" update-index --skip-worktree f.txt
+sed -i 's/^5$/W/' "$W/hiddenboth/f.txt"; git -C "$W/hiddenboth" update-index --assume-unchanged f.txt; git -C "$W/hiddenboth" update-index --skip-worktree f.txt
 cp "$S/u.txt" "$W/untrackedexec/u.txt"; chmod +x "$W/untrackedexec/u.txt"   # base's bytes, base 100644
 # Trees at the base itself (c4): a mode change with the blob still equal to base's.
 for n in modeonly modeonlystaged; do add_tree sub "$n"; done
@@ -339,6 +348,10 @@ expect "$J" modestaged HOLD:dirty "4: a staged mode change the base lacks (conte
 expect "$J" modetype HOLD:dirty "4: a staged file-to-symlink type change, blob unchanged"
 expect "$J" hiddenassume HOLD:hidden "4: an edit hidden by assume-unchanged"
 expect "$J" hiddenskip HOLD:hidden "4: an edit hidden by skip-worktree"
+expect "$J" hiddenboth HOLD:hidden "4: an edit hidden by skip-worktree and assume-unchanged"
+want="f.txt is marked skip-worktree and assume-unchanged; its edits are not visible"
+got=$(reason_msg "$J" hiddenboth)
+[ "$got" = "$want" ] && ok "reason message: $want" || bad "reason message: got '$got', want '$want'"
 expect "$J" untrackedexec HOLD:untracked-differs "4: untracked file with base's bytes but the executable bit base lacks"
 expect "$J" modeonly HOLD:dirty "4: chmod +x at base, blob equal to base's"
 expect "$J" modeonlystaged HOLD:dirty "4: staged chmod +x at base, blob equal to base's"

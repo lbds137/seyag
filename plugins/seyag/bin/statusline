@@ -202,14 +202,14 @@ pct_color() {
 # it: the LITERAL \033[...m color text stripped, codepoints counted. ${#} counts
 # bytes under a non-UTF-8 locale (` · `, ⎇ and ▲ are multibyte), so the count
 # runs under C.UTF-8, scoped to this function; where that locale is missing,
-# bash's setlocale warning is silenced and the count falls back to the
-# inherited locale.
+# the locale assignment's setlocale warning is silenced and the count falls
+# back to the inherited locale.
 visible_width() {
     local stripped
     stripped=$(printf '%s' "$1" | sed 's/\\033\[[0-9;]*m//g')
-    local LC_ALL=C.UTF-8
+    local LC_ALL=C.UTF-8 2>/dev/null
     printf '%s' "${#stripped}"
-} 2>/dev/null
+}
 
 # wrap_rows <budget> — re-flow stdin's sep-joined segment line into rows that
 # fit <budget> visible columns, breaking only at segment boundaries. Visible
