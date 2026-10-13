@@ -30,6 +30,7 @@ temporal-marker-guard	guards-commit
 pr-monitor-reminder	pr-watch
 dispatch-posture-gate	dispatch
 api-credit-ledger	api-credit
-@profile	full	session rules route turn-shape context guards-shell guards-outbound guards-commit pr-watch dispatch api-credit
-@profile	guards	guards-shell guards-outbound guards-commit context dispatch route session api-credit
-@profile	none	session api-credit
+launch-record	launch-record
+@profile	full	session rules route turn-shape context guards-shell guards-outbound guards-commit pr-watch dispatch api-credit launch-record
+@profile	guards	guards-shell guards-outbound guards-commit context dispatch route session api-credit launch-record
+@profile	none	session api-credit launch-record
