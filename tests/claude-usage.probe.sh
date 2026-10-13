@@ -375,9 +375,39 @@ run >/dev/null
 [ "$(wc -l < "$log")" = 2 ] && [ "$(tail -1 "$log" | jq '.five_hour_pct')" = 13 ] \
     && ok "log: a changed reading appends a line" || bad "log: changed reading not appended: $(cat "$log")"
 
+# --- prev_epoch and CLAUDE_USAGE_TTL ---
+# A first-ever reading has no prev_epoch key.
+rm -f "$log" "$log.last"
+now=$(date +%s)
+fixture 10 20 0; touch -d "@$((now - 120))" "$tmp/claude-statusline/usage.json"; run >/dev/null
+[ "$(wc -l < "$log")" = 1 ] && jq -e 'has("prev_epoch") | not' "$log" >/dev/null \
+    && ok "log: first-ever reading has no prev_epoch key" || bad "log first-ever prev_epoch: $(cat "$log")"
+
+# Two fetches with different mtimes and the SAME numbers, then a third with new numbers:
+# the log has 2 lines, and the second line's prev_epoch equals the second fetch's mtime.
+rm -f "$log" "$log.last"
+t1=$((now - 120))
+t2=$((now - 60))
+t3=$now
+fixture 10 20 0; touch -d "@$t1" "$tmp/claude-statusline/usage.json"; run >/dev/null
+fixture 10 20 0; touch -d "@$t2" "$tmp/claude-statusline/usage.json"; run >/dev/null
+fixture 11 20 0; touch -d "@$t3" "$tmp/claude-statusline/usage.json"; run >/dev/null
+[ "$(wc -l < "$log")" = 2 ] && [ "$(tail -1 "$log" | jq -r '.prev_epoch')" = "$t2" ] \
+    && ok "log: prev_epoch records the last unchanged fetch epoch ($t2)" || bad "log prev_epoch: $(cat "$log")"
+
+# CLAUDE_USAGE_TTL=40 with a 50-second-old cache tries a refresh; CLAUDE_USAGE_TTL=10 keeps 120.
+fixture 10 20 0; touch -d "@$((now - 50))" "$tmp/claude-statusline/usage.json"
+rm -f "$tmp/claude-statusline/usage.json.lock"
+CLAUDE_USAGE_TTL=10 run >/dev/null
+[ ! -e "$tmp/claude-statusline/usage.json.lock" ] \
+    && ok "CLAUDE_USAGE_TTL=10 keeps 120s TTL (50s cache not refreshed)" || bad "TTL=10 refreshed"
+CLAUDE_USAGE_TTL=40 run >/dev/null
+[ -e "$tmp/claude-statusline/usage.json.lock" ] \
+    && ok "CLAUDE_USAGE_TTL=40 refreshes 50s cache (lock created)" || bad "TTL=40 did not refresh"
+
 # Producer -> consumer: two readings written by claude-usage feed usage-sweep --points, which
 # also reaches claude-usage --json through PATH (a shim execs this build).
-rm -f "$log"
+rm -f "$log" "$log.last"
 now=$(date +%s)
 fixture 20 30 5; touch -d "@$((now - 60))" "$tmp/claude-statusline/usage.json"; run >/dev/null
 fixture 25 32 5; touch -d "@$now" "$tmp/claude-statusline/usage.json"; run >/dev/null
@@ -392,5 +422,49 @@ jq -e '.points.readings_used == 2 and .points.readings_skipped == 0 and .points.
        and .points.five_hour_delta == 5 and .points.five_hour_usable == true' <<< "$j" >/dev/null 2>&1 \
     && ok "consumer: --points prices the producer's two readings (week +2, 5h +5)" \
     || bad "consumer points (rc $rc): $(jq -c '.points' <<< "$j" 2>/dev/null || echo "$j")"
+
+# --- five_hour_resets_at / weekly_resets_at in reading log ---
+# A logged line carries five_hour_resets_at and weekly_resets_at rounded to the minute (...:59.7 rounds up)
+rm -f "$log" "$log.last"
+jq -n '{
+    five_hour: {utilization: 15, resets_at: "2026-10-13T06:09:59.700000+00:00"},
+    seven_day: {utilization: 25, resets_at: "2026-10-20T06:09:59.700000+00:00"}
+}' > "$tmp/claude-statusline/usage.json"
+run >/dev/null
+[ "$(wc -l < "$log")" = 1 ] \
+    && jq -e '.five_hour_resets_at == 1791871800 and .weekly_resets_at == 1792476600' "$log" >/dev/null \
+    && ok "log: carries five_hour_resets_at and weekly_resets_at rounded to minute (...:59.7 -> :10:00)" \
+    || bad "log resets_at rounded: $(cat "$log")"
+
+# A cache with no resets_at logs null
+rm -f "$log" "$log.last"
+jq -n '{
+    five_hour: {utilization: 15},
+    seven_day: {utilization: 25}
+}' > "$tmp/claude-statusline/usage.json"
+run >/dev/null
+[ "$(wc -l < "$log")" = 1 ] \
+    && jq -e '.five_hour_resets_at == null and .weekly_resets_at == null' "$log" >/dev/null \
+    && ok "log: cache with no resets_at logs null for reset fields" \
+    || bad "log resets_at null: $(cat "$log")"
+
+# Two fetches with identical percentages but resets_at 5 h apart log two lines
+rm -f "$log" "$log.last"
+now=$(date +%s)
+jq -n '{
+    five_hour: {utilization: 15, resets_at: "2026-10-13T06:00:00.000000+00:00"},
+    seven_day: {utilization: 25, resets_at: "2026-10-20T06:00:00.000000+00:00"}
+}' > "$tmp/claude-statusline/usage.json"
+touch -d "@$((now - 60))" "$tmp/claude-statusline/usage.json"
+run >/dev/null
+jq -n '{
+    five_hour: {utilization: 15, resets_at: "2026-10-13T11:00:00.000000+00:00"},
+    seven_day: {utilization: 25, resets_at: "2026-10-20T06:00:00.000000+00:00"}
+}' > "$tmp/claude-statusline/usage.json"
+touch -d "@$now" "$tmp/claude-statusline/usage.json"
+run >/dev/null
+[ "$(wc -l < "$log")" = 2 ] \
+    && ok "log: two fetches with identical percentages but resets_at 5h apart log two lines" \
+    || bad "log identical pct with 5h reset: want 2 lines, got $(wc -l < "$log") ($(cat "$log"))"
 
 exit $fail

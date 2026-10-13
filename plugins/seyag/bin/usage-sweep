@@ -14,6 +14,12 @@ Usage:
   usage-sweep --points             also convert each folder's share into meter points,
                                    priced by claude-usage's readings log
   usage-sweep --by-session         attribute per session (slug/session) instead of per folder
+  usage-sweep --fit                fit per-model meter rates (pts/M) via NNLS over tick intervals
+  usage-sweep --probe START END    compare observed meter ticks vs fitted spend estimate in [START, END]
+  usage-sweep --meter 5h|week      meter to fit (default: 5h)
+  usage-sweep --max-gap SEC        max tick bracket width in seconds (default: 180)
+  usage-sweep --max-span SEC       max interval span in seconds (default: 18000)
+  usage-sweep --boot N             bootstrap resamples for CI (default: 1000)
   usage-sweep --json               machine-readable output
   usage-sweep --no-dedupe          count every usage line (the old, inflated method)
 
@@ -28,18 +34,43 @@ the trend and the delegation ratio; the plan meter is the instrument for pace.
 
 Meter-point shares are of the swept set: with --slug the per-slug points sum
 to less than the window's total weekly delta.
+
+The tick method fits per-model meter rates (points per M weighted tokens) from
+precise meter ticks. claude-usage records prev_epoch to bracket each tick in
+[prev_epoch, epoch]. Ticks with bracket width <= --max-gap seconds (default 180s)
+are precise ticks; intervals join consecutive precise ticks within a chain
+(resets detected via resets_at shifts > 600 s or drops > 0.5%, or gaps > --max-span, split chains). For each interval,
+Δpoints = Σ_family rate_family × spend_family. Non-negative least squares (NNLS)
+over active families solves for rates, with a bootstrap CI (--boot N, default 1000).
+--boot costs time linearly (about a few seconds at 1000 resamples for ~150 intervals);
+lower it for very long windows.
+A dense reading log keeps tick brackets tight: poller recipe
+CLAUDE_USAGE_TTL=55 claude-usage --json >/dev/null run every 60 s (a timer) keeps
+brackets <= ~60 s.
 """
 import argparse
 import json
 import os
+import random
 import subprocess
 import sys
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
+from itertools import combinations
 from pathlib import Path
 
 USAGE_FIELDS = ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
 WEIGHTS = {"input": 1.0, "output": 5.0, "cache_read": 0.1, "cache_write": 1.25}
+FITTED_FAMILIES = ("opus", "sonnet", "haiku", "fable", "claude-other")
+
+
+def family(model):
+    if not model.startswith("claude-"):
+        return "unbilled"
+    for fam in ("opus", "sonnet", "haiku", "fable"):
+        if fam in model:
+            return fam
+    return "claude-other"
 
 
 def parse_ts(s):
@@ -81,7 +112,7 @@ def readings_log_path():
 
 
 def read_readings(path):
-    # Returns ([{epoch, weekly_pct, five_hour_pct}, ...], skipped_malformed_count).
+    # Returns ([{epoch, weekly_pct, five_hour_pct, prev_epoch, five_hour_resets_at, weekly_resets_at}, ...], skipped_malformed_count).
     readings, skipped = [], 0
     try:
         fh = open(path, errors="replace")
@@ -92,14 +123,344 @@ def read_readings(path):
             try:
                 e = json.loads(raw)
                 fh5 = e.get("five_hour_pct")
+                pe = e.get("prev_epoch")
+                prev_epoch = None
+                if pe is not None and not isinstance(pe, bool):
+                    try:
+                        prev_epoch = int(pe)
+                    except (AttributeError, TypeError, ValueError):
+                        prev_epoch = None
+
+                def parse_reset(val):
+                    if val is None or isinstance(val, bool):
+                        return None
+                    try:
+                        return int(val)
+                    except (AttributeError, TypeError, ValueError):
+                        return None
+
+                fh_reset = parse_reset(e.get("five_hour_resets_at"))
+                wk_reset = parse_reset(e.get("weekly_resets_at"))
+
                 readings.append({"epoch": int(e["epoch"]),
                                  "weekly_pct": float(e["weekly_pct"]),
-                                 "five_hour_pct": None if fh5 is None else float(fh5)})
+                                 "five_hour_pct": None if fh5 is None else float(fh5),
+                                 "prev_epoch": prev_epoch,
+                                 "five_hour_resets_at": fh_reset,
+                                 "weekly_resets_at": wk_reset})
             except (AttributeError, KeyError, TypeError, ValueError):
                 skipped += 1  # a malformed line, or a JSON-valid one with wrong-typed values
                 continue
     readings.sort(key=lambda r: r["epoch"])
     return readings, skipped
+
+
+def solve_linear(A, b):
+    # Solves Ax = b using Gaussian elimination with partial pivoting.
+    # Returns list of floats x, or None if singular.
+    n = len(A)
+    M = [list(A[i]) + [float(b[i])] for i in range(n)]
+    for i in range(n):
+        max_row = i
+        max_val = abs(M[i][i])
+        for r in range(i + 1, n):
+            if abs(M[r][i]) > max_val:
+                max_val = abs(M[r][i])
+                max_row = r
+        if max_val < 1e-12:
+            return None
+        if max_row != i:
+            M[i], M[max_row] = M[max_row], M[i]
+        pivot = M[i][i]
+        for r in range(i + 1, n):
+            factor = M[r][i] / pivot
+            for c in range(i, n + 1):
+                M[r][c] -= factor * M[i][c]
+    x = [0.0] * n
+    for i in range(n - 1, -1, -1):
+        s = M[i][n]
+        for c in range(i + 1, n):
+            s -= M[i][c] * x[c]
+        if abs(M[i][i]) < 1e-12:
+            return None
+        x[i] = s / M[i][i]
+    return x
+
+
+def nnls(X, y):
+    # Solves non-negative least squares by subset enumeration.
+    # X is m x k, y is length m.
+    # Returns (best_beta, best_rss).
+    m = len(y)
+    k = len(X[0]) if m > 0 and len(X) > 0 else 0
+    if k == 0:
+        return [0.0] * k, sum(yi ** 2 for yi in y)
+    best_beta = [0.0] * k
+    best_rss = sum(yi ** 2 for yi in y)
+
+    for size in range(1, k + 1):
+        for subset in combinations(range(k), size):
+            p = len(subset)
+            A = [[0.0] * p for _ in range(p)]
+            b = [0.0] * p
+            for r in range(p):
+                col_r = subset[r]
+                for c in range(p):
+                    col_c = subset[c]
+                    A[r][c] = sum(X[i][col_r] * X[i][col_c] for i in range(m))
+                b[r] = sum(X[i][col_r] * y[i] for i in range(m))
+            sol = solve_linear(A, b)
+            if sol is None:
+                continue
+            if all(coef >= -1e-9 for coef in sol):
+                sol_clamped = [max(0.0, c) for c in sol]
+                full_beta = [0.0] * k
+                for idx, col in enumerate(subset):
+                    full_beta[col] = sol_clamped[idx]
+                rss = 0.0
+                for i in range(m):
+                    pred = sum(X[i][j] * full_beta[j] for j in range(k))
+                    rss += (y[i] - pred) ** 2
+                if rss < best_rss:
+                    best_rss = rss
+                    best_beta = full_beta
+    return best_beta, best_rss
+
+
+def percentile(vals, p):
+    if not vals:
+        return 0.0
+    sv = sorted(vals)
+    k = (len(sv) - 1) * (p / 100.0)
+    f = int(k)
+    c = min(f + 1, len(sv) - 1)
+    d = k - f
+    return sv[f] * (1.0 - d) + sv[c] * d
+
+
+def extract_ticks_and_intervals(readings, replies, meter_field, max_gap, max_span, since_ts, until_ts):
+    valid_readings = [r for r in readings if r.get(meter_field) is not None]
+    chains = [[]]
+    ticks_total = 0
+    ticks_precise = 0
+    reset_field = "five_hour_resets_at" if meter_field == "five_hour_pct" else "weekly_resets_at"
+    for a, b in zip(valid_readings, valid_readings[1:]):
+        a_v = a[meter_field]
+        b_v = b[meter_field]
+        a_reset = a.get(reset_field)
+        b_reset = b.get(reset_field)
+
+        is_reset = False
+        if a_reset is not None and b_reset is not None:
+            if abs(b_reset - a_reset) > 600:
+                is_reset = True
+        else:
+            if b_v < a_v - 0.5:
+                is_reset = True
+
+        if (b["epoch"] - a["epoch"]) > max_span:
+            chains.append([])
+            continue
+        elif is_reset:
+            chains.append([])
+            continue
+
+        if b_v > a_v:
+            lo = max(a["epoch"], b["prev_epoch"]) if b.get("prev_epoch") is not None else a["epoch"]
+            hi = b["epoch"]
+            t = (lo + hi) / 2.0
+            width = hi - lo
+            precise = (width <= max_gap)
+
+            in_window = True
+            if since_ts is not None and hi < since_ts:
+                in_window = False
+            if until_ts is not None and hi > until_ts:
+                in_window = False
+
+            if in_window:
+                ticks_total += 1
+                if precise:
+                    ticks_precise += 1
+
+            chains[-1].append({
+                "epoch": b["epoch"],
+                "v": b_v,
+                "lo": lo,
+                "hi": hi,
+                "t": t,
+                "width": width,
+                "precise": precise,
+            })
+
+    intervals = []
+    all_reply_list = list(replies.values())
+    for chain in chains:
+        precise_ticks = [tk for tk in chain if tk["precise"]]
+        for p1, p2 in zip(precise_ticks, precise_ticks[1:]):
+            delta = p2["v"] - p1["v"]
+            t_start = p1["t"]
+            t_end = p2["t"]
+            span = t_end - t_start
+            if span > max_span:
+                continue
+            if since_ts is not None and t_start < since_ts:
+                continue
+            if until_ts is not None and t_end > until_ts:
+                continue
+            if delta <= 0:
+                continue
+
+            iv_spend = {f: 0.0 for f in FITTED_FAMILIES}
+            for r in all_reply_list:
+                rep_epoch = r[5]
+                if t_start <= rep_epoch < t_end:
+                    fam = family(r[3])
+                    w = weigh(r[4])
+                    if fam in iv_spend:
+                        iv_spend[fam] += w
+
+            fitted_spend_M = sum(iv_spend.values()) / 1e6
+            if fitted_spend_M <= 0:
+                continue
+
+            intervals.append({
+                "t_start": t_start,
+                "t_end": t_end,
+                "delta": delta,
+                "spend_M": {f: iv_spend[f] / 1e6 for f in FITTED_FAMILIES},
+            })
+
+    return intervals, ticks_total, ticks_precise
+
+
+def fit_meter_rates(intervals, boot_n=1000):
+    m = len(intervals)
+    if m < 3:
+        sys.stderr.write(f"usage-sweep: --fit needs at least 3 tick intervals, found {m}\n")
+        sys.exit(1)
+
+    active_families = [f for f in FITTED_FAMILIES if sum(iv["spend_M"][f] for iv in intervals) > 0]
+    y = [iv["delta"] for iv in intervals]
+    X = [[iv["spend_M"][f] for f in active_families] for iv in intervals]
+
+    best_beta, best_rss = nnls(X, y)
+
+    y_bar = sum(y) / m
+    sst = sum((yi - y_bar) ** 2 for yi in y)
+    r2 = round(1.0 - best_rss / sst, 4) if abs(sst) > 1e-12 else None
+
+    rates = {f: 0.0 for f in FITTED_FAMILIES}
+    for idx, f in enumerate(active_families):
+        rates[f] = best_beta[idx]
+
+    rng = random.Random(1)
+    boot_samples = []
+    boot_rates = {f: [] for f in FITTED_FAMILIES}
+    for _ in range(boot_n):
+        sample = [intervals[rng.randrange(m)] for _ in range(m)]
+        X_s = [[iv["spend_M"][f] for f in active_families] for iv in sample]
+        y_s = [iv["delta"] for iv in sample]
+        s_beta, _ = nnls(X_s, y_s)
+        s_dict = {f: 0.0 for f in FITTED_FAMILIES}
+        for idx, f in enumerate(active_families):
+            s_dict[f] = s_beta[idx]
+        for f in FITTED_FAMILIES:
+            boot_rates[f].append(s_dict[f])
+        boot_samples.append(s_dict)
+
+    ci90 = {}
+    for f in FITTED_FAMILIES:
+        if active_families and f in active_families:
+            lo = percentile(boot_rates[f], 5)
+            hi = percentile(boot_rates[f], 95)
+            ci90[f] = [round(lo, 4), round(hi, 4)]
+        else:
+            ci90[f] = [0.0, 0.0]
+
+    return rates, ci90, r2, boot_samples
+
+
+def probe_window(start_str, end_str, readings, meter_field, replies, fit_rates, boot_samples, slug_filter=None):
+    start_dt = parse_ts(start_str)
+    end_dt = parse_ts(end_str)
+    start_ts = start_dt.timestamp()
+    end_ts = end_dt.timestamp()
+
+    valid_readings = [r for r in readings if r.get(meter_field) is not None]
+    if not valid_readings:
+        observed = 0.0
+    else:
+        li_cands = [i for i in range(len(valid_readings) - 1, -1, -1) if valid_readings[i]["epoch"] <= start_ts]
+        li = li_cands[0] if li_cands else 0
+        ri_cands = [i for i in range(len(valid_readings)) if valid_readings[i]["epoch"] >= end_ts]
+        ri = ri_cands[0] if ri_cands else len(valid_readings) - 1
+        window = valid_readings[li:ri + 1]
+        observed = 0.0
+        for a, b in zip(window, window[1:]):
+            d = b[meter_field] - a[meter_field]
+            if d > 0:
+                observed += d
+    observed = round(observed, 2)
+
+    all_reply_list = list(replies.values())
+    span_replies = [r for r in all_reply_list if start_ts <= r[5] <= end_ts]
+
+    all_spend = {f: 0.0 for f in FITTED_FAMILIES}
+    for r in span_replies:
+        f = family(r[3])
+        if f in all_spend:
+            all_spend[f] += weigh(r[4])
+    all_spend_M = {f: round(all_spend[f] / 1e6, 2) for f in FITTED_FAMILIES}
+    all_est = sum((all_spend[f] / 1e6) * fit_rates[f] for f in FITTED_FAMILIES)
+
+    all_sample_ests = [
+        sum((all_spend[f] / 1e6) * s[f] for f in FITTED_FAMILIES)
+        for s in boot_samples
+    ]
+    all_ci90 = [
+        round(percentile(all_sample_ests, 5), 2),
+        round(percentile(all_sample_ests, 95), 2),
+    ]
+
+    all_dict = {
+        "spend_M": all_spend_M,
+        "estimate_total": round(all_est, 2),
+        "ci90": all_ci90,
+    }
+
+    probe_result = {
+        "start": start_str,
+        "end": end_str,
+        "observed": observed,
+        "all": all_dict,
+        "unexplained": round(observed - all_est, 2),
+    }
+
+    if slug_filter:
+        run_replies = [r for r in span_replies if r[0] in slug_filter]
+        run_spend = {f: 0.0 for f in FITTED_FAMILIES}
+        for r in run_replies:
+            f = family(r[3])
+            if f in run_spend:
+                run_spend[f] += weigh(r[4])
+        run_spend_M = {f: round(run_spend[f] / 1e6, 2) for f in FITTED_FAMILIES}
+        run_est = sum((run_spend[f] / 1e6) * fit_rates[f] for f in FITTED_FAMILIES)
+        run_sample_ests = [
+            sum((run_spend[f] / 1e6) * s[f] for f in FITTED_FAMILIES)
+            for s in boot_samples
+        ]
+        run_ci90 = [
+            round(percentile(run_sample_ests, 5), 2),
+            round(percentile(run_sample_ests, 95), 2),
+        ]
+        probe_result["run"] = {
+            "spend_M": run_spend_M,
+            "estimate_total": round(run_est, 2),
+            "ci90": run_ci90,
+        }
+
+    return probe_result
 
 
 def meter_points(readings, x, y):
@@ -158,6 +519,18 @@ def main():
                     help="convert each folder's share of the window into meter points from claude-usage's readings log")
     ap.add_argument("--by-session", action="store_true",
                     help="attribute usage per session (slug/session) instead of per folder")
+    ap.add_argument("--fit", action="store_true",
+                    help="fit per-model meter rates (pts/M) via NNLS over tick intervals")
+    ap.add_argument("--probe", nargs=2, metavar=("START", "END"),
+                    help="compare observed meter ticks vs fitted spend estimate in [START, END] (implies --fit)")
+    ap.add_argument("--meter", choices=["5h", "week"], default="5h",
+                    help="meter to fit (5h or week; default: 5h)")
+    ap.add_argument("--max-gap", type=int, default=180,
+                    help="max tick bracket width in seconds for a precise tick (default: 180)")
+    ap.add_argument("--max-span", type=int, default=18000,
+                    help="max interval span in seconds (default: 18000)")
+    ap.add_argument("--boot", type=int, default=1000,
+                    help="bootstrap resamples for CI (default: 1000)")
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--no-dedupe", action="store_true")
     # Every slug starts with "-", which argparse reads as an option; join "--slug X" into "--slug=X".
@@ -166,6 +539,11 @@ def main():
         arg = rest.pop(0)
         argv.append(f"--slug={rest.pop(0)}" if arg == "--slug" and rest else arg)
     a = ap.parse_args(argv)
+
+    if a.probe:
+        a.fit = True
+    if a.boot < 1:
+        sys.exit("usage-sweep: --boot must be at least 1")
 
     m = meter()
     assumed_window = False
@@ -185,14 +563,26 @@ def main():
     if unknown:
         sys.exit(f"usage-sweep: no such project folder under {root}: {' '.join(unknown)}")
 
-    # Claude Code writes one line per content block of a reply, each repeating the reply's usage;
-    # output_tokens grows across those lines as the reply streams, so keep the largest per reply.
+    slug_set = set(a.slug)
     replies = {}
+    report_replies = {}
     lines = files_read = skipped = anon = 0
-    for slug, scope, f in files(root, set(a.slug)):
-        files_read += 1
-        # A session is the first path segment under the project folder: s1.jsonl is s1,
-        # anything under s1/subagents/ is also s1.
+
+    since_ts = since.timestamp()
+    until_ts = until.timestamp()
+    sweep_since_ts = since_ts
+    sweep_until_ts = until_ts
+    if a.probe:
+        p_start_ts = parse_ts(a.probe[0]).timestamp()
+        p_end_ts = parse_ts(a.probe[1]).timestamp()
+        sweep_since_ts = min(since_ts, min(p_start_ts, p_end_ts))
+        sweep_until_ts = max(until_ts, max(p_start_ts, p_end_ts))
+
+    # The meter is global, so --fit sweeps every folder; --slug then filters only the report.
+    for slug, scope, f in files(root, set() if a.fit else slug_set):
+        is_report_folder = (not slug_set or slug in slug_set)
+        if is_report_folder:
+            files_read += 1
         rel = f.relative_to(root / slug)
         session = rel.parts[0] if len(rel.parts) > 1 else rel.stem
         with open(f, errors="replace") as fh:
@@ -202,15 +592,20 @@ def main():
                 try:
                     e = json.loads(raw)
                 except ValueError:
-                    skipped += 1  # a live session's half-written last line
+                    if is_report_folder:
+                        skipped += 1  # a live session's half-written last line
                     continue
                 msg = e.get("message") or {}
                 u = msg.get("usage")
                 if e.get("type") != "assistant" or not u or not e.get("timestamp"):
                     continue
-                if not (since < parse_ts(e["timestamp"]) < until):
+                ts_dt = parse_ts(e["timestamp"])
+                rep_epoch = ts_dt.timestamp()
+                if not (sweep_since_ts <= rep_epoch <= sweep_until_ts):
                     continue
-                lines += 1
+                in_report_window = since_ts < rep_epoch < until_ts  # strict, as the report always was
+                if is_report_folder and in_report_window:
+                    lines += 1
                 if a.no_dedupe or not msg.get("id"):
                     anon += 1
                     key = ("line", anon)
@@ -219,13 +614,18 @@ def main():
                 usage = {k: u.get(k) or 0 for k in USAGE_FIELDS}  # only the counted fields, to keep RAM small
                 prev = replies.get(key)
                 if prev is None or usage["output_tokens"] > prev[4]["output_tokens"]:
-                    replies[key] = (slug, scope, session, msg.get("model") or "?", usage)
+                    replies[key] = (slug, scope, session, msg.get("model") or "?", usage, rep_epoch)
+
+                if is_report_folder and in_report_window:
+                    prev_rep = report_replies.get(key)
+                    if prev_rep is None or usage["output_tokens"] > prev_rep[4]["output_tokens"]:
+                        report_replies[key] = (slug, scope, session, msg.get("model") or "?", usage, rep_epoch)
 
     by_model = defaultdict(lambda: defaultdict(float))
     by_slug = defaultdict(float)
     by_scope = defaultdict(float)
     by_session = defaultdict(float)
-    for slug, scope, session, model, u in replies.values():
+    for slug, scope, session, model, u, epoch in report_replies.values():
         w = weigh(u)
         d = by_model[model]
         d["weighted"] += w
@@ -240,11 +640,15 @@ def main():
     total = sum(d["weighted"] for d in by_model.values())
 
     points = None
-    if a.points:
+    readings = None
+    readings_skipped = 0
+    if a.points or a.fit:
         rlog = readings_log_path()
         readings, readings_skipped = read_readings(rlog)
         if not readings:
             sys.exit(f"usage-sweep: no usable readings in {rlog} — meter points need the readings log that claude-usage appends on cache refresh")
+
+    if a.points:
         points = meter_points(readings, int(since.timestamp()), int(until.timestamp()))
         points["readings_skipped"] = readings_skipped
         points["by_slug"] = {k: round(w / total * points["weekly_delta"], 2) if total else 0.0
@@ -252,6 +656,58 @@ def main():
         if a.by_session:
             points["by_session"] = {k: round(w / total * points["weekly_delta"], 2) if total else 0.0
                                     for k, w in by_session.items()}
+        points["by_model"] = {k: round(v["weighted"] / total * points["weekly_delta"], 2) if total else 0.0
+                              for k, v in by_model.items()}
+
+    fit_obj = None
+    probe_obj = None
+    if a.fit:
+        meter_field = "five_hour_pct" if a.meter == "5h" else "weekly_pct"
+        intervals, ticks_total, ticks_precise = extract_ticks_and_intervals(
+            readings, replies, meter_field, a.max_gap, a.max_span, since_ts, until_ts
+        )
+        rates, ci90, r2, boot_samples = fit_meter_rates(intervals, boot_n=a.boot)
+
+        all_reply_list = list(replies.values())
+        window_replies = [r for r in all_reply_list if since_ts < r[5] < until_ts]
+        unbilled_weighted = sum(weigh(r[4]) for r in window_replies if family(r[3]) == "unbilled")
+        unbilled_M = round(unbilled_weighted / 1e6, 2)
+        window_spend_M = {
+            f: round(sum(weigh(r[4]) for r in window_replies if family(r[3]) == f) / 1e6, 2)
+            for f in FITTED_FAMILIES
+        }
+        fitted_spend_M = {
+            f: round(sum(iv["spend_M"][f] for iv in intervals), 2)
+            for f in FITTED_FAMILIES
+        }
+
+        families_report = {}
+        for f in FITTED_FAMILIES:
+            r_val = rates[f]
+            families_report[f] = {
+                "pts_per_M": round(r_val, 4),
+                "M_per_pt": round(1.0 / r_val, 2) if r_val > 0 else None,
+                "ci90": ci90[f],
+                "spend_M": fitted_spend_M[f],
+                "window_spend_M": window_spend_M[f],
+            }
+
+        fit_obj = {
+            "meter": a.meter,
+            "intervals": len(intervals),
+            "ticks_total": ticks_total,
+            "ticks_precise": ticks_precise,
+            "r2": r2,
+            "unbilled_M": unbilled_M,
+            "max_gap": a.max_gap,
+            "max_span": a.max_span,
+            "by_family": families_report,
+        }
+
+        if a.probe:
+            probe_obj = probe_window(
+                a.probe[0], a.probe[1], readings, meter_field, replies, rates, boot_samples, slug_filter=slug_set
+            )
 
     result = {
         "since": since.isoformat(),
@@ -270,6 +726,10 @@ def main():
     }
     if points is not None:
         result["points"] = points
+    if fit_obj is not None:
+        result["fit"] = fit_obj
+    if probe_obj is not None:
+        result["probe"] = probe_obj
     if a.json:
         print(json.dumps(result, indent=2))
         return
@@ -307,6 +767,10 @@ def main():
         if a.by_session:
             for k, v in sorted(points["by_session"].items(), key=lambda kv: -kv[1]):
                 print(f"  {k:<48} {v:6.2f} pts")
+        print("  by model: (equal-rate shares; --fit gives per-model rates)")
+        for k, v in sorted(points["by_model"].items(), key=lambda kv: -kv[1]):
+            share = 100 * by_model[k]["weighted"] / total if total else 0
+            print(f"    {k:<46} {share:5.1f}% / {v:6.2f} pts")
         el, er = points["edge_left"], points["edge_right"]
         if el["extrapolated"]:
             print("note: no reading at/before the window start; the first reading stands in for it")
@@ -318,6 +782,32 @@ def main():
         dist = max(el["distance_s"], er["distance_s"])
         if dist > 7200:
             print(f"note: nearest reading is {dist // 60} min from the window edge; points are approximate")
+
+    if fit_obj is not None:
+        print(f"\nfit ({fit_obj['meter']} meter, {fit_obj['intervals']} intervals from {fit_obj['ticks_total']} ticks, {fit_obj['ticks_precise']} precise):")
+        for fam in FITTED_FAMILIES:
+            fdata = fit_obj["by_family"][fam]
+            if fdata["spend_M"] > 0 or fdata["window_spend_M"] > 0 or fdata["pts_per_M"] > 0:
+                rate = fdata["pts_per_M"]
+                lo, hi = fdata["ci90"]
+                m_str = f"{fdata['M_per_pt']:.1f}M" if fdata["M_per_pt"] is not None else "     -"
+                print(f"  {fam:<8} {rate:6.2f} pts/M (90% {lo:.2f}..{hi:.2f})  = {m_str:>6} per pt   spend {fdata['spend_M']:5.1f}M (window {fdata['window_spend_M']:5.1f}M)")
+        r2_val = fit_obj["r2"]
+        print(f"r2 {r2_val:.4f}" if r2_val is not None else "r2 null")
+        print("note: spend the local logs can't see (cloud sessions, GitHub reviews) inflates the rates")
+
+    if probe_obj is not None:
+        print(f"\nprobe {probe_obj['start']} → {probe_obj['end']}:")
+        print(f"  observed:    {probe_obj['observed']:+.1f} pts ({fit_obj['meter']} meter)")
+        all_sp = sum(probe_obj['all']['spend_M'].values())
+        print(f"  all:         {probe_obj['all']['estimate_total']:6.2f} pts (90% {probe_obj['all']['ci90'][0]:.2f}..{probe_obj['all']['ci90'][1]:.2f})  spend {all_sp:.1f}M")
+        if "run" in probe_obj:
+            run_sp = sum(probe_obj['run']['spend_M'].values())
+            print(f"  run:         {probe_obj['run']['estimate_total']:6.2f} pts (90% {probe_obj['run']['ci90'][0]:.2f}..{probe_obj['run']['ci90'][1]:.2f})  spend {run_sp:.1f}M")
+        print(f"  unexplained: {probe_obj['unexplained']:+.2f} pts")
+
+    if a.slug and (a.fit or a.probe):
+        print("note: --fit uses all project folders (ignoring --slug for the fit)")
 
 
 if __name__ == "__main__":

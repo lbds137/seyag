@@ -20,11 +20,18 @@
 # sessions make at most one request per 2 minutes. The token is sent on stdin, not argv.
 # Every run also appends the reading, if new, to ~/.local/state/claude-usage/readings.jsonl
 # (see log_reading; usage-sweep --points reads it).
+# Each logged line also carries prev_epoch, the last earlier fetch seen, so a meter tick lies
+# in [prev_epoch, epoch] (usage-sweep --fit). CLAUDE_USAGE_TTL (integer >= 30) overrides the
+# 120 s TTL; a poller running `CLAUDE_USAGE_TTL=55 claude-usage --json >/dev/null` every 60 s
+# keeps those brackets near 60 s.
 
 set -uo pipefail
 
 cache="${XDG_CACHE_HOME:-$HOME/.cache}/claude-statusline/usage.json"
 ttl=120
+if [[ ${CLAUDE_USAGE_TTL:-} =~ ^[0-9]+$ ]] && [ "$((10#$CLAUDE_USAGE_TTL))" -ge 30 ]; then
+    ttl=$((10#$CLAUDE_USAGE_TTL))
+fi
 # Fleet wind-down (2026-10-04): no new units from 75% of the week, so the rest stays for the owner
 # and GitHub claude-review. The 80% hard stop is the CLAUDE.md "Usage Windows" protocol's job.
 # CLAUDE_USAGE_WEEK_RESERVE overrides it; a non-integer value keeps the default.
@@ -197,21 +204,36 @@ to_reset=$(( five_reset > now ? five_reset - now : 0 ))
 # caller: all its stderr is dropped, and a busy lock skips this reading (the next call logs).
 log_reading() {
     local log="${XDG_STATE_HOME:-$HOME/.local/state}/claude-usage/readings.jsonl" line last fetched
+    local prev_raw prev tmp r_five="null" r_week="null"
     mkdir -p "${log%/*}" || return 0
     fetched=$(stat -c %Y "$cache") || return 0
+    [ "${five_reset:-0}" -gt 0 ] 2>/dev/null && r_five=$(( (five_reset + 30) / 60 * 60 ))
+    [ "${week_reset:-0}" -gt 0 ] 2>/dev/null && r_week=$(( (week_reset + 30) / 60 * 60 ))
     # -S sorts keys, so the dedup string comparison can't be fooled by the API's scope order.
-    line=$(jq -cS --argjson fetched "$fetched" '{
+    line=$(jq -cS --argjson fetched "$fetched" --argjson five_resets_at "$r_five" --argjson weekly_resets_at "$r_week" '{
         ts: ($fetched | todate), epoch: $fetched,
         five_hour_pct: (.five_hour.utilization // null),
+        five_hour_resets_at: $five_resets_at,
         weekly_pct: (.seven_day.utilization // null),
+        weekly_resets_at: $weekly_resets_at,
         scoped: ([ .limits[]? | select(.kind == "weekly_scoped" and .scope.model.display_name != null)
                    | {key: .scope.model.display_name, value: .percent} ] | from_entries)
     }' "$cache") || return 0
     [ -n "$line" ] || return 0
     (
         flock -n 8 || exit 0
+        prev_raw=$(cat "$log.last" 2>/dev/null || true)
+        prev=""
+        [ -s "$log" ] && [[ "$prev_raw" =~ ^[0-9]+$ ]] && prev=$((10#$prev_raw))
+        if [ "$prev_raw" != "$fetched" ]; then
+            tmp="${log}.last.tmp.$$"
+            printf '%s\n' "$fetched" > "$tmp" && mv -f "$tmp" "$log.last"
+        fi
         last=$(tail -n 1 "$log")
-        [ "$(jq -cS 'del(.ts, .epoch)' <<< "$last")" = "$(jq -cS 'del(.ts, .epoch)' <<< "$line")" ] && exit 0
+        [ "$(jq -cS 'del(.ts, .epoch, .prev_epoch)' <<< "$last")" = "$(jq -cS 'del(.ts, .epoch, .prev_epoch)' <<< "$line")" ] && exit 0
+        if [ -n "$prev" ] && [ "$prev" -lt "$fetched" ]; then
+            line=$(jq -cS --argjson prev "$prev" '. + {prev_epoch: $prev}' <<< "$line" 2>/dev/null || printf '%s' "$line")
+        fi
         printf '%s\n' "$line" >> "$log"
     ) 8>"$log.lock"
 }

@@ -29,6 +29,15 @@ usage-sweep --since 2026-09-24T01:15Z
 usage-sweep --json                   # for the numbers you put in the ledger
 ```
 
+### Per-model rates
+
+```bash
+usage-sweep --fit
+usage-sweep --fit --probe START END --slug <folder>
+```
+
+Rates need dense readings, so run the poller recipe (`CLAUDE_USAGE_TTL=55 claude-usage --json >/dev/null` every 60 s) during a measurement.
+
 It reads every main-loop session file and every `subagents/` file (subagent spend is real spend), skips `mined-corpus/`, and **counts each reply once, at its largest `output_tokens`**. Claude Code writes each content block of a reply (thinking, text, tool_use) as its own JSONL line, and each of those lines repeats the reply's usage. The input and cache fields are identical across the lines, while `output_tokens` grows as the reply streams. So summing lines overcounts about 2.2x (measured 2026-09-25 over this machine's logs: 1743M line-summed against 801M counted per reply), and keeping the first line undercounts output by about 30%. `--no-dedupe` reproduces the old line-summing method, only for comparing against old rows.
 
 Folder names starting with `-tmp` embed a session id, so the sweep prints them as one `-tmp*` row.
