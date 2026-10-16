@@ -153,12 +153,12 @@ or_remaining() {
     [ -n "$or_fmt" ] && printf '%s\n' "$or_fmt"
 }
 
-# reset_in <epoch>: " (resets HH:MM, in HhMm)" in local time, or nothing for an unknown (0) reset.
+# reset_in <epoch>: " (resets HH:MM, in Hh Mm)" in local time, or nothing for an unknown (0) reset.
 reset_in() {
     local left
     [ "${1:-0}" -gt 0 ] 2>/dev/null || return 0
     left=$(( $1 - $(date +%s) )); [ "$left" -lt 0 ] && left=0
-    printf ' (resets %s, in %dh%dm)' "$(date -d "@$1" +%H:%M)" $((left / 3600)) $(( (left % 3600) / 60 ))
+    printf ' (resets %s, in %dh %dm)' "$(date -d "@$1" +%H:%M)" $((left / 3600)) $(( (left % 3600) / 60 ))
 }
 
 # The gate answers before refresh or the cache check: a routed session needs no plan request.
@@ -257,13 +257,13 @@ plan_line() {
     local five_line week_line to_week
     five_line="5h ${five}%"
     if [ "$five_reset" -gt 0 ]; then
-        five_line="$five_line (resets $(date -d "@$five_reset" +%H:%M), in $((to_reset / 3600))h$(( (to_reset % 3600) / 60 ))m)"
+        five_line="$five_line (resets $(date -d "@$five_reset" +%H:%M), in $((to_reset / 3600))h $(( (to_reset % 3600) / 60 ))m)"
     fi
     week_line="week ${week}%"
     # Date and countdown, not just a weekday: "Sun 02:00" read on a Sunday evening looks like tonight.
     if [ "$week_reset" -gt 0 ]; then
         to_week=$(( week_reset - $(date +%s) )); [ "$to_week" -lt 0 ] && to_week=0
-        week_line="$week_line (resets $(date -d "@$week_reset" '+%a %b %-d %H:%M'), in $((to_week / 86400))d$(( (to_week % 86400) / 3600 ))h)"
+        week_line="$week_line (resets $(date -d "@$week_reset" '+%a %b %-d %H:%M'), in $((to_week / 86400))d $(( (to_week % 86400) / 3600 ))h)"
     fi
     [ -n "$scoped" ] && week_line="$week_line · $scoped of its own weekly cap"
     echo "$five_line · $week_line"

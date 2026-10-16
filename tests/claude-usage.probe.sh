@@ -294,10 +294,14 @@ nowe=$(date +%s); r5=$((nowe + 3600 + 150)); rw=$((nowe + 30 * 3600 + 150))
 zai_stub api 42 17 "$r5" "$rw"
 credit_stub '{"remaining_usd":128.557512,"spent_usd":21.44,"next_expiry":"2026-10-21T00:00:00Z","days_left":11}'
 out=$(run --all); rc=$?
-want_z="z.ai: 5h 42% (resets $(date -d "@$r5" +%H:%M), in 1h2m) · week 17% (resets $(date -d "@$rw" +%H:%M), in 30h2m)"
+want_z="z.ai: 5h 42% (resets $(date -d "@$r5" +%H:%M), in 1h 2m) · week 17% (resets $(date -d "@$rw" +%H:%M), in 30h 2m)"
 [ $rc = 0 ] && [ "$(wc -l <<< "$out")" = 3 ] \
     && [[ $(sed -n 1p <<< "$out") == "Anthropic plan: 5h 10% (resets "*" · week 50% (resets "*" · Fable 0% of its own weekly cap" ]] \
     && ok "--all: plan line first, composed like the plain line" || bad "--all plan line (rc $rc): $out"
+grep -qE 'in [0-9]+d [0-9]+h' <<< "$out" && ok "--all: plan week tail formats countdown as 'in Nd Nh'" \
+    || bad "--all plan week tail: $(sed -n 1p <<< "$out")"
+grep -qE 'in [0-9]+h [0-9]+m' <<< "$(sed -n 1p <<< "$out")" && ok "--all: plan five tail formats countdown as 'in Nh Nm'" \
+    || bad "--all plan five tail: $(sed -n 1p <<< "$out")"
 [ "$(sed -n 2p <<< "$out")" = "$want_z" ] && ok "--all: z.ai line from zai-usage --json (api), local reset times + countdowns" \
     || bad "--all z.ai line: got [$(sed -n 2p <<< "$out")], want [$want_z]"
 [ "$(sed -n 3p <<< "$out")" = 'api credit: $128.56 est (exp 10-21, 11d)' ] && ok "--all: api credit line from balance --json (estimate: 'est' after the figure)" \
