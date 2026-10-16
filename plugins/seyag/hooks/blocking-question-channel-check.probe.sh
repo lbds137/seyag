@@ -2,10 +2,12 @@
 # Fixture check for blocking-question-channel-check.sh — run after ANY edit to
 # the hook. Asserts the exit-code table over synthetic transcripts: a turn that
 # ends on a question fires unless AskUserQuestion or PushNotification was used
-# in the same turn. Statements, the stop_hook_active re-stop, and a missing
-# transcript all stay silent. Also pins the banner: a firing quotes the tripped
-# closing line on stderr, and on lanes matched by SYG_BQ_NO_RC_LANES (a broken
-# regex fails open) the advice routes through SendMessage instead.
+# in the same turn; a closing text matching a pending marker (SYG_BQ_PENDING_MARKERS,
+# with its built-in default) fires the same way. Statements, the stop_hook_active
+# re-stop, and a missing transcript all stay silent. Also pins the banner: a firing
+# quotes the tripped closing line on stderr, and on lanes matched by
+# SYG_BQ_NO_RC_LANES (a broken regex fails open) the advice routes through
+# SendMessage instead.
 #
 # Colocated with the hook — the transcript-parsing python is the fragile part;
 # this probe pins its behavior on hook edits.
@@ -50,7 +52,7 @@ check() { # $1=expected_exit $2=label $3=transcript $4=stop_active $5+=stderr re
 }
 
 # Hermetic: ambient lane vars must not flip the legacy cases' advice.
-unset SYG_BQ_NO_RC_LANES ANTHROPIC_BASE_URL
+unset SYG_BQ_NO_RC_LANES ANTHROPIC_BASE_URL SYG_BQ_PENDING_MARKERS
 
 # --- 1. the core fire case ---------------------------------------------------
 mktx "$TMP/a.jsonl" "Both approaches work here. Should I use X or Y?"
@@ -161,5 +163,56 @@ unset SYG_BQ_NO_RC_LANES ANTHROPIC_BASE_URL
 export SYG_BQ_NO_RC_LANES='z\.ai' ANTHROPIC_BASE_URL='https://api.z.ai/api/anthropic'
 check 0 "statement close with lane vars set — silent stays silent" "$TMP/d.jsonl" "" '!.'
 unset SYG_BQ_NO_RC_LANES ANTHROPIC_BASE_URL
+
+# --- 12. pending-marker pass (no closing "?") ---------------------------------
+mktx "$TMP/m1.jsonl" "Everything is staged — say the word and I'll start 3c"
+check 2 "pending marker: 'say the word'" "$TMP/m1.jsonl" "" \
+  'Your closing message ends with:' "say the word and I'll start 3c"
+
+mktx "$TMP/m2.jsonl" "The branch is pushed; still waiting on you for that"
+check 2 "pending marker: 'waiting on you'" "$TMP/m2.jsonl"
+
+mktx "$TMP/m3.jsonl" "Diff is clean, this needs your yes before it ships"
+check 2 "pending marker: 'needs your yes'" "$TMP/m3.jsonl"
+
+mktx "$TMP/m3b.jsonl" "Ready to cut; this needs your go before I tag"
+check 2 "pending marker: 'needs your go'" "$TMP/m3b.jsonl"
+
+mktx "$TMP/m4.jsonl" "Left the two defaults in place; needs your call on the preset"
+check 2 "pending marker: 'needs your call'" "$TMP/m4.jsonl"
+
+mktx "$TMP/m4b.jsonl" "The migration plan need your input on the retention window"
+check 2 "pending marker: 'need your input'" "$TMP/m4b.jsonl"
+
+mktx "$TMP/m5.jsonl" "Two layouts are ready, for you to decide the ordering"
+check 2 "pending marker: 'for you to decide'" "$TMP/m5.jsonl"
+
+mktx "$TMP/m6.jsonl" "Build is deployed to staging, for you to test on the phone"
+check 2 "pending marker: 'for you to test'" "$TMP/m6.jsonl"
+
+mktx "$TMP/m7.jsonl" "Logs are rotated and archived, for you to check in the morning"
+check 2 "pending marker: 'for you to check'" "$TMP/m7.jsonl"
+
+mktx "$TMP/m8.jsonl" "Waiting on you."
+check 2 "pending marker: case-insensitive ('Waiting on you.')" "$TMP/m8.jsonl"
+
+mktx "$TMP/m9.jsonl" "The hook docs quote ${TICK}say the word${TICK} as an example phrase."
+check 0 "pending marker inside inline code span does not fire" "$TMP/m9.jsonl"
+
+export SYG_BQ_PENDING_MARKERS='green light'
+mktx "$TMP/m10.jsonl" "Once the build finishes, consider it a green light from me"
+check 2 "custom SYG_BQ_PENDING_MARKERS trips on its own pattern" "$TMP/m10.jsonl" "" \
+  'consider it a green light from me'
+check 0 "custom SYG_BQ_PENDING_MARKERS replaces the default ('say the word' passes)" "$TMP/m1.jsonl"
+unset SYG_BQ_PENDING_MARKERS
+
+export SYG_BQ_PENDING_MARKERS=""
+check 0 "empty SYG_BQ_PENDING_MARKERS disables the marker pass" "$TMP/m1.jsonl"
+check 2 "empty SYG_BQ_PENDING_MARKERS keeps the closing-'?' check active" "$TMP/a.jsonl"
+unset SYG_BQ_PENDING_MARKERS
+
+export SYG_BQ_PENDING_MARKERS='['
+check 0 "broken SYG_BQ_PENDING_MARKERS regex fails open" "$TMP/m1.jsonl"
+unset SYG_BQ_PENDING_MARKERS
 
 [ "$fail" = 0 ] && echo "ALL PASS" || { echo "FAILURES"; exit 1; }
