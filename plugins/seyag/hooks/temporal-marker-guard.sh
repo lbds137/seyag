@@ -224,6 +224,8 @@ if total > shown:
     print(f"  ... and {total - shown} more")
 print("Dates, PR/issue numbers and review rounds in code comments rot; keep the invariant,")
 print("put the history in the commit message or PR body.")
+if adds:
+    print("A blocked 'git add && git commit' never ran its add: stage alone, check 'git diff --cached', then commit.")
 print("If a marker must stay (a quoted spec date), put SYG_ALLOW_TEMPORAL=1 in the commit command's own prefix.")
 PYEOF
 ) || exit 0

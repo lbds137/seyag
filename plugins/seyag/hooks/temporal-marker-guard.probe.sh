@@ -277,6 +277,23 @@ case "$ERR" in
   *) fail "stderr shape: $ERR" ;;
 esac
 d=$(new_repo)
+printf '// Added 2026-05-06\n' > "$d/dated.ts"
+expect block 'dated comment via git add && git commit' 'git add dated.ts && git commit -m x' "$d"
+if printf '%s\n' "$ERR" | grep -qF "A blocked 'git add && git commit' never ran its add: stage alone, check 'git diff --cached', then commit."; then
+  pass 'stderr carries the staged-index line on git add && git commit block'
+else
+  fail "stderr missing staged-index line: $ERR"
+fi
+d=$(new_repo)
+printf '// Added 2026-05-06\n' > "$d/dated.ts"
+git -C "$d" add dated.ts
+expect block 'dated comment staged before git add && git commit' 'git add dated.ts && git commit -m x' "$d"
+if printf '%s\n' "$ERR" | grep -qF "A blocked 'git add && git commit' never ran its add: stage alone, check 'git diff --cached', then commit."; then
+  pass 'stderr carries the staged-index line when already staged before git add && git commit'
+else
+  fail "stderr missing staged-index line (staged-first): $ERR"
+fi
+d=$(new_repo)
 for i in $(seq 1 12); do printf '// PR #%d\n' "$((100 + i))"; done > "$d/many.ts"
 git -C "$d" add many.ts
 run_hook 'git commit -m x' "$d"
@@ -286,6 +303,11 @@ case "$ERR" in
 esac
 n=$(printf '%s\n' "$ERR" | grep -c '^    // PR #')
 [ "$n" -eq 10 ] && pass 'exactly 10 lines listed' || fail "listed $n lines, expected 10"
+if printf '%s\n' "$ERR" | grep -qF "A blocked 'git add && git commit' never ran its add: stage alone, check 'git diff --cached', then commit."; then
+  fail "plain git commit stderr should not carry the git-add line: $ERR"
+else
+  pass 'plain git commit stderr omits the git-add line'
+fi
 
 printf '\n--- non-Bash tool and malformed input fail open ---\n'
 printf '%s' '{"tool_name":"Write","tool_input":{"command":"git commit -a"}}' | bash "$HOOK" >/dev/null 2>&1 \

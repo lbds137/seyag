@@ -23,11 +23,14 @@ trap cleanup EXIT
 
 FIXTURE="$TMPDIR_PROBE/fixture"
 mkdir -p "$FIXTURE/services/x" "$FIXTURE/packages/y" "$FIXTURE/docs" "$FIXTURE/.claude/worktrees/w1/services/x"
+git -C "$FIXTURE" init -q -b probe
+git -C "$FIXTURE" -c user.email=probe@probe -c user.name=probe commit -q --allow-empty -m seed
 
 # The opt-in regex the probe's project "sets": Tzurot's original scope.
 PROBE_RE='^(services|packages)/.+\.(ts|tsx|js|jsx|mjs|cjs|mts|cts|py)$'
 
 FAILURES=0
+ERR=""
 
 # run <expected-exit> <label> <tool_name> <file_path> <ack_file> [project_dir]
 run() {
@@ -46,17 +49,18 @@ run() {
 
 # run_sized <expected-exit> <label> <payload-json> <ack_file> [project_dir] [src_re]
 # The 6th arg overrides SYG_DISPATCH_SRC_RE; the literal `-` means UNSET.
+# Stores hook stderr in $ERR.
 run_sized() {
   # `${6-...}` (no colon): an EMPTY sixth arg stays empty, it is the env-empty case.
   local expected="$1" label="$2" payload="$3" ack="$4" project="${5:-$FIXTURE}" re="${6-$PROBE_RE}"
   if [ "$re" = "-" ]; then
-    printf '%s' "$payload" \
+    ERR=$(printf '%s' "$payload" \
       | env -u SYG_DISPATCH_SRC_RE CLAUDE_PROJECT_DIR="$project" SYG_DISPATCH_ACK_FILE="$ack" \
-        "$HOOK" >/dev/null 2>&1
+        "$HOOK" 2>&1 >/dev/null)
   else
-    printf '%s' "$payload" \
+    ERR=$(printf '%s' "$payload" \
       | CLAUDE_PROJECT_DIR="$project" SYG_DISPATCH_ACK_FILE="$ack" SYG_DISPATCH_SRC_RE="$re" \
-        "$HOOK" >/dev/null 2>&1
+        "$HOOK" 2>&1 >/dev/null)
   fi
   local actual=$?
   if [ "$actual" -eq "$expected" ]; then
@@ -372,6 +376,93 @@ run_sized 0 "20-line Edit with the worktree AS project root passes" \
   "$(jq -cn --arg o "$(lines 20)" --arg n "$(lines 20)" \
     '{tool_name:"Edit",tool_input:{file_path:"services/x/a.ts",old_string:$o,new_string:$n}}')" \
   "$ACK_IVC" "$WT_ROOT"
+
+# === cumulative per-file line counting ========================================
+
+# --- case c1: 3+3 lines on the same file → second call hard-blocks ------------
+ACK_C1="$TMPDIR_PROBE/ack_c1"
+P_C1=$(edit_payload "$SRC" "$(lines 3)" "$(lines 3)")
+run_sized 2 "cumulative 3+3: first 3-line Edit blocks once (ack path)" "$P_C1" "$ACK_C1"
+run_sized 0 "cumulative 3+3: first 3-line Edit retry passes (cum=3)" "$P_C1" "$ACK_C1"
+run_sized 2 "cumulative 3+3: second 3-line Edit on same file hard-blocks (cum 6 > 5)" "$P_C1" "$ACK_C1"
+run_sized 2 "cumulative 3+3: retry of second 3-line Edit still hard-blocks" "$P_C1" "$ACK_C1"
+if printf '%s\n' "$ERR" | grep -qF "cumulative inline source edit of 6 lines in services/x/a.ts since the last commit (limit 5)"; then
+  printf 'PASS  (stderr)  cumulative block message states per-file cumulative count\n'
+else
+  printf 'FAIL  (stderr)  missing cumulative count line: %s\n' "$ERR"
+  FAILURES=$((FAILURES + 1))
+fi
+
+# --- case c2: 4+1 passes (cum=5); 5+1 hard-blocks ----------------------------
+ACK_C2="$TMPDIR_PROBE/ack_c2"
+P_C2_4=$(edit_payload "$SRC" "$(lines 4)" "$(lines 4)")
+P_C2_1=$(edit_payload "$SRC" "$(lines 1)" "$(lines 1)")
+run_sized 2 "cumulative 4+1: 4-line Edit blocks once (ack path)" "$P_C2_4" "$ACK_C2"
+run_sized 0 "cumulative 4+1: 4-line Edit retry passes (cum=4)" "$P_C2_4" "$ACK_C2"
+run_sized 0 "cumulative 4+1: following 1-line Edit passes (cum exactly 5)" "$P_C2_1" "$ACK_C2"
+run_sized 2 "cumulative 5+1: another 1-line Edit on same file hard-blocks (cum 6 > 5)" "$P_C2_1" "$ACK_C2"
+
+ACK_C2B="$TMPDIR_PROBE/ack_c2b"
+P_C2_5=$(edit_payload "$SRC" "$(lines 5)" "$(lines 5)")
+run_sized 2 "cumulative 5+1 direct: 5-line Edit blocks once (ack path)" "$P_C2_5" "$ACK_C2B"
+run_sized 0 "cumulative 5+1 direct: 5-line Edit retry passes (cum=5)" "$P_C2_5" "$ACK_C2B"
+run_sized 2 "cumulative 5+1 direct: following 1-line Edit hard-blocks (cum 6 > 5)" "$P_C2_1" "$ACK_C2B"
+
+# --- case c3: same-size calls on two different files stay independent ---------
+ACK_C3="$TMPDIR_PROBE/ack_c3"
+SRC_B="$FIXTURE/packages/y/b.ts"
+P_C3_A=$(edit_payload "$SRC" "$(lines 4)" "$(lines 4)")
+P_C3_B=$(edit_payload "$SRC_B" "$(lines 4)" "$(lines 4)")
+run_sized 2 "per-file independence: 4-line Edit to file A blocks once (ack path)" "$P_C3_A" "$ACK_C3"
+run_sized 0 "per-file independence: 4-line Edit to file A retry passes (A cum=4)" "$P_C3_A" "$ACK_C3"
+run_sized 0 "per-file independence: 4-line Edit to file B passes (B cum=4, independent of A)" "$P_C3_B" "$ACK_C3"
+
+# --- case c3b: file A's count persists after file B appends its line ----------
+P_C3_A2=$(edit_payload "$SRC" "$(lines 2)" "$(lines 2)")
+run_sized 2 "per-file persistence: 2-line Edit to file A after file B hard-blocks (A cum 4+2=6)" "$P_C3_A2" "$ACK_C3"
+
+# --- case c4: single 6-line call hard-blocks with no state change -------------
+ACK_C4="$TMPDIR_PROBE/ack_c4"
+P_C4_6=$(edit_payload "$SRC" "$(lines 6)" "$(lines 6)")
+P_C4_2=$(edit_payload "$SRC" "$(lines 2)" "$(lines 2)")
+run_sized 2 "6-line then 2-line: 6-line Edit hard-blocks with no state change" "$P_C4_6" "$ACK_C4"
+run_sized 2 "6-line then 2-line: following 2-line Edit blocks once (fresh ack)" "$P_C4_2" "$ACK_C4"
+run_sized 0 "6-line then 2-line: 2-line Edit retry passes (cum=2)" "$P_C4_2" "$ACK_C4"
+run_sized 2 "6-line then 2-line: 6-line Edit after ack hard-blocks with no state change" "$P_C4_6" "$ACK_C4"
+run_sized 0 "6-line then 2-line: second 2-line Edit passes (cum=4 <= 5)" "$P_C4_2" "$ACK_C4"
+
+# --- case c6: a cumulative hard-block records nothing to the ledger -----------
+ACK_C6="$TMPDIR_PROBE/ack_c6"
+P_C6_3=$(edit_payload "$SRC" "$(lines 3)" "$(lines 3)")
+run_sized 2 "cumulative no-accrual: 3-line Edit blocks once (ack path)" "$P_C6_3" "$ACK_C6"
+run_sized 0 "cumulative no-accrual: 3-line Edit retry passes (cum=3)" "$P_C6_3" "$ACK_C6"
+run_sized 2 "cumulative no-accrual: second 3-line Edit hard-blocks (cum 6 > 5)" "$P_C6_3" "$ACK_C6"
+run_sized 0 "cumulative no-accrual: following 2-line Edit passes (cum 3+2=5)" "$P_C4_2" "$ACK_C6"
+
+# --- case c7: cross-tool accrual (Write accrues into the same ledger as Edit) -
+ACK_C7="$TMPDIR_PROBE/ack_c7"
+P_C7_W4=$(write_payload "$SRC" "$(lines 4)")
+run_sized 2 "cross-tool accrual: 4-line Write blocks once (ack path)" "$P_C7_W4" "$ACK_C7"
+run_sized 0 "cross-tool accrual: 4-line Write retry passes (cum=4)" "$P_C7_W4" "$ACK_C7"
+run_sized 2 "cross-tool accrual: following 2-line Edit to same file hard-blocks (cum 6 > 5)" "$P_C4_2" "$ACK_C7"
+
+# --- case c8: MultiEdit accrual (MultiEdit shares the ledger with Edit) ------
+ACK_C8="$TMPDIR_PROBE/ack_c8"
+P_C8_ME3=$(jq -cn --arg p "$SRC" --arg s2 "$(lines 2)" --arg s1 "$(lines 1)" \
+  '{tool_name:"MultiEdit",tool_input:{file_path:$p,
+     edits:[{old_string:$s2,new_string:$s2},{old_string:$s1,new_string:$s1}]}}')
+run_sized 2 "MultiEdit accrual: 2+1-line MultiEdit blocks once (ack path)" "$P_C8_ME3" "$ACK_C8"
+run_sized 0 "MultiEdit accrual: 2+1-line MultiEdit retry passes (cum=3)" "$P_C8_ME3" "$ACK_C8"
+run_sized 2 "MultiEdit accrual: following 3-line Edit to same file hard-blocks (cum 6 > 5)" "$P_C6_3" "$ACK_C8"
+
+# --- case c5: after a second commit, an over-count file accepts a small edit --
+ACK_C5="$TMPDIR_PROBE/ack_c5"
+run_sized 2 "commit reset: 5-line Edit at commit 1 blocks once (ack path)" "$P_C2_5" "$ACK_C5"
+run_sized 0 "commit reset: 5-line Edit at commit 1 retry passes (cum=5)" "$P_C2_5" "$ACK_C5"
+run_sized 2 "commit reset: 2-line Edit at commit 1 hard-blocks (cum 7 > 5)" "$P_C4_2" "$ACK_C5"
+git -C "$FIXTURE" -c user.email=probe@probe -c user.name=probe commit -q --allow-empty -m second
+run_sized 2 "commit reset: after second commit, 2-line Edit blocks once (new commit ack)" "$P_C4_2" "$ACK_C5"
+run_sized 0 "commit reset: after second commit, 2-line Edit retry passes (cum reset to 2)" "$P_C4_2" "$ACK_C5"
 
 echo "failures: $FAILURES"
 exit $FAILURES

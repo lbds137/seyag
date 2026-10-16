@@ -17,15 +17,19 @@
 # plus every word that follows it up to the next command separator. Each
 # invocation is then tested as a SET, not a sequence: it blocks when it
 # carries a full-cmdline flag (`-f`, `--full`, or a combined short-flag form
-# like `-af`) AND none of its argument words open with the bracket idiom.
+# like `-af`) AND none of its argument words contain a bracket class that
+# cannot itself match a bracket character (no ^, [ or ] inside the class; a
+# word carrying alternation or a class-optionalizing quantifier never earns
+# the credit).
 # Because the test is set membership, not position, ordering never matters —
 # a value-taking option (`-u root`, `--signal TERM`) before or after the
 # flag, an end-of-options `--`, and a `;` glued to the pattern word are all
-# resolved by the same test. The bracket test checks EVERY argument word, not
-# just "the one right after the flag" — safe because pgrep/pkill accept
-# exactly one pattern (`pgrep foo bar` errors "only one pattern can be
-# provided", exit 2), so a bracket-leading word can only be the pattern
-# itself (or, absurdly, an option's value, which is fine to accept as safe).
+# resolved by the same test. The bracket test runs on every raw argument word
+# (the unanchored `=~` finds the class through quotes), not just "the one
+# right after the flag" — safe because pgrep/pkill accept exactly one pattern
+# (`pgrep foo bar` errors "only one pattern can be provided", exit 2), so a
+# word carrying a bracket class is the pattern itself (or an option's value;
+# see KNOWN UNDER-BLOCK below).
 #
 # KNOWN OVER-BLOCK, accepted: this is a WORD scan, not a shell parse, so a
 # `pgrep -f` appearing inside an `echo`, a quoted string, or a heredoc body is
@@ -39,6 +43,11 @@
 # "executed later". Measured over 13,399 real commands (7 days): 283 blocks,
 # 3 of them prose in a cat-written heredoc. Three retries a week do not buy a
 # bypass class.
+#
+# KNOWN UNDER-BLOCK, accepted: a bracket class inside an option's value
+# credits the whole invocation (a word scan cannot tell pattern from value),
+# so an unguarded pattern beside such a value passes; one wasted retry,
+# accepted.
 #
 # Tokenization: a substitution form ($(...), a backtick, a subshell paren, or
 # a leading assignment) is recognized as an invocation start, and the word
@@ -97,7 +106,9 @@ is_start_word() {
 
 # Evaluates one closed invocation's argument words (the command word itself
 # is never passed in) as a SET: blocks when a full-cmdline flag is present
-# and no argument word opens with the bracket idiom.
+# and none of the argument words contain a bracket class that cannot itself
+# match a bracket character (no ^, [ or ] inside the class; a word carrying
+# alternation or a class-optionalizing quantifier never earns the credit).
 evaluate_invocation() {
   local w p has_f=0 has_bracket=0
   for w in "$@"; do
@@ -106,14 +117,8 @@ evaluate_invocation() {
         has_f=1
       fi
     fi
-    # Strip one leading quote character (including a leading $ that precedes
-    # one, for $'...'/$"...") before checking the bracket idiom.
     p="$w"
-    case "$p" in
-      \$\'*|\$\"*) p="${p:2}" ;;
-      \'*|\"*) p="${p:1}" ;;
-    esac
-    [ "${p:0:1}" = "[" ] && has_bracket=1
+    if [[ "$p" =~ \[[^][^]+\] ]] && ! [[ "$p" =~ \| ]] && ! [[ "$p" =~ \][?*{] ]]; then has_bracket=1; fi
   done
   [ "$has_f" -eq 1 ] && [ "$has_bracket" -eq 0 ] && blocked=1
 }
@@ -190,6 +195,7 @@ kills the session.
 Use the bracket form — `pgrep -f '[p]attern'` (the literal `[p]attern`
 in your cmdline does not match the regex) — or list PIDs first and act
 by PID, or wait on a PID file.
+(the class can sit anywhere in the pattern: `pgrep -f 'cc-rou[t]e'`)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 MSG
 exit 2
