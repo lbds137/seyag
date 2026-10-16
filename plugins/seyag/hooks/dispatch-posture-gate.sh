@@ -41,27 +41,35 @@
 #   - Anything under a `.claude/worktrees/` path (a worker's own scratch tree),
 #     including when that worktree IS `$CLAUDE_PROJECT_DIR`.
 #
-# Size measurement (ported from Tzurot's copy unchanged): the inline exemption
-# in the delegation skill is "≤ ~5 lines of mechanical edit", and this gate
-# MEASURES that five from the tool input itself — for an Edit,
-# max(lines(old_string), lines(new_string)); for a Write, lines(content); for a
-# MultiEdit, the sum of those maxima over `edits[]`. Over five touched lines is
-# a HARD block: no ack is recorded and retrying does not pass. Five or fewer
-# falls through to the ack path below. The metric is LINE COUNT, not
-# characters, so one very long line passes under it (accepted: a character
-# metric would misclassify ordinary edits). A Write is sized on the WHOLE
-# `content` on purpose: a Write of an existing file's full body is meant to
-# hard-block.
+# Size measurement: the inline exemption in the delegation skill is "≤ ~5 lines
+# of mechanical edit", and this gate MEASURES that five from the tool input
+# itself — for an Edit, max(lines(old_string), lines(new_string)); for a Write,
+# lines(content); for a MultiEdit, the sum of those maxima over `edits[]`. Over
+# five touched lines in a single call is a HARD block: no ack or cumulative
+# state is recorded and retrying does not pass. For calls of five lines or
+# fewer, the gate also tracks a CUMULATIVE per-file total of touched lines
+# across passed calls (exit 0 only) under the current ack key: if `cum +
+# TOUCHED > 5` for `(ACK_KEY, RESOLVED)`, the call HARD-blocks with no state
+# write, defeating chunked splits across multiple tool calls. A call that
+# passes the hook but fails inside the editing tool (an Edit miss, a file not
+# read yet) still accrues; the count resets at the next commit. The metric is
+# LINE COUNT, not characters, so one very long line passes under it (accepted:
+# a character metric would misclassify ordinary edits). A Write is sized on the
+# WHOLE `content` on purpose: a Write of an existing file's full body is meant
+# to hard-block. Without git state the key falls back to `nohead`/UTC-date, so
+# a non-repo project gets a per-file per-UTC-day count and a burst crossing UTC
+# midnight resets early (accepted). Two same-tree processes can also read the
+# same total and both append (branch-wide, no lock; sequential hook fires are
+# the normal case).
 #
-# Ack semantics: the FIRST blocked edit at a given (UTC date, project dir,
-# branch, HEAD) records an ack key and blocks (exit 2); retrying the SAME call
-# finds the key recorded and passes (exit 0). HEAD is part of the key so the
-# reminder RE-ARMS after every commit: a review-round fix is by construction a
-# post-commit edit. The ack is branch-wide, not caller-scoped: any same-tree
-# process shares one ack per key (a minor fail-open loss). The ack file is
-# `/tmp/claude-<uid>/dispatch-posture-ack` (override: SYG_DISPATCH_ACK_FILE);
-# the SessionStart prune may delete it after SYG_STATE_MAX_DAYS, which only
-# re-arms a day-keyed ack.
+# Ack semantics: `/tmp/claude-<uid>/dispatch-posture-ack` (override:
+# `SYG_DISPATCH_ACK_FILE`; pruned after `SYG_STATE_MAX_DAYS`) holds two entry
+# kinds under `ACK_KEY` = `(UTC date, project dir, branch, HEAD)`: a bare
+# `ACK_KEY` line for the once-per-commit reminder, and `cum:<key>:<path>=<n>`
+# ledger lines for the per-file cumulative line total. Accrual happens on
+# passed calls only (exit 0), per file, and both the reminder and the per-file
+# counts reset when the key changes (a new commit or UTC date; a review-round
+# fix is by construction a post-commit edit).
 #
 # Fail-open on any internal error (missing jq, unwritable ack file, etc.) —
 # a broken nudge must never block real work. run.sh also skips this hook when
@@ -178,8 +186,7 @@ Retrying will NOT pass: no ack is recorded for an over-size edit.
 
 Do one of:
   - dispatch the unit per the \`delegation\` skill (driver specs, worker
-    implements), or hand a review round's batch to the unit's worker; or
-  - split this into edits that each stand alone at five lines or fewer.
+    implements), or hand a review round's batch to the unit's worker.
 
 If you are a dispatched worker editing the main tree, stop and report:
 your dispatch was meant to be worktree-isolated.
@@ -202,7 +209,44 @@ BRANCH=$(git -C "$PROJECT_DIR" branch --show-current 2>/dev/null || echo detache
 HEAD_SHA=$(git -C "$PROJECT_DIR" rev-parse --short HEAD 2>/dev/null || echo nohead)
 ACK_KEY="$(date -u +%F):$PROJECT_DIR:$BRANCH:$HEAD_SHA"
 
+CUM_PREFIX="cum:${ACK_KEY}:${RESOLVED}="
+# Last line wins — the most recent total.
+CUM=$(grep -F -- "$CUM_PREFIX" "$ACK_FILE" 2>/dev/null | tail -n1)
+CUM="${CUM#"$CUM_PREFIX"}"
+case "$CUM" in
+  '' | *[!0-9]*) CUM=0 ;;
+esac
+NEW_CUM=$((CUM + TOUCHED))
+
+if [ "$NEW_CUM" -gt 5 ]; then
+  cat >&2 <<EOF
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+DISPATCH POSTURE — cumulative inline source edit of $NEW_CUM lines in $MATCH_TARGET since the last commit (limit 5)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+The inline exemption is a ≤5-line mechanical edit per file since the
+last commit (the seyag \`delegation\` skill, § When to dispatch). With
+this call, $MATCH_TARGET has $NEW_CUM cumulative touched lines since the
+last commit ($CUM prior + $TOUCHED this call).
+
+Retrying will NOT pass: no state is recorded for an over-size edit.
+
+A split that lands one change over several calls counts as one edit —
+dispatch the unit per the \`delegation\` skill (driver specs, worker
+implements), or hand a review round's batch to the unit's worker.
+
+If you are a dispatched worker editing the main tree, stop and report:
+your dispatch was meant to be worktree-isolated.
+
+This project opted in via SYG_DISPATCH_SRC_RE=$SRC_RE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+EOF
+  exit 2
+fi
+
 if [ -f "$ACK_FILE" ] && grep -qxF "$ACK_KEY" "$ACK_FILE" 2>/dev/null; then
+  if [ "$TOUCHED" -gt 0 ]; then
+    printf '%s%d\n' "$CUM_PREFIX" "$NEW_CUM" >>"$ACK_FILE" 2>/dev/null || true
+  fi
   exit 0
 fi
 

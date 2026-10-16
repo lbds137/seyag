@@ -104,11 +104,29 @@ echo "[done]"'
 run 2 "redirect target opening with a bracket does not rescue the pattern" 'pgrep -f myserver > "[out].log"'
 run 2 "stderr redirect target opening with a bracket"                      'pkill -f node 2> "[err].log"'
 
+# An unterminated `[` or a lone `]` is not a bracket class and must still block.
+run 2 "unterminated bracket is no class"  "pgrep -f 'foo['"
+run 2 "lone closing bracket is no class"  "pkill -f 'brackets]only'"
+run 2 'empty brackets are no class'          "pgrep -f 'node[]'"
+run 2 'negated class can self-match'         "pgrep -f 'node[^x]'"
+run 2 'bracket-matching class can self-match' "pgrep -f 'node[[]'"
+run 2 'reversed brackets are no class'       "pkill -f 'foo]bar[baz'"
+run 2 'alternation branch matches bare text'      "pgrep -fa 'vite|esbuil[d]'"
+run 2 'optional class still self-matches'         "pgrep -f 'serve[r]?'"
+run 2 'zero-or-one quantifier still self-matches' "pgrep -f 'serve[r]{0,1}'"
+run 2 'alternation suffix matches own last char'  "pkill -f 'a[b]c|d'"
+
 # --- non-blocking shapes -----------------------------------------------------
 run 0 "bracket idiom on the second line of a multi-line command" 'echo start
 pgrep -f "[n]ode dist/index.js"'
 run 0 "pgrep -f bracket idiom"                "pgrep -f '[v]itest run'"
 run 0 "pkill -f bracket idiom"                'pkill -f "[n]ode dist/index.js"'
+run 0 "mined FP: mid-word bracket class cc-rou[t]e"    "pgrep -fa 'cc-rou[t]e'"
+run 0 "mined FP: mid-word bracket class source[-]maps" 'pkill -f "source[-]maps"'
+run 0 "mid-word bracket class inside a longer word"    "pgrep -f 'worke[r]-pool'"
+run 0 'mid-word numeric class still passes'  "pgrep -f 'err[0-9]msg'"
+run 0 'plus quantifier still requires the class'  "pgrep -f 'esbuil[d]+'"
+run 0 'multi-class word still passes'             "pkill -f 'wor[k]er[.]js'"
 run 0 "pgrep without -f"                      'pgrep vitest'
 run 0 "pkill without -f"                      'pkill node'
 run 0 "plain kill by pid"                     'kill 1234'
@@ -128,6 +146,7 @@ run 0 "end-of-options then bracket idiom" "pkill -f -- '[c]rond'"
 # full-cmdline flag anywhere in the invocation never blocks at all.
 run 0 "value-taking option after the flag, bracket pattern" "pkill -f -u root '[n]ode'"
 run 0 "value-taking option, no full-cmdline flag at all"    'pgrep -u root nginx'
+run 0 "accepted option-value edge: bracket class in -u value rescues unguarded nginx" "pgrep -f -u 'roo[t]ed' nginx"
 
 # The same substitution/newline shapes as the blocking cases above, pinned on
 # the non-blocking side: the bracket idiom inside a substitution still passes,
