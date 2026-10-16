@@ -10,6 +10,7 @@ The context that wrote a diff cannot see its own assumptions; a fresh reader can
 ## When to dispatch
 
 - **Inline only at ≤ ~5 lines** of mechanical edit in a file already in context. Above that, dispatch, whatever the justification.
+- **Whitespace-only changes carry no content**: before dispatching a mechanical whitespace sweep, and before reviewing a worker's diff, run `git diff -U0 | whitespace-only-diff`; exit 0 — every `-`/`+` pair is equal after deleting all whitespace — means no dispatch and no fresh review round are earned; exit 1 is a normal unit.
 - **Review-round fixes are dispatched**: batch the round's findings into ONE dispatch per round (prefer a `SendMessage` resume of the unit's worker). Inline round-fixes are how self-fed loops start (round N fixing round N-1's fix).
 - **Read fan-outs of ~4+ files, or a search across unknown locations,** go to an `Explore` agent with the cheap model passed on the call (`model: "haiku"`); an omitted `model` inherits the driver's.
 - **Don't delegate work finishable in a handful of tool calls**, and don't re-read what the spec already quotes.
