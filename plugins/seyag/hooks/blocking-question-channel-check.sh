@@ -31,6 +31,13 @@
 # (an ERE; a broken regex fails open to the default advice, with a note on
 # stderr), there is no Remote Control, so the banner routes the ask through
 # SendMessage to the coordinating session instead of the formal channel tools.
+#
+# Pending-marker pass: when the closing line does not end in "?", the whole
+# final assistant text (with inline `...` code spans stripped) is scanned
+# case-insensitively against SYG_BQ_PENDING_MARKERS (an ERE; unset uses the
+# built-in default `say the word|waiting on you|needs? your (yes|go|call|input)|for you to (decide|test|check)`;
+# set to empty disables the pass; a broken regex fails open). The first
+# matching line is quoted in the banner.
 
 set -uo pipefail
 
@@ -137,7 +144,35 @@ if not lines_out:
 # are the same ask as "…right?".
 last_line = re.sub(r"[*_`\s]+$", "", lines_out[-1])
 
-print(("ask\t" + last_line) if last_line.endswith("?") else "ok")
+if last_line.endswith("?"):
+    print("ask\t" + last_line)
+    sys.exit()
+
+DEFAULT_PENDING_MARKERS = (
+    r"say the word|waiting on you"
+    r"|needs? your (yes|go|call|input)|for you to (decide|test|check)"
+)
+raw_markers = os.environ.get("SYG_BQ_PENDING_MARKERS", DEFAULT_PENDING_MARKERS)
+if raw_markers:
+    try:
+        marker_re = re.compile(raw_markers, re.I)
+    except (re.error, TypeError, ValueError, RecursionError, OverflowError):
+        marker_re = None
+    if marker_re is not None:
+        cleaned = re.sub(r"`[^`]*`", "", final_text)
+        if marker_re.search(cleaned):
+            tripped = next(
+                (
+                    ln.strip()
+                    for ln in final_text.splitlines()
+                    if ln.strip() and marker_re.search(re.sub(r"`[^`]*`", "", ln))
+                ),
+                lines_out[-1].strip(),
+            )
+            print("ask\t" + tripped)
+            sys.exit()
+
+print("ok")
 PYEOF
 ) || exit 0
 
