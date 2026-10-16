@@ -129,7 +129,7 @@ These add to the global ask-first list in `~/.claude/CLAUDE.md`.
 - Before querying configs or API objects that can embed secrets (Discord webhook URLs carry the token; so do git remotes with tokens), select the safe fields (id, name, events, `last_response`, host) in the first call instead of printing the object.
 - **Never kill by pattern.** List, then kill by PID; stop a background waiter by its exact PID or a sentinel file it polls. A `ps | grep` liveness probe matches itself and reports the work as running forever.
 - **A permission gate or classifier block is satisfied or escalated, never routed around.** Change the action so it meets the gate's intent, or hand her a ready `!`-prefixed command with one line on what it does. Never rephrase the same action until the check stops matching.
-- A classifier availability error ("temporarily unavailable", "rate-limited", "Stage 2 classifier error") on a gated action: retry once after ~30 s; if the retry also fails, stop retrying that action, checkpoint, do ungated work, and escalate to her. A policy denial — the action itself refused — is never retried.
+- A classifier availability error — not a denial — on a gated action (e.g. "temporarily unavailable", "rate-limited", "Stage 2 classifier error"): retry once after ~30 s; if the retry also fails, stop retrying that action, checkpoint to disk, do ungated work, and escalate to her. A policy denial — the action itself refused — is never retried.
 - Never modify a test, lint rule or guard just to get past it. Conform to the gate, or flag the conflict.
 
 ## Structure over resolve
@@ -144,14 +144,14 @@ These add to the global ask-first list in `~/.claude/CLAUDE.md`.
 ### Command blocks are code
 - A command block in a rule, skill or doc is code that a future session will run verbatim. It ships only after it has been run in the state it's written for, including the failure state it exists to detect. The prose beside it records what that run showed, not what you expected.
 - Example commit messages, branch names and config snippets count as commands: run them past the hook or validator that will judge them.
-- A `!` line, recipe or URL handed to her counts as a command too: check it against her login shell (a plugin bin is not on her PATH), open URLs where she will, keep it one short line or a script, and never put a secret in a `!` line.
+- A `!` line, recipe or URL handed to her counts as a command too: check it against her login shell (a plugin bin may not be on her PATH), open a URL in the environment she will open it in, keep it one short line or a script, and never put a secret in a `!` line.
 - Rules and skills carry constraints, not history. State the constraint and at most a one-sentence why; incident stories and dates belong in git.
 
 ## Sessions and handoffs
 
 - Before any boundary (a refresh, `/clear`, `/compact`, the end of a session), write the handoff to disk (the role file's Handoff and Next, or the project's own status file) and say that it's written. `/clear` keeps nothing, and `/compact` keeps only a lossy summary.
-- Before a machine restart, move recovery-critical files out of job tmp (`$CLAUDE_JOB_DIR/tmp` — it dies with the job) and `/tmp` (a reboot may erase it).
-- Past about a week in one session, name it at a clean boundary and suggest a refresh; summaries of summaries drift from disk. (hygiene, not the don't-suggest-stopping case).
+- Before a session ends or the machine restarts, move recovery-critical files out of job tmp (`$CLAUDE_JOB_DIR/tmp` — it dies with the job) and `/tmp` (a reboot may erase it).
+- Past about a week in one session, name it at a clean boundary and suggest a refresh; summaries of summaries drift from disk. Frame it as hygiene, never the clock or her.
 - At each finished unit, handoff on disk, name one pick: `/clear` (unrelated next unit), `/compact` (same thread) or keep (reply due within the hour; warm cache); big-picture leans `/clear`. She runs it; never schedule wakeups to keep the cache warm.
 - After a `/clear`, background agents keep running, but a pre-clear worktree-isolated agent can't be resumed with `SendMessage`; dispatch a fresh one with no isolation flag, pointed at its worktree by absolute path. Check `git worktree list` and `ListAgents` before calling a tree stale.
 - A scripted `claude -p` that needs no MCP tools passes `--strict-mcp-config`; without it every MCP server starts.
