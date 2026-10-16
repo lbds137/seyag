@@ -21,6 +21,7 @@ broad-walk-guard	guards-shell
 python-heredoc-edit-guard	guards-shell
 lossy-pipe-guard	guards-shell
 cwd-drift-guard	guards-shell
+env-print-guard	guards-shell
 upstream-submission-guard	guards-outbound
 publish-gate	guards-outbound
 session-url-gate	guards-outbound
@@ -31,7 +32,9 @@ pr-monitor-reminder	pr-watch
 dispatch-posture-gate	dispatch
 api-credit-ledger	api-credit
 launch-record	launch-record
+classifier-ledger	classifier-ledger
 handoff-pick-check	handoff-pick-check
-@profile	full	session rules route turn-shape context guards-shell guards-outbound guards-commit pr-watch dispatch api-credit launch-record handoff-pick-check
-@profile	guards	guards-shell guards-outbound guards-commit context dispatch route session api-credit launch-record
-@profile	none	session api-credit launch-record
+status-claim-cite	status-claim-cite
+@profile	full	session rules route turn-shape context guards-shell guards-outbound guards-commit pr-watch dispatch api-credit launch-record classifier-ledger handoff-pick-check status-claim-cite
+@profile	guards	guards-shell guards-outbound guards-commit context dispatch route session api-credit launch-record classifier-ledger
+@profile	none	session api-credit launch-record classifier-ledger
