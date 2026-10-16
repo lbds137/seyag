@@ -90,6 +90,7 @@ If a project stamps its audit cadence somewhere (Tzurot: `pnpm ops cadence:mark 
 | Trust `weekly_resets_at - 7d` after an applied reset | The window start moved |
 | Adopt a new capacity from one reading | A wrong window looks identical to moved limits |
 | Commit the ledger or quote a session id | Machine-local by design; ids are secrets |
+| Count output tokens only | Cache reads carry most of the weighted bill (§ Step 2); a low-output session can still be the expensive one |
 
 ## Related
 

@@ -148,10 +148,16 @@ can read them, and a force-push per round costs a full CI + review re-run
 every cycle and drops reviewer inline-comment anchors. **Critical: `gh pr
 merge --rebase` does NOT autosquash fixup commits.** It runs `git rebase`,
 not `git rebase --autosquash` — fixups land on the base branch with their
-`fixup!` titles intact and clutter `git log` permanently. Autosquash
-deliberately, once, at the end (how, and what the branch's commit messages
-need by then, is the project's own workflow — this skill owns the
-review-response routing, not the fixup-commit cycle's mechanics).
+`fixup!` titles intact and clutter `git log` permanently. The autosquash is
+one command, non-interactive: `GIT_EDITOR=true GIT_SEQUENCE_EDITOR=true git
+rebase --autosquash <base>` — both editors pinned, so it opens no editor and
+rewrites no messages; never `git rebase -i` in an agent session. One push per
+round is still the rule; the exception is the final round, which folds the
+round's fixups and the pre-merge autosquash into one force-push. A mid-PR
+rebase is justified by exactly three things: the owner asks for it, a fixup
+needs `--edit` (a message change), or commits need restructuring. Tidying
+history is not one of them. Rebase-only merging is not
+rebase-before-every-push.
 
 **A fix round re-reads what it touched**: the invariants and comments adjacent to the edited code, before push — the round-N fix that breaks the round-(N-1) fix is the self-fed signature.
 
