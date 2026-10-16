@@ -130,7 +130,7 @@ check 0 "Bash command not matching SYG_HANDOFF_CMDS + no pick passes" "$TMP/bash
   echo '{"type":"assistant","message":{"content":[{"type":"text","text":"Handoff written. Pick: keep."}]}}'
   echo '{"type":"user","isMeta":null,"message":{"content":"one quick check"}}'
   echo '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"git status"}}]}}'
-  echo '{"type":"assistant","message":{"content":[{"type":"text","text":"Working tree is clean."}}]}}'
+  echo '{"type":"assistant","message":{"content":[{"type":"text","text":"Working tree is clean."}]}}'
 } > "$TMP/earlier-turn.jsonl"
 check 0 "handoff write in an earlier turn does not trigger this turn" "$TMP/earlier-turn.jsonl"
 

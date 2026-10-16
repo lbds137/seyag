@@ -32,10 +32,11 @@
 # stderr), there is no Remote Control, so the banner routes the ask through
 # SendMessage to the coordinating session instead of the formal channel tools.
 #
-# Pending-marker pass: when the closing line does not end in "?", the whole
-# final assistant text (with inline `...` code spans stripped) is scanned
-# case-insensitively against SYG_BQ_PENDING_MARKERS (an ERE; unset uses the
-# built-in default `say the word|waiting on you|needs? your (yes|go|call|input)|for you to (decide|test|check)`;
+# Pending-marker pass: when the closing line does not end in "?", the final
+# paragraph of the final assistant text (after stripping fenced ```...``` code
+# blocks and inline `...` code spans) is scanned case-insensitively against
+# SYG_BQ_PENDING_MARKERS (a Python regex; unset uses the built-in default
+# `say the word\b|waiting on you\b|needs? your (yes|go|call|input)\b|for you to (decide|test|check)\b`;
 # set to empty disables the pass; a broken regex fails open). The first
 # matching line is quoted in the banner.
 
@@ -149,8 +150,8 @@ if last_line.endswith("?"):
     sys.exit()
 
 DEFAULT_PENDING_MARKERS = (
-    r"say the word|waiting on you"
-    r"|needs? your (yes|go|call|input)|for you to (decide|test|check)"
+    r"say the word\b|waiting on you\b"
+    r"|needs? your (yes|go|call|input)\b|for you to (decide|test|check)\b"
 )
 raw_markers = os.environ.get("SYG_BQ_PENDING_MARKERS", DEFAULT_PENDING_MARKERS)
 if raw_markers:
@@ -159,28 +160,40 @@ if raw_markers:
     except (re.error, TypeError, ValueError, RecursionError, OverflowError):
         marker_re = None
     if marker_re is not None:
-        cleaned = re.sub(r"`[^`]*`", "", final_text)
-        if marker_re.search(cleaned):
+        cleaned = re.sub(r"```.*?```", "", final_text, flags=re.S)
+        cleaned = re.sub(r"`[^`]*`", "", cleaned)
+        paras = [p for p in re.split(r"\n\s*\n", cleaned) if p.strip()]
+        scope = paras[-1] if paras else ""
+        if marker_re.search(scope):
             tripped = next(
                 (
                     ln.strip()
-                    for ln in final_text.splitlines()
-                    if ln.strip() and marker_re.search(re.sub(r"`[^`]*`", "", ln))
+                    for ln in scope.splitlines()
+                    if ln.strip() and marker_re.search(ln)
                 ),
-                lines_out[-1].strip(),
+                scope.strip(),
             )
-            print("ask\t" + tripped)
+            print("ask\tmarker\t" + tripped)
             sys.exit()
 
 print("ok")
 PYEOF
 ) || exit 0
 
+LEAD_IN="Your closing message ends with:"
 case $VERDICT in
-  ask|ask$'\t'*) ;;
+  ask$'\t'marker$'\t'*)
+    LEAD_IN="Your closing message leaves an ask pending:"
+    TRIPPED=${VERDICT#ask$'\t'marker$'\t'}
+    ;;
+  ask$'\t'*)
+    TRIPPED=${VERDICT#ask$'\t'}
+    ;;
+  ask)
+    TRIPPED=""
+    ;;
   *) exit 0 ;;
 esac
-TRIPPED=${VERDICT#*$'\t'}
 
 LANE_NO_RC=0
 LANE_BAD=0
@@ -201,7 +214,7 @@ AskUserQuestion nor PushNotification. Remote control surfaces only
 formal tool decision points, so a prose-only ask is invisible on the
 phone and the session stalls until the owner opens the terminal.
 MSG
-[ -n "$TRIPPED" ] && printf >&2 '\nYour closing message ends with:\n  %s\n' "$TRIPPED"
+[ -n "$TRIPPED" ] && printf >&2 '\n%s\n  %s\n' "$LEAD_IN" "$TRIPPED"
 [ "$LANE_BAD" = 1 ] && printf >&2 '\nnote: SYG_BQ_NO_RC_LANES looks like a broken ERE (grep rejected it), so lane routing is OFF this turn.\n'
 if [ "$LANE_NO_RC" = 1 ]; then
 cat >&2 << 'MSG'

@@ -19,8 +19,8 @@
 # SYG_PROFILE is trimmed of surrounding whitespace; a trailing CR on a registry
 # line (CRLF file) is stripped. Sourcing this file must not change shell options.
 
-SYG_HEADLESS_OFF="turn-shape context"
-SYG_HEADLESS_OFF_HOOKS="blocking-question-channel-check turn-end-shape-gate promise-ledger-check queued-message-receipt bare-token-binding-reminder context-size-reminder"
+SYG_HEADLESS_OFF="turn-shape context handoff-pick-check"
+SYG_HEADLESS_OFF_HOOKS="blocking-question-channel-check turn-end-shape-gate promise-ledger-check queued-message-receipt bare-token-binding-reminder handoff-pick-check context-size-reminder"
 # No subshell or dirname here (each is a fork on every tool call); a source path
 # without a slash resolves against the cwd, and a miss just means "all enabled".
 case "${BASH_SOURCE[0]}" in
