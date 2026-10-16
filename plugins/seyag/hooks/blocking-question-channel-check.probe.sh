@@ -167,7 +167,9 @@ unset SYG_BQ_NO_RC_LANES ANTHROPIC_BASE_URL
 # --- 12. pending-marker pass (no closing "?") ---------------------------------
 mktx "$TMP/m1.jsonl" "Everything is staged — say the word and I'll start 3c"
 check 2 "pending marker: 'say the word'" "$TMP/m1.jsonl" "" \
-  'Your closing message ends with:' "say the word and I'll start 3c"
+  'Your closing message leaves an ask pending:' \
+  '!Your closing message ends with:' \
+  "say the word and I'll start 3c"
 
 mktx "$TMP/m2.jsonl" "The branch is pushed; still waiting on you for that"
 check 2 "pending marker: 'waiting on you'" "$TMP/m2.jsonl"
@@ -198,6 +200,19 @@ check 2 "pending marker: case-insensitive ('Waiting on you.')" "$TMP/m8.jsonl"
 
 mktx "$TMP/m9.jsonl" "The hook docs quote ${TICK}say the word${TICK} as an example phrase."
 check 0 "pending marker inside inline code span does not fire" "$TMP/m9.jsonl"
+
+mktx "$TMP/m9b.jsonl" "Earlier I was waiting on you for the token; that is resolved now.
+
+Shipped and verified."
+check 0 "pending marker in an earlier paragraph, clean final paragraph — does not fire" "$TMP/m9b.jsonl"
+
+FENCE="${TICK}${TICK}${TICK}"
+mktx "$TMP/m9c.jsonl" "Example:
+${FENCE}
+waiting on you
+${FENCE}
+All set."
+check 0 "pending marker inside fenced code block does not fire" "$TMP/m9c.jsonl"
 
 export SYG_BQ_PENDING_MARKERS='green light'
 mktx "$TMP/m10.jsonl" "Once the build finishes, consider it a green light from me"

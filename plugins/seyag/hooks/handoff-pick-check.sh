@@ -3,9 +3,10 @@
 # names no next-session pick, block the stop once and remind.
 #
 # Trigger — both conditions must hold in the current turn:
-#   (a) A tool_use block in the current turn wrote a handoff: an Edit or Write
-#       whose `.input.file_path` matches SYG_HANDOFF_PATHS (an ERE), or a Bash
-#       tool_use whose `.input.command` matches SYG_HANDOFF_CMDS (an ERE, e.g.
+#   (a) A tool_use block in the current turn wrote a handoff: an Edit, Write,
+#       MultiEdit or NotebookEdit whose `.input.file_path` matches
+#       SYG_HANDOFF_PATHS (a Python regex), or a Bash tool_use whose
+#       `.input.command` matches SYG_HANDOFF_CMDS (a Python regex, e.g.
 #       `myrole --set`).
 #   (b) The turn's final assistant text contains none of the pick tokens:
 #       `/clear`, `/compact`, or the standalone word `keep` (case-insensitive,
@@ -13,8 +14,13 @@
 #
 # Toggle: when BOTH SYG_HANDOFF_PATHS and SYG_HANDOFF_CMDS are unset or empty,
 # the hook is inert and exits 0 before reading stdin or the transcript. The
-# component ships in every profile and ships inert; machine wiring (the
+# component is in the full profile only and ships inert; machine wiring (the
 # settings.json `env` block) is what turns it on.
+#
+# Known false negative, accepted: a closing using `keep` in an ordinary sense
+# (e.g. "I will keep the old flag") counts as a pick under the word-bounded
+# match; the convention states the pick explicitly ("Pick: keep"), block-once
+# bounds the miss, and a pick-shaped regex was rejected as brittle.
 #
 # Enforcement geometry mirrors the sibling Stop hooks: a deterministic scan of
 # the current turn in a bounded transcript tail, blocking at most once via the
@@ -118,8 +124,8 @@ def is_handoff_write(block):
     inp = block.get("input")
     if not isinstance(inp, dict):
         return False
-    if name in ("Edit", "Write") and paths_re is not None:
-        fp = inp.get("file_path")
+    if name in ("Edit", "Write", "MultiEdit", "NotebookEdit") and paths_re is not None:
+        fp = inp.get("file_path") or inp.get("notebook_path")
         return isinstance(fp, str) and bool(paths_re.search(fp))
     if name == "Bash" and cmds_re is not None:
         cmd = inp.get("command")
