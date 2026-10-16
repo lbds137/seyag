@@ -111,6 +111,8 @@ Do-it-now sends the finding back through **rule 1**, not around it: a trivial-sh
 
 **Reviewer self-contradiction across rounds**: when round-N reviewer reverses its round-(N-1) stance on the same item (e.g., round 3 says "drop the `?? ''` as unreachable," round 4 says "add `?? ''` back for defensive typing"), the reviewer is not authoritative on its own prior disagreement. Dismiss and cite the earlier round's reasoning in the summary. Don't ping-pong. This is distinct from genuine new information surfacing — a round-N reviewer observation that _builds on_ round-(N-1) (adds context, corrects an error) is normal; a direct reversal on the same fact-pattern is noise.
 
+**Falsify a reviewer's runnable claim before adopting it**: build the discriminating fixture or run the check; an assertion that costs nothing to test is still tested, not trusted.
+
 ### 3. Apply with test-suite gating
 
 For items that passed rules 1 and 2 with no conflict — trivial-shape, or semantic and `[semantic:decided]` under rule 1's second axis:
@@ -150,6 +152,8 @@ not `git rebase --autosquash` — fixups land on the base branch with their
 deliberately, once, at the end (how, and what the branch's commit messages
 need by then, is the project's own workflow — this skill owns the
 review-response routing, not the fixup-commit cycle's mechanics).
+
+**A fix round re-reads what it touched**: the invariants and comments adjacent to the edited code, before push — the round-N fix that breaks the round-(N-1) fix is the self-fed signature.
 
 For items escalated to ASK: do not apply. Skip to rule 4.
 
@@ -215,7 +219,7 @@ summary is where the falsification lands.)
 
 ### 5. Step back at ~3 automated rounds
 
-**This is a rule of thumb, not a hard stop** (owner call). Three rounds is where a loop usually stops being refinement — but a round-4 finding that is genuinely substantive (it makes a claim in the diff false, it names a real defect) gets FIXED, not deferred to a menu. Use judgement, and say in the round summary that the guideline was passed and why.
+**This is a rule of thumb, not a hard stop** (owner call). Three rounds is where a loop usually stops being refinement — but a round-4 finding that is genuinely substantive (it makes a claim in the diff false, it names a real defect) gets FIXED, not deferred to a menu. Use judgement, and say in the round summary that the guideline was passed and why. Passing three rounds needs one written line per round naming the new class of finding it found; a round that cannot name its class is the step-back signal.
 
 When a PR reaches **round 4 without user intervention** and the remaining items are nits rather than defects, stop and present consolidated status:
 
