@@ -265,10 +265,11 @@ The main loop dispatches implementation; it does not do it inline
 the full context. A post-commit edit is usually a REVIEW-ROUND fix —
 those are dispatch work too (batch the round to the unit's worker).
 
-If this edit is inline-exempt (a mechanical edit within the measured
-5-line limit in a file already in context): retry — this gate passes
-once acked at this commit. Over five touched lines there is no ack
-and no retry; that block is hard.
+If this edit is inline-exempt (a mechanical edit within five touched
+lines in a file already in context; the file's cumulative count since
+the last commit still applies): retry — this gate passes once acked at
+this commit. Over five touched lines there is no ack and no retry;
+that block is hard.
 
 Otherwise: dispatch the unit per the `delegation` skill, or hand the
 review round's batch to the unit's worker.
