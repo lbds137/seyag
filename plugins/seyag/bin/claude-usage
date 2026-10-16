@@ -6,7 +6,9 @@
 #                             the calling session's model (Fable) has its own weekly cap left, else 1;
 #                             on the z.ai lane the same thresholds apply to z.ai's own quota, with the
 #                             5h one capped at 80% (Tzurot's guests get the band above it);
-#                             other routed lanes (OpenRouter, a Console API key) pass at once (see below)
+#                             other routed lanes (OpenRouter, a Console API key) pass at once (see below);
+#                             prints one verdict line to stderr (lane, meter, value, threshold,
+#                             source=api|estimate|none; says FAIL-OPEN when it passed on an estimate)
 #   claude-usage --wait [PCT] block until --ok PCT (default 50, i.e. the 5h window reset) passes, checking
 #                             every 2 minutes, then print the line; run it in the background to pause a session
 #   claude-usage --json       {five_hour_pct, five_hour_resets_at, seconds_to_reset, weekly_pct, weekly_resets_at, scoped, routed,
@@ -79,7 +81,8 @@ caller_model() {
 }
 
 if [ "${1:-}" = --wait ]; then
-    until "$0" --ok "${2:-50}"; do sleep 120; done
+    until wait_verdict=$("$0" --ok "${2:-50}" 2>&1 >/dev/null); do sleep 120; done
+    [ -n "$wait_verdict" ] && printf '%s\n' "$wait_verdict" >&2
     exec "$0"
 fi
 
@@ -164,17 +167,27 @@ reset_in() {
 # zai-usage's local fallback estimate is not account truth, so it never blocks. Other lanes
 # (OpenRouter) pass: their limit is a dollar cap the provider enforces itself.
 if [ "${1:-}" = --ok ] && [ "$routed" = 1 ]; then
-    [ "$vendor_lane" = zai ] || exit 0
+    if [ "$vendor_lane" != zai ]; then
+        echo "claude-usage: --ok pass lane=$vendor_lane gate=pass-through source=none (provider enforces its own cap)" >&2
+        exit 0
+    fi
     # No --bg: the gate refreshes in the foreground on purpose, bounded by ZAI_USAGE_KEYS_KILL_S.
     zai=$("$zai_usage" --json 2>/dev/null)
     if [ "$(jq -r '.source // empty' <<< "$zai" 2>/dev/null)" != api ]; then
-        echo "claude-usage: z.ai quota API unavailable (zai-usage has only a local estimate); gate passes" >&2
+        echo "claude-usage: --ok pass lane=zai meter=zai-5h source=estimate FAIL-OPEN: z.ai quota API unavailable, local estimate never blocks; gate passes" >&2
         exit 0
     fi
     zfive=$(jq -r '.five_hour_pct // 0' <<< "$zai"); zweek=$(jq -r '.week_pct // 0' <<< "$zai")
-    zlimit=${2:-90}; [ "$zlimit" -gt "$zai_five_cap" ] && zlimit=$zai_five_cap
-    [ "$zfive" -lt "$zlimit" ] && [ "$zweek" -lt "$week_reserve" ]
-    exit
+    zlimit=${2:-90}; [ "$zlimit" -gt "$zai_five_cap" ] 2>/dev/null && zlimit=$zai_five_cap
+    if ! { [ "$zfive" -lt "$zlimit" ] && [ "$zweek" -lt "$week_reserve" ]; } 2>/dev/null; then
+        zfive_op=">="; [ "$zfive" -lt "$zlimit" ] 2>/dev/null && zfive_op="<"
+        zweek_op=">="; [ "$zweek" -lt "$week_reserve" ] 2>/dev/null && zweek_op="<"
+        zmeter="zai-5h"; [ "$zfive" -lt "$zlimit" ] 2>/dev/null && zmeter="week"
+        echo "claude-usage: --ok FAIL lane=zai meter=$zmeter 5h=${zfive}%${zfive_op}${zlimit}% week=${zweek}%${zweek_op}${week_reserve}% source=api" >&2
+        exit 1
+    fi
+    echo "claude-usage: --ok pass lane=zai meter=zai-5h 5h=${zfive}%<${zlimit}% week=${zweek}%<${week_reserve}% source=api" >&2
+    exit 0
 fi
 
 refresh
@@ -323,16 +336,31 @@ case "${1:-}" in
         # A week at the reserve blocks everything, whatever the 5h window says: the last 25% is
         # reserved for the owner and GitHub claude-review (2026-10-04). --wait then sleeps until
         # the weekly reset instead of waking on each fresh 5h window.
-        [ "$five" -lt "${2:-90}" ] && [ "$week" -lt "$week_reserve" ] || exit 1
+        cache_age=$(( $(date +%s) - $(stat -c %Y "$cache" 2>/dev/null || echo 0) ))
+        stale_note=""
+        [ "$cache_age" -gt "$ttl" ] && stale_note=" (cache $((cache_age / 60))m old)"
+        thr=${2:-90}
+        if ! { [ "$five" -lt "$thr" ] && [ "$week" -lt "$week_reserve" ]; } 2>/dev/null; then
+            five_op=">="; [ "$five" -lt "$thr" ] 2>/dev/null && five_op="<"
+            week_op=">="; [ "$week" -lt "$week_reserve" ] 2>/dev/null && week_op="<"
+            meter="5h"; [ "$five" -lt "$thr" ] 2>/dev/null && meter="week"
+            echo "claude-usage: --ok FAIL lane=anthropic meter=$meter 5h=${five}%${five_op}${thr}% week=${week}%${week_op}${week_reserve}% source=api${stale_note}" >&2
+            exit 1
+        fi
         # A model's own weekly cap ("Fable 100%") blocks only sessions on that model.
         model=$(caller_model)
-        [ -z "$model" ] && exit 0
-        while IFS= read -r cap; do
-            name=${cap% *}
-            pct=${cap##* }
-            pct=${pct%%.*} # truncate: 99.6 still has room
-            [[ ${model,,} == *"${name,,}"* ]] && [ "$pct" -ge 100 ] && exit 1
-        done < <(sed 's/, /\n/g; s/%//g' <<< "$scoped" | grep .)
+        if [ -n "$model" ]; then
+            while IFS= read -r cap; do
+                name=${cap% *}
+                pct=${cap##* }
+                pct=${pct%%.*} # truncate: 99.6 still has room
+                if [[ ${model,,} == *"${name,,}"* ]] && [ "$pct" -ge 100 ]; then
+                    echo "claude-usage: --ok FAIL lane=anthropic meter=model-cap model=$name cap=${pct}%>=100% source=api${stale_note}" >&2
+                    exit 1
+                fi
+            done < <(sed 's/, /\n/g; s/%//g' <<< "$scoped" | grep .)
+        fi
+        echo "claude-usage: --ok pass lane=anthropic meter=5h 5h=${five}%<${thr}% week=${week}%<${week_reserve}% source=api${stale_note}" >&2
         exit 0
         ;;
     --json)
@@ -368,7 +396,7 @@ case "${1:-}" in
         echo "$note$(plan_line)$tail"
         ;;
     *)
-        sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'
+        sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'
         exit 2
         ;;
 esac

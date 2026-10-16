@@ -58,34 +58,60 @@ fixture() {
 }
 run() { HOME="$tmp" XDG_CACHE_HOME="$tmp" CLAUDE_USAGE_MODEL=claude-opus-5-5 "$CU" "$@"; }
 
-fixture 10 50 0;  run --ok 90; [ $? = 0 ] && ok "week 50%: --ok passes" || bad "week 50%: --ok should pass"
-fixture 10 74 0;  run --ok 90; [ $? = 0 ] && ok "week 74%: --ok passes" || bad "week 74%: --ok should pass"
-fixture 10 75 0;  run --ok 90; [ $? = 1 ] && ok "week 75%: --ok fails (wind-down)" || bad "week 75%: --ok should fail"
-fixture 10 99 0;  run --ok 90; [ $? = 1 ] && ok "week 99%: --ok fails" || bad "week 99%: --ok should fail"
-fixture 95 10 0;  run --ok 90; [ $? = 1 ] && ok "5h 95%: --ok fails" || bad "5h 95%: --ok should fail"
+fixture 10 50 0
+out=$(run --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 0 ] && [ -z "$out" ] && [ "$err" = "claude-usage: --ok pass lane=anthropic meter=5h 5h=10%<90% week=50%<75% source=api" ] \
+    && ok "week 50%: --ok passes with stderr verdict line" || bad "week 50%: rc=$rc out=[$out] err=[$err]"
+fixture 10 74 0
+out=$(run --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 0 ] && [ -z "$out" ] && [ "$err" = "claude-usage: --ok pass lane=anthropic meter=5h 5h=10%<90% week=74%<75% source=api" ] \
+    && ok "week 74%: --ok passes with stderr verdict line" || bad "week 74%: rc=$rc out=[$out] err=[$err]"
+fixture 10 75 0
+out=$(run --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 1 ] && [ -z "$out" ] && [ "$err" = "claude-usage: --ok FAIL lane=anthropic meter=week 5h=10%<90% week=75%>=75% source=api" ] \
+    && ok "week 75%: --ok fails (wind-down, week binding verdict)" || bad "week 75%: rc=$rc out=[$out] err=[$err]"
+fixture 10 99 0
+out=$(run --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 1 ] && [ -z "$out" ] && [ "$err" = "claude-usage: --ok FAIL lane=anthropic meter=week 5h=10%<90% week=99%>=75% source=api" ] \
+    && ok "week 99%: --ok fails (week binding verdict)" || bad "week 99%: rc=$rc out=[$out] err=[$err]"
+fixture 95 10 0
+out=$(run --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 1 ] && [ -z "$out" ] && [ "$err" = "claude-usage: --ok FAIL lane=anthropic meter=5h 5h=95%>=90% week=10%<75% source=api" ] \
+    && ok "5h 95%: --ok fails (5h binding verdict)" || bad "5h 95%: rc=$rc out=[$out] err=[$err]"
 # The week reserve is overridable; a non-integer override keeps the default (and doesn't crash).
 fixture 10 80 0
-CLAUDE_USAGE_WEEK_RESERVE=85 run --ok 90; [ $? = 0 ] && ok "week 80% with CLAUDE_USAGE_WEEK_RESERVE=85: passes" || bad "week reserve override: --ok should pass"
+CLAUDE_USAGE_WEEK_RESERVE=85 run --ok 90 2>/dev/null; [ $? = 0 ] && ok "week 80% with CLAUDE_USAGE_WEEK_RESERVE=85: passes" || bad "week reserve override: --ok should pass"
 CLAUDE_USAGE_WEEK_RESERVE=lots run --ok 90 2>/dev/null; [ $? = 1 ] && ok "week 80% with a non-integer reserve: default 75 gates" || bad "week reserve 'lots': --ok should fail"
+# A stale cache whose refresh fails (no credentials in hermetic HOME) discloses its age on the verdict line.
+fixture 10 50 0; touch -d "@$(($(date +%s) - 600))" "$tmp/claude-statusline/usage.json"
+out=$(run --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 0 ] && [ -z "$out" ] && [ "$err" = "claude-usage: --ok pass lane=anthropic meter=5h 5h=10%<90% week=50%<75% source=api (cache 10m old)" ] \
+    && ok "stale cache (10m old, refresh fails): --ok appends (cache 10m old) to verdict" || bad "stale cache verdict: rc=$rc out=[$out] err=[$err]"
 
 # Any non-flag argument prints the usage block from the script's own header lines.
 out=$(run --help); rc=$?
-[ $rc = 2 ] && grep -q '^ *claude-usage --ok \[PCT\]' <<< "$out" && grep -q '^ *claude-usage --json' <<< "$out" \
-    && grep -q '^ *claude-usage --all' <<< "$out" && grep -q 'api_credit_remaining_usd' <<< "$out" \
+[ $rc = 2 ] && grep -q '^ *claude-usage --ok \[PCT\]' <<< "$out" && grep -q 'prints one verdict line to stderr' <<< "$out" \
+    && grep -q '^ *claude-usage --json' <<< "$out" && grep -q '^ *claude-usage --all' <<< "$out" \
+    && grep -q 'api_credit_remaining_usd' <<< "$out" \
     && ok "--help: exit 2 with the header's usage block" || bad "--help (rc $rc): $out"
 
-# The reported bug: at 95-99% of the week, --wait returned at once. It must block now.
+# The reported bug: at 95-99% of the week, --wait returned at once. It must block now, and silence inner --ok stderr.
 fixture 10 97 0
-timeout 5 env HOME="$tmp" XDG_CACHE_HOME="$tmp" CLAUDE_USAGE_MODEL=claude-opus-5-5 "$CU" --wait >/dev/null; rc=$?
-[ $rc = 124 ] && ok "week 97%: --wait blocks" || bad "week 97%: --wait returned (rc $rc, want 124 = still waiting)"
+timeout 5 env HOME="$tmp" XDG_CACHE_HOME="$tmp" CLAUDE_USAGE_MODEL=claude-opus-5-5 "$CU" --wait >/dev/null 2>"$tmp/wait-block.err"; rc=$?
+[ $rc = 124 ] && [ ! -s "$tmp/wait-block.err" ] \
+    && ok "week 97%: --wait blocks and silences inner --ok stderr" || bad "week 97%: --wait returned (rc $rc, err [$(cat "$tmp/wait-block.err")])"
 fixture 10 50 0
-out=$(timeout 5 env HOME="$tmp" XDG_CACHE_HOME="$tmp" CLAUDE_USAGE_MODEL=claude-opus-5-5 "$CU" --wait); rc=$?
-[ $rc = 0 ] && grep -q "week 50%" <<< "$out" && ok "week 50%: --wait returns with the line" || bad "week 50%: --wait (rc $rc): $out"
+out=$(timeout 5 env HOME="$tmp" XDG_CACHE_HOME="$tmp" CLAUDE_USAGE_MODEL=claude-opus-5-5 "$CU" --wait 2>"$tmp/wait-wake.err"); rc=$?
+[ $rc = 0 ] && grep -q "week 50%" <<< "$out" \
+    && [ "$(cat "$tmp/wait-wake.err")" = "claude-usage: --ok pass lane=anthropic meter=5h 5h=10%<50% week=50%<75% source=api" ] \
+    && ok "week 50%: --wait returns with the line and one wake verdict on stderr" || bad "week 50%: --wait (rc $rc): out=[$out] err=[$(cat "$tmp/wait-wake.err")]"
 
 # A model's own cap still gates only that model, at 100%.
 fixture 10 50 100
-CLAUDE_USAGE_MODEL=claude-fable-5-1 HOME="$tmp" XDG_CACHE_HOME="$tmp" "$CU" --ok 90; [ $? = 1 ] && ok "Fable cap 100%: Fable session blocked" || bad "Fable cap: Fable should block"
-run --ok 90; [ $? = 0 ] && ok "Fable cap 100%: Opus session passes" || bad "Fable cap: Opus should pass"
+out=$(CLAUDE_USAGE_MODEL=claude-fable-5-1 HOME="$tmp" XDG_CACHE_HOME="$tmp" "$CU" --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 1 ] && [ -z "$out" ] && [ "$err" = "claude-usage: --ok FAIL lane=anthropic meter=model-cap model=Fable cap=100%>=100% source=api" ] \
+    && ok "Fable cap 100%: Fable session blocked with model-cap verdict" || bad "Fable cap: rc=$rc out=[$out] err=[$err]"
+run --ok 90 2>/dev/null; [ $? = 0 ] && ok "Fable cap 100%: Opus session passes" || bad "Fable cap: Opus should pass"
 # No CLAUDE_USAGE_MODEL: the caller's model is the last assistant reply in its session transcript.
 mkdir -p "$tmp/.claude/projects/slugA"
 {
@@ -94,10 +120,10 @@ mkdir -p "$tmp/.claude/projects/slugA"
     jq -cn '{type: "assistant", message: {model: "claude-fable-5-1"}}'
     jq -cn '{type: "user", message: {content: "last"}}'
 } > "$tmp/.claude/projects/slugA/probe-session.jsonl"
-CLAUDE_CODE_SESSION_ID=probe-session HOME="$tmp" XDG_CACHE_HOME="$tmp" "$CU" --ok 90; [ $? = 1 ] \
+CLAUDE_CODE_SESSION_ID=probe-session HOME="$tmp" XDG_CACHE_HOME="$tmp" "$CU" --ok 90 2>/dev/null; [ $? = 1 ] \
     && ok "transcript model (Fable), Fable cap 100%: blocked" || bad "transcript model, Fable cap 100%: should block"
 fixture 10 50 50
-CLAUDE_CODE_SESSION_ID=probe-session HOME="$tmp" XDG_CACHE_HOME="$tmp" "$CU" --ok 90; [ $? = 0 ] \
+CLAUDE_CODE_SESSION_ID=probe-session HOME="$tmp" XDG_CACHE_HOME="$tmp" "$CU" --ok 90 2>/dev/null; [ $? = 0 ] \
     && ok "transcript model (Fable), Fable cap 50%: passes" || bad "transcript model, Fable cap 50%: should pass"
 # A display name with a quote, a backslash and a space round-trips exactly: --json and the plain line.
 jq -n '{five_hour: {utilization: 10}, seven_day: {utilization: 50},
@@ -123,47 +149,60 @@ export CLAUDE_USAGE_ZAI_USAGE="$tmp/.local/bin/zai-usage" SYG_STATUSLINE_ZAI_USA
 route_zai
 fixture 10 99 100
 zai_stub api 10 74
-run --ok 90; [ $? = 0 ] && ok "z.ai week 74% (api): --ok passes" || bad "z.ai week 74%: --ok should pass"
+out=$(run --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 0 ] && [ -z "$out" ] && [ "$err" = "claude-usage: --ok pass lane=zai meter=zai-5h 5h=10%<80% week=74%<75% source=api" ] \
+    && ok "z.ai week 74% (api): --ok passes with capped-at-80 verdict" || bad "z.ai week 74%: rc=$rc out=[$out] err=[$err]"
 zai_stub api 10 75
-run --ok 90; [ $? = 1 ] && ok "z.ai week 75% (api): --ok fails (wind-down)" || bad "z.ai week 75%: --ok should fail"
+out=$(run --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 1 ] && [ -z "$out" ] && [ "$err" = "claude-usage: --ok FAIL lane=zai meter=week 5h=10%<80% week=75%>=75% source=api" ] \
+    && ok "z.ai week 75% (api): --ok fails (wind-down)" || bad "z.ai week 75%: rc=$rc out=[$out] err=[$err]"
 zai_stub api 95 10
-run --ok 90; [ $? = 1 ] && ok "z.ai 5h 95% (api): --ok fails" || bad "z.ai 5h 95%: --ok should fail"
+out=$(run --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 1 ] && [ -z "$out" ] && [ "$err" = "claude-usage: --ok FAIL lane=zai meter=zai-5h 5h=95%>=80% week=10%<75% source=api" ] \
+    && ok "z.ai 5h 95% (api): --ok fails" || bad "z.ai 5h 95%: rc=$rc out=[$out] err=[$err]"
 # z.ai's 5h gate is capped at 80 whatever PCT asks, below Tzurot's guest cutoff (90)
 zai_stub api 82 10
-run --ok 90; [ $? = 1 ] && ok "z.ai 5h 82% with --ok 90: fails (capped at 80)" || bad "z.ai 5h 82%: --ok 90 should fail"
+out=$(run --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 1 ] && [ -z "$out" ] && [ "$err" = "claude-usage: --ok FAIL lane=zai meter=zai-5h 5h=82%>=80% week=10%<75% source=api" ] \
+    && ok "z.ai 5h 82% with --ok 90: fails (capped at 80)" || bad "z.ai 5h 82%: rc=$rc out=[$out] err=[$err]"
 zai_stub api 79 10
-run --ok 90; [ $? = 0 ] && ok "z.ai 5h 79%: passes" || bad "z.ai 5h 79%: --ok should pass"
-run --ok 50; [ $? = 1 ] && ok "z.ai 5h 79% with --ok 50: a lower PCT still wins" || bad "z.ai --ok 50: should fail at 79%"
-CLAUDE_USAGE_ZAI_FIVE_CAP=70 run --ok 90; [ $? = 1 ] && ok "z.ai 5h 79% with CLAUDE_USAGE_ZAI_FIVE_CAP=70: fails" || bad "z.ai cap override 70: --ok should fail at 79%"
+run --ok 90 2>/dev/null; [ $? = 0 ] && ok "z.ai 5h 79%: passes" || bad "z.ai 5h 79%: --ok should pass"
+run --ok 50 2>/dev/null; [ $? = 1 ] && ok "z.ai 5h 79% with --ok 50: a lower PCT still wins" || bad "z.ai --ok 50: should fail at 79%"
+CLAUDE_USAGE_ZAI_FIVE_CAP=70 run --ok 90 2>/dev/null; [ $? = 1 ] && ok "z.ai 5h 79% with CLAUDE_USAGE_ZAI_FIVE_CAP=70: fails" || bad "z.ai cap override 70: --ok should fail at 79%"
 CLAUDE_USAGE_ZAI_FIVE_CAP=7x run --ok 90 2>/dev/null; [ $? = 0 ] && ok "z.ai 5h 79% with a non-integer cap: default 80 applies" || bad "z.ai cap '7x': --ok should pass at 79%"
 zai_stub local 10 308
-err=$(run --ok 90 2>&1); rc=$?
-[ $rc = 0 ] && grep -q 'local estimate' <<< "$err" && ok "z.ai local estimate only: passes, says why" || bad "z.ai local (rc $rc): $err"
+out=$(run --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 0 ] && [ -z "$out" ] && [ "$err" = "claude-usage: --ok pass lane=zai meter=zai-5h source=estimate FAIL-OPEN: z.ai quota API unavailable, local estimate never blocks; gate passes" ] \
+    && ok "z.ai local estimate only: passes with FAIL-OPEN verdict" || bad "z.ai local (rc $rc): out=[$out] err=[$err]"
 zai_stub api 10 10
-run --ok 90; [ $? = 0 ] && ok "z.ai-routed, week 99%: --ok passes" || bad "z.ai-routed, week 99%: --ok should pass"
-CLAUDE_USAGE_MODEL=claude-fable-5-1 HOME="$tmp" XDG_CACHE_HOME="$tmp" "$CU" --ok 90; [ $? = 0 ] && ok "z.ai-routed, Fable cap 100%: --ok passes" || bad "z.ai-routed, Fable cap: --ok should pass"
-out=$(timeout 5 env HOME="$tmp" XDG_CACHE_HOME="$tmp" CLAUDE_USAGE_MODEL=claude-opus-5-5 "$CU" --wait); rc=$?
+run --ok 90 2>/dev/null; [ $? = 0 ] && ok "z.ai-routed, week 99%: --ok passes" || bad "z.ai-routed, week 99%: --ok should pass"
+CLAUDE_USAGE_MODEL=claude-fable-5-1 HOME="$tmp" XDG_CACHE_HOME="$tmp" "$CU" --ok 90 2>/dev/null; [ $? = 0 ] && ok "z.ai-routed, Fable cap 100%: --ok passes" || bad "z.ai-routed, Fable cap: --ok should pass"
+out=$(timeout 5 env HOME="$tmp" XDG_CACHE_HOME="$tmp" CLAUDE_USAGE_MODEL=claude-opus-5-5 "$CU" --wait 2>/dev/null); rc=$?
 [ $rc = 0 ] && grep -q "z.ai-routed" <<< "$out" && ok "z.ai-routed: --wait returns at once with the note" || bad "z.ai-routed: --wait (rc $rc): $out"
 out=$(run); grep -q "z.ai-routed" <<< "$out" && ok "z.ai-routed: plain line carries the note" || bad "z.ai-routed: plain line missing note: $out"
 run --json | jq -e '.routed == 1' >/dev/null && ok "z.ai-routed: --json reports routed:1" || bad "z.ai-routed: --json routed flag"
 # The process env is the truth even when it sets the base URL to empty: an overlay that clears the
 # route puts the session back on the plan lane over a z.ai settings.json, so the plan's 99% gates.
-ANTHROPIC_BASE_URL='' run --ok 90; [ $? = 1 ] && ok "env set-but-empty over z.ai settings: plan lane, plan 99% gates" || bad "env empty over z.ai: --ok should fail"
+ANTHROPIC_BASE_URL='' run --ok 90 2>/dev/null; [ $? = 1 ] && ok "env set-but-empty over z.ai settings: plan lane, plan 99% gates" || bad "env empty over z.ai: --ok should fail"
 # Per-session overlay: settings.json on anthropic, the calling session's env routed to z.ai. The
 # session's own route decides: z.ai's quota gates, the plan's 99% doesn't.
 route_anthropic
 zai_stub api 10 10
-ANTHROPIC_BASE_URL=https://api.z.ai/api/anthropic run --ok 90; [ $? = 0 ] && ok "session env z.ai over anthropic settings: plan 99% doesn't gate" || bad "session env z.ai: --ok should pass"
+ANTHROPIC_BASE_URL=https://api.z.ai/api/anthropic run --ok 90 2>/dev/null; [ $? = 0 ] && ok "session env z.ai over anthropic settings: plan 99% doesn't gate" || bad "session env z.ai: --ok should pass"
 zai_stub api 10 80
-ANTHROPIC_BASE_URL=https://api.z.ai/api/anthropic run --ok 90; [ $? = 1 ] && ok "session env z.ai: z.ai's week 80% gates" || bad "session env z.ai 80%: --ok should fail"
-run --ok 90; [ $? = 1 ] && ok "no session env: anthropic settings, plan 99% gates" || bad "anthropic settings 99%: --ok should fail"
+ANTHROPIC_BASE_URL=https://api.z.ai/api/anthropic run --ok 90 2>/dev/null; [ $? = 1 ] && ok "session env z.ai: z.ai's week 80% gates" || bad "session env z.ai 80%: --ok should fail"
+run --ok 90 2>/dev/null; [ $? = 1 ] && ok "no session env: anthropic settings, plan 99% gates" || bad "anthropic settings 99%: --ok should fail"
 route_url https://openrouter.ai/api
 zai_stub api 10 99
-run --ok 90; [ $? = 0 ] && ok "OpenRouter-routed: --ok passes (dollar cap, not a quota)" || bad "OpenRouter: --ok should pass"
+out=$(run --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 0 ] && [ -z "$out" ] && [ "$err" = "claude-usage: --ok pass lane=or gate=pass-through source=none (provider enforces its own cap)" ] \
+    && ok "OpenRouter-routed: --ok passes with pass-through verdict" || bad "OpenRouter: rc=$rc out=[$out] err=[$err]"
 out=$(run); grep -q "OpenRouter-routed" <<< "$out" && ! grep -q "z.ai" <<< "$out" && ok "OpenRouter line says OpenRouter, not z.ai" || bad "OpenRouter line: $out"
 # A lookalike host is not the plan lane: its gate passes and it never reads plan meters as its own.
 route_url https://api.anthropic.com.evil.com
-run --ok 90; [ $? = 0 ] && ok "api.anthropic.com.evil.com: not the plan lane, gate passes" || bad "lookalike host: --ok should pass"
+out=$(run --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 0 ] && [ -z "$out" ] && [ "$err" = "claude-usage: --ok pass lane=unknown gate=pass-through source=none (provider enforces its own cap)" ] \
+    && ok "api.anthropic.com.evil.com: not the plan lane, gate passes with pass-through verdict" || bad "lookalike host: rc=$rc out=[$out] err=[$err]"
 out=$(run); grep -q '^api\.anthropic\.com\.evil\.com-routed (gate passes' <<< "$out" \
     && ok "lookalike host: line labels the raw host" || bad "lookalike line: $out"
 route_anthropic
@@ -172,11 +211,13 @@ out=$(ANTHROPIC_BASE_URL=https:// run)
 [[ $out == "5h "* ]] && ! grep -q -- '-routed' <<< "$out" && ok "hostless env base URL: no empty '-routed' note" || bad "hostless line: $out"
 # A Console API key (the anthropic-api route preset) bills credits, not the plan: the plan's 99%
 # doesn't gate. The lane is the overlay's CC_ROUTE_PRESET marker, never the key alone.
-CC_ROUTE_PRESET=anthropic-api ANTHROPIC_API_KEY=sk-ant-test run --ok 90; [ $? = 0 ] && ok "anthropic-api session: --ok passes (Console credits)" || bad "anthropic-api session: --ok should pass"
+out=$(CC_ROUTE_PRESET=anthropic-api ANTHROPIC_API_KEY=sk-ant-test run --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 0 ] && [ -z "$out" ] && [ "$err" = "claude-usage: --ok pass lane=console gate=pass-through source=none (provider enforces its own cap)" ] \
+    && ok "anthropic-api session: --ok passes (Console credits pass-through verdict)" || bad "anthropic-api session: rc=$rc out=[$out] err=[$err]"
 out=$(CC_ROUTE_PRESET=anthropic-api ANTHROPIC_API_KEY=sk-ant-test run); grep -q "Console API key-routed" <<< "$out" && ok "API key line names the lane" || bad "API key line: $out"
-ANTHROPIC_API_KEY=sk-ant-test run --ok 90; [ $? = 1 ] && ok "a stray exported API key in a plan session still gates" || bad "stray API key: --ok should fail"
-CC_ROUTE_PRESET=zai run --ok 90; [ $? = 1 ] && ok "another preset's marker on the anthropic base doesn't skip the gate" || bad "zai marker: --ok should fail"
-run --ok 90; [ $? = 1 ] && ok "back on Anthropic: week 99% fails again" || bad "unrouted week 99%: --ok should fail"
+ANTHROPIC_API_KEY=sk-ant-test run --ok 90 2>/dev/null; [ $? = 1 ] && ok "a stray exported API key in a plan session still gates" || bad "stray API key: --ok should fail"
+CC_ROUTE_PRESET=zai run --ok 90 2>/dev/null; [ $? = 1 ] && ok "another preset's marker on the anthropic base doesn't skip the gate" || bad "zai marker: --ok should fail"
+run --ok 90 2>/dev/null; [ $? = 1 ] && ok "back on Anthropic: week 99% fails again" || bad "unrouted week 99%: --ok should fail"
 run --json | jq -e '.routed == 0' >/dev/null && ok "anthropic: --json reports routed:0" || bad "anthropic: --json routed flag"
 
 # Routing equivalence: the same base URL through claude-usage and the statusline lands on the
@@ -243,7 +284,7 @@ equiv "env https://openrouter.ai/api/v1 over z.ai settings" or https://api.z.ai/
 equiv "https://weird.example.org/v1" unknown:weird.example.org https://weird.example.org/v1
 route_url https://weird.example.org/v1
 fixture 10 99 0
-run --ok 90; [ $? = 0 ] && ok "weird.example.org: unknown lane, gate passes" || bad "weird.example.org: --ok should pass"
+run --ok 90 2>/dev/null; [ $? = 0 ] && ok "weird.example.org: unknown lane, gate passes" || bad "weird.example.org: --ok should pass"
 route_anthropic
 
 # --all: one line per lane (plan, z.ai, api credit), whatever lane the caller is on, exit 0.
@@ -366,7 +407,7 @@ route_anthropic
 # Reading log: one line per distinct reading, raw percentages, scoped caps as an object.
 rm -f "$log"
 fixture 12.5 40 7
-run >/dev/null; run --ok 90; run --json >/dev/null
+run >/dev/null; run --ok 90 2>/dev/null; run --json >/dev/null
 [ "$(wc -l < "$log")" = 1 ] && ok "log: three runs on one reading write one line" || bad "log: want 1 line, got $(wc -l < "$log")"
 jq -e '.five_hour_pct == 12.5 and .weekly_pct == 40 and .scoped.Fable == 7 and (.ts | test("Z$")) and (.epoch > 0)' "$log" >/dev/null \
     && ok "log: line holds ts, epoch, raw 5h/week % and scoped caps" || bad "log: line shape: $(cat "$log")"

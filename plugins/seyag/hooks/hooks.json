@@ -96,6 +96,10 @@
           {
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/run.sh\" temporal-marker-guard"
+          },
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/run.sh\" env-print-guard"
           }
         ]
       },
@@ -107,6 +111,15 @@
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/run.sh\" dispatch-posture-gate"
           }
         ]
+      },
+      {
+        "matcher": "SendMessage|PushNotification|AskUserQuestion",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/run.sh\" status-claim-cite"
+          }
+        ]
       }
     ],
     "PostToolUse": [
@@ -116,6 +129,16 @@
           {
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/run.sh\" pr-monitor-reminder"
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/run.sh\" classifier-ledger"
           }
         ]
       }
