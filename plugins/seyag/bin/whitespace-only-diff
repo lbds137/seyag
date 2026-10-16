@@ -1,0 +1,151 @@
+#!/usr/bin/env python3
+"""whitespace-only-diff: classify a unified diff as whitespace-only or real changes.
+
+Reads a unified diff (`git diff -U0` output preferred) from stdin or from a
+single file argument. Inside each `@@ ...` hunk, pairs the i-th `-` deletion
+line with the i-th `+` addition line and checks whether both sides are equal
+after deleting all whitespace (`''.join(line.split())`). Unpaired surplus `-`/`+`
+lines and pairs that differ after stripping all whitespace count as real changed
+lines. Header and metadata lines outside hunks are never line changes, and context
+or `\\ No newline...` lines inside hunks are ignored.
+
+Usage:
+  git diff -U0 | whitespace-only-diff [--json]
+  whitespace-only-diff [--json] [FILE]
+
+Verdicts and exits (text on stdout, or one JSON object with --json):
+  exit 0  whitespace-only: <P> pair(s) matched, <R> real changed line(s), <H> hunk(s)
+          At least one pair matched and real == 0.
+  exit 1  real changes: <P> pair(s) matched, <R> real changed line(s), <H> hunk(s)
+          Any real change (H >= 1).
+  exit 1  real changes: no line hunks (mode, binary or rename change)
+          Diff has metadata (`diff --git `) but no `@@ ` hunks.
+  exit 2  no changes: empty diff
+          Input is empty (zero bytes after stripping whitespace).
+  exit 2  (stderr) whitespace-only-diff: input is not a unified diff
+          Non-empty input with neither `diff --git ` nor `@@ ` lines.
+Usage errors exit 2.
+"""
+import argparse
+import json
+import sys
+from pathlib import Path
+
+
+def die(msg, code=2):
+    print(f"whitespace-only-diff: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+class Parser(argparse.ArgumentParser):
+    def error(self, message):
+        die(f"{message} (see --help)")
+
+
+def emit(as_json, verdict, pairs, real, hunks, text):
+    if as_json:
+        print(json.dumps({"verdict": verdict, "pairs": pairs, "real": real, "hunks": hunks}))
+    else:
+        print(text)
+
+
+def main(argv):
+    if "-h" in argv or "--help" in argv:
+        print(__doc__.strip())
+        return 0
+    parser = Parser(prog="whitespace-only-diff", add_help=False)
+    parser.add_argument("--json", action="store_true")
+    parser.add_argument("file", nargs="?")
+    args = parser.parse_args(argv)
+
+    if args.file is not None:
+        try:
+            text = Path(args.file).read_text(encoding="utf-8", errors="surrogateescape")
+        except OSError as e:
+            die(f"cannot read {args.file}: {e}")
+    else:
+        text = sys.stdin.buffer.read().decode("utf-8", errors="surrogateescape")
+
+    if not text.strip():
+        emit(args.json, "no-changes", 0, 0, 0, "no changes: empty diff")
+        return 2
+
+    lines = text.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+
+    has_diff_header = False
+    in_hunk = False
+    hunks = 0
+    pairs = 0
+    real = 0
+    dels = []
+    adds = []
+
+    def flush():
+        nonlocal pairs, real, dels, adds
+        if not in_hunk:
+            return
+        matched = sum(
+            1 for d, a in zip(dels, adds)
+            if "".join(d.split()) == "".join(a.split())
+        )
+        pairs += matched
+        real += len(dels) + len(adds) - 2 * matched
+        dels, adds = [], []
+
+    for line in lines:
+        if line.startswith("diff --git "):
+            flush()
+            in_hunk = False
+            has_diff_header = True
+        elif line.startswith("@@ "):
+            flush()
+            in_hunk = True
+            hunks += 1
+        elif in_hunk:
+            if line.startswith("-"):
+                dels.append(line[1:])
+            elif line.startswith("+"):
+                adds.append(line[1:])
+
+    flush()
+
+    if not has_diff_header and hunks == 0:
+        die("input is not a unified diff")
+
+    if hunks == 0:
+        emit(
+            args.json,
+            "real-changes",
+            0,
+            0,
+            0,
+            "real changes: no line hunks (mode, binary or rename change)",
+        )
+        return 1
+
+    if pairs >= 1 and real == 0:
+        emit(
+            args.json,
+            "whitespace-only",
+            pairs,
+            real,
+            hunks,
+            f"whitespace-only: {pairs} pair(s) matched, {real} real changed line(s), {hunks} hunk(s)",
+        )
+        return 0
+
+    emit(
+        args.json,
+        "real-changes",
+        pairs,
+        real,
+        hunks,
+        f"real changes: {pairs} pair(s) matched, {real} real changed line(s), {hunks} hunk(s)",
+    )
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
