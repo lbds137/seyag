@@ -39,6 +39,7 @@ For any question about what happened in past sessions ("what went wrong yesterda
 
 ```bash
 session-log ledger --unmined                                        # unmined ranges per lens, machine-wide, grouped by app session
+session-log ledger --extract-due                                    # extracts missing or stale near the cleanup window — extract those deltas before the raw files age out
 session-log list --since <date>                                     # sizes, turn counts, titles for the window
 session-log list --since <date> --paths-to "$C/window-paths.txt"    # full paths for session-extract; never paste them
 ```
