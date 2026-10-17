@@ -35,6 +35,7 @@ launch-record	launch-record
 classifier-ledger	classifier-ledger
 handoff-pick-check	handoff-pick-check
 status-claim-cite	status-claim-cite
-@profile	full	session rules route turn-shape context guards-shell guards-outbound guards-commit pr-watch dispatch api-credit launch-record classifier-ledger handoff-pick-check status-claim-cite
+dispatch-spec-ledger-gate	dispatch-spec
+@profile	full	session rules route turn-shape context guards-shell guards-outbound guards-commit pr-watch dispatch api-credit launch-record classifier-ledger handoff-pick-check status-claim-cite dispatch-spec
 @profile	guards	guards-shell guards-outbound guards-commit context dispatch route session api-credit launch-record classifier-ledger
 @profile	none	session api-credit launch-record classifier-ledger
