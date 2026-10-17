@@ -16,7 +16,12 @@ Usage:
   session-log grep   [FILTERS] [--no-archive] [--role user|agent|tool|all] [-i] [--raw]
                      [--subagents] [--max N] PATTERN         search decoded text, one line per hit
   session-log ledger [FILTERS] [--no-archive] [--lens L] [--unmined]
-                                                    mined / unmined per transcript and lens, UTC
+                     [--extract-due [--within N]]   mined / unmined per transcript and lens, UTC;
+                                                    --extract-due lists local owner/agent extracts missing or
+                                                    stale (>=1h behind last event) within N days (default 7) of
+                                                    the cleanupPeriodDays window (mtime-approximated;
+                                                    procedures-*.txt freshness is out of scope for v1; exits 0
+                                                    when nothing due, 1 when rows print, 2 on usage error).
   session-log mark   --lens L[,L...] [--note TEXT] TRANSCRIPT FROM TO
                                                     record a mined span in the ledger
 
@@ -271,7 +276,7 @@ def summarize(path, slug, since, until):
     """One pass over a transcript: bridge id, title, in-range mineable entries, owner turns, first prompt."""
     r = Reader(path)
     s = {"path": path, "slug": slug, "id": path.stem, "app": None, "kb": kb(path), "titles": {},
-         "entries": [], "turns": 0, "prompt": "-"}
+         "entries": [], "turns": 0, "prompt": "-", "last_owner": None, "last_agent": None}
     for t, ts, e in r.scan():
         if t == "bridge-session":
             bid = e.get("bridgeSessionId")
@@ -285,10 +290,19 @@ def summarize(path, slug, since, until):
             s["entries"].append((ts, t))
             if t == "user" and not e.get("isMeta"):
                 text = user_text(e)
+                if text:
+                    s["last_owner"] = max(s["last_owner"] or ts, ts)
                 if text.strip():
                     s["turns"] += 1
                     if s["prompt"] == "-":
                         s["prompt"] = cut(mask(clean(text)), 60) or "-"
+            elif t == "queue-operation" and e.get("operation") == "enqueue" and e.get("content"):
+                s["last_owner"] = max(s["last_owner"] or ts, ts)
+            elif t == "assistant":
+                m = e.get("message")
+                c = m.get("content") if isinstance(m, dict) else None
+                if isinstance(c, list) and any(isinstance(p, dict) and p.get("type") == "text" for p in c):
+                    s["last_agent"] = max(s["last_agent"] or ts, ts)
     s["entries"].sort(key=lambda x: x[0])
     s["title"] = mask(next((s["titles"][k] for k in TITLE_KEYS if k in s["titles"]), "-"))
     return s
@@ -696,9 +710,84 @@ def coverage(entries, spans):
     return "gaps " + ", ".join(gaps)
 
 
+EXTRACT_LENSES = {"owner": ("", "last_owner"), "agent": (".agent", "last_agent")}
+
+
+def cleanup_window():
+    """(days, source) from $CLAUDE_CONFIG_DIR/settings.json (or ~/.claude/settings.json) cleanupPeriodDays, else (30, 'default')."""
+    cfg = os.environ.get("CLAUDE_CONFIG_DIR")
+    p = (Path(cfg) if cfg else Path.home() / ".claude") / "settings.json"
+    try:
+        v = json.loads(p.read_text(encoding="utf-8")).get("cleanupPeriodDays")
+    except (OSError, ValueError, AttributeError):
+        v = None
+    if isinstance(v, int) and not isinstance(v, bool) and v > 0:
+        return v, "settings"
+    return 30, "default"
+
+
+def extract_state(corpus, tid, suf, last_ev):
+    """Extract state for one transcript×lens: 'missing', 'stale by <Nh>|<Nd>', or None (fresh)."""
+    p = corpus / f"{tid}{suf}.txt"
+    if not p.is_file():
+        return "missing"
+    last_ext = None
+    with p.open(encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            if line.startswith(("=== ", "--- ")):
+                parts = line.split()
+                ts = log_ts(parts[1]) if len(parts) >= 2 else None
+                if ts and (last_ext is None or ts > last_ext):
+                    last_ext = ts
+    if last_ext is None:
+        return "missing"
+    diff = (last_ev - last_ext).total_seconds()
+    if diff < 3600:
+        return None
+    return f"stale by {round(diff / 3600)}h" if diff < 86400 else f"stale by {round(diff / 86400)}d"
+
+
+def cmd_extract_due(a, since, until, shown):
+    within = 7 if a.within is None else a.within
+    if within < 0:
+        die("--within must be at least 0")
+    if a.lens and a.lens not in EXTRACT_LENSES:
+        die(f"--extract-due supports lenses: {', '.join(EXTRACT_LENSES)}")
+    if a.unmined:
+        die("--extract-due does not combine with --unmined")
+    if a.since or a.until:
+        die("--extract-due does not combine with --since/--until (cleanup ages whole files by mtime; use --within N)")
+    window, src = cleanup_window()
+    now = datetime.now(UTC).timestamp()
+    lenses = [l for l in shown if l in EXTRACT_LENSES]
+    print(f"# extract-due  window {window}d ({src})")
+    rows = 0
+    for s in sorted(summaries(a, since, until), key=lambda s: (project(s["slug"]), s["entries"][0][0], s["id"])):
+        age_secs = now - s["path"].stat().st_mtime
+        if age_secs < (window - within) * 86400:
+            continue
+        age = int(age_secs // 86400)
+        due = window - age
+        corpus = s["path"].parent / "mined-corpus/corpus"
+        for lens in lenses:
+            suf, key = EXTRACT_LENSES[lens]
+            last_ev = s.get(key)
+            if last_ev is None:
+                continue
+            st = extract_state(corpus, s["id"], suf, last_ev)
+            if st:
+                print(f"{project(s['slug'])}  {id8(s['id'])}  {age}d  due-in {due}d  {lens}  {st}")
+                rows += 1
+    sys.exit(1 if rows else 0)
+
+
 def cmd_ledger(a):
     since, until = bounds(a)
     shown = [a.lens] if a.lens else list(LENSES)
+    if a.within is not None and not a.extract_due:
+        die("--within requires --extract-due")
+    if a.extract_due:
+        cmd_extract_due(a, since, until, shown)
     marks = read_ledger()
     groups = {}  # (kind, key) -> {"ts": [summaries], "orphans": {(tid, lens): [spans]}, "slugs": set()}
 
@@ -1075,6 +1164,8 @@ def main(argv):
     ld = sub.add_parser("ledger", parents=[filters], add_help=False)
     ld.add_argument("--lens", choices=LENSES)
     ld.add_argument("--unmined", action="store_true")
+    ld.add_argument("--extract-due", action="store_true")
+    ld.add_argument("--within", type=int, default=None, metavar="N")
     ld.set_defaults(fn=cmd_ledger)
     mk = sub.add_parser("mark", add_help=False)
     mk.add_argument("--lens", required=True)

@@ -6,7 +6,8 @@
 set -uo pipefail
 SL="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/plugins/seyag/bin/session-log"
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
-export TZ=America/New_York CLAUDE_PROJECTS_DIR="$T/projects" SESSION_LEDGER="$T/ledger.tsv" CLAUDE_SESSION_ARCHIVE="$T/archive" PYTHONDONTWRITEBYTECODE=1
+# HOME is pinned to $T so cleanup_window reads ~/.claude/settings.json under the temp root (when CLAUDE_CONFIG_DIR is unset), never the runner's real home.
+export TZ=America/New_York HOME="$T" CLAUDE_PROJECTS_DIR="$T/projects" SESSION_LEDGER="$T/ledger.tsv" CLAUDE_SESSION_ARCHIVE="$T/archive" PYTHONDONTWRITEBYTECODE=1
 fail=0
 ok() { echo "ok:   $1"; }
 bad() { echo "FAIL: $1"; fail=1; }
@@ -375,6 +376,120 @@ run list --paths-to "$T/no-such-dir/p.txt"; [ $rc = 2 ] && [ "$(grep -c '^sessio
 grep -q -e "$S_ID" -e "$S2_ID" -e "msg_o1" -e "deadbeef-" "$ALL" && bad "stats leaked a full id, a message id or a partial uuid: $(grep -m1 -e "$S_ID" -e "$S2_ID" -e msg_o1 -e deadbeef- "$ALL")" || ok "no full transcript id, message id or uuid fragment past id8 in any stats output"
 grep -q "deadbeef…" "$ALL" && ok "(leak check positive control: the masked uuid does appear)" || bad "masked-uuid positive control"
 
+# 5d. ledger --extract-due
+run ledger && cp "$T/out" "$T/ledger.before" || bad "ledger baseline before extract-due"
+run ledger --extract-due && [ "$(cat "$T/out")" = "# extract-due  window 30d (default)" ] \
+  && ok "extract-due: default 30d window, fresh mtimes exit 0 with header only" || bad "extract-due fresh: rc=$rc $(cat "$T/out")"
+touch -d "-25 days" "$BETA/$C_ID.jsonl" "$BETA/$D_ID.jsonl"
+run ledger --extract-due; [ $rc = 1 ] \
+  && grep -q "^Projects-beta  cccccccc  25d  due-in 5d  owner  missing$" "$T/out" \
+  && grep -q "^Projects-beta  cccccccc  25d  due-in 5d  agent  missing$" "$T/out" \
+  && [ "$(wc -l < "$T/out")" = 3 ] \
+  && ! grep -q -e procedure -e claude.ai -e eeeeeeee -e "beta project turn" "$T/out" \
+  && ok "extract-due: transcript at age >= window-7 with no extract exits 1 with owner+agent missing rows only" \
+  || bad "extract-due missing: rc=$rc $(cat "$T/out")"
+touch -d "-10 days" "$BETA/$C_ID.jsonl"
+run ledger --extract-due && [ "$(wc -l < "$T/out")" = 1 ] \
+  && ok "extract-due purpose canary: same transcript mutated to age < window-7 exits 0 printing no rows" \
+  || bad "extract-due <window-7: rc=$rc $(cat "$T/out")"
+run ledger --extract-due --within 20; [ $rc = 1 ] \
+  && grep -q "^Projects-beta  cccccccc  10d  due-in 20d  owner  missing$" "$T/out" \
+  && ok "extract-due --within N widens the edge" || bad "extract-due --within: rc=$rc $(cat "$T/out")"
+run ledger --extract-due --within -1; [ $rc = 2 ] && ok "extract-due --within < 0 exits 2" || bad "extract-due --within -1: rc=$rc"
+touch -d "-25 days" "$BETA/$C_ID.jsonl"
+mkdir -p "$T/.claude" && printf '{"cleanupPeriodDays": 45}\n' > "$T/.claude/settings.json"
+run ledger --extract-due && [ "$(cat "$T/out")" = "# extract-due  window 45d (settings)" ] \
+  && ok "extract-due reads cleanupPeriodDays from settings.json (25d < 45-7 exits 0)" \
+  || bad "extract-due settings 25d: rc=$rc $(cat "$T/out")"
+touch -d "-40 days" "$BETA/$C_ID.jsonl"
+run ledger --extract-due; [ $rc = 1 ] && head -1 "$T/out" | grep -q "window 45d (settings)" \
+  && grep -q "^Projects-beta  cccccccc  40d  due-in 5d  owner  missing$" "$T/out" \
+  && ok "extract-due with settings window 45d prints row at 40d" || bad "extract-due settings 40d: rc=$rc $(cat "$T/out")"
+mkdir -p "$T/cfg" && printf '{"cleanupPeriodDays": 50}\n' > "$T/cfg/settings.json"
+CLAUDE_CONFIG_DIR="$T/cfg" run ledger --extract-due && [ "$(cat "$T/out")" = "# extract-due  window 50d (settings)" ] \
+  && ok "extract-due honors CLAUDE_CONFIG_DIR over HOME/.claude (40d < 50-7 exits 0)" \
+  || bad "extract-due CLAUDE_CONFIG_DIR: rc=$rc $(cat "$T/out")"
+touch -d "-25 days" "$BETA/$C_ID.jsonl"
+for bad_days in true false 0 -5; do
+  printf '{"cleanupPeriodDays": %s}\n' "$bad_days" > "$T/.claude/settings.json"
+  run ledger --extract-due; [ $rc = 1 ] && [ "$(head -1 "$T/out")" = "# extract-due  window 30d (default)" ] \
+    && ok "extract-due cleanupPeriodDays=$bad_days falls back to window 30d (default)" \
+    || bad "extract-due cleanupPeriodDays=$bad_days: rc=$rc $(cat "$T/out")"
+done
+rm -f "$T/.claude/settings.json"
+mkdir -p "$BETA/mined-corpus/corpus"
+printf '=== 2026-09-24T06:00:00Z ===\nowner turn\n' > "$BETA/mined-corpus/corpus/$C_ID.txt"
+printf '=== 2026-09-22T06:01:00Z [agent] ===\nold reply\n' > "$BETA/mined-corpus/corpus/$C_ID.agent.txt"
+run ledger --extract-due; [ $rc = 1 ] \
+  && [ "$(sed -n 2p "$T/out")" = "Projects-beta  cccccccc  25d  due-in 5d  agent  stale by 2d" ] \
+  && [ "$(wc -l < "$T/out")" = 2 ] \
+  && ok "extract-due hides fresh owner (<1h gap) and reports stale agent (stale by 2d)" \
+  || bad "extract-due stale: rc=$rc $(cat "$T/out")"
+printf '=== 2026-09-24T01:01:00Z [agent] ===\nfive hours old\n' > "$BETA/mined-corpus/corpus/$C_ID.agent.txt"
+run ledger --extract-due; [ $rc = 1 ] \
+  && [ "$(sed -n 2p "$T/out")" = "Projects-beta  cccccccc  25d  due-in 5d  agent  stale by 5h" ] \
+  && [ "$(wc -l < "$T/out")" = 2 ] \
+  && ok "extract-due reports hours when gap is in [1h, 24h) (stale by 5h)" \
+  || bad "extract-due stale hours: rc=$rc $(cat "$T/out")"
+printf '=== 2026-09-24T06:01:00Z [agent] ===\nfresh reply\n' > "$BETA/mined-corpus/corpus/$C_ID.agent.txt"
+run ledger --extract-due && [ "$(wc -l < "$T/out")" = 1 ] \
+  && ok "extract-due exits 0 when both extracts are fresh" || bad "extract-due both fresh: rc=$rc $(cat "$T/out")"
+touch -d "-26 days" "$ALPHA/$B_ID.jsonl" && rm -f "$BETA/mined-corpus/corpus/$C_ID.agent.txt"
+run ledger --extract-due; [ $rc = 1 ] \
+  && [ "$(sed -n 2p "$T/out")" = "Projects-alpha  aaaaaaaa  26d  due-in 4d  owner  missing" ] \
+  && [ "$(sed -n 3p "$T/out")" = "Projects-alpha  aaaaaaaa  26d  due-in 4d  agent  missing" ] \
+  && [ "$(sed -n 4p "$T/out")" = "Projects-beta  cccccccc  25d  due-in 5d  agent  missing" ] \
+  && ok "extract-due groups rows by slug" || bad "extract-due slug order: $(cat "$T/out")"
+run ledger --extract-due --lens owner; [ $rc = 1 ] && [ "$(wc -l < "$T/out")" = 2 ] && grep -q "owner  missing$" "$T/out" && ! grep -q "  agent  " "$T/out" \
+  && ok "extract-due --lens owner filters to owner" || bad "extract-due --lens: $(cat "$T/out")"
+run ledger --extract-due --since 1d; [ $rc = 2 ] && grep -q "does not combine with --since/--until" "$T/err" \
+  && ok "extract-due --since exits 2" || bad "extract-due --since: rc=$rc $(cat "$T/err")"
+run ledger --extract-due --until 2026-09-25; [ $rc = 2 ] && grep -q "does not combine with --since/--until" "$T/err" \
+  && ok "extract-due --until exits 2" || bad "extract-due --until: rc=$rc $(cat "$T/err")"
+run ledger --extract-due --unmined; [ $rc = 2 ] && grep -q "does not combine with --unmined" "$T/err" \
+  && ok "extract-due --unmined exits 2" || bad "extract-due --unmined: rc=$rc $(cat "$T/err")"
+run ledger --within 5; [ $rc = 2 ] && grep -q -- "--within requires --extract-due" "$T/err" \
+  && ok "ledger --within without --extract-due exits 2" || bad "ledger --within: rc=$rc $(cat "$T/err")"
+run ledger --extract-due --lens procedure; [ $rc = 2 ] && grep -q "supports lenses: owner, agent" "$T/err" \
+  && ok "extract-due --lens procedure exits 2" || bad "extract-due --lens procedure: rc=$rc $(cat "$T/err")"
+printf '{"type":"assistant","timestamp":"2026-09-24T06:00:00Z","message":{"content":[{"type":"text","text":"reply only"}]}}\n' > "$BETA/$UNKNOWN.jsonl"
+touch -d "-25 days" "$BETA/$UNKNOWN.jsonl"
+run ledger --extract-due --project beta; [ $rc = 1 ] \
+  && grep -q "^Projects-beta  ffffffff  25d  due-in 5d  agent  missing$" "$T/out" \
+  && ! grep -q "ffffffff.*owner" "$T/out" \
+  && ok "extract-due skips owner lens when transcript holds only assistant entries" \
+  || bad "extract-due assistant-only: $(cat "$T/out")"
+cat > "$BETA/$UNKNOWN.jsonl" <<'EOF'
+{"type":"user","timestamp":"2026-09-24T01:00:00Z","message":{"content":"last real prompt"}}
+{"type":"assistant","timestamp":"2026-09-24T01:01:00Z","message":{"content":[{"type":"tool_use","id":"tu_1","name":"Bash","input":{"command":"ls"}}]}}
+{"type":"user","timestamp":"2026-09-24T06:00:00Z","message":{"content":[{"type":"tool_result","tool_use_id":"tu_1","content":"file.txt"}]}}
+{"type":"assistant","timestamp":"2026-09-24T06:01:00Z","message":{"content":[{"type":"text","text":"agent reply after tool result"}]}}
+EOF
+touch -d "-25 days" "$BETA/$UNKNOWN.jsonl"
+printf '=== 2026-09-24T01:00:00Z ===\nlast real prompt\n' > "$BETA/mined-corpus/corpus/$UNKNOWN.txt"
+printf '=== 2026-09-24T01:01:00Z [agent] ===\nearly reply\n' > "$BETA/mined-corpus/corpus/$UNKNOWN.agent.txt"
+run ledger --extract-due --project beta; [ $rc = 1 ] \
+  && grep -q "^Projects-beta  ffffffff  25d  due-in 5d  agent  stale by 5h$" "$T/out" \
+  && ! grep -q "ffffffff.*owner" "$T/out" \
+  && ok "extract-due: trailing tool_result user entry does not make owner stale; agent evaluated per its own predicate" \
+  || bad "extract-due tool_result tail: $(cat "$T/out")"
+printf '{"type":"assistant","timestamp":"2026-09-24T09:00:00Z","message":{"content":[{"type":"tool_use","id":"tu_2","name":"Bash","input":{"command":"true"}}]}}\n' >> "$BETA/$UNKNOWN.jsonl"
+touch -d "-25 days" "$BETA/$UNKNOWN.jsonl"
+printf '=== 2026-09-24T01:01:00Z [agent] ===\nearly reply\n--- 2026-09-24T09:00:00Z tool Bash: true\n' > "$BETA/mined-corpus/corpus/$UNKNOWN.agent.txt"
+run ledger --extract-due --project beta; [ $rc = 1 ] \
+  && ! grep -q "ffffffff" "$T/out" \
+  && ok "extract-due: tool_use-only assistant tail with --- <ts> stub after last === keeps agent fresh" \
+  || bad "extract-due tool_use stub tail: $(cat "$T/out")"
+printf 'stray text with no header lines\n' > "$BETA/mined-corpus/corpus/$UNKNOWN.agent.txt"
+run ledger --extract-due --project beta; [ $rc = 1 ] \
+  && grep -q "^Projects-beta  ffffffff  25d  due-in 5d  agent  missing$" "$T/out" \
+  && ! grep -q "ffffffff.*owner" "$T/out" \
+  && ok "extract-due: extract file with no === or --- headers is still missing" \
+  || bad "extract-due headerless extract: $(cat "$T/out")"
+rm -f "$BETA/$UNKNOWN.jsonl" "$BETA/mined-corpus/corpus/$UNKNOWN.txt" "$BETA/mined-corpus/corpus/$UNKNOWN.agent.txt"
+run ledger && cmp -s "$T/ledger.before" "$T/out" \
+  && ok "claim canary: default ledger output is byte-identical" || bad "default ledger drifted"
+
 # 6. no full ids anywhere
 grep -q -e "$A_ID" -e "$B_ID" -e "$C_ID" -e "$D_ID" -e "$UNKNOWN" -e "$BRIDGE" -e "$CLOUD" -e "$ARCH_CLOUD" -e "$SKEW" "$ALL" \
   && bad "a full transcript or bridge id leaked: $(grep -m1 -e "$A_ID" -e "$B_ID" -e "$C_ID" -e "$D_ID" -e "$UNKNOWN" -e "$BRIDGE" -e "$CLOUD" -e "$ARCH_CLOUD" -e "$SKEW" "$ALL")" \
@@ -383,7 +498,8 @@ grep -q "cse_01AAAAAAAA" "$ALL" && ok "(leak check positive control: the short a
 grep -q "cse_01BBBBBBBB" "$ALL" && ok "(leak check positive control: the short archive cse id does appear)" || bad "archive leak check positive control"
 
 # 7. help / usage
-run --help; [ $rc = 0 ] && grep -q "^Usage:" "$T/out" && ok "--help exits 0 with Usage" || bad "--help rc=$rc"
+run --help; [ $rc = 0 ] && grep -q "^Usage:" "$T/out" && grep -q -- "--extract-due" "$T/out" && grep -q "mtime-approximated" "$T/out" \
+  && ok "--help exits 0 with Usage and --extract-due notes" || bad "--help rc=$rc"
 run grep -h; [ $rc = 0 ] && grep -q "^Usage:" "$T/out" && ok "verb -h exits 0 with Usage" || bad "grep -h rc=$rc"
 run bogus; [ $rc = 2 ] && ok "unknown verb exits 2" || bad "unknown verb rc=$rc"
 run grep; [ $rc = 2 ] && ok "grep without a pattern exits 2" || bad "grep no pattern rc=$rc"
