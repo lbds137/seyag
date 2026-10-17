@@ -207,8 +207,7 @@ esac
 # exists for, and case 32 is its negative — the split only exposes a grep that
 # is actually there.
 #
-# Same mechanism as the phantom-script check in dispatch-spec-ledger-gate.sh;
-# newlines in the input already act as splits because `grep -P` is
+# Newlines in the input already act as splits because `grep -P` is
 # line-oriented.
 SEGMENTED_TEXT=$(sed -E 's/(\&\&|\|\||;|\||\&)/\n/g' <<<"$STRIPPED_CMD" 2>/dev/null)
 SPLIT_RC=$?

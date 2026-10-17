@@ -120,6 +120,15 @@
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/run.sh\" status-claim-cite"
           }
         ]
+      },
+      {
+        "matcher": "Agent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/run.sh\" dispatch-spec-ledger-gate"
+          }
+        ]
       }
     ],
     "PostToolUse": [
