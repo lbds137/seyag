@@ -214,6 +214,48 @@ ${FENCE}
 All set."
 check 0 "pending marker inside fenced code block does not fire" "$TMP/m9c.jsonl"
 
+mktx "$TMP/m10a.jsonl" "There's nothing waiting on you either."
+check 0 "negated pending marker: 'nothing waiting on you' does not fire" "$TMP/m10a.jsonl"
+
+mktx "$TMP/m10b.jsonl" "Otherwise I'm idle, with nothing waiting on you."
+check 0 "negated pending marker: 'with nothing waiting on you' does not fire" "$TMP/m10b.jsonl"
+
+mktx "$TMP/m10c.jsonl" "I'm idle again, and nothing is waiting on you."
+check 0 "negated pending marker: 'nothing is waiting on you' does not fire" "$TMP/m10c.jsonl"
+
+mktx "$TMP/m10d.jsonl" "Nobody is waiting on you right now."
+check 0 "negated pending marker: 'Nobody is waiting on you' does not fire" "$TMP/m10d.jsonl"
+
+mktx "$TMP/m10e.jsonl" "It isn't waiting on you anymore."
+check 0 "negated pending marker: \"isn't waiting on you\" does not fire" "$TMP/m10e.jsonl"
+
+mktx "$TMP/m10f.jsonl" "It isn’t waiting on you anymore."
+check 0 "negated pending marker: curly apostrophe (isn’t) does not fire" "$TMP/m10f.jsonl"
+
+mktx "$TMP/m10f.jsonl" "No rush, but this is waiting on you"
+check 2 "negator before comma boundary does not suppress pending marker" "$TMP/m10f.jsonl"
+
+mktx "$TMP/m10g.jsonl" "I can't ship it until it is waiting on you for the final check"
+check 2 "negator more than three words back does not suppress pending marker" "$TMP/m10g.jsonl"
+
+mktx "$TMP/m10h.jsonl" "Nothing else to do; say the word and I'll start"
+check 2 "negator before semicolon boundary does not suppress pending marker" "$TMP/m10h.jsonl"
+
+mktx "$TMP/m10i.jsonl" "No changes pushed - waiting on you"
+check 2 "negator before spaced-hyphen boundary does not suppress pending marker" "$TMP/m10i.jsonl"
+
+mktx "$TMP/m10j.jsonl" "If not say the word"
+check 2 "conditional 'If not' before pending marker still fires" "$TMP/m10j.jsonl"
+
+mktx "$TMP/m10k.jsonl" "Not sure if it's waiting on you"
+check 2 "non-governing negator ('Not sure if it's') does not suppress pending marker" "$TMP/m10k.jsonl"
+
+mktx "$TMP/m10l.jsonl" "There is nothing left but waiting on you"
+check 2 "negator separated by 'left but' does not suppress pending marker" "$TMP/m10l.jsonl"
+
+mktx "$TMP/m10m.jsonl" "Don't forget for you to test"
+check 2 "negator before non-filler verb ('Don't forget') does not suppress pending marker" "$TMP/m10m.jsonl"
+
 export SYG_BQ_PENDING_MARKERS='green light'
 mktx "$TMP/m10.jsonl" "Once the build finishes, consider it a green light from me"
 check 2 "custom SYG_BQ_PENDING_MARKERS trips on its own pattern" "$TMP/m10.jsonl" "" \

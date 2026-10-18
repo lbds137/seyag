@@ -37,7 +37,10 @@
 # blocks and inline `...` code spans) is scanned case-insensitively against
 # SYG_BQ_PENDING_MARKERS (a Python regex; unset uses the built-in default
 # `say the word\b|waiting on you\b|needs? your (yes|go|call|input)\b|for you to (decide|test|check)\b`;
-# set to empty disables the pass; a broken regex fails open). The first
+# set to empty disables the pass; a broken regex fails open). A match directly
+# preceded in its own clause by a negator (nothing, no, not, none, nobody,
+# never, …n't, with only filler words like "is" between, up to three words
+# back) is ignored, so "nothing is waiting on you" does not fire. The first
 # matching line is quoted in the banner.
 
 set -uo pipefail
@@ -153,6 +156,15 @@ DEFAULT_PENDING_MARKERS = (
     r"say the word\b|waiting on you\b"
     r"|needs? your (yes|go|call|input)\b|for you to (decide|test|check)\b"
 )
+NEGATORS = {"nothing", "no", "not", "none", "nobody", "never", "nothing's"}
+FILLER = {
+    "is", "are", "was", "were", "be", "been", "'s", "currently",
+    "else", "either", "right", "now", "anymore", "still", "yet", "really",
+}
+STOP = {
+    "but", "if", "whether", "until", "unless",
+    "except", "though", "although", "when",
+}
 raw_markers = os.environ.get("SYG_BQ_PENDING_MARKERS", DEFAULT_PENDING_MARKERS)
 if raw_markers:
     try:
@@ -160,16 +172,36 @@ if raw_markers:
     except (re.error, TypeError, ValueError, RecursionError, OverflowError):
         marker_re = None
     if marker_re is not None:
+        def live_match(text):
+            for m in marker_re.finditer(text):
+                clause = re.split(r"[\n.;:!?,—–]| - | -- ", text[: m.start()])[-1]
+                # Curly apostrophes (isn’t, nothing’s) count like straight ones.
+                words = [re.sub(r"^\W+|\W+$", "", w).lower().replace("’", "'") for w in clause.split()]
+                words = [w for w in words if w]
+                negated = False
+                for i in range(len(words) - 1, max(-1, len(words) - 4), -1):
+                    w = words[i]
+                    if w in FILLER:
+                        continue
+                    if w in STOP:
+                        break
+                    if w in NEGATORS or w.endswith("n't"):
+                        negated = not (w == "not" and i > 0 and words[i - 1] in STOP)
+                    break
+                if not negated:
+                    return m
+            return None
+
         cleaned = re.sub(r"```.*?```", "", final_text, flags=re.S)
         cleaned = re.sub(r"`[^`]*`", "", cleaned)
         paras = [p for p in re.split(r"\n\s*\n", cleaned) if p.strip()]
         scope = paras[-1] if paras else ""
-        if marker_re.search(scope):
+        if live_match(scope):
             tripped = next(
                 (
                     ln.strip()
                     for ln in scope.splitlines()
-                    if ln.strip() and marker_re.search(ln)
+                    if ln.strip() and live_match(ln)
                 ),
                 scope.strip(),
             )
