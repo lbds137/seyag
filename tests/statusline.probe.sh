@@ -62,7 +62,7 @@ printf '{"env":{"ANTHROPIC_AUTH_TOKEN":"dummy-probe-token"},"modelSettings":{"gl
 export HOME="$h" XDG_CACHE_HOME="$h/cache" XDG_STATE_HOME="$h/state" XDG_STATE_HOME="$h/state"
 export ZAI_SPEND_PROJECTS="$h/projects/empty" ZAI_SPEND_PEAK_UTC="0-24"
 # The API-credit segments read these from the process env; a caller's values must not leak in.
-unset SYG_CREDIT_LEDGER SYG_CREDIT_GRANTS SYG_CREDIT_WHEN SYG_CREDIT_FORCE SYG_CREDIT_NOW SYG_CREDIT_ROUTE SYG_CREDIT_ADMIN_URL ANTHROPIC_ADMIN_API_KEY SYG_CREDIT_ANCHOR
+unset SYG_CREDIT_LEDGER SYG_CREDIT_GRANTS SYG_CREDIT_WHEN SYG_CREDIT_FORCE SYG_CREDIT_NOW SYG_CREDIT_ROUTE SYG_CREDIT_ADMIN_URL ANTHROPIC_ADMIN_API_KEY SYG_CREDIT_ADMIN_KEY_CMD SYG_CREDIT_ANCHOR
 
 cat > "$h/quota.json" <<'EOF'
 {"code":200,"success":true,"data":{"limits":[
@@ -77,7 +77,7 @@ route_anthropic() { jq '.env.ANTHROPIC_BASE_URL = "https://api.anthropic.com"' "
 route_or() { jq '.env.ANTHROPIC_BASE_URL = "https://openrouter.ai/api/v1"' "$h/.claude/settings.json" > "$h/.claude/settings.json.new" && mv "$h/.claude/settings.json.new" "$h/.claude/settings.json"; }
 route_host() { jq --arg u "$1" '.env.ANTHROPIC_BASE_URL = $u' "$h/.claude/settings.json" > "$h/.claude/settings.json.new" && mv "$h/.claude/settings.json.new" "$h/.claude/settings.json"; }
 render() {
-  local env_args=(-u ANTHROPIC_BASE_URL -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u SYG_CREDIT_LEDGER -u SYG_CREDIT_GRANTS -u SYG_CREDIT_FORCE -u COLUMNS -u SYG_STATUSLINE_WRAP_COLUMNS -u SYG_STATUSLINE_DEBUG -u SYG_STATUSLINE_FIT_MARGIN -u ANTHROPIC_ADMIN_API_KEY -u SYG_CREDIT_ADMIN_URL)
+  local env_args=(-u ANTHROPIC_BASE_URL -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u SYG_CREDIT_LEDGER -u SYG_CREDIT_GRANTS -u SYG_CREDIT_FORCE -u COLUMNS -u SYG_STATUSLINE_WRAP_COLUMNS -u SYG_STATUSLINE_DEBUG -u SYG_STATUSLINE_FIT_MARGIN -u ANTHROPIC_ADMIN_API_KEY -u SYG_CREDIT_ADMIN_KEY_CMD -u SYG_CREDIT_ADMIN_URL)
   if [ -n "${PROBE_DEBUG:-}" ]; then
     env_args+=("SYG_STATUSLINE_DEBUG=$PROBE_DEBUG")
   fi
@@ -504,7 +504,7 @@ cr_render() { # ledger-name now [grants-path [VAR=value ...]]; stdin: the cost o
     local cost; cost=$(cat)
     printf '{"session_id":"cr-%s","day":"%s","first_ts":"%s","last_ts":"%s","cost_usd":%s,"source":"transcript"}\n' \
         "$1" "${2:0:10}" "$2" "$2" "$cost" > "$h/credit/$1.jsonl"
-    env -u ANTHROPIC_BASE_URL -u SYG_CREDIT_FORCE -u SYG_CREDIT_GRANTS -u ANTHROPIC_ADMIN_API_KEY -u SYG_CREDIT_ADMIN_URL ANTHROPIC_API_KEY=sk-probe \
+    env -u ANTHROPIC_BASE_URL -u SYG_CREDIT_FORCE -u SYG_CREDIT_GRANTS -u ANTHROPIC_ADMIN_API_KEY -u SYG_CREDIT_ADMIN_KEY_CMD -u SYG_CREDIT_ADMIN_URL ANTHROPIC_API_KEY=sk-probe \
         SYG_CREDIT_LEDGER="$h/credit/$1.jsonl" SYG_CREDIT_NOW="$2" ${3:+SYG_CREDIT_GRANTS="$3"} "${@:4}" \
         bash "$SL" <<< "{\"session_id\":\"cr-$1\",\"cost\":{\"total_cost_usd\":$cost},\"rate_limits\":{\"five_hour\":{\"used_percentage\":83,\"resets_at\":1790790548}},\"context_window\":{\"current_usage\":{\"input_tokens\":1000}},\"model\":{\"id\":\"m\",\"display_name\":\"X\"},\"cwd\":\"/tmp\"}"
 }
@@ -554,7 +554,7 @@ grep -qF 'platform.claude.com $48.00 est' <<< "$out" && ! grep -qF '(exp' <<< "$
 # 40-44. Lane routing, each with rate_limits in the input. The process env decides.
 lane_in='{"rate_limits":{"five_hour":{"used_percentage":83,"resets_at":1790790548},"seven_day":{"used_percentage":56,"resets_at":1791093600}},"context_window":{"current_usage":{"input_tokens":1000}},"model":{"display_name":"X"},"cwd":"/tmp"}'
 lane() { # VAR=value ...: render lane_in under exactly these env vars
-    local env_args=(-u ANTHROPIC_BASE_URL -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u SYG_CREDIT_LEDGER -u SYG_CREDIT_GRANTS -u SYG_CREDIT_FORCE -u COLUMNS -u SYG_STATUSLINE_WRAP_COLUMNS -u SYG_STATUSLINE_DEBUG -u SYG_STATUSLINE_FIT_MARGIN -u ANTHROPIC_ADMIN_API_KEY -u SYG_CREDIT_ADMIN_URL)
+    local env_args=(-u ANTHROPIC_BASE_URL -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u SYG_CREDIT_LEDGER -u SYG_CREDIT_GRANTS -u SYG_CREDIT_FORCE -u COLUMNS -u SYG_STATUSLINE_WRAP_COLUMNS -u SYG_STATUSLINE_DEBUG -u SYG_STATUSLINE_FIT_MARGIN -u ANTHROPIC_ADMIN_API_KEY -u SYG_CREDIT_ADMIN_KEY_CMD -u SYG_CREDIT_ADMIN_URL)
     if [ -n "${PROBE_DEBUG:-}" ]; then
         env_args+=("SYG_STATUSLINE_DEBUG=$PROBE_DEBUG")
     fi
@@ -771,6 +771,19 @@ grep -qF 'platform.claude.com $187.50 est' <<< "$out_nokey" \
     && grep -qF 'platform.claude.com $190.71 · ' <<< "$out_key" && ! grep -qF ' est' <<< "$out_key" \
     && ok "balance cache: keyed and keyless renders keep separate entries (keyless -> '\$187.50 est', keyed -> '\$190.71')" \
     || bad "balance cache key separation: keyless '$out_nokey' / keyed '$out_key'"
+# 48b1. SYG_CREDIT_ADMIN_KEY_CMD vs nothing set: different credit cache keys on line 1,
+# and a command-keyed render does not reuse the keyless cache entry.
+printf '#!/bin/bash\nprintf "fixture-admin-key\\n"\n' > "$h/cr/key-cmd.sh"
+chmod +x "$h/cr/key-cmd.sh"
+out_nokey2=$(strip <<< "$(fleet "$h/credit/grants.json" SYG_CREDIT_ADMIN_URL="$CR")")
+k_none=$(head -n 1 "$cr_cache")
+out_cmd=$(strip <<< "$(fleet "$h/credit/grants.json" SYG_CREDIT_ADMIN_KEY_CMD="$h/cr/key-cmd.sh" SYG_CREDIT_ADMIN_URL="$CR")")
+k_cmd=$(head -n 1 "$cr_cache")
+[ -n "$k_none" ] && [ -n "$k_cmd" ] && [ "$k_none" != "$k_cmd" ] \
+    && grep -qF 'platform.claude.com $187.50 est' <<< "$out_nokey2" \
+    && grep -qF 'platform.claude.com $190.71 · ' <<< "$out_cmd" && ! grep -qF ' est' <<< "$out_cmd" \
+    && ok "balance cache: SYG_CREDIT_ADMIN_KEY_CMD and keyless renders use different cache keys (line 1 differs, '\$187.50 est' vs '\$190.71')" \
+    || bad "balance cache cmd key separation: k_none='$k_none' / k_cmd='$k_cmd' / '$out_nokey2' / '$out_cmd'"
 # 48b2. Same key, another origin (a closed loopback port, so the fetch fails): its own entry,
 # the estimate, not the cached provider figure.
 out_origin=$(strip <<< "$(fleet "$h/credit/grants.json" ANTHROPIC_ADMIN_API_KEY=fixture-admin-key SYG_CREDIT_ADMIN_URL=http://127.0.0.1:1)")
