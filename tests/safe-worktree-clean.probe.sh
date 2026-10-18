@@ -469,6 +469,41 @@ expect "$J" secret HOLD:ignored "5: '*/' is still match-all once its trailing / 
 grep -q "^safe-worktree-clean: warning: SYG_WORKTREE_REGENERABLE: '\*/' matches every path; ignored$" "$T/broad.err" \
   && ok "5: '*/' warns" || { bad "5: '*/' warning"; cat "$T/broad.err"; }
 
+# --- --all: judge every linked worktree wherever it lives. ---
+mk_repo allrepo
+AR="$T/allrepo"
+add_tree allrepo inside
+mkdir -p "$T/elsewhere"
+git -C "$AR" worktree add -q -b worktree-agent-x "$T/elsewhere/agent-x" origin/main 2>/dev/null
+git -C "$AR" worktree add -q -b feature-y "$T/elsewhere/feature-y" origin/main 2>/dev/null
+J=$("$TOOL" --repo "$AR" --json)
+expect "$J" inside SAFE "without --all: inside agent tree judged SAFE"
+expect "$J" agent-x "" "without --all: outside agent tree absent from JSON"
+expect "$J" feature-y "" "without --all: outside non-agent tree absent from JSON"
+J=$("$TOOL" --repo "$AR" --all --json)
+expect "$J" inside SAFE "--all: inside agent tree SAFE"
+expect "$J" agent-x SAFE "--all: outside agent tree SAFE"
+expect "$J" feature-y HOLD:branch-name "--all: outside non-agent tree HOLD:branch-name"
+expect "$J" allrepo "" "--all: main checkout is never listed"
+out=$("$TOOL" --repo "$AR" --all)
+if grep -q 'agent worktrees: 3' <<<"$out" \
+  && grep -q '^SAFE  \.claude/worktrees/inside  \[worktree-agent-inside\]$' <<<"$out" \
+  && grep -q "^SAFE  $T/elsewhere/agent-x  \[worktree-agent-x\]$" <<<"$out" \
+  && grep -q "^  $T/elsewhere/feature-y  \[feature-y\]$" <<<"$out"; then
+  ok "--all text: summary counts 3, inside relative, outside absolute"
+else
+  bad "--all text"; printf '%s\n' "$out"
+fi
+out=$("$TOOL" --repo "$AR" --all --apply); rc=$?
+if [ $rc = 0 ] && [ ! -e "$AR/.claude/worktrees/inside" ] && [ ! -e "$T/elsewhere/agent-x" ] \
+  && ! git -C "$AR" rev-parse -q --verify refs/heads/worktree-agent-inside >/dev/null \
+  && ! git -C "$AR" rev-parse -q --verify refs/heads/worktree-agent-x >/dev/null \
+  && [ -d "$T/elsewhere/feature-y" ] && git -C "$AR" rev-parse -q --verify refs/heads/feature-y >/dev/null; then
+  ok "--all --apply removes outside SAFE agent tree and its branch; feature-y stays"
+else
+  bad "--all --apply (rc $rc)"; printf '%s\n' "$out"
+fi
+
 # --- The rm guards pass the tool's own invocation untouched (exit 0, no output). ---
 for cmd in 'safe-worktree-clean --repo /srv/team/myrepo --apply' \
   'safe-worktree-clean --repo ~/src/node_modules-demo --apply' \

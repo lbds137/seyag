@@ -2,10 +2,10 @@
 # safe-worktree-clean - judge agent worktrees for safe removal; remove the SAFE ones on --apply
 #
 # Usage:
-#   safe-worktree-clean [--apply] [--repo DIR] [--base REF] [--locks] [--locks-apply] [--json]
+#   safe-worktree-clean [--apply] [--repo DIR] [--base REF] [--all] [--locks] [--locks-apply] [--json]
 #
-# Judges every worktree under <repo>/.claude/worktrees/ (--repo DIR, default: the current
-# repo) and prints SAFE or HOLD:<reason> for each; HOLD trees go into one batched report.
+# Judges every worktree under <repo>/.claude/worktrees/ (--all: every linked worktree wherever it
+# lives; --repo DIR, default: the current repo) and prints SAFE or HOLD:<reason> for each; HOLD trees go into one batched report.
 # Dry run by default. --apply removes each SAFE tree on its own (unlock, git worktree remove
 # --force, git branch -D, then one git worktree prune); a HOLD never blocks another tree.
 # A tree is SAFE only when ALL hold, and any check that cannot run is a HOLD:
@@ -49,11 +49,12 @@ set -uo pipefail
 
 usage() { sed -n '2,/^[^#]/s/^# \{0,1\}//p' "$0"; }
 
-APPLY=false LOCKS=false LOCKS_APPLY=false JSON=false REPO=. BASE_ARG="" BASE_SRC=""
+APPLY=false ALL=false LOCKS=false LOCKS_APPLY=false JSON=false REPO=. BASE_ARG="" BASE_SRC=""
 while [ $# -gt 0 ]; do
   case "$1" in
     -h | --help) usage; exit 0 ;;
     --apply) APPLY=true ;;
+    --all) ALL=true ;;
     --locks) LOCKS=true ;;
     --locks-apply) LOCKS=true; LOCKS_APPLY=true ;;
     --json) JSON=true ;;
@@ -492,7 +493,11 @@ judge_git() {
 # Agent trees and their cwd scan.
 TREES=()
 for i in $(seq 1 "$cur"); do
-  case "$(realpath -m -- "${WT_PATH[$i]}")/" in "$WT_ROOT"/?*) TREES+=("$i") ;; esac
+  if $ALL; then
+    TREES+=("$i")
+  else
+    case "$(realpath -m -- "${WT_PATH[$i]}")/" in "$WT_ROOT"/?*) TREES+=("$i") ;; esac
+  fi
 done
 declare -A CWD_PID=()
 CWD_SCAN_OK=true
