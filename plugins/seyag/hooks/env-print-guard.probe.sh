@@ -19,7 +19,7 @@ payload_for() {
 expect_allow() {
   local label="$1" cmd="$2" out err rc tmp_err
   tmp_err=$(mktemp)
-  out=$(payload_for "$cmd" | env -i PATH="$PATH" HOME="$HOME" bash "$HOOK" 2>"$tmp_err")
+  out=$(payload_for "$cmd" | env -i PATH="$PATH" HOME="$HOME" SYG_EPG_TRUSTED_VARS="${SYG_EPG_TRUSTED_VARS:-}" bash "$HOOK" 2>"$tmp_err")
   rc=$?
   err=$(cat "$tmp_err")
   rm -f "$tmp_err"
@@ -34,7 +34,7 @@ expect_allow() {
 expect_deny() {
   local label="$1" cmd="$2" reason_sub="$3" out err rc tmp_err
   tmp_err=$(mktemp)
-  out=$(payload_for "$cmd" | env -i PATH="$PATH" HOME="$HOME" bash "$HOOK" 2>"$tmp_err")
+  out=$(payload_for "$cmd" | env -i PATH="$PATH" HOME="$HOME" SYG_EPG_TRUSTED_VARS="${SYG_EPG_TRUSTED_VARS:-}" bash "$HOOK" 2>"$tmp_err")
   rc=$?
   err=$(cat "$tmp_err")
   rm -f "$tmp_err"
@@ -189,7 +189,9 @@ expect_allow "env > out.txt" "env > out.txt"
 expect_allow "env > ./snap/env.txt" "env > ./snap/env.txt"
 expect_allow "env > ~/snap.txt" "env > ~/snap.txt"
 # shellcheck disable=SC2016
-expect_allow 'env > ${OUT}' 'env > ${OUT}'
+expect_deny 'env > ${OUT}' 'env > ${OUT}' "bulk environment dump via"
+# shellcheck disable=SC2016
+SYG_EPG_TRUSTED_VARS=OUT expect_allow 'env > ${OUT} (SYG_EPG_TRUSTED_VARS=OUT)' 'env > ${OUT}'
 expect_allow "env > build/dev/out.txt" "env > build/dev/out.txt"
 ANSI_C_PROCSUB_CMD=$(cat <<'PROBE_EOF'
 echo $'a\' <(' ; env | cat ; echo ')'
@@ -274,6 +276,82 @@ expect_allow "jq . .env > out.txt 2>/dev/null" "jq . .env > out.txt 2>/dev/null"
 expect_deny ". ./x; env > out.txt" ". ./x; env > out.txt" "bulk environment dump via"
 expect_deny "source ./x && env > out.txt" "source ./x && env > out.txt" "bulk environment dump via"
 expect_deny "FOO=1 eval true; env > out.txt" "FOO=1 eval true; env > out.txt" "bulk environment dump via"
+# shellcheck disable=SC2016
+expect_deny 'X=/dev/stderr; env > $X' 'X=/dev/stderr; env > $X' "bulk environment dump via"
+# shellcheck disable=SC2016
+expect_deny 'X=/dev/stderr; env > ${X}/x' 'X=/dev/stderr; env > ${X}/x' "bulk environment dump via"
+# shellcheck disable=SC2016
+expect_deny 'export X=/dev/stderr && env > $X' 'export X=/dev/stderr && env > $X' "bulk environment dump via"
+# shellcheck disable=SC2016
+expect_deny 'read X < f; env > $X' 'read X < f; env > $X' "bulk environment dump via"
+# shellcheck disable=SC2016
+expect_deny 'for X in /dev/stderr; do env > $X; done' 'for X in /dev/stderr; do env > $X; done' "bulk environment dump via"
+# shellcheck disable=SC2016
+expect_deny 'X=/dev/stderr; jq . .env > /tmp/x 2>$X' 'X=/dev/stderr; jq . .env > /tmp/x 2>$X' "bulk jq filter"
+# shellcheck disable=SC2016
+expect_deny 'printf -v X /dev/stderr; env > $X' 'printf -v X /dev/stderr; env > $X' "bulk environment dump via"
+# shellcheck disable=SC2016
+expect_deny 'read -n 100 X <<< /dev/stderr; env > $X' 'read -n 100 X <<< /dev/stderr; env > $X' "bulk environment dump via"
+# shellcheck disable=SC2016
+expect_deny 'read <<< /dev/stderr; env > $REPLY' 'read <<< /dev/stderr; env > $REPLY' "bulk environment dump via"
+# shellcheck disable=SC2016
+expect_deny ': ${X:=/dev/stderr}; env > $X' ': ${X:=/dev/stderr}; env > $X' "bulk environment dump via"
+# shellcheck disable=SC2016
+expect_deny 'eval "X=/dev/stderr"; env > $X' 'eval "X=/dev/stderr"; env > $X' "bulk environment dump via"
+# shellcheck disable=SC2016
+expect_deny 'set -- /dev/stderr; for X; do env > $X; done' 'set -- /dev/stderr; for X; do env > $X; done' "bulk environment dump via"
+# shellcheck disable=SC2016
+expect_deny 'printf -vX /dev/stderr; env > $X' 'printf -vX /dev/stderr; env > $X' "bulk environment dump via"
+# shellcheck disable=SC2016
+expect_deny 'true /dev/stderr; env > $_' 'true /dev/stderr; env > $_' "bulk environment dump via"
+# shellcheck disable=SC2016
+expect_deny 'cd /dev; env > $PWD/stderr' 'cd /dev; env > $PWD/stderr' "bulk environment dump via"
+# shellcheck disable=SC2016
+expect_deny 'env > $OPTARG' 'env > $OPTARG' "bulk environment dump via"
+# shellcheck disable=SC2016
+expect_deny 'env > $X' 'env > $X' "bulk environment dump via"
+# shellcheck disable=SC2016
+expect_deny ': ${HOME:=/dev}; env > $HOME/stderr' ': ${HOME:=/dev}; env > $HOME/stderr' "bulk environment dump via"
+# shellcheck disable=SC2016
+expect_deny 'eval true; env > $HOME/x' 'eval true; env > $HOME/x' "bulk environment dump via"
+# shellcheck disable=SC2016
+expect_deny 'HOME=/dev; env > $HOME/stderr' 'HOME=/dev; env > $HOME/stderr' "bulk environment dump via"
+# shellcheck disable=SC2016
+expect_deny 'export "HOME=/dev"; env > $HOME/stderr' 'export "HOME=/dev"; env > $HOME/stderr' "bulk environment dump via"
+# shellcheck disable=SC2016
+expect_deny 'declare -n R=HOME; R=/dev; env > $HOME/stderr' 'declare -n R=HOME; R=/dev; env > $HOME/stderr' "bulk environment dump via"
+# shellcheck disable=SC2016
+expect_deny 'export H"OME"=/dev; env > $HOME/stderr' 'export H"OME"=/dev; env > $HOME/stderr' "bulk environment dump via"
+# shellcheck disable=SC2016
+expect_deny 'declare H\OME=/dev; env > $HOME/stderr' 'declare H\OME=/dev; env > $HOME/stderr' "bulk environment dump via"
+# shellcheck disable=SC2016
+expect_deny 'printf -v "HOME" %s /dev; env > $HOME/stderr' 'printf -v "HOME" %s /dev; env > $HOME/stderr' "bulk environment dump via"
+# shellcheck disable=SC2016
+expect_deny 'read H\OME <<< /dev; env > $HOME/stderr' 'read H\OME <<< /dev; env > $HOME/stderr' "bulk environment dump via"
+# shellcheck disable=SC2016
+expect_deny 'mapfile -t "HOME" <<< /dev; env > $HOME/stderr' 'mapfile -t "HOME" <<< /dev; env > $HOME/stderr' "bulk environment dump via"
+# shellcheck disable=SC2016
+expect_deny 'unset HOME; : ${HOME[0]:=/dev}; env > $HOME/stderr' 'unset HOME; : ${HOME[0]:=/dev}; env > $HOME/stderr' "bulk environment dump via"
+# shellcheck disable=SC2016
+expect_deny 'env ${HOME[0]:=/dev} > $HOME/stderr' 'env ${HOME[0]:=/dev} > $HOME/stderr' "bulk environment dump via"
+# shellcheck disable=SC2016
+expect_deny 'HOME=/dev env > $HOME/x' 'HOME=/dev env > $HOME/x' "bulk environment dump via"
+# shellcheck disable=SC2016
+expect_allow 'env > $TMPDIR/x' 'env > $TMPDIR/x'
+# shellcheck disable=SC2016
+expect_deny 'Y=1; env > $TMPDIR/x' 'Y=1; env > $TMPDIR/x' "bulk environment dump via"
+# shellcheck disable=SC2016
+expect_allow 'env > $HOME/x' 'env > $HOME/x'
+# shellcheck disable=SC2016
+expect_allow 'env > ${TMPDIR}/x' 'env > ${TMPDIR}/x'
+# shellcheck disable=SC2016
+expect_allow 'env > $CLAUDE_JOB_DIR/tmp/e' 'env > $CLAUDE_JOB_DIR/tmp/e'
+# shellcheck disable=SC2016
+SYG_EPG_TRUSTED_VARS=MYDIR expect_allow 'env > $MYDIR/x (SYG_EPG_TRUSTED_VARS=MYDIR)' 'env > $MYDIR/x'
+# shellcheck disable=SC2016
+SYG_EPG_TRUSTED_VARS='A-B OUT' expect_allow "env > \${OUT} (SYG_EPG_TRUSTED_VARS='A-B OUT')" 'env > ${OUT}'
+# shellcheck disable=SC2016
+SYG_EPG_TRUSTED_VARS='A-B OUT' expect_deny "env > \$AB/x (SYG_EPG_TRUSTED_VARS='A-B OUT')" 'env > $AB/x' "bulk environment dump via"
 
 # --- Fail-open on malformed JSON ---
 out=$(printf 'not json {' | env -i PATH="$PATH" HOME="$HOME" bash "$HOOK" 2>&1)
