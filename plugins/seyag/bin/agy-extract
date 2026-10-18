@@ -1,0 +1,279 @@
+#!/usr/bin/env python3
+"""agy-extract: turn Antigravity CLI (agy) conversation DBs into the two session-mining corpora.
+
+Usage: agy-extract [--since ISO-TS] [--thinking] OUTDIR [DB...]
+
+With no DB arguments, reads every *.db in ${SYG_AGY_CONVERSATIONS_DIR:-$HOME/.gemini/antigravity-cli/conversations}.
+Each DB is opened read-only and never written (immutable unless a -wal exists; see open_db). For each one writes, into OUTDIR (named by the DB basename):
+  <id>.txt        owner lens: the prompts sent to agy (the dispatching driver's, not a human's),
+                  inbound notifications ([mid-turn]) and compaction summaries ([summary]), raw
+  <id>.agent.txt  agent lens: visible model text in full, one stub per tool call, and tool
+                  errors and content-safety blocks
+Model thinking is dropped unless --thinking (then written as [thinking] blocks: mine such an
+extract only on a non-Anthropic lane).
+--since keeps only steps with a timestamp after ISO-TS (UTC, e.g. 2026-09-20T06:00).
+Prints one count line per conversation, named by the first 8 characters only, with the models
+used (? when none is found at the known fields) and the workspace. [summary] blocks are written but
+not counted. Exit 0 ok, 1 a DB failed to open or parse, 2 usage.
+"""
+import datetime
+import glob
+import json
+import os
+import pathlib
+import re
+import shutil
+import sqlite3
+import sys
+import tempfile
+
+
+
+def usage(fh=sys.stdout):
+    print(__doc__.strip(), file=fh)
+
+
+def varint(b, i):
+    r = s = 0
+    while True:
+        if i >= len(b):
+            raise ValueError("truncated varint")
+        x = b[i]
+        i += 1
+        r |= (x & 0x7F) << s
+        s += 7
+        if x < 0x80:
+            return r, i
+
+
+def fields(b):
+    """Top-level protobuf fields of b as {number: [value, ...]}; bytes for wire type 2, int else."""
+    out = {}
+    i = 0
+    while i < len(b):
+        k, i = varint(b, i)
+        f, w = k >> 3, k & 7
+        if w == 0:
+            v, i = varint(b, i)
+        elif w == 1 or w == 5:
+            n = 8 if w == 1 else 4
+            if i + n > len(b):
+                raise ValueError("truncated fixed field")
+            v, i = int.from_bytes(b[i : i + n], "little"), i + n
+        elif w == 2:
+            n, i = varint(b, i)
+            if i + n > len(b):
+                raise ValueError("truncated length-delimited field")
+            v, i = b[i : i + n], i + n
+        else:
+            raise ValueError(f"unsupported wire type {w}")
+        out.setdefault(f, []).append(v)
+    return out
+
+
+def sub(b, *path):
+    """The bytes at a nested field path (first occurrence at each level), else None."""
+    for f in path:
+        if b is None:
+            return None
+        v = fields(b).get(f)
+        if not v or not isinstance(v[0], bytes):
+            return None
+        b = v[0]
+    return b
+
+
+def text(b, *path):
+    v = sub(b, *path)
+    return v.decode("utf-8", "replace") if v else ""
+
+
+def stamp(payload):
+    ts = sub(payload, 5, 1)
+    if ts is None:
+        return ""
+    f = fields(ts)
+    sec = f.get(1, [0])[0]
+    ms = f.get(2, [0])[0] // 1_000_000
+    t = datetime.datetime.fromtimestamp(sec, datetime.timezone.utc)
+    return t.strftime("%Y-%m-%dT%H:%M:%S.") + f"{ms:03d}Z"
+
+
+ARG_KEYS = ("CommandLine", "AbsolutePath", "Query", "SearchPath", "TargetFile", "Url", "DirectoryPath", "Prompt")
+
+
+def stub(args):
+    arg = args
+    try:
+        d = json.loads(args)
+        if isinstance(d, dict):
+            for k in ARG_KEYS:
+                if d.get(k):
+                    arg = d[k]
+                    break
+    except ValueError:
+        pass
+    return str(arg).replace("\n", " ")[:160]
+
+
+MODEL_RE = re.compile(r"(?:gemini|claude|gpt)-[0-9a-z.-]+")
+MODEL_PATHS = ((1, 19), (3, 28))  # where a generation row names its model; a byte regex also hits prose
+
+
+def models(con):
+    found, rows = set(), 0
+    for (data,) in con.execute("SELECT data FROM gen_metadata"):
+        rows += 1
+        for path in MODEL_PATHS:
+            m = text(data, *path)
+            if MODEL_RE.fullmatch(m) and re.search(r"[0-9]", m):
+                found.add(m)
+    return sorted(found), rows
+
+
+def workspace(con):
+    for (data,) in con.execute("SELECT data FROM trajectory_metadata_blob"):
+        w = text(data, 1, 1)
+        if w:
+            return w
+    return ""
+
+
+def open_db(path):
+    """(connection, TemporaryDirectory or None); never writes next to the original.
+    A WAL-mode DB opened plain `mode=ro` without its -wal and -shm files creates them, so:
+    - both exist (a live writer may hold unread WAL content): `mode=ro`. Race, accepted and not
+      handled: if agy closes between this check and the open, the open recreates the sidecars.
+    - a non-empty -wal but no -shm (no live non-exclusive writer): open a COPY of db and -wal in a
+      temp dir so WAL recovery replays the frames there; the caller removes the dir.
+    - otherwise `immutable=1`, which touches nothing. Immutable trusts that nothing writes: a
+      writer that starts after the check gives a stale snapshot, and a concurrent checkpoint can
+      tear the read, which surfaces as a parse/sqlite error (exit 1)."""
+    p = pathlib.Path(path).resolve()
+    wal, shm = str(p) + "-wal", str(p) + "-shm"
+    if os.path.exists(wal) and os.path.exists(shm):
+        return sqlite3.connect(p.as_uri() + "?mode=ro", uri=True), None
+    if os.path.exists(wal) and os.path.getsize(wal) > 0:
+        tmp = tempfile.TemporaryDirectory()
+        try:
+            shutil.copyfile(p, os.path.join(tmp.name, p.name))
+            shutil.copyfile(wal, os.path.join(tmp.name, p.name + "-wal"))
+            return sqlite3.connect(os.path.join(tmp.name, p.name)), tmp
+        except BaseException:
+            tmp.cleanup()
+            raise
+    return sqlite3.connect(p.as_uri() + "?immutable=1", uri=True), None
+
+
+def extract(path, out, since, thinking):
+    cid = os.path.basename(path)[: -len(".db")] if path.endswith(".db") else os.path.basename(path)
+    con, tmp = open_db(path)
+    try:
+        mods, rows = models(con)
+        ws = workspace(con)
+        if rows and not mods:
+            print(f"agy-extract: {cid[:8]}…: no model names at the known fields (schema drift?)", file=sys.stderr)
+        mods = mods or (["?"] if rows else [])
+        header = f"# agy conversation {cid[:8]} models: {', '.join(mods)} workspace: {ws}\n\n"
+        owner, agent = [header], [header]
+        n = dict(user=0, mid=0, agent=0, calls=0, errs=0)
+        for idx, st, blob in con.execute("SELECT idx, step_type, step_payload FROM steps ORDER BY idx"):
+            ts = stamp(blob)
+            if since and not ts > since:
+                continue
+            if st == 14:
+                t = text(blob, 19, 2)
+                if t:
+                    owner.append(f"=== {ts} ===\n{t}\n\n")
+                    n["user"] += 1
+            elif st == 101:
+                t = text(blob, 114, 1)
+                if t:
+                    owner.append(f"=== {ts} [mid-turn] ===\n{t}\n\n")
+                    n["mid"] += 1
+            elif st == 23:
+                t = text(blob, 30, 5)
+                if t:
+                    owner.append(f"=== {ts} [summary] ===\n{t}\n\n")
+            elif st == 15:
+                turn = sub(blob, 20)
+                if turn is None:
+                    continue
+                f = fields(turn)
+                if thinking and f.get(3) and isinstance(f[3][0], bytes) and f[3][0]:
+                    agent.append(f"=== {ts} [thinking] ===\n{f[3][0].decode('utf-8', 'replace')}\n\n")
+                t = text(turn, 1) or text(turn, 8)
+                if t:
+                    agent.append(f"=== {ts} [agent] ===\n{t}\n\n")
+                    n["agent"] += 1
+                for call in f.get(7, []):
+                    name, args = text(call, 2).replace("\n", " "), text(call, 3)
+                    agent.append(f"--- {ts} tool {name}: {stub(args)}\n")
+                    n["calls"] += 1
+            elif st == 132:
+                e = sub(blob, 31)
+                if e is not None:
+                    msg = text(e, 2) or text(e, 3)
+                    agent.append(f"--- {ts} tool-error: {msg.replace(chr(10), ' ')[:300]}\n")
+                    n["errs"] += 1
+            elif st == 17:
+                msg = text(blob, 24, 3, 2)
+                agent.append(f"--- {ts} tool-error: [safety-block] {msg.replace(chr(10), ' ')[:300]}\n")
+                n["errs"] += 1
+    finally:
+        con.close()
+        if tmp:
+            tmp.cleanup()
+    with open(os.path.join(out, cid + ".txt"), "w") as fh:
+        fh.write("".join(owner))
+    with open(os.path.join(out, cid + ".agent.txt"), "w") as fh:
+        fh.write("".join(agent))
+    print(
+        f"{cid[:8]}…: {n['user']} user blocks, {n['mid']} mid-turn, {n['agent']} agent blocks, "
+        f"{n['calls']} tool calls, {n['errs']} tool errors, models {','.join(mods)}, workspace {ws}"
+    )
+
+
+def main(argv):
+    if argv and argv[0] in ("-h", "--help"):
+        usage()
+        return 0
+    since, thinking = "", False
+    while argv and argv[0] in ("--since", "--thinking"):
+        if argv[0] == "--thinking":
+            thinking = True
+            argv = argv[1:]
+            continue
+        if len(argv) < 2:
+            print("agy-extract: --since needs a timestamp", file=sys.stderr)
+            return 2
+        since = argv[1]
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2})?)?Z?", since):
+            print(f"agy-extract: --since wants UTC YYYY-MM-DD[THH:MM[:SS]], got: {since}", file=sys.stderr)
+            return 2
+        since = since.rstrip("Z")
+        argv = argv[2:]
+    if not argv or argv[0].startswith("-"):
+        usage(sys.stderr)
+        return 2
+    out, dbs = argv[0], argv[1:]
+    if not dbs:
+        d = os.environ.get("SYG_AGY_CONVERSATIONS_DIR") or os.path.expanduser("~/.gemini/antigravity-cli/conversations")
+        dbs = sorted(glob.glob(os.path.join(d, "*.db")))
+    os.makedirs(out, exist_ok=True)
+    rc = 0
+    for p in dbs:
+        if not os.path.isfile(p):
+            print(f"agy-extract: no such file: {p}", file=sys.stderr)
+            rc = 1
+            continue
+        try:
+            extract(p, out, since, thinking)
+        except (sqlite3.Error, ValueError, OverflowError, OSError) as e:
+            print(f"agy-extract: {os.path.basename(p)[:8]}…: failed: {e}", file=sys.stderr)
+            rc = 1
+    return rc
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
