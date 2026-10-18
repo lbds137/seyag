@@ -13,7 +13,7 @@ pass=0
 fail=0
 
 payload_for() {
-  jq -nc --arg cmd "$1" '{tool_name:"Bash",tool_input:{command:$cmd}}'
+  jq -nc --arg cmd "$1" '{tool_name:"Bash",cwd:"/tmp/proj",tool_input:{command:$cmd}}'
 }
 
 expect_allow() {
@@ -46,6 +46,21 @@ expect_deny() {
   fi
 }
 
+expect_deny_payload() {
+  local label="$1" payload="$2" reason_sub="$3" out err rc tmp_err
+  tmp_err=$(mktemp)
+  out=$(printf '%s' "$payload" | env -i PATH="$PATH" HOME="$HOME" bash "$HOOK" 2>"$tmp_err")
+  rc=$?
+  err=$(cat "$tmp_err")
+  rm -f "$tmp_err"
+  if [ "$rc" -eq 2 ] && printf '%s' "$err" | grep -q "ENV-PRINT BLOCKED" && printf '%s' "$err" | grep -qF -- "$reason_sub" && ! printf '%s' "$out" | grep -q "permissionDecision"; then
+    pass=$((pass + 1))
+  else
+    echo "FAIL [$label]: expected deny (rc=2, ENV-PRINT BLOCKED + '$reason_sub' on stderr, no permissionDecision in stdout), got rc=$rc stdout=$out stderr=$err" >&2
+    fail=$((fail + 1))
+  fi
+}
+
 # --- Denies: direct & non-names-only pipelines ---
 expect_deny "bare env" "env" "bulk environment dump via"
 expect_deny "/usr/bin/env" "/usr/bin/env" "bulk environment dump via"
@@ -67,7 +82,9 @@ expect_deny "env FOO=1 no cmd" "env FOO=1" "bulk environment dump via"
 expect_deny "env with redaction sed" "env | sed 's/TOKEN=.*/TOKEN=…/'" "bulk environment dump via"
 expect_deny "env with jq del" "env | jq 'del(.SECRET)'" "bulk environment dump via"
 expect_deny "VAR=x env" "VAR=x env" "bulk environment dump via"
-expect_deny "set > /tmp/env-dump-fixture" "set > /tmp/env-dump-fixture" "bulk environment dump via"
+# A redirect word does not count as an argument (set stays argless); stdout to a file passes (file sinks).
+expect_deny "set 2> /tmp/env-dump-fixture" "set 2> /tmp/env-dump-fixture" "bulk environment dump via"
+expect_allow "set > /tmp/env-dump-fixture" "set > /tmp/env-dump-fixture"
 expect_deny "env -i printenv" "env -i printenv" "bulk environment dump via"
 expect_deny "env -S printenv" "env -S 'printenv'" "bulk environment dump via"
 expect_deny "bypass token in commit msg does not unlock chain" 'git commit -m "doc SYG_ALLOW_ENV_PRINT=1 SYG_X=1" && env' "bulk environment dump via"
@@ -123,8 +140,118 @@ expect_allow "cat cfg.json | jq -r '.env.ANTHROPIC_MODEL'" "cat cfg.json | jq -r
 expect_allow "jq settings.json" "jq settings.json"
 expect_allow "echo '{}' | jq .env" "echo '{}' | jq .env"
 expect_allow "jq -e . ~/.claude/settings.json >/dev/null" "jq -e . ~/.claude/settings.json >/dev/null"
+expect_allow "env > /tmp/envsnap.txt" "env > /tmp/envsnap.txt"
+expect_allow "env >/tmp/e 2>&1" "env >/tmp/e 2>&1"
+# shellcheck disable=SC2016
+expect_allow 'printenv > "$CLAUDE_JOB_DIR/tmp/e"' 'printenv > "$CLAUDE_JOB_DIR/tmp/e"'
+expect_allow "env >/dev/null" "env >/dev/null"
+expect_allow "env &>/tmp/e" "env &>/tmp/e"
+expect_deny "jq . ~/.claude/settings.json > /tmp/x.json" "jq . ~/.claude/settings.json > /tmp/x.json" "bulk jq filter"
+expect_allow "jq . ~/.claude/settings.json > /tmp/x.json 2>/dev/null" "jq . ~/.claude/settings.json > /tmp/x.json 2>/dev/null"
+expect_allow "env 1>>/tmp/e" "env 1>>/tmp/e"
+expect_allow "env >&-" "env >&-"
+expect_deny "env >&2" "env >&2" "bulk environment dump via"
+expect_deny "env 1>&2" "env 1>&2" "bulk environment dump via"
+expect_deny "env >/tmp/f >&2" "env >/tmp/f >&2" "bulk environment dump via"
+expect_deny "env > /dev/stderr" "env > /dev/stderr" "bulk environment dump via"
+expect_deny "env >/dev/tty" "env >/dev/tty" "bulk environment dump via"
+expect_deny "env 2>/tmp/e" "env 2>/tmp/e" "bulk environment dump via"
+expect_deny "jq . settings.json >&2" "jq . settings.json >&2" "bulk jq filter"
+expect_deny "jq . .env > /dev/stdout" "jq . .env > /dev/stdout" "bulk jq filter"
+expect_deny "jq . .env '>x'" "jq . .env '>x'" "bulk jq filter"
+expect_deny 'jq . .env "1>x"' 'jq . .env "1>x"' "bulk jq filter"
+expect_deny 'jq . settings.json \>x' 'jq . settings.json \>x' "bulk jq filter"
+expect_deny "printenv '>x'" "printenv '>x'" "bulk environment dump via"
+expect_deny "env >/dev/./stderr" "env >/dev/./stderr" "bulk environment dump via"
+expect_deny "env >/proc/self/fd/2" "env >/proc/self/fd/2" "bulk environment dump via"
+expect_deny "env >/dev/pts/0" "env >/dev/pts/0" "bulk environment dump via"
+expect_deny "env >/dev/fd/0" "env >/dev/fd/0" "bulk environment dump via"
+# shellcheck disable=SC2016
+expect_deny 'env > $(echo /dev/stderr)' 'env > $(echo /dev/stderr)' "bulk environment dump via"
+expect_deny "env >& /dev/stderr" "env >& /dev/stderr" "bulk environment dump via"
+expect_deny "env >&/dev/stderr" "env >&/dev/stderr" "bulk environment dump via"
+expect_allow "env >& /tmp/e" "env >& /tmp/e"
+expect_allow "env >/tmp/./e" "env >/tmp/./e"
+expect_deny "env > >(cat)" "env > >(cat)" "bulk environment dump via"
+expect_deny "env &> >(cat)" "env &> >(cat)" "bulk environment dump via"
+expect_deny "jq . .env > >(cat)" "jq . .env > >(cat)" "bulk jq filter"
+expect_deny "env >//dev/stderr" "env >//dev/stderr" "bulk environment dump via"
+expect_deny "env > /proc/self/task/1/fd/2" "env > /proc/self/task/1/fd/2" "bulk environment dump via"
+expect_deny "env > /proc/self/root/dev/stderr" "env > /proc/self/root/dev/stderr" "bulk environment dump via"
+# shellcheck disable=SC2016
+expect_deny 'env > ${X:-/dev/stderr}' 'env > ${X:-/dev/stderr}' "bulk environment dump via"
+# shellcheck disable=SC2016
+expect_deny 'env > $X/../dev/stderr' 'env > $X/../dev/stderr' "bulk environment dump via"
+expect_deny "env > /dev/stder?" "env > /dev/stder?" "bulk environment dump via"
+expect_deny "env | tee //dev/stderr | wc -l" "env | tee //dev/stderr | wc -l" "bulk environment dump via"
+expect_deny "env | tee >(cat) | wc -l" "env | tee >(cat) | wc -l" "bulk environment dump via"
+expect_allow "env > out.txt" "env > out.txt"
+expect_allow "env > ./snap/env.txt" "env > ./snap/env.txt"
+expect_allow "env > ~/snap.txt" "env > ~/snap.txt"
+# shellcheck disable=SC2016
+expect_allow 'env > ${OUT}' 'env > ${OUT}'
+expect_allow "env > build/dev/out.txt" "env > build/dev/out.txt"
+ANSI_C_PROCSUB_CMD=$(cat <<'PROBE_EOF'
+echo $'a\' <(' ; env | cat ; echo ')'
+PROBE_EOF
+)
+expect_deny "echo \$'a\\' <(' ; env | cat ; echo ')'" "$ANSI_C_PROCSUB_CMD" "bulk environment dump via"
+expect_deny "cd / && env > dev/stderr" "cd / && env > dev/stderr" "bulk environment dump via"
+expect_deny "cd /proc/self/fd && env > 1" "cd /proc/self/fd && env > 1" "bulk environment dump via"
+expect_allow "diff <(sort a) <(sort b)" "diff <(sort a) <(sort b)"
+HEREDOC_PROCSUB_CMD=$(cat <<'PROBE_EOF'
+cat <<'EOT' > s.sh
+diff <(env) <(b)
+EOT
+PROBE_EOF
+)
+expect_allow "cat <<'EOT' > s.sh with diff <(env) <(b) body" "$HEREDOC_PROCSUB_CMD"
 # shellcheck disable=SC2016
 expect_allow "rewritten delegation skill command" 'for v in $(env | cut -s -d= -f1 | grep '\''^ANTHROPIC_DEFAULT_.*_MODEL$'\''); do printf '\''%s=%s\n'\'' "$v" "$(printenv "$v")"; done'
+expect_deny "env >/tmp/x >| /dev/stderr" "env >/tmp/x >| /dev/stderr" "bulk environment dump via"
+expect_deny "env >/tmp/x 1<>/dev/stderr" "env >/tmp/x 1<>/dev/stderr" "bulk environment dump via"
+expect_deny "env >/tmp/x 1<&2" "env >/tmp/x 1<&2" "bulk environment dump via"
+expect_deny "env >/tmp/x 01>&2" "env >/tmp/x 01>&2" "bulk environment dump via"
+expect_deny "env >/tmp/x 001>/dev/stderr" "env >/tmp/x 001>/dev/stderr" "bulk environment dump via"
+# shellcheck disable=SC2016
+expect_deny 'env >/tmp/x >&$X' 'env >/tmp/x >&$X' "bulk environment dump via"
+expect_deny "jq debug .env > /tmp/x" "jq debug .env > /tmp/x" "bulk jq filter"
+expect_deny "jq 'stderr' .env > /dev/null" "jq 'stderr' .env > /dev/null" "bulk jq filter"
+# shellcheck disable=SC2016
+expect_deny 'echo $(env > /tmp/x; cat /tmp/x)' 'echo $(env > /tmp/x; cat /tmp/x)' "bulk environment dump via"
+expect_deny "env | tee /tmp/f >&2 | cut -s -d= -f1" "env | tee /tmp/f >&2 | cut -s -d= -f1" "bulk environment dump via"
+expect_deny_payload "env > stderr (cwd /dev)" "$(jq -nc --arg cmd 'env > stderr' '{tool_name:"Bash",cwd:"/dev",tool_input:{command:$cmd}}')" "bulk environment dump via"
+expect_deny_payload "env > out.txt (no cwd)" "$(jq -nc --arg cmd 'env > out.txt' '{tool_name:"Bash",tool_input:{command:$cmd}}')" "bulk environment dump via"
+expect_allow "env > /tmp/x 2>&1" "env > /tmp/x 2>&1"
+expect_allow "env 2>&1 >/tmp/x" "env 2>&1 >/tmp/x"
+expect_allow "env &> /tmp/x" "env &> /tmp/x"
+expect_allow "env >/tmp/x 2>/dev/stdout" "env >/tmp/x 2>/dev/stdout"
+expect_deny '\cd /dev; env > stderr' '\cd /dev; env > stderr' "bulk environment dump via"
+expect_deny "'cd' /dev; env > stderr" "'cd' /dev; env > stderr" "bulk environment dump via"
+expect_deny '"cd" /dev; env > stderr' '"cd" /dev; env > stderr' "bulk environment dump via"
+expect_deny 'c\d /dev; env > stderr' 'c\d /dev; env > stderr' "bulk environment dump via"
+expect_deny 'eval "cd /dev"; env > stderr' 'eval "cd /dev"; env > stderr' "bulk environment dump via"
+expect_deny "source ./x; env > out.txt" "source ./x; env > out.txt" "bulk environment dump via"
+expect_deny "true; env > out.txt" "true; env > out.txt" "bulk environment dump via"
+expect_deny "jq '.K|halt_error' .env >/tmp/x" "jq '.K|halt_error' .env >/tmp/x" "bulk jq filter"
+expect_deny "jq 'halt_error(1)' .env >/tmp/x" "jq 'halt_error(1)' .env >/tmp/x" "bulk jq filter"
+expect_deny "jq '.a|error' .env >/tmp/x" "jq '.a|error' .env >/tmp/x" "bulk jq filter"
+expect_deny "jq '.[]|error(.)' .env >/tmp/x" "jq '.[]|error(.)' .env >/tmp/x" "bulk jq filter"
+expect_allow "env > /tmp/x; true" "env > /tmp/x; true"
+expect_allow "jq '.error' .env > /dev/null" "jq '.error' .env > /dev/null"
+expect_allow "jq '.error' .env > /tmp/x" "jq '.error' .env > /tmp/x"
+# shellcheck disable=SC2046
+BIG=$(printf '9%.0s' $(seq 5000))
+expect_deny "env >/tmp/x \${BIG}>&2; env" "env >/tmp/x ${BIG}>&2; env" "bulk environment dump via"
+expect_deny "env \${BIG}>/tmp/x" "env ${BIG}>/tmp/x" "bulk environment dump via"
+expect_deny "jq . .env > /tmp/x \${BIG}>&2" "jq . .env > /tmp/x ${BIG}>&2" "bulk jq filter"
+expect_deny "jq '.K|tonumber' .env >/tmp/x" "jq '.K|tonumber' .env >/tmp/x" "bulk jq filter"
+expect_deny "jq . .env > /tmp/x (stderr on transcript)" "jq . .env > /tmp/x" "bulk jq filter"
+expect_deny "jq . .env 2>&1 > /tmp/x" "jq . .env 2>&1 > /tmp/x" "bulk jq filter"
+expect_allow "jq . .env > /tmp/x 2>/dev/null" "jq . .env > /tmp/x 2>/dev/null"
+expect_allow "jq . .env &> /tmp/x" "jq . .env &> /tmp/x"
+expect_allow "jq . .env > /tmp/x 2>&1" "jq . .env > /tmp/x 2>&1"
+expect_allow "jq . .env > /tmp/x 2>/tmp/err" "jq . .env > /tmp/x 2>/tmp/err"
 
 # --- Bypass: SYG_ALLOW_ENV_PRINT=1 ---
 expect_allow "SYG_ALLOW_ENV_PRINT=1 env" "SYG_ALLOW_ENV_PRINT=1 env"
@@ -135,6 +262,18 @@ expect_allow "SYG_ALLOW_ENV_PRINT=1 jq . .env" "SYG_ALLOW_ENV_PRINT=1 jq . .env"
 # lib/shell_quotes.py command_pipelines, so the hook stays silent. ---
 # shellcheck disable=SC2016
 expect_allow "double-quoted command substitution (unsplit by command_pipelines)" 'echo "$(env)"'
+
+# A substitution elsewhere keeps the legacy jq `> /dev/null` exemption, only in its plain form.
+expect_allow 'jq -e . s.json >/dev/null && for i in $(seq 3); do :; done' 'jq -e . ~/.claude/settings.json >/dev/null && for i in $(seq 3); do :; done'
+expect_allow 'jq . .env > /dev/null 2>&1; x=$(date)' 'jq . .env > /dev/null 2>&1; x=$(date)'
+expect_deny 'jq . .env >/dev/null >&2; echo $(date)' 'jq . .env >/dev/null >&2; echo $(date)' "bulk jq filter"
+expect_deny "jq . .env '>' /dev/null" "jq . .env '>' /dev/null" "bulk jq filter"
+expect_deny 'jq . .env \> /dev/null' 'jq . .env \> /dev/null' "bulk jq filter"
+expect_deny 'jq . .env ">/dev/null"' 'jq . .env ">/dev/null"' "bulk jq filter"
+expect_allow "jq . .env > out.txt 2>/dev/null" "jq . .env > out.txt 2>/dev/null"
+expect_deny ". ./x; env > out.txt" ". ./x; env > out.txt" "bulk environment dump via"
+expect_deny "source ./x && env > out.txt" "source ./x && env > out.txt" "bulk environment dump via"
+expect_deny "FOO=1 eval true; env > out.txt" "FOO=1 eval true; env > out.txt" "bulk environment dump via"
 
 # --- Fail-open on malformed JSON ---
 out=$(printf 'not json {' | env -i PATH="$PATH" HOME="$HOME" bash "$HOOK" 2>&1)

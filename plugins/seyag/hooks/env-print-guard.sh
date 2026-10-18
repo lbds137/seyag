@@ -7,8 +7,8 @@
 #      target command to execute), argumentless `printenv`, or argumentless
 #      `set`, unless a downstream segment in the same pipeline reduces output
 #      to variable names or counts via the names-only allowlist (without first
-#      teeing to `/dev/stderr`, `/dev/fd/2`, `/dev/stdout`, `/dev/fd/1`, or
-#      `/dev/tty`):
+#      teeing to `/dev/stderr`, `/dev/fd/2`, `/dev/stdout`, `/dev/fd/1`,
+#      `/dev/tty`, or their transcript aliases below):
 #        - `cut -s -d= -f1` (or `--only-delimited` with `-d '=' -f 1`; `-s` is
 #          required so continuation lines of multi-line values—which carry no
 #          `=`—are dropped instead of passed whole; `sed 's/=.*//'` and
@@ -24,8 +24,8 @@
 #      the narrow allowlist: (a) final `|`-stage `keys` / `keys_unsorted`, or
 #      (b) a pure dotted identifier chain (`.foo.bar.baz`, optionally `?` per
 #      stage) that is not `.env` and does not stop at `.env` (`.env` and
-#      `.env?` deny; `.env.VAR`, `.model`, `.name` allow), unless stdout is
-#      redirected to `/dev/null`.
+#      `.env?` deny; `.env.VAR`, `.model`, `.name` allow), unless its stdout
+#      ends at a file (see file sinks below).
 #
 # Accepted gaps: bare `export`, `export -p`, bare `declare`, `declare -x`,
 # `declare -p`, `alias`, `typeset -p`, absolute-path `printenv` under a renamed
@@ -44,10 +44,62 @@
 # not done in this PR); `grep -o` patterns cannot be analyzed
 # safely for names-only output, so none are allowlisted (the fleet's
 # `env $(env | grep -oE '^[A-Z_]*' | …)` launcher pattern needs the bypass
-# prefix or a `cut -s -d= -f1` rewrite); intermediate pipeline file sinks
-# (`env | tee /tmp/f | cut -s -d= -f1`) are out of scope because the guard's
-# scope is transcript output; `env -i` / `env -i CMD` and `printenv NAME` keyed reads
-# are allowed by design. Double-quoted command substitutions are not split by
+# prefix or a `cut -s -d= -f1` rewrite).
+#
+# File sinks (allowed by design because the guard's scope is transcript output):
+#   - File targets: a dump segment whose stdout ends at a file (`env > f`,
+#     `jq . .env > f 2>/dev/null`, `jq . settings.json &> f`, `>/dev/null`) and
+#     an intermediate `tee` file (`env | tee /tmp/f | cut -s -d= -f1`) pass when
+#     the target is a plain path (optionally after a bare `$VAR`, `${VAR}`, or
+#     `~` prefix) outside `/dev`, `/proc`, `/sys`, or `/dev/null` itself;
+#     process substitution, expansions with operators, globs, `..`, and device,
+#     proc, or sys paths fail closed.
+#   - Redirect parser and fail-closed forms: one redirect parser scans every
+#     word of the segment (`int(digits)` on at most 9 digits normalises `01`,
+#     `001` to fd 1; a leading digit run longer than 9 fails the redirect match
+#     and hits the unparsed `>`/`<` rule); on fd 1, `>|`, `<>`, `<&`, `>&` with
+#     a `$`/backtick/`'`/`"` target, `&>`/`&>>` to a non-file target, a dangling
+#     redirect with no target word (including `>|` split by the tokenizer), or
+#     any word containing `>` or `<` outside the redirect grammar fails closed.
+#   - Substitutions and the legacy `> /dev/null` exemption: process substitution
+#     (`<(` or `>(`) anywhere in the raw command disables both file-sink and
+#     downstream selector allowances, and command substitution (`$(` or
+#     backtick) disables general file-sink allowance; for `stdout_sent_off_transcript`,
+#     both fall back to the legacy `> /dev/null` exemption
+#     (`_stdout_discarded_to_devnull`).
+#   - Quoted redirects: raw commands matching `(['"\\])[0-9]*&?>` fail closed
+#     in `stdout_sent_off_transcript` (returning False without the `/dev/null`
+#     fallback, because quote stripping in `_tokens` cannot distinguish a
+#     quoted `'>'` or `'>x'` operand from a redirect).
+#   - Relative targets: plain relative targets resolve against the hook input's
+#     `.cwd` via `os.path.realpath`, failing closed when `.cwd` is missing, not
+#     absolute, or fails resolution, when `command_pipelines` yields more than
+#     one pipeline, when the command contains `cd` or `pushd`, or when any
+#     pipeline segment's command word (by basename, after leading `NAME=value`
+#     assignments and unwrapped runners) is `eval`, `source`, or `.`.
+#   - Downstream stdout redirects: downstream selector allowance stops when an
+#     earlier downstream segment is a transcript `tee` or carries an fd-1
+#     redirect (`>`-family on fd 1, `&>`, or a dangling `>`).
+#   - jq stderr: for `jq` file sinks, the allowance applies only when stdout is
+#     sent off the transcript AND either the final stdout target is `/dev/null`
+#     (the legacy `> /dev/null` exemption, whose accidental-error-text gap stays
+#     accepted) or fd 2 is also sent to a file target or `/dev/null` in the
+#     same segment (`2>/dev/null`, `2>f`, `&>f`, `>f 2>&1`, tracked
+#     last-writer-wins with `2>&1` resolving to wherever fd 1 points at that
+#     moment); `jq` filters containing bareword `debug`, `stderr`,
+#     `input_filename`, `error`, `halt_error`, `$__loc__`, or `$__prog_args`
+#     always skip the file-sink allowance (including `> /dev/null`) because
+#     those builtins write values to stderr.
+#   - Exception handling: allowance helpers (`is_file_target`,
+#     `stdout_sent_off_transcript`, `is_transcript_tee`, `_has_fd1_redirect`,
+#     `_has_eval_or_source`) and `_SINGLE_STATEMENT` fail closed on any
+#     exception while the guard core fails open.
+#   - Accepted gaps: a variable target's value and a symlinked absolute file
+#     target are trusted (`env > "$TTY"`, `ln -s /dev/stderr /tmp/x; env > /tmp/x`),
+#     and a later `cat f` of that file in a separate segment is unseen;
+#     `env -i` / `env -i CMD` and `printenv NAME` keyed reads are allowed by
+#     design.
+# Double-quoted command substitutions are not split by
 # `lib/shell_quotes.py` (`command_pipelines`) and fail open. Heredoc bodies
 # written to a file (`cat > f <<EOF`) are scanned as commands, so guard-shaped
 # text inside a written script blocks the writer (observed in replay; lib-level,
@@ -60,7 +112,7 @@
 # words when a full environment or secret-file dump is explicitly intended.
 #
 # Deny channel: delivers via stderr + exit 2, same as the repo's other Bash guards.
-# Fail-open on missing jq/python3 or any parse error.
+# Fail-open on missing jq/python3 or an unexpected core error (allowance helpers fail closed).
 
 set -uo pipefail
 
@@ -72,19 +124,24 @@ INPUT=$(cat 2>/dev/null) || exit 0
 
 COMMAND=$(printf '%s' "$INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null) || exit 0
 [ -n "$COMMAND" ] || exit 0
+CWD=$(printf '%s' "$INPUT" | jq -r '.cwd // empty' 2>/dev/null) || CWD=""
 
 printf '%s\n' "$COMMAND" | grep -qE '(^|[^A-Za-z0-9_])(env|printenv|set|jq)([^A-Za-z0-9_]|$)' || exit 0
 
 LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib"
 
-REASON=$(SYG_LIB_DIR="$LIB_DIR" python3 - 3<<<"$COMMAND" <<'PY' 2>/dev/null
+REASON=$(SYG_LIB_DIR="$LIB_DIR" SYG_EPG_CWD="$CWD" python3 - 3<<<"$COMMAND" <<'PY' 2>/dev/null
 import os
 import re
 import shlex
 import sys
 
 sys.path.insert(0, os.environ["SYG_LIB_DIR"])
-from shell_quotes import command_pipelines, strip_redirections, unwrap_runners  # noqa: E402
+from shell_quotes import (  # noqa: E402
+    command_pipelines,
+    strip_redirections as _lib_strip_redirections,
+    unwrap_runners,
+)
 
 cmd = os.fsdecode(open(3, "rb").read()).removesuffix("\n")
 
@@ -111,6 +168,51 @@ _GREP_1ARG_FLAGS = frozenset({
     "--binary-files", "--color", "--colour", "--label",
     "--exclude", "--exclude-from", "--exclude-dir", "--include",
 })
+_REDIRECT_PARSE_RE = re.compile(
+    r"^([0-9]{0,9})(&>>|&>|>>|>\||>&|>|<>|<&|<<<|<<|<)(.*)$"
+)
+_QUOTED_REDIRECT_RE = re.compile(r"""(['"\\])[0-9]*&?>""")
+_BARE_AMP_REDIRECT_RE = re.compile(r"^\d*[<>]&$")
+_FD_DUP_TARGET_RE = re.compile(r"^[0-9]+-?$")
+_VAR_PREFIX_RE = re.compile(r"^\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*\})")
+_FILE_REM_RE = re.compile(r"^[A-Za-z0-9._/+@%,=-]*$")
+_CHDIR_RE = re.compile(r"(^|[;&|(\s])(cd|pushd)(\s|$)")
+_JQ_STDERR_BUILTIN_RE = re.compile(
+    r"(^|[^A-Za-z0-9_$.])(debug|stderr|input_filename|error|halt_error|halt_error\(|\$__loc__|\$__prog_args)([^A-Za-z0-9_]|$)"
+)
+_RAW_CWD = os.environ.get("SYG_EPG_CWD", "")
+try:
+    _CWD = (
+        os.path.realpath(_RAW_CWD)
+        if _RAW_CWD.startswith("/") and not _RAW_CWD.startswith("//")
+        else ""
+    )
+except Exception:
+    _CWD = ""
+try:
+    pipelines = command_pipelines(cmd)
+except Exception:
+    sys.exit(0)
+_HAS_PROCSUB = ">(" in cmd or "<(" in cmd
+_HAS_CMDSUB = "$(" in cmd or "`" in cmd
+_HAS_CHDIR = bool(_CHDIR_RE.search(cmd))
+
+
+def _fail_closed(default: bool):
+    def _wrap(fn):
+        def _inner(*args, **kwargs):
+            try:
+                return fn(*args, **kwargs)
+            except Exception:
+                return default
+        return _inner
+    return _wrap
+
+
+def strip_redirections(args: list[str]) -> list[str]:
+    return _lib_strip_redirections(
+        ["&>" if _BARE_AMP_REDIRECT_RE.match(w) else w for w in args]
+    )
 
 
 def unwrap_non_env_runners(tokens: list[str]) -> list[str]:
@@ -147,6 +249,197 @@ def unwrap_non_env_runners(tokens: list[str]) -> list[str]:
     return tokens[i:]
 
 
+@_fail_closed(True)
+def _has_eval_or_source(pls: list[list[list[str]]] = pipelines) -> bool:
+    for pipeline in pls:
+        for seg in pipeline:
+            words = strip_redirections(seg)
+            while words:
+                prev = words
+                words = unwrap_non_env_runners(words)
+                words, _ = unwrap_runners(words)
+                if words == prev:
+                    break
+            if words and os.path.basename(words[0]) in ("eval", "source", "."):
+                return True
+    return False
+
+
+try:
+    _SINGLE_STATEMENT = len(pipelines) == 1 and not _has_eval_or_source(pipelines)
+except Exception:
+    _SINGLE_STATEMENT = False
+
+
+def _strip_outer_quotes(s: str) -> str:
+    if len(s) >= 2 and s[0] == s[-1] and s[0] in ("'", '"'):
+        return s[1:-1]
+    return s
+
+
+@_fail_closed(False)
+def is_file_target(t: str) -> bool:
+    t = _strip_outer_quotes(t)
+    if not t:
+        return False
+    if t == "/dev/null":
+        return True
+    has_var = False
+    has_tilde = False
+    m = _VAR_PREFIX_RE.match(t)
+    if m:
+        has_var = True
+        rem = t[m.end():]
+    elif t == "~" or t.startswith("~/"):
+        has_tilde = True
+        rem = t[1:]
+    else:
+        rem = t
+    if not _FILE_REM_RE.match(rem):
+        return False
+    if ".." in rem.split("/"):
+        return False
+    if has_var:
+        if rem and not rem.startswith("/"):
+            return False
+        if any(p in rem for p in ("/dev/", "/proc/", "/sys/")):
+            return False
+    elif not has_tilde:
+        if t.startswith("/"):
+            if t.startswith("//"):
+                return False
+            norm = os.path.normpath(t)
+        else:
+            if not _SINGLE_STATEMENT or _HAS_CHDIR or not _CWD.startswith("/"):
+                return False
+            norm = os.path.normpath(os.path.join(_CWD, t))
+        if (
+            norm.startswith("//")
+            or norm in ("/dev", "/proc", "/sys")
+            or norm.startswith(("/dev/", "/proc/", "/sys/"))
+        ):
+            return False
+    return True
+
+
+def _stdout_discarded_to_devnull(seg: list[str]) -> bool:
+    """The legacy `> /dev/null` exemption, kept for commands with a substitution:
+    true only when stdout goes to /dev/null and every other redirect is stderr to
+    /dev/null or a `2>&1` after it."""
+    null_ops = (">", ">>", "1>", "1>>", "&>", "&>>")
+    seen_null = False
+    i = 0
+    while i < len(seg):
+        w = seg[i]
+        if w in null_ops and i + 1 < len(seg) and seg[i + 1] == "/dev/null":
+            seen_null, i = True, i + 2
+            continue
+        if w in tuple(op + "/dev/null" for op in null_ops):
+            seen_null = True
+        elif w == "2>/dev/null" or (w == "2>&1" and seen_null):
+            pass
+        elif w == "2>" and i + 1 < len(seg) and seg[i + 1] == "/dev/null":
+            i += 1
+        elif ">" in w or "<" in w:
+            return False
+        i += 1
+    return seen_null
+
+
+@_fail_closed(False)
+def stdout_sent_off_transcript(
+    seg: list[str], raw_cmd: str = cmd, *, require_stderr_sink: bool = False
+) -> bool:
+    if _QUOTED_REDIRECT_RE.search(raw_cmd):
+        return False
+    if _HAS_PROCSUB or _HAS_CMDSUB:
+        return _stdout_discarded_to_devnull(seg)   # the legacy `> /dev/null` exemption; nothing to read back
+    off_transcript = False
+    fd1_target: str | None = None
+    fd2_off_transcript = False
+    i = 0
+    n = len(seg)
+    while i < n:
+        w = seg[i]
+        m = _REDIRECT_PARSE_RE.match(w)
+        if m is None:
+            if ">" in w or "<" in w:
+                return False
+            i += 1
+            continue
+        digits, op, rem = m.groups()
+        if rem:
+            target = rem
+            i += 1
+        else:
+            if i + 1 >= n:
+                return False
+            target = seg[i + 1]
+            i += 2
+        if digits:
+            if op in ("&>", "&>>"):
+                return False
+            fd = int(digits)
+        elif op.startswith((">", "&")):
+            fd = 1
+        else:
+            fd = 0
+        if op in ("<", "<<", "<<<"):
+            continue
+        if fd == 2:
+            if op in (">", ">>"):
+                fd2_off_transcript = is_file_target(target)
+            elif op == ">&" and target and target[0] not in ("$", "`", "'", '"'):
+                t2 = _strip_outer_quotes(target)
+                if t2 in ("1", "&1"):
+                    fd2_off_transcript = fd1_target is not None
+                elif t2 not in ("2", "&2"):
+                    fd2_off_transcript = False
+            else:
+                fd2_off_transcript = False
+            continue
+        if fd != 1:
+            continue
+        if op in (">|", "<>", "<&"):
+            return False
+        if op in ("&>", "&>>"):
+            if not is_file_target(target):
+                return False
+            off_transcript = True
+            fd1_target = _strip_outer_quotes(target)
+            fd2_off_transcript = True
+            continue
+        if op in (">", ">>"):
+            off_transcript = is_file_target(target)
+            fd1_target = _strip_outer_quotes(target) if off_transcript else None
+            continue
+        if not target or target[0] in ("$", "`", "'", '"'):
+            return False
+        target = _strip_outer_quotes(target)
+        if not target:
+            off_transcript = False
+            fd1_target = None
+            continue
+        if target in ("-", "&-"):
+            off_transcript = True
+            fd1_target = None
+            continue
+        if target in ("1", "&1"):
+            continue
+        if _FD_DUP_TARGET_RE.match(target) or target.startswith("&") or digits:
+            off_transcript = False
+            fd1_target = None
+            continue
+        off_transcript = is_file_target(target)
+        fd1_target = target if off_transcript else None
+        fd2_off_transcript = off_transcript
+    if not off_transcript:
+        return False
+    if require_stderr_sink:
+        return fd1_target == "/dev/null" or fd2_off_transcript
+    return True
+
+
 def _split_env_s(val: str) -> list[str]:
     try:
         return shlex.split(val)
@@ -156,6 +449,8 @@ def _split_env_s(val: str) -> list[str]:
 
 def detect_env_dump_command(seg: list[str]) -> str | None:
     if "SYG_ALLOW_ENV_PRINT=1" in seg:
+        return None
+    if stdout_sent_off_transcript(seg):
         return None
     words = strip_redirections(seg)
     while words:
@@ -409,24 +704,63 @@ def is_names_only_selector(seg: list[str]) -> bool:
     return False
 
 
-_TRANSCRIPT_TEE_PATHS = frozenset({
-    "/dev/stderr", "/dev/fd/2", "/dev/stdout", "/dev/fd/1", "/dev/tty",
-})
-
-
+@_fail_closed(True)
 def is_transcript_tee(seg: list[str]) -> bool:
     words, _ = unwrap_runners(strip_redirections(seg))
     if not words or os.path.basename(words[0]) != "tee":
         return False
-    return any(a in _TRANSCRIPT_TEE_PATHS for a in words[1:])
+    args: list[str] = []
+    opts = True
+    for a in words[1:]:
+        if opts and a == "--":
+            opts = False
+            continue
+        if opts and a.startswith("-") and len(a) > 1:
+            continue
+        args.append(a)
+    return any(not is_file_target(a) for a in args)
+
+
+@_fail_closed(True)
+def _has_fd1_redirect(seg: list[str]) -> bool:
+    i = 0
+    n = len(seg)
+    while i < n:
+        w = seg[i]
+        m = _REDIRECT_PARSE_RE.match(w)
+        if m is None:
+            if ">" in w or "<" in w:
+                return True
+            i += 1
+            continue
+        digits, op, rem = m.groups()
+        if rem:
+            i += 1
+        else:
+            if i + 1 >= n:
+                return True
+            i += 2
+        if digits:
+            fd = int(digits)
+        elif op.startswith((">", "&")):
+            fd = 1
+        else:
+            fd = 0
+        if (fd == 1 and op not in ("<", "<<", "<<<")) or op in ("&>", "&>>"):
+            return True
+    return False
 
 
 def has_downstream_names_only_selector(downstream: list[list[str]]) -> bool:
+    if _HAS_PROCSUB:
+        return False
     for s in downstream:
         if is_transcript_tee(s):
             return False
         if is_names_only_selector(s):
             return True
+        if _has_fd1_redirect(s):
+            return False
     return False
 
 
@@ -451,19 +785,8 @@ def is_bulk_jq_filter(filt: str, file_kind: str = "") -> bool:
     return True
 
 
-def stdout_discarded_to_devnull(seg: list[str]) -> bool:
-    for idx, w in enumerate(seg):
-        if w in (">/dev/null", ">>/dev/null", "1>/dev/null", "1>>/dev/null", "&>/dev/null", "&>>/dev/null"):
-            return True
-        if w in (">", ">>", "1>", "1>>", "&>", "&>>") and idx + 1 < len(seg) and seg[idx + 1] == "/dev/null":
-            return True
-    return False
-
-
 def detect_jq_bulk_file_dump(seg: list[str]) -> tuple[str, str] | None:
     if "SYG_ALLOW_ENV_PRINT=1" in seg:
-        return None
-    if stdout_discarded_to_devnull(seg):
         return None
     words, _ = unwrap_runners(strip_redirections(seg))
     if not words or os.path.basename(words[0]) != "jq":
@@ -472,17 +795,16 @@ def detect_jq_bulk_file_dump(seg: list[str]) -> tuple[str, str] | None:
     if parsed is None:
         return None
     filt, files = parsed
+    if not _JQ_STDERR_BUILTIN_RE.search(filt or "") and stdout_sent_off_transcript(
+        seg, require_stderr_sink=True
+    ):
+        return None
     for fpath in files:
         kind = is_sensitive_env_file(fpath)
         if kind is not None and is_bulk_jq_filter(filt or "", kind):
             return (filt or "", fpath)
     return None
 
-
-try:
-    pipelines = command_pipelines(cmd)
-except Exception:
-    sys.exit(0)
 
 for pipeline in pipelines:
     for idx, seg in enumerate(pipeline):
