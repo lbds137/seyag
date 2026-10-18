@@ -2,34 +2,148 @@
 """whitespace-only-diff: classify a unified diff as whitespace-only or real changes.
 
 Reads a unified diff (`git diff -U0` output preferred) from stdin or from a
-single file argument. Inside each `@@ ...` hunk, pairs the i-th `-` deletion
-line with the i-th `+` addition line and checks whether both sides are equal
-after deleting all whitespace (`''.join(line.split())`). Unpaired surplus `-`/`+`
-lines and pairs that differ after stripping all whitespace count as real changed
-lines. Header and metadata lines outside hunks are never line changes, and context
-or `\\ No newline...` lines inside hunks are ignored.
+single file argument.
+
+Rules:
+- Path classes (resolved from `+++ ` outside a hunk, cut at the first tab with
+  `\\r` and one pair of outer double quotes stripped and `/dev/null` falling
+  back to `--- `, else `diff --git ` `b/` or last token, else `diff ` last
+  token; default is strict):
+  - Lenient (`LENIENT_SUFFIXES` as the last suffix — languages with no
+    indentation syntax, raw-text mode outside literals, column-0 markers or
+    indentation-stripping heredocs — or a basename or suffix in
+    `SYG_WSDIFF_LENIENT_NAMES`, plus bare hunks with no file header under
+    `--lenient`): leading ASCII whitespace ignored (unless `--strict-indent` is
+    set or the previous line on that side of the hunk ended in `\\` followed
+    only by ASCII whitespace), internal runs collapsed to one space, trailing
+    ignored unless the body ends in `\\`, and whitespace-only lines normalise
+    to `""`.
+  - Strict (everything else, including bare hunks with no file header unless
+    `--lenient`, Python, Haskell/F#/Elm/PureScript, Scala, Ruby, Perl, PHP,
+    Elixir, Terraform, `.m`, JSX/TSX, unknown suffixes,
+    extensionless files and `Makefile*`, `.yaml`/`.yml`/`.sls`/`.mk`/`.cabal`,
+    `.haml`/`.pug`/`.jade`/`.slim`/`.sass`/`.styl`,
+    `.md`/`.mdx`/`.rst`/`.txt`/`.ini`/`.cfg`/`.sh`/`.tsv`/`.csv`/`.patch`,
+    multi-suffix paths whose last suffix is not lenient, and empty/unparseable
+    header paths): lines compare exactly (leading, internal and trailing
+    whitespace exact, with no whitespace-only-line exemption).
+- Equality: inside each hunk, pairs the i-th `-` deletion line with the i-th
+  `+` addition line within each contiguous change run (flushed at context lines
+  and hunk end). A pair matches when both lines have the same `\\r` ending and
+  equal normalised forms. Every whitespace operation uses ASCII `[ \\t\\f\\v]`
+  only (never Unicode whitespace such as NBSP). Whitespace-only lines normalise
+  to `""` in lenient files only. An asymmetric `\\ No newline at end of file`
+  marker within a change run counts as 1 real changed line.
+- Metadata: each `diff ` block with `old mode `, `new mode `, `new file mode `,
+  `deleted file mode `, `index <a>..<b> 120000` (symlink), `rename from `,
+  `rename to `, `copy from `, `copy to `, `Binary files `, or `GIT binary
+  patch` anywhere outside a hunk in the block, or ending with no `@@ ` hunk at
+  all, adds 1 to `meta`; `Binary files … differ`, `GIT binary patch`,
+  `Only in <dir>: <name>`, `File … is a … while file … is a …`, and
+  `Symbolic links … and … differ` lines outside a hunk also add 1 each to
+  `meta`. Any `meta >= 1` forces exit 1 (`real changes`).
+- Hunk parsing: `@@ -a[,b] +c[,d] @@` line counts (missing count = 1; context
+  ` ` or blank context line consumes one of each, `-` one old, `+` one new,
+  `\\` neither; unparseable `@@` headers run until the next `@@ `/`diff `).
+  Any other line inside a hunk, or any `-` or `+` line outside a hunk other
+  than `--- `/`+++ ` headers, counts as 1 real changed line.
+- Known limits: collapsed ASCII whitespace runs inside string literals (`"a  b"`
+  to `"a b"`), trailing-trimmed or re-spaced lines inside multi-line string or
+  template literals (without a trailing `\\` on the preceding line), and
+  whitespace-only lines inside such literals in lenient files still pass as
+  whitespace-only; under `-U0` the backslash-continuation guard cannot see a
+  continuation line outside the hunk, so a reindented line after an unchanged
+  `\\` line passes (default `git diff` context covers it).
 
 Usage:
-  git diff -U0 | whitespace-only-diff [--json]
-  whitespace-only-diff [--json] [FILE]
+  git diff -U0 | whitespace-only-diff [--json] [--strict-indent] [--lenient]
+  whitespace-only-diff [--json] [--strict-indent] [--lenient] [FILE]
 
-Verdicts and exits (text on stdout, or one JSON object with --json):
+Verdicts and exits (text on stdout, or one JSON object with --json carrying
+"verdict", "pairs", "real", "hunks", and "meta"):
   exit 0  whitespace-only: <P> pair(s) matched, <R> real changed line(s), <H> hunk(s)
-          At least one pair matched and real == 0.
-  exit 1  real changes: <P> pair(s) matched, <R> real changed line(s), <H> hunk(s)
-          Any real change (H >= 1).
+          At least one pair matched, real == 0, and meta == 0.
+  exit 1  real changes: <P> pair(s) matched, <R> real changed line(s), <H> hunk(s)[, <M> metadata change(s)]
+          Any real change or metadata change (H >= 1; metadata clause appended when M >= 1).
   exit 1  real changes: no line hunks (mode, binary or rename change)
-          Diff has metadata (`diff --git `) but no `@@ ` hunks.
+          Diff has metadata (`diff ` or binary/`Only in`) but no `@@ ` hunks.
   exit 2  no changes: empty diff
-          Input is empty (zero bytes after stripping whitespace).
+          Input is empty (zero bytes after stripping whitespace; JSON "meta": 0).
   exit 2  (stderr) whitespace-only-diff: input is not a unified diff
-          Non-empty input with neither `diff --git ` nor `@@ ` lines.
+          Non-empty input with no `diff `, `@@ `, or metadata lines.
 Usage errors exit 2.
 """
 import argparse
 import json
+import os
+import re
 import sys
 from pathlib import Path
+
+ASCII_WS = " \t\f\v"
+
+LENIENT_SUFFIXES = frozenset(
+    (
+        ".c",
+        ".h",
+        ".cc",
+        ".cpp",
+        ".cxx",
+        ".hpp",
+        ".hh",
+        ".mm",
+        ".js",
+        ".mjs",
+        ".cjs",
+        ".ts",
+        ".go",
+        ".java",
+        ".kt",
+        ".kts",
+        ".rs",
+        ".cs",
+        ".swift",
+        ".lua",
+        ".r",
+        ".css",
+        ".scss",
+        ".less",
+        # Markup (.html .xml .svg .vue .svelte .jsx .tsx) stays strict: <pre>,
+        # <textarea> and text nodes carry whitespace as data.
+        ".json",
+        ".jsonc",
+        ".sql",
+        ".dart",
+        ".erl",
+        ".clj",
+        ".zig",
+        ".proto",
+        ".graphql",
+        ".toml",
+    )
+)
+
+HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+DIFF_R_META_RE = re.compile(
+    r"^(?:File .+ is a .+ while file .+ is a .+|Symbolic links .+ and .+ differ)$"
+)
+
+BINARY_PREFIXES = (
+    "Binary files ",
+    "GIT binary patch",
+)
+
+META_PREFIXES = (
+    "old mode ",
+    "new mode ",
+    "new file mode ",
+    "deleted file mode ",
+    "rename from ",
+    "rename to ",
+    "copy from ",
+    "copy to ",
+    *BINARY_PREFIXES,
+)
 
 
 def die(msg, code=2):
@@ -42,19 +156,105 @@ class Parser(argparse.ArgumentParser):
         die(f"{message} (see --help)")
 
 
-def emit(as_json, verdict, pairs, real, hunks, text):
+def strip_quotes(p):
+    if len(p) >= 2 and p.startswith('"') and p.endswith('"'):
+        return p[1:-1]
+    return p
+
+
+def _env_tokens(var):
+    return tuple(re.findall(r"[^ \t\f\v\r\n]+", os.environ.get(var, "")))
+
+
+LENIENT_ENV_TOKENS = _env_tokens("SYG_WSDIFF_LENIENT_NAMES")
+LENIENT_BASENAMES = frozenset(LENIENT_ENV_TOKENS)
+lenient_ext = LENIENT_SUFFIXES | {
+    tok.lower() for tok in LENIENT_ENV_TOKENS if tok.startswith(".")
+}
+
+
+def path_class(path, has_file_header, lenient=False):
+    if not has_file_header:
+        return "lenient" if lenient else "strict"
+    if not path:
+        return "strict"
+    p = Path(path)
+    if p.name in LENIENT_BASENAMES or p.suffix.lower() in lenient_ext:
+        return "lenient"
+    return "strict"
+
+
+def header_b_path(line):
+    hdr = line[len("diff --git ") :].rstrip("\r")
+    if " b/" in hdr:
+        return hdr.rsplit(" b/", 1)[1]
+    if ' "b/' in hdr:
+        return hdr.rsplit(' "b/', 1)[1].rstrip('"')
+    tokens = re.findall(r"[^ \t\f\v]+", hdr)
+    if len(tokens) >= 2:
+        return strip_quotes(tokens[-1])
+    return ""
+
+
+def header_diff_path(line):
+    if line.startswith("diff --git "):
+        return header_b_path(line)
+    tokens = re.findall(r"[^ \t\f\v]+", line[len("diff ") :].rstrip("\r"))
+    return strip_quotes(tokens[-1]) if tokens else ""
+
+
+def header_file_path(line):
+    return strip_quotes(line[4:].split("\t", 1)[0].rstrip("\r"))
+
+
+def is_only_in(line):
+    return line.startswith("Only in ") and ": " in line[len("Only in ") :]
+
+
+def is_meta_line(line):
+    return line.startswith(META_PREFIXES) or (
+        line.startswith("index ") and line.rstrip("\r").endswith(" 120000")
+    )
+
+
+def norm(s, keep_lead=True, strict=True):
+    s = s.rstrip("\r")
+    if strict:
+        return s
+    rest = s.lstrip(ASCII_WS)
+    if not rest:
+        return ""   # blank lines carry no meaning in lenient files
+    lead = s[: len(s) - len(rest)] if keep_lead else ""
+    body = rest.rstrip(ASCII_WS)
+    trail = rest[len(body) :] if body.endswith("\\") else ""
+    return lead + re.sub(r"[ \t\f\v]+", " ", body) + trail
+
+
+def emit(as_json, verdict, pairs, real, hunks, meta, text):
     if as_json:
-        print(json.dumps({"verdict": verdict, "pairs": pairs, "real": real, "hunks": hunks}))
+        print(
+            json.dumps(
+                {
+                    "verdict": verdict,
+                    "pairs": pairs,
+                    "real": real,
+                    "hunks": hunks,
+                    "meta": meta,
+                }
+            )
+        )
     else:
         print(text)
 
 
 def main(argv):
     if "-h" in argv or "--help" in argv:
-        print(__doc__.strip())
+        print(__doc__.strip(" \t\f\v\r\n"))
         return 0
     parser = Parser(prog="whitespace-only-diff", add_help=False)
     parser.add_argument("--json", action="store_true")
+    parser.add_argument("--strict-indent", action="store_true")
+    parser.add_argument("--lenient", action="store_true")
     parser.add_argument("file", nargs="?")
     args = parser.parse_args(argv)
 
@@ -66,8 +266,8 @@ def main(argv):
     else:
         text = sys.stdin.buffer.read().decode("utf-8", errors="surrogateescape")
 
-    if not text.strip():
-        emit(args.json, "no-changes", 0, 0, 0, "no changes: empty diff")
+    if not text.strip(" \t\f\v\r\n"):
+        emit(args.json, "no-changes", 0, 0, 0, 0, "no changes: empty diff")
         return 2
 
     lines = text.split("\n")
@@ -75,43 +275,146 @@ def main(argv):
         lines.pop()
 
     has_diff_header = False
+    in_block = False
     in_hunk = False
+    block_hunks = 0
+    block_has_meta = False
+    block_path = ""
+    has_file_header = False
+    block_class = path_class(block_path, has_file_header, args.lenient)
+    minus_path = ""
+    rem_old = None
+    rem_new = None
     hunks = 0
     pairs = 0
     real = 0
+    meta = 0
     dels = []
     adds = []
+    del_no_eol = False
+    add_no_eol = False
+    last_side = ""
+    prev_old = ""
+    prev_new = ""
 
     def flush():
-        nonlocal pairs, real, dels, adds
-        if not in_hunk:
+        nonlocal pairs, real, dels, adds, del_no_eol, add_no_eol, last_side
+        if not in_hunk or (not dels and not adds and not del_no_eol and not add_no_eol):
             return
+        strict = block_class == "strict"
         matched = sum(
-            1 for d, a in zip(dels, adds)
-            if "".join(d.split()) == "".join(a.split())
+            1
+            for (d, d_cont), (a, a_cont) in zip(dels, adds)
+            if d.endswith("\r") == a.endswith("\r")
+            and norm(d, args.strict_indent or d_cont or a_cont, strict)
+            == norm(a, args.strict_indent or d_cont or a_cont, strict)
         )
         pairs += matched
         real += len(dels) + len(adds) - 2 * matched
+        if del_no_eol != add_no_eol:
+            real += 1
         dels, adds = [], []
+        del_no_eol = False
+        add_no_eol = False
+        last_side = ""
 
-    for line in lines:
-        if line.startswith("diff --git "):
-            flush()
-            in_hunk = False
+    def finish_block():
+        nonlocal meta
+        flush()
+        if in_block and (block_has_meta or block_hunks == 0):
+            meta += 1
+
+    for i, line in enumerate(lines):
+        if line.startswith("diff "):
+            finish_block()
             has_diff_header = True
+            in_block = True
+            in_hunk = False
+            block_hunks = 0
+            block_has_meta = False
+            block_path = header_diff_path(line)
+            has_file_header = True
+            block_class = path_class(block_path, has_file_header, args.lenient)
+            minus_path = ""
+            prev_old = prev_new = ""
         elif line.startswith("@@ "):
             flush()
             in_hunk = True
+            prev_old = prev_new = ""
+            block_hunks += 1
             hunks += 1
+            m = HUNK_RE.match(line)
+            if m:
+                rem_old = int(m.group(2)) if m.group(2) is not None else 1
+                rem_new = int(m.group(4)) if m.group(4) is not None else 1
+                if rem_old == 0 and rem_new == 0:
+                    flush()
+                    in_hunk = False
+            else:
+                rem_old = None
+                rem_new = None
         elif in_hunk:
             if line.startswith("-"):
-                dels.append(line[1:])
+                raw = line[1:]
+                dels.append((raw, prev_old.rstrip(ASCII_WS).endswith("\\")))
+                prev_old = raw.rstrip("\r")
+                last_side = "-"
+                if rem_old is not None:
+                    rem_old -= 1
             elif line.startswith("+"):
-                adds.append(line[1:])
+                raw = line[1:]
+                adds.append((raw, prev_new.rstrip(ASCII_WS).endswith("\\")))
+                prev_new = raw.rstrip("\r")
+                last_side = "+"
+                if rem_new is not None:
+                    rem_new -= 1
+            elif line.startswith(" ") or line in ("", "\r"):   # a blank context line may lose its space
+                flush()
+                prev_old = prev_new = line[1:].rstrip("\r") if line.startswith(" ") else ""
+                if rem_old is not None:
+                    rem_old -= 1
+                    rem_new -= 1
+            elif line.startswith("\\"):
+                if last_side == "-":
+                    del_no_eol = True
+                elif last_side == "+":
+                    add_no_eol = True
+            else:
+                real += 1
+            if (
+                rem_old is not None
+                and rem_old <= 0
+                and rem_new <= 0
+                and not (i + 1 < len(lines) and lines[i + 1].startswith("\\"))
+            ):
+                flush()
+                in_hunk = False
+        elif line.startswith("--- "):
+            minus_path = header_file_path(line)
+            has_file_header = True
+            block_class = path_class(block_path, has_file_header, args.lenient)
+        elif line.startswith("+++ "):
+            p = header_file_path(line)
+            if p == "/dev/null":
+                p = minus_path
+            block_path = "" if p == "/dev/null" else p
+            has_file_header = True
+            block_class = path_class(block_path, has_file_header, args.lenient)
+        elif line.startswith("-") or line.startswith("+"):
+            real += 1
+        elif is_only_in(line) or DIFF_R_META_RE.match(line.rstrip("\r")):
+            meta += 1
+        elif line.startswith(BINARY_PREFIXES):
+            if in_block and block_hunks == 0:
+                block_has_meta = True
+            else:
+                meta += 1
+        elif in_block and is_meta_line(line):
+            block_has_meta = True
 
-    flush()
+    finish_block()
 
-    if not has_diff_header and hunks == 0:
+    if not has_diff_header and hunks == 0 and meta == 0:
         die("input is not a unified diff")
 
     if hunks == 0:
@@ -121,28 +424,32 @@ def main(argv):
             0,
             0,
             0,
+            meta,
             "real changes: no line hunks (mode, binary or rename change)",
         )
         return 1
 
-    if pairs >= 1 and real == 0:
+    if pairs >= 1 and real == 0 and meta == 0:
         emit(
             args.json,
             "whitespace-only",
             pairs,
             real,
             hunks,
+            meta,
             f"whitespace-only: {pairs} pair(s) matched, {real} real changed line(s), {hunks} hunk(s)",
         )
         return 0
 
+    meta_suffix = f", {meta} metadata change(s)" if meta >= 1 else ""
     emit(
         args.json,
         "real-changes",
         pairs,
         real,
         hunks,
-        f"real changes: {pairs} pair(s) matched, {real} real changed line(s), {hunks} hunk(s)",
+        meta,
+        f"real changes: {pairs} pair(s) matched, {real} real changed line(s), {hunks} hunk(s){meta_suffix}",
     )
     return 1
 
