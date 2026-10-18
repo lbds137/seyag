@@ -85,7 +85,7 @@ Every hook belongs to one component, and each component switches on its own, so 
 
 | Component | Hooks | What it is for |
 |---|---|---|
-| `session` | `session-start` | The version line other tools read, and aging out state files. Always runs; it cannot be disabled. |
+| `session` | `session-start` | The version line other tools read, optional machine-gate lines (`SYG_MEM_GATE_CMD`, `SYG_LONG_JOB_CMD`), and aging out state files. Always runs; it cannot be disabled. |
 | `rules` | (none: gates parts of `session-start`) | The rules-link warning at startup/clear and the post-compaction checklist. |
 | `route` | `route-check` | Approved model route check at session start. |
 | `turn-shape` | `blocking-question-channel-check`, `turn-end-shape-gate`, `promise-ledger-check`, `queued-message-receipt`, `bare-token-binding-reminder` | Turn-end and prompt-time checks about talking to a person. |
@@ -140,6 +140,8 @@ A project that keeps the plugin disabled, so that its skills and agents do not l
 - The dispatcher applies each hook's `hooks.json` matcher itself, runs the selected hooks in parallel, and merges their results in `hooks.json` order. Any block wins: every blocker's text goes to stderr with exit 2, followed by the other hooks' context and messages under `Also from seyag hooks:`. Otherwise the context pieces join into one `additionalContext`, the messages into one `systemMessage`, and a PreToolUse `ask` is passed on with its reasons. Output a direct hook could not give for that event (plain stdout outside SessionStart and UserPromptSubmit, context on Stop) goes to stderr instead, and anything the merge does not forward is named there. Project overrides apply per hook, as above.
 - Matchers, as read from Claude Code's code but not verified against it: empty or `*` matches every tool, a plain list such as `Edit|Write|MultiEdit` matches those exact names, and anything else is treated as an unanchored regex. A payload without a `tool_name` runs every entry of its event. Only plain matchers appear in `hooks.json` today.
 - Cost: every call of a wired event starts the dispatcher, including tool calls no hook matches. When nothing matches, it exits right after one `jq` call. One slow hook can delay the event by up to `SYG_EVENT_HOOK_TIMEOUT` seconds (default 45), after which it is stopped and ignored.
+
+**Machine gates:** `SYG_MEM_GATE_CMD` is a command that exits 0 when there is enough free memory to launch a worker, a test suite or a fan-out; `SYG_LONG_JOB_CMD` is a runner prefix, called as `$SYG_LONG_JOB_CMD NAME -- CMD [ARG...]`, that runs a job of over ~10 minutes outside the session's process tree, where a low-memory reaper that kills background shells cannot reach it. Each is off when empty or unset (a value with a newline is ignored); when set, `session-start` names it on `startup`, `clear` and `compact` (outside the `rules` component), and the `delegation` skill tells the agent to use it.
 
 ## Bypass tokens
 
