@@ -46,6 +46,16 @@ Everything is configured by environment variables; nothing is hardcoded.
                      balance below for balance and statusline. Unset or empty:
                      no request is made and the output is the ledger estimate,
                      unchanged. Never printed, logged or passed in argv.
+  SYG_CREDIT_ADMIN_KEY_CMD  a command string (split with shell quoting rules
+                     (no ~ or $VAR expansion)): used only when
+                     ANTHROPIC_ADMIN_API_KEY is empty; run only on a cache miss,
+                     15 s timeout (SYG_CREDIT_KEY_CMD_TIMEOUT overrides for
+                     tests), stdout stripped is the key, any failure is a
+                     fetch failure cached for 60 s; it runs inside the caller,
+                     so the statusline render waits for it on a cache miss:
+                     point it at something fast (a cached read); the cache is
+                     keyed by a hash of the command string, so a key rotated in
+                     the store shows after at most the cache TTL.
   SYG_CREDIT_ADMIN_URL  replaces the Admin API origin (default
                      https://api.anthropic.com; tests point it at a loopback mock).
 
@@ -111,43 +121,69 @@ are replayed in time order against the grants, drawing from the soonest-expiring
 live grant first; a grant's unused remainder is forfeited when it expires. The
 provider's real drawdown order is not documented; first-to-expire-first is an
 assumption. Spend that no live grant covers is overage.
-Each (session, UTC day) entry's spend is dated at its last_ts, so a grant that
-expires mid-UTC-day (a non-UTC tz or a timestamp expiry) can see earlier
-same-day spend replayed after its expiry; date-only UTC expiries align with the
-day split and are exact.
+Each (session, UTC day) entry's spend is dated at its last_ts (and on the
+provider path each cost_report bucket covers a whole UTC day, dated 23:59:59),
+so a grant that is granted or expires mid-UTC-day (a non-UTC tz or a timestamp)
+can see same-day spend replayed on the wrong side of its boundary; date-only
+UTC grant times align with the day split and are exact.
 
 Provider balance (balance and statusline only; hook and daily never fetch):
-with ANTHROPIC_ADMIN_API_KEY set and a live grant, the Admin API's
-/v1/organizations/cost_report is read (curl, 10 s timeout) from 00:00 UTC of the
-earliest live grant's granted day up to the start of the current UTC day, so it
-covers closed UTC days only (no closed day yet: no request). Each page is
-fetched with &limit=31 (the Admin API's enforced max; the default is 7) and
-has_more/next_page pages are followed (up to MAX_PAGES: at 31 buckets a page,
-a 366-day window fits; a page size under the enforced max, a repeated token or
-exhausted pages are a failure that falls back to the labeled estimate); a
-repeated next_page is a failure. Only USD result rows count; each amount is a
-decimal string in cents. Spent is that sum plus the ledger's entries for every
-UTC day after the last provider bucket (the whole window when the response has
-no dated bucket); remaining is the live grants' total minus spent, clamped at 0
-with the rest as overage. The object then carries source "provider", estimate
-false, provider_as_of (the last bucket's UTC day, else the day before the
-window) and ledger_bridge_days (the number of distinct ledger days added); the
-one-line text shows the bare figure (an estimate carries an "est" suffix) and
-the balance command's second line names the basis "provider through <day>".
-lapsed_usd, next_expiry and days_left
-stay the ledger replay's. Any failure (curl error, timeout, HTTP >= 400,
-non-JSON, no data array, an unparsable USD amount, a bucket with USD amounts
-but no parsable starting_at, a repeated next_page, a non-finite sum) gives the ledger estimate labeled source "ledger", estimate
-true, provider_as_of and ledger_bridge_days null; it never fails the command.
-The new keys (source, provider_as_of, ledger_bridge_days) are absent, and
-estimate stays true, when no fetch is attempted: no key (or one containing CR
-or LF), no live grant, no closed day; a missing source means ledger. The sum is
-cached at ${XDG_CACHE_HOME:-~/.cache}/claude-statusline/api-credit-live.json
-(line 1: the key's SHA-256, the origin and the window; line 2: the numbers: the
-sum, the as-of day and the per-UTC-day sums) and
-reused for 300 s; a failure is cached the same way (as "failed") for 300 s, so
-a broken endpoint is not re-asked on every render; a corrupt cache, or one
-without a valid per-day map, is refetched.
+with ANTHROPIC_ADMIN_API_KEY or SYG_CREDIT_ADMIN_KEY_CMD set and a live grant,
+the Admin API's /v1/organizations/cost_report is read (curl, 10 s timeout) from
+00:00 UTC of the earliest live grant's granted day — moved back to the granted
+day of any grant granted before it and expiring after it (or without expiry),
+repeatedly, then clamped to at most 366 days before the start of the current
+UTC day — up to the start of the current UTC day, so it covers closed UTC days
+only (no closed day yet: no request). Each page is fetched with &limit=31 (the
+Admin API's enforced max; the default is 7) and has_more/next_page pages are
+followed (up to MAX_PAGES: at 31 buckets a page, a 366-day window fits; a page
+size under the enforced max, a repeated token or exhausted pages are a failure
+that falls back to the labeled estimate); a repeated next_page is a failure.
+Only USD result rows count; each amount is a decimal string in cents. When the
+window is unclamped, the provider's per-day sums inside it and the ledger's
+entries for every UTC day after the last provider bucket (the whole window when
+the response has no dated bucket) are replayed soonest-expiry first through the
+same drawdown as the ledger estimate; when clamped, the replay starts with the
+ledger's entries from the earliest overlapping grant's granted day up to the
+clamp day (so older grants' drawdown before the clamp is the ledger's estimate,
+and ledger spend before every grant is excluded). spent_usd is the provider's
+closed-day sums in the window plus the bridged ledger entries, plus, when
+clamped, the pre-window ledger entries since the earliest overlapping grant.
+The object then carries source "provider", estimate (which labels remaining_usd:
+false unless the window is clamped or a grant starts or expires mid-UTC-day on
+a provider-bucket day, i.e. after the window start and on or before
+provider_as_of), provider_as_of (the last bucket's UTC day, else the day before
+the window), provider_window_start (the fetch window's start day, present
+whenever a fetch was attempted), provider_chain_start (the earliest grant day of
+the overlap chain), provider_clamped, provider_subday,
+ledger_lapsed_usd and ledger_bridge_days (the number of distinct ledger days
+added). next_expiry and days_left come from that replay; lapsed_usd is summed
+per grant, taking in-window grants (granted at or after the earliest grant of
+the overlap chain) from the provider replay and grants that lapsed before the
+chain from the ledger replay (that ledger-sourced part is also reported as
+ledger_lapsed_usd). The one-line text shows the bare figure (an estimate
+carries an "est" suffix) and the balance command's second line names the basis
+and what the ledger supplied ("provider through <day>; today[, lapses before
+<chain start>][, and spend before <window start>], from the ledger", plus
+"; grant times mid-day" when provider_subday is true). Any failure (curl error,
+timeout, HTTP >= 400, non-JSON, no data array, an unparsable USD amount, a
+bucket with USD amounts but no parsable starting_at, a repeated next_page, a
+non-finite sum) gives the ledger estimate labeled source "ledger", estimate
+true, provider_as_of and ledger_bridge_days null, and provider_window_start set
+to the window's start day; it never fails the command. The fetch-attempt keys
+(source, provider_as_of, provider_window_start, ledger_bridge_days) are present
+whenever a fetch was attempted (anchored path included, with
+provider_chain_start, provider_clamped, provider_subday and ledger_lapsed_usd
+added on the unanchored provider success path) and absent, with estimate true,
+when no fetch is attempted: no key (no ANTHROPIC_ADMIN_API_KEY and no
+SYG_CREDIT_ADMIN_KEY_CMD, or an env key containing CR or LF), no live grant, no
+closed day; a missing source means ledger. The sum is cached at
+${XDG_CACHE_HOME:-~/.cache}/claude-statusline/api-credit-live.json (line 1: the
+key's SHA-256, the origin and the window; line 2: the numbers: the sum, the
+as-of day and the per-UTC-day sums) and reused for 300 s; a failure is cached
+the same way (as "failed") for 300 s (60 s with "kind": "key-cmd" when
+SYG_CREDIT_ADMIN_KEY_CMD fails), so a broken endpoint is not re-asked on every
+render; a corrupt cache, or one without a valid per-day map, is refetched.
 
 Anchor (calibrate): the ledger estimate is the grants minus ledger spend, blind
 to card top-ups and to anything the ledger misprices. `calibrate AMOUNT` records
@@ -201,6 +237,7 @@ import math
 import os
 import re
 import shlex
+import signal
 import stat
 import subprocess
 import sys
@@ -689,6 +726,7 @@ def balance(entries, grants_cfg, now):
         for g in grants:
             if not g["lapsed"] and g["expires"] is not None and g["expires"] <= t:
                 lapsed += g["remaining"]
+                g["lapsed_usd"] = g["remaining"]
                 g["remaining"] = 0.0
                 g["lapsed"] = True
 
@@ -727,6 +765,7 @@ def balance(entries, grants_cfg, now):
 
 ADMIN_URL = "https://api.anthropic.com"
 LIVE_TTL = 300   # seconds a cached cost_report sum is reused (the statusline's render cadence)
+KEY_CMD_FAIL_TTL = 60   # seconds a failed key command is cached before retrying
 MAX_PAGES = 14   # ceil(366 daily buckets / 31 per page) + margin; page size live-verified
 
 
@@ -830,14 +869,69 @@ def live_cache_path():
     return os.path.join(root, "claude-statusline", "api-credit-live.json")
 
 
-def provider_spend(key, start, end, now):
-    """The closed-day provider spend, from the TTL cache (line 1: the key's SHA-256,
-    the admin origin and the window; line 2: the numbers) when it is under LIVE_TTL
-    old, else fetched and cached. None on any fetch failure, and for LIVE_TTL
-    after one (a {"failed": true} record); cache errors are ignored (a corrupt
-    cache is refetched, never trusted)."""
+def admin_key_source():
+    """("env", key) or ("cmd", cmd_string), or None when no key source is configured
+    (or the env key contains CR or LF: a CR/LF key could inject a curl -K directive)."""
+    key = os.environ.get("ANTHROPIC_ADMIN_API_KEY", "")
+    if key:
+        return None if "\r" in key or "\n" in key else ("env", key)
+    cmd = os.environ.get("SYG_CREDIT_ADMIN_KEY_CMD", "")
+    return ("cmd", cmd) if cmd else None
+
+
+def key_cmd_timeout():
+    try:
+        t = float(os.environ.get("SYG_CREDIT_KEY_CMD_TIMEOUT", ""))
+        if math.isfinite(t) and t > 0:
+            return t
+    except ValueError:
+        pass
+    return 15
+
+
+def resolve_admin_key(src):
+    """The admin key string from src, running the command on demand for ("cmd", ...),
+    or None when the command fails or prints an empty or multi-line value."""
+    kind, val = src
+    if kind == "env":
+        return val
+    try:
+        argv = shlex.split(val)
+        if not argv:
+            return None
+        proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                stderr=subprocess.DEVNULL, start_new_session=True)
+        try:
+            out, _ = proc.communicate(timeout=key_cmd_timeout())
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+            try:
+                proc.communicate(timeout=2)
+            except subprocess.TimeoutExpired:
+                pass
+            return None
+        key = out.decode("utf-8").strip()
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0 or not key or "\r" in key or "\n" in key:
+        return None
+    return key
+
+
+def provider_spend(src, start, end, now):
+    """The closed-day provider spend, from the TTL cache (line 1: the key's or
+    command's SHA-256, the admin origin and the window; line 2: the numbers) when
+    it is under LIVE_TTL old, else fetched (resolving a command key on demand) and
+    cached. None on any fetch or key-command failure, cached as {"failed": true}
+    for LIVE_TTL (or KEY_CMD_FAIL_TTL with "kind": "key-cmd" when the key command
+    failed); cache errors are ignored (a corrupt cache is refetched, never
+    trusted)."""
     path = live_cache_path()
-    ident = "%s %s %s %s" % (hashlib.sha256(key.encode("utf-8")).hexdigest(), admin_origin(),
+    raw_id = src[1] if src[0] == "env" else "cmd\0" + src[1]
+    ident = "%s %s %s %s" % (hashlib.sha256(raw_id.encode("utf-8")).hexdigest(), admin_origin(),
                              iso(start), iso(end))
     try:
         with open(path, encoding="utf-8") as f:
@@ -845,9 +939,11 @@ def provider_spend(key, start, end, now):
         if line1 == ident:
             c = json.loads(line2)
             age = (now - parse_ts(c["fetched_at"])).total_seconds()
-            if 0 <= age < LIVE_TTL and c.get("failed") is True:
-                return None
-            if 0 <= age < LIVE_TTL and isinstance(c["as_of"], str) and isinstance(c["spent"], str):
+            if c.get("failed") is True:
+                ttl = KEY_CMD_FAIL_TTL if c.get("kind") == "key-cmd" else LIVE_TTL
+                if 0 <= age < ttl:
+                    return None
+            elif 0 <= age < LIVE_TTL and isinstance(c["as_of"], str) and isinstance(c["spent"], str):
                 spent = Decimal(c["spent"])
                 # A record without a valid per-day map (an older shape) is a miss.
                 raw_days = c.get("days")
@@ -859,12 +955,17 @@ def provider_spend(key, start, end, now):
                     return {"spent": spent, "as_of": c["as_of"], "days": days}
     except (OSError, ValueError, KeyError, TypeError, AttributeError, InvalidOperation):
         pass
-    got = fetch_cost_report(key, start, end)
+    key = resolve_admin_key(src)
+    got = fetch_cost_report(key, start, end) if key else None
     if got is not None and not all(math.isfinite(float(v)) for v in [got["spent"]] + list(got["days"].values())):
         got = None   # e.g. "1E+400" cents: a finite Decimal, an infinite float
-    record = ({"fetched_at": iso(now), "failed": True} if got is None else
-              {"fetched_at": iso(now), "spent": str(got["spent"]), "as_of": got["as_of"],
-               "days": {k: str(v) for k, v in got["days"].items()}})
+    if key is None:
+        record = {"fetched_at": iso(now), "failed": True, "kind": "key-cmd"}
+    elif got is None:
+        record = {"fetched_at": iso(now), "failed": True}
+    else:
+        record = {"fetched_at": iso(now), "spent": str(got["spent"]), "as_of": got["as_of"],
+                  "days": {k: str(v) for k, v in got["days"].items()}}
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         fd, tmp = tempfile.mkstemp(prefix=".api-credit-live.", suffix=".tmp", dir=os.path.dirname(path))
@@ -884,34 +985,73 @@ def provider_spend(key, start, end, now):
 
 
 def with_provider(b, entries, grants_cfg, now):
-    """b with spent and remaining from the provider's closed-day cost_report plus
-    the ledger's spend after its last bucket, when ANTHROPIC_ADMIN_API_KEY is set
-    and a live grant exists; labeled ledger fallback on any failure; b untouched
-    without a fetch."""
-    key = os.environ.get("ANTHROPIC_ADMIN_API_KEY", "")
-    if not key or "\r" in key or "\n" in key or grants_cfg is None:
-        return b   # a CR/LF key could inject a curl -K directive: no usable key
+    """Overlay the provider balance onto b when an admin key source is set and a
+    live grant exists. The fetch window starts at the earliest grant in the
+    overlap closure of the live grants, clamped to at most 366 days before today.
+    Provider per-day sums in the window and ledger entries after the last bucket
+    (plus pre-clamp ledger entries when clamped) are replayed soonest-expiry
+    first. Each grant in the chain takes its lapse from the provider replay, and
+    older grants take theirs from the ledger replay (also reported as
+    ledger_lapsed_usd). estimate is False unless the window is clamped
+    (provider_clamped) or a grant starts or expires mid-UTC-day on a
+    provider-bucket day (provider_subday). Any failure returns the labeled ledger
+    fallback; b is untouched when no fetch is attempted."""
+    src = admin_key_source()
+    if src is None or grants_cfg is None:
+        return b
     # live_of reads the sort and "lapsed" flags balance() set on grants_cfg[1] in
     # place; the window derives from that list, so a copying balance() breaks it.
     live = live_of(grants_cfg[1], now)
     if not live:
         return b
-    start, end = day_start(min(g["granted"] for g in live)), day_start(now)
+    s = min(g["granted"] for g in live)
+    while True:
+        older = [g["granted"] for g in grants_cfg[1]
+                 if g["granted"] < s and (g["expires"] is None or g["expires"] > s)]
+        if not older:
+            break
+        s = min(older)
+    s_day, clamp, end = day_start(s), day_start(now) - timedelta(days=366), day_start(now)
+    clamped = s_day < clamp
+    start = max(s_day, clamp)
     if start >= end:
         return b   # no closed day since the earliest live grant: nothing to fetch
-    b.update({"source": "ledger", "estimate": True, "provider_as_of": None, "ledger_bridge_days": None})
+    start_day = start.strftime("%Y-%m-%d")
+    b.update({"source": "ledger", "estimate": True, "provider_as_of": None,
+              "provider_window_start": start_day, "ledger_bridge_days": None})
     try:
-        got = provider_spend(key, start, end, now)
+        got = provider_spend(src, start, end, now)
     except Exception:  # the balance must never fail on the live path
         got = None
     if got is None:
         return b
-    bridged = [e for e in entries if e["day"] > got["as_of"]]
-    spent = float(got["spent"]) + sum(e["cost_usd"] for e in bridged)
-    left = sum(g["amount"] for g in live) - spent
-    b.update({"source": "provider", "estimate": False, "provider_as_of": got["as_of"],
-              "ledger_bridge_days": len({e["day"] for e in bridged}), "spent_usd": round(spent, 6),
-              "remaining_usd": round(max(left, 0.0), 6), "overage_usd": round(max(-left, 0.0), 6)})
+    as_of, s_key = got["as_of"], s_day.strftime("%Y-%m-%d")
+    events = [e for e in entries if s_key <= e["day"] < start_day] if clamped else []
+    d = start
+    while d < end and d.strftime("%Y-%m-%d") <= as_of:
+        dk = d.strftime("%Y-%m-%d")
+        when = min(d + timedelta(days=1) - timedelta(seconds=1), now)
+        events.append({"last_ts": iso(when), "cost_usd": float(got["days"].get(dk, 0))})
+        d += timedelta(days=1)
+    bridged = [e for e in entries if e["day"] > as_of]
+    subday = any(
+        t is not None and start < t and t.strftime("%Y-%m-%d") <= as_of and t != day_start(t)
+        for g in grants_cfg[1] for t in (g["granted"], g["expires"])
+    )
+    for i, g in enumerate(grants_cfg[1]):
+        g["idx"] = i
+    fresh_cfg = (grants_cfg[0], [dict(g, remaining=g["amount"], lapsed=False, lapsed_usd=0.0) for g in grants_cfg[1]])
+    b.update(balance(events + bridged, fresh_cfg, now))
+    by_idx = {pg["idx"]: pg for pg in fresh_cfg[1]}
+    lapsed = sum((by_idx[lg["idx"]] if lg["granted"] >= s else lg).get("lapsed_usd", 0.0)
+                 for lg in grants_cfg[1])
+    ledger_lapsed = sum(lg.get("lapsed_usd", 0.0) for lg in grants_cfg[1] if lg["granted"] < s)
+    b.update({"lapsed_usd": round(lapsed, 6), "ledger_lapsed_usd": round(ledger_lapsed, 6),
+              "source": "provider", "estimate": clamped or subday,
+              "provider_as_of": as_of, "provider_window_start": start_day,
+              "provider_chain_start": s_key,
+              "provider_clamped": clamped, "provider_subday": subday,
+              "ledger_bridge_days": len({e["day"] for e in bridged})})
     return b
 
 
@@ -1041,15 +1181,16 @@ def anchored_balance(entries, grants_cfg, now, anc):
     b = balance(events, cfg(), now)
     b.update({"anchor_at": iso(t), "anchor_usd": round(anc["amount"], 6)})
 
-    key = os.environ.get("ANTHROPIC_ADMIN_API_KEY", "")
-    if not key or "\r" in key or "\n" in key:
-        return b   # a CR/LF key could inject a curl -K directive: no usable key
+    src = admin_key_source()
+    if src is None:
+        return b
     start, end = day_start(t), day_start(now)
     if start >= end:
         return b   # no closed day since the anchor's day: nothing to fetch
-    b.update({"source": "ledger", "estimate": True, "provider_as_of": None, "ledger_bridge_days": None})
+    b.update({"source": "ledger", "estimate": True, "provider_as_of": None,
+              "provider_window_start": day, "ledger_bridge_days": None})
     try:
-        got = provider_spend(key, start, end, now)
+        got = provider_spend(src, start, end, now)
     except Exception:  # the balance must never fail on the live path
         got = None
     if got is None:
@@ -1069,7 +1210,8 @@ def anchored_balance(entries, grants_cfg, now, anc):
         events.append(anchor_day_event(day_entries, anc))
         used.update(e["day"] for e in day_entries)
     b.update(balance(events + bridged, cfg(), now))
-    b.update({"source": "provider", "estimate": False, "provider_as_of": as_of, "ledger_bridge_days": len(used)})
+    b.update({"source": "provider", "estimate": False, "provider_as_of": as_of,
+              "provider_window_start": day, "ledger_bridge_days": len(used)})
     return b
 
 
@@ -1286,8 +1428,21 @@ def main(argv=None):
             print(json.dumps(b, sort_keys=True))
         else:
             print(balance_text(b))
-            basis = ("provider through %s; today and lapsed from the ledger" % b["provider_as_of"]
-                     if b.get("source") == "provider" else "estimate")
+            if b.get("source") == "provider":
+                parts = ["today"]
+                if "anchor_at" in b:   # the anchored replay's lapses come from the ledger
+                    parts.append("lapsed")
+                if b.get("ledger_lapsed_usd", 0) > 0:
+                    parts.append("lapses before %s" % (b.get("provider_chain_start") or b.get("provider_window_start")))
+                if b.get("provider_clamped"):
+                    parts.append("spend before %s" % b.get("provider_window_start"))
+                ledger_part = (parts[0] + " from the ledger" if len(parts) == 1 else
+                               "%s and %s, from the ledger" % (", ".join(parts[:-1]), parts[-1]))
+                basis = "provider through %s; %s" % (b["provider_as_of"], ledger_part)
+                if b.get("provider_subday"):
+                    basis += "; grant times mid-day"
+            else:
+                basis = "estimate"
             if "anchor_at" in b:
                 basis += "; anchored $%s at %s" % (money(b["anchor_usd"]), b["anchor_at"])
             print("spent $%s, lapsed $%s, overage $%s (%s)"

@@ -379,18 +379,19 @@ vendor_host=$(printf '%s' "$base_url" \
 # start python every time. Cache file: line 1 the key (ns mtime and size of the
 # ledger, the grants file and the anchor file (SYG_CREDIT_ANCHOR, else
 # <ledger>.anchor.json), `0 0` when missing, plus the three paths,
-# SYG_CREDIT_NOW, whether ANTHROPIC_ADMIN_API_KEY is set and SYG_CREDIT_ADMIN_URL),
-# line 2 the JSON. The admin-key fields keep a keyed render's provider-exact
-# balance and a keyless render's estimate in separate entries. Reused while the
-# key matches and the file is under 60s old (so expiry and days_left still move).
-# Cache errors never fail the render; an empty answer is not cached.
+# SYG_CREDIT_NOW, whether ANTHROPIC_ADMIN_API_KEY or SYG_CREDIT_ADMIN_KEY_CMD
+# is set and SYG_CREDIT_ADMIN_URL), line 2 the JSON. The admin-key fields keep
+# a keyed render's provider-exact balance and a keyless render's estimate in
+# separate entries. Reused while the key matches and the file is under 60s old
+# (so expiry and days_left still move). Cache errors never fail the render; an
+# empty answer is not cached.
 credit_balance_json() {
     local cache key anchor k="" j="" age tmp
     cache="${XDG_CACHE_HOME:-$HOME/.cache}/claude-statusline/api-credit-balance.json"
     # The anchor file as api-credit resolves it, so a calibrate shows on the next render.
     anchor=${SYG_CREDIT_ANCHOR:-${SYG_CREDIT_LEDGER:-}.anchor.json}
     # Nanosecond mtimes: two ledger writes within one second can leave the size equal.
-    key="$(stat -c '%.9Y %s' "${SYG_CREDIT_LEDGER:-}" 2>/dev/null || echo 0 0) $(stat -c '%.9Y %s' "${SYG_CREDIT_GRANTS:-}" 2>/dev/null || echo 0 0) $(stat -c '%.9Y %s' "$anchor" 2>/dev/null || echo 0 0) ${SYG_CREDIT_LEDGER:-} ${SYG_CREDIT_GRANTS:-} $anchor ${SYG_CREDIT_NOW:-} admin-key=${ANTHROPIC_ADMIN_API_KEY:+set} admin-url=${SYG_CREDIT_ADMIN_URL:-}"
+    key="$(stat -c '%.9Y %s' "${SYG_CREDIT_LEDGER:-}" 2>/dev/null || echo 0 0) $(stat -c '%.9Y %s' "${SYG_CREDIT_GRANTS:-}" 2>/dev/null || echo 0 0) $(stat -c '%.9Y %s' "$anchor" 2>/dev/null || echo 0 0) ${SYG_CREDIT_LEDGER:-} ${SYG_CREDIT_GRANTS:-} $anchor ${SYG_CREDIT_NOW:-} admin-key=${ANTHROPIC_ADMIN_API_KEY:+set}${SYG_CREDIT_ADMIN_KEY_CMD:+cmd} admin-url=${SYG_CREDIT_ADMIN_URL:-}"
     age=$(( $(date +%s) - $(stat -c %Y "$cache" 2>/dev/null || echo 0) ))
     if [ "$age" -ge 0 ] && [ "$age" -lt 60 ] && { IFS= read -r k && IFS= read -r j; } 2>/dev/null < "$cache" \
         && [ "$k" = "$key" ] && [ -n "$j" ]; then
