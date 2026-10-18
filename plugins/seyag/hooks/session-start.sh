@@ -11,6 +11,9 @@
 # - compact: adds the post-compaction recovery checklist (the failure class
 #   where re-suggested settings, dropped promises and lost work-stack pointers
 #   keep recurring; component `rules`). Adapted from Tzurot's session-start.sh.
+# - startup / clear / compact: appends the memory-gate (SYG_MEM_GATE_CMD) and
+#   long-job runner (SYG_LONG_JOB_CMD) lines when set (single-line values only;
+#   not gated by `rules`).
 # - resume: outputs nothing.
 # - every source: deletes prompt-hook state files older than 7 days (below),
 #   and runs `seyag-git-hooks relink` (adds one line only when it rewrote
@@ -45,8 +48,8 @@ INPUT=$(cat)
 SOURCE=$(jq -r '.source // empty' <<<"$INPUT" 2>/dev/null || echo "")
 
 # Components: the rules-link warning and the compact checklist belong to the
-# `rules` component (SYG_PROFILE / SYG_DISABLE); the version line never does. A
-# resolver that will not load leaves everything on.
+# `rules` component (SYG_PROFILE / SYG_DISABLE); the version line and the
+# machine-gate lines never do. A resolver that will not load leaves everything on.
 HOOK_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=lib/components.sh
 if [ -r "$HOOK_DIR/lib/components.sh" ] && source "$HOOK_DIR/lib/components.sh" 2>/dev/null \
@@ -92,8 +95,8 @@ case "$SOURCE" in
 }The seyag plugin's core rules are not loaded (no file in $RULES_DIR matches its rules/core.md). Tell the owner; the fix is in the seyag README under Install, and it takes effect in the next session."
     ;;
   compact)
-    syg_enabled rules || exit 0
-    TEXT=$(cat <<'EOF'
+    if syg_enabled rules; then
+      TEXT=$(cat <<'EOF'
 POST-COMPACTION RECOVERY (structural checklist — act before new work):
 0. Undelivered reports FIRST: if the compaction summary names a user-facing
    report, answer, or completion message that was never delivered, deliver it
@@ -113,6 +116,26 @@ POST-COMPACTION RECOVERY (structural checklist — act before new work):
    a fresh Read of any file first.
 EOF
 )
+    fi
+    ;;
+esac
+
+case "$SOURCE" in
+  startup | clear | compact)
+    case "${SYG_MEM_GATE_CMD:-}" in
+      '' | *$'\n'*) ;;
+      *)
+        TEXT="${TEXT:+$TEXT
+}Memory gate: run \`$SYG_MEM_GATE_CMD\` before launching a worker, a test suite or a fan-out (exit 0 = go)."
+        ;;
+    esac
+    case "${SYG_LONG_JOB_CMD:-}" in
+      '' | *$'\n'*) ;;
+      *)
+        TEXT="${TEXT:+$TEXT
+}Long jobs (over ~10 min): run them as \`$SYG_LONG_JOB_CMD NAME -- CMD\` so a low-memory reaper can't kill them."
+        ;;
+    esac
     ;;
 esac
 

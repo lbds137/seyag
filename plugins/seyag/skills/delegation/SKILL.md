@@ -180,6 +180,7 @@ Post-session cleanup is one command: `safe-worktree-clean --repo <repo>` (dry ru
 
 - **One local gate-running unit at a time.** Heavy gates never run in parallel on a resource-limited machine; the worker's gates count against that one slot.
 - **Gate every new unit on the machine's usage gate** (`claude-usage --ok 90` on this Deck; exit 0 = go).
+- **Gate every launch on memory too, when the machine has a gate**: run `$SYG_MEM_GATE_CMD` (SessionStart names it when set) before a worker, a test suite or a fan-out; exit 0 = go. Run anything over ~10 min through `$SYG_LONG_JOB_CMD NAME -- CMD` when set: a background shell can be killed by a low-memory reaper.
 - **Before estimating whether the next units fit the week**, run `usage-sweep --since <session start> --points` for this project's meter points so far, instead of eyeballing from the live percentage.
 - **How many cloud units may run is owner policy** (it bills the weekly quota); it lives with the model-role split in the shared memory, not here. Read it before launching one.
 - **The dispatching turn states the expected wall time** (roughly 20–45 min for an initial unit, 5–20 min for a review round) so the owner has a not-stuck-yet horizon.
