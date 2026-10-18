@@ -50,10 +50,16 @@
 #   - File targets: a dump segment whose stdout ends at a file (`env > f`,
 #     `jq . .env > f 2>/dev/null`, `jq . settings.json &> f`, `>/dev/null`) and
 #     an intermediate `tee` file (`env | tee /tmp/f | cut -s -d= -f1`) pass when
-#     the target is a plain path (optionally after a bare `$VAR`, `${VAR}`, or
-#     `~` prefix) outside `/dev`, `/proc`, `/sys`, or `/dev/null` itself;
-#     process substitution, expansions with operators, globs, `..`, and device,
-#     proc, or sys paths fail closed.
+#     the target is a plain path (optionally after a `~` prefix or a bare
+#     `$VAR` / `${VAR}` prefix whose `VAR` is in `_TRUSTED_TARGET_VARS` —
+#     `HOME`, `TMPDIR`, `TMP`, `TEMP`, `XDG_CACHE_HOME`, `XDG_RUNTIME_DIR`,
+#     `XDG_STATE_HOME`, `XDG_DATA_HOME`, `XDG_CONFIG_HOME`, `CLAUDE_JOB_DIR`,
+#     `CLAUDE_PROJECT_DIR`, plus valid space-separated names from
+#     `SYG_EPG_TRUSTED_VARS` — in a single-statement command (`_SINGLE_STATEMENT`)
+#     with no `${…=…}` expansion and no assignment of that name (`_ASSIGNED_VARS`))
+#     outside `/dev`, `/proc`, `/sys`, or `/dev/null` itself; every other
+#     variable target, process substitution, expansions with operators, globs,
+#     `..`, and device, proc, or sys paths fail closed.
 #   - Redirect parser and fail-closed forms: one redirect parser scans every
 #     word of the segment (`int(digits)` on at most 9 digits normalises `01`,
 #     `001` to fd 1; a leading digit run longer than 9 fails the redirect match
@@ -92,10 +98,12 @@
 #     those builtins write values to stderr.
 #   - Exception handling: allowance helpers (`is_file_target`,
 #     `stdout_sent_off_transcript`, `is_transcript_tee`, `_has_fd1_redirect`,
-#     `_has_eval_or_source`) and `_SINGLE_STATEMENT` fail closed on any
-#     exception while the guard core fails open.
-#   - Accepted gaps: a variable target's value and a symlinked absolute file
-#     target are trusted (`env > "$TTY"`, `ln -s /dev/stderr /tmp/x; env > /tmp/x`),
+#     `_has_eval_or_source`), `_SINGLE_STATEMENT`, `_TRUSTED_TARGET_VARS`, and
+#     `_ASSIGNED_VARS` fail closed on any exception while the guard core fails
+#     open.
+#   - Accepted gaps: a trusted directory variable's value set outside the
+#     command and a symlinked absolute file target are trusted
+#     (`ln -s /dev/stderr /tmp/x; env > /tmp/x`),
 #     and a later `cat f` of that file in a separate segment is unseen;
 #     `env -i` / `env -i CMD` and `printenv NAME` keyed reads are allowed by
 #     design.
@@ -125,12 +133,13 @@ INPUT=$(cat 2>/dev/null) || exit 0
 COMMAND=$(printf '%s' "$INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null) || exit 0
 [ -n "$COMMAND" ] || exit 0
 CWD=$(printf '%s' "$INPUT" | jq -r '.cwd // empty' 2>/dev/null) || CWD=""
+TRUSTED_VARS="${SYG_EPG_TRUSTED_VARS:-}"
 
 printf '%s\n' "$COMMAND" | grep -qE '(^|[^A-Za-z0-9_])(env|printenv|set|jq)([^A-Za-z0-9_]|$)' || exit 0
 
 LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib"
 
-REASON=$(SYG_LIB_DIR="$LIB_DIR" SYG_EPG_CWD="$CWD" python3 - 3<<<"$COMMAND" <<'PY' 2>/dev/null
+REASON=$(SYG_LIB_DIR="$LIB_DIR" SYG_EPG_CWD="$CWD" SYG_EPG_TRUSTED_VARS="$TRUSTED_VARS" python3 - 3<<<"$COMMAND" <<'PY' 2>/dev/null
 import os
 import re
 import shlex
@@ -175,11 +184,40 @@ _QUOTED_REDIRECT_RE = re.compile(r"""(['"\\])[0-9]*&?>""")
 _BARE_AMP_REDIRECT_RE = re.compile(r"^\d*[<>]&$")
 _FD_DUP_TARGET_RE = re.compile(r"^[0-9]+-?$")
 _VAR_PREFIX_RE = re.compile(r"^\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*\})")
+_VALID_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _FILE_REM_RE = re.compile(r"^[A-Za-z0-9._/+@%,=-]*$")
 _CHDIR_RE = re.compile(r"(^|[;&|(\s])(cd|pushd)(\s|$)")
+_DEFAULT_ASSIGN_EXP_RE = re.compile(r"\$\{[^}]*=")
+_CMD_ASSIGN_RE = re.compile(
+    r"(^|[;&|()\s])(?:export\s+|declare\s+(?:-\S+\s+)*|local\s+(?:-\S+\s+)*|typeset\s+(?:-\S+\s+)*|readonly\s+(?:-\S+\s+)*)?([A-Za-z_][A-Za-z0-9_]*)(\[[^]]*\])?\+?="
+)
+_READ_ASSIGN_RE = re.compile(
+    r"read(?:\s+(?:-[adinNptu]\s+\S+|-\S+))*\s+([A-Za-z_][A-Za-z0-9_ ]*)"
+)
+_FOR_ASSIGN_RE = re.compile(
+    r"(?:for|select)\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s+in\b|\s*;|\s+do\b)"
+)
+_PRINTF_V_RE = re.compile(r"printf\s+-v\s*([A-Za-z_][A-Za-z0-9_]*)")
+_MAPFILE_RE = re.compile(
+    r"(?:mapfile|readarray)(?:\s+(?:-[dnosuCc]\s+\S+|-\S+))*(?:\s+([A-Za-z_][A-Za-z0-9_ ]*))?"
+)
+_GETOPTS_RE = re.compile(r"getopts\s+\S+\s+([A-Za-z_][A-Za-z0-9_]*)")
 _JQ_STDERR_BUILTIN_RE = re.compile(
     r"(^|[^A-Za-z0-9_$.])(debug|stderr|input_filename|error|halt_error|halt_error\(|\$__loc__|\$__prog_args)([^A-Za-z0-9_]|$)"
 )
+try:
+    _TRUSTED_TARGET_VARS: frozenset[str] = frozenset({
+        "HOME", "TMPDIR", "TMP", "TEMP",
+        "XDG_CACHE_HOME", "XDG_RUNTIME_DIR", "XDG_STATE_HOME",
+        "XDG_DATA_HOME", "XDG_CONFIG_HOME",
+        "CLAUDE_JOB_DIR", "CLAUDE_PROJECT_DIR",
+    } | {
+        v
+        for v in os.environ.get("SYG_EPG_TRUSTED_VARS", "").split()
+        if _VALID_VAR_NAME_RE.match(v)
+    })
+except Exception:
+    _TRUSTED_TARGET_VARS = frozenset()
 _RAW_CWD = os.environ.get("SYG_EPG_CWD", "")
 try:
     _CWD = (
@@ -196,6 +234,19 @@ except Exception:
 _HAS_PROCSUB = ">(" in cmd or "<(" in cmd
 _HAS_CMDSUB = "$(" in cmd or "`" in cmd
 _HAS_CHDIR = bool(_CHDIR_RE.search(cmd))
+try:
+    _assigned: set[str] = {m.group(2) for m in _CMD_ASSIGN_RE.finditer(cmd)}
+    for _m in _READ_ASSIGN_RE.finditer(cmd):
+        _assigned.update(_m.group(1).split())
+    for _m in _MAPFILE_RE.finditer(cmd):
+        _names = (_m.group(1) or "").split()
+        _assigned.update(_names if _names else ("MAPFILE",))
+    for _rx in (_FOR_ASSIGN_RE, _PRINTF_V_RE, _GETOPTS_RE):
+        for _m in _rx.finditer(cmd):
+            _assigned.add(_m.group(1))
+    _ASSIGNED_VARS: frozenset[str] | str = frozenset(_assigned)
+except Exception:
+    _ASSIGNED_VARS = "ALL"
 
 
 def _fail_closed(default: bool):
@@ -300,6 +351,15 @@ def is_file_target(t: str) -> bool:
     if ".." in rem.split("/"):
         return False
     if has_var:
+        var_name = m.group(0)[1:].strip("{}")
+        if (
+            not _SINGLE_STATEMENT
+            or var_name not in _TRUSTED_TARGET_VARS
+            or _ASSIGNED_VARS == "ALL"
+            or var_name in _ASSIGNED_VARS
+            or _DEFAULT_ASSIGN_EXP_RE.search(cmd)
+        ):
+            return False
         if rem and not rem.startswith("/"):
             return False
         if any(p in rem for p in ("/dev/", "/proc/", "/sys/")):
@@ -497,7 +557,7 @@ def detect_env_dump_command(seg: list[str]) -> str | None:
                     ignore_env = True
                     j += 1
                     continue
-                if tok.startswith("-") or _ASSIGN_RE.match(tok):
+                if tok.startswith("-") or _ASSIGN_RE.match(tok) or _DEFAULT_ASSIGN_EXP_RE.search(tok):
                     j += 1
                     continue
                 break
