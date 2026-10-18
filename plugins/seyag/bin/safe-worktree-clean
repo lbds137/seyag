@@ -12,8 +12,11 @@
 #   1 lock      no lock, or the first "pid <N>" in the lock reason is a dead process
 #               (a lock reason without a pid is HOLD:lock-unparsable)
 #   2 cwd       no process has its cwd inside the tree (/proc walk)
-#   3 commits   `git cherry <base> <branch>` shows no +, or every + subject is found on <base>
-#               by `git log <base> --fixed-strings --grep=<subject>`
+#   3 commits   `git cherry <base> <branch>` shows no +, or no path the branch changed from its
+#               merge-base with <base> differs between <base> and the branch tip (net tip content:
+#               a commit the branch itself reverted is not kept); squash/rebase-merged work passes
+#               until <base> changes a file it touched, then HOLD (the owner's call), and a commit
+#               subject alone never passes
 #   4 files     every dirty, staged or untracked file has <base>'s mode for that path (both
 #               absent counts), and its content equals <base>'s or <base> subsumes it. Tracked:
 #               `git merge-file <base> <tree HEAD's blob> <tree content>` is clean and yields
@@ -334,6 +337,31 @@ z_list() {
 REASONS=()
 hold() { REASONS+=("$1"$'\t'"$2"); }
 
+# True when BASE contains the branch $1's net changes (check 3, run only when git cherry
+# reported + commits): no path the branch changed from its merge-base with BASE differs
+# between BASE and the branch tip.
+branch_contained() {
+  local ref="refs/heads/$1" mb p
+  local -a br_changed=() base_diff=()
+  local -A br_set=()
+  if ! mb=$(git -C "$MAIN" merge-base "$BASE" "$ref" 2>/dev/null) || [ -z "$mb" ] ||
+    ! z_list br_changed git -C "$MAIN" diff --no-renames --no-ext-diff --no-textconv \
+      --ignore-submodules=none --name-only -z "$mb" "$ref" 2>/dev/null ||
+    ! z_list base_diff git -C "$MAIN" diff --no-renames --no-ext-diff --no-textconv \
+      --ignore-submodules=none --name-only -z "$BASE" "$ref" 2>/dev/null; then
+    return 1
+  fi
+  for p in "${br_changed[@]}"; do
+    if [ -n "$p" ]; then br_set[$p]=1; fi
+  done
+  for p in "${base_diff[@]}"; do
+    if [ -n "$p" ] && [ -n "${br_set[$p]+set}" ]; then
+      return 1
+    fi
+  done
+  return 0
+}
+
 # Criteria 3-7 for tree index $1; criteria 1-2 are judged by the caller.
 judge_git() {
   local i=$1 t=${WT_PATH[$1]} b=${WT_BRANCH[$1]} head=${WT_HEAD[$1]}
@@ -359,15 +387,16 @@ judge_git() {
     else
       while IFS= read -r line; do
         [ "${line:0:1}" = + ] || continue
-        sha=${line#+ }
-        subj=$(git -C "$MAIN" log -1 --format=%s "$sha" 2>/dev/null) || subj=""
-        if [ -n "$subj" ] && [ -n "$(git -C "$MAIN" log "$BASE" --fixed-strings --grep="$subj" -n 1 --format=%H 2>/dev/null)" ]; then
-          continue
-        fi
         n_unmerged=$((n_unmerged + 1))
-        [ -n "$first" ] || first="${sha:0:12} ${subj:-<empty subject>}"
+        if [ -z "$first" ]; then
+          sha=${line#+ }
+          subj=$(git -C "$MAIN" log -1 --format=%s "$sha" 2>/dev/null) || subj=""
+          first="${sha:0:12} ${subj:-<empty subject>}"
+        fi
       done <<<"$out"
-      [ "$n_unmerged" -eq 0 ] || hold unmerged "$n_unmerged commit(s) not on $BASE, first: $first"
+      if [ "$n_unmerged" -gt 0 ] && ! branch_contained "$b"; then
+        hold unmerged "$n_unmerged commit(s) not on $BASE and $BASE does not provably contain the branch's changes, first: $first"
+      fi
     fi
   else
     if ! out=$(git -C "$MAIN" rev-list -n 1 "$head" --not "$BASE" --branches 2>&1); then

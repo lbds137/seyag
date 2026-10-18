@@ -64,8 +64,13 @@ add_tree judge dirtysame "$C1"; echo v2 > "$R/.claude/worktrees/dirtysame/a.txt"
 add_tree judge untrackedsame "$C1"; echo b > "$R/.claude/worktrees/untrackedsame/b.txt"
 add_tree judge ignoredcache; mkdir -p "$R/.claude/worktrees/ignoredcache/pkg/__pycache__"
 echo x > "$R/.claude/worktrees/ignoredcache/pkg/__pycache__/m.pyc"
-add_tree judge subjmatch "$C1"; echo v2-pre > "$R/.claude/worktrees/subjmatch/a.txt"
-git -C "$R/.claude/worktrees/subjmatch" commit -qam second       # a pre-rebase copy of c2
+add_tree judge squashed "$C1"; echo v2 > "$R/.claude/worktrees/squashed/a.txt"
+git -C "$R/.claude/worktrees/squashed" commit -qam "wip one"
+echo b > "$R/.claude/worktrees/squashed/b.txt"
+git -C "$R/.claude/worktrees/squashed" add b.txt && git -C "$R/.claude/worktrees/squashed" commit -qm "wip two"
+add_tree judge netempty; echo n > "$R/.claude/worktrees/netempty/n.txt"
+git -C "$R/.claude/worktrees/netempty" add n.txt && git -C "$R/.claude/worktrees/netempty" commit -qm "add n"
+git -C "$R/.claude/worktrees/netempty" rm -q n.txt && git -C "$R/.claude/worktrees/netempty" commit -qm "drop n"
 add_tree judge lockdead; git -C "$R" worktree lock --reason "claude agent agent-x (pid $(dead_pid))" "$R/.claude/worktrees/lockdead"
 add_tree judge detachedok; git -C "$R/.claude/worktrees/detachedok" checkout -q --detach
 git -C "$R" branch -q -D worktree-agent-detachedok
@@ -76,6 +81,14 @@ add_tree judge locknopid; git -C "$R" worktree lock "$R/.claude/worktrees/lockno
 add_tree judge livecwd; (cd "$R/.claude/worktrees/livecwd" && exec sleep 300) & PIDS+=("$!")
 add_tree judge unmerged; echo new > "$R/.claude/worktrees/unmerged/c.txt"
 git -C "$R/.claude/worktrees/unmerged" add c.txt && git -C "$R/.claude/worktrees/unmerged" commit -qm "unique work"
+add_tree judge subjdiff "$C1"; echo v2-pre > "$R/.claude/worktrees/subjdiff/a.txt"
+git -C "$R/.claude/worktrees/subjdiff" commit -qam second        # subject on base, content differs
+add_tree judge generic; echo p > "$R/.claude/worktrees/generic/p.txt"
+git -C "$R/.claude/worktrees/generic" add p.txt && git -C "$R/.claude/worktrees/generic" commit -qm eco
+git -C "$R" config merge.ours.driver true
+echo 'a.txt merge=ours' > "$R/.gitattributes"
+add_tree judge drvours "$C1"; echo v2-drv > "$R/.claude/worktrees/drvours/a.txt"
+git -C "$R/.claude/worktrees/drvours" commit -qam drv
 add_tree judge dirty; echo mine > "$R/.claude/worktrees/dirty/a.txt"
 add_tree judge stagedonly; echo staged > "$R/.claude/worktrees/stagedonly/a.txt"
 git -C "$R/.claude/worktrees/stagedonly" add a.txt; echo v2 > "$R/.claude/worktrees/stagedonly/a.txt"
@@ -99,13 +112,17 @@ expect "$J" safe SAFE "clean tree at base"
 expect "$J" dirtysame SAFE "dirty file equal to base (criterion 4 positive)"
 expect "$J" untrackedsame SAFE "untracked file equal to base's blob"
 expect "$J" ignoredcache SAFE "ignored __pycache__ is a safe-clean cache name"
-expect "$J" subjmatch SAFE "cherry + whose subject is on base"
+expect "$J" squashed SAFE "cherry + but base contains the branch's changes (squash merge)"
+expect "$J" netempty SAFE "cherry + but net branch change is empty (added then removed)"
 expect "$J" lockdead SAFE "lock pid dead"
 expect "$J" detachedok SAFE "detached HEAD reachable from base"
 expect "$J" locklive HOLD:locked-live "criterion 1"
 expect "$J" locknopid HOLD:lock-unparsable "criterion 1, fails closed"
 expect "$J" livecwd HOLD:live-cwd "criterion 2"
 expect "$J" unmerged HOLD:unmerged "criterion 3"
+expect "$J" subjdiff HOLD:unmerged "subject on base but content differs"
+expect "$J" generic HOLD:unmerged "generic subject that is a substring of a base message"
+expect "$J" drvours HOLD:unmerged "criterion 3, working-tree .gitattributes merge=ours driver ignored"
 expect "$J" dirty HOLD:dirty "criterion 4, worktree content"
 expect "$J" stagedonly HOLD:dirty "criterion 4, index content"
 expect "$J" untrackednew HOLD:untracked-new "criterion 4, new untracked file"
@@ -120,10 +137,28 @@ expect "$(SYG_WORKTREE_BRANCH_RE='([' "$TOOL" --repo "$R" --json 2>/dev/null)" s
 
 out=$("$TOOL" --repo "$R"); rc=$?
 grep -q '^SAFE  .claude/worktrees/safe  \[worktree-agent-safe\]$' <<<"$out" \
-  && grep -q '^HOLD report: 11 tree(s) left in place$' <<<"$out" \
+  && grep -q '^HOLD report: 14 tree(s) left in place$' <<<"$out" \
   && grep -q '^    HOLD:untracked-new  notes.md is untracked and not on origin/main$' <<<"$out" \
   && [ -d "$R/.claude/worktrees/safe" ] && ok "text dry run: SAFE lines, one batched HOLD report, nothing removed" \
   || { bad "text dry run"; printf '%s\n' "$out"; }
+
+# --- Criterion 3: an info/attributes merge=ours driver cannot make a conflicting branch SAFE. ---
+mk_repo infoattr
+IA="$T/infoattr"
+git -C "$IA" config merge.ours.driver true
+echo 'a.txt merge=ours' > "$IA/$(git -C "$IA" rev-parse --git-path info/attributes)"
+add_tree infoattr infoattr "$C1"; echo v2-drv > "$IA/.claude/worktrees/infoattr/a.txt"
+git -C "$IA/.claude/worktrees/infoattr" commit -qam drv
+expect "$("$TOOL" --repo "$IA" --json)" infoattr HOLD:unmerged "criterion 3, info/attributes merge=ours holds"
+
+# --- Criterion 3: merge.default + merge.ours.driver in repo config (no attributes) holds unmerged. ---
+mk_repo mergedefault
+MD="$T/mergedefault"
+git -C "$MD" config merge.ours.driver true
+git -C "$MD" config merge.default ours
+add_tree mergedefault mergedefault "$C1"; echo v2-drv > "$MD/.claude/worktrees/mergedefault/a.txt"
+git -C "$MD/.claude/worktrees/mergedefault" commit -qam drv
+expect "$("$TOOL" --repo "$MD" --json)" mergedefault HOLD:unmerged "criterion 3, merge.default ours driver holds"
 
 # --- No base ref: every tree is HOLD:no-base. ---
 NB="$T/nobase"; git init -q -b main "$NB"; echo x > "$NB/x"; git -C "$NB" add x; git -C "$NB" commit -qm x
