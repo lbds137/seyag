@@ -641,6 +641,42 @@ check_trailing_create_case be "git push origin main && gh pr create --head=other
 # 18bf. `git push origin main && gh pr create --repo=a/b --fill` with PR URL on stdout (--repo= on trailing create) -> 777 ignored, pr list called with --head main
 check_trailing_create_case bf "git push origin main && gh pr create --repo=a/b --fill" 300 "main" "refs/heads/main"
 
+# 18bg. standalone `gh pr create -tHotfix --fill` (attached -t value with H) -> PR #777, banner rev refs/heads/main
+check_standalone_create_case bg "gh pr create -tHotfix --fill" "refs/heads/main"
+
+# 18bh. standalone `gh pr create -tRelease --fill` (attached -t value with R) -> PR #777, banner rev refs/heads/main
+check_standalone_create_case bh "gh pr create -tRelease --fill" "refs/heads/main"
+
+# 18bi. standalone `gh pr create --title -H --head feat-y` (-H is --title's value) -> PR #777, banner rev refs/heads/feat-y
+check_standalone_create_case bi "gh pr create --title -H --head feat-y" "refs/heads/feat-y"
+
+# 18bj. standalone `gh pr create -H=feat-y` -> PR #777, banner rev refs/heads/feat-y
+check_standalone_create_case bj "gh pr create -H=feat-y" "refs/heads/feat-y"
+
+# 18bk. standalone `gh pr create -fH=feat-y` -> PR #777, banner rev refs/heads/feat-y
+check_standalone_create_case bk "gh pr create -fH=feat-y" "refs/heads/feat-y"
+
+# 18bl. standalone `gh pr create --head other --head feat-y` (last --head wins) -> PR #777, banner rev refs/heads/feat-y
+check_standalone_create_case bl "gh pr create --head other --head feat-y" "refs/heads/feat-y"
+
+# 18bm. standalone `gh pr create --help` -> no output, gh never called
+check_standalone_create_case bm "gh pr create --help" ""
+
+# 18bn. standalone `gh pr create --dry-run --fill` -> no output, gh never called
+check_standalone_create_case bn "gh pr create --dry-run --fill" ""
+
+# 18bo. standalone `gh pr create -w` -> no output, gh never called
+check_standalone_create_case bo "gh pr create -w" ""
+
+# 18bp. standalone `gh pr create --head ""` -> no output, gh never called
+check_standalone_create_case bp 'gh pr create --head ""' ""
+
+# 18bq. `git push origin main && gh pr create -tHotfix --fill` (attached -t value with H on trailing create) -> PR #777 used, gh pr list not called
+check_trailing_create_case bq "git push origin main && gh pr create -tHotfix --fill" 777 "" "refs/heads/main"
+
+# 18br. `git push origin main && gh pr create --title "-R x" --fill` (--title value on trailing create) -> PR #777 used, gh pr list not called
+check_trailing_create_case br 'git push origin main && gh pr create --title "-R x" --fill' 777 "" "refs/heads/main"
+
 echo "---"
 echo "$FAILURES failed"
 [ "$FAILURES" -eq 0 ]

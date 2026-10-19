@@ -55,8 +55,9 @@
 #    full `refs/...` ref, tag, or rev expression, resolved by the hook),
 #    staying silent when an explicit source does not resolve; a standalone
 #    `gh pr create` with `--head`/`-H` (`[owner:]branch`) pins that branch the
-#    same way, and stays silent on `--repo`/`-R`, `GH_REPO=`, or a non-literal
-#    or unresolvable head; with no usable refspec or `--head` (none, multiple,
+#    same way, and stays silent on `--repo`/`-R`, `GH_REPO=`, a no-PR flag
+#    (`--help`/`-h`, `--dry-run`, `--web`/`-w`), or a non-literal or
+#    unresolvable head; with no usable refspec or `--head` (none, multiple,
 #    delete, or a `HEAD`/`@` destination) — or for the local rev alone when the
 #    source is `HEAD`/`@` — it falls back to the checked-out branch (detached
 #    HEAD -> HEAD).
@@ -272,6 +273,27 @@ def parse_push_refspec(push_args):
     return src, dst
 
 
+GH_CREATE_VAL_LONG = {
+    "--assignee",
+    "--attach",
+    "--base",
+    "--body",
+    "--body-file",
+    "--head",
+    "--label",
+    "--milestone",
+    "--project",
+    "--recover",
+    "--reviewer",
+    "--template",
+    "--title",
+    "--repo",
+}
+GH_CREATE_NO_PR_LONG = {"--help", "--dry-run", "--web"}
+GH_CREATE_VAL_SHORT = set("aBbFlmprTtHR")
+GH_CREATE_BOOL_SHORT = set("defwh")
+
+
 def parse_gh_pr_create(words):
     i = skip_assignments(words)
     return (
@@ -280,6 +302,79 @@ def parse_gh_pr_create(words):
         and words[i + 1] == "pr"
         and words[i + 2] == "create"
     )
+
+
+def parse_gh_create_opts(args):
+    head = None
+    has_repo = False
+    no_pr = False
+    ok = True
+
+    def set_head(val):
+        nonlocal head, ok
+        branch = val.rsplit(":", 1)[-1]
+        if not literal_ok(val) or not literal_ok(branch):
+            ok = False
+        head = branch
+
+    k = 0
+    while k < len(args):
+        w = args[k]
+        if w == "--":
+            break
+        if w.startswith("--"):
+            if "=" in w:
+                opt, val = w.split("=", 1)
+                if opt == "--head":
+                    set_head(val)
+                elif opt == "--repo":
+                    has_repo = True
+                elif opt in GH_CREATE_NO_PR_LONG:
+                    no_pr = True
+                k += 1
+            elif w in GH_CREATE_NO_PR_LONG:
+                no_pr = True
+                k += 1
+            elif w in GH_CREATE_VAL_LONG:
+                val = args[k + 1] if k + 1 < len(args) else ""
+                if w == "--head":
+                    set_head(val)
+                elif w == "--repo":
+                    has_repo = True
+                k += 2
+            else:
+                k += 1
+            continue
+        if w.startswith("-") and len(w) > 1:
+            s = w[1:]
+            step = 1
+            for idx, ch in enumerate(s):
+                if ch in GH_CREATE_BOOL_SHORT:
+                    if ch in ("h", "w"):
+                        no_pr = True
+                    continue
+                if ch in GH_CREATE_VAL_SHORT:
+                    rest = s[idx + 1 :]
+                    if rest:
+                        val = rest.removeprefix("=")
+                    else:
+                        val = args[k + 1] if k + 1 < len(args) else ""
+                        step = 2
+                    if ch == "H":
+                        set_head(val)
+                    elif ch == "R":
+                        has_repo = True
+                    break
+                break
+            k += step
+            continue
+        k += 1
+    return {
+        "head": head,
+        "has_repo": has_repo,
+        "no_pr": no_pr,
+        "ok": ok,
+    }
 
 
 body = strip_heredoc_bodies(cmd)
@@ -313,21 +408,23 @@ for idx, seg in enumerate(segments):
         # `git switch`, another push) or an env prefix on the create could
         # change which branch or repo the create used, so only an immediately
         # following, unprefixed create counts; `--head`/`-H`, `--repo`/`-R`,
-        # and a push `-C` are excluded for the same reason.
+        # no-PR flags (`--help`/`-h`/`--dry-run`/`--web`/`-w`), and a push `-C`
+        # are excluded.
         if (
             idx == trigger_idx + 1
             and skip_assignments(seg) == 0
             and parse_gh_pr_create(seg)
             and not push["c_dirs"]
-            and not any(
-                w in ("--head", "--repo")
-                or w.startswith(("--head=", "--repo="))
-                or re.match(r"^-[A-Za-z]*[HR]", w)
-                for w in seg
-            )
         ):
-            is_create = True
-            trailing_create = True
+            opts = parse_gh_create_opts(seg[3:])
+            if (
+                opts["head"] is None
+                and not opts["has_repo"]
+                and not opts["no_pr"]
+                and opts["ok"]
+            ):
+                is_create = True
+                trailing_create = True
         break
     push = parse_git_push(seg)
     if push is not None:
@@ -345,45 +442,19 @@ for idx, seg in enumerate(segments):
         c_dir = cur if (ok and push["c_dirs"]) else None
         continue
     if parse_gh_pr_create(seg):
-        # Standalone `gh pr create`: with a repo option (`--repo`, `--repo=…`,
-        # `-R`) or `GH_REPO=` assignment before `gh`, the PR lives in another
-        # repo than DIR, so neither the printed `cd DIR && pr-ci-wait` nor the
-        # dedup key would be right — stay silent, even when the value names
-        # this checkout's own repo.
+        # Standalone `gh pr create`: stay silent on a repo override (`--repo`,
+        # `-R`, `GH_REPO=`), a no-PR flag (`--help`, `-h`, `--dry-run`,
+        # `--web`, `-w`), or a non-literal `--head`/`-H`.
         i = skip_assignments(seg)
-        args = seg[i + 3 :]
-        if any(w.startswith("GH_REPO=") for w in seg[:i]) or any(
-            w == "--repo"
-            or w.startswith("--repo=")
-            or re.match(r"^-[A-Za-z]*R", w)
-            for w in args
+        opts = parse_gh_create_opts(seg[i + 3 :])
+        if (
+            any(w.startswith("GH_REPO=") for w in seg[:i])
+            or opts["has_repo"]
+            or opts["no_pr"]
+            or not opts["ok"]
         ):
             break
-        head_ok = True
-        head_branch = ""
-        k = 0
-        while k < len(args):
-            w = args[k]
-            if w == "--head" or re.match(r"^-[A-Za-z]*H$", w):
-                val = args[k + 1] if k + 1 < len(args) else ""
-                k += 2
-            elif w.startswith("--head="):
-                val = w[len("--head=") :]
-                k += 1
-            elif m := re.match(r"^-[A-Za-z]*H(.+)$", w):
-                val = m.group(1)
-                k += 1
-            else:
-                k += 1
-                continue
-            branch = val.rsplit(":", 1)[-1]
-            if not literal_ok(val) or not literal_ok(branch):
-                head_ok = False
-                break
-            head_branch = branch
-        if not head_ok:
-            break
-        push_src = push_dst = head_branch
+        push_src = push_dst = opts["head"] or ""
         trigger_idx = idx
         is_create = True
         break
