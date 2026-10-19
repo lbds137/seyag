@@ -44,10 +44,12 @@
 #    Within that directory, an explicit single literal refspec on `git push`
 #    names the branch when its destination is a branch name (not `HEAD`/`@`
 #    or another `refs/...` namespace): the PR lookup (`gh pr list --head`)
-#    uses its destination (unless a trailing `gh pr create` without `--head`
-#    already supplied the PR URL on stdout — used only when the push went to
-#    the checked-out branch, immediately after the push, from the same
-#    directory and repo), and the local rev (for the dedup SHA and printed
+#    uses its destination, unless a `gh pr create` immediately after the push
+#    (same directory and repo, no `--head`) already supplied the PR URL on
+#    stdout. That URL is the checked-out branch's PR, so it is used only when
+#    the push's destination is the checked-out branch or the push has no
+#    usable destination (then lookup and rev fall back to that branch too).
+#    The local rev (for the dedup SHA and printed
 #    `--sha`) uses its source when that resolves to a commit
 #    (`refs/heads/<src>` if that local branch exists, or its commit SHA for a
 #    full `refs/...` ref, tag, or rev expression, resolved by the hook),
@@ -466,8 +468,11 @@ fi
 
 PR_BRANCH="${PUSH_DST:-$BRANCH}"
 
-# A trailing `gh pr create` opened the checked-out branch's PR, not
-# `$PUSH_DST`'s; fall back to `gh pr list --head "$PR_BRANCH"`.
+# A trailing `gh pr create` opened the checked-out branch's PR (`$BRANCH`),
+# so its URL applies when `$PUSH_DST` is `$BRANCH` or empty (no usable push
+# destination -> both `$PR_BRANCH` and `$REV` fall back to `$BRANCH`); when a
+# non-empty `$PUSH_DST` differs from `$BRANCH`, fall back to
+# `gh pr list --head "$PR_BRANCH"`.
 if [ "$TRAILING_CREATE" = "1" ] && [ -n "$PUSH_DST" ] && [ "$PUSH_DST" != "$BRANCH" ]; then
   IS_CREATE=0
 fi

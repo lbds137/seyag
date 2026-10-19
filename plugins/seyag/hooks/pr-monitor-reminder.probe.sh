@@ -632,6 +632,15 @@ check_standalone_create_case bb "GH_REPO=o/r gh pr create --fill" ""
 # 18bc. standalone `gh pr create --fill` (control) -> PR #777, banner rev refs/heads/main
 check_standalone_create_case bc "gh pr create --fill" "refs/heads/main"
 
+# 18bd. `git -C <PUSH_WT> push origin main && gh pr create --fill` with PR URL on stdout (push -C excluded from trailing create) -> 777 ignored, pr list called with --head main
+check_trailing_create_case bd "git -C $PUSH_WT push origin main && gh pr create --fill" 300 "main" "refs/heads/main"
+
+# 18be. `git push origin main && gh pr create --head=other --fill` with PR URL on stdout (--head= on trailing create) -> 777 ignored, pr list called with --head main
+check_trailing_create_case be "git push origin main && gh pr create --head=other --fill" 300 "main" "refs/heads/main"
+
+# 18bf. `git push origin main && gh pr create --repo=a/b --fill` with PR URL on stdout (--repo= on trailing create) -> 777 ignored, pr list called with --head main
+check_trailing_create_case bf "git push origin main && gh pr create --repo=a/b --fill" 300 "main" "refs/heads/main"
+
 echo "---"
 echo "$FAILURES failed"
 [ "$FAILURES" -eq 0 ]
