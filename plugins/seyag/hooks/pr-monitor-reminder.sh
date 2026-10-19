@@ -41,6 +41,15 @@
 #    raw string — a `-C` value or commit message can itself contain the text
 #    "push" or "cd " without being one.
 #
+#    Within that directory, an explicit single literal refspec on `git push`
+#    names the branch: the PR lookup (`gh pr list --head`) uses its
+#    destination, and the local rev (for the dedup SHA and printed `--sha`)
+#    uses its source when that resolves to a commit (`refs/heads/<src>` if
+#    that local branch exists, its commit SHA otherwise, resolved by the
+#    hook), staying silent when an explicit source does not resolve; with no
+#    explicit source (no single refspec, or `HEAD`/`@`), it falls back to the
+#    checked-out branch (detached HEAD -> HEAD).
+#
 # Fires only after a Bash tool call whose command contains a `git push`
 # (optionally `-C`-anchored) or `gh pr create` (ignoring a plain `--tags`
 # push, which has no PR association). PostToolUse fires only after the tool
@@ -86,8 +95,10 @@ PAYLOAD_CWD=$(jq -r '.cwd // empty' <<<"$INPUT" 2>/dev/null || echo "")
 
 # The structural scan: finds the matched trigger segment (a `git ... push` or
 # `gh pr create`), whether it's the create shape, whether that push carries
-# `--tags`, and the effective directory per the priority order in the header.
-# Prints four lines on a match (TRIGGER=1, IS_CREATE=0|1, HAS_TAGS=0|1, DIR=…);
+# `--tags`, the effective directory per the priority order in the header, and
+# any explicit single-refspec branch (`PUSH_SRC`, `PUSH_DST`).
+# Prints six lines on a match (TRIGGER=1, IS_CREATE=0|1, HAS_TAGS=0|1, DIR=…,
+# PUSH_SRC=…, PUSH_DST=…);
 # prints nothing (or TRIGGER=0) on no match. Any internal error/exception
 # prints nothing, matching the fail-open direction. The command goes to python
 # on fd 3, never through the environment: Linux caps one env string at 128 KiB
@@ -106,10 +117,18 @@ cmd = os.fsdecode(open(3, "rb").read()).removesuffix("\n")
 payload_cwd = os.environ.get("PAYLOAD_CWD", "") or None
 
 ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+REDIRECT = re.compile(r"^[0-9]*(&>>|&>|>>|>\||>&|>|<<<|<<-|<<|<&|<>|<)")
 
 
 def literal_ok(v):
-    return v != "" and "$" not in v and "`" not in v and not v.startswith("~")
+    return (
+        v != ""
+        and "$" not in v
+        and "`" not in v
+        and "\n" not in v
+        and "\r" not in v
+        and not v.startswith("~")
+    )
 
 
 def resolve_against(value, base):
@@ -168,6 +187,77 @@ def parse_git_push(words):
     return {"c_dirs": c_dirs, "push_args": words[j + 1 :]}
 
 
+def parse_push_refspec(push_args):
+    """`(src, dst)` for a single literal push refspec, or `("", "")` for zero
+    or several refspecs, a non-literal refspec, `--tags`/`--all`/`--mirror`,
+    any delete form, patterns, or non-`refs/heads/` refs; a `HEAD`/`@` source
+    keeps only `dst`."""
+    args = []
+    skip_next = False
+    for w in push_args:
+        if skip_next:
+            skip_next = False
+            continue
+        m = REDIRECT.match(w)
+        if m:
+            if m.end() == len(w):
+                skip_next = True  # the target is the next word
+            continue
+        args.append(w)
+    if any(opt in args for opt in ("--tags", "--all", "--mirror", "--delete")):
+        return "", ""
+    opts_with_val = {"-o", "--push-option", "--repo", "--receive-pack", "--exec"}
+    has_repo = False
+    positional = []
+    k = 0
+    while k < len(args):
+        w = args[k]
+        if w in opts_with_val:
+            if w == "--repo":
+                has_repo = True
+            k += 2
+            continue
+        if w.startswith("--repo="):
+            has_repo = True
+            k += 1
+            continue
+        if re.match(r"^-[fnuvqd46]*d[fnuvqd46]*$", w):
+            return "", ""
+        if w.startswith("-"):
+            k += 1
+            continue
+        positional.append(w)
+        k += 1
+    if len(positional) == 2:
+        refspec = positional[1]
+    elif has_repo and len(positional) == 1:
+        refspec = positional[0]
+    else:
+        return "", ""
+    if not literal_ok(refspec):
+        return "", ""
+    refspec = refspec.removeprefix("+")
+    if ":" in refspec:
+        src, dst = refspec.split(":", 1)
+    else:
+        src = dst = refspec
+    src = src.removeprefix("refs/heads/")
+    dst = dst.removeprefix("refs/heads/")
+    if (
+        not src
+        or "*" in src
+        or "*" in dst
+        or src.startswith("refs/")
+        or dst.startswith("refs/")
+    ):
+        return "", ""
+    if src in ("HEAD", "@"):
+        src = ""
+    if dst in ("HEAD", "@"):
+        dst = ""
+    return src, dst
+
+
 def parse_gh_pr_create(words):
     i = skip_assignments(words)
     return (
@@ -199,12 +289,15 @@ trigger_idx = None
 is_create = False
 has_tags = False
 c_dir = None
+push_src = ""
+push_dst = ""
 
 for idx, seg in enumerate(segments):
     push = parse_git_push(seg)
     if push is not None:
         trigger_idx = idx
         has_tags = "--tags" in push["push_args"]
+        push_src, push_dst = parse_push_refspec(push["push_args"])
         cur = payload_cwd
         ok = True
         for d in push["c_dirs"]:
@@ -263,6 +356,8 @@ print("TRIGGER=1")
 print(f"IS_CREATE={1 if is_create else 0}")
 print(f"HAS_TAGS={1 if has_tags else 0}")
 print(f"DIR={effective_dir or ''}")
+print(f"PUSH_SRC={push_src}")
+print(f"PUSH_DST={push_dst}")
 PYEOF
 ) || exit 0
 
@@ -272,6 +367,8 @@ TRIGGER=$(printf '%s\n' "$SCAN" | sed -n 's/^TRIGGER=//p')
 IS_CREATE=$(printf '%s\n' "$SCAN" | sed -n 's/^IS_CREATE=//p')
 HAS_TAGS=$(printf '%s\n' "$SCAN" | sed -n 's/^HAS_TAGS=//p')
 DIR=$(printf '%s\n' "$SCAN" | sed -n 's/^DIR=//p')
+PUSH_SRC=$(printf '%s\n' "$SCAN" | sed -n 's/^PUSH_SRC=//p')
+PUSH_DST=$(printf '%s\n' "$SCAN" | sed -n 's/^PUSH_DST=//p')
 
 # A tag-only push has no PR association.
 [ "$HAS_TAGS" = "1" ] && exit 0
@@ -280,6 +377,19 @@ DIR="${DIR:-$PWD}"  # priority 4: nothing else resolved, fall back to the
                      # hook process's own cwd.
 
 BRANCH=$(git -C "$DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
+
+if [ -n "$PUSH_SRC" ] && git -C "$DIR" show-ref --verify -q "refs/heads/$PUSH_SRC" >/dev/null 2>&1; then
+  REV="refs/heads/$PUSH_SRC"
+elif [ -n "$PUSH_SRC" ]; then
+  REV=$(git -C "$DIR" rev-parse --verify -q "$PUSH_SRC^{commit}" 2>/dev/null)
+  [ -n "$REV" ] || exit 0
+elif [ -n "$BRANCH" ] && [ "$BRANCH" != "HEAD" ]; then
+  REV="refs/heads/$BRANCH"
+else
+  REV="HEAD"
+fi
+
+PR_BRANCH="${PUSH_DST:-$BRANCH}"
 
 PR_NUM=""
 
@@ -298,8 +408,8 @@ fi
 # the tool call it fires after) on a network hang. A timeout kill (exit 124)
 # gets its own stderr note, same fail-open direction (PR_NUM stays empty).
 if [ -z "$PR_NUM" ]; then
-  [ -z "$BRANCH" ] && exit 0
-  GH_LIST_OUT=$(cd "$DIR" 2>/dev/null && timeout 2 gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number' 2>/dev/null)
+  [ -z "$PR_BRANCH" ] && exit 0
+  GH_LIST_OUT=$(cd "$DIR" 2>/dev/null && timeout 2 gh pr list --head "$PR_BRANCH" --state open --json number --jq '.[0].number' 2>/dev/null)
   GH_LIST_RC=$?
   if [ "$GH_LIST_RC" -eq 124 ]; then
     echo "pr-monitor-reminder: gh pr list timed out after 2s; skipping this reminder" >&2
@@ -317,7 +427,7 @@ TOPLEVEL=$(git -C "$DIR" rev-parse --show-toplevel 2>/dev/null || echo "")
 
 # Dedup per (repo toplevel, PR, head SHA) so one push prints once. /tmp (or
 # the runtime dir) is bounded naturally by reboot/session churn.
-SHA=$(git -C "$TOPLEVEL" rev-parse HEAD 2>/dev/null || echo "nosha-$$")
+SHA=$(git -C "$TOPLEVEL" rev-parse "$REV" 2>/dev/null || echo "nosha-$$")
 KEY="${TOPLEVEL}:${PR_NUM}:${SHA}"
 SEEN_FILE="${SYG_PR_MONITOR_SEEN_FILE:-${XDG_RUNTIME_DIR:-/tmp}/.claude_pr_monitor_seen.$(id -u)}"
 if [ -f "$SEEN_FILE" ] && grep -qxF "$KEY" "$SEEN_FILE" 2>/dev/null; then
@@ -332,25 +442,21 @@ chmod 600 "$SEEN_FILE" 2>/dev/null || true
 # it holds a space or other shell metacharacter, with any embedded single
 # quote itself escaped the standard way.
 Q_TOPLEVEL="'$(printf '%s' "$TOPLEVEL" | sed "s/'/'\\\\''/g")'"
-
-if [ -n "$BRANCH" ] && [ "$BRANCH" != "HEAD" ]; then
-  REV="refs/heads/$BRANCH"
-else
-  REV="HEAD"
-fi
 Q_REV="'$(printf '%s' "$REV" | sed "s/'/'\\\\''/g")'"
 
 # The `$(...)` below is printed UNRESOLVED, on purpose — copy the line
 # verbatim except for the already-resolved, single-quoted toplevel path.
-# The rev is the branch checked out at push time, pinned as refs/heads/<branch>
-# so a later `git switch` cannot change what it resolves to; detached HEAD
-# falls back to HEAD. Hand-transcribing a SHA has failed repeatedly (twice by
-# completing an abbreviated one with invented characters — see pr-ci-wait's own
-# head-SHA validation, which exists because of exactly that), and the
-# substitution resolves the SHA when the watcher actually runs rather than at
-# arm time, closing that window entirely. The toplevel path is baked in as a
-# literal because it's already known now — nothing is gained by re-deriving it in
-# the watcher's own (potentially different) cwd.
+# The rev is the pushed source branch (`refs/heads/<src>`), else the source's
+# commit SHA resolved at hook time (non-branch sources), else the checked-out
+# branch (`refs/heads/<branch>`) so a later `git switch` cannot change what it
+# resolves to; detached HEAD falls back to HEAD. Hand-transcribing a SHA has
+# failed repeatedly (twice by completing an abbreviated one with invented
+# characters — see pr-ci-wait's own head-SHA validation, which exists because
+# of exactly that), and the substitution resolves the SHA when the watcher
+# actually runs rather than at arm time, closing that window entirely. The
+# toplevel path is baked in as a literal because it's already known now —
+# nothing is gained by re-deriving it in the watcher's own (potentially
+# different) cwd.
 #
 # The command `cd`s into the toplevel FIRST, rather than only anchoring the
 # `--sha` substitution's own `git rev-parse`: pr-ci-wait itself has no
