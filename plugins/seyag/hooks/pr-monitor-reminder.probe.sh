@@ -331,6 +331,184 @@ OUT17=$(run_hook "Bash" "${BIGDOC}git push" SYG_PR_MONITOR_SEEN_FILE="$WORK/seen
   && pass "a push past 128 KiB -> banner prints" \
   || { fail "a push past 128 KiB -> banner prints"; printf '%s\n' "$OUT17" | head -5 | sed 's/^/      /'; }
 
+# --- 18. explicit push refspec names the branch (PR lookup + rev + dedup) --
+PUSH_WT="$WORK/push-branch-wt"
+mkdir -p "$PUSH_WT"
+git -C "$PUSH_WT" init -q -b main
+git -C "$PUSH_WT" -c user.email=t@t -c user.name=t commit -q --allow-empty -m "main-init"
+MAIN_SHA=$(git -C "$PUSH_WT" rev-parse main)
+git -C "$PUSH_WT" checkout -q -b feat-y
+git -C "$PUSH_WT" -c user.email=t@t -c user.name=t commit -q --allow-empty -m "feat-y-commit"
+git -C "$PUSH_WT" tag v1
+git -C "$PUSH_WT" -c user.email=t@t -c user.name=t tag -a v2 -m v2 feat-y
+FEAT_Y_SHA=$(git -C "$PUSH_WT" rev-parse feat-y)
+git -C "$PUSH_WT" checkout -q main
+
+check_push_branch_case() {
+  local id="$1" cmd="$2" exp_head="$3" exp_rev="$4"
+  local log="$WORK/log18_${id}" seen="$WORK/seen18_${id}" out ctx got_head
+  : > "$log"
+  out=$(run_hook_cwd "Bash" "$cmd" "$PUSH_WT" \
+    SYG_PR_MONITOR_SEEN_FILE="$seen" FAKE_GH_PR_LIST_NUM=300 FAKE_GH_LOG="$log")
+  got_head=$(gh_log_used_branch "$log")
+  [ "$got_head" = "$exp_head" ] \
+    && pass "18${id} ($cmd): gh --head $exp_head" \
+    || fail "18${id} ($cmd): gh --head $exp_head (got '$got_head')"
+  ctx=$(jq -r '.hookSpecificOutput.additionalContext' <<<"$out" 2>/dev/null || echo "")
+  [[ "$ctx" == *"git rev-parse '$exp_rev'"* ]] \
+    && pass "18${id} ($cmd): banner rev $exp_rev" \
+    || { fail "18${id} ($cmd): banner rev $exp_rev"; printf '%s\n' "$out" | sed 's/^/      /'; }
+}
+
+# 18a. `git push origin feat-y` -> gh --head feat-y; banner refs/heads/feat-y
+check_push_branch_case a "git push origin feat-y" "feat-y" "refs/heads/feat-y"
+
+# 18b. `git push -u origin feat-y` -> same as a
+check_push_branch_case b "git push -u origin feat-y" "feat-y" "refs/heads/feat-y"
+
+# 18c. `git push --force-with-lease origin +feat-y` -> same as a
+check_push_branch_case c "git push --force-with-lease origin +feat-y" "feat-y" "refs/heads/feat-y"
+
+# 18d. `git push origin feat-y:feat-z` -> gh --head feat-z; banner refs/heads/feat-y
+check_push_branch_case d "git push origin feat-y:feat-z" "feat-z" "refs/heads/feat-y"
+
+# 18e. `git push origin HEAD:feat-z` -> gh --head feat-z; banner refs/heads/main
+check_push_branch_case e "git push origin HEAD:feat-z" "feat-z" "refs/heads/main"
+
+# 18f. `git push origin gone-branch` (unresolvable source) -> silent, gh never called
+LOG18F="$WORK/log18_f"
+: > "$LOG18F"
+OUT18F=$(run_hook_cwd "Bash" "git push origin gone-branch" "$PUSH_WT" \
+  SYG_PR_MONITOR_SEEN_FILE="$WORK/seen18_f" FAKE_GH_PR_LIST_NUM=300 FAKE_GH_LOG="$LOG18F")
+[ -z "$OUT18F" ] && [ ! -s "$LOG18F" ] \
+  && pass "18f (git push origin gone-branch): unresolvable source -> silent, gh not called" \
+  || { fail "18f (git push origin gone-branch): unresolvable source -> silent, gh not called"; printf 'OUT:%s\nLOG:%s\n' "$OUT18F" "$(cat "$LOG18F")" | sed 's/^/      /'; }
+
+# 18g. `git push origin feat-y other` (two refspecs) -> gh --head main; banner refs/heads/main
+check_push_branch_case g "git push origin feat-y other" "main" "refs/heads/main"
+
+# 18h. `git push` (no args) -> gh --head main; banner refs/heads/main
+check_push_branch_case h "git push" "main" "refs/heads/main"
+
+# 18i. `git push origin :feat-y` (delete) -> gh --head main; banner refs/heads/main
+check_push_branch_case i "git push origin :feat-y" "main" "refs/heads/main"
+# 18i2. `git push --delete origin feat-y` is also a delete -> nothing derived
+check_push_branch_case i2 "git push --delete origin feat-y" "main" "refs/heads/main"
+
+# 18j. dedup: pushing feat-y then main from the same fixture with the same PR
+#      number and seen-file prints a banner both times (different SHAs)
+SEEN18J="$WORK/seen18_j"
+OUT18J_A=$(run_hook_cwd "Bash" "git push origin feat-y" "$PUSH_WT" \
+  SYG_PR_MONITOR_SEEN_FILE="$SEEN18J" FAKE_GH_PR_LIST_NUM=301)
+OUT18J_B=$(run_hook_cwd "Bash" "git push origin main" "$PUSH_WT" \
+  SYG_PR_MONITOR_SEEN_FILE="$SEEN18J" FAKE_GH_PR_LIST_NUM=301)
+[[ -n "$OUT18J_A" && -n "$OUT18J_B" ]] \
+  && pass "18j (dedup per pushed branch SHA): feat-y then main both print" \
+  || { fail "18j (dedup per pushed branch SHA): feat-y then main both print"; printf 'A:%s\nB:%s\n' "$OUT18J_A" "$OUT18J_B" | sed 's/^/      /'; }
+
+# 18k. `git push origin feat-y 2>&1` -> same as a
+check_push_branch_case k "git push origin feat-y 2>&1" "feat-y" "refs/heads/feat-y"
+
+# 18l. `git push origin feat-y > out.txt` -> same as a
+check_push_branch_case l "git push origin feat-y > out.txt" "feat-y" "refs/heads/feat-y"
+
+# 18m. `git push origin feat-y &>/dev/null` -> same as a
+check_push_branch_case m "git push origin feat-y &>/dev/null" "feat-y" "refs/heads/feat-y"
+
+# 18n. `git push -o ci.skip origin feat-y` -> same as a
+check_push_branch_case n "git push -o ci.skip origin feat-y" "feat-y" "refs/heads/feat-y"
+
+# 18o. `git push origin refs/heads/feat-y` -> same as a
+check_push_branch_case o "git push origin refs/heads/feat-y" "feat-y" "refs/heads/feat-y"
+
+# 18p. `git push origin @` -> gh --head main; banner refs/heads/main
+check_push_branch_case p "git push origin @" "main" "refs/heads/main"
+
+# 18q. `git push -fd origin feat-y` (bundled delete flag) -> gh --head main; banner refs/heads/main
+check_push_branch_case q "git push -fd origin feat-y" "main" "refs/heads/main"
+
+# 18r. `git push origin feat-y 2>&1 | tail -3` -> same as a
+check_push_branch_case r "git push origin feat-y 2>&1 | tail -3" "feat-y" "refs/heads/feat-y"
+
+# 18s. `git push origin <feat-y SHA>:feat-z` -> gh --head feat-z; banner <that SHA>
+check_push_branch_case s "git push origin ${FEAT_Y_SHA}:feat-z" "feat-z" "$FEAT_Y_SHA"
+
+# 18t. `git push origin v1:feat-z` (lightweight tag) -> gh --head feat-z; banner <feat-y SHA>
+check_push_branch_case t "git push origin v1:feat-z" "feat-z" "$FEAT_Y_SHA"
+
+# 18u. `git push --repo=origin feat-y` -> gh --head feat-y; banner refs/heads/feat-y
+check_push_branch_case u "git push --repo=origin feat-y" "feat-y" "refs/heads/feat-y"
+
+# 18v. `git -C <PUSH_WT> push origin feat-y` with payload .cwd elsewhere -> resolves in PUSH_WT
+LOG18V="$WORK/log18_v"
+: > "$LOG18V"
+OUT18V=$(run_hook_cwd "Bash" "git -C $PUSH_WT push origin feat-y" "$FIXTURE_WT" \
+  SYG_PR_MONITOR_SEEN_FILE="$WORK/seen18_v" FAKE_GH_PR_LIST_NUM=300 FAKE_GH_LOG="$LOG18V")
+[ "$(gh_log_used_branch "$LOG18V")" = "feat-y" ] \
+  && pass "18v (git -C <PUSH_WT> push origin feat-y): gh --head feat-y" \
+  || fail "18v (git -C <PUSH_WT> push origin feat-y): gh --head feat-y (got '$(gh_log_used_branch "$LOG18V")')"
+CTX18V=$(jq -r '.hookSpecificOutput.additionalContext' <<<"$OUT18V" 2>/dev/null || echo "")
+[[ "$CTX18V" == *"git rev-parse 'refs/heads/feat-y'"* ]] \
+  && pass "18v (git -C <PUSH_WT> push origin feat-y): banner rev refs/heads/feat-y" \
+  || { fail "18v (git -C <PUSH_WT> push origin feat-y): banner rev refs/heads/feat-y"; printf '%s\n' "$OUT18V" | sed 's/^/      /'; }
+
+# 18w. `cd <PUSH_WT> && git push origin feat-y` with payload .cwd elsewhere -> resolves in PUSH_WT
+LOG18W="$WORK/log18_w"
+: > "$LOG18W"
+OUT18W=$(run_hook_cwd "Bash" "cd $PUSH_WT && git push origin feat-y" "$FIXTURE_WT" \
+  SYG_PR_MONITOR_SEEN_FILE="$WORK/seen18_w" FAKE_GH_PR_LIST_NUM=300 FAKE_GH_LOG="$LOG18W")
+[ "$(gh_log_used_branch "$LOG18W")" = "feat-y" ] \
+  && pass "18w (cd <PUSH_WT> && git push origin feat-y): gh --head feat-y" \
+  || fail "18w (cd <PUSH_WT> && git push origin feat-y): gh --head feat-y (got '$(gh_log_used_branch "$LOG18W")')"
+CTX18W=$(jq -r '.hookSpecificOutput.additionalContext' <<<"$OUT18W" 2>/dev/null || echo "")
+[[ "$CTX18W" == *"git rev-parse 'refs/heads/feat-y'"* ]] \
+  && pass "18w (cd <PUSH_WT> && git push origin feat-y): banner rev refs/heads/feat-y" \
+  || { fail "18w (cd <PUSH_WT> && git push origin feat-y): banner rev refs/heads/feat-y"; printf '%s\n' "$OUT18W" | sed 's/^/      /'; }
+
+# 18x. Detached HEAD with explicit refspec `git push origin feat-y` -> feat-y / refs/heads/feat-y
+PUSH_DETACHED_WT="$WORK/push-detached-wt"
+cp -R "$PUSH_WT" "$PUSH_DETACHED_WT"
+git -C "$PUSH_DETACHED_WT" checkout -q --detach HEAD
+LOG18X="$WORK/log18_x"
+: > "$LOG18X"
+OUT18X=$(run_hook_cwd "Bash" "git push origin feat-y" "$PUSH_DETACHED_WT" \
+  SYG_PR_MONITOR_SEEN_FILE="$WORK/seen18_x" FAKE_GH_PR_LIST_NUM=300 FAKE_GH_LOG="$LOG18X")
+[ "$(gh_log_used_branch "$LOG18X")" = "feat-y" ] \
+  && pass "18x (detached HEAD, git push origin feat-y): gh --head feat-y" \
+  || fail "18x (detached HEAD, git push origin feat-y): gh --head feat-y (got '$(gh_log_used_branch "$LOG18X")')"
+CTX18X=$(jq -r '.hookSpecificOutput.additionalContext' <<<"$OUT18X" 2>/dev/null || echo "")
+[[ "$CTX18X" == *"git rev-parse 'refs/heads/feat-y'"* ]] \
+  && pass "18x (detached HEAD, git push origin feat-y): banner rev refs/heads/feat-y" \
+  || { fail "18x (detached HEAD, git push origin feat-y): banner rev refs/heads/feat-y"; printf '%s\n' "$OUT18X" | sed 's/^/      /'; }
+
+# 18y. Refspec word with embedded newline -> rejected by literal_ok; falls back to main
+check_push_branch_case y $'git push origin "feat-y\nDIR=/tmp"' "main" "refs/heads/main"
+
+# 18z. Repeat-push dedup negative: same seen-file, `git push origin feat-y` twice -> second output empty
+SEEN18Z="$WORK/seen18_z"
+OUT18Z_A=$(run_hook_cwd "Bash" "git push origin feat-y" "$PUSH_WT" \
+  SYG_PR_MONITOR_SEEN_FILE="$SEEN18Z" FAKE_GH_PR_LIST_NUM=302)
+OUT18Z_B=$(run_hook_cwd "Bash" "git push origin feat-y" "$PUSH_WT" \
+  SYG_PR_MONITOR_SEEN_FILE="$SEEN18Z" FAKE_GH_PR_LIST_NUM=302)
+[[ -n "$OUT18Z_A" && -z "$OUT18Z_B" ]] \
+  && pass "18z (repeat-push dedup negative): second git push origin feat-y is silent" \
+  || { fail "18z (repeat-push dedup negative): second git push origin feat-y is silent"; printf 'A:%s\nB:%s\n' "$OUT18Z_A" "$OUT18Z_B" | sed 's/^/      /'; }
+
+# 18aa. `git push origin v2:feat-z` (annotated tag) -> gh --head feat-z; banner <feat-y SHA> (commit, not tag object)
+check_push_branch_case aa "git push origin v2:feat-z" "feat-z" "$FEAT_Y_SHA"
+
+# 18ab. `git push origin main~0:feat-z` -> gh --head feat-z; banner <main SHA>
+check_push_branch_case ab "git push origin main~0:feat-z" "feat-z" "$MAIN_SHA"
+
+# 18ac. `git push origin feat-y~1:feat-z` (relative parent source) -> gh --head feat-z; banner <main SHA>
+check_push_branch_case ac "git push origin feat-y~1:feat-z" "feat-z" "$MAIN_SHA"
+
+# 18ad. `git push -odeploy origin feat-y` (attached -o value is not a delete) -> feat-y / refs/heads/feat-y
+check_push_branch_case ad "git push -odeploy origin feat-y" "feat-y" "refs/heads/feat-y"
+
+# 18ae. `git push -u origin feat-y && gh pr create --fill` -> push segment matches first; feat-y / refs/heads/feat-y
+check_push_branch_case ae "git push -u origin feat-y && gh pr create --fill" "feat-y" "refs/heads/feat-y"
+
 echo "---"
 echo "$FAILURES failed"
 [ "$FAILURES" -eq 0 ]
