@@ -341,6 +341,7 @@ git -C "$PUSH_WT" checkout -q -b feat-y
 git -C "$PUSH_WT" -c user.email=t@t -c user.name=t commit -q --allow-empty -m "feat-y-commit"
 git -C "$PUSH_WT" tag v1
 git -C "$PUSH_WT" -c user.email=t@t -c user.name=t tag -a v2 -m v2 feat-y
+git -C "$PUSH_WT" update-ref refs/remotes/origin/feat-y feat-y
 FEAT_Y_SHA=$(git -C "$PUSH_WT" rev-parse feat-y)
 git -C "$PUSH_WT" checkout -q main
 
@@ -358,6 +359,33 @@ check_push_branch_case() {
   [[ "$ctx" == *"git rev-parse '$exp_rev'"* ]] \
     && pass "18${id} ($cmd): banner rev $exp_rev" \
     || { fail "18${id} ($cmd): banner rev $exp_rev"; printf '%s\n' "$out" | sed 's/^/      /'; }
+}
+
+check_trailing_create_case() {
+  local id="$1" cmd="$2" exp_num="$3" exp_head="$4" exp_rev="$5"
+  local log="$WORK/log18_${id}" seen="$WORK/seen18_${id}" payload out ctx got_head
+  : > "$log"
+  payload=$(jq -n --arg cmd "$cmd" --arg cwd "$PUSH_WT" \
+    '{tool_name:"Bash", tool_input:{command:$cmd}, cwd:$cwd, tool_response:{stdout:"https://github.com/o/r/pull/777\n"}}')
+  out=$(printf '%s' "$payload" | env PATH="$FAKE_BIN:$PATH" \
+    SYG_PR_MONITOR_SEEN_FILE="$seen" FAKE_GH_PR_LIST_NUM=300 FAKE_GH_LOG="$log" "$HOOK" 2>&1)
+  ctx=$(jq -r '.hookSpecificOutput.additionalContext' <<<"$out" 2>/dev/null || echo "")
+  if [ "$exp_num" = "777" ]; then
+    ! grep -q 'pr list' "$log" 2>/dev/null \
+      && pass "18${id} ($cmd): gh pr list not called" \
+      || { fail "18${id} ($cmd): gh pr list not called"; printf 'LOG:%s\n' "$(cat "$log")" | sed 's/^/      /'; }
+    [[ "$ctx" == *"PR #777"* && "$ctx" == *"git rev-parse '$exp_rev'"* ]] \
+      && pass "18${id} ($cmd): banner uses PR #777 and $exp_rev" \
+      || { fail "18${id} ($cmd): banner uses PR #777 and $exp_rev"; printf '%s\n' "$out" | sed 's/^/      /'; }
+  else
+    got_head=$(gh_log_used_branch "$log")
+    [ "$got_head" = "$exp_head" ] \
+      && pass "18${id} ($cmd): gh --head $exp_head" \
+      || fail "18${id} ($cmd): gh --head $exp_head (got '$got_head')"
+    [[ "$ctx" == *"PR #${exp_num}"* && "$ctx" != *"777"* && "$ctx" == *"git rev-parse '$exp_rev'"* ]] \
+      && pass "18${id} ($cmd): 777 ignored, banner uses PR #${exp_num} and $exp_rev" \
+      || { fail "18${id} ($cmd): 777 ignored, banner uses PR #${exp_num} and $exp_rev"; printf '%s\n' "$out" | sed 's/^/      /'; }
+  fi
 }
 
 # 18a. `git push origin feat-y` -> gh --head feat-y; banner refs/heads/feat-y
@@ -508,6 +536,57 @@ check_push_branch_case ad "git push -odeploy origin feat-y" "feat-y" "refs/heads
 
 # 18ae. `git push -u origin feat-y && gh pr create --fill` -> push segment matches first; feat-y / refs/heads/feat-y
 check_push_branch_case ae "git push -u origin feat-y && gh pr create --fill" "feat-y" "refs/heads/feat-y"
+
+# 18af. `git push origin refs/remotes/origin/feat-y:feat-z` -> gh --head feat-z; banner <feat-y SHA>
+check_push_branch_case af "git push origin refs/remotes/origin/feat-y:feat-z" "feat-z" "$FEAT_Y_SHA"
+
+# 18ag. `git push origin refs/remotes/origin/feat-y:refs/heads/feat-z` -> same as af
+check_push_branch_case ag "git push origin refs/remotes/origin/feat-y:refs/heads/feat-z" "feat-z" "$FEAT_Y_SHA"
+
+# 18ah. `git push origin feat-y:HEAD` -> gh --head main; banner refs/heads/main
+check_push_branch_case ah "git push origin feat-y:HEAD" "main" "refs/heads/main"
+
+# 18ai. `git push origin feat-y:@` -> same as ah
+check_push_branch_case ai "git push origin feat-y:@" "main" "refs/heads/main"
+
+# 18aj. `git push -uo ci.skip origin feat-y` -> feat-y / refs/heads/feat-y
+check_push_branch_case aj "git push -uo ci.skip origin feat-y" "feat-y" "refs/heads/feat-y"
+
+# 18ak. `git push --repo=origin -do ci.skip feat-y` (bundled delete + -o) -> gh --head main; banner refs/heads/main
+check_push_branch_case ak "git push --repo=origin -do ci.skip feat-y" "main" "refs/heads/main"
+
+# 18al. `git push origin feat-y && gh pr create --fill` with PR URL on stdout (checked-out branch is main != feat-y) -> 777 ignored, pr list called with --head feat-y
+check_trailing_create_case al "git push origin feat-y && gh pr create --fill" 300 "feat-y" "refs/heads/feat-y"
+
+# 18am. `git push -u origin feat-y && gh pr create --fill --head other` with PR URL on stdout -> 777 ignored, pr list called with --head feat-y
+check_trailing_create_case am "git push -u origin feat-y && gh pr create --fill --head other" 300 "feat-y" "refs/heads/feat-y"
+
+# 18an. `git push origin main && gh pr create -fH other` with PR URL on stdout (bundled -H) -> 777 ignored, pr list called with --head main
+check_trailing_create_case an "git push origin main && gh pr create -fH other" 300 "main" "refs/heads/main"
+
+# 18ao. `git push origin main && gh pr create -R a/b --fill` with PR URL on stdout (-R repo option) -> 777 ignored, pr list called with --head main
+check_trailing_create_case ao "git push origin main && gh pr create -R a/b --fill" 300 "main" "refs/heads/main"
+
+# 18ap. `git push origin main && cd .. && gh pr create --fill` with PR URL on stdout (intervening cd) -> 777 ignored, pr list called with --head main
+check_trailing_create_case ap "git push origin main && cd .. && gh pr create --fill" 300 "main" "refs/heads/main"
+
+# 18aq. `git push origin main && gh pr create --fill` with PR URL on stdout (dst == checked-out branch) -> PR #777 used, gh pr list not called
+check_trailing_create_case aq "git push origin main && gh pr create --fill" 777 "" "refs/heads/main"
+
+# 18ar. `git push -u origin HEAD && gh pr create --fill` with PR URL on stdout (HEAD dst -> blank, falls back to checked-out branch) -> PR #777 used, gh pr list not called
+check_trailing_create_case ar "git push -u origin HEAD && gh pr create --fill" 777 "" "refs/heads/main"
+
+# 18as. `git push origin main && pushd .. && gh pr create --fill` with PR URL on stdout (intervening pushd; create not adjacent) -> 777 ignored, pr list called with --head main
+check_trailing_create_case as "git push origin main && pushd .. && gh pr create --fill" 300 "main" "refs/heads/main"
+
+# 18at. `git push origin main && git switch feat-y && gh pr create --fill` with PR URL on stdout (intervening git switch; create not adjacent) -> 777 ignored, pr list called with --head main
+check_trailing_create_case at "git push origin main && git switch feat-y && gh pr create --fill" 300 "main" "refs/heads/main"
+
+# 18au. `git push origin main && GH_REPO=a/b gh pr create --fill` with PR URL on stdout (env prefix on create) -> 777 ignored, pr list called with --head main
+check_trailing_create_case au "git push origin main && GH_REPO=a/b gh pr create --fill" 300 "main" "refs/heads/main"
+
+# 18av. `git push origin feat-y && git push origin main && gh pr create --fill` with PR URL on stdout (second push before create; first push is trigger) -> 777 ignored, pr list called with --head feat-y, banner rev refs/heads/feat-y
+check_trailing_create_case av "git push origin feat-y && git push origin main && gh pr create --fill" 300 "feat-y" "refs/heads/feat-y"
 
 echo "---"
 echo "$FAILURES failed"

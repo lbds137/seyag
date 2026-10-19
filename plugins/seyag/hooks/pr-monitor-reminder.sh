@@ -42,12 +42,18 @@
 #    "push" or "cd " without being one.
 #
 #    Within that directory, an explicit single literal refspec on `git push`
-#    names the branch: the PR lookup (`gh pr list --head`) uses its
-#    destination, and the local rev (for the dedup SHA and printed `--sha`)
-#    uses its source when that resolves to a commit (`refs/heads/<src>` if
-#    that local branch exists, its commit SHA otherwise, resolved by the
-#    hook), staying silent when an explicit source does not resolve; with no
-#    explicit source (no single refspec, or `HEAD`/`@`), it falls back to the
+#    names the branch when its destination is a branch name (not `HEAD`/`@`
+#    or another `refs/...` namespace): the PR lookup (`gh pr list --head`)
+#    uses its destination (unless a trailing `gh pr create` without `--head`
+#    already supplied the PR URL on stdout — used only when the push went to
+#    the checked-out branch, immediately after the push, from the same
+#    directory and repo), and the local rev (for the dedup SHA and printed
+#    `--sha`) uses its source when that resolves to a commit
+#    (`refs/heads/<src>` if that local branch exists, or its commit SHA for a
+#    full `refs/...` ref, tag, or rev expression, resolved by the hook),
+#    staying silent when an explicit source does not resolve; with no usable
+#    refspec (none, multiple, delete, or a `HEAD`/`@` destination) — or for
+#    the local rev alone when the source is `HEAD`/`@` — it falls back to the
 #    checked-out branch (detached HEAD -> HEAD).
 #
 # Fires only after a Bash tool call whose command contains a `git push`
@@ -97,8 +103,8 @@ PAYLOAD_CWD=$(jq -r '.cwd // empty' <<<"$INPUT" 2>/dev/null || echo "")
 # `gh pr create`), whether it's the create shape, whether that push carries
 # `--tags`, the effective directory per the priority order in the header, and
 # any explicit single-refspec branch (`PUSH_SRC`, `PUSH_DST`).
-# Prints six lines on a match (TRIGGER=1, IS_CREATE=0|1, HAS_TAGS=0|1, DIR=…,
-# PUSH_SRC=…, PUSH_DST=…);
+# Prints seven lines on a match (TRIGGER=1, IS_CREATE=0|1, TRAILING_CREATE=0|1,
+# HAS_TAGS=0|1, DIR=…, PUSH_SRC=…, PUSH_DST=…);
 # prints nothing (or TRIGGER=0) on no match. Any internal error/exception
 # prints nothing, matching the fail-open direction. The command goes to python
 # on fd 3, never through the environment: Linux caps one env string at 128 KiB
@@ -188,10 +194,11 @@ def parse_git_push(words):
 
 
 def parse_push_refspec(push_args):
-    """`(src, dst)` for a single literal push refspec, or `("", "")` for zero
-    or several refspecs, a non-literal refspec, `--tags`/`--all`/`--mirror`,
-    any delete form, patterns, or non-`refs/heads/` refs; a `HEAD`/`@` source
-    keeps only `dst`."""
+    """`(src, dst)` for a single literal push refspec to a branch destination,
+    or `("", "")` for zero or several refspecs, a non-literal refspec,
+    `--tags`/`--all`/`--mirror`, any delete form, patterns, or a non-`refs/heads/`
+    or `HEAD`/`@` destination; a full `refs/...` source is kept when `dst` is a
+    branch name, and a `HEAD`/`@` source keeps only `dst`."""
     args = []
     skip_next = False
     for w in push_args:
@@ -221,8 +228,11 @@ def parse_push_refspec(push_args):
             has_repo = True
             k += 1
             continue
-        if re.match(r"^-[fnuvqd46]*d[fnuvqd46]*$", w):
+        if re.match(r"^-[fnuvqd46]*d[fnuvqd46]*(o.*)?$", w):
             return "", ""
+        if re.match(r"^-[fnuvqd46]*o$", w):
+            k += 2
+            continue
         if w.startswith("-"):
             k += 1
             continue
@@ -247,14 +257,12 @@ def parse_push_refspec(push_args):
         not src
         or "*" in src
         or "*" in dst
-        or src.startswith("refs/")
         or dst.startswith("refs/")
+        or dst in ("HEAD", "@")
     ):
         return "", ""
     if src in ("HEAD", "@"):
         src = ""
-    if dst in ("HEAD", "@"):
-        dst = ""
     return src, dst
 
 
@@ -287,12 +295,34 @@ if current:
 
 trigger_idx = None
 is_create = False
+trailing_create = False
 has_tags = False
 c_dir = None
 push_src = ""
 push_dst = ""
 
 for idx, seg in enumerate(segments):
+    if trigger_idx is not None:
+        # Anything between the push and the create (a `cd`, `pushd`,
+        # `git switch`, another push) or an env prefix on the create could
+        # change which branch or repo the create used, so only an immediately
+        # following, unprefixed create counts; `--head`/`-H`, `--repo`/`-R`,
+        # and a push `-C` are excluded for the same reason.
+        if (
+            idx == trigger_idx + 1
+            and skip_assignments(seg) == 0
+            and parse_gh_pr_create(seg)
+            and not push["c_dirs"]
+            and not any(
+                w in ("--head", "--repo")
+                or w.startswith(("--head=", "--repo="))
+                or re.match(r"^-[A-Za-z]*[HR]", w)
+                for w in seg
+            )
+        ):
+            is_create = True
+            trailing_create = True
+        break
     push = parse_git_push(seg)
     if push is not None:
         trigger_idx = idx
@@ -307,7 +337,7 @@ for idx, seg in enumerate(segments):
                 break
             cur = resolved
         c_dir = cur if (ok and push["c_dirs"]) else None
-        break
+        continue
     if parse_gh_pr_create(seg):
         trigger_idx = idx
         is_create = True
@@ -354,6 +384,7 @@ if effective_dir is None:
 
 print("TRIGGER=1")
 print(f"IS_CREATE={1 if is_create else 0}")
+print(f"TRAILING_CREATE={1 if trailing_create else 0}")
 print(f"HAS_TAGS={1 if has_tags else 0}")
 print(f"DIR={effective_dir or ''}")
 print(f"PUSH_SRC={push_src}")
@@ -365,6 +396,7 @@ PYEOF
 TRIGGER=$(printf '%s\n' "$SCAN" | sed -n 's/^TRIGGER=//p')
 [ "$TRIGGER" = "1" ] || exit 0
 IS_CREATE=$(printf '%s\n' "$SCAN" | sed -n 's/^IS_CREATE=//p')
+TRAILING_CREATE=$(printf '%s\n' "$SCAN" | sed -n 's/^TRAILING_CREATE=//p')
 HAS_TAGS=$(printf '%s\n' "$SCAN" | sed -n 's/^HAS_TAGS=//p')
 DIR=$(printf '%s\n' "$SCAN" | sed -n 's/^DIR=//p')
 PUSH_SRC=$(printf '%s\n' "$SCAN" | sed -n 's/^PUSH_SRC=//p')
@@ -391,11 +423,18 @@ fi
 
 PR_BRANCH="${PUSH_DST:-$BRANCH}"
 
+# A trailing `gh pr create` opened the checked-out branch's PR, not
+# `$PUSH_DST`'s; fall back to `gh pr list --head "$PR_BRANCH"`.
+if [ "$TRAILING_CREATE" = "1" ] && [ -n "$PUSH_DST" ] && [ "$PUSH_DST" != "$BRANCH" ]; then
+  IS_CREATE=0
+fi
+
 PR_NUM=""
 
-# `gh pr create` returns the PR URL on stdout — parsing it avoids the
-# replication lag a `gh pr list` lookup hits immediately after creation, and
-# needs no directory (the URL is already absolute).
+# `gh pr create` (standalone, or the trailing create the scan loop accepts)
+# returns the PR URL on stdout — parsing it avoids the replication lag a
+# `gh pr list` lookup hits immediately after creation, and needs no directory
+# (the URL is already absolute).
 if [ "$IS_CREATE" = "1" ]; then
   OUTPUT=$(jq -r '.tool_response.stdout // .tool_result.stdout // .tool_response.output // empty' <<<"$INPUT" 2>/dev/null || echo "")
   PR_NUM=$(grep -oE 'pull/[0-9]+' <<<"$OUTPUT" | head -1 | grep -oE '[0-9]+$' || echo "")
