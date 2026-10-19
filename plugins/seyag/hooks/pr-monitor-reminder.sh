@@ -51,10 +51,13 @@
 #    `--sha`) uses its source when that resolves to a commit
 #    (`refs/heads/<src>` if that local branch exists, or its commit SHA for a
 #    full `refs/...` ref, tag, or rev expression, resolved by the hook),
-#    staying silent when an explicit source does not resolve; with no usable
-#    refspec (none, multiple, delete, or a `HEAD`/`@` destination) — or for
-#    the local rev alone when the source is `HEAD`/`@` — it falls back to the
-#    checked-out branch (detached HEAD -> HEAD).
+#    staying silent when an explicit source does not resolve; a standalone
+#    `gh pr create` with `--head`/`-H` (`[owner:]branch`) pins that branch the
+#    same way, and stays silent on `--repo`/`-R`, `GH_REPO=`, or a non-literal
+#    or unresolvable head; with no usable refspec or `--head` (none, multiple,
+#    delete, or a `HEAD`/`@` destination) — or for the local rev alone when the
+#    source is `HEAD`/`@` — it falls back to the checked-out branch (detached
+#    HEAD -> HEAD).
 #
 # Fires only after a Bash tool call whose command contains a `git push`
 # (optionally `-C`-anchored) or `gh pr create` (ignoring a plain `--tags`
@@ -102,7 +105,8 @@ PAYLOAD_CWD=$(jq -r '.cwd // empty' <<<"$INPUT" 2>/dev/null || echo "")
 # The structural scan: finds the matched trigger segment (a `git ... push` or
 # `gh pr create`), whether it's the create shape, whether that push carries
 # `--tags`, the effective directory per the priority order in the header, and
-# any explicit single-refspec branch (`PUSH_SRC`, `PUSH_DST`).
+# any explicit single-refspec or standalone-create `--head` branch (`PUSH_SRC`,
+# `PUSH_DST`).
 # Prints seven lines on a match (TRIGGER=1, IS_CREATE=0|1, TRAILING_CREATE=0|1,
 # HAS_TAGS=0|1, DIR=…, PUSH_SRC=…, PUSH_DST=…);
 # prints nothing (or TRIGGER=0) on no match. Any internal error/exception
@@ -339,6 +343,45 @@ for idx, seg in enumerate(segments):
         c_dir = cur if (ok and push["c_dirs"]) else None
         continue
     if parse_gh_pr_create(seg):
+        # Standalone `gh pr create`: with a repo option (`--repo`, `--repo=…`,
+        # `-R`) or `GH_REPO=` assignment before `gh`, the PR lives in another
+        # repo than DIR, so neither the printed `cd DIR && pr-ci-wait` nor the
+        # dedup key would be right — stay silent, even when the value names
+        # this checkout's own repo.
+        i = skip_assignments(seg)
+        args = seg[i + 3 :]
+        if any(w.startswith("GH_REPO=") for w in seg[:i]) or any(
+            w == "--repo"
+            or w.startswith("--repo=")
+            or re.match(r"^-[A-Za-z]*R", w)
+            for w in args
+        ):
+            break
+        head_ok = True
+        head_branch = ""
+        k = 0
+        while k < len(args):
+            w = args[k]
+            if w == "--head" or re.match(r"^-[A-Za-z]*H$", w):
+                val = args[k + 1] if k + 1 < len(args) else ""
+                k += 2
+            elif w.startswith("--head="):
+                val = w[len("--head=") :]
+                k += 1
+            elif m := re.match(r"^-[A-Za-z]*H(.+)$", w):
+                val = m.group(1)
+                k += 1
+            else:
+                k += 1
+                continue
+            branch = val.rsplit(":", 1)[-1]
+            if not literal_ok(val) or not literal_ok(branch):
+                head_ok = False
+                break
+            head_branch = branch
+        if not head_ok:
+            break
+        push_src = push_dst = head_branch
         trigger_idx = idx
         is_create = True
         break

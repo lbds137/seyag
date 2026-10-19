@@ -588,6 +588,50 @@ check_trailing_create_case au "git push origin main && GH_REPO=a/b gh pr create 
 # 18av. `git push origin feat-y && git push origin main && gh pr create --fill` with PR URL on stdout (second push before create; first push is trigger) -> 777 ignored, pr list called with --head feat-y, banner rev refs/heads/feat-y
 check_trailing_create_case av "git push origin feat-y && git push origin main && gh pr create --fill" 300 "feat-y" "refs/heads/feat-y"
 
+check_standalone_create_case() {
+  local id="$1" cmd="$2" exp_rev="$3"
+  local log="$WORK/log18_${id}" seen="$WORK/seen18_${id}" payload out ctx
+  : > "$log"
+  payload=$(jq -n --arg cmd "$cmd" --arg cwd "$PUSH_WT" \
+    '{tool_name:"Bash", tool_input:{command:$cmd}, cwd:$cwd, tool_response:{stdout:"https://github.com/o/r/pull/777\n"}}')
+  out=$(printf '%s' "$payload" | env PATH="$FAKE_BIN:$PATH" \
+    SYG_PR_MONITOR_SEEN_FILE="$seen" FAKE_GH_PR_LIST_NUM=300 FAKE_GH_LOG="$log" "$HOOK" 2>&1)
+  if [ -z "$exp_rev" ]; then
+    [ -z "$out" ] && [ ! -s "$log" ] \
+      && pass "18${id} ($cmd): silent, gh not called" \
+      || { fail "18${id} ($cmd): silent, gh not called"; printf 'OUT:%s\nLOG:%s\n' "$out" "$(cat "$log")" | sed 's/^/      /'; }
+  else
+    ctx=$(jq -r '.hookSpecificOutput.additionalContext' <<<"$out" 2>/dev/null || echo "")
+    [ ! -s "$log" ] \
+      && pass "18${id} ($cmd): gh not called" \
+      || { fail "18${id} ($cmd): gh not called"; printf 'LOG:%s\n' "$(cat "$log")" | sed 's/^/      /'; }
+    [[ "$ctx" == *"PR #777"* && "$ctx" == *"git rev-parse '$exp_rev'"* ]] \
+      && pass "18${id} ($cmd): banner uses PR #777 and $exp_rev" \
+      || { fail "18${id} ($cmd): banner uses PR #777 and $exp_rev"; printf '%s\n' "$out" | sed 's/^/      /'; }
+  fi
+}
+
+# 18aw. standalone `gh pr create --fill --head feat-y` -> PR #777, banner rev refs/heads/feat-y
+check_standalone_create_case aw "gh pr create --fill --head feat-y" "refs/heads/feat-y"
+
+# 18ax. standalone `gh pr create -fH feat-y` -> PR #777, banner rev refs/heads/feat-y
+check_standalone_create_case ax "gh pr create -fH feat-y" "refs/heads/feat-y"
+
+# 18ay. standalone `gh pr create --head=someone:feat-y --fill` -> PR #777, banner rev refs/heads/feat-y
+check_standalone_create_case ay "gh pr create --head=someone:feat-y --fill" "refs/heads/feat-y"
+
+# 18az. standalone `gh pr create --fill --head gone-branch` -> no output, gh never called
+check_standalone_create_case az "gh pr create --fill --head gone-branch" ""
+
+# 18ba. standalone `gh pr create --repo o/r --fill` -> no output, gh never called
+check_standalone_create_case ba "gh pr create --repo o/r --fill" ""
+
+# 18bb. standalone `GH_REPO=o/r gh pr create --fill` -> no output, gh never called
+check_standalone_create_case bb "GH_REPO=o/r gh pr create --fill" ""
+
+# 18bc. standalone `gh pr create --fill` (control) -> PR #777, banner rev refs/heads/main
+check_standalone_create_case bc "gh pr create --fill" "refs/heads/main"
+
 echo "---"
 echo "$FAILURES failed"
 [ "$FAILURES" -eq 0 ]
