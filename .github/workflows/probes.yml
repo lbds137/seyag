@@ -1,7 +1,7 @@
 name: Probes
 
-# The probe suite is this repo's whole gate (tests/run-probes.sh: every
-# plugins/seyag/hooks/*.probe.sh and tests/*.probe.sh, one at a time).
+# The probe suite is this repo's whole gate (tests/run-probes.sh -j 0: every
+# plugins/seyag/hooks/*.probe.sh and tests/*.probe.sh, in parallel across CPUs).
 # Runtime deps are bash, jq, python3 and GNU grep, all on ubuntu-latest.
 #
 # Hygiene gates on top of the probes:
@@ -30,7 +30,7 @@ jobs:
           # shellcheck disable=SC2046 # the file list has no spaces and must split
           shellcheck -S warning $(bash tests/shell-files.sh)
       - name: Run every probe
-        run: bash tests/run-probes.sh
+        run: bash tests/run-probes.sh -j 0
 
   fixup-check:
     if: github.event_name == 'pull_request'
