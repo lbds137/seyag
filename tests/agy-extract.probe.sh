@@ -15,6 +15,11 @@ cat > "$T/build.py" <<'EOF'
 #   plain     WAL-mode DB closed cleanly (no sidecars left)
 #   nomodel   like plain, but gen_metadata names no model at the known fields
 #   badts     like plain, but one step carries an absurd timestamp
+#   bytests   like plain, but one step's timestamp seconds are length-delimited, not a varint
+#   since     only two steps: one stamped exactly at CUT (a minute boundary), one a second later
+#   nostamp   only a stamped prompt and two steps with no timestamp field
+#   nomsg     only one type-17 step with no sub-message at all
+#   emptyts   a stamped prompt and one step whose timestamp field is present but empty
 #   walcopy   like live, but copies db + -wal (no -shm) to a new dir ARG3 instead of running the tool
 #   live      like plain, then a writer stays open (sidecars present, no checkpoint) holding one
 #             uncheckpointed step while agy-extract runs against the DB
@@ -40,6 +45,7 @@ def step(stype, ts, *body):
 
 # Epoch seconds for the fixture steps: OLD falls before the probe's --since cutoff, NEW after it.
 OLD, NEW = 1788220800, 1790211600
+CUT = 1789884000  # the --since minute boundary used by the since mode
 mode, db = sys.argv[1], sys.argv[2]
 steps = [
     step(14, (OLD, 0), m(19, s(2, "old prompt"))),
@@ -56,6 +62,18 @@ steps = [
 ]
 if mode == "badts":
     steps.append(step(14, (1 << 62, 0), m(19, s(2, "bad clock"))))
+if mode == "bytests":
+    steps.append((14, v(1, 14) + m(5, m(1, s(1, "x") + s(2, "y"))) + m(19, s(2, "bytes clock"))))
+if mode == "since":
+    steps = [step(14, (CUT, 0), m(19, s(2, "at cutoff"))), step(14, (CUT + 1, 0), m(19, s(2, "one second later")))]
+if mode == "nostamp":
+    steps = [step(14, (NEW, 0), m(19, s(2, "stamped prompt"))), (14, v(1, 14) + m(19, s(2, "unstamped one"))),
+             (101, v(1, 101) + m(114, s(1, "unstamped two")))]
+if mode == "nomsg":
+    steps = [step(17, (NEW + 7, 0))]
+if mode == "emptyts":
+    steps = [step(14, (NEW, 0), m(19, s(2, "real prompt"))),
+             (14, v(1, 14) + m(5, m(1, b"")) + m(19, s(2, "empty clock")))]
 con = sqlite3.connect(db)
 con.execute("pragma journal_mode=wal")
 con.execute("create table steps(idx integer primary key, step_type integer, step_payload blob)")
@@ -170,6 +188,80 @@ python3 -I "$T/build.py" badts "$T/badts/$ID2.db"
 "$AE" "$T/out9" "$T/badts/$ID2.db" "$DB" > "$T/log9" 2>/dev/null; rc=$?
 [ $rc = 1 ] && [ -f "$T/out9/$ID.txt" ] && [ ! -e "$T/out9/$ID2.txt" ] && grep -q '^aaaabbbb…: 2 user blocks' "$T/log9" \
   && ok "a DB with an absurd timestamp fails alone (exit 1); the next DB is still extracted" || bad "bad timestamp: rc=$rc $(cat "$T/log9"); $(ls "$T/out9")"
+
+# A bytes-typed timestamp field is schema drift: it fails its own DB with a ValueError, and the next DB still runs.
+ID3=ccccdddd-0000-4000-8000-000000000003
+mkdir "$T/bytests"
+python3 -I "$T/build.py" bytests "$T/bytests/$ID3.db"
+"$AE" "$T/out11" "$T/bytests/$ID3.db" "$DB" > "$T/log11" 2> "$T/err11"; rc=$?
+[ $rc = 1 ] && [ -f "$T/out11/$ID.txt" ] && [ ! -e "$T/out11/$ID3.txt" ] \
+  && grep -q '^agy-extract: ccccdddd…: failed: timestamp field is not an integer$' "$T/err11" && grep -q '^aaaabbbb…: 2 user blocks' "$T/log11" \
+  && ok "a bytes-typed timestamp fails alone with the ValueError text (exit 1); the next DB is still extracted" \
+  || bad "bytes timestamp: rc=$rc $(cat "$T/err11" "$T/log11"); $(ls "$T/out11")"
+
+# --since is strictly after its minute: a step stamped exactly at the cutoff is dropped, one a second later is kept.
+ID4=ddddeeee-0000-4000-8000-000000000004
+mkdir "$T/bound"
+python3 -I "$T/build.py" since "$T/bound/$ID4.db"
+"$AE" --since 2026-09-20T06:00 "$T/out12" "$T/bound/$ID4.db" > "$T/log12" 2>&1; rc=$?
+[ $rc = 0 ] && grep -q '^one second later$' "$T/out12/$ID4.txt" && ! grep -q '^at cutoff$' "$T/out12/$ID4.txt" \
+  && ok "--since 2026-09-20T06:00: the step at the cutoff is dropped, one a second later is kept" \
+  || bad "since boundary: rc=$rc $(cat "$T/log12")"
+
+# The shorter accepted shapes pad to the same cutoff; a bare date is midnight, so both steps are after it.
+pad_ok=1; i=0
+for since in 2026-09-20T06:00Z 2026-09-20T06:00:00 2026-09-20T06:00:00.000 2026-09-20T06:00:00.000Z; do
+  i=$((i + 1))
+  "$AE" --since "$since" "$T/pad$i" "$T/bound/$ID4.db" > /dev/null 2>&1 || pad_ok=0
+  { grep -q '^one second later$' "$T/pad$i/$ID4.txt" && ! grep -q '^at cutoff$' "$T/pad$i/$ID4.txt"; } 2>/dev/null || pad_ok=0
+done
+"$AE" --since 2026-09-20 "$T/bare" "$T/bound/$ID4.db" > /dev/null 2>&1 || pad_ok=0
+{ grep -q '^at cutoff$' "$T/bare/$ID4.txt" && grep -q '^one second later$' "$T/bare/$ID4.txt"; } 2>/dev/null || pad_ok=0
+[ $pad_ok = 1 ] && ok "--since shapes HH:MM, HH:MM:SS, .000 and Z pad to the cutoff; a bare date is midnight" \
+  || bad "--since padding"
+
+# Malformed --since (a space for the T, an impossible date, a fraction without seconds) is a usage error, exit 2.
+malformed_ok=1
+for since in "2026-09-20 06:00" "2026-02-30T00:00" "2026-09-20T06:00.000" "2026-09-20T24:00" "2026-09-20T06:00ZZ"; do
+  "$AE" --since "$since" "$T/o14" "$DB" > /dev/null 2>&1; [ $? = 2 ] || malformed_ok=0
+done
+"$AE" --since 2> "$T/errmv" >/dev/null; [ $? = 2 ] && grep -q "needs a timestamp" "$T/errmv" || malformed_ok=0
+"$AE" --since "2026-09-20 06:00" "$T/o14" "$DB" 2> "$T/errmi" >/dev/null; [ $? = 2 ] && grep -q "wants UTC YYYY-MM-DD" "$T/errmi" || malformed_ok=0
+[ $malformed_ok = 1 ] && ok "malformed --since (space for T, impossible date, .fff without seconds, 24:00, double Z, missing value) exits 2, with the usage text" || bad "malformed --since accepted"
+
+# A step with no timestamp is skipped under --since with one stderr note; no note without --since or when every step is stamped.
+ID5=eeeeffff-0000-4000-8000-000000000005
+mkdir "$T/nostamp"
+python3 -I "$T/build.py" nostamp "$T/nostamp/$ID5.db"
+"$AE" --since 2026-09-20T00:00 "$T/out15" "$T/nostamp/$ID5.db" > "$T/log15" 2> "$T/err15"; rc=$?
+[ $rc = 0 ] && [ "$(cat "$T/err15")" = "agy-extract: eeeeffff…: 2 step(s) without a timestamp skipped under --since" ] \
+  && grep -q '^stamped prompt$' "$T/out15/$ID5.txt" && ! grep -q 'unstamped' "$T/out15/$ID5.txt" \
+  && ok "steps without a timestamp are skipped under --since, with one stderr note per DB" \
+  || bad "missing-stamp note: rc=$rc $(cat "$T/err15")"
+"$AE" "$T/out16" "$T/nostamp/$ID5.db" > /dev/null 2> "$T/err16"; rc=$?
+[ $rc = 0 ] && [ ! -s "$T/err16" ] && ok "no missing-stamp note without --since" || bad "note without --since: rc=$rc $(cat "$T/err16")"
+"$AE" --since 2026-09-20T00:00 "$T/out17" "$DB" > /dev/null 2> "$T/err17"; rc=$?
+[ $rc = 0 ] && [ ! -s "$T/err17" ] && ok "no missing-stamp note when every step is stamped" || bad "note on a fully stamped DB: rc=$rc $(cat "$T/err17")"
+
+# A type-17 step with no message is still a safety block, and its line has no trailing space.
+ID6=99998888-0000-4000-8000-000000000006
+mkdir "$T/nomsg"
+python3 -I "$T/build.py" nomsg "$T/nomsg/$ID6.db"
+"$AE" "$T/out18" "$T/nomsg/$ID6.db" > "$T/log18" 2>&1; rc=$?
+[ $rc = 0 ] && grep -q '^--- 2026-09-24T01:00:07.000Z tool-error: \[safety-block\]$' "$T/out18/$ID6.agent.txt" \
+  && grep -q ', 1 tool errors, ' "$T/log18" \
+  && ok "a type-17 step with no message emits [safety-block] with no trailing space" \
+  || bad "empty safety block: rc=$rc $(cat "$T/out18/$ID6.agent.txt" "$T/log18")"
+
+# A present-but-empty timestamp stamps 1970-01-01 (known gap, see stamp()): under --since the
+# step is dropped silently — stamped, so no unstamped note.
+ID7=77776666-0000-4000-8000-000000000007
+mkdir "$T/emptyts"
+python3 -I "$T/build.py" emptyts "$T/emptyts/$ID7.db"
+"$AE" --since 2026-09-20T00:00 "$T/out19" "$T/emptyts/$ID7.db" > /dev/null 2> "$T/err19"; rc=$?
+[ $rc = 0 ] && [ ! -s "$T/err19" ] && grep -q '^real prompt$' "$T/out19/$ID7.txt" && ! grep -q 'empty clock' "$T/out19/$ID7.txt" \
+  && ok "a present-but-empty timestamp (1970) is dropped silently under --since, no unstamped note" \
+  || bad "emptyts: rc=$rc $(cat "$T/err19"; ls "$T/out19")"
 
 [ "$(sidecars "$DB")" = 0 ] && [ "$(sha256sum "$DB" | cut -d' ' -f1)" = "$sum_before" ] \
   && ok "DB still unchanged and sidecar-free after all runs" || bad "DB modified by a later run"
