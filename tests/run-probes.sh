@@ -7,6 +7,10 @@
 #   -j N, --jobs N   run N probes at once (default 1; 0 = nproc)
 
 set -uo pipefail
+if [ "${BASH_VERSINFO[0]}" -lt 5 ] || { [ "${BASH_VERSINFO[0]}" -eq 5 ] && [ "${BASH_VERSINFO[1]}" -lt 1 ]; }; then
+  echo "run-probes: needs bash >= 5.1 (found $BASH_VERSION)" >&2
+  exit 2
+fi
 
 usage() {
   echo "Usage: tests/run-probes.sh [-j N | --jobs N]" >&2
@@ -116,13 +120,29 @@ reap_one() {
 for i in "${!PROBES[@]}"; do
   p="${PROBES[$i]}"
   (
-    child=""
-    trap 'if [ -n "$child" ]; then kill "$child" 2>/dev/null || true; wait "$child" 2>/dev/null || true; fi; exit 143' TERM INT
+    set -m
+    got_sig=""
+    trap 'got_sig=1' TERM INT
     bash "$p" </dev/null >"$TMP/$i.out" 2>&1 &
     child=$!
-    wait "$child"
-    echo "$?" >"$TMP/$i.rc"
-  ) &
+    trap 'kill -TERM -- "-$child" 2>/dev/null || true; wait "$child" 2>/dev/null || true; exit 143' TERM INT
+    if [ -n "$got_sig" ]; then
+      kill -TERM -- "-$child" 2>/dev/null || true
+      wait "$child" 2>/dev/null || true
+      exit 143
+    fi
+    wait "$child" 2>/dev/null
+    rc=$?
+    kill -TERM -- "-$child" 2>/dev/null || true
+    for _ in 1 2 3 4 5; do
+      kill -0 -- "-$child" 2>/dev/null || break
+      sleep 0.02
+    done
+    if kill -0 -- "-$child" 2>/dev/null; then
+      kill -KILL -- "-$child" 2>/dev/null || true
+    fi
+    echo "$rc" >"$TMP/$i.rc"
+  ) 2>/dev/null &
   live[$!]=$i
   if [ ${#live[@]} -ge "$JOBS" ]; then
     reap_one
