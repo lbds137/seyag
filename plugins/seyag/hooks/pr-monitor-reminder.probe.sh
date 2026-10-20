@@ -738,6 +738,18 @@ check_standalone_create_case ck "A=1 export GH_REPO=o/r && gh pr create --fill" 
 # 18cl. standalone `declare +x GH_REPO=o/r && gh pr create --fill` (control: +x unexports) -> the stdout-URL PR, banner rev refs/heads/main
 check_standalone_create_case cl "declare +x GH_REPO=o/r && gh pr create --fill" "refs/heads/main"
 
+# 18cm. standalone `readonly GH_REPO=o/r && gh pr create --fill` (readonly assignment) -> no output, gh never called
+check_standalone_create_case cm "readonly GH_REPO=o/r && gh pr create --fill" ""
+
+# 18cn. `typeset -x GH_REPO=a/b && git push origin main && gh pr create --fill` with PR URL on stdout (earlier typeset -x GH_REPO) -> 777 ignored, pr list called with --head main
+check_trailing_create_case cn "typeset -x GH_REPO=a/b && git push origin main && gh pr create --fill" 300 "main" "refs/heads/main"
+
+# 18co. `export A=1 GH_REPO=a/b && git push origin main && gh pr create --fill` with PR URL on stdout (earlier export GH_REPO) -> 777 ignored, pr list called with --head main
+check_trailing_create_case co "export A=1 GH_REPO=a/b && git push origin main && gh pr create --fill" 300 "main" "refs/heads/main"
+
+# 18cp. standalone `gh pr create --fill && export GH_REPO=o/r` (an export AFTER the create has no effect) -> the stdout-URL PR, banner rev refs/heads/main
+check_standalone_create_case cp "gh pr create --fill && export GH_REPO=o/r" "refs/heads/main"
+
 echo "---"
 echo "$FAILURES failed"
 [ "$FAILURES" -eq 0 ]
