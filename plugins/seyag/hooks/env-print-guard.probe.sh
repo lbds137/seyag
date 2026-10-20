@@ -336,6 +336,88 @@ expect_deny 'unset HOME; : ${HOME[0]:=/dev}; env > $HOME/stderr' 'unset HOME; : 
 expect_deny 'env ${HOME[0]:=/dev} > $HOME/stderr' 'env ${HOME[0]:=/dev} > $HOME/stderr' "bulk environment dump via"
 # shellcheck disable=SC2016
 expect_deny 'HOME=/dev env > $HOME/x' 'HOME=/dev env > $HOME/x' "bulk environment dump via"
+# Non-prefix assignment forms (read, for/select, printf -v, mapfile/readarray,
+# getopts) across separate statements are denied by the single-statement rule.
+# shellcheck disable=SC2016
+expect_deny 'read HOME <<< /dev; env > $HOME/x' 'read HOME <<< /dev; env > $HOME/x' "bulk environment dump via"
+# shellcheck disable=SC2016
+expect_deny 'read HOME <<< /dev NEWLINE env > $HOME/x' $'read HOME <<< /dev\nenv > $HOME/x' "bulk environment dump via"
+# shellcheck disable=SC2016
+expect_deny 'for HOME in /dev; do env > $HOME/x; done' 'for HOME in /dev; do env > $HOME/x; done' "bulk environment dump via"
+# shellcheck disable=SC2016
+expect_deny 'for HOME in /dev NEWLINE do NEWLINE env > $HOME/x NEWLINE done' $'for HOME in /dev\ndo\nenv > $HOME/x\ndone' "bulk environment dump via"
+# shellcheck disable=SC2016
+expect_deny 'select HOME in /dev; do env > $HOME/x; done' 'select HOME in /dev; do env > $HOME/x; done' "bulk environment dump via"
+# shellcheck disable=SC2016
+expect_deny 'printf -v HOME /dev; env > $HOME/x' 'printf -v HOME /dev; env > $HOME/x' "bulk environment dump via"
+# shellcheck disable=SC2016
+expect_deny 'mapfile HOME < f; env > $HOME/x' 'mapfile HOME < f; env > $HOME/x' "bulk environment dump via"
+# shellcheck disable=SC2016
+expect_deny 'readarray -t HOME < f; env > $HOME/x' 'readarray -t HOME < f; env > $HOME/x' "bulk environment dump via"
+# shellcheck disable=SC2016
+expect_deny 'getopts a HOME; env > $HOME/x' 'getopts a HOME; env > $HOME/x' "bulk environment dump via"
+# shellcheck disable=SC2016
+expect_deny 'getopts a HOME NEWLINE env > $HOME/x' $'getopts a HOME\nenv > $HOME/x' "bulk environment dump via"
+# shellcheck disable=SC2016
+expect_deny 'while read HOME; do env > $HOME/x; done < f' 'while read HOME; do env > $HOME/x; done < f' "bulk environment dump via"
+# shellcheck disable=SC2016
+expect_deny 'while read HOME NEWLINE do NEWLINE env > $HOME/x NEWLINE done < f' $'while read HOME\ndo\nenv > $HOME/x\ndone < f' "bulk environment dump via"
+# shellcheck disable=SC2016
+expect_deny 'read HOME <<< /dev && env > $HOME/x' 'read HOME <<< /dev && env > $HOME/x' "bulk environment dump via"
+# A pipeline segment runs in a subshell, but the raw-text assignment scan reads
+# the whole command and over-denies both prefix assignments and `read` there.
+# shellcheck disable=SC2016
+expect_deny 'export HOME=/dev | env > $HOME/x' 'export HOME=/dev | env > $HOME/x' "bulk environment dump via"
+# shellcheck disable=SC2016
+expect_deny 'read HOME <<< /dev | env > $HOME/x' 'read HOME <<< /dev | env > $HOME/x' "bulk environment dump via"
+# A single pipeline per case, so only the raw-text assignment scan can deny them.
+# shellcheck disable=SC2016
+expect_deny 'for HOME in /dev | env > $HOME/x' 'for HOME in /dev | env > $HOME/x' "bulk environment dump via"
+# shellcheck disable=SC2016
+expect_deny 'printf -v HOME /dev | env > $HOME/x' 'printf -v HOME /dev | env > $HOME/x' "bulk environment dump via"
+# shellcheck disable=SC2016
+expect_deny 'mapfile HOME < f | env > $HOME/x' 'mapfile HOME < f | env > $HOME/x' "bulk environment dump via"
+# shellcheck disable=SC2016
+expect_deny 'getopts a HOME | env > $HOME/x' 'getopts a HOME | env > $HOME/x' "bulk environment dump via"
+# shellcheck disable=SC2016
+expect_deny '\read HOME <<< /dev | env > $HOME/x' '\read HOME <<< /dev | env > $HOME/x' "bulk environment dump via"
+# shellcheck disable=SC2016
+expect_deny '\printf -v HOME /dev | env > $HOME/x' '\printf -v HOME /dev | env > $HOME/x' "bulk environment dump via"
+# shellcheck disable=SC2016
+expect_deny "''read HOME <<< /dev | env > \$HOME/x" "''read HOME <<< /dev | env > \$HOME/x" "bulk environment dump via"
+# shellcheck disable=SC2016
+expect_deny '${e}read HOME <<< /dev | env > $HOME/x' '${e}read HOME <<< /dev | env > $HOME/x' "bulk environment dump via"
+# shellcheck disable=SC2016
+expect_deny '$@read HOME <<< /dev | env > $HOME/x' '$@read HOME <<< /dev | env > $HOME/x' "bulk environment dump via"
+# shellcheck disable=SC2016
+expect_deny '$1read HOME <<< /dev | env > $HOME/x' '$1read HOME <<< /dev | env > $HOME/x' "bulk environment dump via"
+# shellcheck disable=SC2016
+expect_deny 'select HOME in /dev | env > $HOME/x' 'select HOME in /dev | env > $HOME/x' "bulk environment dump via"
+# shellcheck disable=SC2016
+expect_deny 'readarray HOME < f | env > $HOME/x' 'readarray HOME < f | env > $HOME/x' "bulk environment dump via"
+# Accepted over-deny of the unanchored scan.
+# shellcheck disable=SC2016
+expect_deny 'xread HOME <<< /dev | env > $HOME/x' 'xread HOME <<< /dev | env > $HOME/x' "bulk environment dump via"
+# shellcheck disable=SC2016
+expect_deny '# <<true NEWLINE read HOME <<< /dev/stdout NEWLINE true NEWLINE env > $HOME' $'# <<true\nread HOME <<< /dev/stdout\ntrue\nenv > $HOME' "bulk environment dump via"
+# shellcheck disable=SC2016
+expect_deny '# <<true NEWLINE printf -v HOME /dev/stdout NEWLINE true NEWLINE env > $HOME' $'# <<true\nprintf -v HOME /dev/stdout\ntrue\nenv > $HOME' "bulk environment dump via"
+# shellcheck disable=SC2016
+expect_deny '# <<true NEWLINE eval x NEWLINE true NEWLINE env > $HOME' $'# <<true\neval x\ntrue\nenv > $HOME' "bulk environment dump via"
+# shellcheck disable=SC2016
+expect_deny 'echo "<<true" NEWLINE read HOME <<< /dev/stdout NEWLINE true NEWLINE env > $HOME' $'echo "<<true"\nread HOME <<< /dev/stdout\ntrue\nenv > $HOME' "bulk environment dump via"
+# A bare `$VAR` target with no path after it.
+# shellcheck disable=SC2016
+expect_allow 'env > $HOME' 'env > $HOME'
+# accepted over-deny: the unanchored scan reads `read HOME` inside `.thread HOME`
+# shellcheck disable=SC2016
+expect_deny "jq '.[] | .thread HOME' .env > \$HOME/out 2>/dev/null" "jq '.[] | .thread HOME' .env > \$HOME/out 2>/dev/null" "bulk jq filter"
+# shellcheck disable=SC2016
+expect_allow 'env > $HOME/x # note' 'env > $HOME/x # note'
+# A here-string (`<<<`) is not a heredoc opener and keeps trust; a heredoc ends relative-target trust.
+# shellcheck disable=SC2016
+expect_allow 'env > $HOME/x <<< foo' 'env > $HOME/x <<< foo'
+expect_deny "env > out.txt <<'E' NEWLINE x NEWLINE E" $'env > out.txt <<\'E\'\nx\nE' "bulk environment dump via"
 # shellcheck disable=SC2016
 expect_allow 'env > $TMPDIR/x' 'env > $TMPDIR/x'
 # shellcheck disable=SC2016

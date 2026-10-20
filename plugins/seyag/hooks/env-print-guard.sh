@@ -59,7 +59,11 @@
 #     with no `${…=…}` expansion and no assignment of that name (`_ASSIGNED_VARS`))
 #     outside `/dev`, `/proc`, `/sys`, or `/dev/null` itself; every other
 #     variable target, process substitution, expansions with operators, globs,
-#     `..`, and device, proc, or sys paths fail closed.
+#     `..`, and device, proc, or sys paths fail closed. A heredoc opener anywhere
+#     in the raw command also disables variable-target and relative-target trust,
+#     and the raw-text assignment scan stays unanchored as defense in depth
+#     against the lib split disagreeing with bash (it over-denies a word merely
+#     containing `read NAME`, e.g. a jq `.thread HOME`).
 #   - Redirect parser and fail-closed forms: one redirect parser scans every
 #     word of the segment (`int(digits)` on at most 9 digits normalises `01`,
 #     `001` to fd 1; a leading digit run longer than 9 fails the redirect match
@@ -80,9 +84,10 @@
 #   - Relative targets: plain relative targets resolve against the hook input's
 #     `.cwd` via `os.path.realpath`, failing closed when `.cwd` is missing, not
 #     absolute, or fails resolution, when `command_pipelines` yields more than
-#     one pipeline, when the command contains `cd` or `pushd`, or when any
+#     one pipeline, when the command contains `cd` or `pushd`, when any
 #     pipeline segment's command word (by basename, after leading `NAME=value`
-#     assignments and unwrapped runners) is `eval`, `source`, or `.`.
+#     assignments and unwrapped runners) is `eval`, `source`, or `.`, or when the
+#     raw command contains a heredoc opener (`<<`, not `<<<`).
 #   - Downstream stdout redirects: downstream selector allowance stops when an
 #     earlier downstream segment is a transcript `tee` or carries an fd-1
 #     redirect (`>`-family on fd 1, `&>`, or a dangling `>`).
@@ -202,6 +207,7 @@ _MAPFILE_RE = re.compile(
     r"(?:mapfile|readarray)(?:\s+(?:-[dnosuCc]\s+\S+|-\S+))*(?:\s+([A-Za-z_][A-Za-z0-9_ ]*))?"
 )
 _GETOPTS_RE = re.compile(r"getopts\s+\S+\s+([A-Za-z_][A-Za-z0-9_]*)")
+_RAW_HEREDOC_RE = re.compile(r"(?<!<)<<(?!<)")
 _JQ_STDERR_BUILTIN_RE = re.compile(
     r"(^|[^A-Za-z0-9_$.])(debug|stderr|input_filename|error|halt_error|halt_error\(|\$__loc__|\$__prog_args)([^A-Za-z0-9_]|$)"
 )
@@ -317,7 +323,7 @@ def _has_eval_or_source(pls: list[list[list[str]]] = pipelines) -> bool:
 
 
 try:
-    _SINGLE_STATEMENT = len(pipelines) == 1 and not _has_eval_or_source(pipelines)
+    _SINGLE_STATEMENT = len(pipelines) == 1 and not _has_eval_or_source(pipelines) and not _RAW_HEREDOC_RE.search(cmd)
 except Exception:
     _SINGLE_STATEMENT = False
 
