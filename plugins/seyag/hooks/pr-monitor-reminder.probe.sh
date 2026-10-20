@@ -699,8 +699,8 @@ check_standalone_create_case bx "env GH_REPO=o/r gh pr create --fill" ""
 # 18by. standalone `export OTHER=1 && gh pr create --fill` (control) -> the stdout-URL PR, banner rev refs/heads/main
 check_standalone_create_case by "export OTHER=1 && gh pr create --fill" "refs/heads/main"
 
-# 18bz. standalone `declare GH_REPO=o/r && gh pr create --fill` (no -x: not exported, not an override) -> the stdout-URL PR, banner rev refs/heads/main
-check_standalone_create_case bz "declare GH_REPO=o/r && gh pr create --fill" "refs/heads/main"
+# 18bz. standalone `declare GH_REPO=o/r && gh pr create --fill` (no -x: still changes an already-exported GH_REPO, like a bare assignment) -> no output, gh never called
+check_standalone_create_case bz "declare GH_REPO=o/r && gh pr create --fill" ""
 
 # 18ca. standalone `GH_REPO=o/r git status && gh pr create --fill` (one-shot prefix on another command does not persist) -> the stdout-URL PR, banner rev refs/heads/main
 check_standalone_create_case ca "GH_REPO=o/r git status && gh pr create --fill" "refs/heads/main"
@@ -734,6 +734,9 @@ check_standalone_create_case cj "gh pr create --head rel-1" "$MAIN_SHA"
 
 # 18ck. standalone `A=1 export GH_REPO=o/r && gh pr create --fill` (one-shot prefix before the export builtin) -> no output, gh never called
 check_standalone_create_case ck "A=1 export GH_REPO=o/r && gh pr create --fill" ""
+
+# 18cl. standalone `declare +x GH_REPO=o/r && gh pr create --fill` (control: +x unexports) -> the stdout-URL PR, banner rev refs/heads/main
+check_standalone_create_case cl "declare +x GH_REPO=o/r && gh pr create --fill" "refs/heads/main"
 
 echo "---"
 echo "$FAILURES failed"
