@@ -11,8 +11,7 @@
 # Fire status: PreToolUse is runtime-confirmed for PushNotification and
 # absent-toolset for AskUserQuestion in headless runs; SendMessage and
 # AskUserQuestion fire behavior in interactive sessions is unverified — the
-# matcher ships anyway, inert if the event does not fire:
-# verified by a driver-side live probe of the harness events.
+# matcher ships anyway, inert if the event does not fire.
 #
 # Extending markers: SYG_STATUS_CLAIM_MARKERS appends |-separated alternatives
 # to the default marker alternation without removing defaults.
