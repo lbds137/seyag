@@ -62,9 +62,10 @@
 #      `--repo`/`-R`, `GH_REPO=`, a no-PR flag (`--help`/`-h`, `--dry-run`,
 #      `--web`/`-w`), or a non-literal or unresolvable head. An earlier
 #      segment of the same command that sets GH_REPO (`export GH_REPO=…`,
-#      `declare -x`/`typeset -x`, or a bare `GH_REPO=…` assignment) is a repo
-#      override too: a standalone create stays silent, and a trailing create
-#      is not accepted (the push falls back to its own lookup, as with `-R`).
+#      `declare`/`typeset` (not `+x`), or a bare `GH_REPO=…` assignment) is a
+#      repo override too: a standalone create stays silent, and a trailing
+#      create is not accepted (the push falls back to its own lookup, as with
+#      `-R`).
 #      Not covered: a GH_REPO exported in an EARLIER Bash tool call (the
 #      persistent shell) is invisible to this hook.
 #    - Fallbacks: with no usable refspec or `--head` (none, multiple, delete,
@@ -183,9 +184,9 @@ def sets_gh_repo(seg):
     if cmd == "export":
         return any(w.startswith("GH_REPO=") for w in seg[i + 1 :])
     if cmd in ("declare", "typeset"):
-        return any(
-            re.match(r"^-[A-Za-z]*x[A-Za-z]*$", w) for w in seg[i + 1 :]
-        ) and any(w.startswith("GH_REPO=") for w in seg[i + 1 :])
+        return any(w.startswith("GH_REPO=") for w in seg[i + 1 :]) and not any(
+            re.match(r"^\+[A-Za-z]*x[A-Za-z]*$", w) for w in seg[i + 1 :]
+        )
     return False
 
 
@@ -433,9 +434,9 @@ for idx, seg in enumerate(segments):
         # `git switch`, another push) or an env prefix on the create could
         # change which branch or repo the create used, so only an immediately
         # following, unprefixed create counts; `--head`/`-H`, `--repo`/`-R`,
-        # an earlier segment's `export GH_REPO=`/`declare -x`/`typeset -x`/
-        # assignment-only `GH_REPO=`, no-PR flags (`--help`/`-h`/`--dry-run`/
-        # `--web`/`-w`), and a push `-C` are excluded.
+        # an earlier segment's `export GH_REPO=`/`declare`/`typeset`
+        # (not `+x`)/assignment-only `GH_REPO=`, no-PR flags (`--help`/`-h`/
+        # `--dry-run`/`--web`/`-w`), and a push `-C` are excluded.
         if (
             idx == trigger_idx + 1
             and skip_assignments(seg) == 0
@@ -474,8 +475,8 @@ for idx, seg in enumerate(segments):
     if parse_gh_pr_create(seg):
         # Standalone `gh pr create`: stay silent on a repo override (`--repo`,
         # `-R`, `GH_REPO=` or an earlier segment's `export GH_REPO=`/
-        # `declare -x`/`typeset -x`/assignment-only `GH_REPO=`), a no-PR flag
-        # (`--help`, `-h`, `--dry-run`, `--web`, `-w`), or a non-literal
+        # `declare`/`typeset` (not `+x`)/assignment-only `GH_REPO=`), a no-PR
+        # flag (`--help`, `-h`, `--dry-run`, `--web`, `-w`), or a non-literal
         # `--head`/`-H`.
         i = skip_assignments(seg)
         opts = parse_gh_create_opts(seg[i + 3 :])
