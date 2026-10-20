@@ -404,4 +404,60 @@ out5=$(printf '%s\n' '--- a/x.c' '+++ b/x.c' '@@ -1,2 +1,2 @@' '-a' '+a ' 'garba
   && ok "case 61: .scala/.php/.rb reindent, .c trailing-space continuation, and stray garbage hunk line exit 1" \
   || bad "case 61 (rc1 $rc1: $out1; rc2 $rc2: $out2; rc3 $rc3: $out3; rc4 $rc4: $out4; rc5 $rc5: $out5)"
 
+# 62. Data formats (.json .jsonc .toml .sql) are strict: reindent and value-space collapse exit 1; .c reindent exits 0; SYG_WSDIFF_LENIENT_NAMES=.json makes .json lenient
+ok62=1
+for ext in json jsonc toml sql; do
+  rc1=0; rc2=0
+  printf -- '--- a/x.%s\n+++ b/x.%s\n@@ -1 +1 @@\n-  k = 1\n+k = 1\n' "$ext" "$ext" | "$BS" >/dev/null || rc1=$?
+  printf -- '--- a/x.%s\n+++ b/x.%s\n@@ -1 +1 @@\n-k = "x  y"\n+k = "x y"\n' "$ext" "$ext" | "$BS" >/dev/null || rc2=$?
+  [ $rc1 = 1 ] && [ $rc2 = 1 ] || { ok62=0; echo "  .$ext: reindent rc $rc1, collapse rc $rc2"; }
+done
+rc3=0; printf -- '--- a/x.c\n+++ b/x.c\n@@ -1 +1 @@\n-  k = 1\n+k = 1\n' | "$BS" >/dev/null || rc3=$?
+rc4=0; printf -- '--- a/x.json\n+++ b/x.json\n@@ -1 +1 @@\n-  k = 1\n+k = 1\n' | SYG_WSDIFF_LENIENT_NAMES=.json "$BS" >/dev/null || rc4=$?
+[ $ok62 = 1 ] && [ $rc3 = 0 ] && [ $rc4 = 0 ] \
+  && ok "case 62: .json/.jsonc/.toml/.sql reindent and value-space collapse exit 1; .c reindent exits 0; SYG_WSDIFF_LENIENT_NAMES=.json makes .json exit 0" \
+  || bad "case 62 (ok62 $ok62; rc3 $rc3; rc4 $rc4)"
+
+# 63. Block class from both header paths: strict if either is strict; a /dev/null side cannot change the verdict
+rc1=0; printf -- '--- a/x.py\n+++ b/x.c\n@@ -1 +1 @@\n-  x\n+x\n' | "$BS" >/dev/null || rc1=$?
+rc2=0; printf -- '--- a/x.c\n+++ b/x.py\n@@ -1 +1 @@\n-  x\n+x\n' | "$BS" >/dev/null || rc2=$?
+rc3=0; printf -- '--- a/x.c\n+++ b/y.c\n@@ -1 +1 @@\n-  x\n+x\n' | "$BS" >/dev/null || rc3=$?
+rc4=0; printf -- '--- /dev/null\n+++ b/x.py\n@@ -0,0 +1 @@\n+x = 1\n' | "$BS" >/dev/null || rc4=$?
+rc5=0; printf -- '--- /dev/null\n+++ b/x.c\n@@ -0,0 +1 @@\n+int x;\n' | "$BS" >/dev/null || rc5=$?
+[ $rc1 = 1 ] && [ $rc2 = 1 ] && [ $rc3 = 0 ] && [ $rc4 = 1 ] && [ $rc5 = 1 ] \
+  && ok "case 63: plain diff classed by both header paths (x.py/x.c either order exit 1; x.c/y.c exits 0); /dev/null add-only exits 1" \
+  || bad "case 63 (rc1 $rc1; rc2 $rc2; rc3 $rc3; rc4 $rc4; rc5 $rc5)"
+
+# 64. Help: lone -h / --help print the docstring and exit 0; -- -h reads a file named -h
+out1=$("$BS" -h); rc1=$?
+out2=$("$BS" --help); rc2=$?
+first='whitespace-only-diff: classify a unified diff as whitespace-only or real changes.'
+mkdir -p "$T/nohelp" "$T/withh"
+(cd "$T/nohelp" && "$BS" -- -h 2>"$T/err64") >/dev/null; rc3=$?
+printf -- '--- a/x.c\n+++ b/x.c\n@@ -1 +1 @@\n-  x\n+x\n' > "$T/withh/-h"
+out4=$(cd "$T/withh" && "$BS" -- -h); rc4=$?
+[ $rc1 = 0 ] && [ $rc2 = 0 ] && [ "$(head -n1 <<< "$out1")" = "$first" ] && [ "$(head -n1 <<< "$out2")" = "$first" ] \
+  && [ $rc3 = 2 ] && grep -qF "cannot read -h" "$T/err64" && [ $rc4 = 0 ] \
+  && ok "case 64: -h and --help print the docstring (exit 0); -- -h reads a file named -h (exit 2 when absent, 0 when present)" \
+  || bad "case 64 (rc1 $rc1; rc2 $rc2; rc3 $rc3; rc4 $rc4; out4: $out4; err: $(cat "$T/err64"))"
+
+# 65. A header line with an empty path is malformed and strict, whatever the sibling path:
+# the +++ case that used to inherit the --- path's leniency (reindent in a lenient .c must exit 1)
+rc1=0; printf -- 'diff --git a/x.c b/x.c\n--- a/x.c\n+++ \n@@ -1 +1 @@\n-  int x;\n+int x;\n' | "$BS" >/dev/null || rc1=$?
+rc2=0; printf -- '--- a/x.c\n+++ \n@@ -1 +1 @@\n-  int x;\n+int x;\n' | "$BS" >/dev/null || rc2=$?
+rc3=0; printf -- '--- \n+++ b/x.c\n@@ -1 +1 @@\n-  int x;\n+int x;\n' | "$BS" >/dev/null || rc3=$?
+[ $rc1 = 1 ] && [ $rc2 = 1 ] && [ $rc3 = 1 ] \
+  && ok "case 65: an empty --- or +++ header path is strict even next to a lenient path (exit 1)" \
+  || bad "case 65 (rc1 $rc1; rc2 $rc2; rc3 $rc3)"
+
+# 66. With no --- or +++ line at all, the diff --git path decides: x.c is lenient (exit 0),
+# x.py strict (exit 1); bare hunks with no diff line stay --lenient (exit 0) / strict without it
+rc1=0; printf -- 'diff --git a/x.py b/x.c\n@@ -1 +1 @@\n-  x\n+x\n' | "$BS" >/dev/null || rc1=$?
+rc2=0; printf -- 'diff --git a/x.c b/x.py\n@@ -1 +1 @@\n-  x\n+x\n' | "$BS" >/dev/null || rc2=$?
+rc3=0; printf -- '@@ -1 +1 @@\n-  x\n+x\n' | "$BS" --lenient >/dev/null || rc3=$?
+rc4=1; printf -- '@@ -1 +1 @@\n-  x\n+x\n' | "$BS" >/dev/null || rc4=$?
+[ $rc1 = 0 ] && [ $rc2 = 1 ] && [ $rc3 = 0 ] && [ $rc4 = 1 ] \
+  && ok "case 66: no header lines: the diff --git path classes the block; bare hunks follow --lenient" \
+  || bad "case 66 (rc1 $rc1; rc2 $rc2; rc3 $rc3; rc4 $rc4)"
+
 exit $fail

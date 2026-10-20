@@ -5,13 +5,15 @@ Reads a unified diff (`git diff -U0` output preferred) from stdin or from a
 single file argument.
 
 Rules:
-- Path classes (resolved from `+++ ` outside a hunk, cut at the first tab with
-  `\\r` and one pair of outer double quotes stripped and `/dev/null` falling
-  back to `--- `, else `diff --git ` `b/` or last token, else `diff ` last
-  token; default is strict):
+- Path classes (resolved from the `--- ` and `+++ ` paths outside a hunk, cut
+  at the first tab with `\\r` and one pair of outer double quotes stripped;
+  a `/dev/null` side cannot change the verdict, and a block is lenient only when every
+  real path is lenient; with no `--- ` or `+++ ` line, `diff --git ` `b/` or last
+  token, else `diff ` last token; default is strict):
   - Lenient (`LENIENT_SUFFIXES` as the last suffix — languages with no
     indentation syntax, raw-text mode outside literals, column-0 markers or
-    indentation-stripping heredocs — or a basename or suffix in
+    indentation-stripping heredocs (text-block literals are in Known limits) —
+    or a basename or suffix in
     `SYG_WSDIFF_LENIENT_NAMES`, plus bare hunks with no file header under
     `--lenient`): leading ASCII whitespace ignored (unless `--strict-indent` is
     set or the previous line on that side of the hunk ended in `\\` followed
@@ -24,6 +26,7 @@ Rules:
     extensionless files and `Makefile*`, `.yaml`/`.yml`/`.sls`/`.mk`/`.cabal`,
     `.haml`/`.pug`/`.jade`/`.slim`/`.sass`/`.styl`,
     `.md`/`.mdx`/`.rst`/`.txt`/`.ini`/`.cfg`/`.sh`/`.tsv`/`.csv`/`.patch`,
+    `.json`/`.jsonc`/`.toml`/`.sql` (data formats: their content is string data),
     multi-suffix paths whose last suffix is not lenient, and empty/unparseable
     header paths): lines compare exactly (leading, internal and trailing
     whitespace exact, with no whitespace-only-line exemption).
@@ -48,7 +51,10 @@ Rules:
   Any other line inside a hunk, or any `-` or `+` line outside a hunk other
   than `--- `/`+++ ` headers, counts as 1 real changed line.
 - Known limits: collapsed ASCII whitespace runs inside string literals (`"a  b"`
-  to `"a b"`), trailing-trimmed or re-spaced lines inside multi-line string or
+  to `"a b"`), and reindents of Java text blocks, Swift `\"\"\"` multi-line
+  strings and C# raw string literals (their compilers strip the content
+  indentation, and they still pass as whitespace-only in lenient files),
+  trailing-trimmed or re-spaced lines inside multi-line string or
   template literals (without a trailing `\\` on the preceding line), and
   whitespace-only lines inside such literals in lenient files still pass as
   whitespace-only; under `-U0` the backslash-continuation guard cannot see a
@@ -109,17 +115,14 @@ LENIENT_SUFFIXES = frozenset(
         ".scss",
         ".less",
         # Markup (.html .xml .svg .vue .svelte .jsx .tsx) stays strict: <pre>,
-        # <textarea> and text nodes carry whitespace as data.
-        ".json",
-        ".jsonc",
-        ".sql",
+        # <textarea> and text nodes carry whitespace as data. Data formats
+        # (.json .jsonc .toml .sql) stay strict too: their content is string data.
         ".dart",
         ".erl",
         ".clj",
         ".zig",
         ".proto",
         ".graphql",
-        ".toml",
     )
 )
 
@@ -248,7 +251,9 @@ def emit(as_json, verdict, pairs, real, hunks, meta, text):
 
 
 def main(argv):
-    if "-h" in argv or "--help" in argv:
+    # help flags only count before `--`, so `-- -h` can name a file called -h
+    help_args = argv[: argv.index("--")] if "--" in argv else argv
+    if "-h" in help_args or "--help" in help_args:
         print(__doc__.strip(" \t\f\v\r\n"))
         return 0
     parser = Parser(prog="whitespace-only-diff", add_help=False)
@@ -279,10 +284,24 @@ def main(argv):
     in_hunk = False
     block_hunks = 0
     block_has_meta = False
-    block_path = ""
+    diff_path = ""
     has_file_header = False
-    block_class = path_class(block_path, has_file_header, args.lenient)
-    minus_path = ""
+    minus_path = None
+    plus_path = None
+
+    def class_of_block():
+        # strict if any real header path is strict; a header line with an empty
+        # path is malformed and strict (path_class decides); /dev/null is no
+        # path; with no header line at all, the diff --git path decides
+        seen = [p for p in (minus_path, plus_path) if p is not None]
+        real = [p for p in seen if p != "/dev/null"]
+        if "" in seen:
+            real.append("")
+        paths = real or [diff_path]
+        strict = any(path_class(p, has_file_header, args.lenient) == "strict" for p in paths)
+        return "strict" if strict else "lenient"
+
+    block_class = class_of_block()
     rem_old = None
     rem_new = None
     hunks = 0
@@ -332,10 +351,10 @@ def main(argv):
             in_hunk = False
             block_hunks = 0
             block_has_meta = False
-            block_path = header_diff_path(line)
+            diff_path = header_diff_path(line)
             has_file_header = True
-            block_class = path_class(block_path, has_file_header, args.lenient)
-            minus_path = ""
+            minus_path = plus_path = None
+            block_class = class_of_block()
             prev_old = prev_new = ""
         elif line.startswith("@@ "):
             flush()
@@ -348,7 +367,6 @@ def main(argv):
                 rem_old = int(m.group(2)) if m.group(2) is not None else 1
                 rem_new = int(m.group(4)) if m.group(4) is not None else 1
                 if rem_old == 0 and rem_new == 0:
-                    flush()
                     in_hunk = False
             else:
                 rem_old = None
@@ -391,15 +409,13 @@ def main(argv):
                 in_hunk = False
         elif line.startswith("--- "):
             minus_path = header_file_path(line)
+            plus_path = None
             has_file_header = True
-            block_class = path_class(block_path, has_file_header, args.lenient)
+            block_class = class_of_block()
         elif line.startswith("+++ "):
-            p = header_file_path(line)
-            if p == "/dev/null":
-                p = minus_path
-            block_path = "" if p == "/dev/null" else p
+            plus_path = header_file_path(line)
             has_file_header = True
-            block_class = path_class(block_path, has_file_header, args.lenient)
+            block_class = class_of_block()
         elif line.startswith("-") or line.startswith("+"):
             real += 1
         elif is_only_in(line) or DIFF_R_META_RE.match(line.rstrip("\r")):
