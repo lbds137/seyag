@@ -41,26 +41,36 @@
 #    raw string — a `-C` value or commit message can itself contain the text
 #    "push" or "cd " without being one.
 #
-#    Within that directory, an explicit single literal refspec on `git push`
-#    names the branch when its destination is a branch name (not `HEAD`/`@`
-#    or another `refs/...` namespace): the PR lookup (`gh pr list --head`)
-#    uses its destination, unless a `gh pr create` immediately after the push
-#    (same directory and repo, no `--head`) already supplied the PR URL on
-#    stdout. That URL is the checked-out branch's PR, so it is used only when
-#    the push's destination is the checked-out branch or the push has no
-#    usable destination (then lookup and rev fall back to that branch too).
-#    The local rev (for the dedup SHA and printed
-#    `--sha`) uses its source when that resolves to a commit
-#    (`refs/heads/<src>` if that local branch exists, or its commit SHA for a
-#    full `refs/...` ref, tag, or rev expression, resolved by the hook),
-#    staying silent when an explicit source does not resolve; a standalone
-#    `gh pr create` with `--head`/`-H` (`[owner:]branch`) pins that branch the
-#    same way, and stays silent on `--repo`/`-R`, `GH_REPO=`, a no-PR flag
-#    (`--help`/`-h`, `--dry-run`, `--web`/`-w`), or a non-literal or
-#    unresolvable head; with no usable refspec or `--head` (none, multiple,
-#    delete, or a `HEAD`/`@` destination) — or for the local rev alone when the
-#    source is `HEAD`/`@` — it falls back to the checked-out branch (detached
-#    HEAD -> HEAD).
+#    Within that directory:
+#    - Push refspec: an explicit single literal refspec on `git push` names
+#      the branch when its destination is a branch name (not `HEAD`/`@` or
+#      another `refs/...` namespace): the PR lookup (`gh pr list --head`)
+#      uses its destination.
+#    - Trailing create: a `gh pr create` immediately after the push (same
+#      directory and repo, no `--head`) already supplies the checked-out
+#      branch's PR URL on stdout; that URL is used only when the push's
+#      destination is the checked-out branch or the push has no usable
+#      destination (then lookup and rev fall back to that branch too), while
+#      any other destination falls back to the `gh pr list --head` lookup.
+#    - Local rev: the local rev (for the dedup SHA and printed `--sha`) uses
+#      its source when that resolves to a commit (`refs/heads/<src>` if that
+#      local branch exists, or its commit SHA for a full `refs/...` ref, tag,
+#      or rev expression, resolved by the hook), staying silent when an
+#      explicit source does not resolve.
+#    - Standalone create: a standalone `gh pr create` with `--head`/`-H`
+#      (`[owner:]branch`) pins that branch the same way, and stays silent on
+#      `--repo`/`-R`, `GH_REPO=`, a no-PR flag (`--help`/`-h`, `--dry-run`,
+#      `--web`/`-w`), or a non-literal or unresolvable head. An earlier
+#      segment of the same command that sets GH_REPO (`export GH_REPO=…`,
+#      `declare -x`/`typeset -x`, or a bare `GH_REPO=…` assignment) is a repo
+#      override too: a standalone create stays silent, and a trailing create
+#      is not accepted (the push falls back to its own lookup, as with `-R`).
+#      Not covered: a GH_REPO exported in an EARLIER Bash tool call (the
+#      persistent shell) is invisible to this hook.
+#    - Fallbacks: with no usable refspec or `--head` (none, multiple, delete,
+#      or a `HEAD`/`@` destination) — or for the local rev alone when the
+#      source is `HEAD`/`@` — it falls back to the checked-out branch
+#      (detached HEAD -> HEAD).
 #
 # Fires only after a Bash tool call whose command contains a `git push`
 # (optionally `-C`-anchored) or `gh pr create` (ignoring a plain `--tags`
@@ -163,6 +173,20 @@ def skip_assignments(words):
 
 def cmd_name(word):
     return word.rsplit("/", 1)[-1]
+
+
+def sets_gh_repo(seg):
+    i = skip_assignments(seg)
+    if i == len(seg):
+        return any(w.startswith("GH_REPO=") for w in seg[:i])
+    cmd = cmd_name(seg[i])
+    if cmd == "export":
+        return any(w.startswith("GH_REPO=") for w in seg[i + 1 :])
+    if cmd in ("declare", "typeset"):
+        return any(
+            re.match(r"^-[A-Za-z]*x[A-Za-z]*$", w) for w in seg[i + 1 :]
+        ) and any(w.startswith("GH_REPO=") for w in seg[i + 1 :])
+    return False
 
 
 def parse_git_push(words):
@@ -401,6 +425,7 @@ has_tags = False
 c_dir = None
 push_src = ""
 push_dst = ""
+repo_env = False
 
 for idx, seg in enumerate(segments):
     if trigger_idx is not None:
@@ -408,13 +433,15 @@ for idx, seg in enumerate(segments):
         # `git switch`, another push) or an env prefix on the create could
         # change which branch or repo the create used, so only an immediately
         # following, unprefixed create counts; `--head`/`-H`, `--repo`/`-R`,
-        # no-PR flags (`--help`/`-h`/`--dry-run`/`--web`/`-w`), and a push `-C`
-        # are excluded.
+        # an earlier segment's `export GH_REPO=`/`declare -x`/`typeset -x`/
+        # assignment-only `GH_REPO=`, no-PR flags (`--help`/`-h`/`--dry-run`/
+        # `--web`/`-w`), and a push `-C` are excluded.
         if (
             idx == trigger_idx + 1
             and skip_assignments(seg) == 0
             and parse_gh_pr_create(seg)
             and not push["c_dirs"]
+            and not repo_env
         ):
             opts = parse_gh_create_opts(seg[3:])
             if (
@@ -426,6 +453,9 @@ for idx, seg in enumerate(segments):
                 is_create = True
                 trailing_create = True
         break
+    if sets_gh_repo(seg):
+        repo_env = True
+        continue
     push = parse_git_push(seg)
     if push is not None:
         trigger_idx = idx
@@ -443,12 +473,15 @@ for idx, seg in enumerate(segments):
         continue
     if parse_gh_pr_create(seg):
         # Standalone `gh pr create`: stay silent on a repo override (`--repo`,
-        # `-R`, `GH_REPO=`), a no-PR flag (`--help`, `-h`, `--dry-run`,
-        # `--web`, `-w`), or a non-literal `--head`/`-H`.
+        # `-R`, `GH_REPO=` or an earlier segment's `export GH_REPO=`/
+        # `declare -x`/`typeset -x`/assignment-only `GH_REPO=`), a no-PR flag
+        # (`--help`, `-h`, `--dry-run`, `--web`, `-w`), or a non-literal
+        # `--head`/`-H`.
         i = skip_assignments(seg)
         opts = parse_gh_create_opts(seg[i + 3 :])
         if (
             any(w.startswith("GH_REPO=") for w in seg[:i])
+            or repo_env
             or opts["has_repo"]
             or opts["no_pr"]
             or not opts["ok"]

@@ -344,6 +344,7 @@ git -C "$PUSH_WT" -c user.email=t@t -c user.name=t tag -a v2 -m v2 feat-y
 git -C "$PUSH_WT" update-ref refs/remotes/origin/feat-y feat-y
 FEAT_Y_SHA=$(git -C "$PUSH_WT" rev-parse feat-y)
 git -C "$PUSH_WT" checkout -q main
+git -C "$PUSH_WT" tag rel-1 main
 
 check_push_branch_case() {
   local id="$1" cmd="$2" exp_head="$3" exp_rev="$4"
@@ -676,6 +677,63 @@ check_trailing_create_case bq "git push origin main && gh pr create -tHotfix --f
 
 # 18br. `git push origin main && gh pr create --title "-R x" --fill` (--title value on trailing create) -> PR #777 used, gh pr list not called
 check_trailing_create_case br 'git push origin main && gh pr create --title "-R x" --fill' 777 "" "refs/heads/main"
+
+# 18bs. standalone `export GH_REPO=o/r && gh pr create --fill` -> no output, gh never called
+check_standalone_create_case bs "export GH_REPO=o/r && gh pr create --fill" ""
+
+# 18bt. standalone `export A=1 GH_REPO=o/r && gh pr create --fill` -> no output, gh never called
+check_standalone_create_case bt "export A=1 GH_REPO=o/r && gh pr create --fill" ""
+
+# 18bu. standalone `declare -x GH_REPO=o/r && gh pr create --fill` -> no output, gh never called
+check_standalone_create_case bu "declare -x GH_REPO=o/r && gh pr create --fill" ""
+
+# 18bv. standalone `typeset -x GH_REPO=o/r && gh pr create --fill` -> no output, gh never called
+check_standalone_create_case bv "typeset -x GH_REPO=o/r && gh pr create --fill" ""
+
+# 18bw. standalone `GH_REPO=o/r && gh pr create --fill` -> no output, gh never called
+check_standalone_create_case bw "GH_REPO=o/r && gh pr create --fill" ""
+
+# 18bx. standalone `env GH_REPO=o/r gh pr create --fill` -> no output, gh never called
+check_standalone_create_case bx "env GH_REPO=o/r gh pr create --fill" ""
+
+# 18by. standalone `export OTHER=1 && gh pr create --fill` (control) -> the stdout-URL PR, banner rev refs/heads/main
+check_standalone_create_case by "export OTHER=1 && gh pr create --fill" "refs/heads/main"
+
+# 18bz. standalone `declare GH_REPO=o/r && gh pr create --fill` (no -x: not exported, not an override) -> the stdout-URL PR, banner rev refs/heads/main
+check_standalone_create_case bz "declare GH_REPO=o/r && gh pr create --fill" "refs/heads/main"
+
+# 18ca. standalone `GH_REPO=o/r git status && gh pr create --fill` (one-shot prefix on another command does not persist) -> the stdout-URL PR, banner rev refs/heads/main
+check_standalone_create_case ca "GH_REPO=o/r git status && gh pr create --fill" "refs/heads/main"
+
+# 18cb. `export GH_REPO=a/b && git push origin main && gh pr create --fill` with PR URL on stdout (earlier export GH_REPO) -> 777 ignored, pr list called with --head main
+check_trailing_create_case cb "export GH_REPO=a/b && git push origin main && gh pr create --fill" 300 "main" "refs/heads/main"
+
+# 18cc. `GH_REPO=a/b && git push origin main && gh pr create --fill` with PR URL on stdout (earlier bare GH_REPO assignment) -> 777 ignored, pr list called with --head main
+check_trailing_create_case cc "GH_REPO=a/b && git push origin main && gh pr create --fill" 300 "main" "refs/heads/main"
+
+# 18cd. `declare -x GH_REPO=a/b && git push origin main && gh pr create --fill` with PR URL on stdout (earlier declare -x GH_REPO) -> 777 ignored, pr list called with --head main
+check_trailing_create_case cd "declare -x GH_REPO=a/b && git push origin main && gh pr create --fill" 300 "main" "refs/heads/main"
+
+# 18ce. `export OTHER=1 && git push origin main && gh pr create --fill` with PR URL on stdout (unrelated export control) -> the stdout-URL PR used, gh pr list not called
+check_trailing_create_case ce "export OTHER=1 && git push origin main && gh pr create --fill" 777 "" "refs/heads/main"
+
+# 18cf. standalone `gh pr create -R o/r --fill` -> no output, gh never called
+check_standalone_create_case cf "gh pr create -R o/r --fill" ""
+
+# 18cg. standalone `gh pr create -dR o/r` -> no output, gh never called
+check_standalone_create_case cg "gh pr create -dR o/r" ""
+
+# 18ch. standalone `gh pr create -h` -> no output, gh never called
+check_standalone_create_case ch "gh pr create -h" ""
+
+# 18ci. standalone `gh pr create -fw` -> no output, gh never called
+check_standalone_create_case ci "gh pr create -fw" ""
+
+# 18cj. standalone `gh pr create --head rel-1` (tag fallback, no branch named rel-1) -> the stdout-URL PR, banner rev <main SHA>
+check_standalone_create_case cj "gh pr create --head rel-1" "$MAIN_SHA"
+
+# 18ck. standalone `A=1 export GH_REPO=o/r && gh pr create --fill` (one-shot prefix before the export builtin) -> no output, gh never called
+check_standalone_create_case ck "A=1 export GH_REPO=o/r && gh pr create --fill" ""
 
 echo "---"
 echo "$FAILURES failed"
