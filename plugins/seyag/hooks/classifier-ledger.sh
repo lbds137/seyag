@@ -8,8 +8,9 @@
 #   command (.tool_input.command truncated to 200 chars when present),
 #   is_interrupt.
 #
-# Evidence: PostToolUseFailure payload
-# verified by a driver-side live probe of the harness events.
+# Payload fields: taken from the harness's PostToolUseFailure event; no
+# captured payload is committed, so a field rename upstream shows up only as
+# empty values in the ledger.
 #
 # Trigger: second-consecutive injection + z.ai rate-limit canary defer until
 # the ledger holds real classifier-shaped entries.

@@ -52,7 +52,7 @@ TOK_FIELDS = ("input_tokens", "cache_creation_input_tokens", "cache_read_input_t
 # notice. The peak window is matched in UTC+8 (hour and weekday both Beijing-side); it is
 # overridable for tests (test mode skips the weekday gate).
 W = {"main": (1.0, 3.0), "flash": (0.4, 1.2)}  # (off-peak, peak)
-PEAK_UTC = os.environ.get("ZAI_SPEND_PEAK_UTC", "14-18")
+PEAK_UTC = os.environ.get("ZAI_SPEND_PEAK_UTC", "14-18")  # hours in UTC+8 (Beijing), despite the name
 
 
 def is_peak(epoch):

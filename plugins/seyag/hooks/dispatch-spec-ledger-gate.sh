@@ -178,6 +178,8 @@ NEXT_SEC_RE='^##'
 ROW_RE='^[[:space:]]*- '
 BLANK_RE='^[[:space:]]*$'
 CONT_RE='^[[:space:]]+'
+# The cite test is a presence floor, not proof of a read: any backticked span or any
+# `dir/file.ext` token counts, so a row like "- uses `x`" passes; the gate nudges, review judges.
 # shellcheck disable=SC2016
 CITE_RE='(`[^`]+`|[A-Za-z0-9._~-]+(/[A-Za-z0-9._~-]+)+\.[A-Za-z0-9]{1,7}(:[0-9]+)?)'
 
