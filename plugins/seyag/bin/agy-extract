@@ -11,7 +11,10 @@ Each DB is opened read-only and never written (immutable unless a -wal exists; s
                   errors and content-safety blocks
 Model thinking is dropped unless --thinking (then written as [thinking] blocks: mine such an
 extract only on a non-Anthropic lane).
---since keeps only steps with a timestamp after ISO-TS (UTC, e.g. 2026-09-20T06:00).
+--since keeps only steps strictly after ISO-TS (UTC; shape YYYY-MM-DD[THH:MM[:SS[.fff]]], optional
+trailing Z, zero-padded; a step stamped exactly at the cutoff is dropped). Malformed input is a
+usage error (exit 2). Steps with no timestamp are skipped under --since, one stderr note per
+conversation.
 Prints one count line per conversation, named by the first 8 characters only, with the models
 used (? when none is found at the known fields) and the workspace. [summary] blocks are written but
 not counted. Exit 0 ok, 1 a DB failed to open or parse, 2 usage.
@@ -26,7 +29,6 @@ import shutil
 import sqlite3
 import sys
 import tempfile
-
 
 
 def usage(fh=sys.stdout):
@@ -88,13 +90,23 @@ def text(b, *path):
     return v.decode("utf-8", "replace") if v else ""
 
 
+def one_line(s):
+    return s.replace("\n", " ")
+
+
 def stamp(payload):
     ts = sub(payload, 5, 1)
     if ts is None:
         return ""
+    # A present-but-empty timestamp (field 5.1 empty, or without a seconds
+    # subfield) stamps 1970-01-01T00:00:00.000Z — known gap, pinned by the
+    # emptyts probe case.
     f = fields(ts)
     sec = f.get(1, [0])[0]
-    ms = f.get(2, [0])[0] // 1_000_000
+    ms = f.get(2, [0])[0]
+    if not isinstance(sec, int) or not isinstance(ms, int):
+        raise ValueError("timestamp field is not an integer")
+    ms //= 1_000_000
     t = datetime.datetime.fromtimestamp(sec, datetime.timezone.utc)
     return t.strftime("%Y-%m-%dT%H:%M:%S.") + f"{ms:03d}Z"
 
@@ -177,8 +189,12 @@ def extract(path, out, since, thinking):
         header = f"# agy conversation {cid[:8]} models: {', '.join(mods)} workspace: {ws}\n\n"
         owner, agent = [header], [header]
         n = dict(user=0, mid=0, agent=0, calls=0, errs=0)
+        unstamped = 0
         for idx, st, blob in con.execute("SELECT idx, step_type, step_payload FROM steps ORDER BY idx"):
             ts = stamp(blob)
+            if since and not ts:
+                unstamped += 1
+                continue
             if since and not ts > since:
                 continue
             if st == 14:
@@ -214,12 +230,16 @@ def extract(path, out, since, thinking):
                 e = sub(blob, 31)
                 if e is not None:
                     msg = text(e, 2) or text(e, 3)
-                    agent.append(f"--- {ts} tool-error: {msg.replace(chr(10), ' ')[:300]}\n")
+                    agent.append(f"--- {ts} tool-error: {one_line(msg)[:300]}\n")
                     n["errs"] += 1
             elif st == 17:
-                msg = text(blob, 24, 3, 2)
-                agent.append(f"--- {ts} tool-error: [safety-block] {msg.replace(chr(10), ' ')[:300]}\n")
+                # The step type itself is a content-safety block, so it counts even with no message (132 checks its sub-message first).
+                msg = one_line(text(blob, 24, 3, 2))[:300]
+                tail = f" {msg}" if msg else ""
+                agent.append(f"--- {ts} tool-error: [safety-block]{tail}\n")
                 n["errs"] += 1
+        if unstamped:
+            print(f"agy-extract: {cid[:8]}…: {unstamped} step(s) without a timestamp skipped under --since", file=sys.stderr)
     finally:
         con.close()
         if tmp:
@@ -232,6 +252,24 @@ def extract(path, out, since, thinking):
         f"{cid[:8]}…: {n['user']} user blocks, {n['mid']} mid-turn, {n['agent']} agent blocks, "
         f"{n['calls']} tool calls, {n['errs']} tool errors, models {','.join(mods)}, workspace {ws}"
     )
+
+
+SINCE_RE = re.compile(r"(\d{4}-\d{2}-\d{2})(?:T(\d{2}:\d{2})(?::(\d{2})(?:\.(\d{3}))?)?)?Z?")
+
+
+def normalise_since(s):
+    """--since in the extract's own YYYY-MM-DDTHH:MM:SS.mmmZ shape, missing parts zero-padded,
+    so `ts > since` is strictly after. None when s is not an accepted shape or not a real time."""
+    m = SINCE_RE.fullmatch(s)
+    if not m:
+        return None
+    date, hm, sec, frac = m.groups()
+    shaped = f"{date}T{hm or '00:00'}:{sec or '00'}.{frac or '000'}"
+    try:
+        datetime.datetime.strptime(shaped, "%Y-%m-%dT%H:%M:%S.%f")
+    except ValueError:
+        return None
+    return shaped + "Z"
 
 
 def main(argv):
@@ -247,11 +285,10 @@ def main(argv):
         if len(argv) < 2:
             print("agy-extract: --since needs a timestamp", file=sys.stderr)
             return 2
-        since = argv[1]
-        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2})?)?Z?", since):
-            print(f"agy-extract: --since wants UTC YYYY-MM-DD[THH:MM[:SS]], got: {since}", file=sys.stderr)
+        since = normalise_since(argv[1])
+        if since is None:
+            print(f"agy-extract: --since wants UTC YYYY-MM-DD[THH:MM[:SS[.fff]]], optional trailing Z, got: {argv[1]}", file=sys.stderr)
             return 2
-        since = since.rstrip("Z")
         argv = argv[2:]
     if not argv or argv[0].startswith("-"):
         usage(sys.stderr)
@@ -269,7 +306,7 @@ def main(argv):
             continue
         try:
             extract(p, out, since, thinking)
-        except (sqlite3.Error, ValueError, OverflowError, OSError) as e:
+        except (sqlite3.Error, ValueError, TypeError, OverflowError, OSError) as e:
             print(f"agy-extract: {os.path.basename(p)[:8]}…: failed: {e}", file=sys.stderr)
             rc = 1
     return rc
