@@ -9,9 +9,12 @@ Usage:
   api-credit statusline [--json] read-only: one line (or, with --json, the balance
                                  object) for a statusline; nothing when
                                  SYG_CREDIT_LEDGER is unset
-  api-credit balance [--json]    live grants minus spend: provider-exact with an
+  api-credit balance [--json] [--month]
+                                 live grants minus spend: provider-exact with an
                                  admin key (see Provider balance), else the
-                                 ledger estimate
+                                 ledger estimate; --month adds month-to-date
+                                 spend (month_start, month_spend_usd,
+                                 month_as_of, month_source, month_bridge_days)
   api-credit daily [--json]      per UTC day: sessions, spend, models (reconcile
                                  these rows against the provider console)
   api-credit calibrate AMOUNT [--at TIME]
@@ -178,12 +181,13 @@ added on the unanchored provider success path) and absent, with estimate true,
 when no fetch is attempted: no key (no ANTHROPIC_ADMIN_API_KEY and no
 SYG_CREDIT_ADMIN_KEY_CMD, or an env key containing CR or LF), no live grant, no
 closed day; a missing source means ledger. The sum is cached at
-${XDG_CACHE_HOME:-~/.cache}/claude-statusline/api-credit-live.json (line 1: the
-key's SHA-256, the origin and the window; line 2: the numbers: the sum, the
-as-of day and the per-UTC-day sums) and reused for 300 s; a failure is cached
-the same way (as "failed") for 300 s (60 s with "kind": "key-cmd" when
-SYG_CREDIT_ADMIN_KEY_CMD fails), so a broken endpoint is not re-asked on every
-render; a corrupt cache, or one without a valid per-day map, is refetched.
+${XDG_CACHE_HOME:-~/.cache}/claude-statusline/api-credit-live.json (a JSON
+object keyed by the key's SHA-256, the origin and the window, at most 4
+entries; each value holds the sum, the as-of day and the per-UTC-day sums) and
+reused for 300 s; a failure is cached the same way (as "failed") for 300 s (60 s
+with "kind": "key-cmd" when SYG_CREDIT_ADMIN_KEY_CMD fails), so a broken
+endpoint is not re-asked on every render; a corrupt or old-format cache, or one
+without a valid per-day map, is refetched.
 
 Anchor (calibrate): the ledger estimate is the grants minus ledger spend, blind
 to card top-ups and to anything the ledger misprices. `calibrate AMOUNT` records
@@ -921,23 +925,34 @@ def resolve_admin_key(src):
     return key
 
 
+MAX_CACHE_ENTRIES = 4   # cached cost_report windows kept in live_cache_path()
+
+
 def provider_spend(src, start, end, now):
-    """The closed-day provider spend, from the TTL cache (line 1: the key's or
-    command's SHA-256, the admin origin and the window; line 2: the numbers) when
-    it is under LIVE_TTL old, else fetched (resolving a command key on demand) and
-    cached. None on any fetch or key-command failure, cached as {"failed": true}
-    for LIVE_TTL (or KEY_CMD_FAIL_TTL with "kind": "key-cmd" when the key command
-    failed); cache errors are ignored (a corrupt cache is refetched, never
+    """The closed-day provider spend, from the TTL cache (a JSON object keyed by
+    the key's or command's SHA-256, the admin origin and the window, at most
+    MAX_CACHE_ENTRIES entries) when it is under LIVE_TTL old, else fetched
+    (resolving a command key on demand) and cached. None on any fetch or
+    key-command failure, cached as {"failed": true} for LIVE_TTL (or
+    KEY_CMD_FAIL_TTL with "kind": "key-cmd" when the key command failed); cache
+    errors are ignored (a corrupt or old-format cache is refetched, never
     trusted)."""
     path = live_cache_path()
     raw_id = src[1] if src[0] == "env" else "cmd\0" + src[1]
     ident = "%s %s %s %s" % (hashlib.sha256(raw_id.encode("utf-8")).hexdigest(), admin_origin(),
                              iso(start), iso(end))
+    cache = {}
     try:
         with open(path, encoding="utf-8") as f:
-            line1, line2 = f.readline().rstrip("\n"), f.readline()
-        if line1 == ident:
-            c = json.loads(line2)
+            raw = json.load(f)
+        if isinstance(raw, dict):
+            cache = {k: v for k, v in raw.items()
+                     if isinstance(k, str) and isinstance(v, dict) and isinstance(v.get("fetched_at"), str)}
+    except (OSError, ValueError):
+        pass
+    c = cache.get(ident)
+    if isinstance(c, dict):
+        try:
             age = (now - parse_ts(c["fetched_at"])).total_seconds()
             if c.get("failed") is True:
                 ttl = KEY_CMD_FAIL_TTL if c.get("kind") == "key-cmd" else LIVE_TTL
@@ -953,8 +968,8 @@ def provider_spend(src, start, end, now):
                 days = {k: Decimal(v) for k, v in raw_days.items()}
                 if spent.is_finite() and all(v.is_finite() for v in days.values()):
                     return {"spent": spent, "as_of": c["as_of"], "days": days}
-    except (OSError, ValueError, KeyError, TypeError, AttributeError, InvalidOperation):
-        pass
+        except (ValueError, KeyError, TypeError, AttributeError, InvalidOperation):
+            pass
     key = resolve_admin_key(src)
     got = fetch_cost_report(key, start, end) if key else None
     if got is not None and not all(math.isfinite(float(v)) for v in [got["spent"]] + list(got["days"].values())):
@@ -966,12 +981,17 @@ def provider_spend(src, start, end, now):
     else:
         record = {"fetched_at": iso(now), "spent": str(got["spent"]), "as_of": got["as_of"],
                   "days": {k: str(v) for k, v in got["days"].items()}}
+    cache.pop(ident, None)
+    if len(cache) >= MAX_CACHE_ENTRIES:
+        keep = sorted(cache, key=lambda k: cache[k].get("fetched_at", ""))[-(MAX_CACHE_ENTRIES - 1):]
+        cache = {k: cache[k] for k in keep}
+    cache[ident] = record
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         fd, tmp = tempfile.mkstemp(prefix=".api-credit-live.", suffix=".tmp", dir=os.path.dirname(path))
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write(ident + "\n" + json.dumps(record, sort_keys=True) + "\n")
+                f.write(json.dumps(cache) + "\n")
             os.replace(tmp, path)
         except BaseException:
             try:
@@ -1055,20 +1075,58 @@ def with_provider(b, entries, grants_cfg, now):
     return b
 
 
+def with_month(b, entries, now):
+    """Add month-to-date spend fields (month_start, month_spend_usd,
+    month_as_of, month_source, month_bridge_days) to b for the current UTC
+    month. Uses provider_spend for closed UTC days when an admin key source is
+    set and the month has closed days, bridging later days from the ledger;
+    falls back to the ledger on the 1st of the month, without a key, or on any
+    failure."""
+    end = day_start(now)
+    start = end.replace(day=1)
+    month_start, today = start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d")
+    ledger_spent = sum(e["cost_usd"] for e in entries if month_start <= e["day"] <= today)
+    b.update({"month_start": month_start, "month_spend_usd": round(ledger_spent, 6),
+              "month_as_of": None, "month_source": "ledger", "month_bridge_days": 0})
+    src = admin_key_source()
+    if src is None or start >= end:
+        return b
+    if b.get("source") == "ledger" and b.get("provider_window_start") is not None:
+        return b   # the balance fetch just failed: don't run the key command a second time
+    try:
+        got = provider_spend(src, start, end, now)
+        if got is None:
+            return b
+        as_of = got["as_of"]
+        if as_of < month_start:
+            return b   # no provider bucket this month yet: the figure is all ledger
+        bridged = [e for e in entries if month_start <= e["day"] <= today and e["day"] > as_of]
+        spent = float(got["spent"]) + sum(e["cost_usd"] for e in bridged)
+        b.update({"month_spend_usd": round(spent, 6), "month_as_of": as_of,
+                  "month_source": "provider", "month_bridge_days": len({e["day"] for e in bridged})})
+    except Exception:  # the balance must never fail on the live path
+        pass
+    return b
+
+
 def balance_text(b):
     """The one-line statusline text for a balance object: the bare figure when it
     is exact, followed by "est" when it is an estimate."""
     est = "" if b.get("estimate") is False else " est"
     if b["remaining_usd"] is None:
-        return "api $%s spent%s" % (money(b["spent_usd"]), est)
-    if b["remaining_usd"] > EPS:
+        s = "api $%s spent%s" % (money(b["spent_usd"]), est)
+    elif b["remaining_usd"] > EPS:
         s = "api credit $%s%s" % (money(b["remaining_usd"]), est)
         if b["next_expiry"]:
             s += " (exp %s, %dd)" % (b["next_expiry"][5:10], b["days_left"])
-        return s
-    if b["overage_usd"] > EPS:
-        return "api credit over $%s%s" % (money(b["overage_usd"]), est)
-    return "api credit $0.00" + est
+    elif b["overage_usd"] > EPS:
+        s = "api credit over $%s%s" % (money(b["overage_usd"]), est)
+    else:
+        s = "api credit $0.00" + est
+    if "month_spend_usd" in b:
+        m_est = "" if b.get("month_source") == "provider" else " est"
+        s += " · month $%s%s" % (money(b["month_spend_usd"]), m_est)
+    return s
 
 
 # ---------------------------------------------------------------- anchor
@@ -1378,18 +1436,20 @@ def need_ledger():
     return path
 
 
-def current_balance(warn=False):
+def current_balance(warn=False, month=False):
     """The balance for the read-only commands (balance, statusline): the ledger
     estimate, replaced by the provider figures when the live path answers; from
     the governing anchor when there is one (warn: say so on stderr when the
-    anchor file is unreadable)."""
+    anchor file is unreadable). With month, adds month-to-date spend."""
     ledger = need_ledger()
     entries, _ = read_ledger(ledger)
     grants_cfg, now = load_grants(), utcnow()
     anc = governing_anchor(ledger, now, warn)
     if anc is not None:
-        return anchored_balance(entries, grants_cfg, now, anc)
-    return with_provider(balance(entries, grants_cfg, now), entries, grants_cfg, now)
+        b = anchored_balance(entries, grants_cfg, now, anc)
+    else:
+        b = with_provider(balance(entries, grants_cfg, now), entries, grants_cfg, now)
+    return with_month(b, entries, now) if month else b
 
 
 def main(argv=None):
@@ -1400,6 +1460,7 @@ def main(argv=None):
     sp.add_argument("--json", action="store_true")
     bp = sub.add_parser("balance")
     bp.add_argument("--json", action="store_true")
+    bp.add_argument("--month", action="store_true")
     dp = sub.add_parser("daily")
     dp.add_argument("--json", action="store_true")
     cp = sub.add_parser("calibrate")
@@ -1423,7 +1484,7 @@ def main(argv=None):
         print(json.dumps(b, sort_keys=True) if args.json else balance_text(b))
         return 0
     if args.cmd == "balance":
-        b = current_balance(warn=True)
+        b = current_balance(warn=True, month=args.month)
         if args.json:
             print(json.dumps(b, sort_keys=True))
         else:

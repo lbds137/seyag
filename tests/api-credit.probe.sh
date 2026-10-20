@@ -500,9 +500,9 @@ req=$(head -n 1 "$T/cr/hits.log")
   && ok "provider: request window [earliest live grant day, start of today), group_by description, x-api-key and anthropic-version headers" || bad "provider request: '$req'"
 cf="$T/cache-ok/claude-statusline/api-credit-live.json"
 if [ "$(hits)" = 1 ] && ! grep -q fixture-admin-key "$T/cr/argv.log" && ! grep -q fixture-admin-key "$cf" \
-  && [ "$(head -n 1 "$cf" | cut -d' ' -f1)" = "$(printf '%s' fixture-admin-key | sha256sum | cut -d' ' -f1)" ] \
+  && [ "$(jq -r 'keys[0]' "$cf" | cut -d' ' -f1)" = "$(printf '%s' fixture-admin-key | sha256sum | cut -d' ' -f1)" ] \
   && ! grep -v "http://127.0.0.1:" "$T/cr/argv.log" | grep -q .; then
-  ok "provider: one request (the statusline call reused the cache); key absent from curl argv and from the cache (line 1 holds its SHA-256); every URL loopback"
+  ok "provider: one request (the statusline call reused the cache); key absent from curl argv and from the cache (cache key holds its SHA-256); every URL loopback"
 else bad "provider key hygiene: hits $(hits) / argv $(cat "$T/cr/argv.log") / cache $(cat "$cf")"; fi
 b=$(lv ok balance)
 [ "$b" = $'api credit $83.80 (exp 10-21, 11d)\nspent $16.20, lapsed $0.00, overage $0.00 (provider through 2026-10-08; today from the ledger)' ] \
@@ -1036,7 +1036,7 @@ want_kid=$(printf 'cmd\0%s' "$T/key-ok.sh" | sha256sum | cut -d' ' -f1)
 if [ "$(jq -c '[.remaining_usd, .source]' <<< "$b1")" = "$(jq -c '[.remaining_usd, .source]' <<< "$ref_env")" ] \
   && [ "$(jq -c '[.remaining_usd, .source]' <<< "$b2")" = "$(jq -c '[.remaining_usd, .source]' <<< "$ref_env")" ] \
   && [ "$(nlines "$T/key-calls")" = 1 ] && [ "$(hits)" = 1 ] \
-  && [ "$(head -n 1 "$kcf" | cut -d' ' -f1)" = "$want_kid" ] \
+  && [ "$(jq -r 'keys[0]' "$kcf" | cut -d' ' -f1)" = "$want_kid" ] \
   && ! grep -q fixture-admin-key "$kcf" && ! grep -q fixture-admin-key "$T/cr/argv.log"; then
   ok "SYG_CREDIT_ADMIN_KEY_CMD: matches env-key provider balance, runs once across TTL cache hit (1 call), cache keyed by cmd hash"
 else bad "SYG_CREDIT_ADMIN_KEY_CMD ok/lazy: b1=$b1 / b2=$b2 / calls=$(nlines "$T/key-calls") / hits=$(hits)"; fi
@@ -1072,5 +1072,108 @@ be=$(lv kenv balance --json ANTHROPIC_ADMIN_API_KEY=fixture-admin-key SYG_CREDIT
 if [ ! -s "$T/key-calls" ] && jq -e '.source=="provider" and .estimate==false' <<< "$be" > /dev/null; then
   ok "SYG_CREDIT_ADMIN_KEY_CMD with ANTHROPIC_ADMIN_API_KEY set: env wins, command never run"
 else bad "SYG_CREDIT_ADMIN_KEY_CMD env precedence: calls=$(nlines "$T/key-calls") / $be"; fi
+
+# 32. balance --month: month-to-date spend (provider closed days + ledger bridge, else ledger)
+#     and multi-window cache (up to 4 windows; old 2-line cache treated as a miss).
+cat > "$T/cr/month.json" <<'EOF'
+{"data":[
+ {"starting_at":"2026-10-02T00:00:00Z","ending_at":"2026-10-03T00:00:00Z","results":[{"currency":"USD","amount":"400"}]},
+ {"starting_at":"2026-10-05T00:00:00Z","ending_at":"2026-10-06T00:00:00Z","results":[{"currency":"USD","amount":"370.289"}]},
+ {"starting_at":"2026-10-08T00:00:00Z","ending_at":"2026-10-09T00:00:00Z","results":[{"currency":"USD","amount":"1000"}]}
+],"has_more":false,"next_page":null}
+EOF
+{
+  entry p 2026-09-30 2026-09-30T12:00:00Z 9
+  entry q 2026-10-03 2026-10-03T12:00:00Z 6
+  entry a 2026-10-06 2026-10-06T12:00:00Z 5
+  entry o 2026-10-08 2026-10-08T12:00:00Z 1
+  entry b 2026-10-09 2026-10-09T12:00:00Z 2.5
+} > "$T/lv-month.jsonl"
+echo month > "$T/cr/mode"; : > "$T/cr/hits.log"
+# 32a. Without --month: no month_* keys and no month-window request.
+b_nom=$(lv m-off balance --json SYG_CREDIT_LEDGER="$T/lv-month.jsonl")
+if [ "$(hits)" = 1 ] && ! grep -q 'starting_at=2026-10-01T00:00:00Z' "$T/cr/hits.log" \
+  && jq -e '([keys[]|select(startswith("month_"))]|length)==0' <<< "$b_nom" > /dev/null; then
+  ok "balance --json without --month: no month_* keys and no month-window request"
+else bad "balance without --month: hits $(hits) / $(cat "$T/cr/hits.log") / $b_nom"; fi
+# 32b. Mid-month with admin key + multi-window cache reuse across balance --month and balance.
+: > "$T/cr/hits.log"
+b_m=$(lv m-on balance --month --json SYG_CREDIT_LEDGER="$T/lv-month.jsonl")
+h_m1=$(hits)
+b_m2=$(lv m-on balance --json SYG_CREDIT_LEDGER="$T/lv-month.jsonl" SYG_CREDIT_NOW=2026-10-09T15:01:00Z)
+txt_m=$(lv m-on balance --month SYG_CREDIT_LEDGER="$T/lv-month.jsonl" SYG_CREDIT_NOW=2026-10-09T15:01:00Z)
+h_m2=$(hits)
+m_req=$(sed -n 2p "$T/cr/hits.log" | cut -f1)
+if [ "$h_m1" = 2 ] && [ "$h_m2" = 2 ] \
+  && [[ "$m_req" == *'starting_at=2026-10-01T00:00:00Z&ending_at=2026-10-09T00:00:00Z&'* ]] \
+  && near "$(jq .spent_usd <<< "$b_m")" 16.20289 && near "$(jq .month_spend_usd <<< "$b_m")" 20.20289 \
+  && jq -e '.month_start=="2026-10-01" and .month_as_of=="2026-10-08" and .month_source=="provider" and .month_bridge_days==1' <<< "$b_m" > /dev/null \
+  && near "$(jq .remaining_usd <<< "$b_m2")" 83.79711 \
+  && [ "$(head -n 1 <<< "$txt_m")" = 'api credit $83.80 (exp 10-21, 11d) · month $20.20' ]; then
+  ok "balance --month mid-month with admin key: window [2026-10-01, 2026-10-09), month_spend_usd 20.20289 (17.70289 provider + 2.50 today), both windows cached across follow-up balance call, text appends ' · month \$20.20'"
+else bad "balance --month mid-month: h=$h_m1/$h_m2 req='$m_req' / $b_m / '$txt_m'"; fi
+# 32c. Mid-month without admin key: ledger-only, month_source ledger, month_as_of null.
+: > "$T/cr/hits.log"
+b_mnk=$(ac SYG_CREDIT_LEDGER="$T/lv-month.jsonl" SYG_CREDIT_GRANTS="$T/g-live.json" SYG_CREDIT_NOW="$LNOW" -- balance --month --json)
+txt_mnk=$(ac SYG_CREDIT_LEDGER="$T/lv-month.jsonl" SYG_CREDIT_GRANTS="$T/g-live.json" SYG_CREDIT_NOW="$LNOW" -- balance --month | head -n 1)
+if [ "$(hits)" = 0 ] && near "$(jq .month_spend_usd <<< "$b_mnk")" 14.5 \
+  && jq -e '.month_start=="2026-10-01" and .month_source=="ledger" and .month_as_of==null and .month_bridge_days==0' <<< "$b_mnk" > /dev/null \
+  && [ "$txt_mnk" = 'api credit $91.50 est (exp 10-21, 11d) · month $14.50 est' ]; then
+  ok "balance --month without admin key: ledger-only (6 + 5 + 1 + 2.5 = 14.50, 09-30 excluded; the 10-08 entry sits on the provider as_of day in 32b and must not be double-counted there), month_source ledger, month_as_of null, text appends ' · month \$14.50 est'"
+else bad "balance --month no-key: hits $(hits) / $b_mnk / '$txt_mnk'"; fi
+# 32d. On the 1st of the month: no fetch for the month window, ledger only.
+echo '{"grants":[{"amount":100,"granted":"2026-09-25","expires":"2026-10-21"}]}' > "$T/g-sep.json"
+{ entry p 2026-09-30 2026-09-30T12:00:00Z 9; entry r 2026-10-01 2026-10-01T08:00:00Z 3; } > "$T/lv-first.jsonl"
+: > "$T/cr/hits.log"
+b_1st=$(lv m-1st balance --month --json SYG_CREDIT_LEDGER="$T/lv-first.jsonl" SYG_CREDIT_GRANTS="$T/g-sep.json" SYG_CREDIT_NOW=2026-10-01T12:00:00Z)
+if [ "$(hits)" = 1 ] && ! grep -q 'starting_at=2026-10-01T00:00:00Z' "$T/cr/hits.log" \
+  && near "$(jq .month_spend_usd <<< "$b_1st")" 3 \
+  && jq -e '.month_start=="2026-10-01" and .month_source=="ledger" and .month_as_of==null and .month_bridge_days==0 and .source=="provider"' <<< "$b_1st" > /dev/null; then
+  ok "balance --month on the 1st of the month: no month-window fetch (only balance window fetched), month_spend_usd 3.00 from ledger, month_source ledger"
+else bad "balance --month 1st: hits $(hits) / $(cat "$T/cr/hits.log") / $b_1st"; fi
+# 32e. Fetch failure: falls back to ledger, month_source ledger.
+echo 401 > "$T/cr/mode"; : > "$T/cr/hits.log"
+b_mf=$(lv m-fail balance --month --json SYG_CREDIT_LEDGER="$T/lv-month.jsonl")
+txt_mf=$(lv m-fail balance --month SYG_CREDIT_LEDGER="$T/lv-month.jsonl" | head -n 1)
+echo ok > "$T/cr/mode"
+if near "$(jq .month_spend_usd <<< "$b_mf")" 14.5 \
+  && jq -e '.month_start=="2026-10-01" and .month_source=="ledger" and .month_as_of==null and .month_bridge_days==0 and .source=="ledger"' <<< "$b_mf" > /dev/null \
+  && [ "$txt_mf" = 'api credit $91.50 est (exp 10-21, 11d) · month $14.50 est' ]; then
+  ok "balance --month fetch failure: falls back to ledger (14.50), month_source ledger, month_as_of null"
+else bad "balance --month failure: $b_mf / '$txt_mf'"; fi
+# 32e2. Provider answers with no bucket this month (as_of before month_start): all ledger, labelled ledger.
+echo nobucket > "$T/cr/mode"; : > "$T/cr/hits.log"
+b_mnb=$(lv m-nob balance --month --json SYG_CREDIT_LEDGER="$T/lv-month.jsonl")
+echo ok > "$T/cr/mode"
+if near "$(jq .month_spend_usd <<< "$b_mnb")" 14.5 \
+  && jq -e '.month_source=="ledger" and .month_as_of==null and .month_bridge_days==0' <<< "$b_mnb" > /dev/null; then
+  ok "balance --month with no provider bucket this month: all-ledger 14.50 labelled month_source ledger, month_as_of null"
+else bad "balance --month no bucket: $b_mnb"; fi
+# 32f. Anchored balance with --month: month figure is independent of the anchor.
+echo anc > "$T/cr/mode"; : > "$T/cr/hits.log"
+b_am=$(pv anc-m balance --month --json)
+echo ok > "$T/cr/mode"
+if near "$(jq .remaining_usd <<< "$b_am")" 41.5 && near "$(jq .spent_usd <<< "$b_am")" 8.5 && near "$(jq .month_spend_usd <<< "$b_am")" 9.5 \
+  && jq -e '.anchor_usd==50 and .month_start=="2026-10-01" and .month_source=="provider" and .month_as_of=="2026-10-13" and .month_bridge_days==1' <<< "$b_am" > /dev/null; then
+  ok "balance --month with anchor: remaining 41.50 and spent 8.50 from anchor, month_spend_usd 9.50 (5.00 + 3.00 + 1.50) independent of anchor"
+else bad "balance --month with anchor: $b_am"; fi
+# 32g. Old 2-line cache format treated as a miss and overwritten; cache caps at 4 windows.
+mkdir -p "$T/cache-oldfmt/claude-statusline"
+printf 'deadbeef %s 2026-10-05T00:00:00Z 2026-10-09T00:00:00Z\n{"as_of":"2026-10-08","days":{},"fetched_at":"2026-10-09T15:00:00Z","spent":"0"}\n' "$CR" > "$T/cache-oldfmt/claude-statusline/api-credit-live.json"
+: > "$T/cr/hits.log"
+b_oldc=$(lv oldfmt balance --json)
+if [ "$(hits)" = 1 ] && jq -e 'type=="object" and (keys|length)==1' "$T/cache-oldfmt/claude-statusline/api-credit-live.json" > /dev/null \
+  && near "$(jq .spent_usd <<< "$b_oldc")" 16.20289; then
+  ok "cache: old 2-line format treated as a miss and overwritten with JSON object"
+else bad "cache old format: hits $(hits) / $b_oldc / $(cat "$T/cache-oldfmt/claude-statusline/api-credit-live.json")"; fi
+for d in 02 03 04 05 06; do
+  echo "{\"grants\":[{\"amount\":100,\"granted\":\"2026-10-$d\",\"expires\":\"2026-10-21\"}]}" > "$T/g-cap-$d.json"
+  lv cap4 balance --json SYG_CREDIT_GRANTS="$T/g-cap-$d.json" SYG_CREDIT_NOW="2026-10-09T15:0${d#0}:00Z" > /dev/null
+done
+capf="$T/cache-cap4/claude-statusline/api-credit-live.json"
+if [ "$(jq 'keys|length' "$capf")" = 4 ] && ! jq -e 'any(keys[]; contains("2026-10-02T00:00:00Z"))' "$capf" > /dev/null \
+  && jq -e 'any(keys[]; contains("2026-10-06T00:00:00Z"))' "$capf" > /dev/null; then
+  ok "cache cap: 5 windows fetched -> at most 4 kept, oldest evicted"
+else bad "cache cap: $(cat "$capf")"; fi
 
 exit $fail
