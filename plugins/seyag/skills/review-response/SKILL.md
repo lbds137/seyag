@@ -20,8 +20,8 @@ This procedure shifts trivial chores to auto-apply (under tight constraints) and
 When the PR's `claude-review` CI check cannot run because the Anthropic
 weekly quota is exhausted — the signature is fast failures with
 `is_error: true` on the check result (typically ×2–3) against the week meter
-at its cap — the gate is not dead, the reviewer is. Owner ruling
-(2026-10-02): substitute, don't loop.
+at its cap — the gate is not dead, the reviewer is. Owner ruling:
+substitute, don't loop.
 
 - **Substitute reviewer**: a fresh-context review subagent on the current
   lane — never the authoring session, read-only, adversarial. Its report
@@ -318,4 +318,4 @@ Before each round's consolidated message:
 - **seyag core.md § Safety** ("Never modify a test, lint rule or guard just to get past it") remains in force. The test-suite gate in rule 3 fails closed — a trivial-shape edit that breaks tests is escalated, not covered up by modifying tests.
 - **seyag core.md § Fix what you touch, file what you find / Everything not done gets a disposition** governs where every deferred, rejected or dismissed finding lands — this skill's dispositions route into that surface, and none of them may end in _neither_.
 - **seyag:delegation** owns the dispatch of review-round fixes (rule 3a) and the fresh-context handoff at the hard cap (rule 5a).
-- **The quota-wall substitute (rule 0) is the owner's standing ruling (2026-10-02)**, exercised live on a parked PR before this section existed: the substitute verdict substitutes the reviewer, never the merge gate.
+- **The quota-wall substitute (rule 0) is the owner's standing ruling**: the substitute verdict substitutes the reviewer, never the merge gate.
