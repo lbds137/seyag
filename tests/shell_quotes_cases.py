@@ -13,6 +13,7 @@ control that proves these cases can fail).
 import json
 import os
 import sys
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 LIB_DIR = os.environ.get("SHELL_QUOTES_LIB_DIR") or os.path.join(
@@ -23,6 +24,7 @@ sys.path.insert(0, LIB_DIR)
 from shell_quotes import (  # noqa: E402
     HEREDOC_OPENER,
     executed_segments,
+    heredoc_openers,
     resolve_placeholders,
     strip_heredoc_bodies,
     strip_quoted,
@@ -299,9 +301,79 @@ HEREDOC_CASES = [
         "cat <<'EOF'\n\n",
     ),
     (
-        'second heredoc opener on a line leaves its body',
+        'two heredoc openers on a line drop both bodies in order',
         'cat <<A <<B\naaa-body\nA\nbbb-body\nB\ntrailer\n',
-        'cat <<A <<B\n\nbbb-body\nB\ntrailer\n',
+        'cat <<A <<B\n\ntrailer\n',
+    ),
+    (
+        'a comment-hidden <<x opener leaves the following lines unchanged',
+        '# <<x\nenv\nx',
+        '# <<x\nenv\nx',
+    ),
+    (
+        'a double-quoted <<x opener leaves the following lines unchanged',
+        'echo "a <<x"\nenv\nx',
+        'echo "a <<x"\nenv\nx',
+    ),
+    (
+        'a single-quoted <<x opener leaves the following lines unchanged',
+        "echo 'a <<x'\nenv\nx",
+        "echo 'a <<x'\nenv\nx",
+    ),
+    (
+        'an arithmetic shift $((1<<2)) is not a heredoc opener',
+        'echo $((1<<2))\nenv\n2\n',
+        'echo $((1<<2))\nenv\n2\n',
+    ),
+    (
+        'a <<y inside ${…} is pattern text, not a heredoc opener',
+        'echo ${x/<<y/z}\nenv\ny\n',
+        'echo ${x/<<y/z}\nenv\ny\n',
+    ),
+    (
+        "an opener after a quoted 'it''s' arg on the same line is still stripped",
+        "cat 'it''s' <<EOF\nbody\nEOF\necho B\n",
+        "cat 'it''s' <<EOF\n\necho B\n",
+    ),
+    (
+        'an opener inside "$(…)" strips its body at top level (H1)',
+        "git commit -m \"$(cat <<'EOF'\nSupport 27\" monitors\nEOF\n)\"\nenv",
+        "git commit -m \"$(cat <<'EOF'\n\n)\"\nenv",
+    ),
+    (
+        'an opener inside $(…) inside ${…} is still stripped (M1)',
+        "echo ${x:-$(cat <<A\nit's\nA\n)}\nenv",
+        "echo ${x:-$(cat <<A\n\n)}\nenv",
+    ),
+    (
+        'an opener inside backticks is not collected for the outer line (M2)',
+        "cat <<A `: <<B`\na\nA\nenv\nB\n",
+        "cat <<A `: <<B`\n\nenv\nB\n",
+    ),
+    (
+        "a heredoc inside a backtick span takes its body from the span's own lines",
+        "x=`cat <<EOF\nit's\nEOF\n`\nenv",
+        "x=`cat <<EOF\n\n`\nenv",
+    ),
+    (
+        'a partially double-quoted <<E"OF" delimiter strips its EOF body',
+        'cat <<E"OF"\nrm -rf x\nEOF\n',
+        'cat <<E"OF"\n\n',
+    ),
+    (
+        "a partially single-quoted <<'E'OF delimiter strips its EOF body",
+        "cat <<'E'OF\nrm -rf x\nEOF\n",
+        "cat <<'E'OF\n\n",
+    ),
+    (
+        '<<- strips leading tabs only, not spaces',
+        'cat <<-EOF\n  EOF\nbody\n\tEOF\nafter\n',
+        'cat <<-EOF\n\nafter\n',
+    ),
+    (
+        'a terminator line with trailing whitespace does not close the heredoc',
+        'cat <<EOF\nEOF \nbody\nEOF\nafter\n',
+        'cat <<EOF\n\nafter\n',
     ),
 ]
 
@@ -345,6 +417,28 @@ for inp, want in [
     _checks.append((got == want, got, want))
 check_all('numbers its groups indent-flag, quote-char, marker', _checks)
 check_equal('does not match a here-string', opener_groups('git commit -F - <<<Fixup'), None)
+check_equal(
+    'heredoc_openers ignores comment, quote, and arithmetic <<',
+    [m.group(3) for m in heredoc_openers('# <<a\necho "<<b" \'<<c\' $((1<<d))\ncat <<E <<F\n1\nE\n2\nF\n')],
+    ['E', 'F'],
+)
+_m4_raw = 'cat <<done\nx\ndone\ngit commit -m $(cat <<B\nb\nB\n) | tail\nfor i in 1; do :\ndone'
+check_equal(
+    'heredoc_openers(bodies_stripped=True) does not skip openers across a later line matching an earlier marker (M4)',
+    [m.group(3) for m in heredoc_openers(strip_heredoc_bodies(_m4_raw), bodies_stripped=True)],
+    ['done', 'B'],
+)
+_bt_stripped = strip_heredoc_bodies("git push `: <<EOF\nx\nEOF\n` | tail -5")
+check_equal(
+    'heredoc_openers(bodies_stripped=True, include_spans=True) returns an opener inside a backtick span',
+    [m.group(3) for m in heredoc_openers(_bt_stripped, bodies_stripped=True, include_spans=True)],
+    ['EOF'],
+)
+check_equal(
+    'heredoc_openers(bodies_stripped=True) omits an opener inside a backtick span by default',
+    [m.group(3) for m in heredoc_openers(_bt_stripped, bodies_stripped=True)],
+    [],
+)
 
 
 # ---------------------------------------------------------------------------
@@ -449,7 +543,7 @@ check_all(
 check_equal(
     'falls back to the raw text when a quote is unterminated',
     executed_segments('bash -c "unterminated'),
-    ['bash -c "unterminated'],
+    ['bash -c "unterminated', '"unterminated'],
 )
 check_equal(
     'yields no wrapper segment when -c has no following word',
@@ -559,7 +653,7 @@ SIMPLE_COMMAND_CASES = [
         [['bash', '-c', 'cd /tmp; rm -rf x'], ['cd', '/tmp'], ['rm', '-rf', 'x']],
     ),
     ('a quoted command is an argument, not a command', 'echo "rm -rf x"', [['echo', 'rm -rf x']]),
-    ('an unterminated quote ends the scan where it opens', 'ls\nrm -rf "x', [['ls'], ['rm', '-rf']]),
+    ('an unterminated quote ends the scan where it opens', 'ls\nrm -rf "x', [['ls'], ['rm', '-rf', '"x']]),
 ]
 SIMPLE_COMMAND_CASES += [
     ('a # starting a word begins a comment', "# it's fine\nrm -rf x", [['rm', '-rf', 'x']]),
@@ -587,6 +681,78 @@ SIMPLE_COMMAND_CASES += [
      [['watch', '-n', '5', 'rm -rf x'], ['rm', '-rf', 'x']]),
     ('watch -n 5 ls stays one command', "watch -n 5 'ls -la'",
      [['watch', '-n', '5', 'ls -la'], ['ls', '-la']]),
+    ('after $(…), # is literal and does not swallow the next command',
+     'echo $(echo A)#; echo B',
+     [['echo', '$'], ['echo', 'A'], ['$(…)', '#'], ['echo', 'B']]),
+    ('after <(…), # is literal and does not swallow the next command',
+     'cat <(echo A)#; echo B',
+     [['cat', '<'], ['echo', 'A'], ['#'], ['echo', 'B']]),
+    ('after (…), # starts a comment to end of line',
+     '(echo A)#; echo B',
+     [['echo', 'A']]),
+    ('inside ${…}, # does not start a comment',
+     'echo ${x:- #}; echo B',
+     [['echo', '${x:-', '#}'], ['echo', 'B']]),
+    ('inside ${#var}, # does not start a comment',
+     'echo ${#var}; echo B',
+     [['echo', '${#var}'], ['echo', 'B']]),
+    ('a comment inside backticks ends at the closing backtick',
+     'echo `echo A #`; echo B',
+     [['echo', '`echo', 'A', '`'], ['echo', 'B']]),
+    ('a comment inside $(…) ends at the newline',
+     'echo $(echo A # c\n); echo B',
+     [['echo', '$'], ['echo', 'A'], ['echo', 'B']]),
+    ('arithmetic $((1<<2)) shift and base # literal do not swallow following commands',
+     'echo $((1<<2)); echo $((2#101)); echo B',
+     [['echo', '$'], ['1<<2'], ['echo', '$'], ['2#101'], ['echo', 'B']]),
+    ('two heredoc openers on one line consume both bodies then see the next command',
+     'cat <<A <<B\na\nA\nb\nB\necho C',
+     [['cat', '<<A', '<<B'], ['echo', 'C']]),
+    ('quoted <<x does not consume following commands',
+     'echo "a <<x"\necho B\nx',
+     [['echo', 'a <<x'], ['echo', 'B'], ['x']]),
+    ('single-quoted arg before real <<x opener keeps command after body',
+     "echo 'a' <<x\nbody\nx\necho B",
+     [['echo', 'a', '<<x'], ['echo', 'B']]),
+    ('comment-hidden <<x does not consume following commands',
+     '# <<x\nenv\nx',
+     [['env'], ['x']]),
+    ('H1: stray quote inside "$(cat <<EOF …)" body does not hide following command',
+     "git commit -m \"$(cat <<'EOF'\nSupport 27\" monitors\nEOF\n)\"\nenv",
+     [['git', 'commit', '-m', "$(cat <<'EOF'\n\n)"], ['env']]),
+    ('H2a: after ((…)), # starts a comment so an apostrophe cannot hide the next command',
+     "((1))# it's\nenv",
+     [['1'], ['env']]),
+    ("H2b: after a case pattern's ), # starts a comment",
+     "case x in *)# it's\nenv;; esac",
+     [['case', 'x', 'in', '*'], ['env'], ['esac']]),
+    ('H3: an escaped backtick inside a backtick comment does not end the backtick span',
+     'echo `#\\``#; env',
+     [['echo', '``#'], ['env']]),
+    ('M1: heredoc opener inside $(…) inside ${…} strips its body so quotes inside do not hide following commands',
+     "echo ${x:-$(cat <<A\nit's\nA\n)}\nenv",
+     [['echo', '${x:-$'], ['cat', '<<A'], ['$(…)', '}'], ['env']]),
+    ('M2: heredoc opener inside backticks does not consume lines after the outer heredoc',
+     'cat <<A `: <<B`\na\nA\nenv\nB',
+     [['cat', '<<A', '`:', '<<B`'], ['env'], ['B']]),
+    ('M3: closing ) inside <(…) does not insert a placeholder before the command word',
+     'cat <(case x in *)rm -rf x;; esac)',
+     [['cat', '<'], ['case', 'x', 'in', '*'], ['rm', '-rf', 'x'], ['esac']]),
+    ('$${ does not open a ${…} parameter expansion',
+     "echo $${; # it's\nenv",
+     [['echo', '$${'], ['env']]),
+    ('partially quoted <<E"OF" delimiter strips body so stray quote inside does not hide next command',
+     'cat <<E"OF"\nit\'s\nEOF\nenv',
+     [['cat', '<<EOF'], ['env']]),
+    ('space-indented line does not terminate <<-EOF early',
+     "cat <<-EOF\n  EOF\nit's\nEOF\nenv",
+     [['cat', '<<-EOF'], ['env']]),
+    ('terminator line with trailing space does not terminate <<EOF early',
+     "cat <<EOF\nEOF \nit's\nEOF\nenv",
+     [['cat', '<<EOF'], ['env']]),
+    ('unterminated quote rewinds and exposes later commands',
+     "echo it's\nenv",
+     [['echo', "it's"], ['env']]),
 ]
 for label, inp, want in SIMPLE_COMMAND_CASES:
     check_equal('simple_commands: ' + label, simple_commands(inp), want)
@@ -716,6 +882,110 @@ PLACEHOLDER_CASES = [
 
 for label, token, values, next_index, want in PLACEHOLDER_CASES:
     check_equal(label, resolve_placeholders(token, values, next_index), want)
+
+# ---------------------------------------------------------------------------
+# Performance bounds (M5)
+# ---------------------------------------------------------------------------
+_t0 = time.monotonic()
+_dd_pls = command_pipelines('echo ' + '$${' * 40000 + '; env')
+_dd_elapsed = time.monotonic() - _t0
+check_all(
+    'perf: command_pipelines on 40k $${ finishes in <2s and yields env',
+    [
+        (_dd_elapsed < 2.0, _dd_elapsed, '< 2.0s'),
+        ([['env']] in _dd_pls, _dd_pls[-1:], [[['env']]]),
+    ],
+)
+
+_t0 = time.monotonic()
+_hd_pls = command_pipelines('cat <<A\n' * 16000)
+_hd_openers = heredoc_openers('cat <<A\n' * 16000)
+_hd_elapsed = time.monotonic() - _t0
+check_all(
+    'perf: command_pipelines and heredoc_openers on 16k unterminated <<A finishes in <2s',
+    [
+        (_hd_elapsed < 2.0, _hd_elapsed, '< 2.0s'),
+        (len(_hd_pls) == 16000, len(_hd_pls), 16000),
+        (len(_hd_openers) == 16000, len(_hd_openers), 16000),
+    ],
+)
+
+# ---------------------------------------------------------------------------
+# Round 3: backtick span boundaries, `((` lookahead, case inside "$(…)", no
+# stack cap. Each input hid `env` from a scanner that bash runs it under; the
+# check is that `env` is a command of its own.
+# ---------------------------------------------------------------------------
+ENV_VISIBLE_CASES = [
+    ('BT0: an apostrophe inside a backtick span does not pair past its closing backtick',
+     "x=`echo it's`; env; echo \"a'b\""),
+    ('BT1: a stray apostrophe in a heredoc body inside backticks stays inside the span',
+     "x=`cat <<EOF\nit's\nEOF\n`\nenv; echo 'done'"),
+    ('BT2: ...and a stray double quote',
+     'x=`cat <<EOF\nsay "hi\nEOF\n`\nenv; echo "done"'),
+    ('BT3: a case clause heredoc inside backticks',
+     "x=`case a in a) cat <<'EOF'\nit's\nEOF\n;; esac`\nenv; echo 'done'"),
+    ('AR1: ((echo a) … is two subshells, so # starts a comment',
+     "((echo a) ; echo b # it's\nenv # don't\n)"),
+    ('AR2: ...with double quotes in the comments',
+     '((echo a) ; echo b # say "hi\nenv # x"\n)'),
+    ('((1)+(2)) is subshell syntax, not arithmetic', '((1)+(2))\nenv'),
+    ('(( (1) )) is still arithmetic, so # after it starts a comment', "(( (1) ))# it's\nenv"),
+    ('CS1: a case pattern ) inside "$(…)" does not close the substitution',
+     "x=\"$(case a in a) cat <<'EOF'\nit's 27\" wide\nEOF\n;; esac)\"\nenv; echo \"done\""),
+    ('CAP: 256 nested subshells do not skip the "$(" descent',
+     '( ' * 256
+     + "git commit -m \"$(cat <<'EOF'\nSupport 27\" monitors\nEOF\n)\"\nenv; echo \"done\"\n"
+     + ')' * 256),
+    ('M2: a heredoc opener inside backticks does not swallow the outer body',
+     'cat <<A `: <<B`\na\nA\nenv\nB'),
+]
+for label, inp in ENV_VISIBLE_CASES:
+    got = simple_commands(inp)
+    report('simple_commands: ' + label, ['env'] in got, got, "a list containing ['env']")
+
+
+def _timed(fn, arg):
+    t0 = time.monotonic()
+    out = fn(arg)
+    return time.monotonic() - t0, out
+
+
+def _env_pipeline(pipelines):
+    return [p for p in pipelines if ['env'] in p][:1]
+
+
+for label, inp in [
+    ("'( ' * 40000 around echo a; env", '( ' * 40000 + 'echo a; env' + ')' * 40000),
+    ("'$(' * 40000 around env", '$(' * 40000 + 'env' + ')' * 40000),
+]:
+    elapsed, pls = _timed(command_pipelines, inp)
+    check_all(
+        'perf: command_pipelines on %s finishes in <2s and yields env' % label,
+        [
+            (elapsed < 2.0, elapsed, '< 2.0s'),
+            (bool(_env_pipeline(pls)), len(pls), "a pipeline holding ['env']"),
+        ],
+    )
+
+_PERF_INPUTS = [
+    ("'\"$(' * 256 + ')' * 256 + 'a' * 130000", '"$(' * 256 + ')' * 256 + 'a' * 130000),
+    ("'\"$(' * 20000 + 'a' * 60000", '"$(' * 20000 + 'a' * 60000),
+    ("\"'\" + 'a' * 130000", "'" + 'a' * 130000),
+    ("'\"' + '$(' * 10000 + 'a' * 100000", '"' + '$(' * 10000 + 'a' * 100000),
+    ("'`' + 'a' * 130000", '`' + 'a' * 130000),
+]
+# The same inputs with a `<<` appended, so strip_heredoc_bodies really scans
+# them (without one it returns at once: no opener can match).
+_PERF_INPUTS += [(label + " + ' <<E'", inp + ' <<E') for label, inp in _PERF_INPUTS]
+for label, inp in _PERF_INPUTS:
+    for fn in (strip_heredoc_bodies, command_pipelines):
+        elapsed, _out = _timed(fn, inp)
+        report(
+            'perf: %s on %s finishes in <0.5s' % (fn.__name__, label),
+            elapsed < 0.5,
+            elapsed,
+            '< 0.5s',
+        )
 
 print("%d passed, %d failed" % (passed, failed))
 sys.exit(1 if failed else 0)

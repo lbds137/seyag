@@ -87,7 +87,7 @@
 #     one pipeline, when the command contains `cd` or `pushd`, when any
 #     pipeline segment's command word (by basename, after leading `NAME=value`
 #     assignments and unwrapped runners) is `eval`, `source`, or `.`, or when the
-#     raw command contains a heredoc opener (`<<`, not `<<<`).
+#     raw command contains any `<<` (not `<<<`), including arithmetic shifts.
 #   - Downstream stdout redirects: downstream selector allowance stops when an
 #     earlier downstream segment is a transcript `tee` or carries an fd-1
 #     redirect (`>`-family on fd 1, `&>`, or a dangling `>`).
@@ -197,7 +197,7 @@ _CMD_ASSIGN_RE = re.compile(
     r"(^|[;&|()\s])(?:export\s+|declare\s+(?:-\S+\s+)*|local\s+(?:-\S+\s+)*|typeset\s+(?:-\S+\s+)*|readonly\s+(?:-\S+\s+)*)?([A-Za-z_][A-Za-z0-9_]*)(\[[^]]*\])?\+?="
 )
 _READ_ASSIGN_RE = re.compile(
-    r"read(?:\s+(?:-[adinNptu]\s+\S+|-\S+))*\s+([A-Za-z_][A-Za-z0-9_ ]*)"
+    r"read(?:\s+(?:-[A-Za-z]*[adinNptu]\s+\S+|-\S+))*\s+([A-Za-z_][A-Za-z0-9_ ]*)"
 )
 _FOR_ASSIGN_RE = re.compile(
     r"(?:for|select)\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s+in\b|\s*;|\s+do\b)"
@@ -207,6 +207,7 @@ _MAPFILE_RE = re.compile(
     r"(?:mapfile|readarray)(?:\s+(?:-[dnosuCc]\s+\S+|-\S+))*(?:\s+([A-Za-z_][A-Za-z0-9_ ]*))?"
 )
 _GETOPTS_RE = re.compile(r"getopts\s+\S+\s+([A-Za-z_][A-Za-z0-9_]*)")
+# Defense-in-depth raw check: matches any `<<` (not `<<<`), including arithmetic shifts.
 _RAW_HEREDOC_RE = re.compile(r"(?<!<)<<(?!<)")
 _JQ_STDERR_BUILTIN_RE = re.compile(
     r"(^|[^A-Za-z0-9_$.])(debug|stderr|input_filename|error|halt_error|halt_error\(|\$__loc__|\$__prog_args)([^A-Za-z0-9_]|$)"
@@ -323,7 +324,11 @@ def _has_eval_or_source(pls: list[list[list[str]]] = pipelines) -> bool:
 
 
 try:
-    _SINGLE_STATEMENT = len(pipelines) == 1 and not _has_eval_or_source(pipelines) and not _RAW_HEREDOC_RE.search(cmd)
+    _SINGLE_STATEMENT = (
+        len(pipelines) == 1
+        and not _has_eval_or_source(pipelines)
+        and not _RAW_HEREDOC_RE.search(cmd)
+    )
 except Exception:
     _SINGLE_STATEMENT = False
 

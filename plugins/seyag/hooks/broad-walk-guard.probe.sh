@@ -51,6 +51,8 @@ run 2 "bash -c 'find / -name x'"
 run 0 $'echo "cd /tmp\nfind / -name x"'       # a quoted newline is text, not a boundary
 run 2 $'# it\'s here\nfind / -name x'           # an apostrophe in a comment opens no quote
 run 2 $'echo hi # don\'t worry\nfind / -name x'
+run 2 $'# <<x\nfind / -name x\nx'               # comment-hidden opener does not swallow find
+run 2 $'echo "<<x"\nfind / -name x\nx'          # quote-hidden opener does not swallow find
 run 0 '# find / -name x'                        # a comment is not a command
 run 2 "sudo bash -c 'find / -name x'"           # a runner before the wrapper
 run 2 "timeout 60 bash -c 'find / -name x'"

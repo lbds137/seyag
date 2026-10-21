@@ -583,6 +583,10 @@ run 2 "block: env --u git push --no-verify" "$PUB" "${T[@]}" -- "env --u git pus
 run 2 "block: env --uns git -c core.hooksPath= push" "$PUB" "${T[@]}" -- "env --uns git -c core.hooksPath=/x push"
 run 2 "block: env --un git config --global core.hooksPath" "$PUB" "${T[@]}" -- \
   "env --un git config --global core.hooksPath /x"
+run 2 "block: comment-hidden opener before git push --no-verify" "$PUB" "${T[@]}" -- \
+  $'# <<x\ngit push --no-verify origin main\nx'
+run 2 "block: quote-hidden opener before git push --no-verify" "$PUB" "${T[@]}" -- \
+  $'echo "<<x"\ngit push --no-verify origin main\nx'
 run 0 "not public: git push --no-verify in a repo not marked public" "$PRIV" "${T[@]}" -- \
   "git push --no-verify origin main"
 run 0 "off without a terms file: git push --no-verify (session-url-gate blocks it)" "$PUB" \

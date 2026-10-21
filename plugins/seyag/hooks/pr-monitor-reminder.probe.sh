@@ -330,6 +330,14 @@ OUT17=$(run_hook "Bash" "${BIGDOC}git push" SYG_PR_MONITOR_SEEN_FILE="$WORK/seen
 [[ "$OUT17" == *"PR #42"* ]] \
   && pass "a push past 128 KiB -> banner prints" \
   || { fail "a push past 128 KiB -> banner prints"; printf '%s\n' "$OUT17" | head -5 | sed 's/^/      /'; }
+OUT17B=$(run_hook "Bash" $'# <<x\ngit push\nx' SYG_PR_MONITOR_SEEN_FILE="$WORK/seen17b" FAKE_GH_PR_LIST_NUM=42)
+[[ "$OUT17B" == *"PR #42"* ]] \
+  && pass "a push behind a comment-hidden <<x opener -> banner prints" \
+  || { fail "a push behind a comment-hidden <<x opener -> banner prints"; printf '%s\n' "$OUT17B" | head -5 | sed 's/^/      /'; }
+OUT17C=$(run_hook "Bash" $'echo "<<x"\ngit push\nx' SYG_PR_MONITOR_SEEN_FILE="$WORK/seen17c" FAKE_GH_PR_LIST_NUM=42)
+[[ "$OUT17C" == *"PR #42"* ]] \
+  && pass "a push behind a quote-hidden <<x opener -> banner prints" \
+  || { fail "a push behind a quote-hidden <<x opener -> banner prints"; printf '%s\n' "$OUT17C" | head -5 | sed 's/^/      /'; }
 
 # --- 18. explicit push refspec names the branch (PR lookup + rev + dedup) --
 PUSH_WT="$WORK/push-branch-wt"

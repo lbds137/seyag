@@ -223,6 +223,8 @@ EOF'
 # command heredoc strip keeps the tail on an unterminated opener.
 run 2 "unterminated heredoc opener does not truncate a later piped target" 'echo "notes: <<EOF"
 echo "$(git push origin b)" | tail -5'
+run 2 "comment-hidden opener does not swallow piped target" $'# <<x\ngit push | tail -5\nx'
+run 2 "quote-hidden opener does not swallow piped target" $'echo "<<x"\ngit push | tail -5\nx'
 # THE ACCEPTED OVER-BLOCK, pinned as behaviour rather than left in a comment.
 # The span scan is command-wide because the stage split runs on the STRIPPED
 # text, where the span no longer exists to be tied back to its stage — so a
@@ -486,6 +488,19 @@ MSG
 cat <<'NOTES' | tail -5
 notes
 NOTES"
+run 2 "terminated heredoc before piped heredoc commit + later matching line (M4)" $'cat <<done\nx\ndone\ngit commit -m $(cat <<B\nb\nB\n) | tail\nfor i in 1; do :\ndone'
+# The rejoin keeps the whole opener text: a partly quoted <<E"OF" delimiter is
+# not cut down to <<E on the joined line.
+run 2 "partly quoted <<E\"OF\" heredoc inside \$(…) + trailing tail" 'git commit -m $(cat <<E"OF"
+feat: x
+EOF
+) | tail -5'
+# The rejoin also sees heredoc openers inside backtick spans, whose bodies
+# strip_heredoc_bodies already stripped inside the span.
+run 2 "backtick heredoc on git push + trailing tail" $'git push `: <<EOF\nx\nEOF\n` | tail -5'
+run 2 "backtick <<-EOF heredoc on git push + trailing tail" $'git push `: <<-EOF\nx\nEOF\n` | tail -5'
+run 2 "backtick heredoc commit message + trailing tail" $'git commit -m `cat <<EOF\nfeat: x\nEOF\n` | tail -5'
+run 0 "unpiped backtick heredoc is allowed" $'echo `: <<EOF\nx\nEOF\n`'
 
 # --- a BARE heredoc body is prose, not a pipeline -------------------------
 # The reproducer: writing up the incident this guard exists for — a body line

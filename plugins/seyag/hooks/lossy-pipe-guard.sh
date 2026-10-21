@@ -196,7 +196,7 @@ import sys
 # what catches a missing lib, not runtime.
 sys.path.insert(0, os.environ["HOOK_LIB"])
 from shell_quotes import (
-    HEREDOC_OPENER,
+    heredoc_openers,
     strip_heredoc_bodies,
     strip_quoted,
     substitution_spans_matching,
@@ -229,7 +229,9 @@ cmd = strip_heredoc_bodies(cmd)
 # `) | tail` lands in a later chain segment than the target. Collapse the
 # emptied heredoc back onto its opener line so the target and the truncator
 # stay in one segment — pinned by the "heredoc message + real trailing tail"
-# cases in the probe, which block only if this join happens.
+# cases in the probe, which block only if this join happens. `include_spans=True`
+# also returns openers inside backtick substitutions (`git push `: <<EOF …` | tail`),
+# whose bodies `strip_heredoc_bodies` stripped inside the span.
 #
 # The opener half is the SHARED pattern rather than a second spelling of it.
 # Re-typing it here dropped the `(?<!<)` here-string lookbehind the shared one
@@ -237,9 +239,10 @@ cmd = strip_heredoc_bodies(cmd)
 # joined into one segment and false-blocked — pinned by the "here-string is not
 # a heredoc opener to rejoin" case in the probe, which exits 0 only while the
 # lookbehind is inherited. Composing by string keeps ONE opener definition; the
-# replacement template rebuilds the opener from that pattern's groups (1 = the
-# `-` indent flag, 2 = the quote character, 3 = the marker), a coupling the
-# shared pattern's own comment names as its exported contract.
+# replacement keeps the WHOLE matched opener text (`group(0)`) plus a space,
+# rather than rebuilding it from the pattern's groups: a rebuild from groups
+# 1–3 dropped the rest of a partly quoted delimiter (`<<E"OF"` became `<<E`,
+# `<<'E'OF` became `<<'E'`). Pinned by the `<<E"OF"` rejoin case in the probe.
 #
 # ACCEPTED OVER-BLOCK, and its boundary is wider than the two-heredoc shape that
 # first surfaced it. The trailing `\n+\s*` matches whatever follows the emptied
@@ -261,7 +264,15 @@ cmd = strip_heredoc_bodies(cmd)
 # following text continues the statement, which for the `$(cat <<EOF … EOF) |
 # tail` form means a remainder beginning with `)` — is real work with its own
 # canary set, not a nicety.
-cmd = re.sub(HEREDOC_OPENER.pattern + r"\n+\s*", r"<<\1\2\3\2 ", cmd)
+for _m in reversed(heredoc_openers(cmd, bodies_stripped=True, include_spans=True)):
+    _tail = re.match(r"\n+\s*", cmd[_m.end() :])
+    if _tail:
+        cmd = (
+            cmd[: _m.start()]
+            + _m.group(0)
+            + " "
+            + cmd[_m.end() + _tail.end() :]
+        )
 
 # Quote stripping is a single left-to-right SCAN, not a pair of regex passes:
 # the two-pass version failed on ordinary English (an apostrophe in one
