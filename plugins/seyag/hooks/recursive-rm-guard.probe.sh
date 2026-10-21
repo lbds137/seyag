@@ -114,6 +114,12 @@ run 2 'watch --interval 5 -d rm -rf /home/example/x'
 run 2 'pkexec rm -rf /opt/thing'
 run 2 'pkexec --user root rm -rf /opt/thing'
 run 2 'unbuffer rm -rf /home/example/x'
+run 2 $'# <<x\nrm -rf build\nx'                                   # comment-hidden opener does not swallow rm
+run 2 $'echo "<<x"\nrm -rf build\nx'                              # quote-hidden opener does not swallow rm
+# A later quoted word after the target, so each case needs the heredoc opener scan, not just
+# unterminated-quote recovery, to keep the rm visible.
+run 2 $'git commit -m "$(cat <<\'EOF\'\nSupport 27" monitors\nEOF\n)"\nrm -rf build; echo "x"'
+run 2 $'echo ${x:-$(cat <<A\nit\'s\nA\n)}\nrm -rf build; echo \'x\''
 # Allowed: not a recursive or mass delete.
 run 0 'rm file.txt'
 run 0 'rm -f file.txt'

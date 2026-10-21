@@ -507,6 +507,10 @@ run 2 "env --ignore-e on a push (abbreviated --ignore-environment) blocks" "$PUB
   "env --ignore-e git push origin main"
 run 2 "env --i on a push (shortest abbreviation of --ignore-environment) blocks" "$PUBW" "${NT[@]}" -- \
   "env --i git push origin main"
+run 2 "comment-hidden opener before git push --no-verify blocks" "$PUBW" "${NT[@]}" -- \
+  $'# <<x\ngit push --no-verify origin main\nx'
+run 2 "quote-hidden opener before git push --no-verify blocks" "$PUBW" "${NT[@]}" -- \
+  $'echo "<<x"\ngit push --no-verify origin main\nx'
 run 0 "not public: git push --no-verify passes" "$WORK" "${NT[@]}" -- \
   "git push --no-verify origin main"
 

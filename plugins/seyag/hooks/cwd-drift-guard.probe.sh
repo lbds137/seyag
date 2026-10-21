@@ -132,6 +132,10 @@ check 0 "a heredoc commit message body is not scanned" \
   "git commit -F - <<'EOF'
 git add docs/x.md
 EOF" "$SUB"
+check 2 "a comment-hidden opener does not swallow git add" \
+  $'# <<x\ngit add docs/x.md\nx' "$SUB"
+check 2 "a quote-hidden opener does not swallow git add" \
+  $'echo "<<x"\ngit add docs/x.md\nx' "$SUB"
 
 # --- Case and anchor flags -----------------------------------------------
 check 2 "uppercase GIT is still detected" "GIT ADD docs/x.md" "$SUB"

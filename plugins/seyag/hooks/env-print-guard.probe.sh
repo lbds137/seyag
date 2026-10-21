@@ -418,6 +418,39 @@ expect_allow 'env > $HOME/x # note' 'env > $HOME/x # note'
 # shellcheck disable=SC2016
 expect_allow 'env > $HOME/x <<< foo' 'env > $HOME/x <<< foo'
 expect_deny "env > out.txt <<'E' NEWLINE x NEWLINE E" $'env > out.txt <<\'E\'\nx\nE' "bulk environment dump via"
+expect_deny "env > out.txt <<-E NEWLINE x NEWLINE E" $'env > out.txt <<-E\nx\nE' "bulk environment dump via"
+expect_deny "env > out.txt <<E NEWLINE x NEWLINE E" $'env > out.txt <<E\nx\nE' "bulk environment dump via"
+# shellcheck disable=SC2016
+expect_deny "env > \$TMPDIR/x <<'E' NEWLINE x NEWLINE E" $'env > $TMPDIR/x <<\'E\'\nx\nE' "bulk environment dump via"
+# shellcheck disable=SC2016
+expect_deny "env > \$TMPDIR/x <<-E NEWLINE x NEWLINE E" $'env > $TMPDIR/x <<-E\nx\nE' "bulk environment dump via"
+# shellcheck disable=SC2016
+expect_deny "env > \$TMPDIR/x <<E NEWLINE x NEWLINE E" $'env > $TMPDIR/x <<E\nx\nE' "bulk environment dump via"
+# shellcheck disable=SC2016
+expect_deny 'echo $((1<<4)) | env > $TMPDIR/x (accepted over-deny)' 'echo $((1<<4)) | env > $TMPDIR/x' "bulk environment dump via"
+# shellcheck disable=SC2016
+expect_deny "read -rp 'x' HOME <<< /dev | env > \$HOME/x" "read -rp 'x' HOME <<< /dev | env > \$HOME/x" "bulk environment dump via"
+expect_deny '# <<x NEWLINE env NEWLINE x' $'# <<x\nenv\nx' "bulk environment dump via"
+expect_deny 'echo "<<x" NEWLINE env NEWLINE x' $'echo "<<x"\nenv\nx' "bulk environment dump via"
+# shellcheck disable=SC2016
+expect_deny 'echo $(true)#; env' 'echo $(true)#; env' "bulk environment dump via"
+# shellcheck disable=SC2016
+expect_deny 'echo ${a:- #}; env' 'echo ${a:- #}; env' "bulk environment dump via"
+# shellcheck disable=SC2016
+expect_deny 'echo `echo hi #`; env' 'echo `echo hi #`; env' "bulk environment dump via"
+expect_allow '(true)#; env' '(true)#; env'
+expect_deny 'H1: stray quote inside "$(cat <<EOF …)" body before env; echo "x"' $'git commit -m "$(cat <<\'EOF\'\nSupport 27" monitors\nEOF\n)"\nenv; echo "x"' "bulk environment dump via"
+expect_deny "H2a: ((1))# it's NEWLINE env" $'((1))# it\'s\nenv' "bulk environment dump via"
+expect_deny "H2b: case x in *)# it's NEWLINE env;; esac" $'case x in *)# it\'s\nenv;; esac' "bulk environment dump via"
+# shellcheck disable=SC2016
+expect_deny 'H3: echo `#\``#; env' 'echo `#\``#; env' "bulk environment dump via"
+expect_deny "M1: echo \${x:-\$(cat <<A ...)} NEWLINE env; echo 'x'" $'echo ${x:-$(cat <<A\nit\'s\nA\n)}\nenv; echo \'x\'' "bulk environment dump via"
+expect_deny 'M2: cat <<A `: <<B` NEWLINE a NEWLINE A NEWLINE env NEWLINE B' $'cat <<A `: <<B`\na\nA\nenv\nB' "bulk environment dump via"
+# Round 3: these pin regressions found in earlier rounds of this rewrite, which main did not have.
+expect_deny "BT1: x=\`cat <<EOF NEWLINE it's NEWLINE EOF NEWLINE \` NEWLINE env; echo 'done'" $'x=`cat <<EOF\nit\'s\nEOF\n`\nenv; echo \'done\'' "bulk environment dump via"
+expect_deny "BT3: x=\`case a in a) cat <<'EOF' NEWLINE it's NEWLINE EOF NEWLINE ;; esac\` NEWLINE env; echo 'done'" $'x=`case a in a) cat <<\'EOF\'\nit\'s\nEOF\n;; esac`\nenv; echo \'done\'' "bulk environment dump via"
+expect_deny "AR1: ((echo a) ; echo b # it's NEWLINE env # don't NEWLINE )" $'((echo a) ; echo b # it\'s\nenv # don\'t\n)' "bulk environment dump via"
+expect_deny "CS1: x=\"\$(case a in a) cat <<'EOF' NEWLINE it's 27\" wide NEWLINE EOF NEWLINE ;; esac)\" NEWLINE env; echo \"done\"" $'x="$(case a in a) cat <<\'EOF\'\nit\'s 27" wide\nEOF\n;; esac)"\nenv; echo "done"' "bulk environment dump via"
 # shellcheck disable=SC2016
 expect_allow 'env > $TMPDIR/x' 'env > $TMPDIR/x'
 # shellcheck disable=SC2016

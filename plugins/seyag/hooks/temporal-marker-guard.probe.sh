@@ -225,6 +225,8 @@ expect block 'cd <dir> && git commit -a' "cd $d && git commit -a -m x" "$TMP"
 expect block 'git -c user.name=x commit -a' 'git -c user.name=x commit -a -m x' "$d"
 expect block 'env-prefixed commit' 'env FOO=1 git commit -a -m x' "$d"
 expect block 'commit inside bash -c' "bash -c 'git commit -a -m x'" "$d"
+expect block 'comment-hidden opener before commit -a' $'# <<x\ngit commit -a -m x\nx' "$d"
+expect block 'quote-hidden opener before commit -a' $'echo "<<x"\ngit commit -a -m x\nx' "$d"
 
 printf '\n--- git stage is git add ---\n'
 r=$(new_repo)

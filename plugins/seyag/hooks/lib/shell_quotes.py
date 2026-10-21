@@ -62,7 +62,8 @@ CONSUMERS
 ---------
 In this plugin (hooks/):
     lossy-pipe-guard.sh           strip_quoted, strip_heredoc_bodies,
-                                  substitution_spans_matching, HEREDOC_OPENER
+                                  substitution_spans_matching, heredoc_openers,
+                                  HEREDOC_OPENER
     cwd-drift-guard.sh            strip_quoted_indexed, strip_heredoc_bodies,
                                   QUOTED_SPAN, ESCAPED_BLANK (substitution-blind,
                                   the lower-stakes drift-warning case)
@@ -138,55 +139,75 @@ def _scan_events(text, bash_words=False):
     span) and before a newline (where both are removed). That is bash's rule,
     argued from its documented quoting behaviour rather than a runtime repro.
 
-    `bash_words=True` (the `_tokens` reader only; `strip_quoted` and its
-    siblings keep the plain behaviour their consumers are pinned on) adds two
-    things bash does outside quotes:
-    - a `#` that STARTS a word begins a comment to the end of the line, so an
-      apostrophe in it opens no quote (`# it's fine` NEWLINE `rm -rf x` hid
-      the rm from every splitter consumer). `a#b` and `$#` are not comments.
+    `bash_words=True` (the `_tokens` and heredoc-opener readers; `strip_quoted`
+    and its siblings keep the plain behaviour their consumers are pinned on)
+    adds what bash does outside quotes:
+    - a `#` that STARTS a word begins a comment, so an apostrophe in it opens
+      no quote (`# it's fine` NEWLINE `rm -rf x` hid the rm from every splitter
+      consumer). `a#b` and `$#` are not comments. Outside quotes a stack
+      tracks open `$(`/`<(`/`)` substitutions, plain `(` subshells,
+      `$((`/`((` arithmetic, `${…}` parameter expansions and `case` commands:
+      after a `)` word start is true unless that `)` closed a `$(`,
+      `<(`/`>(` or `$((` substitution; `#` never starts a comment while the
+      innermost construct is `${…}` or arithmetic; inside `$(…)` a comment
+      ends at the newline. The stack has no depth cap — how deep the nesting
+      is never changes how the text is read — and each push or pop is O(1).
+    - a backtick span ends where bash ends it: at the next backtick not
+      preceded by an unescaped backslash (quotes do NOT protect a backtick).
+      Its interior is scanned as a command of its own that nothing opened in
+      it can outlive: a comment ends at the closing backtick, and a quote
+      still open there is a literal character (the recovery rule below). A
+      backtick with no closing backtick is itself a literal character.
+    - `((` is arithmetic only when the `)` that balances its inner `(` is
+      immediately followed by `)`, as in bash; otherwise it is two nested
+      subshells (`((echo a) )`), where `#` can start a comment. `$((` is
+      always arithmetic.
+    - inside a `case` command a pattern's `)` closes nothing, so
+      `$(case a in a) …;; esac)` stays one substitution until its last `)`.
     - `$'…'` (ANSI-C quoting) yields its decoded value, and `$"…"` is a double-
       quoted string, so `rm $'-rf' x` reads as `rm -rf x`, not `rm $-rf x`.
+    - when a quote is still open at the end of the text (or of the backtick
+      span it opened in), that quote character is emitted as an ordinary
+      `("char", q)` and scanning continues after it unquoted, so a stray quote
+      can never hide later commands (`bash_words=False` keeps
+      `unterminated`).
     """
+    if not bash_words:
+        yield from _scan_plain(text)
+        return
+    for kind, payload, _pos, _ctx in _scan(text):
+        if kind == "run":
+            for ch in payload:
+                yield ("char", ch)
+        else:
+            yield (kind, payload)
+
+
+def _scan_plain(text):
+    """The `bash_words=False` reader behind `_scan_events`: quotes and
+    backslashes only, ending with `unterminated` when a quote is left open."""
     quote = None
     span = []
-    word_start = True
     i = 0
-    while i < len(text):
+    n = len(text)
+    while i < n:
         ch = text[i]
         if quote is None:
-            if ch == "\\" and i + 1 < len(text):
+            if ch == "\\" and i + 1 < n:
                 nxt = text[i + 1]
-                yield ("continuation", "") if nxt == "\n" else ("escape", nxt)
-                if nxt != "\n":
-                    word_start = False
+                if nxt == "\n":
+                    yield ("continuation", "")
+                else:
+                    yield ("escape", nxt)
                 i += 2
-                continue
-            if bash_words and ch == "#" and word_start:
-                newline = text.find("\n", i)
-                if newline == -1:
-                    break
-                i = newline
-                continue
-            if bash_words and ch == "$" and text[i + 1 : i + 2] == '"':
-                i += 1  # `$"…"` is a double-quoted string (locale translation)
-                continue
-            if bash_words and ch == "$" and text[i + 1 : i + 2] == "'":
-                value, end = _ansi_c_span(text, i + 2)
-                if end is None:
-                    yield ("unterminated", "")
-                    return
-                yield ("quoted", value)
-                word_start = False
-                i = end + 1
                 continue
             if ch in "\"'":
                 quote = ch
                 span = []
             else:
                 yield ("char", ch)
-                word_start = ch in " \t\n;&|()"
         elif quote == '"':
-            if ch == "\\" and i + 1 < len(text):
+            if ch == "\\" and i + 1 < n:
                 nxt = text[i + 1]
                 if nxt == "\n":
                     pass
@@ -200,7 +221,6 @@ def _scan_events(text, bash_words=False):
             if ch == quote:
                 yield ("quoted", "".join(span))
                 quote = None
-                word_start = False
             else:
                 span.append(ch)
         else:
@@ -209,12 +229,578 @@ def _scan_events(text, bash_words=False):
             if ch == quote:
                 yield ("quoted", "".join(span))
                 quote = None
-                word_start = False
             else:
                 span.append(ch)
         i += 1
     if quote is not None:
         yield ("unterminated", "")
+
+
+def _peek_char(text, j, end=None):
+    """Index and character of the first char at or after `j` (and before
+    `end`, default the end of `text`), skipping any backslash-newline
+    continuation splices."""
+    n = len(text) if end is None else end
+    while j + 1 < n and text[j] == "\\" and text[j + 1] == "\n":
+        j += 2
+    if j < n:
+        return j, text[j]
+    return j, ""
+
+
+# Construct kinds on the bash-words stack (`_bash_scan`): `subshell`, `subst`
+# (`$(`), `proc_subst` (`<(`/`>(`), `arith` (`((` and parens inside
+# arithmetic), `arith_subst` (`$((`), `param` (`${`), `dq_subst` /
+# `dq_arith_subst` (`$(` / `$((` inside double quotes, `descend_dq` only),
+# `backtick` (the root of a backtick span's own scan), `case_word` /
+# `case_in` / `case_pat` / `case_cmd` (a `case` command before its subject,
+# before `in`, reading a pattern, running a clause) and `pat_paren` (a paren
+# inside a case pattern).
+_NO_COMMENT = frozenset(("param", "arith", "arith_subst", "dq_arith_subst"))
+_ARITH = frozenset(("arith", "arith_subst", "dq_arith_subst"))
+_PAREN_CLOSES = frozenset(
+    ("subshell", "subst", "proc_subst", "arith", "arith_subst", "dq_subst", "dq_arith_subst")
+)
+_CASE_OPEN = frozenset(("case_word", "case_in", "case_cmd"))
+_COMMAND_CONTEXTS = frozenset(
+    (None, "subshell", "subst", "proc_subst", "dq_subst", "backtick", "case_cmd")
+)
+# Reserved words after which the next word is still at command position.
+_KEEP_CMD_POS = frozenset(("if", "then", "elif", "else", "do", "while", "until", "!", "{", "time"))
+# The characters outside quotes that need more than "part of the current word".
+_SPECIAL = frozenset("\\#$'\"`{}() \t\n;&|<>")
+_INERT_RUN = re.compile(r"[^\\#$'\"`{}() \t\n;&|<>]+")
+_DQ_STOP = re.compile(r'[\\"]')
+_DQ_STOP_DESCEND = re.compile(r'[\\"$`]')
+_BACKTICK_STOP = re.compile(r"[\\`]")
+_PAREN_STOP = re.compile(r"[\\'\"()]")
+
+
+class _ScanState:
+    """What a bash-words scan of one text, within one bound, carries across
+    the `_scan` calls that resume it (`_next_heredoc_line` resumes after each
+    heredoc body): the construct stack, the backtick spans passed (for the
+    caller to strip inside), and the memos that keep the scan linear.
+
+    LINEAR QUOTE RECOVERY. A double-quoted RUN starts at an opening quote or
+    where the scan returns to double quotes (after the `)` of a `$(…)` or a
+    backtick span inside them) and ends at its closing quote or its next
+    descent into `$(`/a backtick; a run that reaches the bound instead
+    descends nowhere and passes every later position with the same backslash
+    pairing (a run can only start just after a non-backslash character that
+    the scan read unescaped), so every run starting at or after its start is
+    unterminated too. `dq_fail_from` records the earliest such start, and a
+    run starting at or after it is known unterminated without scanning;
+    `sq_fail_from` does the same for `'` (no escapes, so "no `'` from here
+    on"), `ansi_fail_from` for `$'…'` and `bt_fail_from` for a backtick span
+    with no closing backtick. The scan never moves backwards, so each kind
+    costs at most one scan to the bound.
+
+    `paren_match` memoizes the `((` lookahead per `(` position, and `budget`
+    caps the lookahead's total steps; past it a `((` keeps the arithmetic
+    reading (the pre-lookahead behaviour)."""
+
+    __slots__ = (
+        "stack", "spans", "dq_fail_from", "sq_fail_from", "ansi_fail_from",
+        "bt_fail_from", "la_dq_fail_from", "paren_match", "budget",
+    )
+
+    def __init__(self, root, size):
+        self.stack = [] if root is None else [root]
+        self.spans = []
+        self.dq_fail_from = None
+        self.sq_fail_from = None
+        self.ansi_fail_from = None
+        self.bt_fail_from = None
+        self.la_dq_fail_from = None
+        self.paren_match = {}
+        self.budget = 8 * size + 1024
+
+
+def _scan(text, start=0, *, descend_dq=False, state=None):
+    """The bash-words scanner behind `_scan_events(bash_words=True)`,
+    `_tokens` and the heredoc readers, yielding `(kind, payload, pos, ctx)`:
+    `pos` is the character offset in `text` and `ctx` is `(innermost
+    construct kind or None, inside a backtick span)`. The kinds are those of
+    `_scan_events` minus `unterminated`, plus `("run", s)`: a run of ordinary
+    word characters outside quotes, emitted whole so a long word is one event.
+
+    With `descend_dq=True`, `$(` inside double quotes enters a nested
+    unquoted command context (`dq_subst`) that returns to double quotes at
+    its matching `)`, and a backtick span inside double quotes is scanned
+    like an unquoted one (same boundary rule) before the double quotes
+    resume. Without it a backtick inside double quotes is an ordinary
+    character of the quoted value, as before. `state` (a `_ScanState`)
+    carries the stack and memos across calls that resume the same text."""
+    if state is None:
+        state = _ScanState(None, len(text))
+    return _bash_scan(text, start, len(text), descend_dq, state, False)
+
+
+def _finish_word(word, stack, cmd_pos):
+    """Apply a word that just ended to the `case` tracking on `stack`; return
+    whether the next word is at command position. `word` is the word's text
+    when it is short and wholly unquoted (a possible reserved word), else
+    None."""
+    top = stack[-1] if stack else None
+    if top == "case_word":
+        stack[-1] = "case_in"
+        return False
+    if top == "case_in":
+        if word == "in":
+            stack[-1] = "case_pat"
+        return False
+    if top == "case_pat":
+        if word == "esac":
+            stack.pop()
+        return False
+    if not cmd_pos or top not in _COMMAND_CONTEXTS:
+        return False
+    if word == "case":
+        stack.append("case_word")
+        return False
+    if word == "esac" and top == "case_cmd":
+        stack.pop()
+        return False
+    return word in _KEEP_CMD_POS
+
+
+def _backtick_end(text, j, n, st):
+    """Index of the backtick closing a span whose interior starts at `j`: the
+    next backtick not preceded by an unescaped backslash, as bash finds it
+    (quotes do not protect a backtick). -1 when there is none before `n`."""
+    if st.bt_fail_from is not None and j >= st.bt_fail_from:
+        return -1
+    start = j
+    while True:
+        m = _BACKTICK_STOP.search(text, j, n)
+        if m is None:
+            st.bt_fail_from = start
+            return -1
+        p = m.start()
+        if text[p] == "`":
+            return p
+        j = p + 2
+
+
+def _dq_run(text, j, n, descend, st):
+    """Read a double-quoted run from `j` (just past its opening quote, or past
+    the `)`/backtick that returned to double quotes) without emitting events.
+
+    Returns `("close", p, None, value)` at the closing quote `p`; with
+    `descend`, `("subst", p, (k, is_arith), None)` at a `$(` (`k` the index
+    of its paren, `is_arith` for `$((`) and `("bt", p, end, None)` at a
+    backtick span closing at `end`; or None when the run reaches `n`
+    unterminated. A backslash is literal except before `$`, a backtick, `"`,
+    `\\\\` (removed, character kept) and a newline (both removed)."""
+    stop = _DQ_STOP_DESCEND if descend else _DQ_STOP
+    span = []
+    while True:
+        m = stop.search(text, j, n)
+        if m is None:
+            return None
+        p = m.start()
+        if p > j:
+            span.append(text[j:p])
+        c = text[p]
+        if c == '"':
+            return ("close", p, None, "".join(span))
+        if c == "\\":
+            if p + 1 < n:
+                nxt = text[p + 1]
+                if nxt == "\n":
+                    pass
+                elif nxt in '$`"\\':
+                    span.append(nxt)
+                else:
+                    span.append(c + nxt)
+                j = p + 2
+            else:
+                span.append(c)
+                j = p + 1
+            continue
+        if c == "$":
+            k, nxt = _peek_char(text, p + 1, n)
+            if nxt == "(":
+                _, after = _peek_char(text, k + 1, n)
+                return ("subst", p, (k, after == "("), None)
+            span.append(c)
+            j = p + 1
+            continue
+        end = _backtick_end(text, p + 1, n, st)
+        if end == -1:
+            span.append(c)
+            j = p + 1
+            continue
+        return ("bt", p, end, None)
+
+
+def _lookahead_dq_end(text, j, n, st):
+    """For the `((` lookahead: index of the `"` closing a double-quoted run
+    from `j`, -1 when none does, None once the lookahead budget is spent."""
+    if st.la_dq_fail_from is not None and j >= st.la_dq_fail_from:
+        return -1
+    start = j
+    while True:
+        st.budget -= 1
+        if st.budget < 0:
+            return None
+        m = _DQ_STOP.search(text, j, n)
+        if m is None:
+            st.la_dq_fail_from = start
+            return -1
+        p = m.start()
+        if text[p] == '"':
+            return p
+        j = p + 2
+
+
+def _paren_match(text, k, n, st):
+    """Index of the `)` balancing the `(` at `k`, counting parens outside
+    quotes and escapes; -1 when none does before `n`; None once the state's
+    lookahead budget is spent. Every `(` the walk opens is memoized with its
+    match (or -1), so a later lookahead from inside this one is a dict hit
+    and a walk jumps over any `(` already matched."""
+    memo = st.paren_match
+    if k in memo:
+        return memo[k]
+    opens = [k]
+    j = k + 1
+    while True:
+        st.budget -= 1
+        if st.budget < 0:
+            return None
+        m = _PAREN_STOP.search(text, j, n)
+        if m is None:
+            break
+        p = m.start()
+        c = text[p]
+        if c == "\\":
+            j = p + 2
+        elif c == "'":
+            close = -1
+            if st.sq_fail_from is None or p + 1 < st.sq_fail_from:
+                close = text.find("'", p + 1, n)
+                if close == -1:
+                    st.sq_fail_from = p + 1
+            j = p + 1 if close == -1 else close + 1
+        elif c == '"':
+            close = _lookahead_dq_end(text, p + 1, n, st)
+            if close is None:
+                return None
+            j = p + 1 if close == -1 else close + 1
+        elif c == "(":
+            seen = memo.get(p)
+            if seen is None:
+                opens.append(p)
+                j = p + 1
+            elif seen == -1:
+                break
+            else:
+                j = seen + 1
+        else:
+            memo[opens.pop()] = p
+            if not opens:
+                return p
+            j = p + 1
+    for o in opens:
+        memo[o] = -1
+    return -1
+
+
+def _dparen_is_arith(text, k, n, st):
+    """True when the `((` whose inner `(` is at `k` is arithmetic: the `)`
+    balancing that inner `(` is immediately followed by `)`. With no such
+    `)` (or no lookahead budget left) it stays arithmetic, the reading
+    before this lookahead existed."""
+    close = _paren_match(text, k, n, st)
+    if close is None or close < 0:
+        return True
+    _, after = _peek_char(text, close + 1, n)
+    return after == ")"
+
+
+def _bash_scan(text, start, bound, descend, st, in_bt):
+    """The `_scan` generator over `text[start:bound]`. `st` is the
+    `_ScanState`; `in_bt` marks a backtick span's own scan, whose bound is the
+    span's closing backtick."""
+    stack = st.stack
+    ctx = (stack[-1] if stack else None, in_bt)
+    word_start = True
+    cmd_pos = True
+    word_begin = -1
+    word_plain = False
+    prev = ""
+    lone_dollar = False
+    dq_from = -1
+    i = start
+    n = bound
+    while True:
+        if dq_from >= 0:
+            # Double quotes opened (or returned to) at `dq_from`.
+            q = dq_from
+            dq_from = -1
+            j = q + 1
+            res = None
+            if st.dq_fail_from is None or j < st.dq_fail_from:
+                res = _dq_run(text, j, n, descend, st)
+                if res is None:
+                    st.dq_fail_from = j
+            if word_begin < 0:
+                word_begin = q
+            word_plain = False
+            if res is None:
+                # Unterminated: the quote is a literal character.
+                yield ("char", '"', q, ctx)
+                prev = '"'
+                lone_dollar = False
+                word_start = False
+                i = q + 1
+                continue
+            what, p, extra, value = res
+            if what == "close":
+                yield ("quoted", value, q, ctx)
+                word_start = False
+                prev = ""
+                lone_dollar = False
+                i = p + 1
+            elif what == "subst":
+                k, is_arith = extra
+                kind = "dq_arith_subst" if is_arith else "dq_subst"
+                stack.append(kind)
+                ctx = (kind, in_bt)
+                word_start = True
+                cmd_pos = True
+                word_begin = -1
+                prev = "("
+                lone_dollar = False
+                i = k + 1
+            else:
+                st.spans.append((p + 1, extra))
+                yield from _bash_scan(
+                    text, p + 1, extra, descend, _ScanState("backtick", extra - p), True
+                )
+                dq_from = extra
+            continue
+        if i >= n:
+            break
+        ch = text[i]
+        if ch not in _SPECIAL:
+            j = _INERT_RUN.match(text, i, n).end()
+            if word_begin < 0:
+                word_begin = i
+                word_plain = True
+            yield ("run", text[i:j], i, ctx)
+            word_start = False
+            prev = text[j - 1]
+            lone_dollar = False
+            i = j
+            continue
+        if ch == "\\" and i + 1 < n:
+            nxt = text[i + 1]
+            if nxt == "\n":
+                yield ("continuation", "", i, ctx)
+                if word_begin >= 0:
+                    word_plain = False
+            else:
+                yield ("escape", nxt, i, ctx)
+                word_start = False
+                prev = ""
+                lone_dollar = False
+                if word_begin < 0:
+                    word_begin = i
+                word_plain = False
+            i += 2
+            continue
+        if ch == "#" and word_start and ctx[0] not in _NO_COMMENT:
+            newline = text.find("\n", i, n)
+            if newline == -1:
+                break
+            i = newline
+            continue
+        if ch == "$" and i + 1 < n and text[i + 1] in "\"'":
+            if word_begin < 0:
+                word_begin = i
+            word_plain = False
+            if text[i + 1] == '"':
+                prev = "$"
+                lone_dollar = False
+                i += 1  # `$"…"` is a double-quoted string (locale translation)
+                continue
+            value = end = None
+            if st.ansi_fail_from is None or i + 2 < st.ansi_fail_from:
+                value, end = _ansi_c_span(text, i + 2, n)
+                if end is None:
+                    st.ansi_fail_from = i + 2
+            word_start = False
+            lone_dollar = False
+            if end is None:
+                yield ("char", "$", i, ctx)
+                yield ("char", "'", i + 1, ctx)
+                prev = "'"
+                i += 2
+                continue
+            yield ("quoted", value, i, ctx)
+            prev = ""
+            i = end + 1
+            continue
+        if ch == "'":
+            if word_begin < 0:
+                word_begin = i
+            word_plain = False
+            close = -1
+            if st.sq_fail_from is None or i + 1 < st.sq_fail_from:
+                close = text.find("'", i + 1, n)
+                if close == -1:
+                    st.sq_fail_from = i + 1
+            word_start = False
+            lone_dollar = False
+            if close == -1:
+                # Unterminated: the quote is a literal character.
+                yield ("char", "'", i, ctx)
+                prev = "'"
+                i += 1
+                continue
+            yield ("quoted", text[i + 1 : close], i, ctx)
+            prev = ""
+            i = close + 1
+            continue
+        if ch == '"':
+            prev = ""
+            lone_dollar = False
+            dq_from = i
+            continue
+        if ch == "`":
+            if word_begin < 0:
+                word_begin = i
+            word_plain = False
+            yield ("char", "`", i, ctx)
+            end = _backtick_end(text, i + 1, n, st)
+            if end >= 0:
+                st.spans.append((i + 1, end))
+                yield from _bash_scan(
+                    text, i + 1, end, descend, _ScanState("backtick", end - i), True
+                )
+                yield ("char", "`", end, ctx)
+                i = end + 1
+            else:
+                i += 1  # no closing backtick: a literal character
+            word_start = False
+            prev = "`"
+            lone_dollar = False
+            continue
+        if ch in " \t\n;&|<>()":
+            # A word ends here; apply it to the `case` tracking first, so the
+            # `)` after `esac` is yielded with the construct it really closes.
+            if word_begin >= 0:
+                cmd_pos = _finish_word(
+                    text[word_begin:i] if word_plain and i - word_begin <= 5 else None,
+                    stack,
+                    cmd_pos,
+                )
+                word_begin = -1
+                ctx = (stack[-1] if stack else None, in_bt)
+            if ch == "(":
+                top = ctx[0]
+                yield ("char", ch, i, ctx)
+                k, nxt = _peek_char(text, i + 1, n)
+                if top in _ARITH:
+                    kind = "subst" if prev == "$" and nxt != "(" else "arith"
+                elif prev == "$" and nxt == "(":
+                    kind = "arith_subst"
+                elif prev == "$":
+                    kind = "subst"
+                elif prev in ("<", ">"):
+                    kind = "proc_subst"
+                elif top == "param":
+                    kind = None
+                elif top == "case_pat":
+                    # A pattern's optional leading `(` opens nothing.
+                    kind = None if word_start else "pat_paren"
+                elif top == "pat_paren":
+                    kind = "pat_paren"
+                elif nxt == "(" and _dparen_is_arith(text, k, n, st):
+                    kind = "arith"
+                else:
+                    kind = "subshell"
+                if kind is not None:
+                    stack.append(kind)
+                    ctx = (kind, in_bt)
+                word_start = True
+                cmd_pos = True
+            elif ch == ")":
+                top = ctx[0]
+                if top == "case_pat":
+                    # The `)` ending a case pattern; a command follows.
+                    yield ("char", ch, i, ctx)
+                    stack[-1] = "case_cmd"
+                    ctx = ("case_cmd", in_bt)
+                    word_start = True
+                    cmd_pos = True
+                elif top == "pat_paren":
+                    yield ("char", ch, i, ctx)
+                    stack.pop()
+                    ctx = (stack[-1] if stack else None, in_bt)
+                    word_start = False
+                else:
+                    # A `case` still open here never saw its `esac`.
+                    while top in _CASE_OPEN:
+                        stack.pop()
+                        top = stack[-1] if stack else None
+                    ctx = (top, in_bt)
+                    yield ("char", ch, i, ctx)
+                    closed = stack.pop() if top in _PAREN_CLOSES else None
+                    ctx = (stack[-1] if stack else None, in_bt)
+                    cmd_pos = False
+                    if closed in ("dq_subst", "dq_arith_subst"):
+                        word_start = False
+                        prev = ch
+                        lone_dollar = False
+                        dq_from = i
+                        continue
+                    word_start = closed not in ("subst", "proc_subst", "arith_subst")
+            else:
+                yield ("char", ch, i, ctx)
+                if ch in "<>":
+                    cmd_pos = False
+                    word_start = False
+                else:
+                    word_start = True
+                    if ch != " " and ch != "\t":
+                        cmd_pos = True
+                        if (
+                            ch == ";"
+                            and ctx[0] == "case_cmd"
+                            and i + 1 < n
+                            and text[i + 1] in ";&"
+                        ):
+                            # `;;`, `;&`, `;;&` end a clause; patterns follow.
+                            stack[-1] = "case_pat"
+                            ctx = ("case_pat", in_bt)
+            prev = ch
+            lone_dollar = False
+            i += 1
+            continue
+        # `{`, `}`, a plain `$`, a `#` that starts no comment, a lone trailing
+        # backslash: one character of the current word.
+        if word_begin < 0:
+            word_begin = i
+            word_plain = True
+        if ch == "$" or ch == "\\":
+            word_plain = False
+        yield ("char", ch, i, ctx)
+        if ch == "{":
+            if lone_dollar:
+                stack.append("param")
+                ctx = ("param", in_bt)
+        elif ch == "}":
+            if ctx[0] == "param":
+                stack.pop()
+                ctx = (stack[-1] if stack else None, in_bt)
+        word_start = False
+        lone_dollar = (ch == "$") and not lone_dollar
+        prev = ch
+        i += 1
 
 
 _ANSI_C_ESCAPES = {
@@ -223,16 +809,31 @@ _ANSI_C_ESCAPES = {
 }
 
 
-def _ansi_c_span(text, start):
-    """Decode a `$'…'` body starting at `text[start]`; return `(value, index of
-    the closing quote)`, or `(None, None)` when it never closes."""
+_ANSI_C_STOP = re.compile(r"[\\']")
+_HEX_DIGITS = {
+    width: re.compile(r"[0-9A-Fa-f]{1,%d}" % width) for width in (2, 4, 8)
+}
+_OCTAL_DIGITS = re.compile(r"[0-7]{1,3}")
+
+
+def _ansi_c_span(text, start, end=None):
+    """Decode a `$'…'` body starting at `text[start]` (and ending before
+    `end`, default the end of `text`); return `(value, index of the closing
+    quote)`, or `(None, None)` when it never closes."""
+    n = len(text) if end is None else end
     out = []
     i = start
-    while i < len(text):
+    while i < n:
+        m = _ANSI_C_STOP.search(text, i, n)
+        if m is None:
+            return None, None
+        if m.start() > i:
+            out.append(text[i : m.start()])
+            i = m.start()
         ch = text[i]
         if ch == "'":
             return "".join(out), i
-        if ch != "\\" or i + 1 >= len(text):
+        if i + 1 >= n:
             out.append(ch)
             i += 1
             continue
@@ -242,18 +843,20 @@ def _ansi_c_span(text, start):
             i += 2
         elif nxt in "xuU":
             width = {"x": 2, "u": 4, "U": 8}[nxt]
-            digits = re.match(r"[0-9A-Fa-f]{1,%d}" % width, text[i + 2 :])
-            if digits:
+            digits = _HEX_DIGITS[width].match(text, i + 2, n)
+            # Past U+10FFFF chr() raises, and an exception here fails every
+            # consuming hook open; such an escape stays literal instead.
+            if digits and int(digits.group(0), 16) <= 0x10FFFF:
                 out.append(chr(int(digits.group(0), 16)))
                 i += 2 + len(digits.group(0))
             else:
                 out.append("\\" + nxt)
                 i += 2
         elif nxt in "01234567":
-            digits = re.match(r"[0-7]{1,3}", text[i + 1 :]).group(0)
+            digits = _OCTAL_DIGITS.match(text, i + 1, n).group(0)
             out.append(chr(int(digits, 8) & 0xFF))
             i += 1 + len(digits)
-        elif nxt == "c" and i + 2 < len(text):
+        elif nxt == "c" and i + 2 < n:
             out.append(chr(ord(text[i + 2]) & 0x1F))
             i += 3
         else:
@@ -631,11 +1234,212 @@ def _extract_spans(text, skip_single_quoted):
 # here-string followed by a piped command, so the hook composes from this name
 # instead. Two consequences for anyone editing the pattern: the group NUMBERING
 # (1 = the `-` indent flag, 2 = the quote character, 3 = the marker) is part of
-# the exported contract, because that hook's replacement template reconstructs
-# an opener from those groups; and both consumers are pinned by the heredoc and
-# here-string cases in lossy-pipe-guard.probe.sh, which is where a group
-# renumbering would surface.
-HEREDOC_OPENER = re.compile(r"(?<!<)<<(-?)\s*(['\"]?)(\w+)\2")
+# the exported contract (callers read them; the hook's rejoin itself now keeps
+# the whole matched opener, `group(0)`, so a partly quoted delimiter such as
+# `<<E"OF"` survives it unchanged); and both consumers are pinned by the
+# heredoc and here-string cases in lossy-pipe-guard.probe.sh, which is where a
+# change to the pattern would surface.
+HEREDOC_OPENER = re.compile(r"(?<!<)<<(-?)\s*(['\"]?)(\w+)\2(?:['\"]?\w+['\"]?)*")
+
+
+def _heredoc_marker(match):
+    """Return the delimiter word after `<<`/`<<-` with bash quote removal
+    applied (`<<E"OF"` and `<<'E'OF` both yield `EOF`)."""
+    text = match.string
+    i = match.start(2)
+    out = []
+    quote = None
+    while i < len(text):
+        ch = text[i]
+        if quote is None:
+            if ch == "\\" and i + 1 < len(text):
+                if text[i + 1] != "\n":
+                    out.append(text[i + 1])
+                i += 2
+                continue
+            if ch == "$" and text[i + 1 : i + 2] == '"':
+                i += 1
+                continue
+            if ch == "$" and text[i + 1 : i + 2] == "'":
+                val, end = _ansi_c_span(text, i + 2)
+                if end is not None:
+                    out.append(val)
+                    i = end + 1
+                    continue
+            if ch in "\"'":
+                quote = ch
+            elif ch in " \t\n;&|()<>":
+                break
+            else:
+                out.append(ch)
+        elif quote == '"':
+            if ch == "\\" and i + 1 < len(text):
+                nxt = text[i + 1]
+                if nxt == "\n":
+                    pass
+                elif nxt in '$`"\\':
+                    out.append(nxt)
+                else:
+                    out.append(ch)
+                    out.append(nxt)
+                i += 2
+                continue
+            if ch == '"':
+                quote = None
+            else:
+                out.append(ch)
+        else:
+            if ch == "'":
+                quote = None
+            else:
+                out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _terminator_re(match):
+    indent = "\t*" if match.group(1) == "-" else ""
+    return re.compile(
+        r"^" + indent + re.escape(_heredoc_marker(match)) + r"$", re.M
+    )
+
+
+def _next_heredoc_line(text, pos, state):
+    """Scan `text` from `pos` for the first logical line carrying one or more
+    live heredoc openers (outside quotes, `#` comments, arithmetic and
+    backtick spans). Returns `(openers, newline_index)` where `openers` is the
+    non-empty list of `HEREDOC_OPENER` match objects on that line and
+    `newline_index` is the index of the unquoted `\\n` ending the line (or
+    `-1` if `text` ends before any newline), or `(None, -1)` when no opener is
+    found. `state` (a `_ScanState`) carries the construct stack from call to
+    call; the backtick spans this call passed are appended to `state.spans`.
+
+    An opener inside a backtick span is never collected for the outer line,
+    and a newline inside one never ends it: bash reads the span as a string of
+    its own, so its heredocs take their bodies from the span's own lines
+    (`_strip_span_bodies`)."""
+    openers = []
+    skip_until = pos
+    for kind, ch, i, ctx in _scan(text, pos, descend_dq=True, state=state):
+        if i < skip_until or kind != "char" or ctx[1]:
+            continue
+        if ch == "<" and ctx[0] not in _NO_COMMENT:
+            match = HEREDOC_OPENER.match(text, i)
+            if match is not None:
+                openers.append(match)
+                skip_until = match.end()
+        elif ch == "\n" and openers:
+            return openers, i
+    if openers:
+        return openers, -1
+    return None, -1
+
+
+def _consume_bodies(text, openers, cursor, no_terminator_from):
+    """Consume the bodies of `openers`, in order, from `cursor` (just past the
+    newline ending their line). Returns `(end, True)` past the last
+    terminator, or `(cursor, False)` at the first body with no terminator.
+
+    `no_terminator_from` is the failed-terminator memo shared by every body
+    search over one text: a `(indent flag, marker)` search that found nothing
+    from `p` finds nothing from any later position either, so it is never
+    repeated."""
+    for match in openers:
+        key = (match.group(1) == "-", _heredoc_marker(match))
+        failed = no_terminator_from.get(key)
+        if failed is not None and cursor >= failed:
+            return cursor, False
+        end = _terminator_re(match).search(text, cursor)
+        if end is None:
+            no_terminator_from[key] = cursor
+            return cursor, False
+        cursor = end.end()
+    return cursor, True
+
+
+def _strip_span_bodies(text, start, end, spans):
+    """`text[start:end]` with the interior of each backtick span in `spans`
+    (in order, all inside that range) replaced by its own
+    `strip_heredoc_bodies`: a heredoc inside a span takes its body from the
+    span's own lines, so a body that terminates before the span ends is
+    stripped and one that does not keeps its text.
+
+    EXCEPT where a stripped body may hold commands bash runs, which the old
+    reading (span bodies kept as text) exposed: a span holding a `$(` or an
+    escaped backtick (an unquoted-delimiter body expands them), or one whose
+    own commands include a shell reading its script from stdin
+    (`` x=`bash <<EOF … EOF` ``, where the glued first word `` x=`bash ``
+    hides the shell from `command_pipelines`' own check). Such a span is kept
+    whole — the over-arm direction, and safe for quoting: the span bounds its
+    body's quotes either way."""
+    pieces = []
+    for span_start, span_end in spans:
+        pieces.append(text[start:span_start])
+        inner = text[span_start:span_end]
+        stripped = strip_heredoc_bodies(inner)
+        if stripped != inner and (
+            "$(" in inner
+            or "\\`" in inner
+            or any(
+                _reads_script_from_stdin(argv)
+                for pipeline in _pipelines(_tokens(stripped))
+                for argv in pipeline
+            )
+        ):
+            stripped = inner
+        pieces.append(stripped)
+        start = span_end
+    pieces.append(text[start:end])
+    return "".join(pieces)
+
+
+def heredoc_openers(text, bodies_stripped=False, include_spans=False):
+    """Return the `HEREDOC_OPENER` match objects for every live heredoc opener
+    in `text` (outside quotes, `#` comments, arithmetic, `${…}` and — unless
+    `include_spans=True` — backtick spans), skipping over terminated heredoc
+    bodies just as `strip_heredoc_bodies` does (unless `bodies_stripped=True`,
+    when the bodies have already been removed), with the same failed-terminator
+    memo (`_consume_bodies`).
+
+    `include_spans=True` requires `bodies_stripped=True` (raises `ValueError`
+    otherwise): span bodies are stripped per-span by `strip_heredoc_bodies`, so
+    afterward a single scan yields outer and backtick-span openers in text
+    order for callers that rejoin emptied lines (`lossy-pipe-guard.sh`)."""
+    if include_spans and not bodies_stripped:
+        raise ValueError("include_spans requires bodies_stripped=True")
+    if "<<" not in text:
+        return []
+    if include_spans:
+        result = []
+        skip_until = 0
+        for kind, ch, i, ctx in _scan(text, descend_dq=True):
+            if i < skip_until or kind != "char":
+                continue
+            if ch == "<" and ctx[0] not in _NO_COMMENT:
+                match = HEREDOC_OPENER.match(text, i)
+                if match is not None:
+                    result.append(match)
+                    skip_until = match.end()
+        return result
+    result = []
+    pos = 0
+    state = _ScanState(None, len(text))
+    no_terminator_from = {}
+    while pos < len(text):
+        openers, newline = _next_heredoc_line(text, pos, state)
+        if not openers:
+            break
+        result.extend(openers)
+        if newline == -1:
+            break
+        if bodies_stripped:
+            pos = newline + 1
+            continue
+        cursor, terminated = _consume_bodies(
+            text, openers, newline + 1, no_terminator_from
+        )
+        pos = cursor if terminated else newline + 1
+    return result
 
 
 def strip_heredoc_bodies(text):
@@ -660,57 +1464,52 @@ def strip_heredoc_bodies(text):
     documented expansion rules.
 
     Handles `<<MARKER`, `<<'MARKER'`, `<<"MARKER"` and the `<<-` indent form.
-    The terminator must be the whole line; leading whitespace is tolerated only
+    The terminator must be the whole line; leading tabs are tolerated only
     for `<<-`, matching bash.
 
-    KNOWN LIMITATION, matching the sibling `strip_heredocs` in
-    pr-merge-review-check.sh: only the FIRST opener on a line is recognized.
-    Bash allows two on one line (`cmd <<A <<B` reads body A then body B), but
-    search resumes past A's terminator, so B's body is left un-stripped. Fails
-    SAFE — an un-stripped body only ADDS text a guard scans, which can only
-    over-block, never hide a target. Pinned by "second heredoc opener on a line
-    leaves its body" in shellQuotes.test.ts.
+    Openers are recognized only at outside-quote (plus `$(…)` inside double
+    quotes), outside-comment, outside-backtick, and outside-arithmetic/param
+    positions using the shared scanner (`_scan`), so a
+    `<<word` inside `# <<word`, `"a <<word"`, `'<<word'` or `$((1<<2))` never
+    consumes the lines that follow. Every opener on a logical line is collected
+    and their bodies are consumed in order after the unquoted newline ending
+    that line (`cmd <<A <<B` strips body A then body B), resuming the scan
+    after the last terminator. A backtick span is a string bash parses on its
+    own, so a heredoc inside one takes its body from the span's own lines:
+    each span's interior is stripped by its own recursive call.
 
     An UNTERMINATED heredoc KEEPS the text after the opener rather than dropping
     it — the same over-arm direction as the sibling `strip_heredocs` in
-    pr-merge-review-check.sh, and for the same reason. `substitution_spans_matching`
-    hands this the WHOLE raw command, not one span's content, and the opener
-    regex is quote-blind: a `<<WORD`-shaped string sitting inside an earlier
-    quoted argument with no matching terminator line anywhere later would, under
-    a drop-to-end rule, silently truncate a REAL `$(git commit …)` span that
-    comes after it — a measured bypass of both blocking guards. Keeping the tail
-    can only ADD text a guard scans (over-block, recoverable); dropping it can
-    hide a target (a bypass, the one direction this must never take). Pinned by
+    pr-merge-review-check.sh, and for the same reason. Keeping the tail can only
+    ADD text a guard scans (over-block, recoverable); dropping it can hide a
+    target (a bypass, the one direction this must never take). Pinned by
     "a target after an unterminated heredoc opener still matches" in
     shellQuotes.test.ts and by the equivalent probe cases.
     """
+    if "<<" not in text:
+        return text  # no opener can match without `<<`
     out = []
     pos = 0
+    state = _ScanState(None, len(text))
+    no_terminator_from = {}
     while True:
-        match = HEREDOC_OPENER.search(text, pos)
-        if match is None:
-            out.append(text[pos:])
+        state.spans = []
+        openers, newline = _next_heredoc_line(text, pos, state)
+        if not openers or newline == -1:
+            out.append(_strip_span_bodies(text, pos, len(text), state.spans))
             return "".join(out)
-        # Keep the redirection operator and the rest of the line carrying it;
-        # only what the operator INTRODUCES is data.
-        out.append(text[pos : match.end()])
-        newline = text.find("\n", match.end())
-        if newline == -1:
-            out.append(text[match.end() :])
-            return "".join(out)
-        out.append(text[match.end() : newline + 1])
-        indent = "[ \t]*" if match.group(1) == "-" else ""
-        terminator = re.compile(
-            r"^" + indent + re.escape(match.group(3)) + r"[ \t]*$", re.M
+        # Keep the redirection operator(s) and the rest of the logical line
+        # carrying them; only what the operators INTRODUCE is data.
+        out.append(_strip_span_bodies(text, pos, newline + 1, state.spans))
+        cursor, terminated = _consume_bodies(
+            text, openers, newline + 1, no_terminator_from
         )
-        end = terminator.search(text, newline + 1)
-        if end is None:
-            # Unterminated: keep everything after the opener line (over-arm)
-            # instead of dropping it — see the docstring for the bypass this
-            # closes. Only the body of a TERMINATED heredoc is inert data.
-            out.append(text[newline + 1 :])
+        if not terminated:
+            # Unterminated: keep everything after the last consumed body (or
+            # opener line) instead of dropping it.
+            out.append(text[cursor:])
             return "".join(out)
-        pos = end.end()
+        pos = cursor
 
 
 def substitution_spans_matching(raw_text, predicate):
@@ -730,7 +1529,10 @@ def substitution_spans_matching(raw_text, predicate):
        pulled out as a span (a per-span strip cannot see it — the extracted span
        carries no heredoc marker). This is what keeps a documented bypass
        example inside a heredoc'd commit message from false-blocking.
-    2. extract the substitution spans that remain.
+    2. extract the substitution spans that remain, and strip heredoc bodies from
+       each extracted span as well (an opener inside a quoted `"$(cat <<'EOF'
+       …)"` span is inside outer quotes at step 1 and becomes top-level once the
+       span is unwrapped).
     3. strip_quoted each span, so a quoted argument that merely MENTIONS the
        target (`$(gh pr comment --body "…git commit…")`) is inert prose. None
        means an unbalanced quote inside the span; fall back to the raw span so a
@@ -741,6 +1543,7 @@ def substitution_spans_matching(raw_text, predicate):
     tests/shell_quotes_cases.py.
     """
     for span in substitution_spans(strip_heredoc_bodies(raw_text)):
+        span = strip_heredoc_bodies(span)
         scanned = strip_quoted(span)
         if predicate(scanned if scanned is not None else span):
             return True
@@ -824,9 +1627,8 @@ _SUBSTITUTION_REST = "$(…)"
 def _tokens(text):
     """`_words` with each separator kept as an `_Op` naming the operator, so a
     reader can tell a pipe (`|`, `|&`) from a list separator (`;`, `&&`, …)."""
-    events = list(_scan_events(text, bash_words=True))
+    events = list(_scan(text))
     tokens = []
-    substitutions = []  # per open `(`: True when it opened a `$(`
     value = []
     started = False
 
@@ -841,12 +1643,11 @@ def _tokens(text):
 
     k = 0
     while k < len(events):
-        kind, payload = events[k]
-        if kind == "unterminated":
-            break
-        if kind in ("quoted", "escape"):
+        kind, payload, _pos, ctx = events[k]
+        if kind in ("quoted", "escape", "run"):
             # A quoted span starts a word even when empty: `cmd ""` passes one
             # empty argument, and dropping it would shift the `-c` lookahead.
+            # A `run` is a stretch of plain word characters.
             if not started:
                 started, value = True, []
             value.append(payload)
@@ -869,14 +1670,12 @@ def _tokens(text):
                 elif payload == ";" and nxt in (";", "&"):
                     op, k = ";" + nxt, k + 1
                 tokens.append(_Op(op))
-                if payload == "(":
-                    substitutions.append(char_at(k - 1) == "$")
-                elif payload == ")" and substitutions and substitutions.pop():
+                if payload == ")" and ctx[0] in ("subst", "arith_subst"):
                     # Text glued after a `$(…)` (`/proc/$(pgrep x)/fd`) is the rest
                     # of a WORD, not a new command: a placeholder takes command
                     # position so `/fd` is never read as the program `fd`.
                     after = events[k + 1] if k + 1 < len(events) else None
-                    if after and (after[0] in ("quoted", "escape") or (
+                    if after and (after[0] in ("quoted", "escape", "run") or (
                             after[0] == "char" and after[1] not in " \t\n;&|()<>")):
                         tokens.append(_SUBSTITUTION_REST)
             else:
@@ -920,8 +1719,14 @@ def wrapped_command_strings(text):
     than treated as the command: bash still runs the WORD AFTER it at command
     position, so `FOO=1 bash -c "…"` is still a wrapper invocation.
     """
+    return _wrapped_strings(_pipelines(_tokens(text)))
+
+
+def _wrapped_strings(pipelines):
+    """`wrapped_command_strings` over text already split by `_pipelines`, so
+    a caller holding the pipelines does not tokenize the text twice."""
     found = []
-    for pipeline in _pipelines(_tokens(text)):
+    for pipeline in pipelines:
         upstream = None
         for raw in pipeline:
             argv, info = unwrap_runners(raw)
@@ -1293,13 +2098,14 @@ def command_pipelines(text):
 def _command_pipelines(text, depth):
     body_free = strip_heredoc_bodies(text)
     pipelines = _pipelines(_tokens(body_free))
-    scanned = body_free
     if body_free != text and any(
         _reads_script_from_stdin(c) for pipeline in pipelines for c in pipeline
     ):
-        scanned = text
         pipelines = _pipelines(_tokens(text))
     if depth < MAX_WRAPPER_DEPTH:
-        for inner in wrapped_command_strings(scanned):
+        # `pipelines` is exactly `_pipelines(_tokens(scanned text))`, so the
+        # wrapper strings come from it rather than from a second tokenization;
+        # the list is complete before the loop extends `pipelines`.
+        for inner in _wrapped_strings(pipelines):
             pipelines.extend(_command_pipelines(inner, depth + 1))
     return pipelines

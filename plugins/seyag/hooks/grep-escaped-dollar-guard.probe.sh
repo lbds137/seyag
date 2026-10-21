@@ -169,6 +169,8 @@ grep -rn "\$extends" src
 CMDEOF
 )
 run 2 "27: real grep after an unrelated heredoc still blocks" "Bash" "$CMD27"
+run 2 "27b: comment-hidden opener does not swallow grep" "Bash" $'# <<x\ngrep -rn "\\$extends" src\nx'
+run 2 "27c: quote-hidden opener does not swallow grep" "Bash" $'echo "<<x"\ngrep -rn "\\$extends" src\nx'
 
 # --- case 28: a grep after a bare `&` → blocks --------------------------------
 # Without the single `&` in the split set the whole line is one segment whose

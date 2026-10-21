@@ -32,6 +32,8 @@ run 2 "bash -c 'rm -rf node_modules'"
 run 2 $'cat <<\'EOF\' | bash\nrm -rf node_modules\nEOF'
 run 0 $'echo "cd /tmp\nrm -rf x/__pycache__"'   # a quoted newline is text, not a boundary
 run 0 $'cat > notes.md <<\'EOF\'\nrm -rf node_modules\nEOF'  # heredoc data, not a command
+run 2 $'# <<x\nrm -rf node_modules\nx'            # comment-hidden opener does not swallow rm
+run 2 $'echo "<<x"\nrm -rf node_modules\nx'       # quote-hidden opener does not swallow rm
 run 2 "${BIGDOC}rm -rf node_modules"              # a command past 128 KiB
 run 0 "${BIGDOC}ls node_modules"
 # Runner prefixes come off with their option values (lib/shell_quotes.py unwrap_runners).
