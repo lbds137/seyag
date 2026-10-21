@@ -180,6 +180,11 @@ expect_opt 1 "$wk98 extra=off (stale) source=api (cache 10m old)" "extra-usage: 
 # Within two TTLs it still passes, with the age disclosed: 3m old with CLAUDE_USAGE_TTL=120 (> 1 TTL, < 2).
 extra_raw 10 98 '{"is_enabled": true, "spend_limit_reached": false}'; touch -d "@$(($(date +%s) - 180))" "$tmp/claude-statusline/usage.json"
 expect_opt 0 "claude-usage: --ok pass lane=anthropic meter=extra-usage 5h=10%<90% week=98%>=75% source=api (cache 3m old)" "extra-usage: a cache within two TTLs passes and discloses its age"
+# A long TTL doesn't stretch it: with CLAUDE_USAGE_TTL=3600 the ceiling is 10 minutes (11m fails, 9m passes).
+extra_raw 10 98 '{"is_enabled": true, "spend_limit_reached": false}'; touch -d "@$(($(date +%s) - 660))" "$tmp/claude-statusline/usage.json"
+expect_opt 1 "$wk98 extra=off (stale) source=api" "extra-usage: TTL 3600, an 11m cache fails closed (10-minute ceiling)" CLAUDE_USAGE_TTL=3600
+extra_raw 10 98 '{"is_enabled": true, "spend_limit_reached": false}'; touch -d "@$(($(date +%s) - 540))" "$tmp/claude-statusline/usage.json"
+expect_opt 0 "claude-usage: --ok pass lane=anthropic meter=extra-usage 5h=10%<90% week=98%>=75% source=api" "extra-usage: TTL 3600, a 9m cache passes" CLAUDE_USAGE_TTL=3600
 # --wait inherits the opt-in: at week 98% with extra usage on it returns at once.
 extra_raw 10 98 '{"is_enabled": true, "spend_limit_reached": false}'
 out=$(timeout 5 env CLAUDE_USAGE_EXTRA_OK=1 HOME="$tmp" XDG_CACHE_HOME="$tmp" CLAUDE_USAGE_MODEL=claude-opus-5-5 "$CU" --wait 2>/dev/null); rc=$?
