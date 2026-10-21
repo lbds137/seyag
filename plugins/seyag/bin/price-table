@@ -100,7 +100,7 @@ TABLE = {
     "~anthropic/claude-fable-latest":  (10, 50, 0.25, 12.5),  # OR models live 2026-10-02 evening
     "~anthropic/claude-opus-latest":   (4, 20, 0.20, 5),       # OR models live 2026-10-02 evening
     "~anthropic/claude-sonnet-latest": (2, 10, 0.10, 2.5),     # OR models live 2026-10-08 (cacheRead 0.20 -> 0.10)
-    "~anthropic/claude-haiku-latest":  (0.1, 0.5, 0.01, 0.125),  # OR models live 2026-10-08: alias now resolves to Haiku 5.5; >100K card 0.5/2.5 not expressible
+    "~anthropic/claude-haiku-latest":  (0.1, 0.5, 0.01, 0.125),  # OR models live 2026-10-08: alias now resolves to Haiku 5.5; >100K card unverified for the alias (LONG_CARDS carries it for claude-haiku-5-5 only)
     # OR GPT aliases (cc-route `or-chatgpt` preset), OR models live 2026-10-02
     # evening (cacheWrite = OR's published input_cache_write).
     "~openai/gpt-astra-latest": (10, 50, 1, 12.5),      # OR models live 2026-10-02 evening
@@ -351,7 +351,7 @@ def main():
     ap.add_argument("--sync", action="store_true", help="diff OR-sourced rows against the live OR models endpoint")
     ap.add_argument("--audit", action="store_true", help="flag transcript model ids the table does not cover")
     ap.add_argument("--since", help="audit window in days, e.g. 7d (default: 30d)")
-    ap.add_argument("--json", action="store_true", help="machine-readable table")
+    ap.add_argument("--json", action="store_true", help="machine-readable table, OR keys and long cards")
     a = ap.parse_args()
     if sum(bool(getattr(a, n)) for n in ("emit", "merge", "apply", "sync", "audit", "json")) != 1:
         ap.error("exactly one of --emit --merge --apply --sync --audit --json")

@@ -1308,6 +1308,31 @@ if jq -e 'has("long")|not' "$T/prices.json" > /dev/null && near "$(jq .cost_usd 
   ok "long card absent: stub without 'long' key prices m-a (1M in + 0.5M out = 2.00) unchanged"
 else bad "long card absent: $enolong"; fi
 
+# 34c2. Float above in long card: integral 1000.0 prices prompt 1001 on the long card (0.02001);
+#       non-integral 1000.5 is ignored -> base rates (0.002001).
+cat > "$T/prices-long-flt.json" <<'EOF'
+{"or_keys":[],"table":{
+ "m-flt-int":{"input":1,"output":2,"cacheRead":0.5,"cacheWrite":1.25},
+ "m-flt-frac":{"input":1,"output":2,"cacheRead":0.5,"cacheWrite":1.25}
+},"long":{
+ "m-flt-int":{"above":1000.0,"input":10,"output":20,"cacheRead":5,"cacheWrite":12.5},
+ "m-flt-frac":{"above":1000.5,"input":10,"output":20,"cacheRead":5,"cacheWrite":12.5}
+}}
+EOF
+printf '#!/bin/bash\n[ "$1" = --json ] || exit 9\ncat %q\n' "$T/prices-long-flt.json" > "$T/pt-long-flt.sh"
+chmod +x "$T/pt-long-flt.sh"
+uline msg-lf1 req-lf1 m-flt-int ${D1}T10:00:00Z 401 500 300 200 100 > "$P/LFLT1.jsonl"
+uline msg-lf2 req-lf2 m-flt-frac ${D1}T10:01:00Z 401 500 300 200 100 > "$P/LFLT2.jsonl"
+hk LFLT1 "$T/lflt1/l.jsonl" SYG_CREDIT_PRICE_TABLE_CMD="$T/pt-long-flt.sh"
+hk LFLT2 "$T/lflt2/l.jsonl" SYG_CREDIT_PRICE_TABLE_CMD="$T/pt-long-flt.sh"
+eflt1=$(cat "$T/lflt1/l.jsonl")
+eflt2=$(cat "$T/lflt2/l.jsonl")
+if near "$(jq .cost_usd <<< "$eflt1")" 0.02001 && near "$(jq .cost_usd <<< "$eflt2")" 0.002001 \
+  && jq -e '.models["m-flt-int"].cost_usd==0.02001 and .unpriced_models==[]' <<< "$eflt1" > /dev/null \
+  && jq -e '.models["m-flt-frac"].cost_usd==0.002001 and .unpriced_models==[]' <<< "$eflt2" > /dev/null; then
+  ok "long card float above: integral 1000.0 prices prompt 1001 on long card (0.02001); non-integral 1000.5 ignored -> base rates (0.002001)"
+else bad "long card float above: $eflt1 / $eflt2"; fi
+
 # 34d. Clamped provider window together with the settle window:
 #      g-chain.json (3x $100 chained grants) at a "now" over a year past the first grant
 #      clamps the window to clamp_day. A pre-clamp ledger entry ($40) draws grant 1 to $60,
