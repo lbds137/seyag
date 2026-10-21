@@ -62,7 +62,7 @@ printf '{"env":{"ANTHROPIC_AUTH_TOKEN":"dummy-probe-token"},"modelSettings":{"gl
 export HOME="$h" XDG_CACHE_HOME="$h/cache" XDG_STATE_HOME="$h/state" XDG_STATE_HOME="$h/state"
 export ZAI_SPEND_PROJECTS="$h/projects/empty" ZAI_SPEND_PEAK_UTC="0-24"
 # The API-credit segments read these from the process env; a caller's values must not leak in.
-unset SYG_CREDIT_LEDGER SYG_CREDIT_GRANTS SYG_CREDIT_WHEN SYG_CREDIT_FORCE SYG_CREDIT_NOW SYG_CREDIT_ROUTE SYG_CREDIT_ADMIN_URL ANTHROPIC_ADMIN_API_KEY SYG_CREDIT_ADMIN_KEY_CMD SYG_CREDIT_ANCHOR
+unset SYG_CREDIT_LEDGER SYG_CREDIT_GRANTS SYG_CREDIT_WHEN SYG_CREDIT_FORCE SYG_CREDIT_NOW SYG_CREDIT_ROUTE SYG_CREDIT_ADMIN_URL ANTHROPIC_ADMIN_API_KEY SYG_CREDIT_ADMIN_KEY_CMD SYG_CREDIT_ANCHOR SYG_CREDIT_SETTLE_DAYS
 
 cat > "$h/quota.json" <<'EOF'
 {"code":200,"success":true,"data":{"limits":[
@@ -77,7 +77,7 @@ route_anthropic() { jq '.env.ANTHROPIC_BASE_URL = "https://api.anthropic.com"' "
 route_or() { jq '.env.ANTHROPIC_BASE_URL = "https://openrouter.ai/api/v1"' "$h/.claude/settings.json" > "$h/.claude/settings.json.new" && mv "$h/.claude/settings.json.new" "$h/.claude/settings.json"; }
 route_host() { jq --arg u "$1" '.env.ANTHROPIC_BASE_URL = $u' "$h/.claude/settings.json" > "$h/.claude/settings.json.new" && mv "$h/.claude/settings.json.new" "$h/.claude/settings.json"; }
 render() {
-  local env_args=(-u ANTHROPIC_BASE_URL -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u SYG_CREDIT_LEDGER -u SYG_CREDIT_GRANTS -u SYG_CREDIT_FORCE -u COLUMNS -u SYG_STATUSLINE_WRAP_COLUMNS -u SYG_STATUSLINE_DEBUG -u SYG_STATUSLINE_FIT_MARGIN -u ANTHROPIC_ADMIN_API_KEY -u SYG_CREDIT_ADMIN_KEY_CMD -u SYG_CREDIT_ADMIN_URL)
+  local env_args=(-u ANTHROPIC_BASE_URL -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u SYG_CREDIT_LEDGER -u SYG_CREDIT_GRANTS -u SYG_CREDIT_FORCE -u COLUMNS -u SYG_STATUSLINE_WRAP_COLUMNS -u SYG_STATUSLINE_DEBUG -u SYG_STATUSLINE_FIT_MARGIN -u ANTHROPIC_ADMIN_API_KEY -u SYG_CREDIT_ADMIN_KEY_CMD -u SYG_CREDIT_ADMIN_URL -u SYG_CREDIT_SETTLE_DAYS)
   if [ -n "${PROBE_DEBUG:-}" ]; then
     env_args+=("SYG_STATUSLINE_DEBUG=$PROBE_DEBUG")
   fi
@@ -504,14 +504,14 @@ cr_render() { # ledger-name now [grants-path [VAR=value ...]]; stdin: the cost o
     local cost; cost=$(cat)
     printf '{"session_id":"cr-%s","day":"%s","first_ts":"%s","last_ts":"%s","cost_usd":%s,"source":"transcript"}\n' \
         "$1" "${2:0:10}" "$2" "$2" "$cost" > "$h/credit/$1.jsonl"
-    env -u ANTHROPIC_BASE_URL -u SYG_CREDIT_FORCE -u SYG_CREDIT_GRANTS -u ANTHROPIC_ADMIN_API_KEY -u SYG_CREDIT_ADMIN_KEY_CMD -u SYG_CREDIT_ADMIN_URL ANTHROPIC_API_KEY=sk-probe \
+    env -u ANTHROPIC_BASE_URL -u SYG_CREDIT_FORCE -u SYG_CREDIT_GRANTS -u ANTHROPIC_ADMIN_API_KEY -u SYG_CREDIT_ADMIN_KEY_CMD -u SYG_CREDIT_ADMIN_URL -u SYG_CREDIT_SETTLE_DAYS ANTHROPIC_API_KEY=sk-probe \
         SYG_CREDIT_LEDGER="$h/credit/$1.jsonl" SYG_CREDIT_NOW="$2" ${3:+SYG_CREDIT_GRANTS="$3"} "${@:4}" \
         bash "$SL" <<< "{\"session_id\":\"cr-$1\",\"cost\":{\"total_cost_usd\":$cost},\"rate_limits\":{\"five_hour\":{\"used_percentage\":83,\"resets_at\":1790790548}},\"context_window\":{\"current_usage\":{\"input_tokens\":1000}},\"model\":{\"id\":\"m\",\"display_name\":\"X\"},\"cwd\":\"/tmp\"}"
 }
 anth_label=$'\x1b[38;2;240;238;230mplatform.claude.com\x1b[0m'
 plan_label=$'\x1b[38;2;240;238;230mclaude.ai\x1b[0m'
 # 35. Ledger var unset on the API-key lane: the label alone, no credit text, no ledger, no meters.
-raw=$(env -u SYG_CREDIT_LEDGER -u ANTHROPIC_BASE_URL -u SYG_CREDIT_FORCE ANTHROPIC_API_KEY=sk-probe SYG_CREDIT_GRANTS="$h/credit/grants.json" \
+raw=$(env -u SYG_CREDIT_LEDGER -u ANTHROPIC_BASE_URL -u SYG_CREDIT_FORCE -u SYG_CREDIT_SETTLE_DAYS ANTHROPIC_API_KEY=sk-probe SYG_CREDIT_GRANTS="$h/credit/grants.json" \
     bash "$SL" <<< '{"session_id":"cr-off","cost":{"total_cost_usd":1},"model":{"display_name":"X"},"cwd":"/tmp"}')
 out=$(strip <<< "$raw")
 grep -qF "$anth_label" <<< "$raw" && ! grep -qE 'platform\.claude\.com \$|spent|over' <<< "$out" \
@@ -554,7 +554,7 @@ grep -qF 'platform.claude.com $48.00 est' <<< "$out" && ! grep -qF '(exp' <<< "$
 # 40-44. Lane routing, each with rate_limits in the input. The process env decides.
 lane_in='{"rate_limits":{"five_hour":{"used_percentage":83,"resets_at":1790790548},"seven_day":{"used_percentage":56,"resets_at":1791093600}},"context_window":{"current_usage":{"input_tokens":1000}},"model":{"display_name":"X"},"cwd":"/tmp"}'
 lane() { # VAR=value ...: render lane_in under exactly these env vars
-    local env_args=(-u ANTHROPIC_BASE_URL -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u SYG_CREDIT_LEDGER -u SYG_CREDIT_GRANTS -u SYG_CREDIT_FORCE -u COLUMNS -u SYG_STATUSLINE_WRAP_COLUMNS -u SYG_STATUSLINE_DEBUG -u SYG_STATUSLINE_FIT_MARGIN -u ANTHROPIC_ADMIN_API_KEY -u SYG_CREDIT_ADMIN_KEY_CMD -u SYG_CREDIT_ADMIN_URL)
+    local env_args=(-u ANTHROPIC_BASE_URL -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u SYG_CREDIT_LEDGER -u SYG_CREDIT_GRANTS -u SYG_CREDIT_FORCE -u COLUMNS -u SYG_STATUSLINE_WRAP_COLUMNS -u SYG_STATUSLINE_DEBUG -u SYG_STATUSLINE_FIT_MARGIN -u ANTHROPIC_ADMIN_API_KEY -u SYG_CREDIT_ADMIN_KEY_CMD -u SYG_CREDIT_ADMIN_URL -u SYG_CREDIT_SETTLE_DAYS)
     if [ -n "${PROBE_DEBUG:-}" ]; then
         env_args+=("SYG_STATUSLINE_DEBUG=$PROBE_DEBUG")
     fi
@@ -756,17 +756,27 @@ CR="http://127.0.0.1:$(cat "$h/cr/port")"
 px_key=(ANTHROPIC_ADMIN_API_KEY=fixture-admin-key SYG_CREDIT_ADMIN_URL="$CR")
 # 48a. Fleet, keyed: 200 granted - 9.29 provider spend (the ledger's 10-07 entry is
 # not after the as-of day, so nothing is bridged) -> the bare '$190.71', no est, no px.
-raw=$(fleet "$h/credit/grants.json" "${px_key[@]}"); out=$(strip <<< "$raw")
+# SYG_CREDIT_SETTLE_DAYS=0 on the keyed renders in 48a/48b/48b1: the fixture's ledger ($12.50) exceeds the provider bucket ($9.29) on as_of.
+raw=$(fleet "$h/credit/grants.json" "${px_key[@]}" SYG_CREDIT_SETTLE_DAYS=0); out=$(strip <<< "$raw")
 grep -qE 'claude\.ai 5h:.* · platform\.claude\.com \$190\.71 · session ' <<< "$out" \
     && grep -qF "$anth_label"$' \x1b[90m$190.71\x1b[0m' <<< "$raw" && ! grep -qE ' est|px' <<< "$out" \
     && [ "$(wc -l < "$h/cr/hits.log")" -ge 1 ] \
     && ok "fleet provider-exact: admin key in the render env -> gray 'platform.claude.com \$190.71', no est, no px" \
     || bad "fleet provider-exact: $out / hits $(wc -l < "$h/cr/hits.log")"
+# 48a2. Fleet, keyed, default settle window (SYG_CREDIT_SETTLE_DAYS unset): the ledger's
+# $12.50 wins over the $9.29 bucket inside the settle window -> '$187.50 est', and a
+# SYG_CREDIT_SETTLE_DAYS=0 render immediately before it does not make this render show '$190.71'.
+fleet "$h/credit/grants.json" "${px_key[@]}" SYG_CREDIT_SETTLE_DAYS=0 >/dev/null
+raw=$(fleet "$h/credit/grants.json" "${px_key[@]}"); out=$(strip <<< "$raw")
+grep -qE 'claude\.ai 5h:.* · platform\.claude\.com \$187\.50 est · session ' <<< "$out" \
+    && grep -qF "$anth_label"$' \x1b[90m$187.50 est\x1b[0m' <<< "$raw" && ! grep -qF '$190.71' <<< "$out" \
+    && ok "fleet settle window (default): ledger \$12.50 > provider \$9.29 on as_of -> gray 'platform.claude.com \$187.50 est', not cached '\$190.71'" \
+    || bad "fleet settle window: $out"
 # 48b. Cache-key separation, seconds after 48a cached the provider JSON: keyless ->
 # the ledger estimate (not the cached provider figure); keyed again -> provider again.
 # Only the key differs (SYG_CREDIT_ADMIN_URL stays), so this pins the key-presence field.
 out_nokey=$(strip <<< "$(fleet "$h/credit/grants.json" SYG_CREDIT_ADMIN_URL="$CR")")
-out_key=$(strip <<< "$(fleet "$h/credit/grants.json" "${px_key[@]}")")
+out_key=$(strip <<< "$(fleet "$h/credit/grants.json" "${px_key[@]}" SYG_CREDIT_SETTLE_DAYS=0)")
 grep -qF 'platform.claude.com $187.50 est' <<< "$out_nokey" \
     && grep -qF 'platform.claude.com $190.71 · ' <<< "$out_key" && ! grep -qF ' est' <<< "$out_key" \
     && ok "balance cache: keyed and keyless renders keep separate entries (keyless -> '\$187.50 est', keyed -> '\$190.71')" \
@@ -777,7 +787,7 @@ printf '#!/bin/bash\nprintf "fixture-admin-key\\n"\n' > "$h/cr/key-cmd.sh"
 chmod +x "$h/cr/key-cmd.sh"
 out_nokey2=$(strip <<< "$(fleet "$h/credit/grants.json" SYG_CREDIT_ADMIN_URL="$CR")")
 k_none=$(head -n 1 "$cr_cache")
-out_cmd=$(strip <<< "$(fleet "$h/credit/grants.json" SYG_CREDIT_ADMIN_KEY_CMD="$h/cr/key-cmd.sh" SYG_CREDIT_ADMIN_URL="$CR")")
+out_cmd=$(strip <<< "$(fleet "$h/credit/grants.json" SYG_CREDIT_ADMIN_KEY_CMD="$h/cr/key-cmd.sh" SYG_CREDIT_ADMIN_URL="$CR" SYG_CREDIT_SETTLE_DAYS=0)")
 k_cmd=$(head -n 1 "$cr_cache")
 [ -n "$k_none" ] && [ -n "$k_cmd" ] && [ "$k_none" != "$k_cmd" ] \
     && grep -qF 'platform.claude.com $187.50 est' <<< "$out_nokey2" \

@@ -391,7 +391,7 @@ credit_balance_json() {
     # The anchor file as api-credit resolves it, so a calibrate shows on the next render.
     anchor=${SYG_CREDIT_ANCHOR:-${SYG_CREDIT_LEDGER:-}.anchor.json}
     # Nanosecond mtimes: two ledger writes within one second can leave the size equal.
-    key="$(stat -c '%.9Y %s' "${SYG_CREDIT_LEDGER:-}" 2>/dev/null || echo 0 0) $(stat -c '%.9Y %s' "${SYG_CREDIT_GRANTS:-}" 2>/dev/null || echo 0 0) $(stat -c '%.9Y %s' "$anchor" 2>/dev/null || echo 0 0) ${SYG_CREDIT_LEDGER:-} ${SYG_CREDIT_GRANTS:-} $anchor ${SYG_CREDIT_NOW:-} admin-key=${ANTHROPIC_ADMIN_API_KEY:+set}${SYG_CREDIT_ADMIN_KEY_CMD:+cmd} admin-url=${SYG_CREDIT_ADMIN_URL:-}"
+    key="$(stat -c '%.9Y %s' "${SYG_CREDIT_LEDGER:-}" 2>/dev/null || echo 0 0) $(stat -c '%.9Y %s' "${SYG_CREDIT_GRANTS:-}" 2>/dev/null || echo 0 0) $(stat -c '%.9Y %s' "$anchor" 2>/dev/null || echo 0 0) ${SYG_CREDIT_LEDGER:-} ${SYG_CREDIT_GRANTS:-} $anchor ${SYG_CREDIT_NOW:-} admin-key=${ANTHROPIC_ADMIN_API_KEY:+set}${SYG_CREDIT_ADMIN_KEY_CMD:+cmd} admin-url=${SYG_CREDIT_ADMIN_URL:-} settle=${SYG_CREDIT_SETTLE_DAYS:-}"
     age=$(( $(date +%s) - $(stat -c %Y "$cache" 2>/dev/null || echo 0) ))
     if [ "$age" -ge 0 ] && [ "$age" -lt 60 ] && { IFS= read -r k && IFS= read -r j; } 2>/dev/null < "$cache" \
         && [ "$k" = "$key" ] && [ -n "$j" ]; then
