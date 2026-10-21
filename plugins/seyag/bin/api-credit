@@ -67,7 +67,10 @@ Everything is configured by environment variables; nothing is hardcoded.
                      days (as_of and the N-1 days before it, inside the fetch
                      window) take max(provider_day, ledger_day) until they
                      settle, and mark the balance an estimate while the ledger
-                     figure is larger.
+                     figure is larger. A ledger that runs above the provider
+                     keeps those days counted at the ledger figure (and the
+                     balance "est") until the ledger is corrected; the price
+                     table is matched to the provider to keep that rare.
 
 Metered route test (with SYG_CREDIT_WHEN unset or empty): ANTHROPIC_API_KEY is
 non-empty in the process environment AND ANTHROPIC_BASE_URL is empty or its host
@@ -119,12 +122,13 @@ trailing [...] suffix stripped, else with a trailing -YYYYMMDD date stripped,
 after the bracket strip too). Cost = input*input + output*output +
 cache_read*cacheRead + 5m writes*cacheWrite + 1h writes*(2*input). The 1h write
 rate (2x input) is an assumption from the provider's published multipliers, not
-a table field. Not priced: the fast-mode premium (fast requests are counted and
-priced at standard rates), server tool requests (web search, web fetch: counted
-only), long-context premiums for requests over 200k input tokens (transcripts do
-not mark them), and models with no table row (tokens recorded, no cost added,
-listed in unpriced_models). A failing price table aborts the call (no write), so
-a transient failure cannot zero recorded spend.
+a table field. A model's second rate card (price-table `long`: an `above`
+threshold and four rates) prices the whole request when its prompt (input +
+cache read + cache writes) is over the threshold. Not priced: the fast-mode premium (fast
+requests are counted and priced at standard rates), server tool requests (web
+search, web fetch: counted only), and models with no table row (tokens recorded,
+no cost added, listed in unpriced_models). A failing price table aborts the call
+(no write), so a transient failure cannot zero recorded spend.
 
 Balance (an estimate): each ledger entry is a spend event at its last_ts. Events
 are replayed in time order against the grants, drawing from the soonest-expiring
@@ -152,48 +156,47 @@ that falls back to the labeled estimate); a repeated next_page is a failure.
 Only USD result rows count; each amount is a decimal string in cents. When the
 window is unclamped, the provider's per-day sums inside it (with the last
 SYG_CREDIT_SETTLE_DAYS closed days, default 2, taking max(provider_day,
-ledger_day)) and the ledger's
-entries for every UTC day after the last provider bucket (the whole window when
-the response has no dated bucket) are replayed soonest-expiry first through the
-same drawdown as the ledger estimate; when clamped, the replay starts with the
-ledger's entries from the earliest overlapping grant's granted day up to the
-clamp day (so older grants' drawdown before the clamp is the ledger's estimate,
-and ledger spend before every grant is excluded). spent_usd is the provider's
-closed-day sums in the window (settled with the ledger on the last N closed
-days) plus the bridged ledger entries, plus, when
-clamped, the pre-window ledger entries since the earliest overlapping grant.
-The object then carries source "provider", estimate (which labels remaining_usd:
-false unless the window is clamped, a grant starts or expires mid-UTC-day on
-a provider-bucket day, i.e. after the window start and on or before
-provider_as_of, or a settle-window day used the ledger figure), provider_as_of
-(the last bucket's UTC day, else the day before
-the window), provider_window_start (the fetch window's start day, present
-whenever a fetch was attempted), provider_chain_start (the earliest grant day of
-the overlap chain), provider_clamped, provider_subday, provider_unsettled_days
-(the count of settle-window days where the ledger figure won),
-ledger_lapsed_usd and ledger_bridge_days (the number of distinct ledger days
-added). next_expiry and days_left come from that replay; lapsed_usd is summed
-per grant, taking in-window grants (granted at or after the earliest grant of
-the overlap chain) from the provider replay and grants that lapsed before the
-chain from the ledger replay (that ledger-sourced part is also reported as
-ledger_lapsed_usd). The one-line text shows the bare figure (an estimate
-carries an "est" suffix) and the balance command's second line names the basis
-and what the ledger supplied ("provider through <day>; today[, lapses before
-<chain start>][, and spend before <window start>], from the ledger", plus
-"; grant times mid-day" when provider_subday is true). Any failure (curl error,
-timeout, HTTP >= 400, non-JSON, no data array, an unparsable USD amount, a
-bucket with USD amounts but no parsable starting_at, a repeated next_page, a
-non-finite sum) gives the ledger estimate labeled source "ledger", estimate
-true, provider_as_of and ledger_bridge_days null, and provider_window_start set
-to the window's start day; it never fails the command. The fetch-attempt keys
-(source, provider_as_of, provider_window_start, ledger_bridge_days) are present
-whenever a fetch was attempted (anchored path included, with
-provider_unsettled_days on the provider success path and
-provider_chain_start, provider_clamped, provider_subday and ledger_lapsed_usd
-added on the unanchored provider success path) and absent, with estimate true,
-when no fetch is attempted: no key (no ANTHROPIC_ADMIN_API_KEY and no
-SYG_CREDIT_ADMIN_KEY_CMD, or an env key containing CR or LF), no live grant, no
-closed day; a missing source means ledger. The sum is cached at
+ledger_day)) and the ledger's entries for every UTC day after the last provider
+bucket (the whole window when the response has no dated bucket) are replayed
+soonest-expiry first through the same drawdown as the ledger estimate; when
+clamped, the replay starts with the ledger's entries from the earliest
+overlapping grant's granted day up to the clamp day (so older grants' drawdown
+before the clamp is the ledger's estimate, and ledger spend before every grant
+is excluded). spent_usd is the provider's closed-day sums in the window
+(settled with the ledger on the last N closed days) plus the bridged ledger
+entries, plus, when clamped, the pre-window ledger entries since the earliest
+overlapping grant. The object then carries source "provider", estimate (which
+labels remaining_usd: false unless the window is clamped, a grant starts or
+expires mid-UTC-day on a provider-bucket day, i.e. after the window start and
+on or before provider_as_of, or a settle-window day used the ledger figure),
+provider_as_of (the last bucket's UTC day, else the day before the window),
+provider_window_start (the fetch window's start day, present whenever a fetch
+was attempted), provider_chain_start (the earliest grant day of the overlap
+chain), provider_clamped, provider_subday, provider_unsettled_days (the count
+of settle-window days where the ledger figure won), ledger_lapsed_usd and
+ledger_bridge_days (the number of distinct ledger days added). next_expiry and
+days_left come from that replay; lapsed_usd is summed per grant, taking
+in-window grants (granted at or after the earliest grant of the overlap chain)
+from the provider replay and grants that lapsed before the chain from the
+ledger replay (that ledger-sourced part is also reported as ledger_lapsed_usd).
+The one-line text shows the bare figure (an estimate carries an "est" suffix)
+and the balance command's second line names the basis and what the ledger
+supplied ("provider through <day>; today[, lapses before <chain start>][, and
+spend before <window start>], from the ledger", plus "; grant times mid-day"
+when provider_subday is true). Any failure (curl error, timeout, HTTP >= 400,
+non-JSON, no data array, an unparsable USD amount, a bucket with USD amounts
+but no parsable starting_at, a repeated next_page, a non-finite sum) gives the
+ledger estimate labeled source "ledger", estimate true, provider_as_of and
+ledger_bridge_days null, and provider_window_start set to the window's start
+day; it never fails the command. The fetch-attempt keys (source,
+provider_as_of, provider_window_start, ledger_bridge_days) are present whenever
+a fetch was attempted (anchored path included, with provider_unsettled_days on
+the provider success path and provider_chain_start, provider_clamped,
+provider_subday and ledger_lapsed_usd added on the unanchored provider success
+path) and absent, with estimate true, when no fetch is attempted: no key (no
+ANTHROPIC_ADMIN_API_KEY and no SYG_CREDIT_ADMIN_KEY_CMD, or an env key
+containing CR or LF), no live grant, no closed day; a missing source means
+ledger. The sum is cached at
 ${XDG_CACHE_HOME:-~/.cache}/claude-statusline/api-credit-live.json (a JSON
 object keyed by the key's SHA-256, the origin and the window, at most 4
 entries; each value holds the sum, the as-of day and the per-UTC-day sums) and
@@ -525,15 +528,41 @@ def price_source_paths():
     return [cmd[1]]
 
 
+RATE_FIELDS = ("input", "output", "cacheRead", "cacheWrite")
+
+
+def parse_long_card(card):
+    if not isinstance(card, dict):
+        return None
+    above = card.get("above")
+    if not isinstance(above, int) or isinstance(above, bool) or above <= 0:
+        return None
+    if not all(is_num(card.get(k)) for k in RATE_FIELDS):
+        return None
+    out = {"above": int(above)}
+    for k in RATE_FIELDS:
+        out[k] = float(card[k])
+    return out
+
+
 def load_prices():
     """{model: rates} from the sibling price-table --json. Raises on failure."""
     cmd = price_command()
     res = subprocess.run(cmd + ["--json"], stdin=subprocess.DEVNULL, capture_output=True,
                          text=True, timeout=30, check=True)
-    table = json.loads(res.stdout).get("table")
+    doc = json.loads(res.stdout)
+    table = doc.get("table") if isinstance(doc, dict) else None
     if not isinstance(table, dict):
         raise ValueError("price-table --json has no table object")
-    return table
+    out = {k: dict(v) if isinstance(v, dict) else v for k, v in table.items()}
+    long_cards = doc.get("long")
+    if isinstance(long_cards, dict):
+        for model, card in long_cards.items():
+            if isinstance(out.get(model), dict):
+                parsed = parse_long_card(card)
+                if parsed is not None:
+                    out[model]["long"] = parsed
+    return out
 
 
 def rates_for(prices, model):
@@ -549,16 +578,26 @@ def rates_for(prices, model):
     if not isinstance(row, dict):
         return None
     try:
-        return {k: float(row[k]) for k in ("input", "output", "cacheRead", "cacheWrite")}
+        out = {k: float(row[k]) for k in RATE_FIELDS}
     except (KeyError, TypeError, ValueError):
         return None
+    long_card = parse_long_card(row.get("long"))
+    if long_card is not None:
+        out["long"] = long_card
+    return out
 
 
 def request_cost(r, rates):
     """USD, an estimate. 1h cache writes at 2x the input rate (an assumption from
-    the provider's published multipliers; the table carries the 5m rate only).
-    Not priced: server tool requests, the fast-mode premium (standard rates are
-    used), and long-context premiums over 200k input tokens."""
+    the provider's published multipliers; the table carries the 5m rate only);
+    per-request threshold cards from the table are applied. Not priced: server
+    tool requests and the fast-mode premium (standard rates are used)."""
+    long_card = rates.get("long")
+    if isinstance(long_card, dict):
+        prompt = (r["input_tokens"] + r["cache_read_input_tokens"]
+                  + r["cache_write_5m_tokens"] + r["cache_write_1h_tokens"])
+        if prompt > long_card["above"]:
+            rates = long_card
     return (r["input_tokens"] * rates["input"] + r["output_tokens"] * rates["output"]
             + r["cache_read_input_tokens"] * rates["cacheRead"]
             + r["cache_write_5m_tokens"] * rates["cacheWrite"]
@@ -1072,8 +1111,10 @@ def with_provider(b, entries, grants_cfg, now):
     first. Each grant in the chain takes its lapse from the provider replay, and
     older grants take theirs from the ledger replay (also reported as
     ledger_lapsed_usd). estimate is False unless the window is clamped
-    (provider_clamped) or a grant starts or expires mid-UTC-day on a
-    provider-bucket day (provider_subday). Any failure returns the labeled ledger
+    (provider_clamped), a grant starts or expires mid-UTC-day on a
+    provider-bucket day (provider_subday), or any of the last
+    SYG_CREDIT_SETTLE_DAYS closed days are unsettled (ledger > provider + EPS,
+    provider_unsettled_days > 0). Any failure returns the labeled ledger
     fallback; b is untouched when no fetch is attempted."""
     src = admin_key_source()
     if src is None or grants_cfg is None:

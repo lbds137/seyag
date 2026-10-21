@@ -70,15 +70,20 @@ assert all(isinstance(x,(int,float)) for r in o.values() for x in r.values()), "
 if python3 - "$PT" <<'PY'
 import json, subprocess, sys
 o = json.loads(subprocess.run([sys.argv[1], "--json"], capture_output=True, text=True).stdout)
-assert set(o) == {"table", "or_keys"}, f"keys {sorted(o)}"
+assert set(o) == {"table", "or_keys", "long"}, f"keys {sorted(o)}"
 assert len(o["table"]) == 34, "row count"
 assert len(o["or_keys"]) == 18, f"or_keys count {len(o['or_keys'])}"
 assert "~z-ai/glm-flash-latest:nitro" in o["or_keys"], "nitro not an or_key"
 assert "glm-5.3-flash" not in o["or_keys"], "z.ai-direct key is not an or_key"
+assert set(o["long"]) <= set(o["table"]), f"long keys not in table: {set(o['long']) - set(o['table'])}"
 PY
-then ok "--json: table + or_keys, 34 rows, 18 OR keys"; else bad "--json: shape"; fi
+then ok "--json: table + or_keys + long, 34 rows, 18 OR keys"; else bad "--json: shape"; fi
 "$PT" --json | jq -e '.table["claude-haiku-5-5"] == {input:0.1,output:0.5,cacheRead:0.01,cacheWrite:0.125}' >/dev/null \
   && ok "--json: claude-haiku-5-5 priced (0.1 / 0.5 / 0.01 / 0.125)" || bad "--json: claude-haiku-5-5 row"
+"$PT" --json | jq -e '.long["claude-haiku-5-5"] == {above:100000,input:0.5,output:2.5,cacheRead:0.05,cacheWrite:0.625}
+    and ((.long | keys) - (.table | keys)) == [] and .table["claude-sonnet-5-5"].cacheRead == 0.1' >/dev/null \
+  && ok "--json: claude-haiku-5-5 long card (>100k: 0.5 / 2.5 / 0.05 / 0.625), every long key in table, claude-sonnet-5-5 cacheRead 0.1" \
+  || bad "--json: long cards / sonnet cacheRead"
 "$PT" --json | jq -e '.table["google/gemini-3.8-flash"].input == 0.75 and .table["google/gemini-3.1-pro-preview"] == {input:2,output:12,cacheRead:0.2,cacheWrite:0.375}
     and (.or_keys | index("google/gemini-3.8-flash")) != null and (.or_keys | index("google/gemini-3.1-pro-preview")) != null' >/dev/null \
   && ok "--json: gemini-3.8-flash and gemini-3.1-pro-preview priced and OR-checked" || bad "--json: new gemini rows"
