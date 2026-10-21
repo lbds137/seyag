@@ -1176,4 +1176,86 @@ if [ "$(jq 'keys|length' "$capf")" = 4 ] && ! jq -e 'any(keys[]; contains("2026-
   ok "cache cap: 5 windows fetched -> at most 4 kept, oldest evicted"
 else bad "cache cap: $(cat "$capf")"; fi
 
+# 33. Recent provider days settle window (SYG_CREDIT_SETTLE_DAYS, default 2):
+#     closed days in [as_of - (N-1), as_of] within the fetch window take max(provider, ledger).
+echo ok > "$T/cr/mode"
+# 33a. ledger > provider on as_of (10-08: ledger 9 + 6 = 15 vs provider 10): ledger amount used,
+#      estimate true, provider_unsettled_days 1, statusline text has "est".
+{ entry a1 2026-10-08 2026-10-08T10:00:00Z 9; entry a2 2026-10-08 2026-10-08T18:00:00Z 6; entry b 2026-10-09 2026-10-09T12:00:00Z 2.5; } > "$T/lv-s-asof.jsonl"
+b_sa=$(lv s-asof balance --json SYG_CREDIT_LEDGER="$T/lv-s-asof.jsonl")
+txt_sa=$(lv s-asof statusline SYG_CREDIT_LEDGER="$T/lv-s-asof.jsonl" < /dev/null)
+if near "$(jq .spent_usd <<< "$b_sa")" 21.20289 && near "$(jq .remaining_usd <<< "$b_sa")" 78.79711 \
+  && jq -e '.source=="provider" and .estimate==true and .provider_unsettled_days==1 and .provider_as_of=="2026-10-08"' <<< "$b_sa" > /dev/null \
+  && [ "$txt_sa" = 'api credit $78.80 est (exp 10-21, 11d)' ]; then
+  ok "settle window: ledger (15.00) > provider (10.00) on as_of -> spent 21.20289, remaining 78.79711, estimate true, unsettled 1, text has est"
+else bad "settle window ledger > provider on as_of: $b_sa / '$txt_sa'"; fi
+
+# 33b. provider > ledger on as_of (10-08: provider 10 vs ledger 6): provider amount used,
+#      estimate false, provider_unsettled_days 0.
+{ entry a 2026-10-08 2026-10-08T12:00:00Z 6; entry b 2026-10-09 2026-10-09T12:00:00Z 2.5; } > "$T/lv-s-prov.jsonl"
+b_sp=$(lv s-prov balance --json SYG_CREDIT_LEDGER="$T/lv-s-prov.jsonl")
+txt_sp=$(lv s-prov statusline SYG_CREDIT_LEDGER="$T/lv-s-prov.jsonl" < /dev/null)
+if near "$(jq .spent_usd <<< "$b_sp")" 16.20289 && near "$(jq .remaining_usd <<< "$b_sp")" 83.79711 \
+  && jq -e '.source=="provider" and .estimate==false and .provider_unsettled_days==0' <<< "$b_sp" > /dev/null \
+  && [ "$txt_sp" = 'api credit $83.80 (exp 10-21, 11d)' ]; then
+  ok "settle window: provider (10.00) > ledger (6.00) on as_of -> provider amount used, estimate false, unsettled 0"
+else bad "settle window provider > ledger: $b_sp / '$txt_sp'"; fi
+
+# 33c. Days older than N (10-05 ledger 20 vs provider 3.70289; 10-06 ledger 5 vs provider 0,
+#      with as_of 10-08 and N=2 -> settle window is 10-07..10-08): provider amount used.
+{ entry o1 2026-10-05 2026-10-05T12:00:00Z 20; entry o2 2026-10-06 2026-10-06T12:00:00Z 5; entry b 2026-10-09 2026-10-09T12:00:00Z 2.5; } > "$T/lv-s-old.jsonl"
+b_so=$(lv s-old balance --json SYG_CREDIT_LEDGER="$T/lv-s-old.jsonl")
+if near "$(jq .spent_usd <<< "$b_so")" 16.20289 && near "$(jq .remaining_usd <<< "$b_so")" 83.79711 \
+  && jq -e '.source=="provider" and .estimate==false and .provider_unsettled_days==0' <<< "$b_so" > /dev/null; then
+  ok "settle window: ledger > provider on days older than N (10-05, 10-06 with as_of 10-08, N=2) -> provider amount used"
+else bad "settle window older than N: $b_so"; fi
+
+# 33d. SYG_CREDIT_SETTLE_DAYS=0: identical to pre-settle provider output for the same fixture.
+b_s0=$(lv s-asof balance --json SYG_CREDIT_LEDGER="$T/lv-s-asof.jsonl" SYG_CREDIT_SETTLE_DAYS=0)
+txt_s0=$(lv s-asof statusline SYG_CREDIT_LEDGER="$T/lv-s-asof.jsonl" SYG_CREDIT_SETTLE_DAYS=0 < /dev/null)
+if [ "$b_s0" = "$b_sp" ] && [ "$txt_s0" = 'api credit $83.80 (exp 10-21, 11d)' ] \
+  && jq -e '.estimate==false and .provider_unsettled_days==0' <<< "$b_s0" > /dev/null; then
+  ok "SYG_CREDIT_SETTLE_DAYS=0: identical to provider-only output on the ledger > provider fixture"
+else bad "SYG_CREDIT_SETTLE_DAYS=0: $b_s0 / '$txt_s0' vs $b_sp"; fi
+
+# 33e. SYG_CREDIT_SETTLE_DAYS=bogus (and empty or negative): behaves as 2.
+{ entry o 2026-10-06 2026-10-06T12:00:00Z 5; entry d1 2026-10-07 2026-10-07T12:00:00Z 4; entry d2 2026-10-08 2026-10-08T12:00:00Z 15; entry b 2026-10-09 2026-10-09T12:00:00Z 2.5; } > "$T/lv-s-2d.jsonl"
+b_s2=$(lv s-2d balance --json SYG_CREDIT_LEDGER="$T/lv-s-2d.jsonl")
+b_sbog=$(lv s-2d balance --json SYG_CREDIT_LEDGER="$T/lv-s-2d.jsonl" SYG_CREDIT_SETTLE_DAYS=bogus)
+b_semp=$(lv s-2d balance --json SYG_CREDIT_LEDGER="$T/lv-s-2d.jsonl" SYG_CREDIT_SETTLE_DAYS=)
+b_sneg=$(lv s-2d balance --json SYG_CREDIT_LEDGER="$T/lv-s-2d.jsonl" SYG_CREDIT_SETTLE_DAYS=-1)
+b_s1=$(lv s-2d balance --json SYG_CREDIT_LEDGER="$T/lv-s-2d.jsonl" SYG_CREDIT_SETTLE_DAYS=1)
+if near "$(jq .spent_usd <<< "$b_s2")" 25.20289 && near "$(jq .remaining_usd <<< "$b_s2")" 74.79711 \
+  && jq -e '.estimate==true and .provider_unsettled_days==2' <<< "$b_s2" > /dev/null \
+  && [ "$b_sbog" = "$b_s2" ] && [ "$b_semp" = "$b_s2" ] && [ "$b_sneg" = "$b_s2" ] \
+  && near "$(jq .spent_usd <<< "$b_s1")" 21.20289 && jq -e '.provider_unsettled_days==1' <<< "$b_s1" > /dev/null; then
+  ok "SYG_CREDIT_SETTLE_DAYS=bogus (and empty/-1): behaves as 2 (10-07 +4 and 10-08 +5 settled, 10-06 ignored -> unsettled 2; N=1 -> unsettled 1)"
+else bad "SYG_CREDIT_SETTLE_DAYS=bogus: s2=$b_s2 / bog=$b_sbog / s1=$b_s1"; fi
+
+# 33f. Anchored path with ledger > provider on the anchor day: max applied before pre-anchor subtraction.
+{ entry a 2026-10-12 2026-10-12T10:00:00Z 1; entry b 2026-10-12 2026-10-12T14:00:00Z 7
+  entry c 2026-10-13 2026-10-13T12:00:00Z 2.5; entry d 2026-10-14 2026-10-14T12:00:00Z 1.5; } > "$T/anc/pv-settle.jsonl"
+ac SYG_CREDIT_LEDGER="$T/anc/pv-settle.jsonl" SYG_CREDIT_NOW="$PNOW" -- calibrate 50 --at 2026-10-12T12:00:00Z > /dev/null
+echo anc > "$T/cr/mode"
+b_as=$(lv anc-s balance --json SYG_CREDIT_LEDGER="$T/anc/pv-settle.jsonl" SYG_CREDIT_GRANTS="$T/missing.json" SYG_CREDIT_NOW="$PNOW")
+txt_as=$(lv anc-s statusline SYG_CREDIT_LEDGER="$T/anc/pv-settle.jsonl" SYG_CREDIT_GRANTS="$T/missing.json" SYG_CREDIT_NOW="$PNOW" < /dev/null)
+if near "$(jq .remaining_usd <<< "$b_as")" 38.5 && near "$(jq .spent_usd <<< "$b_as")" 11.5 \
+  && jq -e '.source=="provider" and .estimate==true and .provider_unsettled_days==1 and .provider_as_of=="2026-10-13" and .anchor_usd==50' <<< "$b_as" > /dev/null \
+  && [ "$txt_as" = 'api credit $38.50 est' ]; then
+  ok "anchor + settle window: 10-12 ledger 8.00 > provider 5.00 -> (8.00 - 1.00 pre) + 3.00 + 1.50 = 11.50 spent, remaining 38.50, estimate true, unsettled 1"
+else bad "anchor + settle window: $b_as / '$txt_as'"; fi
+
+# 33g. balance --month: settle-window excess added to month_spend_usd, month_estimate true, text has "est".
+echo month > "$T/cr/mode"
+b_ms=$(lv m-settle balance --month --json SYG_CREDIT_LEDGER="$T/lv-s-2d.jsonl")
+txt_ms=$(lv m-settle balance --month SYG_CREDIT_LEDGER="$T/lv-s-2d.jsonl" | head -n 1)
+echo ok > "$T/cr/mode"
+if near "$(jq .month_spend_usd <<< "$b_ms")" 29.20289 \
+  && jq -e '.month_source=="provider" and .month_estimate==true and .month_as_of=="2026-10-08" and .month_bridge_days==1' <<< "$b_ms" > /dev/null \
+  && jq -e '.month_estimate==false' <<< "$b_m" > /dev/null \
+  && jq -e '.month_estimate==true' <<< "$b_mnk" > /dev/null \
+  && [ "$txt_ms" = 'api credit $74.80 est (exp 10-21, 11d) · month $29.20 est' ]; then
+  ok "balance --month + settle window: provider 17.70289 + excess 9.00 (10-07 +4, 10-08 +5; 10-06 excluded) + 2.50 today = 29.20289, month_source provider, month_estimate true, text ' · month \$29.20 est'"
+else bad "balance --month + settle window: $b_ms / '$txt_ms' / b_m=$b_m"; fi
+
 exit $fail

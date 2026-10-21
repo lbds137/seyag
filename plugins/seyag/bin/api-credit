@@ -14,7 +14,8 @@ Usage:
                                  admin key (see Provider balance), else the
                                  ledger estimate; --month adds month-to-date
                                  spend (month_start, month_spend_usd,
-                                 month_as_of, month_source, month_bridge_days)
+                                 month_as_of, month_source, month_estimate,
+                                 month_bridge_days)
   api-credit daily [--json]      per UTC day: sessions, spend, models (reconcile
                                  these rows against the provider console)
   api-credit calibrate AMOUNT [--at TIME]
@@ -61,6 +62,12 @@ Everything is configured by environment variables; nothing is hardcoded.
                      the store shows after at most the cache TTL.
   SYG_CREDIT_ADMIN_URL  replaces the Admin API origin (default
                      https://api.anthropic.com; tests point it at a loopback mock).
+  SYG_CREDIT_SETTLE_DAYS  non-negative integer (default 2; unset, empty or
+                     invalid means 2; 0 disables): the last N closed provider
+                     days (as_of and the N-1 days before it, inside the fetch
+                     window) take max(provider_day, ledger_day) until they
+                     settle, and mark the balance an estimate while the ledger
+                     figure is larger.
 
 Metered route test (with SYG_CREDIT_WHEN unset or empty): ANTHROPIC_API_KEY is
 non-empty in the process environment AND ANTHROPIC_BASE_URL is empty or its host
@@ -143,22 +150,27 @@ followed (up to MAX_PAGES: at 31 buckets a page, a 366-day window fits; a page
 size under the enforced max, a repeated token or exhausted pages are a failure
 that falls back to the labeled estimate); a repeated next_page is a failure.
 Only USD result rows count; each amount is a decimal string in cents. When the
-window is unclamped, the provider's per-day sums inside it and the ledger's
+window is unclamped, the provider's per-day sums inside it (with the last
+SYG_CREDIT_SETTLE_DAYS closed days, default 2, taking max(provider_day,
+ledger_day)) and the ledger's
 entries for every UTC day after the last provider bucket (the whole window when
 the response has no dated bucket) are replayed soonest-expiry first through the
 same drawdown as the ledger estimate; when clamped, the replay starts with the
 ledger's entries from the earliest overlapping grant's granted day up to the
 clamp day (so older grants' drawdown before the clamp is the ledger's estimate,
 and ledger spend before every grant is excluded). spent_usd is the provider's
-closed-day sums in the window plus the bridged ledger entries, plus, when
+closed-day sums in the window (settled with the ledger on the last N closed
+days) plus the bridged ledger entries, plus, when
 clamped, the pre-window ledger entries since the earliest overlapping grant.
 The object then carries source "provider", estimate (which labels remaining_usd:
-false unless the window is clamped or a grant starts or expires mid-UTC-day on
+false unless the window is clamped, a grant starts or expires mid-UTC-day on
 a provider-bucket day, i.e. after the window start and on or before
-provider_as_of), provider_as_of (the last bucket's UTC day, else the day before
+provider_as_of, or a settle-window day used the ledger figure), provider_as_of
+(the last bucket's UTC day, else the day before
 the window), provider_window_start (the fetch window's start day, present
 whenever a fetch was attempted), provider_chain_start (the earliest grant day of
-the overlap chain), provider_clamped, provider_subday,
+the overlap chain), provider_clamped, provider_subday, provider_unsettled_days
+(the count of settle-window days where the ledger figure won),
 ledger_lapsed_usd and ledger_bridge_days (the number of distinct ledger days
 added). next_expiry and days_left come from that replay; lapsed_usd is summed
 per grant, taking in-window grants (granted at or after the earliest grant of
@@ -176,6 +188,7 @@ true, provider_as_of and ledger_bridge_days null, and provider_window_start set
 to the window's start day; it never fails the command. The fetch-attempt keys
 (source, provider_as_of, provider_window_start, ledger_bridge_days) are present
 whenever a fetch was attempted (anchored path included, with
+provider_unsettled_days on the provider success path and
 provider_chain_start, provider_clamped, provider_subday and ledger_lapsed_usd
 added on the unanchored provider success path) and absent, with estimate true,
 when no fetch is attempted: no key (no ANTHROPIC_ADMIN_API_KEY and no
@@ -926,6 +939,52 @@ def resolve_admin_key(src):
 
 
 MAX_CACHE_ENTRIES = 4   # cached cost_report windows kept in live_cache_path()
+DEFAULT_SETTLE_DAYS = 2
+
+
+def settle_days():
+    """SYG_CREDIT_SETTLE_DAYS as a non-negative int; unset, empty or invalid -> 2."""
+    try:
+        n = int(os.environ.get("SYG_CREDIT_SETTLE_DAYS", "").strip())
+        if n >= 0:
+            return n
+    except ValueError:
+        pass
+    return DEFAULT_SETTLE_DAYS
+
+
+def settled_days(got, entries, start, end):
+    """For each closed day in [start, end) up to got["as_of"], (d, dk, amount)
+    where the last SYG_CREDIT_SETTLE_DAYS closed days (as_of and the N-1 days
+    before it, limited to [start, end)) take max(provider_day, ledger_day) and
+    older days take provider_day, plus the count of those days where the ledger
+    figure won (ledger > provider + EPS) and the total excess added."""
+    as_of = got["as_of"]
+    days, d = [], start
+    while d < end and d.strftime("%Y-%m-%d") <= as_of:
+        days.append(d)
+        d += timedelta(days=1)
+    n = settle_days()
+    as_of_date = date.fromisoformat(as_of)
+    recent = {x.strftime("%Y-%m-%d") for x in days if 0 <= (as_of_date - x.date()).days < n}
+    ledger_by_day = {}
+    if recent:
+        for e in entries:
+            if e["day"] in recent:
+                ledger_by_day[e["day"]] = ledger_by_day.get(e["day"], 0.0) + e["cost_usd"]
+    out, unsettled, excess = [], 0, 0.0
+    for d in days:
+        dk = d.strftime("%Y-%m-%d")
+        prov = float(got["days"].get(dk, 0))
+        amount = prov
+        if dk in recent:
+            led = ledger_by_day.get(dk, 0.0)
+            if led > prov + EPS:
+                amount = led
+                unsettled += 1
+                excess += led - prov
+        out.append((d, dk, amount))
+    return out, unsettled, excess
 
 
 def provider_spend(src, start, end, now):
@@ -1047,12 +1106,10 @@ def with_provider(b, entries, grants_cfg, now):
         return b
     as_of, s_key = got["as_of"], s_day.strftime("%Y-%m-%d")
     events = [e for e in entries if s_key <= e["day"] < start_day] if clamped else []
-    d = start
-    while d < end and d.strftime("%Y-%m-%d") <= as_of:
-        dk = d.strftime("%Y-%m-%d")
+    day_rows, unsettled, _ = settled_days(got, entries, start, end)
+    for d, _, amount in day_rows:
         when = min(d + timedelta(days=1) - timedelta(seconds=1), now)
-        events.append({"last_ts": iso(when), "cost_usd": float(got["days"].get(dk, 0))})
-        d += timedelta(days=1)
+        events.append({"last_ts": iso(when), "cost_usd": amount})
     bridged = [e for e in entries if e["day"] > as_of]
     subday = any(
         t is not None and start < t and t.strftime("%Y-%m-%d") <= as_of and t != day_start(t)
@@ -1067,27 +1124,30 @@ def with_provider(b, entries, grants_cfg, now):
                  for lg in grants_cfg[1])
     ledger_lapsed = sum(lg.get("lapsed_usd", 0.0) for lg in grants_cfg[1] if lg["granted"] < s)
     b.update({"lapsed_usd": round(lapsed, 6), "ledger_lapsed_usd": round(ledger_lapsed, 6),
-              "source": "provider", "estimate": clamped or subday,
+              "source": "provider", "estimate": clamped or subday or unsettled > 0,
               "provider_as_of": as_of, "provider_window_start": start_day,
               "provider_chain_start": s_key,
               "provider_clamped": clamped, "provider_subday": subday,
+              "provider_unsettled_days": unsettled,
               "ledger_bridge_days": len({e["day"] for e in bridged})})
     return b
 
 
 def with_month(b, entries, now):
     """Add month-to-date spend fields (month_start, month_spend_usd,
-    month_as_of, month_source, month_bridge_days) to b for the current UTC
-    month. Uses provider_spend for closed UTC days when an admin key source is
-    set and the month has closed days, bridging later days from the ledger;
-    falls back to the ledger on the 1st of the month, without a key, or on any
-    failure."""
+    month_as_of, month_source, month_estimate, month_bridge_days) to b for the
+    current UTC month. Uses provider_spend for closed UTC days when an admin key
+    source is set and the month has closed days (with the last
+    SYG_CREDIT_SETTLE_DAYS closed days taking max(provider_day, ledger_day)),
+    bridging later days from the ledger; falls back to the ledger on the 1st of
+    the month, without a key, or on any failure."""
     end = day_start(now)
     start = end.replace(day=1)
     month_start, today = start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d")
     ledger_spent = sum(e["cost_usd"] for e in entries if month_start <= e["day"] <= today)
     b.update({"month_start": month_start, "month_spend_usd": round(ledger_spent, 6),
-              "month_as_of": None, "month_source": "ledger", "month_bridge_days": 0})
+              "month_as_of": None, "month_source": "ledger", "month_estimate": True,
+              "month_bridge_days": 0})
     src = admin_key_source()
     if src is None or start >= end:
         return b
@@ -1100,10 +1160,12 @@ def with_month(b, entries, now):
         as_of = got["as_of"]
         if as_of < month_start:
             return b   # no provider bucket this month yet: the figure is all ledger
+        _, unsettled, excess = settled_days(got, entries, start, end)
         bridged = [e for e in entries if month_start <= e["day"] <= today and e["day"] > as_of]
-        spent = float(got["spent"]) + sum(e["cost_usd"] for e in bridged)
+        spent = float(got["spent"]) + excess + sum(e["cost_usd"] for e in bridged)
         b.update({"month_spend_usd": round(spent, 6), "month_as_of": as_of,
-                  "month_source": "provider", "month_bridge_days": len({e["day"] for e in bridged})})
+                  "month_source": "provider", "month_estimate": unsettled > 0,
+                  "month_bridge_days": len({e["day"] for e in bridged})})
     except Exception:  # the balance must never fail on the live path
         pass
     return b
@@ -1124,7 +1186,7 @@ def balance_text(b):
     else:
         s = "api credit $0.00" + est
     if "month_spend_usd" in b:
-        m_est = "" if b.get("month_source") == "provider" else " est"
+        m_est = "" if b.get("month_estimate") is False else " est"
         s += " · month $%s%s" % (money(b["month_spend_usd"]), m_est)
     return s
 
@@ -1253,23 +1315,22 @@ def anchored_balance(entries, grants_cfg, now, anc):
         got = None
     if got is None:
         return b
-    as_of, events, d = got["as_of"], [], start
-    while d < end and d.strftime("%Y-%m-%d") <= as_of:
-        dk = d.strftime("%Y-%m-%d")
+    as_of, events = got["as_of"], []
+    day_rows, unsettled, _ = settled_days(got, entries, start, end)
+    for d, dk, amount in day_rows:
         when = min(d + timedelta(days=1) - timedelta(seconds=1), now)
-        amount = float(got["days"].get(dk, 0))
         if dk == day:
             amount, when = max(0.0, amount - anc["pre"]), max(t, when)
         events.append({"last_ts": iso(when), "cost_usd": amount})
-        d += timedelta(days=1)
     bridged = [e for e in entries if e["day"] > as_of and e["day"] > day]
     used = {e["day"] for e in bridged}
     if day > as_of:
         events.append(anchor_day_event(day_entries, anc))
         used.update(e["day"] for e in day_entries)
     b.update(balance(events + bridged, cfg(), now))
-    b.update({"source": "provider", "estimate": False, "provider_as_of": as_of,
-              "provider_window_start": day, "ledger_bridge_days": len(used)})
+    b.update({"source": "provider", "estimate": unsettled > 0, "provider_as_of": as_of,
+              "provider_window_start": day, "provider_unsettled_days": unsettled,
+              "ledger_bridge_days": len(used)})
     return b
 
 
