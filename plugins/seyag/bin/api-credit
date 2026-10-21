@@ -68,9 +68,11 @@ Everything is configured by environment variables; nothing is hardcoded.
                      window) take max(provider_day, ledger_day) until they
                      settle, and mark the balance an estimate while the ledger
                      figure is larger. A ledger that runs above the provider
-                     keeps those days counted at the ledger figure (and the
-                     balance "est") until the ledger is corrected; the price
-                     table is matched to the provider to keep that rare.
+                     counts the ledger figure for each such day (and marks the
+                     balance "est") for as long as the day is in the window,
+                     so a ledger that runs high keeps every close "est" for N
+                     days; the price table is matched to the provider to keep
+                     that rare.
 
 Metered route test (with SYG_CREDIT_WHEN unset or empty): ANTHROPIC_API_KEY is
 non-empty in the process environment AND ANTHROPIC_BASE_URL is empty or its host
@@ -535,7 +537,7 @@ def parse_long_card(card):
     if not isinstance(card, dict):
         return None
     above = card.get("above")
-    if not isinstance(above, int) or isinstance(above, bool) or above <= 0:
+    if not is_num(above) or above <= 0 or above != int(above):
         return None
     if not all(is_num(card.get(k)) for k in RATE_FIELDS):
         return None
