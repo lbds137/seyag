@@ -478,7 +478,7 @@ nk=$(ac SYG_CREDIT_LEDGER="$T/lv.jsonl" SYG_CREDIT_GRANTS="$T/g-live.json" SYG_C
 nkt=$(ac SYG_CREDIT_LEDGER="$T/lv.jsonl" SYG_CREDIT_GRANTS="$T/g-live.json" SYG_CREDIT_NOW="$LNOW" -- statusline < /dev/null)
 nkb=$(ac SYG_CREDIT_LEDGER="$T/lv.jsonl" SYG_CREDIT_GRANTS="$T/g-live.json" SYG_CREDIT_NOW="$LNOW" -- balance)
 nke=$(ac SYG_CREDIT_LEDGER="$T/lv.jsonl" SYG_CREDIT_GRANTS="$T/g-live.json" SYG_CREDIT_NOW="$LNOW" ANTHROPIC_ADMIN_API_KEY= SYG_CREDIT_ADMIN_URL="$CR" -- balance --json)
-if [ "$nk" = '{"currency": "USD", "days_left": 11, "estimate": true, "granted_total_live": 100.0, "lapsed_usd": 0.0, "live_grants": 1, "next_expiry": "2026-10-21T00:00:00Z", "overage_usd": 0.0, "remaining_usd": 92.5, "spent_usd": 7.5}' ] \
+if [ "$nk" = '{"currency": "USD", "days_left": 11, "estimate": true, "granted_total_live": 100.0, "lapsed_usd": 0.0, "live_grants": 1, "next_expiry": "2026-10-21T00:00:00Z", "overage_usd": 0.0, "remaining_by_kind": {"unspecified": 92.5}, "remaining_usd": 92.5, "spent_usd": 7.5}' ] \
   && [ "$nkt" = 'api credit $92.50 est (exp 10-21, 11d)' ] \
   && [ "$nkb" = $'api credit $92.50 est (exp 10-21, 11d)\nspent $7.50, lapsed $0.00, overage $0.00 (estimate)' ] \
   && [ "$nke" = "$nk" ] && [ "$(hits)" = 0 ]; then
@@ -1362,5 +1362,210 @@ if near "$(jq .spent_usd <<< "$b_snb")" 7.5 && near "$(jq .remaining_usd <<< "$b
   && jq -e '.source=="provider" and .estimate==false and .provider_as_of=="2026-10-04" and .provider_window_start=="2026-10-05" and .provider_unsettled_days==0 and .ledger_bridge_days==2' <<< "$b_snb" > /dev/null; then
   ok "settle window + no dated bucket (as_of 2026-10-04 before window 2026-10-05): settle rows empty, provider_unsettled_days 0, estimate false, in-window 7.50 bridged"
 else bad "settle window + no dated bucket: $b_snb"; fi
+
+# 35. Per-kind remaining credit (remaining_by_kind, "by kind:" line, calibrate --kind).
+# 35a. No anchor: grants A (kind "promo", $10, expires 10-20), B (kind "paid", $5,
+#      expires 10-25), C (no kind, $3, no expiry).
+#      - Spend $4 on 10-05 draws from soonest-expiring A ("promo"):
+#        promo 10 - 4 = 6, paid 5, unspecified 3; remaining_usd = 14.
+#        Text third line (draw order: promo exp 10-20, paid exp 10-25, unspecified None):
+#        "by kind: promo $6.00, paid $5.00, unspecified $3.00"
+#      - Spend $12 on 10-05 exhausts A ($10 -> 0, omitted) and draws $2 from B ("paid"):
+#        paid 5 - 2 = 3, unspecified 3; remaining_usd = 6.
+#        Text third line: "by kind: paid $3.00, unspecified $3.00"
+#      - With a grants file whose grants have no kind (g-live.json): remaining_by_kind has
+#        only "unspecified", so balance prints 2 lines (no third line).
+#      - Without a usable grants file: remaining_by_kind == {}.
+cat > "$T/g-35a.json" <<'EOF'
+{"currency":"USD","grants":[
+ {"amount":10,"granted":"2026-10-01","expires":"2026-10-20","kind":" promo "},
+ {"amount":5,"granted":"2026-10-01","expires":"2026-10-25","kind":"paid"},
+ {"amount":3,"granted":"2026-10-01"}
+]}
+EOF
+NOW35=2026-10-15T12:00:00Z
+entry s1 2026-10-05 2026-10-05T12:00:00Z 4 > "$T/k35-4.jsonl"
+entry s1 2026-10-05 2026-10-05T12:00:00Z 12 > "$T/k35-12.jsonl"
+b_35a4=$(ac SYG_CREDIT_LEDGER="$T/k35-4.jsonl" SYG_CREDIT_GRANTS="$T/g-35a.json" SYG_CREDIT_NOW="$NOW35" -- balance --json)
+t_35a4=$(ac SYG_CREDIT_LEDGER="$T/k35-4.jsonl" SYG_CREDIT_GRANTS="$T/g-35a.json" SYG_CREDIT_NOW="$NOW35" -- balance)
+b_35a12=$(ac SYG_CREDIT_LEDGER="$T/k35-12.jsonl" SYG_CREDIT_GRANTS="$T/g-35a.json" SYG_CREDIT_NOW="$NOW35" -- balance --json)
+t_35a12=$(ac SYG_CREDIT_LEDGER="$T/k35-12.jsonl" SYG_CREDIT_GRANTS="$T/g-35a.json" SYG_CREDIT_NOW="$NOW35" -- balance)
+t_35anok=$(ac SYG_CREDIT_LEDGER="$T/k35-4.jsonl" SYG_CREDIT_GRANTS="$T/g-live.json" SYG_CREDIT_NOW="$NOW35" -- balance)
+b_35anog=$(ac SYG_CREDIT_LEDGER="$T/k35-4.jsonl" SYG_CREDIT_GRANTS="$T/missing.json" SYG_CREDIT_NOW="$NOW35" -- balance --json)
+if jq -e '.remaining_usd==14 and .remaining_by_kind=={"promo":6,"paid":5,"unspecified":3}' <<< "$b_35a4" > /dev/null \
+  && [ "$(sed -n 3p <<< "$t_35a4")" = 'by kind: promo $6.00, paid $5.00, unspecified $3.00' ] \
+  && jq -e '.remaining_usd==6 and .remaining_by_kind=={"paid":3,"unspecified":3}' <<< "$b_35a12" > /dev/null \
+  && [ "$(wc -l <<< "$t_35a12" | tr -d ' ')" = 3 ] \
+  && [ "$(sed -n 3p <<< "$t_35a12")" = 'by kind: paid $3.00, unspecified $3.00' ] \
+  && [ "$(wc -l <<< "$t_35anok" | tr -d ' ')" = 2 ] \
+  && jq -e '.remaining_by_kind=={}' <<< "$b_35anog" > /dev/null; then
+  ok "35a: remaining_by_kind and 'by kind:' line (spend 4 -> promo 6, paid 5, unspecified 3; spend 12 -> promo omitted, paid 3, unspecified 3; no-kind grants -> 2 lines)"
+else bad "35a: $b_35a4 / '$t_35a4' / $b_35a12 / '$t_35a12' / '$t_35anok' / $b_35anog"; fi
+
+# 35b. Anchor without kinds: calibrate 12 over grants A ("promo", $10, exp 10-20) +
+#      B ("paid", $5, exp 10-25), no pre-anchor spend.
+#      - Anchor record has no "kinds" key.
+#      - Pools fill latest-expiring first, capped at replay remainders (B: 5, A: 10):
+#        B ("paid", exp 10-25) takes min(12, 5) = 5; A ("promo", exp 10-20) takes
+#        min(12 - 5, 10) = 7; cash pool 0 -> remaining_by_kind == {"promo": 7, "paid": 5}.
+cat > "$T/g-35b.json" <<'EOF'
+{"currency":"USD","grants":[
+ {"amount":10,"granted":"2026-10-01","expires":"2026-10-20","kind":"promo"},
+ {"amount":5,"granted":"2026-10-01","expires":"2026-10-25","kind":"paid"}
+]}
+EOF
+L35B="$T/anc/k35b.jsonl"; : > "$L35B"
+cal_35b=$(ac SYG_CREDIT_LEDGER="$L35B" SYG_CREDIT_GRANTS="$T/g-35b.json" SYG_CREDIT_NOW=2026-10-15T13:00:00Z -- calibrate 12 --at "$NOW35" | head -n 1)
+b_35b=$(ac SYG_CREDIT_LEDGER="$L35B" SYG_CREDIT_GRANTS="$T/g-35b.json" SYG_CREDIT_NOW=2026-10-15T13:00:00Z -- balance --json)
+if [ "$cal_35b" = 'anchored $12.00 at 2026-10-15T12:00:00Z (same-day spend before it $0.00)' ] \
+  && jq -e '(.anchors[0]|has("kinds"))|not' "$L35B.anchor.json" > /dev/null \
+  && jq -e '.remaining_usd==12 and .remaining_by_kind=={"promo":7,"paid":5}' <<< "$b_35b" > /dev/null; then
+  ok "35b: calibrate 12 without --kind -> no 'kinds' key in record, pools carry kinds (paid 5 latest-first, promo 7)"
+else bad "35b: '$cal_35b' / $(cat "$L35B.anchor.json") / $b_35b"; fi
+
+# 35c. Anchor with kinds: calibrate 12 --kind paid=2 over grants A+B.
+#      - Record has kinds == {"paid": 2}; first printed line includes "(paid $2.00)".
+#      - Stated kind "paid" takes 2 in B (exp 10-25); remaining 12 - 2 = 10 fills unstated
+#        A ("promo", exp 10-20, full amount 10) -> remaining_by_kind == {"promo": 10, "paid": 2}.
+#      - Then $3 spent after the anchor (on 10-16) draws soonest-expiring promo first:
+#        promo 10 - 3 = 7, paid 2.
+#      - With $4 pre-anchor spend (on 10-05, leaving promo replay remainder 6, paid 5):
+#        * calibrate 12 --kind paid=2 leaves unstated promo uncapped at its full 10:
+#          {"promo": 10, "paid": 2};
+#        * calibrate 12 --kind promo=9 (stated promo uncapped at 10, unstated paid uncapped
+#          at 5 takes 3): {"promo": 9, "paid": 3};
+#        * no-kinds counterpart calibrate 12 (no --kind) caps at replay remainders
+#          (paid 5, promo 6) and puts the leftover 1 in unspecified:
+#          {"promo": 6, "paid": 5, "unspecified": 1}.
+L35C="$T/anc/k35c.jsonl"; : > "$L35C"
+cal_35c=$(ac SYG_CREDIT_LEDGER="$L35C" SYG_CREDIT_GRANTS="$T/g-35b.json" SYG_CREDIT_NOW=2026-10-15T13:00:00Z -- calibrate 12 --at "$NOW35" --kind paid=2 | head -n 1)
+b_35c1=$(ac SYG_CREDIT_LEDGER="$L35C" SYG_CREDIT_GRANTS="$T/g-35b.json" SYG_CREDIT_NOW=2026-10-15T13:00:00Z -- balance --json)
+entry post 2026-10-16 2026-10-16T12:00:00Z 3 >> "$L35C"
+b_35c2=$(ac SYG_CREDIT_LEDGER="$L35C" SYG_CREDIT_GRANTS="$T/g-35b.json" SYG_CREDIT_NOW=2026-10-16T15:00:00Z -- balance --json)
+L35C_PRE="$T/anc/k35c-pre.jsonl"
+entry pre 2026-10-05 2026-10-05T12:00:00Z 4 > "$L35C_PRE"
+ac SYG_CREDIT_LEDGER="$L35C_PRE" SYG_CREDIT_GRANTS="$T/g-35b.json" SYG_CREDIT_NOW=2026-10-15T13:00:00Z -- calibrate 12 --at "$NOW35" --kind paid=2 > /dev/null
+b_35c3=$(ac SYG_CREDIT_LEDGER="$L35C_PRE" SYG_CREDIT_GRANTS="$T/g-35b.json" SYG_CREDIT_NOW=2026-10-15T13:00:00Z -- balance --json)
+ac SYG_CREDIT_LEDGER="$L35C_PRE" SYG_CREDIT_GRANTS="$T/g-35b.json" SYG_CREDIT_ANCHOR="$T/anc/k35c-uncap.json" SYG_CREDIT_NOW=2026-10-15T13:00:00Z -- calibrate 12 --at "$NOW35" --kind promo=9 > /dev/null
+b_35c4=$(ac SYG_CREDIT_LEDGER="$L35C_PRE" SYG_CREDIT_GRANTS="$T/g-35b.json" SYG_CREDIT_ANCHOR="$T/anc/k35c-uncap.json" SYG_CREDIT_NOW=2026-10-15T13:00:00Z -- balance --json)
+ac SYG_CREDIT_LEDGER="$L35C_PRE" SYG_CREDIT_GRANTS="$T/g-35b.json" SYG_CREDIT_ANCHOR="$T/anc/k35c-nokind.json" SYG_CREDIT_NOW=2026-10-15T13:00:00Z -- calibrate 12 --at "$NOW35" > /dev/null
+b_35c5=$(ac SYG_CREDIT_LEDGER="$L35C_PRE" SYG_CREDIT_GRANTS="$T/g-35b.json" SYG_CREDIT_ANCHOR="$T/anc/k35c-nokind.json" SYG_CREDIT_NOW=2026-10-15T13:00:00Z -- balance --json)
+if [ "$cal_35c" = 'anchored $12.00 at 2026-10-15T12:00:00Z (paid $2.00) (same-day spend before it $0.00)' ] \
+  && jq -e '.anchors[0].kinds=={"paid":2}' "$L35C.anchor.json" > /dev/null \
+  && jq -e '.remaining_usd==12 and .remaining_by_kind=={"promo":10,"paid":2}' <<< "$b_35c1" > /dev/null \
+  && jq -e '.remaining_usd==9 and .spent_usd==3 and .remaining_by_kind=={"promo":7,"paid":2}' <<< "$b_35c2" > /dev/null \
+  && jq -e '.remaining_usd==12 and .remaining_by_kind=={"promo":10,"paid":2}' <<< "$b_35c3" > /dev/null \
+  && jq -e '.remaining_usd==12 and .remaining_by_kind=={"promo":9,"paid":3}' <<< "$b_35c4" > /dev/null \
+  && jq -e '.remaining_usd==12 and .remaining_by_kind=={"promo":6,"paid":5,"unspecified":1}' <<< "$b_35c5" > /dev/null; then
+  ok "35c: calibrate 12 --kind paid=2 -> kinds {\"paid\":2}, promo 10 + paid 2; \$3 post-anchor spend -> promo 7, paid 2; stated + unstated uncapped with --kind, replay-capped without --kind (promo 6, paid 5, unspecified 1)"
+else bad "35c: '$cal_35c' / $b_35c1 / $b_35c2 / $b_35c3 / $b_35c4 / $b_35c5"; fi
+
+# 35d. calibrate --kind errors, each leaving the anchor file absent (and an existing one unchanged):
+#      --kind paid (no =), --kind paid=-1, --kind =1, --kind paid=1 --kind paid=2,
+#      --kind paid=20 with AMOUNT 12 -> exit 2; --kind nosuch=1 -> exit 1.
+#      Stderr for duplicate kind ("duplicate --kind") and unknown kind ("matches no grant").
+L35D="$T/anc/k35d.jsonl"; : > "$L35D"
+ck35d() { ac SYG_CREDIT_LEDGER="$L35D" SYG_CREDIT_GRANTS="$T/g-35b.json" SYG_CREDIT_NOW=2026-10-15T13:00:00Z -- calibrate 12 --at "$NOW35" "$@" > /dev/null 2>&1; echo $?; }
+codes_35d="$(ck35d --kind paid) $(ck35d --kind paid=-1) $(ck35d --kind =1) $(ck35d --kind paid=1 --kind paid=2) $(ck35d --kind paid=20) $(ck35d --kind nosuch=1)"
+err_35d_dup=$(ac SYG_CREDIT_LEDGER="$L35D" SYG_CREDIT_GRANTS="$T/g-35b.json" SYG_CREDIT_NOW=2026-10-15T13:00:00Z -- calibrate 12 --at "$NOW35" --kind paid=1 --kind paid=2 2>&1 > /dev/null)
+sum_35c=$(cksum < "$L35C.anchor.json")
+err_35d_unk=$(ac SYG_CREDIT_LEDGER="$L35C" SYG_CREDIT_GRANTS="$T/g-35b.json" SYG_CREDIT_NOW=2026-10-15T13:00:00Z -- calibrate 12 --at "$NOW35" --kind nosuch=1 2>&1 > /dev/null)
+if [ "$codes_35d" = "2 2 2 2 2 1" ] && [ ! -e "$L35D.anchor.json" ] && [ "$(cksum < "$L35C.anchor.json")" = "$sum_35c" ] \
+  && [[ "$err_35d_dup" == *'duplicate --kind'* ]] && [[ "$err_35d_unk" == *'matches no grant'* ]]; then
+  ok "35d: calibrate --kind errors (no '=', negative, empty kind, duplicate 'duplicate --kind', > AMOUNT -> exit 2; unknown kind 'matches no grant' -> exit 1), anchor file absent/unchanged"
+else bad "35d: codes '$codes_35d' / dup='$err_35d_dup' / unk='$err_35d_unk' / exists $(ls "$L35D.anchor.json" 2>&1)"; fi
+
+# 35e. Hand-written anchor file with malformed kinds ({"paid":"x"}, and one summing over
+#      amount: {"paid":8,"promo":5} > 12): anchor still governs (anchor_usd == 12) and
+#      falls back to the no-kinds split ({"promo": 7, "paid": 5}).
+printf '{"anchors":[{"amount":12,"at":"2026-10-15T12:00:00Z","pre_anchor_day_usd":0,"recorded":"2026-10-15T13:00:00Z","kinds":{"paid":"x"}}]}\n' > "$T/anc/bad-k1.json"
+printf '{"anchors":[{"amount":12,"at":"2026-10-15T12:00:00Z","pre_anchor_day_usd":0,"recorded":"2026-10-15T13:00:00Z","kinds":{"paid":8,"promo":5}}]}\n' > "$T/anc/bad-k2.json"
+b_35e1=$(ac SYG_CREDIT_LEDGER="$L35B" SYG_CREDIT_GRANTS="$T/g-35b.json" SYG_CREDIT_ANCHOR="$T/anc/bad-k1.json" SYG_CREDIT_NOW=2026-10-15T13:00:00Z -- balance --json)
+b_35e2=$(ac SYG_CREDIT_LEDGER="$L35B" SYG_CREDIT_GRANTS="$T/g-35b.json" SYG_CREDIT_ANCHOR="$T/anc/bad-k2.json" SYG_CREDIT_NOW=2026-10-15T13:00:00Z -- balance --json)
+if jq -e '.anchor_usd==12 and .remaining_usd==12 and .remaining_by_kind=={"promo":7,"paid":5}' <<< "$b_35e1" > /dev/null \
+  && jq -e '.anchor_usd==12 and .remaining_usd==12 and .remaining_by_kind=={"promo":7,"paid":5}' <<< "$b_35e2" > /dev/null; then
+  ok "35e: malformed anchor kinds ({paid:'x'} and sum > amount) -> anchor still governs (anchor_usd 12) with the no-kinds split (promo 7, paid 5)"
+else bad "35e: $b_35e1 / $b_35e2"; fi
+
+# 35f. Provider path with kinds on grants: ok.json has closed-day spend 3.70289 (10-05) +
+#      10.00 (10-08) = 13.70289; lv.jsonl adds 2.50 bridged today (10-09) = 16.20289 total.
+#      Grants: promo $20 (exp 10-15) + paid $80 (exp 10-21) -> promo takes all 16.20289:
+#      promo 20 - 16.20289 = 3.79711, paid 80, remaining_usd 83.79711.
+cat > "$T/g-35f.json" <<'EOF'
+{"grants":[
+ {"amount":20,"granted":"2026-10-05","expires":"2026-10-15","kind":"promo"},
+ {"amount":80,"granted":"2026-10-05","expires":"2026-10-21","kind":"paid"}
+]}
+EOF
+echo ok > "$T/cr/mode"
+b_35f=$(lv k35f balance --json SYG_CREDIT_GRANTS="$T/g-35f.json")
+if near "$(jq .remaining_usd <<< "$b_35f")" 83.79711 \
+  && near "$(jq '.remaining_by_kind.promo' <<< "$b_35f")" 3.79711 \
+  && near "$(jq '.remaining_by_kind.paid' <<< "$b_35f")" 80 \
+  && jq -e '.source=="provider" and .estimate==false and (.remaining_by_kind|keys)==["paid","promo"]' <<< "$b_35f" > /dev/null; then
+  ok "35f: provider path with kinds -> remaining_by_kind promo 3.79711 (20 - 16.20289), paid 80.00"
+else bad "35f: $b_35f"; fi
+
+# 35h. Stated kind larger than its grants: calibrate 14 --kind paid=7 over g-35b
+#      (paid grant $5 exp 10-25, promo grant $10 exp 10-20) -> paid 7 (5 in the grant +
+#      2 excess keeping latest paid expiry 10-25), promo 7; after 10-25 (at 10-26) both
+#      paid pools (5 + 2 = 7) and promo (7) have lapsed -> paid omitted, remaining 0,
+#      lapsed_usd 14 (covering paid's 7 + promo's 7).
+L35H="$T/anc/k35h.jsonl"; : > "$L35H"
+ac SYG_CREDIT_LEDGER="$L35H" SYG_CREDIT_GRANTS="$T/g-35b.json" SYG_CREDIT_NOW=2026-10-15T13:00:00Z -- calibrate 14 --at "$NOW35" --kind paid=7 > /dev/null
+b_35h1=$(ac SYG_CREDIT_LEDGER="$L35H" SYG_CREDIT_GRANTS="$T/g-35b.json" SYG_CREDIT_NOW=2026-10-15T13:00:00Z -- balance --json)
+b_35h2=$(ac SYG_CREDIT_LEDGER="$L35H" SYG_CREDIT_GRANTS="$T/g-35b.json" SYG_CREDIT_NOW=2026-10-26T00:00:00Z -- balance --json)
+if jq -e '.remaining_usd==14 and .remaining_by_kind=={"promo":7,"paid":7}' <<< "$b_35h1" > /dev/null \
+  && jq -e '.remaining_usd==0 and .remaining_by_kind=={} and .lapsed_usd==14' <<< "$b_35h2" > /dev/null; then
+  ok "35h: stated kind > grant amount (calibrate 14 --kind paid=7 over \$5 paid grant) -> promo 7, paid 7 (2 excess keeps 10-25 expiry); after 10-25 -> paid omitted, lapsed_usd 14 (covering 7 paid + 7 promo)"
+else bad "35h: $b_35h1 / $b_35h2"; fi
+
+# 35i. Lapsed-kind refusal: promo grant expired 10-10, paid grant live (exp 10-25);
+#      calibrate 5 --at 10-15T12:00:00Z --kind promo=1 -> exit 1, stderr names the kind,
+#      anchor file absent.
+cat > "$T/g-35i.json" <<'EOF'
+{"currency":"USD","grants":[
+ {"amount":10,"granted":"2026-10-01","expires":"2026-10-10","kind":"promo"},
+ {"amount":5,"granted":"2026-10-01","expires":"2026-10-25","kind":"paid"}
+]}
+EOF
+L35I="$T/anc/k35i.jsonl"; : > "$L35I"
+err_35i=$(ac SYG_CREDIT_LEDGER="$L35I" SYG_CREDIT_GRANTS="$T/g-35i.json" SYG_CREDIT_NOW=2026-10-15T13:00:00Z -- calibrate 5 --at 2026-10-15T12:00:00Z --kind promo=1 2>&1 > /dev/null); rc_35i=$?
+if [ "$rc_35i" = 1 ] && [ ! -e "$L35I.anchor.json" ] \
+  && [[ "$err_35i" == *"'promo'"* && "$err_35i" == *"matches no grant live at 2026-10-15T12:00:00Z"* ]]; then
+  ok "35i: lapsed kind refused (calibrate 5 --at 10-15 --kind promo=1 when promo expired 10-10) -> exit 1, stderr names promo, anchor file absent"
+else bad "35i: rc=$rc_35i err='$err_35i' / exists $(ls "$L35I.anchor.json" 2>&1)"; fi
+
+# 35j. A grant granted after an anchor with kinds enters unchanged with its kind:
+#      calibrate 12 --kind paid=2 at 10-15T12:00:00Z over g-35b plus a third grant
+#      {"amount":50,"granted":"10-16","kind":"promo"}; balance at 10-16T13:00:00Z ->
+#      promo 10 + 50 = 60, paid 2, remaining_usd 62.
+cat > "$T/g-35j.json" <<'EOF'
+{"currency":"USD","grants":[
+ {"amount":10,"granted":"2026-10-01","expires":"2026-10-20","kind":"promo"},
+ {"amount":5,"granted":"2026-10-01","expires":"2026-10-25","kind":"paid"},
+ {"amount":50,"granted":"2026-10-16","kind":"promo"}
+]}
+EOF
+L35J="$T/anc/k35j.jsonl"; : > "$L35J"
+ac SYG_CREDIT_LEDGER="$L35J" SYG_CREDIT_GRANTS="$T/g-35j.json" SYG_CREDIT_NOW=2026-10-15T13:00:00Z -- calibrate 12 --at "$NOW35" --kind paid=2 > /dev/null
+b_35j=$(ac SYG_CREDIT_LEDGER="$L35J" SYG_CREDIT_GRANTS="$T/g-35j.json" SYG_CREDIT_NOW=2026-10-16T13:00:00Z -- balance --json)
+if jq -e '.remaining_usd==62 and .remaining_by_kind=={"promo":60,"paid":2}' <<< "$b_35j" > /dev/null; then
+  ok "35j: grant granted after an anchor with kinds (+50 promo on 10-16) enters unchanged -> promo 60, paid 2"
+else bad "35j: $b_35j"; fi
+
+# 36. Long-card pricing on suffixed model ids: m-long-20261006 and m-long[1m] at prompt
+#     1001 (401 in + 500 out + 300 read + 200 w5m + 100 w1h, > above 1000) each price
+#     on m-long's long card at 0.02001 (as in 34a), total 0.04002.
+{
+  uline msg-ls1 req-ls1 m-long-20261006 ${D1}T10:00:00Z 401 500 300 200 100
+  uline msg-ls2 req-ls2 'm-long[1m]' ${D1}T10:01:00Z 401 500 300 200 100
+} > "$P/LSUF.jsonl"
+hk LSUF "$T/lsuf/l.jsonl" SYG_CREDIT_PRICE_TABLE_CMD="$T/pt-long.sh"
+elsuf=$(cat "$T/lsuf/l.jsonl")
+if near "$(jq .cost_usd <<< "$elsuf")" 0.04002 \
+  && jq -e '.models["m-long-20261006"].cost_usd==0.02001 and .models["m-long[1m]"].cost_usd==0.02001 and .unpriced_models==[]' <<< "$elsuf" > /dev/null; then
+  ok "36: suffixed ids m-long-20261006 and m-long[1m] at prompt 1001 price on m-long's long card (0.02001 each)"
+else bad "36 long card suffixed ids: $elsuf"; fi
 
 exit $fail

@@ -79,7 +79,7 @@ TABLE = {
     "~z-ai/glm-latest":     (0.05, 6.00, 0.049, 0.05),    # OR models re-synced (OR repriced GLM output; the prior sync rates are stale)
     # Anthropic direct ids: list price (claude-api skill cache 2026-09-25).
     # cacheWrite = the 5-min 1.25x rate (the setting cannot express the TTL split).
-    # Haiku 5.5 has two rate cards split at a 100K-token prompt ($0.50/$2.50 above, cache rates scaling with input); the table carries the <=100K card only.
+    # Haiku 5.5 has two rate cards split at a 100K-token prompt ($0.50/$2.50 above, cache rates scaling with input); the table carries the <=100K card only; the >100K card is in LONG_CARDS (api-credit only).
     "claude-fable-5-1":     (10, 50, 0.25, 12.5),     # list price 2026-09-25
     "claude-opus-5-5":      (4, 20, 0.20, 5),         # list price 2026-09-25
     "claude-sonnet-5-5":    (2, 10, 0.10, 2.5),       # list price 2026-09-25; cacheRead 0.10 measured from the provider cost_report 2026-10-21
