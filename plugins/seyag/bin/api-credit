@@ -18,7 +18,7 @@ Usage:
                                  month_bridge_days)
   api-credit daily [--json]      per UTC day: sessions, spend, models (reconcile
                                  these rows against the provider console)
-  api-credit calibrate AMOUNT [--at TIME]
+  api-credit calibrate AMOUNT [--at TIME] [--kind KIND=AMOUNT ...]
                                  record AMOUNT (USD, read in the provider console)
                                  as the true balance at TIME (a full ISO-8601
                                  timestamp with offset or Z; default now): the
@@ -86,7 +86,10 @@ amount is a number > 0 (other grants are skipped); granted is required, expires
 is optional. Each is a date YYYY-MM-DD, meaning 00:00 of that day in the grant's
 tz (default UTC; an unknown tz skips the grant), or a full ISO-8601 timestamp
 with offset or Z. A date-only expiry therefore lapses at the START of that day
-(conservative).
+(conservative). kind is an optional label (e.g. "promotional", "purchased");
+balance reports remaining_by_kind and, when a kind other than "unspecified"
+has a remainder that rounds to a cent or more, a "by kind:" line (kinds that
+round to $0.00 are left out of it); grants without one count as "unspecified".
 
 Ledger: one JSON object per line, one per (session_id, day) where day is the UTC
 date of each request's timestamp, so a session's spend is split by UTC day.
@@ -126,11 +129,12 @@ cache_read*cacheRead + 5m writes*cacheWrite + 1h writes*(2*input). The 1h write
 rate (2x input) is an assumption from the provider's published multipliers, not
 a table field. A model's second rate card (price-table `long`: an `above`
 threshold and four rates) prices the whole request when its prompt (input +
-cache read + cache writes) is over the threshold. Not priced: the fast-mode premium (fast
-requests are counted and priced at standard rates), server tool requests (web
-search, web fetch: counted only), and models with no table row (tokens recorded,
-no cost added, listed in unpriced_models). A failing price table aborts the call
-(no write), so a transient failure cannot zero recorded spend.
+cache read + cache writes) is over the threshold. Not priced: the fast-mode
+premium (fast requests are counted and priced at standard rates), server tool
+requests (web search, web fetch: counted only), and models with no table row
+(tokens recorded, no cost added, listed in unpriced_models). A failing price
+table aborts the call (no write), so a transient failure cannot zero recorded
+spend.
 
 Balance (an estimate): each ledger entry is a spend event at its last_ts. Events
 are replayed in time order against the grants, drawing from the soonest-expiring
@@ -208,17 +212,22 @@ endpoint is not re-asked on every render; a corrupt or old-format cache, or one
 without a valid per-day map, is refetched.
 
 Anchor (calibrate): the ledger estimate is the grants minus ledger spend, blind
-to card top-ups and to anything the ledger misprices. `calibrate AMOUNT` records
-the balance read in the provider console as an anchor: it appends
-{"amount", "at", "pre_anchor_day_usd", "recorded"} to the anchor file's
-"anchors" list (history kept; rewritten atomically, mode kept) and prints the
-anchor and the new balance line. pre_anchor_day_usd is the spend on the
-anchor's UTC day before its instant, computed under the ledger lock: every
-session in the ledger (entries of any day) whose transcript, the
-transcript_path of its latest entry, was modified on or after 00:00 UTC of
-that day is read once, and its requests of that day timed before the instant
-count (those another session's entry holds excluded, the hook's rule, so a turn
-no entry holds yet counts), priced like the hook; older transcripts cannot hold
+to card top-ups and to anything the ledger misprices. `calibrate AMOUNT [--at
+TIME] [--kind KIND=AMOUNT ...]` records the balance read in the provider
+console as an anchor: it appends {"amount", "at", "pre_anchor_day_usd",
+"recorded"} (plus "kinds": {KIND: amount} when --kind is given) to the anchor
+file's "anchors" list (history kept; rewritten atomically, mode kept) and
+prints the anchor and the new balance line. Repeatable --kind KIND=AMOUNT
+records the console's per-kind remaining at the instant (split on the last "=":
+non-empty KIND, finite AMOUNT >= 0, no duplicate KIND, sum <= AMOUNT, else
+exit 2; every KIND must match a grant live at the instant, i.e. granted at or
+before it and not expired by it, else exit 1). pre_anchor_day_usd is the spend
+on the anchor's UTC day before its instant, computed under the ledger lock:
+every session in the ledger (entries of any day) whose transcript, the
+transcript_path of its latest entry, was modified on or after 00:00 UTC of that
+day is read once, and its requests of that day timed before the instant count
+(those another session's entry holds excluded, the hook's rule, so a turn no
+entry holds yet counts), priced like the hook; older transcripts cannot hold
 that day's requests and are not read. That day's entries of the other sessions
 (a transcript gone or older than the day) count whole when their last_ts is
 before the instant, not at all when their first_ts is at or after it, and one
@@ -226,29 +235,34 @@ that straddles the instant refuses the calibrate (exit 1, nothing written).
 AMOUNT is a finite number >= 0, --at a full timestamp no later than now (else
 exit 2); an unparsable anchor file is never overwritten (exit 1). Known limit:
 a session with no ledger entry at all at calibrate (its first turn not hooked
-yet) is invisible; its spend before the instant later counts as spend after
-it, so the balance reads low, never high.
+yet) is invisible; its spend before the instant later counts as spend after it,
+so the balance reads low, never high.
 The governing anchor is the readable record with the latest "at" no later than
 now (an unparsable file or record is ignored for the balance; the balance
 command says so on stderr for a file). With one, the balance is: (1) the grants
 granted by the anchor are absorbed into AMOUNT: they are replayed to the
 instant (ledger days before its day plus the pre-anchor spend) to learn each
-one's remainder, and AMOUNT is allocated across them latest-expiring first (no
-expiry counts as latest), each capped at its remainder and keeping its expiry,
-the rest one cash pool without expiry; the drawdown assumption is
-soonest-to-expire first, so money that survived to the instant sits in the
-latest-expiring pools, and anything beyond the grants is a top-up; (2) grants
-granted after the anchor enter unchanged; (3) the spend events are every
-ledger entry after the anchor's day plus that day's ledger spend minus
-pre_anchor_day_usd (clamped at 0), dated at the later of the instant and that
-day's last request; (4) these are replayed as above, so spent_usd is the spend
-since the anchor, and the object gains anchor_at and anchor_usd. (5) With the
-admin key, the cost_report window runs from 00:00 UTC of the anchor's day to
-the start of today; each closed day up to the as-of day takes the provider's
-sum (the anchor's day minus pre_anchor_day_usd), later days the ledger's, and
-the replay is redone with source "provider"; a failure labels the ledger
-figure as above. The label stays "est" until a provider fetch covers the
-post-anchor days.
+one's remainder and whether it lapsed; each stated --kind (if valid) fills that
+kind's non-lapsed pre-anchor grants latest-expiring first (no expiry counts as
+latest), up to each grant's full amount (uncapped by the replay) and keeping
+its expiry and kind, with any excess becoming a pool of that kind with that
+kind's latest live expiry; the remaining AMOUNT is allocated across the
+unstated kinds' non-lapsed pre-anchor grants latest-expiring first, each capped
+at its full amount when any kind is stated (else at its replayed remainder) and
+keeping its expiry and kind, the rest one cash pool without expiry or kind; the
+drawdown assumption is soonest-to-expire first, so money that survived to the
+instant sits in the latest-expiring pools, and anything beyond the grants is a
+top-up; (2) grants granted after the anchor enter unchanged; (3) the spend
+events are every ledger entry after the anchor's day plus that day's ledger
+spend minus pre_anchor_day_usd (clamped at 0), dated at the later of the
+instant and that day's last request; (4) these are replayed as above, so
+spent_usd is the spend since the anchor, and the object gains anchor_at and
+anchor_usd. (5) With the admin key, the cost_report window runs from 00:00 UTC
+of the anchor's day to the start of today; each closed day up to the as-of day
+takes the provider's sum (the anchor's day minus pre_anchor_day_usd), later
+days the ledger's, and the replay is redone with source "provider"; a failure
+labels the ledger figure as above. The label stays "est" until a provider fetch
+covers the post-anchor days.
 """
 import argparse
 import fcntl
@@ -746,8 +760,10 @@ def load_grants():
             expires = parse_when(g["expires"], tz) if g.get("expires") else None
         except Exception:  # unknown tz, bad date, missing granted: skip this grant
             continue
+        raw_kind = g.get("kind")
+        kind = raw_kind.strip() or None if isinstance(raw_kind, str) else None
         out.append({"amount": float(g["amount"]), "granted": granted, "expires": expires,
-                    "remaining": float(g["amount"]), "lapsed": False})
+                    "kind": kind, "remaining": float(g["amount"]), "lapsed": False})
     currency = cfg.get("currency") if isinstance(cfg.get("currency"), str) else "USD"
     return currency, out
 
@@ -763,9 +779,9 @@ def live_of(grants, now):
 def balance(entries, grants_cfg, now):
     spent = sum(e["cost_usd"] for e in entries)
     result = {"estimate": True, "currency": "USD", "spent_usd": round(spent, 6),
-              "remaining_usd": None, "overage_usd": 0.0, "lapsed_usd": 0.0,
-              "live_grants": 0, "next_expiry": None, "days_left": None,
-              "granted_total_live": 0.0}
+              "remaining_usd": None, "remaining_by_kind": {}, "overage_usd": 0.0,
+              "lapsed_usd": 0.0, "live_grants": 0, "next_expiry": None,
+              "days_left": None, "granted_total_live": 0.0}
     if grants_cfg is None:
         return result
     currency, grants = grants_cfg
@@ -806,9 +822,23 @@ def balance(entries, grants_cfg, now):
     remaining = sum(g["remaining"] for g in live)
     exps = [g["expires"] for g in live if g["remaining"] > EPS and g["expires"] is not None]
     nxt = min(exps) if exps else None
+    by_kind, kind_exp = {}, {}
+    for g in live:
+        k = g.get("kind") or "unspecified"
+        by_kind[k] = by_kind.get(k, 0.0) + g["remaining"]
+        if g["remaining"] > EPS:
+            exp = g["expires"] or FAR
+            if k not in kind_exp or exp < kind_exp[k]:
+                kind_exp[k] = exp
+    rem_by_kind = {
+        k: round(by_kind[k], 6)
+        for k in sorted((k for k, v in by_kind.items() if v > EPS),
+                        key=lambda k: (kind_exp.get(k, FAR), k))
+    }
     result.update({
         "currency": currency,
         "remaining_usd": round(remaining, 6),
+        "remaining_by_kind": rem_by_kind,
         "overage_usd": round(overage, 6),
         "lapsed_usd": round(lapsed, 6),
         "live_grants": len(live),
@@ -1256,7 +1286,7 @@ def read_anchor_doc(path):
 
 
 def anchor_of(rec):
-    """One anchor record -> {"amount", "at", "pre"}, or None when it is unusable."""
+    """One anchor record -> {"amount", "at", "pre", "kinds"}, or None when it is unusable."""
     if not isinstance(rec, dict):
         return None
     amount, pre = rec.get("amount"), rec.get("pre_anchor_day_usd")
@@ -1266,7 +1296,22 @@ def anchor_of(rec):
         at = parse_ts(rec["at"])
     except ValueError:
         return None
-    return {"amount": float(amount), "at": at, "pre": float(pre)}
+    raw_kinds = rec.get("kinds")
+    kinds = {}
+    if isinstance(raw_kinds, dict):
+        ok = True
+        for k, v in raw_kinds.items():
+            if not isinstance(k, str) or not k.strip() or not is_num(v) or v < 0:
+                ok = False
+                break
+            sk = k.strip()
+            if sk in kinds:
+                ok = False
+                break
+            kinds[sk] = float(v)
+        if not ok or sum(kinds.values()) > float(amount) + EPS:
+            kinds = {}
+    return {"amount": float(amount), "at": at, "pre": float(pre), "kinds": kinds}
 
 
 def governing_anchor(ledger, now, warn=False):
@@ -1288,28 +1333,48 @@ def governing_anchor(ledger, now, warn=False):
     return best
 
 
-def pool(amount, granted, expires):
-    return {"amount": amount, "granted": granted, "expires": expires, "remaining": amount, "lapsed": False}
+def pool(amount, granted, expires, kind=None):
+    return {"amount": amount, "granted": granted, "expires": expires, "kind": kind,
+            "remaining": amount, "lapsed": False}
 
 
 def anchor_pools(entries, grants, currency, anc):
     """Fresh pool dicts carrying the anchor's amount: the grants granted by the
     anchor are replayed to its instant (ledger days before its day plus the
-    pre-anchor spend) for their remainders; the amount fills them latest-expiring
-    first (no expiry = latest), each capped at its remainder, and the rest is one
-    cash pool without expiry, kept even at 0."""
+    pre-anchor spend) for their remainders and lapses; stated kinds fill their
+    own non-lapsed pre-anchor grants latest-expiring first up to each grant's
+    full amount (excess becomes a pool of that kind with its latest live
+    expiry), and the remaining amount fills the unstated kinds' non-lapsed
+    pre-anchor grants latest-expiring first (no expiry = latest), each capped
+    at its full amount when any kind is stated else its replayed remainder, and
+    the rest is one cash pool without expiry, kept even at 0."""
     t, day = anc["at"], anc["at"].strftime("%Y-%m-%d")
     pre = [dict(g) for g in grants if g["granted"] <= t]
     if pre:
         replay = [e for e in entries if e["day"] < day] + [{"last_ts": iso(t), "cost_usd": anc["pre"]}]
         balance(replay, (currency, pre), t)   # sets each copy's remaining and lapsed
-    left, pools = anc["amount"], []
-    for g in sorted(pre, key=lambda g: g["expires"] or FAR, reverse=True):
-        take = min(left, 0.0 if g["lapsed"] else max(g["remaining"], 0.0))
+    kinds = anc.get("kinds") or {}
+    pools = []
+    for k in sorted(kinds):
+        k_left = kinds[k]
+        k_grants = sorted((g for g in pre if g.get("kind") == k and not g["lapsed"]),
+                          key=lambda g: g["expires"] or FAR, reverse=True)
+        for g in k_grants:
+            take = min(k_left, g["amount"])
+            if take > EPS:
+                pools.append(pool(take, t, g["expires"], k))
+                k_left -= take
+        if k_left > EPS:
+            pools.append(pool(k_left, t, k_grants[0]["expires"] if k_grants else None, k))
+    left = max(0.0, anc["amount"] - sum(kinds.values()))
+    unstated = [g for g in pre if g.get("kind") not in kinds and not g["lapsed"]]
+    for g in sorted(unstated, key=lambda g: g["expires"] or FAR, reverse=True):
+        cap = g["amount"] if kinds else max(g["remaining"], 0.0)
+        take = min(left, cap)
         if take > EPS:
-            pools.append(pool(take, t, g["expires"]))
+            pools.append(pool(take, t, g["expires"], g.get("kind")))
             left -= take
-    pools.append(pool(left if left > EPS else 0.0, t, None))
+    pools.append(pool(left if left > EPS else 0.0, t, None, None))
     return pools
 
 
@@ -1461,7 +1526,7 @@ def pre_anchor_spend(entries, t):
     return total
 
 
-def calibrate(amount_raw, at_raw):
+def calibrate(amount_raw, at_raw, kind_raws=()):
     """Append an anchor record (see Anchor) and print it with the new balance."""
     ledger = need_ledger()
     try:
@@ -1479,6 +1544,24 @@ def calibrate(amount_raw, at_raw):
     t = t.replace(microsecond=0)   # the stored instant has whole seconds; compute with that one
     if t > now:
         usage_exit("--at %s is later than now (%s)" % (iso(t), iso(now)))
+    kinds = {}
+    for item in kind_raws:
+        if "=" not in item:
+            usage_exit("--kind needs KIND=AMOUNT, got %r" % item)
+        k_raw, v_raw = item.rsplit("=", 1)
+        k = k_raw.strip()
+        try:
+            v = float(v_raw)
+        except ValueError:
+            v = float("nan")
+        if not k or not math.isfinite(v) or v < 0:
+            usage_exit("--kind needs non-empty KIND and finite AMOUNT >= 0, got %r" % item)
+        if k in kinds:
+            usage_exit("duplicate --kind %r (in %r)" % (k, item))
+        kinds[k] = v + 0.0
+    if sum(kinds.values()) > amount + EPS:
+        usage_exit("--kind sum ($%s) exceeds calibrate AMOUNT ($%s): %s"
+                   % (money(sum(kinds.values())), money(amount), ", ".join(kind_raws)))
     path = anchor_path(ledger)
     for p in (ledger, path):
         os.makedirs(os.path.dirname(os.path.abspath(p)), exist_ok=True)
@@ -1488,12 +1571,23 @@ def calibrate(amount_raw, at_raw):
             doc = read_anchor_doc(path)
         except ValueError:
             raise CalibrateError("refusing to overwrite unreadable anchor file %s" % path)
+        if kinds:
+            grants_cfg = load_grants()
+            live_kinds = {g["kind"] for g in (grants_cfg[1] if grants_cfg else ())
+                          if g["granted"] <= t and (g["expires"] is None or g["expires"] > t) and g.get("kind")}
+            for k in kinds:
+                if k not in live_kinds:
+                    raise CalibrateError("--kind %r matches no grant live at %s" % (k, iso(t)))
         entries, _ = read_ledger(ledger)
         pre = pre_anchor_spend(entries, t)
-        doc["anchors"].append({"amount": amount, "at": iso(t), "pre_anchor_day_usd": round(pre, 6),
-                               "recorded": iso(now)})
+        rec = {"amount": amount, "at": iso(t), "pre_anchor_day_usd": round(pre, 6),
+               "recorded": iso(now)}
+        if kinds:
+            rec["kinds"] = kinds
+        doc["anchors"].append(rec)
         write_atomic(path, [json.dumps(doc, sort_keys=True, ensure_ascii=False)])
-    print("anchored $%s at %s (same-day spend before it $%s)" % (money(amount), iso(t), money(pre)))
+    k_str = (" (%s)" % ", ".join("%s $%s" % (k, money(kinds[k])) for k in sorted(kinds))) if kinds else ""
+    print("anchored $%s at %s%s (same-day spend before it $%s)" % (money(amount), iso(t), k_str, money(pre)))
     try:
         print(balance_text(current_balance()))
     except Exception as exc:  # the anchor is written: report, never fail the command
@@ -1570,6 +1664,7 @@ def main(argv=None):
     cp = sub.add_parser("calibrate")
     cp.add_argument("amount")
     cp.add_argument("--at")
+    cp.add_argument("--kind", action="append", default=[], metavar="KIND=AMOUNT")
     args = ap.parse_args(argv)
 
     if args.cmd == "hook":
@@ -1612,10 +1707,14 @@ def main(argv=None):
                 basis += "; anchored $%s at %s" % (money(b["anchor_usd"]), b["anchor_at"])
             print("spent $%s, lapsed $%s, overage $%s (%s)"
                   % (money(b["spent_usd"]), money(b["lapsed_usd"]), money(b["overage_usd"]), basis))
+            shown_kinds = [(k, money(v)) for k, v in (b.get("remaining_by_kind") or {}).items()
+                           if money(v) != "0.00"]
+            if any(k != "unspecified" for k, _ in shown_kinds):
+                print("by kind: %s" % ", ".join("%s $%s" % (k, m) for k, m in shown_kinds))
         return 0
     if args.cmd == "calibrate":
         try:
-            calibrate(args.amount, args.at)
+            calibrate(args.amount, args.at, args.kind)
         except CalibrateError as exc:
             print("api-credit: %s" % exc, file=sys.stderr)
             return 1
