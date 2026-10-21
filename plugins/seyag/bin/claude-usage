@@ -4,6 +4,7 @@
 #   claude-usage              one line: 5h window % and reset, weekly % and reset, per-model weekly caps
 #   claude-usage --ok [PCT]   exit 0 if the 5h window is below PCT% (default 90), the week is under 75% and
 #                             the calling session's model (Fable) has its own weekly cap left, else 1;
+#                             CLAUDE_USAGE_EXTRA_OK=1 passes past the weekly reserve while extra usage is on and under its spend limit (fresh cache only);
 #                             on the z.ai lane the same thresholds apply to z.ai's own quota, with the
 #                             5h one capped at 80% (Tzurot's guests get the band above it);
 #                             other routed lanes (OpenRouter, a Console API key) pass at once (see below);
@@ -336,16 +337,43 @@ case "${1:-}" in
         # A week at the reserve blocks everything, whatever the 5h window says: the last 25% is
         # reserved for the owner and GitHub claude-review (2026-10-04). --wait then sleeps until
         # the weekly reset instead of waking on each fresh 5h window.
+        # CLAUDE_USAGE_EXTRA_OK=1 lifts the weekly reserve while the plan's extra usage is on and under its spend limit.
+        # That pass spends money, so it fails closed: strict booleans only, and never on a cache older than two TTLs.
         cache_age=$(( $(date +%s) - $(stat -c %Y "$cache" 2>/dev/null || echo 0) ))
         stale_note=""
         [ "$cache_age" -gt "$ttl" ] && stale_note=" (cache $((cache_age / 60))m old)"
         thr=${2:-90}
+        pass_meter="5h"
+        week_op="<"
         if ! { [ "$five" -lt "$thr" ] && [ "$week" -lt "$week_reserve" ]; } 2>/dev/null; then
             five_op=">="; [ "$five" -lt "$thr" ] 2>/dev/null && five_op="<"
             week_op=">="; [ "$week" -lt "$week_reserve" ] 2>/dev/null && week_op="<"
             meter="5h"; [ "$five" -lt "$thr" ] 2>/dev/null && meter="week"
-            echo "claude-usage: --ok FAIL lane=anthropic meter=$meter 5h=${five}%${five_op}${thr}% week=${week}%${week_op}${week_reserve}% source=api${stale_note}" >&2
-            exit 1
+            extra_note=""
+            if [ "$meter" = week ] && [ "${CLAUDE_USAGE_EXTRA_OK:-}" = 1 ]; then
+                # The reason is the API's own token, reduced to [A-Za-z0-9_.-] so it can't break the verdict line.
+                extra_state=$(jq -r '
+                    (.extra_usage? // {}) as $x | if ($x | type) != "object" then "off:disabled"
+                    elif $x.is_enabled == true and $x.spend_limit_reached == false then "ok"
+                    elif $x.spend_limit_reached == true then "off:spend_limit_reached"
+                    elif ($x.disabled_reason | type) == "string" and ($x.disabled_reason | length) > 0
+                        then "off:\($x.disabled_reason | gsub("[^A-Za-z0-9_.-]"; "_"))"
+                    else "off:disabled" end' "$cache" 2>/dev/null)
+                if [ "$extra_state" = ok ] && [ "$cache_age" -gt $((2 * ttl)) ]; then
+                    extra_state="off:stale"
+                fi
+                if [ "$extra_state" = ok ]; then
+                    pass_meter="extra-usage"
+                else
+                    extra_reason=${extra_state#off:}
+                    [ -n "$extra_reason" ] || extra_reason=disabled
+                    extra_note=" extra=off ($extra_reason)"
+                fi
+            fi
+            if [ "$pass_meter" != extra-usage ]; then
+                echo "claude-usage: --ok FAIL lane=anthropic meter=$meter 5h=${five}%${five_op}${thr}% week=${week}%${week_op}${week_reserve}%${extra_note} source=api${stale_note}" >&2
+                exit 1
+            fi
         fi
         # A model's own weekly cap ("Fable 100%") blocks only sessions on that model.
         model=$(caller_model)
@@ -360,7 +388,7 @@ case "${1:-}" in
                 fi
             done < <(sed 's/, /\n/g; s/%//g' <<< "$scoped" | grep .)
         fi
-        echo "claude-usage: --ok pass lane=anthropic meter=5h 5h=${five}%<${thr}% week=${week}%<${week_reserve}% source=api${stale_note}" >&2
+        echo "claude-usage: --ok pass lane=anthropic meter=$pass_meter 5h=${five}%<${thr}% week=${week}%${week_op}${week_reserve}% source=api${stale_note}" >&2
         exit 0
         ;;
     --json)
@@ -396,7 +424,7 @@ case "${1:-}" in
         echo "$note$(plan_line)$tail"
         ;;
     *)
-        sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'
+        sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'
         exit 2
         ;;
 esac
