@@ -56,6 +56,14 @@ fixture() {
         limits: [{kind: "weekly_scoped", percent: $m, scope: {model: {display_name: "Fable"}}}]}' \
         > "$tmp/claude-statusline/usage.json"
 }
+# fixture_extra <5h %> <week %> <fable %> <is_enabled> <spend_limit_reached> <disabled_reason|null>
+fixture_extra() {
+    fixture "$1" "$2" "$3"
+    jq --argjson en "$4" --argjson lim "$5" --arg dr "${6:-null}" \
+        '. + {extra_usage: {is_enabled: $en, spend_limit_reached: $lim, disabled_reason: (if $dr == "null" or $dr == "" then null else $dr end)}}' \
+        "$tmp/claude-statusline/usage.json" > "$tmp/claude-statusline/usage.json.tmp"
+    mv "$tmp/claude-statusline/usage.json.tmp" "$tmp/claude-statusline/usage.json"
+}
 run() { HOME="$tmp" XDG_CACHE_HOME="$tmp" CLAUDE_USAGE_MODEL=claude-opus-5-5 "$CU" "$@"; }
 
 fixture 10 50 0
@@ -88,11 +96,101 @@ out=$(run --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
 [ $rc = 0 ] && [ -z "$out" ] && [ "$err" = "claude-usage: --ok pass lane=anthropic meter=5h 5h=10%<90% week=50%<75% source=api (cache 10m old)" ] \
     && ok "stale cache (10m old, refresh fails): --ok appends (cache 10m old) to verdict" || bad "stale cache verdict: rc=$rc out=[$out] err=[$err]"
 
+# Paid extra usage opt-in (CLAUDE_USAGE_EXTRA_OK=1): lifts only the weekly reserve while extra_usage is enabled and under spend limit.
+fixture_extra 10 98 0 true false null
+out=$(CLAUDE_USAGE_EXTRA_OK=1 run --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 0 ] && [ -z "$out" ] && [ "$err" = "claude-usage: --ok pass lane=anthropic meter=extra-usage 5h=10%<90% week=98%>=75% source=api" ] \
+    && ok "extra-usage opted in + on at week 98%: passes with meter=extra-usage" || bad "extra-usage pass: rc=$rc out=[$out] err=[$err]"
+fixture_extra 10 98 0 false false out_of_credits
+out=$(CLAUDE_USAGE_EXTRA_OK=1 run --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 1 ] && [ -z "$out" ] && [ "$err" = "claude-usage: --ok FAIL lane=anthropic meter=week 5h=10%<90% week=98%>=75% extra=off (out_of_credits) source=api" ] \
+    && ok "extra-usage opted in + off (out_of_credits): fails with extra=off (out_of_credits)" || bad "extra-usage out_of_credits: rc=$rc out=[$out] err=[$err]"
+fixture_extra 10 98 0 true true null
+out=$(CLAUDE_USAGE_EXTRA_OK=1 run --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 1 ] && [ -z "$out" ] && [ "$err" = "claude-usage: --ok FAIL lane=anthropic meter=week 5h=10%<90% week=98%>=75% extra=off (spend_limit_reached) source=api" ] \
+    && ok "extra-usage opted in + spend_limit_reached: fails with extra=off (spend_limit_reached)" || bad "extra-usage spend_limit_reached: rc=$rc out=[$out] err=[$err]"
+fixture 10 98 0
+out=$(CLAUDE_USAGE_EXTRA_OK=1 run --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 1 ] && [ -z "$out" ] && [ "$err" = "claude-usage: --ok FAIL lane=anthropic meter=week 5h=10%<90% week=98%>=75% extra=off (disabled) source=api" ] \
+    && ok "extra-usage opted in + no extra_usage key: fails with extra=off (disabled)" || bad "extra-usage missing key: rc=$rc out=[$out] err=[$err]"
+fixture_extra 10 98 0 true false null
+out=$(run --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 1 ] && [ -z "$out" ] && [ "$err" = "claude-usage: --ok FAIL lane=anthropic meter=week 5h=10%<90% week=98%>=75% source=api" ] \
+    && ok "extra-usage on, not opted in: fails with today's exact week line" || bad "extra-usage not opted in: rc=$rc out=[$out] err=[$err]"
+out=$(CLAUDE_USAGE_EXTRA_OK=yes run --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 1 ] && [ -z "$out" ] && [ "$err" = "claude-usage: --ok FAIL lane=anthropic meter=week 5h=10%<90% week=98%>=75% source=api" ] \
+    && ok "CLAUDE_USAGE_EXTRA_OK=yes: fails with today's exact week line" || bad "extra-usage =yes: rc=$rc out=[$out] err=[$err]"
+fixture_extra 95 98 0 true false null
+out=$(CLAUDE_USAGE_EXTRA_OK=1 run --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 1 ] && [ -z "$out" ] && [ "$err" = "claude-usage: --ok FAIL lane=anthropic meter=5h 5h=95%>=90% week=98%>=75% source=api" ] \
+    && ok "extra-usage opted in + 5h 95%: fails with meter=5h, no suffix" || bad "extra-usage 5h 95%: rc=$rc out=[$out] err=[$err]"
+fixture_extra 10 98 100 true false null
+out=$(CLAUDE_USAGE_EXTRA_OK=1 CLAUDE_USAGE_MODEL=claude-fable-5-1 HOME="$tmp" XDG_CACHE_HOME="$tmp" "$CU" --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 1 ] && [ -z "$out" ] && [ "$err" = "claude-usage: --ok FAIL lane=anthropic meter=model-cap model=Fable cap=100%>=100% source=api" ] \
+    && ok "extra-usage opted in + Fable cap 100% on Fable: fails with model-cap line" || bad "extra-usage Fable cap: rc=$rc out=[$out] err=[$err]"
+fixture_extra 10 50 0 true false null
+out=$(CLAUDE_USAGE_EXTRA_OK=1 run --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 0 ] && [ -z "$out" ] && [ "$err" = "claude-usage: --ok pass lane=anthropic meter=5h 5h=10%<90% week=50%<75% source=api" ] \
+    && ok "extra-usage opted in at week 50%: unchanged normal meter=5h pass line" || bad "extra-usage week 50%: rc=$rc out=[$out] err=[$err]"
+# The pass spends money, so it fails closed. extra_raw <5h> <week> <extra_usage JSON>: any shape.
+extra_raw() {
+    fixture "$1" "$2" 0
+    jq --argjson x "$3" '. + {extra_usage: $x}' "$tmp/claude-statusline/usage.json" > "$tmp/claude-statusline/usage.json.tmp"
+    mv "$tmp/claude-statusline/usage.json.tmp" "$tmp/claude-statusline/usage.json"
+}
+# expect_opt <rc> <stderr line> <label> [extra env ...]: one opted-in --ok 90 run.
+expect_opt() {
+    local want_rc=$1 want=$2 label=$3; shift 3
+    out=$(env CLAUDE_USAGE_EXTRA_OK=1 "$@" HOME="$tmp" XDG_CACHE_HOME="$tmp" CLAUDE_USAGE_MODEL=claude-opus-5-5 "$CU" --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+    [ "$rc" = "$want_rc" ] && [ -z "$out" ] && [ "$err" = "$want" ] && ok "$label" || bad "$label: rc=$rc out=[$out] err=[$err]"
+}
+wk98="claude-usage: --ok FAIL lane=anthropic meter=week 5h=10%<90% week=98%>=75%"
+extra_raw 10 98 '{"is_enabled": true}'
+expect_opt 1 "$wk98 extra=off (disabled) source=api" "extra-usage: spend_limit_reached missing fails closed"
+extra_raw 10 98 '{"is_enabled": true, "spend_limit_reached": null}'
+expect_opt 1 "$wk98 extra=off (disabled) source=api" "extra-usage: spend_limit_reached null fails closed"
+extra_raw 10 98 '{"is_enabled": true, "spend_limit_reached": "true"}'
+expect_opt 1 "$wk98 extra=off (disabled) source=api" "extra-usage: spend_limit_reached \"true\" (string) fails closed"
+extra_raw 10 98 '{"is_enabled": "true", "spend_limit_reached": false}'
+expect_opt 1 "$wk98 extra=off (disabled) source=api" "extra-usage: is_enabled \"true\" (string) fails closed"
+extra_raw 10 98 '"on"'
+expect_opt 1 "$wk98 extra=off (disabled) source=api" "extra-usage: extra_usage a string fails closed"
+extra_raw 10 98 '[true]'
+expect_opt 1 "$wk98 extra=off (disabled) source=api" "extra-usage: extra_usage an array fails closed"
+extra_raw 10 98 '{"is_enabled": true, "spend_limit_reached": true, "disabled_reason": "x"}'
+expect_opt 1 "$wk98 extra=off (spend_limit_reached) source=api" "extra-usage: spend_limit_reached wins over disabled_reason"
+extra_raw 10 98 '{"is_enabled": true, "spend_limit_reached": false, "disabled_reason": "x"}'
+expect_opt 0 "claude-usage: --ok pass lane=anthropic meter=extra-usage 5h=10%<90% week=98%>=75% source=api" "extra-usage: on and under the limit passes whatever disabled_reason says"
+extra_raw 10 98 '{"is_enabled": false, "spend_limit_reached": false, "disabled_reason": "a b\nFAKE ok"}'
+expect_opt 1 "$wk98 extra=off (a_b_FAKE_ok) source=api" "extra-usage: disabled_reason reduced to [A-Za-z0-9_.-]"
+# Boundaries: 5h exactly at the threshold stays a 5h fail; the week exactly at the reserve takes the extra pass.
+extra_raw 90 98 '{"is_enabled": true, "spend_limit_reached": false}'
+expect_opt 1 "claude-usage: --ok FAIL lane=anthropic meter=5h 5h=90%>=90% week=98%>=75% source=api" "extra-usage: 5h at the threshold still fails on 5h"
+extra_raw 10 75 '{"is_enabled": true, "spend_limit_reached": false}'
+expect_opt 0 "claude-usage: --ok pass lane=anthropic meter=extra-usage 5h=10%<90% week=75%>=75% source=api" "extra-usage: week at the reserve passes on extra usage"
+# Only exactly 1 opts in.
+for v in 0 "" 10 true; do
+    extra_raw 10 98 '{"is_enabled": true, "spend_limit_reached": false}'
+    out=$(CLAUDE_USAGE_EXTRA_OK="$v" run --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+    [ $rc = 1 ] && [ "$err" = "$wk98 source=api" ] && ok "CLAUDE_USAGE_EXTRA_OK='$v': not opted in" || bad "CLAUDE_USAGE_EXTRA_OK='$v': rc=$rc err=[$err]"
+done
+# A stale cache (refresh fails in the hermetic HOME) never passes on extra usage: 10m > 2 x 120 s.
+extra_raw 10 98 '{"is_enabled": true, "spend_limit_reached": false}'; touch -d "@$(($(date +%s) - 600))" "$tmp/claude-statusline/usage.json"
+expect_opt 1 "$wk98 extra=off (stale) source=api (cache 10m old)" "extra-usage: a cache older than two TTLs fails closed"
+# Within two TTLs it still passes, with the age disclosed: 3m old with CLAUDE_USAGE_TTL=120 (> 1 TTL, < 2).
+extra_raw 10 98 '{"is_enabled": true, "spend_limit_reached": false}'; touch -d "@$(($(date +%s) - 180))" "$tmp/claude-statusline/usage.json"
+expect_opt 0 "claude-usage: --ok pass lane=anthropic meter=extra-usage 5h=10%<90% week=98%>=75% source=api (cache 3m old)" "extra-usage: a cache within two TTLs passes and discloses its age"
+# --wait inherits the opt-in: at week 98% with extra usage on it returns at once.
+extra_raw 10 98 '{"is_enabled": true, "spend_limit_reached": false}'
+out=$(timeout 5 env CLAUDE_USAGE_EXTRA_OK=1 HOME="$tmp" XDG_CACHE_HOME="$tmp" CLAUDE_USAGE_MODEL=claude-opus-5-5 "$CU" --wait 2>/dev/null); rc=$?
+[ $rc = 0 ] && grep -q "week 98%" <<< "$out" && ok "extra-usage: --wait returns at once when opted in" || bad "extra-usage --wait: rc=$rc out=[$out]"
+
 # Any non-flag argument prints the usage block from the script's own header lines.
 out=$(run --help); rc=$?
 [ $rc = 2 ] && grep -q '^ *claude-usage --ok \[PCT\]' <<< "$out" && grep -q 'prints one verdict line to stderr' <<< "$out" \
     && grep -q '^ *claude-usage --json' <<< "$out" && grep -q '^ *claude-usage --all' <<< "$out" \
-    && grep -q 'api_credit_remaining_usd' <<< "$out" \
+    && grep -q 'api_credit_remaining_usd' <<< "$out" && grep -q 'CLAUDE_USAGE_EXTRA_OK=1' <<< "$out" \
+    && grep -q 'always exits 0$' <<< "$out" \
     && ok "--help: exit 2 with the header's usage block" || bad "--help (rc $rc): $out"
 
 # The reported bug: at 95-99% of the week, --wait returned at once. It must block now, and silence inner --ok stderr.
