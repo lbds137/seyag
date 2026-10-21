@@ -4,7 +4,8 @@
 #   claude-usage              one line: 5h window % and reset, weekly % and reset, per-model weekly caps
 #   claude-usage --ok [PCT]   exit 0 if the 5h window is below PCT% (default 90), the week is under 75% and
 #                             the calling session's model (Fable) has its own weekly cap left, else 1;
-#                             CLAUDE_USAGE_EXTRA_OK=1 passes past the weekly reserve while extra usage is on and under its spend limit (fresh cache only);
+#                             CLAUDE_USAGE_EXTRA_OK=1 passes past the weekly reserve while extra usage is on
+#                             and under its spend limit (cache at most 2 TTLs or 10 min old);
 #                             on the z.ai lane the same thresholds apply to z.ai's own quota, with the
 #                             5h one capped at 80% (Tzurot's guests get the band above it);
 #                             other routed lanes (OpenRouter, a Console API key) pass at once (see below);
@@ -334,11 +335,12 @@ lane_fields() {
 
 case "${1:-}" in
     --ok)
-        # A week at the reserve blocks everything, whatever the 5h window says: the last 25% is
-        # reserved for the owner and GitHub claude-review (2026-10-04). --wait then sleeps until
-        # the weekly reset instead of waking on each fresh 5h window.
+        # A week at the reserve blocks everything, whatever the 5h window says, unless the extra-usage
+        # opt-in below applies: the last 25% is reserved for the owner and GitHub claude-review.
+        # --wait then keeps polling until the weekly reset instead of waking on each fresh 5h window.
         # CLAUDE_USAGE_EXTRA_OK=1 lifts the weekly reserve while the plan's extra usage is on and under its spend limit.
-        # That pass spends money, so it fails closed: strict booleans only, and never on a cache older than two TTLs.
+        # That pass spends money, so it fails closed: strict booleans only, and never on a cache older
+        # than two TTLs or 10 minutes, whichever is less.
         cache_age=$(( $(date +%s) - $(stat -c %Y "$cache" 2>/dev/null || echo 0) ))
         stale_note=""
         [ "$cache_age" -gt "$ttl" ] && stale_note=" (cache $((cache_age / 60))m old)"
@@ -359,7 +361,8 @@ case "${1:-}" in
                     elif ($x.disabled_reason | type) == "string" and ($x.disabled_reason | length) > 0
                         then "off:\($x.disabled_reason | gsub("[^A-Za-z0-9_.-]"; "_"))"
                     else "off:disabled" end' "$cache" 2>/dev/null)
-                if [ "$extra_state" = ok ] && [ "$cache_age" -gt $((2 * ttl)) ]; then
+                extra_max_age=$((2 * ttl)); [ "$extra_max_age" -gt 600 ] && extra_max_age=600
+                if [ "$extra_state" = ok ] && [ "$cache_age" -gt "$extra_max_age" ]; then
                     extra_state="off:stale"
                 fi
                 if [ "$extra_state" = ok ]; then
@@ -424,7 +427,7 @@ case "${1:-}" in
         echo "$note$(plan_line)$tail"
         ;;
     *)
-        sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'
+        sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
         exit 2
         ;;
 esac
