@@ -1258,4 +1258,84 @@ if near "$(jq .month_spend_usd <<< "$b_ms")" 29.20289 \
   ok "balance --month + settle window: provider 17.70289 + excess 9.00 (10-07 +4, 10-08 +5; 10-06 excluded) + 2.50 today = 29.20289, month_source provider, month_estimate true, text ' · month \$29.20 est'"
 else bad "balance --month + settle window: $b_ms / '$txt_ms' / b_m=$b_m"; fi
 
+# 34. Per-request long-prompt rate cards (price-table --json .long) and settle-window edge cases.
+cat > "$T/prices-long.json" <<'EOF'
+{"or_keys":[],"table":{
+ "m-long":{"input":1,"output":2,"cacheRead":0.5,"cacheWrite":1.25},
+ "m-bad":{"input":1,"output":2,"cacheRead":0.5,"cacheWrite":1.25}
+},"long":{
+ "m-long":{"above":1000,"input":10,"output":20,"cacheRead":5,"cacheWrite":12.5},
+ "m-orphan":{"above":1000,"input":10,"output":20,"cacheRead":5,"cacheWrite":12.5},
+ "m-bad":{"above":1000,"input":10,"output":20,"cacheRead":5}
+}}
+EOF
+printf '#!/bin/bash\n[ "$1" = --json ] || exit 9\ncat %q\n' "$T/prices-long.json" > "$T/pt-long.sh"
+chmod +x "$T/pt-long.sh"
+
+# 34a. Long card threshold (above: 1000): prompt = input + cache_read + cache_write_5m + cache_write_1h.
+#      - L1000: prompt = 400 + 300 + 200 + 100 = 1000 (output 500 excluded from prompt) -> base rates:
+#        (400*1 + 500*2 + 300*0.5 + 200*1.25 + 100*2*1) / 1e6 = (400 + 1000 + 150 + 250 + 200) / 1e6 = 0.002
+#      - L1001: prompt = 401 + 300 + 200 + 100 = 1001 > 1000 -> long rates (1h write at 2x long input = 20):
+#        (401*10 + 500*20 + 300*5 + 200*12.5 + 100*2*10) / 1e6 = (4010 + 10000 + 1500 + 2500 + 2000) / 1e6 = 0.02001
+uline msg-l1 req-l1 m-long ${D1}T10:00:00Z 400 500 300 200 100 > "$P/L1000.jsonl"
+uline msg-l2 req-l2 m-long ${D1}T10:01:00Z 401 500 300 200 100 > "$P/L1001.jsonl"
+hk L1000 "$T/l1000/l.jsonl" SYG_CREDIT_PRICE_TABLE_CMD="$T/pt-long.sh"
+hk L1001 "$T/l1001/l.jsonl" SYG_CREDIT_PRICE_TABLE_CMD="$T/pt-long.sh"
+e1000=$(cat "$T/l1000/l.jsonl")
+e1001=$(cat "$T/l1001/l.jsonl")
+if near "$(jq .cost_usd <<< "$e1000")" 0.002 && near "$(jq .cost_usd <<< "$e1001")" 0.02001 \
+  && jq -e '.models["m-long"].cost_usd==0.002 and .unpriced_models==[]' <<< "$e1000" > /dev/null \
+  && jq -e '.models["m-long"].cost_usd==0.02001 and .unpriced_models==[]' <<< "$e1001" > /dev/null; then
+  ok "long card: prompt 1000 (== above) -> base rates (0.002); prompt 1001 (> above) -> long rates incl. 2x long input on 1h write (0.02001)"
+else bad "long card 1000 vs 1001: $e1000 / $e1001"; fi
+
+# 34b. Orphan long card (m-orphan has no table row) and malformed card (m-bad missing cacheWrite):
+#      both ignored without crash; m-bad prices at base rates (1M input -> 1.00), m-orphan stays unpriced.
+{ uline msg-lb1 req-lb1 m-bad ${D1}T10:00:00Z $M 0; uline msg-lb2 req-lb2 m-orphan ${D1}T10:01:00Z 2000 0; } > "$P/LBAD.jsonl"
+hk LBAD "$T/lbad/l.jsonl" SYG_CREDIT_PRICE_TABLE_CMD="$T/pt-long.sh"
+ebad=$(cat "$T/lbad/l.jsonl")
+if near "$(jq .cost_usd <<< "$ebad")" 1 \
+  && jq -e '.models["m-bad"].cost_usd==1 and .models["m-orphan"].cost_usd==null and .unpriced_models==["m-orphan"]' <<< "$ebad" > /dev/null; then
+  ok "long card validation: orphan long card (no table row) and malformed card (missing cacheWrite) ignored -> base pricing 1.00, no crash"
+else bad "long card validation: $ebad"; fi
+
+# 34c. A price-table stub with no "long" key at all ($T/prices.json) prices as before.
+uline msg-lnl req-lnl m-a ${D1}T10:00:00Z $M $((M / 2)) > "$P/LNOLONG.jsonl"
+hk LNOLONG "$T/lnolong/l.jsonl"
+enolong=$(cat "$T/lnolong/l.jsonl")
+if jq -e 'has("long")|not' "$T/prices.json" > /dev/null && near "$(jq .cost_usd <<< "$enolong")" 2 \
+  && jq -e '.models["m-a"].cost_usd==2 and .unpriced_models==[]' <<< "$enolong" > /dev/null; then
+  ok "long card absent: stub without 'long' key prices m-a (1M in + 0.5M out = 2.00) unchanged"
+else bad "long card absent: $enolong"; fi
+
+# 34d. Clamped provider window together with the settle window:
+#      g-chain.json (3x $100 chained grants) at a "now" over a year past the first grant
+#      clamps the window to clamp_day. A pre-clamp ledger entry ($40) draws grant 1 to $60,
+#      which then lapses (lapsed 60); on the provider as_of day (f2.json: provider $30) the
+#      ledger has $45 -> the settle window takes $45 (unsettled 1); today has $5 bridged
+#      -> spent 40 + 45 + 5 = 90, remaining 200 - 50 = 150.
+{ entry pre 2025-06-01 2025-06-01T12:00:00Z 40; entry s 2026-10-03 2026-10-03T12:00:00Z 45; entry t 2026-12-01 2026-12-01T08:00:00Z 5; } > "$T/lv-s-clamp.jsonl"
+echo f2 > "$T/cr/mode"; : > "$T/cr/hits.log"
+b_sc=$(lv s-clamp balance --json SYG_CREDIT_LEDGER="$T/lv-s-clamp.jsonl" SYG_CREDIT_GRANTS="$T/g-chain.json" SYG_CREDIT_NOW=2026-12-01T12:00:00Z)
+b_sc0=$(lv s-clamp balance --json SYG_CREDIT_LEDGER="$T/lv-s-clamp.jsonl" SYG_CREDIT_GRANTS="$T/g-chain.json" SYG_CREDIT_NOW=2026-12-01T12:00:00Z SYG_CREDIT_SETTLE_DAYS=0)
+echo ok > "$T/cr/mode"
+if near "$(jq .spent_usd <<< "$b_sc")" 90 && near "$(jq .remaining_usd <<< "$b_sc")" 150 && near "$(jq .lapsed_usd <<< "$b_sc")" 60 \
+  && jq -e --arg cd "$clamp_day" '.source=="provider" and .estimate==true and .provider_clamped==true and .provider_unsettled_days==1 and .provider_window_start==$cd and .provider_as_of=="2026-10-03" and .ledger_bridge_days==1' <<< "$b_sc" > /dev/null \
+  && near "$(jq .spent_usd <<< "$b_sc0")" 75 && near "$(jq .remaining_usd <<< "$b_sc0")" 165 \
+  && jq -e '.provider_clamped==true and .provider_unsettled_days==0 and .estimate==true' <<< "$b_sc0" > /dev/null; then
+  ok "settle window + clamped provider window: pre-clamp 40 + settled 45 (vs 30) + bridged 5 = 90 spent, remaining 150, clamped true, unsettled 1 (N=0 -> 75 spent, unsettled 0)"
+else bad "settle window + clamped window: $b_sc / $b_sc0"; fi
+
+# 34e. cost_report with no dated bucket (nobucket.json -> as_of is the day before the
+#      window start): settle rows empty, provider_unsettled_days 0 even when the ledger
+#      has an entry on the as_of day; in-window entries are bridged.
+{ entry pre 2026-10-04 2026-10-04T12:00:00Z 99; entry a 2026-10-06 2026-10-06T12:00:00Z 5; entry b 2026-10-09 2026-10-09T12:00:00Z 2.5; } > "$T/lv-s-nobucket.jsonl"
+echo nobucket > "$T/cr/mode"
+b_snb=$(lv s-nobucket balance --json SYG_CREDIT_LEDGER="$T/lv-s-nobucket.jsonl")
+echo ok > "$T/cr/mode"
+if near "$(jq .spent_usd <<< "$b_snb")" 7.5 && near "$(jq .remaining_usd <<< "$b_snb")" 92.5 \
+  && jq -e '.source=="provider" and .estimate==false and .provider_as_of=="2026-10-04" and .provider_window_start=="2026-10-05" and .provider_unsettled_days==0 and .ledger_bridge_days==2' <<< "$b_snb" > /dev/null; then
+  ok "settle window + no dated bucket (as_of 2026-10-04 before window 2026-10-05): settle rows empty, provider_unsettled_days 0, estimate false, in-window 7.50 bridged"
+else bad "settle window + no dated bucket: $b_snb"; fi
+
 exit $fail

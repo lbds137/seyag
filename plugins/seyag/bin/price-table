@@ -25,7 +25,7 @@ Usage:
                                 row (exact, or after stripping a trailing [x]-style
                                 bracket suffix); exit 1 if any uncovered id.
                                 Default window: the last 30 days; --since overrides.
-  price-table --json            machine-readable table + OR key list
+  price-table --json            machine-readable table + OR key list + long cards
 
 All rates are USD per million tokens. cacheWrite covers both cache TTLs in one
 field; the 5-minute rate is set everywhere (CC's default TTL).
@@ -82,7 +82,7 @@ TABLE = {
     # Haiku 5.5 has two rate cards split at a 100K-token prompt ($0.50/$2.50 above, cache rates scaling with input); the table carries the <=100K card only.
     "claude-fable-5-1":     (10, 50, 0.25, 12.5),     # list price 2026-09-25
     "claude-opus-5-5":      (4, 20, 0.20, 5),         # list price 2026-09-25
-    "claude-sonnet-5-5":    (2, 10, 0.20, 2.5),       # list price 2026-09-25
+    "claude-sonnet-5-5":    (2, 10, 0.10, 2.5),       # list price 2026-09-25; cacheRead 0.10 measured from the provider cost_report 2026-10-21
     "claude-haiku-4-5":     (1, 5, 0.10, 1.25),       # list price 2026-09-25
     "claude-haiku-5-5":     (0.10, 0.50, 0.01, 0.125),  # list price 2026-10-06 (<=100K-token prompts)
     # Anthropic direct ids, current-model generation: platform.claude.com pricing
@@ -114,6 +114,12 @@ TABLE = {
     "google/gemini-3.1-flash-lite": (0.25, 1.5, 0.025, 0.0833333333333333),   # OR models live 2026-10-02 evening
     "google/gemini-3.8-flash":      (0.75, 3.75, 0.075, 0.0416666666666667),  # OR models live 2026-10-08
     "google/gemini-3.1-pro-preview": (2, 12, 0.2, 0.375),  # OR models live 2026-10-08; OR lists a >200K-prompt card (4 / 18 / cacheRead 0.4) the table cannot express; <=200K card kept
+}
+
+# Second rate cards for prompts over a token threshold, priced per request by
+# api-credit (CC's modelPricing cannot express a threshold, so --emit omits them).
+LONG_CARDS = {
+    "claude-haiku-5-5": (100000, (0.50, 2.50, 0.05, 0.625)),  # list price 2026-10-06 (>100K-token prompts), matched to the provider cost_report 2026-10-21
 }
 # fmt: on
 
@@ -329,8 +335,12 @@ def cmd_audit(args):
     return 1
 
 
+def long_cards():
+    return {k: dict(above=above, **dict(zip(FIELDS, v))) for k, (above, v) in sorted(LONG_CARDS.items())}
+
+
 def cmd_json():
-    print_json({"table": overrides(), "or_keys": sorted(OR_KEYS)})
+    print_json({"table": overrides(), "or_keys": sorted(OR_KEYS), "long": long_cards()})
 
 
 def main():
