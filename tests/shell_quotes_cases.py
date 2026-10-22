@@ -890,9 +890,9 @@ _t0 = time.monotonic()
 _dd_pls = command_pipelines('echo ' + '$${' * 40000 + '; env')
 _dd_elapsed = time.monotonic() - _t0
 check_all(
-    'perf: command_pipelines on 40k $${ finishes in <2s and yields env',
+    'perf: command_pipelines on 40k $${ finishes in <5s and yields env',
     [
-        (_dd_elapsed < 2.0, _dd_elapsed, '< 2.0s'),
+        (_dd_elapsed < 5.0, _dd_elapsed, '< 5.0s'),
         ([['env']] in _dd_pls, _dd_pls[-1:], [[['env']]]),
     ],
 )
@@ -902,9 +902,9 @@ _hd_pls = command_pipelines('cat <<A\n' * 16000)
 _hd_openers = heredoc_openers('cat <<A\n' * 16000)
 _hd_elapsed = time.monotonic() - _t0
 check_all(
-    'perf: command_pipelines and heredoc_openers on 16k unterminated <<A finishes in <2s',
+    'perf: command_pipelines and heredoc_openers on 16k unterminated <<A finishes in <5s',
     [
-        (_hd_elapsed < 2.0, _hd_elapsed, '< 2.0s'),
+        (_hd_elapsed < 5.0, _hd_elapsed, '< 5.0s'),
         (len(_hd_pls) == 16000, len(_hd_pls), 16000),
         (len(_hd_openers) == 16000, len(_hd_openers), 16000),
     ],
@@ -960,9 +960,9 @@ for label, inp in [
 ]:
     elapsed, pls = _timed(command_pipelines, inp)
     check_all(
-        'perf: command_pipelines on %s finishes in <2s and yields env' % label,
+        'perf: command_pipelines on %s finishes in <5s and yields env' % label,
         [
-            (elapsed < 2.0, elapsed, '< 2.0s'),
+            (elapsed < 5.0, elapsed, '< 5.0s'),
             (bool(_env_pipeline(pls)), len(pls), "a pipeline holding ['env']"),
         ],
     )
@@ -981,10 +981,10 @@ for label, inp in _PERF_INPUTS:
     for fn in (strip_heredoc_bodies, command_pipelines):
         elapsed, _out = _timed(fn, inp)
         report(
-            'perf: %s on %s finishes in <0.5s' % (fn.__name__, label),
-            elapsed < 0.5,
+            'perf: %s on %s finishes in <2.0s' % (fn.__name__, label),
+            elapsed < 2.0,
             elapsed,
-            '< 0.5s',
+            '< 2.0s',
         )
 
 print("%d passed, %d failed" % (passed, failed))

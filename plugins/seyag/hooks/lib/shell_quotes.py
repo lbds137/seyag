@@ -62,8 +62,10 @@ CONSUMERS
 ---------
 In this plugin (hooks/):
     lossy-pipe-guard.sh           strip_quoted, strip_heredoc_bodies,
+                                  substitution_spans,
                                   substitution_spans_matching, heredoc_openers,
                                   HEREDOC_OPENER
+    session-url-gate.sh           strip_heredoc_bodies
     cwd-drift-guard.sh            strip_quoted_indexed, strip_heredoc_bodies,
                                   QUOTED_SPAN, ESCAPED_BLANK (substitution-blind,
                                   the lower-stakes drift-warning case)

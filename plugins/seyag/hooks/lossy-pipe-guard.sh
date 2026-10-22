@@ -199,6 +199,7 @@ from shell_quotes import (
     heredoc_openers,
     strip_heredoc_bodies,
     strip_quoted,
+    substitution_spans,
     substitution_spans_matching,
 )
 
@@ -264,15 +265,55 @@ cmd = strip_heredoc_bodies(cmd)
 # following text continues the statement, which for the `$(cat <<EOF … EOF) |
 # tail` form means a remainder beginning with `)` — is real work with its own
 # canary set, not a nicety.
-for _m in reversed(heredoc_openers(cmd, bodies_stripped=True, include_spans=True)):
-    _tail = re.match(r"\n+\s*", cmd[_m.end() :])
+_REJOIN_TAIL = re.compile(r"\n+\s*")
+_rejoin_parts = []
+_cursor = 0
+for _m in heredoc_openers(cmd, bodies_stripped=True, include_spans=True):
+    _tail = _REJOIN_TAIL.match(cmd, _m.end())
     if _tail:
-        cmd = (
-            cmd[: _m.start()]
-            + _m.group(0)
-            + " "
-            + cmd[_m.end() + _tail.end() :]
-        )
+        _rejoin_parts.append(cmd[_cursor : _m.end()])
+        _rejoin_parts.append(" ")
+        _cursor = _tail.end()
+if _rejoin_parts:
+    _rejoin_parts.append(cmd[_cursor:])
+    cmd = "".join(_rejoin_parts)
+
+
+def _find_span(text, open_delim, span, close_delim, start):
+    needle = open_delim + span + close_delim
+    pos = start
+    while True:
+        idx = text.find(needle, pos)
+        if idx == -1:
+            return -1
+        bs = 0
+        while idx - 1 - bs >= 0 and text[idx - 1 - bs] == "\\":
+            bs += 1
+        if bs % 2 == 0:
+            return idx
+        pos = idx + 1
+
+
+# Blank substitution-span interiors before `strip_quoted` + chain split (keep
+# the `$( )`/backtick delimiters, replace interiors with a character that
+# cannot be `|`, `&`, `;`, or a newline) so an inner newline or operator cannot
+# invent a chain segment or stage boundary.
+_span_parts = []
+_cursor = 0
+for _span in substitution_spans(cmd):
+    _hits = [
+        (_find_span(cmd, _o, _span, _c, _cursor), _o)
+        for _o, _c in (("$(", ")"), ("`", "`"))
+    ]
+    _hits = [(_i, _o) for _i, _o in _hits if _i != -1]
+    if _hits:
+        _idx, _open = min(_hits)
+        _span_parts.append(cmd[_cursor : _idx + len(_open)])
+        _span_parts.append("X")
+        _cursor = _idx + len(_open) + len(_span)
+if _span_parts:
+    _span_parts.append(cmd[_cursor:])
+    cmd = "".join(_span_parts)
 
 # Quote stripping is a single left-to-right SCAN, not a pair of regex passes:
 # the two-pass version failed on ordinary English (an apostrophe in one
@@ -374,20 +415,22 @@ GIT_TARGET = re.compile(r"(?i)\bgit(?:\s+-+[^-\s]\S*(?:\s+[^-\s]\S*)?)*\s+(commi
 # lib/shell_quotes.py for the boundaries.
 #
 # COMMAND-WIDE, NOT PER-STAGE, and that is an accepted OVER-BLOCK rather than an
-# oversight: the stage split runs on the STRIPPED text, where the span no longer
-# exists, so there is no offset left to tie a span back to the stage that
-# carried it. The consequence is that a command holding BOTH a target-bearing
-# substitution and any filtered pipeline blocks, even when the two are in
-# different segments. Over-blocking costs one re-run without the pipe; the
-# under-arm it replaces is a swallowed commit/push failure or a truncated gh
-# read, which is the whole reason this hook exists. Pinned by the "quoted
-# substitution hides the commit/target from the pipe scan" cases in
-# lossy-pipe-guard.probe.sh.
+# oversight: substitution-span interiors are blanked before `strip_quoted` and
+# the chain/stage split (and quoted spans collapse to `S`), while
+# `substitution_spans_matching` scans `raw_cmd` as a whole without tying each
+# span back to the segment or stage that carried it. The consequence is that a
+# command holding BOTH a target-bearing substitution and any filtered pipeline
+# blocks, even when the two are in different segments. Over-blocking costs one
+# re-run without the pipe; the under-arm it replaces is a swallowed commit/push
+# failure or a truncated gh read, which is the whole reason this hook exists.
+# Pinned by the "quoted substitution hides the commit/target from the pipe scan"
+# cases in lossy-pipe-guard.probe.sh.
 #
-# The substitution is only ever read for a rule's target, never fed to the
-# pipe segmentation — a `|` inside a substitution is that subshell's pipeline,
-# not this command's, and treating it as a stage boundary would invent stages
-# bash never runs.
+# Because span interiors are blanked before segmentation, a substitution is
+# only ever read for a rule's target and never fed to the chain or pipe
+# splitters — a newline, `;`, `&&`, `||` or `|` inside a substitution belongs
+# to that subshell, not to the outer command, and treating it as a segment or
+# stage boundary would invent boundaries bash never runs.
 SPAN_CARRIES_GIT_TARGET = substitution_spans_matching(
     raw_cmd, lambda span: GIT_TARGET.search(span) is not None
 )
