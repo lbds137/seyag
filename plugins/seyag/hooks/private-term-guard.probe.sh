@@ -606,6 +606,27 @@ run 2 "an invalid seyag.publicRepo (yesplz) counts as public" "$INVAL" "${T[@]}"
   "git commit -m 'add zorbleflux'"
 assert_out "invalid publicRepo: the commit text matched" present "matched in: the command text"
 
+# =============================================================================
+# Read-only gh commands: command text is not scanned; writes/unknowns fail closed
+# =============================================================================
+mkdir -p "$PUB/zorbleflux"
+run 0 "gh read (1): cd <dir-with-private-term> && gh pr view 1 --json number" "$PUB" "${T[@]}" -- \
+  "cd $PUB/zorbleflux && gh pr view 1 --json number"
+run 0 "gh read (2): gh api repos/x/y --jq .name with a private term in the text" "$PUB" "${T[@]}" -- \
+  "gh api repos/x/y --jq .name # zorbleflux"
+run 2 "gh write (3): gh api -X POST repos/x/y --input body.json with a private term" "$PUB" "${T[@]}" -- \
+  "gh api -X POST repos/x/y --input body.json # zorbleflux"
+run 2 "gh write (4): gh api -f note=x with a private term (fields without explicit GET stay scanned)" "$PUB" "${T[@]}" -- \
+  "gh api repos/x/y -f note=zorbleflux"
+run 2 "gh write (5): gh pr create -t <term>" "$PUB" "${T[@]}" -- \
+  "gh pr create -t zorbleflux --body clean"
+run 2 "gh unknown subcommand (6): gh frobnicate <term> fails closed" "$PUB" "${T[@]}" -- \
+  "gh frobnicate zorbleflux"
+run 2 "compound (7): git commit -m <term> && gh pr view 1 still scans the commit" "$PUB" "${T[@]}" -- \
+  "git commit -m 'add zorbleflux' && gh pr view 1"
+run 0 "gh read (8): gh run list with a private term" "$PUB" "${T[@]}" -- \
+  "gh run list # zorbleflux"
+
 if [ "$FAILURES" -ne 0 ]; then
   printf '\n%d probe case(s) FAILED\n' "$FAILURES"
   exit 1
