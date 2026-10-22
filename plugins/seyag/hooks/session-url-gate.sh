@@ -143,15 +143,21 @@ sys.path.insert(0, os.environ["HOOK_LIB"])
 from outbound import bypass_block_message, outbound_items, prepush_bypasses
 from prepush_state import enforcing_judge, global_install_present
 from session_link import SECRET, mask
+from shell_quotes import strip_heredoc_bodies
 
 cmd = os.fsdecode(open(3, "rb").read()).removesuffix("\n")
 payload_cwd = os.environ.get("CWD") or "."
 
 BYPASS = "SYG_ALLOW_SESSION_URL=1"
 
+# Strip heredoc bodies on the raw command before the push-argument and pipeline
+# scans, matching sibling guards: a quoted heredoc body written to a file that
+# merely mentions `git push $(…)` is inert data, not a push bypass.
+body_free = strip_heredoc_bodies(cmd)
+
 # The pre-push bypass shapes, where that hook is in force (this hook needs no
 # private-terms file, so they block with or without one).
-bypass_tokens = prepush_bypasses(cmd, payload_cwd, BYPASS,
+bypass_tokens = prepush_bypasses(body_free, payload_cwd, BYPASS,
                                  dir_filter=enforcing_judge(payload_cwd),
                                  global_filter=global_install_present)
 if bypass_tokens:
@@ -159,8 +165,8 @@ if bypass_tokens:
     sys.exit(0)
 
 
-findings = [mask(item.label) for item in outbound_items(cmd, payload_cwd, BYPASS)
-            if SECRET.search(item.text)]
+findings = [mask(item.label) for item in outbound_items(body_free, payload_cwd, BYPASS)
+            if SECRET.search(cmd if item.kind == "text" else item.text)]
 
 if findings:
     uniq = list(dict.fromkeys(findings))

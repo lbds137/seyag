@@ -501,6 +501,17 @@ run 2 "backtick heredoc on git push + trailing tail" $'git push `: <<EOF\nx\nEOF
 run 2 "backtick <<-EOF heredoc on git push + trailing tail" $'git push `: <<-EOF\nx\nEOF\n` | tail -5'
 run 2 "backtick heredoc commit message + trailing tail" $'git commit -m `cat <<EOF\nfeat: x\nEOF\n` | tail -5'
 run 0 "unpiped backtick heredoc is allowed" $'echo `: <<EOF\nx\nEOF\n`'
+# Span interiors are blanked before chain/stage splitting, so newlines inside a
+# substitution no longer invent segment boundaries that separate the target from
+# its trailing filter.
+# Backtick span with a comment-hidden <<EOF and newlines stays one pipeline segment.
+run 2 "backtick # <<EOF in span + trailing tail" $'git push `: # <<EOF\nx\nEOF\n` | tail -5'
+# $(…) twin: a comment-hidden <<EOF and newlines inside $(…) no longer split segments.
+run 2 "\$(…) # <<EOF in span + trailing tail" $'git push $(: # <<EOF\nx\nEOF\n) | tail -5'
+# Multi-line command substitution on git push no longer splits segments at the inner newline.
+run 2 "multi-line \$(…) on git push + trailing tail" $'git push $(echo a\necho b) | tail -5'
+# Control: a multi-line substitution with no git/gh target stays allowed.
+run 0 "multi-line \$(…) without a target is allowed" $'echo $(: # c\n) | tail -5'
 
 # --- a BARE heredoc body is prose, not a pipeline -------------------------
 # The reproducer: writing up the incident this guard exists for — a body line
