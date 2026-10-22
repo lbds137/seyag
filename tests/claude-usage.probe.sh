@@ -551,11 +551,11 @@ j=$(run --json); rc=$?
 [ $rc = 0 ] && jq -e 'type == "object" and has("extra_usage") == false' <<< "$j" >/dev/null \
     && ok "--json extra_usage: string extra_usage omitted, exits 0 with valid JSON" || bad "--json string extra_usage (rc $rc): $j"
 printf '{not json\n' > "$tmp/claude-statusline/usage.json"
-# Pins the behaviour from before extra_usage: zeroed plan fields on stdout, rc 1 from printf's
-# "invalid number" on the empty fields. The extra_usage step adds nothing to it.
+# Pins the stdout from before extra_usage: zeroed plan fields, no extra_usage key. The exit code is
+# left unpinned: printf's "invalid number" on the empty fields is rc 1 under bash 5.3 and rc 0 on CI.
 j=$(run --json 2>/dev/null); rc=$?
-[ $rc = 1 ] && [ "$j" = '{"five_hour_pct":0,"five_hour_resets_at":0,"seconds_to_reset":0,"weekly_pct":0,"weekly_resets_at":0,"scoped":"","routed":0,"lane":"anthropic"}' ] \
-    && ok "--json malformed cache ({not json): zeroed plan fields, no extra_usage key, rc 1 as before" || bad "--json malformed cache (rc $rc): $j"
+[ "$j" = '{"five_hour_pct":0,"five_hour_resets_at":0,"seconds_to_reset":0,"weekly_pct":0,"weekly_resets_at":0,"scoped":"","routed":0,"lane":"anthropic"}' ] \
+    && ok "--json malformed cache ({not json): zeroed plan fields, no extra_usage key" || bad "--json malformed cache (rc $rc): $j"
 fixture 10 50 0
 
 # OpenRouter: the remaining dollars come from the statusline's credits cache, read-only.
