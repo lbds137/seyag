@@ -15,7 +15,7 @@
 #                             every 2 minutes, then print the line; run it in the background to pause a session
 #   claude-usage --json       {five_hour_pct, five_hour_resets_at, seconds_to_reset, weekly_pct, weekly_resets_at, scoped, routed,
 #                             lane (anthropic|zai|or|console|unknown)} plus the calling lane's numbers, null when unreadable:
-#                             zai_five_hour_pct, zai_week_pct (z.ai) | or_remaining_usd (OpenRouter, 2 dp as displayed) | api_credit_remaining_usd (Console)
+#                             zai_five_hour_pct, zai_week_pct (z.ai) | or_remaining_usd (OpenRouter, 2 dp as displayed) | api_credit_remaining_usd (Console); extra_usage {enabled, spend_limit_reached, disabled_reason, used_usd} when in cache
 #   claude-usage --all        one line per lane on this machine (Anthropic plan, z.ai quota, API credit), whatever the
 #                             calling session's lane; always exits 0
 #
@@ -333,6 +333,27 @@ lane_fields() {
     esac
 }
 
+# --json's extra_usage field when the cache carries an extra_usage object, else nothing.
+extra_usage_field() {
+    jq -c '
+        if type == "object" and (.extra_usage | type) == "object" then
+            .extra_usage as $x |
+            (if (.spend | type) == "object" and (.spend.used | type) == "object" then .spend.used else {} end) as $u |
+            {extra_usage: {
+                enabled: ($x.is_enabled == true),
+                spend_limit_reached: ($x.spend_limit_reached == true),
+                disabled_reason: (if ($x.disabled_reason | type) == "string" and ($x.disabled_reason | length) > 0
+                    then ($x.disabled_reason | gsub("[^A-Za-z0-9_.-]"; "_"))
+                    else null end),
+                used_usd: (if $u.currency == "USD"
+                    and ($u.amount_minor | type) == "number" and ($u.amount_minor | floor) == $u.amount_minor and $u.amount_minor >= 0
+                    and ($u.exponent | type) == "number" and ($u.exponent | floor) == $u.exponent and $u.exponent >= 0 and $u.exponent <= 6
+                    then (($u.amount_minor * 100 / pow(10; $u.exponent)) | round) / 100
+                    else null end)
+            }}
+        else empty end' "$cache" 2>/dev/null
+}
+
 case "${1:-}" in
     --ok)
         # A week at the reserve blocks everything, whatever the 5h window says, unless the extra-usage
@@ -398,6 +419,10 @@ case "${1:-}" in
         # The lane fields ride after the original ones, which stay byte-for-byte as they were.
         ext=$(lane_fields); ext=${ext#\{}; ext=${ext%\}}
         [ -n "$ext" ] || ext="\"lane\":\"$vendor_lane\""
+        if extra=$(extra_usage_field) && [ -n "$extra" ] && [[ $extra != *$'\n'* ]]; then
+            extra=${extra#\{}; extra=${extra%\}}
+            ext="$ext,$extra"
+        fi
         printf '{"five_hour_pct":%d,"five_hour_resets_at":%d,"seconds_to_reset":%d,"weekly_pct":%d,"weekly_resets_at":%d,"scoped":%s,"routed":%d,%s}\n' \
             "$five" "$five_reset" "$to_reset" "$week" "$week_reset" "$(jq -rn --arg s "$scoped" '$s | @json')" "$routed" "$ext"
         ;;
