@@ -34,8 +34,8 @@ ITEMS, for every unbypassed command:
     `-m`, heredoc and here-string bodies, `--body`, `--title`, `gh api -f
     body=…`), once per distinct directory, when a `git commit|tag|notes`
     (global options before the subcommand skipped) or any non-read `gh`
-    command (read-only `gh` commands — `pr`/`issue`/`run`/`repo`/`release`/
-    `gist` `view`/`list`/`status`/`checks`/`diff`/`watch`, `gh api` with a GET
+    command (read-only `gh` commands — the read verbs of `pr`/`issue`/`run`/
+    `repo`/`release`/`gist` in `GH_READ_SUBCOMMANDS`, `gh api` with a GET
     method, and bare/help-only `gh` — are skipped) is present.
   - ("file <f>", contents): a body read from a file: `git commit|tag|notes
     -F <f>` / `--file <f>` / `--file=<f>` (also inside a short cluster such as
@@ -216,6 +216,7 @@ def repo_create_push_dir(argv, base):
 GH_GLOBAL_VALUE_OPTS = {
     "-R", "--repo", "--hostname", "--json", "-q", "--jq", "-t", "--template",
 }
+GH_API_VALUE_OPTS = GH_GLOBAL_VALUE_OPTS | {"--header", "--cache", "--preview"}
 GH_READ_SUBCOMMANDS = {
     "pr": {"view", "list", "checks", "status", "diff"},
     "issue": {"view", "list", "status"},
@@ -241,7 +242,17 @@ def gh_is_read(argv):
         if w in GH_GLOBAL_VALUE_OPTS:
             i += 2
             continue
+        if "=" in w and w.split("=", 1)[0] in GH_GLOBAL_VALUE_OPTS:
+            i += 1
+            continue
         if w.startswith("-"):
+            # Once the group word is found, any non-global flag before the verb
+            # returns False: under Cobra's stripFlags an unknown `--long` flag
+            # swallows the next word (`gh pr --body view create` runs `create`),
+            # so requiring only known global options between group and verb is
+            # conservative (fail-closed) under either parser convention.
+            if pos:
+                return False
             i += 1
             continue
         pos.append(w)
@@ -271,6 +282,8 @@ def gh_is_read(argv):
             i += 1
         elif w.startswith(("--raw-field=", "--field=", "--input=")):
             has_field = True
+        elif w in GH_API_VALUE_OPTS:
+            i += 1
         elif w.startswith("-") and not w.startswith("--") and len(w) > 1:
             j = 1
             while j < len(w):

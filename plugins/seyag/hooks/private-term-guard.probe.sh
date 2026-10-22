@@ -626,6 +626,20 @@ run 2 "compound (7): git commit -m <term> && gh pr view 1 still scans the commit
   "git commit -m 'add zorbleflux' && gh pr view 1"
 run 0 "gh read (8): gh run list with a private term" "$PUB" "${T[@]}" -- \
   "gh run list # zorbleflux"
+run 0 "gh read (9): gh api with fields and explicit -X GET" "$PUB" "${T[@]}" -- \
+  "gh api -X GET repos/x/y -f q=zorbleflux"
+run 2 "gh write (10): gh api --method=POST with a private term" "$PUB" "${T[@]}" -- \
+  "gh api --method=POST repos/x/y # zorbleflux"
+run 2 "gh write (11): gh api clustered -XPOST with a private term" "$PUB" "${T[@]}" -- \
+  "gh api -XPOST repos/x/y # zorbleflux"
+run 0 "gh read (12): gh -R owner/repo before the subcommand" "$PUB" "${T[@]}" -- \
+  "gh -R owner/repo pr view 1 # zorbleflux"
+run 0 "gh read (13): bare gh with a private term in a comment" "$PUB" "${T[@]}" -- \
+  "gh # zorbleflux"
+run 2 "gh write (14): unknown flag before verb (gh pr --body view create) fails closed" "$PUB" "${T[@]}" -- \
+  "gh pr --body view create --title zorbleflux"
+run 2 "gh write (15): long-option value -XGET (gh api --jq -XGET -f) is not a method flag" "$PUB" "${T[@]}" -- \
+  "gh api repos/x/y --jq -XGET -f title=zorbleflux"
 
 if [ "$FAILURES" -ne 0 ]; then
   printf '\n%d probe case(s) FAILED\n' "$FAILURES"

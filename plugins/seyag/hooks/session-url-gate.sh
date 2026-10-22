@@ -47,7 +47,10 @@
 # same one publish-gate uses: top-level pipelines, wrapper strings such as
 # `bash -c '…'`, and command substitutions):
 #   1. `git commit`, `git tag`, `git notes` (global options before the
-#      subcommand are skipped; `-C <dir>` is honored), or ANY `gh` command,
+#      subcommand are skipped; `-C <dir>` is honored), or any non-read `gh`
+#      command (read-only `gh` commands — the read verbs of
+#      pr/issue/run/repo/release/gist in GH_READ_SUBCOMMANDS, `gh api` with a
+#      GET method — do not publish, so their command text is not scanned),
 #      when the WHOLE command text matches the pattern. That covers `-m`, heredoc and
 #      here-string bodies, `--body`, `--title` and `gh api -f body=…`. A link
 #      anywhere in the same text as such a command is an over-arm on purpose
