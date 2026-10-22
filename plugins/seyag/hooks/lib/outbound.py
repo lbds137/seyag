@@ -33,8 +33,10 @@ ITEMS, for every unbypassed command:
   - ("the command text", cmd): the WHOLE text, over-arm on purpose (it covers
     `-m`, heredoc and here-string bodies, `--body`, `--title`, `gh api -f
     body=…`), once per distinct directory, when a `git commit|tag|notes`
-    (global options before the subcommand skipped) or ANY `gh` command is
-    present.
+    (global options before the subcommand skipped) or any non-read `gh`
+    command (read-only `gh` commands — `pr`/`issue`/`run`/`repo`/`release`/
+    `gist` `view`/`list`/`status`/`checks`/`diff`/`watch`, `gh api` with a GET
+    method, and bare/help-only `gh` — are skipped) is present.
   - ("file <f>", contents): a body read from a file: `git commit|tag|notes
     -F <f>` / `--file <f>` / `--file=<f>` (also inside a short cluster such as
     `-aF f`); for `gh`: `--body-file <f>`, `--notes-file <f>`, `-F <f>` (not
@@ -209,6 +211,85 @@ def repo_create_push_dir(argv, base):
             source = w[len("--source="):]
         i += 1
     return join_dir(base, os.path.expanduser(source))
+
+
+GH_GLOBAL_VALUE_OPTS = {
+    "-R", "--repo", "--hostname", "--json", "-q", "--jq", "-t", "--template",
+}
+GH_READ_SUBCOMMANDS = {
+    "pr": {"view", "list", "checks", "status", "diff"},
+    "issue": {"view", "list", "status"},
+    "run": {"view", "list", "watch"},
+    "repo": {"view"},
+    "release": {"view", "list"},
+    "gist": {"view", "list"},
+}
+
+
+def gh_is_read(argv):
+    """True when a `gh` argv is provably a read (publishes nothing); anything
+    unrecognized returns False (fail closed)."""
+    words = strip_redirections(argv[1:])
+    pos = []
+    i = 0
+    n = len(words)
+    while i < n and len(pos) < 2:
+        w = words[i]
+        if w == "--":
+            pos.extend(words[i + 1: i + 1 + (2 - len(pos))])
+            break
+        if w in GH_GLOBAL_VALUE_OPTS:
+            i += 2
+            continue
+        if w.startswith("-"):
+            i += 1
+            continue
+        pos.append(w)
+        i += 1
+        if len(pos) == 1 and pos[0] == "api":
+            break
+    if not pos:
+        return True
+    sub = pos[0]
+    if sub in GH_READ_SUBCOMMANDS:
+        return len(pos) >= 2 and pos[1] in GH_READ_SUBCOMMANDS[sub]
+    if sub != "api":
+        return False
+    methods = []
+    has_field = False
+    i = 0
+    while i < n:
+        w = words[i]
+        nxt = words[i + 1] if i + 1 < n else ""
+        if w in ("-X", "--method"):
+            methods.append(nxt)
+            i += 1
+        elif w.startswith("--method="):
+            methods.append(w[len("--method="):])
+        elif w in ("-f", "--raw-field", "-F", "--field", "--input"):
+            has_field = True
+            i += 1
+        elif w.startswith(("--raw-field=", "--field=", "--input=")):
+            has_field = True
+        elif w.startswith("-") and not w.startswith("--") and len(w) > 1:
+            j = 1
+            while j < len(w):
+                c = w[j]
+                if c in "FHqXpftR":
+                    rest = w[j + 1:]
+                    val = rest[1:] if rest.startswith("=") else (rest or nxt)
+                    if c == "X":
+                        methods.append(val)
+                    elif c in "fF":
+                        has_field = True
+                    if not rest:
+                        i += 1
+                    break
+                j += 1
+        i += 1
+    if methods:
+        return all(m.upper() == "GET" for m in methods)
+    return not has_field
 
 
 def file_values_gh(argv):
@@ -774,7 +855,8 @@ def outbound_items(cmd, cwd, bypass_assignment, dir_filter=None):
                 if bypassed:
                     continue
                 if wanted(directory):
-                    command_text(directory)
+                    if not gh_is_read(argv):
+                        command_text(directory)
                     files(file_values_gh(argv), directory)
                 push_dir = repo_create_push_dir(argv, directory)
                 if push_dir is not None and wanted(push_dir):

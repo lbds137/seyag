@@ -44,6 +44,9 @@
 # files (`-F`,
 # `--body-file`, `@file`, gist files), the messages of pushed commits, and the
 # added lines of the commit being made and of pushed commits, in every file.
+# Read-only gh commands (pr/issue/run/repo/release/gist
+# view-list-status-checks-diff-watch, gh api with a GET method) do not publish,
+# their command text is not scanned.
 #
 # PRE-PUSH BYPASSES: where the pre-push is in force (a public repo with the
 # seyag hooks dir as its effective core.hooksPath and no alias that skips
