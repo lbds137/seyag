@@ -56,11 +56,12 @@ fixture() {
         limits: [{kind: "weekly_scoped", percent: $m, scope: {model: {display_name: "Fable"}}}]}' \
         > "$tmp/claude-statusline/usage.json"
 }
-# fixture_extra <5h %> <week %> <fable %> <is_enabled> <spend_limit_reached> <disabled_reason|null>
+# fixture_extra <5h %> <week %> <fable %> <is_enabled> <spend_limit_reached> <disabled_reason|null> [<spend.used json>]
 fixture_extra() {
     fixture "$1" "$2" "$3"
-    jq --argjson en "$4" --argjson lim "$5" --arg dr "${6:-null}" \
-        '. + {extra_usage: {is_enabled: $en, spend_limit_reached: $lim, disabled_reason: (if $dr == "null" or $dr == "" then null else $dr end)}}' \
+    jq --argjson en "$4" --argjson lim "$5" --arg dr "${6:-null}" --argjson su "${7:-null}" \
+        '. + {extra_usage: {is_enabled: $en, spend_limit_reached: $lim, disabled_reason: (if $dr == "null" or $dr == "" then null else $dr end)}}
+         + (if $su == null then {} else {spend: {used: $su}} end)' \
         "$tmp/claude-statusline/usage.json" > "$tmp/claude-statusline/usage.json.tmp"
     mv "$tmp/claude-statusline/usage.json.tmp" "$tmp/claude-statusline/usage.json"
 }
@@ -478,6 +479,84 @@ j=$(CC_ROUTE_PRESET=anthropic-api run --json)
 jq -e '.api_credit_remaining_usd == null' <<< "$j" >/dev/null && ok "--json Console lane, api-credit fails: null" || bad "--json console fail: $j"
 j=$(ANTHROPIC_BASE_URL=https://weird.example.org/v1 run --json)
 jq -e '.lane == "unknown" and (keys | length) == 8' <<< "$j" >/dev/null && ok "--json unknown lane: lane only" || bad "--json unknown: $j"
+fixture 10 50 0
+j=$(run --json)
+jq -e 'has("extra_usage") == false' <<< "$j" >/dev/null \
+    && ok "--json no extra_usage key in cache: has(\"extra_usage\") is false" || bad "--json no extra_usage key: $j"
+fixture_extra 10 50 0 true false null '{"amount_minor":1234,"currency":"USD","exponent":2}'
+j=$(run --json)
+[[ $j == "$old_prefix"* ]] && [[ $j == *',"routed":0,"lane":"anthropic","extra_usage":{"enabled":true,"spend_limit_reached":false,"disabled_reason":null,"used_usd":12.34}}' ]] \
+    && jq -e '.extra_usage == {"enabled":true,"spend_limit_reached":false,"disabled_reason":null,"used_usd":12.34}' <<< "$j" >/dev/null \
+    && ok "--json extra_usage: enabled + spend.used 12.34 USD, old_prefix first, extra_usage after lane" || bad "--json extra_usage on: $j"
+route_zai
+zai_stub api 42 17
+j=$(run --json)
+jq -e '.lane == "zai" and .zai_five_hour_pct == 42 and .extra_usage == {"enabled":true,"spend_limit_reached":false,"disabled_reason":null,"used_usd":12.34}' <<< "$j" >/dev/null \
+    && ok "--json extra_usage on z.ai lane: appended after lane fields" || bad "--json extra_usage zai: $j"
+route_anthropic
+fixture_extra 10 50 0 false false out_of_credits
+j=$(run --json)
+jq -e '.extra_usage == {"enabled":false,"spend_limit_reached":false,"disabled_reason":"out_of_credits","used_usd":null}' <<< "$j" >/dev/null \
+    && ok "--json extra_usage: off, out_of_credits, no spend key -> used_usd null" || bad "--json extra_usage out_of_credits: $j"
+fixture_extra 10 50 0 true true null
+j=$(run --json)
+jq -e '.extra_usage == {"enabled":true,"spend_limit_reached":true,"disabled_reason":null,"used_usd":null}' <<< "$j" >/dev/null \
+    && ok "--json extra_usage: spend_limit_reached true" || bad "--json extra_usage spend_limit_reached: $j"
+fixture_extra 10 50 0 false false 'bad "reason"'
+j=$(run --json)
+jq -e '.extra_usage == {"enabled":false,"spend_limit_reached":false,"disabled_reason":"bad__reason_","used_usd":null}' <<< "$j" >/dev/null \
+    && ok "--json extra_usage: disabled_reason with space and quote reduced to underscores" || bad "--json extra_usage reason reduction: $j"
+fixture_extra 10 50 0 '"true"' false null
+j=$(run --json)
+jq -e '.extra_usage == {"enabled":false,"spend_limit_reached":false,"disabled_reason":null,"used_usd":null}' <<< "$j" >/dev/null \
+    && ok "--json extra_usage: is_enabled string \"true\" -> enabled false" || bad "--json extra_usage string is_enabled: $j"
+fixture_extra 10 50 0 true false null '{"amount_minor":1234,"currency":"EUR","exponent":2}'
+j=$(run --json)
+jq -e '.extra_usage == {"enabled":true,"spend_limit_reached":false,"disabled_reason":null,"used_usd":null}' <<< "$j" >/dev/null \
+    && ok "--json extra_usage: spend.used currency EUR -> used_usd null" || bad "--json extra_usage EUR: $j"
+fixture_extra 10 50 0 true false null '{"amount_minor":1234,"currency":"USD","exponent":"2"}'
+j=$(run --json)
+jq -e '.extra_usage == {"enabled":true,"spend_limit_reached":false,"disabled_reason":null,"used_usd":null}' <<< "$j" >/dev/null \
+    && ok "--json extra_usage: spend.used string exponent -> used_usd null" || bad "--json extra_usage string exponent: $j"
+fixture_extra 10 50 0 true false null '{"amount_minor":1235,"currency":"USD","exponent":3}'
+j=$(run --json)
+jq -e '.extra_usage == {"enabled":true,"spend_limit_reached":false,"disabled_reason":null,"used_usd":1.24}' <<< "$j" >/dev/null \
+    && ok "--json extra_usage: spend.used {1235, USD, 3} rounds to 1.24" || bad "--json extra_usage round 1.24: $j"
+fixture_extra 10 50 0 true false null '{"amount_minor":7,"currency":"USD","exponent":0}'
+j=$(run --json)
+jq -e '.extra_usage == {"enabled":true,"spend_limit_reached":false,"disabled_reason":null,"used_usd":7}' <<< "$j" >/dev/null \
+    && ok "--json extra_usage: spend.used exponent 0 {7, USD, 0} -> 7" || bad "--json extra_usage exp 0: $j"
+fixture_extra 10 50 0 true false null '{"amount_minor":1500000,"currency":"USD","exponent":6}'
+j=$(run --json)
+jq -e '.extra_usage == {"enabled":true,"spend_limit_reached":false,"disabled_reason":null,"used_usd":1.5}' <<< "$j" >/dev/null \
+    && ok "--json extra_usage: spend.used exponent 6 {1500000, USD, 6} -> 1.5" || bad "--json extra_usage exp 6: $j"
+fixture_extra 10 50 0 true false null '{"amount_minor":10000000,"currency":"USD","exponent":7}'
+j=$(run --json)
+jq -e '.extra_usage == {"enabled":true,"spend_limit_reached":false,"disabled_reason":null,"used_usd":null}' <<< "$j" >/dev/null \
+    && ok "--json extra_usage: spend.used exponent 7 -> used_usd null" || bad "--json extra_usage exp 7: $j"
+fixture_extra 10 50 0 true false null '{"amount_minor":10,"currency":"USD","exponent":-1}'
+j=$(run --json)
+jq -e '.extra_usage == {"enabled":true,"spend_limit_reached":false,"disabled_reason":null,"used_usd":null}' <<< "$j" >/dev/null \
+    && ok "--json extra_usage: spend.used exponent -1 -> used_usd null" || bad "--json extra_usage exp -1: $j"
+fixture_extra 10 50 0 true false null '{"amount_minor":-1,"currency":"USD","exponent":2}'
+j=$(run --json)
+jq -e '.extra_usage == {"enabled":true,"spend_limit_reached":false,"disabled_reason":null,"used_usd":null}' <<< "$j" >/dev/null \
+    && ok "--json extra_usage: spend.used amount_minor -1 -> used_usd null" || bad "--json extra_usage amount_minor -1: $j"
+fixture_extra 10 50 0 true false null '{"amount_minor":12.5,"currency":"USD","exponent":2}'
+j=$(run --json)
+jq -e '.extra_usage == {"enabled":true,"spend_limit_reached":false,"disabled_reason":null,"used_usd":null}' <<< "$j" >/dev/null \
+    && ok "--json extra_usage: spend.used amount_minor 12.5 -> used_usd null" || bad "--json extra_usage amount_minor 12.5: $j"
+extra_raw 10 50 '"on"'
+j=$(run --json); rc=$?
+[ $rc = 0 ] && jq -e 'type == "object" and has("extra_usage") == false' <<< "$j" >/dev/null \
+    && ok "--json extra_usage: string extra_usage omitted, exits 0 with valid JSON" || bad "--json string extra_usage (rc $rc): $j"
+printf '{not json\n' > "$tmp/claude-statusline/usage.json"
+# Pins the behaviour from before extra_usage: zeroed plan fields on stdout, rc 1 from printf's
+# "invalid number" on the empty fields. The extra_usage step adds nothing to it.
+j=$(run --json 2>/dev/null); rc=$?
+[ $rc = 1 ] && [ "$j" = '{"five_hour_pct":0,"five_hour_resets_at":0,"seconds_to_reset":0,"weekly_pct":0,"weekly_resets_at":0,"scoped":"","routed":0,"lane":"anthropic"}' ] \
+    && ok "--json malformed cache ({not json): zeroed plan fields, no extra_usage key, rc 1 as before" || bad "--json malformed cache (rc $rc): $j"
+fixture 10 50 0
 
 # OpenRouter: the remaining dollars come from the statusline's credits cache, read-only.
 orc="$tmp/claude-statusline/or-credits.json"
