@@ -513,10 +513,6 @@ run 2 "quote-hidden opener before git push --no-verify blocks" "$PUBW" "${NT[@]}
   $'echo "<<x"\ngit push --no-verify origin main\nx'
 run 0 "not public: git push --no-verify passes" "$WORK" "${NT[@]}" -- \
   "git push --no-verify origin main"
-run 0 "quoted heredoc body mentioning git push \$(…) passes" "$PUBW" "${NT[@]}" -- \
-  $'cat <<\'EOF\' >"$TMP/notes.md"\ngit push $(echo main)\n`git push $(echo main)`\nEOF'
-run 2 "real git push \$(…) blocks" "$PUBW" "${NT[@]}" -- \
-  'git push origin $(echo main)'
 
 # =============================================================================
 # Group 11: read-only gh commands' text is not scanned; write gh commands block

@@ -512,6 +512,33 @@ run 2 "\$(…) # <<EOF in span + trailing tail" $'git push $(: # <<EOF\nx\nEOF\n
 run 2 "multi-line \$(…) on git push + trailing tail" $'git push $(echo a\necho b) | tail -5'
 # Control: a multi-line substitution with no git/gh target stays allowed.
 run 0 "multi-line \$(…) without a target is allowed" $'echo $(: # c\n) | tail -5'
+# A fallback-extracted span whose opener sits inside single quotes must NOT be
+# blanked: blanking from `'use $('` to the comment's `)` would erase the real
+# `| tail -5` pipe between them.
+run 2 "single-quoted \$( with trailing # ) does not blank the real pipe" \
+  "git commit -m 'use \$(' 2>&1 | tail -5   # see )"
+
+# Rejoin regression bound: N=64000 unterminated `cat <<A` lines + `git push | tail`
+# stays linear (~1.5 s; quadratic slicing ran ~10 s; assert < 5 s). Sent via
+# stdin so the ~500 KiB command never hits Linux's 128 KiB MAX_ARG_STRLEN cap.
+rejoin_64k=$(python3 -c "print('cat <<A\n' * 64000 + 'git push | tail', end='')")
+rejoin_start=$(date +%s%N)
+printf '%s' "$rejoin_64k" | jq -Rs '{tool_name:"Bash",tool_input:{command:.}}' \
+  | timeout 10 "$HOOK" >/dev/null 2>&1
+rejoin_rc=$?
+rejoin_ms=$(( ($(date +%s%N) - rejoin_start) / 1000000 ))
+if [ "$rejoin_rc" -eq 124 ]; then
+  printf 'FAIL  (timed out at 10s)  rejoin on 64k <<A openers is quadratic\n'
+  FAILURES=$((FAILURES + 1))
+elif [ "$rejoin_rc" -ne 2 ]; then
+  printf 'FAIL  (exit %d, expected 2)  rejoin on 64k <<A openers + git push | tail\n' "$rejoin_rc"
+  FAILURES=$((FAILURES + 1))
+elif [ "$rejoin_ms" -ge 5000 ]; then
+  printf 'FAIL  (%dms, expected <5000ms)  rejoin on 64k <<A openers is quadratic\n' "$rejoin_ms"
+  FAILURES=$((FAILURES + 1))
+else
+  printf 'PASS  (%dms, exit 2)  rejoin on 64k <<A openers stays linear (<5000ms)\n' "$rejoin_ms"
+fi
 
 # --- a BARE heredoc body is prose, not a pipeline -------------------------
 # The reproducer: writing up the incident this guard exists for — a body line

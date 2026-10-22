@@ -62,10 +62,9 @@ CONSUMERS
 ---------
 In this plugin (hooks/):
     lossy-pipe-guard.sh           strip_quoted, strip_heredoc_bodies,
-                                  substitution_spans,
+                                  substitution_span_offsets,
                                   substitution_spans_matching, heredoc_openers,
                                   HEREDOC_OPENER
-    session-url-gate.sh           strip_heredoc_bodies
     cwd-drift-guard.sh            strip_quoted_indexed, strip_heredoc_bodies,
                                   QUOTED_SPAN, ESCAPED_BLANK (substitution-blind,
                                   the lower-stakes drift-warning case)
@@ -1079,9 +1078,24 @@ def substitution_spans(text):
     text for the caller to scan, so an over-long span can over-arm and can
     never hide an invocation.
     """
+    return [text[s:e] for s, e, _ in substitution_span_offsets(text)]
+
+
+def substitution_span_offsets(text):
+    """Return `(start, end, in_single_quotes)` for every span `substitution_spans`
+    extracts from `text`.
+
+    `start` is the offset of the span's interior (just past the opening `$(` or
+    backtick delimiter); `end` is the offset of the closing `)` or backtick
+    delimiter, or `None` when the span runs to end of text unterminated (so
+    `text[start:end]` is always the extracted span content); `in_single_quotes`
+    is True when the span opened inside a single-quoted region (only possible on
+    the fail-closed fallback path, where `skip_single_quoted=False` extracts
+    every span regardless of single quotes).
+    """
     if _SKIP_UNSAFE_TEXT.search(text) is None:
         spans = _extract_spans(text, skip_single_quoted=True)
-        if spans is not None and not any(_span_desyncs(s) for s in spans):
+        if spans is not None and not any(_span_desyncs(text[s:e]) for s, e, _ in spans):
             return spans
     return _extract_spans(text, skip_single_quoted=False)
 
@@ -1129,12 +1143,13 @@ def _span_desyncs(span):
 
 
 def _extract_spans(text, skip_single_quoted):
-    """The span scan behind `substitution_spans`.
+    """The span scan behind `substitution_spans` and `substitution_span_offsets`.
 
-    With `skip_single_quoted` False this reads the raw text quote-blind and
-    extracts every span. With it True it tracks double-quote state and skips a
-    span opening inside a single-quoted region — and returns None, meaning
-    "fall back", on reaching a construct whose quoting it cannot model:
+    With `skip_single_quoted` False this extracts every span, recording whether
+    its opening delimiter sat inside a closed single-quoted region. With it True
+    it tracks double-quote state and skips a span opening inside a
+    single-quoted region — and returns None, meaning "fall back", on reaching a
+    construct whose quoting it cannot model:
 
     - an unquoted, unescaped `#`: a comment makes its apostrophes literal, but
       whether a `#` starts one depends on word boundaries the scanner does not
@@ -1149,21 +1164,32 @@ def _extract_spans(text, skip_single_quoted):
     i = 0
     end_of_text = len(text)
     in_double = False
+    single_end = -1
+    comment_end = -1
     while i < end_of_text:
         ch = text[i]
+        if i == single_end:
+            single_end = -1
+            i += 1
+            continue
         if ch == "\\" and i + 1 < end_of_text:
             # An escaped `$` or backtick opens nothing, and an escaped quote
             # opens no region.
             i += 2
             continue
-        if skip_single_quoted:
+        if i > single_end and i > comment_end:
             if ch == '"':
                 in_double = not in_double
                 i += 1
                 continue
             if not in_double:
                 if ch == "#":
-                    return None
+                    if skip_single_quoted:
+                        return None
+                    nl = text.find("\n", i + 1)
+                    comment_end = end_of_text if nl == -1 else nl
+                    i += 1
+                    continue
                 if ch == "'":
                     close = text.find("'", i + 1)
                     if close != -1:
@@ -1173,12 +1199,19 @@ def _extract_spans(text, skip_single_quoted):
                             and close - 1 > i
                             and text[close - 1] == "\\"
                         ):
-                            return None
-                        i = close + 1
-                        continue
+                            if skip_single_quoted:
+                                return None
+                        elif skip_single_quoted:
+                            i = close + 1
+                            continue
+                        else:
+                            single_end = close
+                            i += 1
+                            continue
                     # Unterminated: read the apostrophe as literal and keep
                     # scanning; skipping to end of text would hide every span.
         if ch == "$" and i + 1 < end_of_text and text[i + 1] == "(":
+            in_single = i < single_end
             j = i + 2
             depth = 1
             while j < end_of_text:
@@ -1193,12 +1226,13 @@ def _extract_spans(text, skip_single_quoted):
                         break
                 j += 1
             if j >= end_of_text:
-                spans.append(text[i + 2 :])
+                spans.append((i + 2, None, in_single))
                 break
-            spans.append(text[i + 2 : j])
+            spans.append((i + 2, j, in_single))
             i = j + 1
             continue
         if ch == "`":
+            in_single = i < single_end
             j = i + 1
             while j < end_of_text:
                 if text[j] == "\\" and j + 1 < end_of_text:
@@ -1208,9 +1242,9 @@ def _extract_spans(text, skip_single_quoted):
                     break
                 j += 1
             if j >= end_of_text:
-                spans.append(text[i + 1 :])
+                spans.append((i + 1, None, in_single))
                 break
-            spans.append(text[i + 1 : j])
+            spans.append((i + 1, j, in_single))
             i = j + 1
             continue
         i += 1

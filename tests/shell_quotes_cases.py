@@ -29,6 +29,7 @@ from shell_quotes import (  # noqa: E402
     strip_heredoc_bodies,
     strip_quoted,
     strip_quoted_indexed,
+    substitution_span_offsets,
     substitution_spans,
     command_pipelines,
     simple_commands,
@@ -261,6 +262,31 @@ SPAN_CASES = [
 
 for label, inp, want in SPAN_CASES:
     check_equal(label, substitution_spans(inp), want)
+
+OFFSET_CASES = [
+    (
+        'substitution_span_offsets: records interior offsets outside single quotes',
+        'echo $(a) and `b`',
+        [(7, 8, False), (15, 16, False)],
+    ),
+    (
+        'substitution_span_offsets: flags fallback span opening inside single quotes',
+        "git commit -m 'use $(' 2>&1 | tail -5   # see )",
+        [(21, 46, True)],
+    ),
+    (
+        'substitution_span_offsets: keeps fallback span outside single quotes unflagged',
+        'git push $(: # <<EOF\nx\nEOF\n) | tail -5',
+        [(11, 27, False)],
+    ),
+    (
+        'substitution_span_offsets: marks unterminated span end as None',
+        'echo "$(git commit',
+        [(8, None, False)],
+    ),
+]
+for label, inp, want in OFFSET_CASES:
+    check_equal(label, substitution_span_offsets(inp), want)
 
 # ---------------------------------------------------------------------------
 # strip_heredoc_bodies — [label, input, expected]
@@ -885,6 +911,7 @@ for label, token, values, next_index, want in PLACEHOLDER_CASES:
 
 # ---------------------------------------------------------------------------
 # Performance bounds (M5)
+# Loosened for loaded-runner CI flakes; wall-clock is the pinned property.
 # ---------------------------------------------------------------------------
 _t0 = time.monotonic()
 _dd_pls = command_pipelines('echo ' + '$${' * 40000 + '; env')
@@ -976,6 +1003,7 @@ _PERF_INPUTS = [
 ]
 # The same inputs with a `<<` appended, so strip_heredoc_bodies really scans
 # them (without one it returns at once: no opener can match).
+# Loosened (<2.0s) for loaded-runner CI flakes; wall-clock is the pinned property.
 _PERF_INPUTS += [(label + " + ' <<E'", inp + ' <<E') for label, inp in _PERF_INPUTS]
 for label, inp in _PERF_INPUTS:
     for fn in (strip_heredoc_bodies, command_pipelines):
