@@ -514,6 +514,14 @@ run 2 "quote-hidden opener before git push --no-verify blocks" "$PUBW" "${NT[@]}
 run 0 "not public: git push --no-verify passes" "$WORK" "${NT[@]}" -- \
   "git push --no-verify origin main"
 
+# =============================================================================
+# Group 11: read-only gh commands' text is not scanned; write gh commands block
+# =============================================================================
+run 0 "gh read-only command with a session link in the text: gh pr view" "$WORK" "${NOENV[@]}" -- \
+  "gh pr view 1 --json body # ${LINK}"
+run 2 "gh write command with a session link in the text: gh pr create" "$WORK" "${NOENV[@]}" -- \
+  "gh pr create --title t --body \"${LINK}\""
+
 if [ "$FAILURES" -ne 0 ]; then
   printf '\n%d probe case(s) FAILED\n' "$FAILURES"
   exit 1
