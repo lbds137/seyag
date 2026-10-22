@@ -69,6 +69,18 @@ jobs:
 
           claude_args: '--model claude-opus-5-5 --allowed-tools "Bash(gh issue view:*),Bash(gh search:*),Bash(gh issue list:*),Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr list:*)"'
 
+      # With show_full_output off, a failed run logs only is_error:true. The result text says
+      # why (a usage limit, an auth error), so a failure prints it, capped at 500 characters.
+      - name: Show why the review failed
+        if: always() && steps.claude-review.outcome == 'failure'
+        env:
+          EXEC_FILE: ${{ steps.claude-review.outputs.execution_file }}
+        run: |
+          f=${EXEC_FILE:-$RUNNER_TEMP/claude-execution-output.json}
+          if [ ! -s "$f" ]; then echo "No execution file at $f."; exit 0; fi
+          jq -r '[.[]? | select(.type == "result")] | last | .result // "no result text" | tostring | .[0:500]' "$f" \
+            || echo "The execution file is not the expected JSON."
+
       # This job is the check auto-merge waits on, so it passes only on a posted review
       # whose verdict names this run's head commit: VERDICT: PASS <sha>. The action can
       # finish green having posted nothing, and a stale PASS for an earlier commit must
