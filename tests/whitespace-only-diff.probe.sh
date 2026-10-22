@@ -450,14 +450,15 @@ rc3=0; printf -- '--- \n+++ b/x.c\n@@ -1 +1 @@\n-  int x;\n+int x;\n' | "$BS" >/
   && ok "case 65: an empty --- or +++ header path is strict even next to a lenient path (exit 1)" \
   || bad "case 65 (rc1 $rc1; rc2 $rc2; rc3 $rc3)"
 
-# 66. With no --- or +++ line at all, the diff --git path decides: x.c is lenient (exit 0),
-# x.py strict (exit 1); bare hunks with no diff line stay --lenient (exit 0) / strict without it
+# 66. With no --- or +++ line at all, both diff --git paths decide: x.c/x.c is lenient (exit 0),
+# either side x.py is strict (exit 1); bare hunks with no diff line stay --lenient (exit 0) / strict without it
 rc1=0; printf -- 'diff --git a/x.py b/x.c\n@@ -1 +1 @@\n-  x\n+x\n' | "$BS" >/dev/null || rc1=$?
 rc2=0; printf -- 'diff --git a/x.c b/x.py\n@@ -1 +1 @@\n-  x\n+x\n' | "$BS" >/dev/null || rc2=$?
 rc3=0; printf -- '@@ -1 +1 @@\n-  x\n+x\n' | "$BS" --lenient >/dev/null || rc3=$?
-rc4=1; printf -- '@@ -1 +1 @@\n-  x\n+x\n' | "$BS" >/dev/null || rc4=$?
-[ $rc1 = 0 ] && [ $rc2 = 1 ] && [ $rc3 = 0 ] && [ $rc4 = 1 ] \
-  && ok "case 66: no header lines: the diff --git path classes the block; bare hunks follow --lenient" \
-  || bad "case 66 (rc1 $rc1; rc2 $rc2; rc3 $rc3; rc4 $rc4)"
+rc4=0; printf -- '@@ -1 +1 @@\n-  x\n+x\n' | "$BS" >/dev/null || rc4=$?
+rc5=0; printf -- 'diff --git a/x.c b/x.c\n@@ -1 +1 @@\n-  x\n+x\n' | "$BS" >/dev/null || rc5=$?
+[ $rc1 = 1 ] && [ $rc2 = 1 ] && [ $rc3 = 0 ] && [ $rc4 = 1 ] && [ $rc5 = 0 ] \
+  && ok "case 66: no header lines: both diff --git paths class the block; bare hunks follow --lenient" \
+  || bad "case 66 (rc1 $rc1; rc2 $rc2; rc3 $rc3; rc4 $rc4; rc5 $rc5)"
 
 exit $fail
