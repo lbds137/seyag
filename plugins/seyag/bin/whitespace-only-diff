@@ -8,8 +8,8 @@ Rules:
 - Path classes (resolved from the `--- ` and `+++ ` paths outside a hunk, cut
   at the first tab with `\\r` and one pair of outer double quotes stripped;
   a `/dev/null` side cannot change the verdict, and a block is lenient only when every
-  real path is lenient; with no `--- ` or `+++ ` line, `diff --git ` `b/` or last
-  token, else `diff ` last token; default is strict):
+  real path is lenient; with no `--- ` or `+++ ` line, both `diff --git ` paths,
+  else `diff ` last token; default is strict):
   - Lenient (`LENIENT_SUFFIXES` as the last suffix — languages with no
     indentation syntax, raw-text mode outside literals, column-0 markers or
     indentation-stripping heredocs (text-block literals are in Known limits) —
@@ -187,6 +187,18 @@ def path_class(path, has_file_header, lenient=False):
     return "strict"
 
 
+def header_a_path(line):
+    hdr = line[len("diff --git ") :].rstrip("\r")
+    if " b/" in hdr:
+        return strip_quotes(hdr.rsplit(" b/", 1)[0]).removeprefix("a/")
+    if ' "b/' in hdr:
+        return strip_quotes(hdr.rsplit(' "b/', 1)[0]).removeprefix("a/")
+    tokens = re.findall(r"[^ \t\f\v]+", hdr)
+    if len(tokens) >= 2:
+        return strip_quotes(tokens[0])
+    return ""
+
+
 def header_b_path(line):
     hdr = line[len("diff --git ") :].rstrip("\r")
     if " b/" in hdr:
@@ -199,11 +211,11 @@ def header_b_path(line):
     return ""
 
 
-def header_diff_path(line):
+def header_diff_paths(line):
     if line.startswith("diff --git "):
-        return header_b_path(line)
+        return [header_a_path(line), header_b_path(line)]
     tokens = re.findall(r"[^ \t\f\v]+", line[len("diff ") :].rstrip("\r"))
-    return strip_quotes(tokens[-1]) if tokens else ""
+    return [strip_quotes(tokens[-1]) if tokens else ""]
 
 
 def header_file_path(line):
@@ -284,7 +296,7 @@ def main(argv):
     in_hunk = False
     block_hunks = 0
     block_has_meta = False
-    diff_path = ""
+    diff_paths = [""]
     has_file_header = False
     minus_path = None
     plus_path = None
@@ -292,12 +304,10 @@ def main(argv):
     def class_of_block():
         # strict if any real header path is strict; a header line with an empty
         # path is malformed and strict (path_class decides); /dev/null is no
-        # path; with no header line at all, the diff --git path decides
+        # path; with no header line at all, the diff --git paths decide
         seen = [p for p in (minus_path, plus_path) if p is not None]
         real = [p for p in seen if p != "/dev/null"]
-        if "" in seen:
-            real.append("")
-        paths = real or [diff_path]
+        paths = real or diff_paths
         strict = any(path_class(p, has_file_header, args.lenient) == "strict" for p in paths)
         return "strict" if strict else "lenient"
 
@@ -351,7 +361,7 @@ def main(argv):
             in_hunk = False
             block_hunks = 0
             block_has_meta = False
-            diff_path = header_diff_path(line)
+            diff_paths = header_diff_paths(line)
             has_file_header = True
             minus_path = plus_path = None
             block_class = class_of_block()
