@@ -517,9 +517,20 @@ run 0 "multi-line \$(…) without a target is allowed" $'echo $(: # c\n) | tail 
 # `| tail -5` pipe between them.
 run 2 "single-quoted \$( with trailing # ) does not blank the real pipe" \
   "git commit -m 'use \$(' 2>&1 | tail -5   # see )"
+# A quoted `(` makes the safe path flag a desync; the fallback re-extracts the
+# same span terminated at the subshell `)`, outside single quotes — a desynced
+# span must not be blanked either, or the outer `| tail -5` disappears.
+run 2 "quoted-paren overrun span does not blank the outer pipe" \
+  $'( git commit -m "$(echo \'step (1\')" 2>&1 | tail -5 )'
+# The fallback treats a mid-word `#` as a comment and skips quote tracking from
+# there, so the span after it reads as outside single quotes; the desync check
+# (the span interior holds an unbalanced quote) is what keeps the pipe visible.
+run 2 "mid-word # before a quote does not blank the real pipe" \
+  $'git commit -m a#b\'use $(\' 2>&1 | tail -5 # )'
 
 # Rejoin regression bound: N=64000 unterminated `cat <<A` lines + `git push | tail`
-# stays linear (~1.5 s; quadratic slicing ran ~10 s; assert < 5 s). Sent via
+# stays linear (~1.5 s; quadratic slicing ran ~10 s; assert < 5 s). (The driver's
+# N=16000 benchmark: 0.605 s pre-fix, 0.346 s fixed, best of 3.) Sent via
 # stdin so the ~500 KiB command never hits Linux's 128 KiB MAX_ARG_STRLEN cap.
 rejoin_64k=$(python3 -c "print('cat <<A\n' * 64000 + 'git push | tail', end='')")
 rejoin_start=$(date +%s%N)

@@ -1074,9 +1074,13 @@ def substitution_spans(text):
     so recursing would only produce duplicate hits.
 
     An UNTERMINATED span runs to end of text. Unlike strip_quoted's
-    strip-nothing rule, that direction is safe here: this function only ADDS
-    text for the caller to scan, so an over-long span can over-arm and can
-    never hide an invocation.
+    strip-nothing rule, that direction is safe for a scanning consumer: this
+    function only ADDS text for the caller to scan, so an over-long span can
+    over-arm and can never hide an invocation. It is NOT safe for a consumer
+    that DELETES span interiors (lossy-pipe-guard's blanking): there, every
+    span is additionally gated on span_overruns_quotes, in_single_quotes and
+    being terminated, so a span that could overrun its true end is left in
+    place and can still only over-arm.
     """
     return [text[s:e] for s, e, _ in substitution_span_offsets(text)]
 
@@ -1095,7 +1099,7 @@ def substitution_span_offsets(text):
     """
     if _SKIP_UNSAFE_TEXT.search(text) is None:
         spans = _extract_spans(text, skip_single_quoted=True)
-        if spans is not None and not any(_span_desyncs(text[s:e]) for s, e, _ in spans):
+        if spans is not None and not any(span_desyncs(text[s:e]) for s, e, _ in spans):
             return spans
     return _extract_spans(text, skip_single_quoted=False)
 
@@ -1122,7 +1126,26 @@ _SKIP_UNSAFE_TEXT = re.compile(
 _CASE_WORD = re.compile(r"(?<![\w.-])case(?![\w.-])")
 
 
-def _span_desyncs(span):
+def span_overruns_quotes(span):
+    """True when blanking this span could hide text beyond its true end.
+
+    The two DANGEROUS arms of span_desyncs only: the span's own quotes are
+    unbalanced (bash's parse continues past the span), or a quoted region
+    inside it holds a paren (the structural count ended the span LATE). The
+    `#` and `case` arms of span_desyncs are deliberately absent: they fire on
+    a span that ended EARLY, and an early end leaves the remainder unblanked,
+    which keeps every real pipe visible — the safe direction for a consumer
+    that deletes span interiors.
+    """
+    for kind, payload in _scan_events(span):
+        if kind == "unterminated":
+            return True
+        if kind == "quoted" and ("(" in payload or ")" in payload):
+            return True
+    return False
+
+
+def span_desyncs(span):
     """True when an extracted span may have ended at the wrong character.
 
     The span scan counts `(`/`)` and backticks structurally, so a quoted `)`

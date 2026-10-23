@@ -912,10 +912,17 @@ for label, token, values, next_index, want in PLACEHOLDER_CASES:
 # ---------------------------------------------------------------------------
 # Performance bounds (M5)
 # Loosened for loaded-runner CI flakes; wall-clock is the pinned property.
+# Each timing is the MINIMUM of two runs, so one loaded sample cannot fail the
+# run while the bound still catches a real slowdown (a 2x+ regression on these
+# shapes exceeds the ceiling; the lossy-pipe 64k rejoin probe carries the
+# discriminating linear-vs-quadratic pin).
 # ---------------------------------------------------------------------------
 _t0 = time.monotonic()
 _dd_pls = command_pipelines('echo ' + '$${' * 40000 + '; env')
 _dd_elapsed = time.monotonic() - _t0
+_t0 = time.monotonic()
+command_pipelines('echo ' + '$${' * 40000 + '; env')
+_dd_elapsed = min(_dd_elapsed, time.monotonic() - _t0)
 check_all(
     'perf: command_pipelines on 40k $${ finishes in <5s and yields env',
     [
@@ -928,6 +935,10 @@ _t0 = time.monotonic()
 _hd_pls = command_pipelines('cat <<A\n' * 16000)
 _hd_openers = heredoc_openers('cat <<A\n' * 16000)
 _hd_elapsed = time.monotonic() - _t0
+_t0 = time.monotonic()
+command_pipelines('cat <<A\n' * 16000)
+heredoc_openers('cat <<A\n' * 16000)
+_hd_elapsed = min(_hd_elapsed, time.monotonic() - _t0)
 check_all(
     'perf: command_pipelines and heredoc_openers on 16k unterminated <<A finishes in <5s',
     [
