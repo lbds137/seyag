@@ -292,13 +292,16 @@ if _rejoin_parts:
 # the subshell `)`, outside single quotes), and an unbalanced interior quote
 # means bash's parse continues past it — either way the span may overrun a
 # real pipeline. The `#`/case desync arms are NOT gated on: they fire on a
-# span that ended EARLY, and an early end leaves the remainder unblanked,
-# which keeps pipes visible (the comment-heredoc flip forms depend on that).
+# span that ended EARLY, and an early end leaves the remainder unblanked and
+# visible to the stage scan — though the invented boundary can still separate
+# a target from its filter, which is a known §20b shape, not fixed here.
 _span_parts = []
+_span_interiors = []
 _cursor = 0
 for _start, _end, _in_single in substitution_span_offsets(cmd):
     if _in_single or _end is None or _start < _cursor:
         continue
+    _span_interiors.append(cmd[_start:_end])
     if span_overruns_quotes(cmd[_start:_end]):
         continue
     _span_parts.append(cmd[_cursor:_start])
@@ -538,14 +541,40 @@ def stage_head(stage):
     return REDIRECT_PREFIX.sub("", stage, count=1)
 
 
-for segment in re.split(r"&&|\|\||;|\n", cmd):
-    stages = segment.split("|")
-    for i, stage in enumerate(stages[:-1]):
-        for target, lossy, name in RULES:
-            hit = target.search(stage) or SPAN_TARGET_HITS.get(name, False)
-            if hit and any(lossy.match(stage_head(later)) for later in stages[i + 1 :]):
-                print("block:" + name)
-                raise SystemExit
+def pipeline_block(text, outer=False):
+    """The rule name a target→lossy-stage pairing in text blocks under, else None.
+
+    outer=True additionally credits the command-wide span targets
+    (SPAN_TARGET_HITS); an interior scan must not, because a span holding
+    another span is that inner subshell's own text.
+    """
+    for segment in re.split(r"&&|\|\||;|\n", text):
+        stages = segment.split("|")
+        for i, stage in enumerate(stages[:-1]):
+            for target, lossy, name in RULES:
+                hit = target.search(stage) or (outer and SPAN_TARGET_HITS.get(name, False))
+                if hit and any(lossy.match(stage_head(later)) for later in stages[i + 1 :]):
+                    return name
+    return None
+
+
+# A substitution interior is a pipeline bash actually runs, and blanking hides
+# it from the stage split below (`x=$(git push 2>&1 | tail -5)` used to block
+# because the inner pipe stayed visible). Scan every captured interior with the
+# same rules BEFORE the outer verdict; this also closes the older quoted-form
+# gap (`echo "$(git push | tail)"`), which strip_quoted erased on main too.
+# Overrun-skipped interiors are scanned as captured: an over-long interior can
+# only over-block (one re-run without the pipe), never under-block.
+for _interior in _span_interiors:
+    _inner = pipeline_block(_interior)
+    if _inner:
+        print("block:" + _inner)
+        raise SystemExit
+
+name = pipeline_block(cmd, outer=True)
+if name:
+    print("block:" + name)
+    raise SystemExit
 print("ok")
 PYEOF
 ) || exit 0

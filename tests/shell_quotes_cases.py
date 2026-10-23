@@ -912,10 +912,10 @@ for label, token, values, next_index, want in PLACEHOLDER_CASES:
 # ---------------------------------------------------------------------------
 # Performance bounds (M5)
 # Loosened for loaded-runner CI flakes; wall-clock is the pinned property.
+# These bounds catch only gross regressions — a 2x slowdown still passes — the
+# discriminating linear-vs-quadratic pin is the lossy-pipe 64k rejoin probe.
 # Each timing is the MINIMUM of two runs, so one loaded sample cannot fail the
-# run while the bound still catches a real slowdown (a 2x+ regression on these
-# shapes exceeds the ceiling; the lossy-pipe 64k rejoin probe carries the
-# discriminating linear-vs-quadratic pin).
+# run.
 # ---------------------------------------------------------------------------
 _t0 = time.monotonic()
 _dd_pls = command_pipelines('echo ' + '$${' * 40000 + '; env')
