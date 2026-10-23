@@ -45,6 +45,8 @@ Every dispatch carries these sections by name; a missing one is a gap the worker
 
 ## Task
 <The design decisions already made. The worker executes; it never designs.>
+<When the unit's floor is red-first: add the new failing case first, run it against the
+unfixed code (through the project's check gate, where checks are gated), only then edit.>
 
 ## Premise ledger
 > A premise about a value's form or state at a pipeline stage cites the producer line that establishes it AT that stage, never a similar-looking site elsewhere — the form at the stage is exactly what the spec's next step consumes.
