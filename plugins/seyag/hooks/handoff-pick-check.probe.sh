@@ -6,7 +6,10 @@
 # one of the pick tokens (/clear, /compact, or the standalone word keep).
 # Unmatched tool calls, an earlier turn's write, both env vars unset/empty
 # (the inert default), stop_hook_active re-stops, and missing/broken inputs all
-# stay silent.
+# stay silent. Fire-once memory: a fired (or pick-accompanied) write never
+# re-arms the poll turn-ends absorbed after it, a NEW write past the stored
+# offset re-arms, isMeta cron prompts do not bound the turn, and state
+# failures (corrupt content, unwritable dir) fail open.
 #
 # Usage: plugins/seyag/hooks/handoff-pick-check.probe.sh   (from repo root)
 
@@ -55,8 +58,10 @@ check() { # $1=expected_exit $2=label $3=transcript $4=stop_active $5+=stderr re
   echo "ok   [$got]: $2"
 }
 
-# Hermetic: ambient machine config must not leak into the probe.
+# Hermetic: ambient machine config must not leak into the probe, and the
+# fire-once memory's state lives under the fixture tmp, never ~/.local/state.
 unset SYG_HANDOFF_PATHS SYG_HANDOFF_CMDS
+export XDG_STATE_HOME="$TMP/state"
 
 # --- 1. Handoff via Bash matching SYG_HANDOFF_CMDS + no pick → exit 2 ---------
 mktx_bash "$TMP/bash-nopick.jsonl" "myrole --set widget --handoff 'unit 3 done'" \
@@ -156,5 +161,60 @@ check 0 "missing transcript file fails open" "$TMP/does-not-exist.jsonl"
 : > "$TMP/empty.jsonl"
 check 0 "empty transcript file fails open" "$TMP/empty.jsonl"
 unset SYG_HANDOFF_PATHS
+
+# --- 9. Fire-once memory: an accounted write never re-arms ---------------------
+export SYG_HANDOFF_CMDS='myrole --set'
+# §1 fired on bash-nopick.jsonl and recorded the write; a poll turn-end that
+# writes nothing (the today-bug: isMeta polls never bound the window) stays
+# silent on re-evaluation.
+check 0 "re-evaluation with no new handoff write stays silent" "$TMP/bash-nopick.jsonl" "" '!.'
+
+# A NEW matching write past the stored offset re-arms the gate.
+mktx_bash "$TMP/mem-chain.jsonl" "myrole --set widget --handoff 'unit 3 done'" \
+  "Unit 3 is landed and the handoff is written to disk."
+check 2 "memory chain: fresh write, first fire" "$TMP/mem-chain.jsonl"
+{
+  echo '{"type":"user","isMeta":true,"message":{"content":"[Cron] poll the worker"}}'
+  echo '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"myrole --set widget --handoff unit-4-done"}}]}}'
+  echo '{"type":"assistant","message":{"content":[{"type":"text","text":"Polled; handoff updated for unit 4."}]}}'
+} >> "$TMP/mem-chain.jsonl"
+check 2 "a NEW handoff write past the stored offset fires again" "$TMP/mem-chain.jsonl"
+check 0 "and the advanced state absorbs the next poll turn-end" "$TMP/mem-chain.jsonl" "" '!.'
+
+# A pick-accompanied write is accounted too (not only fires): the poll
+# turn-ends absorbed after it must not re-arm the gate.
+mktx_bash "$TMP/pick-then-poll.jsonl" "myrole --set widget --handoff 'unit 3 done'" \
+  "Handoff on disk. Pick: keep."
+check 0 "pick-accompanied write passes (and is accounted)" "$TMP/pick-then-poll.jsonl"
+{
+  echo '{"type":"user","isMeta":true,"message":{"content":"[Cron] poll the worker"}}'
+  echo '{"type":"assistant","message":{"content":[{"type":"text","text":"Polled; nothing new to report."}]}}'
+} >> "$TMP/pick-then-poll.jsonl"
+check 0 "absorbed poll turn-end after a picked write stays silent" "$TMP/pick-then-poll.jsonl" "" '!.'
+
+# --- 10. isMeta cron prompts do not bound the turn ------------------------------
+# The write stays in the window across the isMeta entry, so the gate fires on
+# the poll's pickless closing — pins the boundary rule itself (were isMeta a
+# boundary, the poll turn alone has no write and would pass).
+mktx_bash "$TMP/cron-boundary.jsonl" "myrole --set widget --handoff 'unit 3 done'" \
+  "Unit 3 is landed and the handoff is written to disk."
+{
+  echo '{"type":"user","isMeta":true,"message":{"content":"[Cron] poll the worker"}}'
+  echo '{"type":"assistant","message":{"content":[{"type":"text","text":"Polled; nothing new to report."}]}}'
+} >> "$TMP/cron-boundary.jsonl"
+check 2 "isMeta cron prompt does not bound the turn (write stays in window)" "$TMP/cron-boundary.jsonl"
+
+# --- 11. State failures fail open ----------------------------------------------
+mkdir -p "$XDG_STATE_HOME/seyag/handoff-pick-check"
+echo 'not-a-number' > "$XDG_STATE_HOME/seyag/handoff-pick-check/bash-nopick.jsonl.offset"
+check 2 "corrupt state content fails open (fires)" "$TMP/bash-nopick.jsonl"
+
+: > "$TMP/state-not-a-dir"  # a regular file where the state dir must go
+XDG_STATE_HOME="$TMP/state-not-a-dir"
+export XDG_STATE_HOME
+check 2 "unwritable state dir still fires (fail-open)" "$TMP/bash-nopick.jsonl" "" \
+  'HANDOFF PICK' '!Traceback'
+export XDG_STATE_HOME="$TMP/state"
+unset SYG_HANDOFF_CMDS
 
 [ "$fail" = 0 ] && echo "ALL PASS" || { echo "FAILURES"; exit 1; }
