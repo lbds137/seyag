@@ -31,6 +31,7 @@ from shell_quotes import (  # noqa: E402
     strip_quoted_indexed,
     substitution_span_offsets,
     substitution_spans,
+    span_overruns_quotes,
     command_pipelines,
     simple_commands,
     strip_redirections,
@@ -287,6 +288,15 @@ OFFSET_CASES = [
 ]
 for label, inp, want in OFFSET_CASES:
     check_equal(label, substitution_span_offsets(inp), want)
+
+_OVERRUN_CASES = [
+    ('span_overruns_quotes: an unbalanced interior quote overruns', "use $('", True),
+    ('span_overruns_quotes: a quoted region holding a paren overruns', "echo 'step (1'", True),
+    ('span_overruns_quotes: a comment-heredoc interior is blankable', ': # <<EOF\nx\nEOF\n', False),
+    ('span_overruns_quotes: plain text does not overrun', 'echo a', False),
+]
+for label, inp, want in _OVERRUN_CASES:
+    check_equal(label, span_overruns_quotes(inp), want)
 
 # ---------------------------------------------------------------------------
 # strip_heredoc_bodies — [label, input, expected]
@@ -911,11 +921,10 @@ for label, token, values, next_index, want in PLACEHOLDER_CASES:
 
 # ---------------------------------------------------------------------------
 # Performance bounds (M5)
-# Loosened for loaded-runner CI flakes; wall-clock is the pinned property.
-# These bounds catch only gross regressions — a 2x slowdown still passes — the
+# Wall-clock is the pinned property. Every timing is the MINIMUM of two runs,
+# so one loaded sample cannot fail the run; the bounds sit at their pre-loosen
+# values (the 0.5s one doubles to 1.0s) and catch gross regressions — the
 # discriminating linear-vs-quadratic pin is the lossy-pipe 64k rejoin probe.
-# Each timing is the MINIMUM of two runs, so one loaded sample cannot fail the
-# run.
 # ---------------------------------------------------------------------------
 _t0 = time.monotonic()
 _dd_pls = command_pipelines('echo ' + '$${' * 40000 + '; env')
@@ -926,7 +935,7 @@ _dd_elapsed = min(_dd_elapsed, time.monotonic() - _t0)
 check_all(
     'perf: command_pipelines on 40k $${ finishes in <5s and yields env',
     [
-        (_dd_elapsed < 5.0, _dd_elapsed, '< 5.0s'),
+        (_dd_elapsed < 2.0, _dd_elapsed, '< 2.0s'),
         ([['env']] in _dd_pls, _dd_pls[-1:], [[['env']]]),
     ],
 )
@@ -942,7 +951,7 @@ _hd_elapsed = min(_hd_elapsed, time.monotonic() - _t0)
 check_all(
     'perf: command_pipelines and heredoc_openers on 16k unterminated <<A finishes in <5s',
     [
-        (_hd_elapsed < 5.0, _hd_elapsed, '< 5.0s'),
+        (_hd_elapsed < 2.0, _hd_elapsed, '< 2.0s'),
         (len(_hd_pls) == 16000, len(_hd_pls), 16000),
         (len(_hd_openers) == 16000, len(_hd_openers), 16000),
     ],
@@ -983,9 +992,13 @@ for label, inp in ENV_VISIBLE_CASES:
 
 
 def _timed(fn, arg):
+    # Min of two runs: one loaded sample cannot fail the run.
     t0 = time.monotonic()
     out = fn(arg)
-    return time.monotonic() - t0, out
+    elapsed = time.monotonic() - t0
+    t0 = time.monotonic()
+    fn(arg)
+    return min(elapsed, time.monotonic() - t0), out
 
 
 def _env_pipeline(pipelines):
@@ -998,9 +1011,9 @@ for label, inp in [
 ]:
     elapsed, pls = _timed(command_pipelines, inp)
     check_all(
-        'perf: command_pipelines on %s finishes in <5s and yields env' % label,
+        'perf: command_pipelines on %s finishes in <1s and yields env' % label,
         [
-            (elapsed < 5.0, elapsed, '< 5.0s'),
+            (elapsed < 1.0, elapsed, '< 1.0s'),
             (bool(_env_pipeline(pls)), len(pls), "a pipeline holding ['env']"),
         ],
     )
@@ -1014,16 +1027,16 @@ _PERF_INPUTS = [
 ]
 # The same inputs with a `<<` appended, so strip_heredoc_bodies really scans
 # them (without one it returns at once: no opener can match).
-# Loosened (<2.0s) for loaded-runner CI flakes; wall-clock is the pinned property.
+# Tight (<1.0s) and min-of-two: a loaded sample reruns, a real slowdown fails.
 _PERF_INPUTS += [(label + " + ' <<E'", inp + ' <<E') for label, inp in _PERF_INPUTS]
 for label, inp in _PERF_INPUTS:
     for fn in (strip_heredoc_bodies, command_pipelines):
         elapsed, _out = _timed(fn, inp)
         report(
-            'perf: %s on %s finishes in <2.0s' % (fn.__name__, label),
-            elapsed < 2.0,
+            'perf: %s on %s finishes in <1.0s' % (fn.__name__, label),
+            elapsed < 1.0,
             elapsed,
-            '< 2.0s',
+            '< 1.0s',
         )
 
 print("%d passed, %d failed" % (passed, failed))

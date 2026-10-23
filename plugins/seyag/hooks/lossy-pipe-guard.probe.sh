@@ -538,6 +538,15 @@ run 2 "gh-rule interior: checks piped to a truncator" \
   $'out=$(gh pr checks 5 | tail -3)'
 run 2 "quoted interior holds a push piped to tail (gap closed from main)" \
   $'echo "$(git push 2>&1 | tail -5)"'
+# The |& shorthand is normalized per scan: an interior carrying it blocks too.
+run 2 "pipe-amp inside a substitution interior blocks" \
+  $'x=$(git commit -m x |& grep fatal)'
+run 2 "pipe-amp gh interior blocks" \
+  $'out=$(gh pr checks 5 |& tail -3)'
+# Quoted text inside an interior is data, not code: a commit message quoting a
+# push pipe stays prose (strip_quoted runs on interiors like the outer scan).
+run 0 "a quoted mention of a push pipe inside a substitution is prose" \
+  "git commit -m \"\$(echo 'fix: git push | tail hid errors')\""
 
 # Rejoin regression bound: N=64000 unterminated `cat <<A` lines + `git push | tail`
 # stays linear (~1.5 s; quadratic slicing ran ~10 s; assert < 5 s). (The driver's
