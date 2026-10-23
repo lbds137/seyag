@@ -140,7 +140,11 @@ COMMAND=$(printf '%s' "$INPUT" | jq -r '.tool_input.command // empty' 2>/dev/nul
 CWD=$(printf '%s' "$INPUT" | jq -r '.cwd // empty' 2>/dev/null) || CWD=""
 TRUSTED_VARS="${SYG_EPG_TRUSTED_VARS:-}"
 
-printf '%s\n' "$COMMAND" | grep -qE '(^|[^A-Za-z0-9_])(env|printenv|set|jq)([^A-Za-z0-9_]|$)' || exit 0
+# Pure-bash admission: no pipe, so no SIGPIPE-vs-pipefail interaction — the
+# pipeline form could fail OPEN when grep -q's early exit killed a large
+# printf mid-write. A here-string is not needed; =~ reads the variable.
+_ADMIT_RE='(^|[^A-Za-z0-9_])(env|printenv|set|jq)([^A-Za-z0-9_]|$)'
+[[ "$COMMAND" =~ $_ADMIT_RE ]] || exit 0
 
 LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib"
 

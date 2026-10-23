@@ -758,6 +758,22 @@ check_trailing_create_case co "export A=1 GH_REPO=a/b && git push origin main &&
 # 18cp. standalone `gh pr create --fill && export GH_REPO=o/r` (an export AFTER the create has no effect) -> the stdout-URL PR, banner rev refs/heads/main
 check_standalone_create_case cp "gh pr create --fill && export GH_REPO=o/r" "refs/heads/main"
 
+# 18cq. standalone `declare -x GH_REPO=o/r +x && gh pr create --fill` (the +x AFTER the
+#       assignment is inert for the export in bash — `declare -x V=v +x` stays exported —
+#       and makes declare exit 1, so the chained create would not actually run at runtime;
+#       the guard reads the text statically, sees the export override, and stays silent)
+#       -> override -> no output, gh never called
+check_standalone_create_case cq "declare -x GH_REPO=o/r +x && gh pr create --fill" ""
+
+# 18cr. standalone `declare +x -x GH_REPO=o/r && gh pr create --fill` (a +x BEFORE the
+#       assignment unexports and a later -x in the same command does not re-export it,
+#       measured on bash 5.3 -> not an override) -> the stdout-URL PR, banner rev refs/heads/main
+check_standalone_create_case cr "declare +x -x GH_REPO=o/r && gh pr create --fill" "refs/heads/main"
+
+# 18cs. standalone `declare -x +x GH_REPO=o/r && gh pr create --fill` (same rule, flags
+#       reversed before the assignment: +x anywhere before it wins) -> the stdout-URL PR, banner rev refs/heads/main
+check_standalone_create_case cs "declare -x +x GH_REPO=o/r && gh pr create --fill" "refs/heads/main"
+
 echo "---"
 echo "$FAILURES failed"
 [ "$FAILURES" -eq 0 ]
