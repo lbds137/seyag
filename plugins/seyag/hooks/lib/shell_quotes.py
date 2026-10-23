@@ -106,6 +106,7 @@ passes when the import works, and `guard:hook-probes` runs them in the lint job
 and in `pnpm quality`.
 """
 
+import bisect
 import re
 
 
@@ -263,6 +264,18 @@ _PAREN_CLOSES = frozenset(
     ("subshell", "subst", "proc_subst", "arith", "arith_subst", "dq_subst", "dq_arith_subst")
 )
 _CASE_OPEN = frozenset(("case_word", "case_in", "case_cmd"))
+# The SUBSTITUTION constructs: spans whose interior bash parses as a script
+# of its own — the class lossy-pipe-guard blanks before its chain split,
+# whose interior newlines `_tokens` reads as command separators, and the
+# only frames that defer a pending heredoc opener past a
+# newline (`_next_heredoc_line` tags depth by these frames alone). A plain
+# `(` subshell is deliberately absent from all three: its newlines separate
+# real commands (`( echo a; echo b # c NEWLINE env )` runs env), and a plain
+# `((` arithmetic command likewise stays split — the over-split direction
+# there, matching the behaviour before this set existed.
+_SUBST_CONSTRUCTS = frozenset(
+    ("subst", "proc_subst", "arith_subst", "dq_subst", "dq_arith_subst")
+)
 _COMMAND_CONTEXTS = frozenset(
     (None, "subshell", "subst", "proc_subst", "dq_subst", "backtick", "case_cmd")
 )
@@ -272,6 +285,14 @@ _KEEP_CMD_POS = frozenset(("if", "then", "elif", "else", "do", "while", "until",
 _SPECIAL = frozenset("\\#$'\"`{}() \t\n;&|<>")
 _INERT_RUN = re.compile(r"[^\\#$'\"`{}() \t\n;&|<>]+")
 _DQ_STOP = re.compile(r'[\\"]')
+# The non-descend double-quoted stop still includes the backtick: quotes do
+# NOT protect a backtick (bash opens a span for it inside double quotes), and
+# reading it as a value character desynced the quote pairing whenever the
+# backtick text and the quotes interleaved — `echo "\`echo "\`" ; env"` then
+# swallowed `; env` into a quoted value. `_lookahead_dq_end` keeps `_DQ_STOP`
+# (its skip-a-pair logic assumes only a backslash precedes) while `_dq_run`
+# uses this class, descending into the span like the `descend` mode does.
+_DQ_STOP_BT = re.compile(r'[\\"`]')
 _DQ_STOP_DESCEND = re.compile(r'[\\"$`]')
 _BACKTICK_STOP = re.compile(r"[\\`]")
 _PAREN_STOP = re.compile(r"[\\'\"()]")
@@ -304,6 +325,7 @@ class _ScanState:
     __slots__ = (
         "stack", "spans", "dq_fail_from", "sq_fail_from", "ansi_fail_from",
         "bt_fail_from", "la_dq_fail_from", "paren_match", "budget",
+        "pending_openers",
     )
 
     def __init__(self, root, size):
@@ -316,6 +338,10 @@ class _ScanState:
         self.la_dq_fail_from = None
         self.paren_match = {}
         self.budget = 8 * size + 1024
+        # Heredoc openers still awaiting their newline (see _next_heredoc_line):
+        # an outer line's openers stay pending while a $(…)-family span holds
+        # the newlines, each with the construct-stack depth it was read at.
+        self.pending_openers = []
 
 
 def _scan(text, start=0, *, descend_dq=False, state=None):
@@ -328,9 +354,13 @@ def _scan(text, start=0, *, descend_dq=False, state=None):
 
     With `descend_dq=True`, `$(` inside double quotes enters a nested
     unquoted command context (`dq_subst`) that returns to double quotes at
-    its matching `)`, and a backtick span inside double quotes is scanned
+    its matching `)`. A backtick span inside double quotes is scanned
     like an unquoted one (same boundary rule) before the double quotes
-    resume. Without it a backtick inside double quotes is an ordinary
+    resume, in BOTH modes — quotes do not protect a backtick, and reading
+    one as a value character desynced the quote pairing (see `_DQ_STOP_BT`);
+    the text accumulated before the span is yielded as its own `quoted`
+    event first, so a word value keeps it.
+    Without `descend_dq` a `$(` inside double quotes is an ordinary
     character of the quoted value, as before. `state` (a `_ScanState`)
     carries the stack and memos across calls that resume the same text."""
     if state is None:
@@ -390,11 +420,20 @@ def _dq_run(text, j, n, descend, st):
 
     Returns `("close", p, None, value)` at the closing quote `p`; with
     `descend`, `("subst", p, (k, is_arith), None)` at a `$(` (`k` the index
-    of its paren, `is_arith` for `$((`) and `("bt", p, end, None)` at a
+    of its paren, `is_arith` for `$((`) and `("bt", p, end, prefix)` at a
     backtick span closing at `end`; or None when the run reaches `n`
     unterminated. A backslash is literal except before `$`, a backtick, `"`,
-    `\\\\` (removed, character kept) and a newline (both removed)."""
-    stop = _DQ_STOP_DESCEND if descend else _DQ_STOP
+    `\\\\` (removed, character kept) and a newline (both removed).
+
+    A backtick stops the run in BOTH modes (bash opens a span for it inside
+    double quotes); `descend` alone decides whether `$(` does. The value is
+    accumulated per run, so a span's own text does not reappear in the
+    `close` value — it carries only what followed the span — while the `bt`
+    value carries the accumulated PREFIX, which `_bash_scan` yields as its
+    own `quoted` event before descending, so an argv reader's word keeps
+    prefix, interior and suffix in order (`-m "fix `foo` bug"` is one argv
+    `fix foo bug`; the prefix used to vanish)."""
+    stop = _DQ_STOP_DESCEND if descend else _DQ_STOP_BT
     span = []
     while True:
         m = stop.search(text, j, n)
@@ -433,7 +472,7 @@ def _dq_run(text, j, n, descend, st):
             span.append(c)
             j = p + 1
             continue
-        return ("bt", p, end, None)
+        return ("bt", p, end, "".join(span))
 
 
 def _lookahead_dq_end(text, j, n, st):
@@ -577,6 +616,13 @@ def _bash_scan(text, start, bound, descend, st, in_bt):
                 lone_dollar = False
                 i = k + 1
             else:
+                if value:
+                    # The run's text before the backtick is part of the word:
+                    # without this event an argv reader's value started at the
+                    # span (`-m "fix `foo` bug"` lost its `fix ` prefix).
+                    # Empty prefixes emit nothing, so event streams
+                    # for span-initial quotes are unchanged.
+                    yield ("quoted", value, q, ctx)
                 st.spans.append((p + 1, extra))
                 yield from _bash_scan(
                     text, p + 1, extra, descend, _ScanState("backtick", extra - p), True
@@ -1085,7 +1131,7 @@ def substitution_spans(text):
     return [text[s:e] for s, e, _ in substitution_span_offsets(text)]
 
 
-def substitution_span_offsets(text):
+def substitution_span_offsets(text, regions=None):
     """Return `(start, end, in_single_quotes)` for every span `substitution_spans`
     extracts from `text`.
 
@@ -1096,12 +1142,23 @@ def substitution_span_offsets(text):
     is True when the span opened inside a single-quoted region (only possible on
     the fail-closed fallback path, where `skip_single_quoted=False` extracts
     every span regardless of single quotes).
+
+    Only the OUTERMOST spans are returned (nesting is paren depth, the inner
+    text verbatim — `substitution_spans`), so the executed-span readers find
+    executed spans at TOP LEVEL only: a span nested inside another span's
+    interior is never checked.
+
+    `regions`, when given, are the consumed heredoc-body ranges of `text`
+    (`_strip_heredoc`'s second return): a heredoc body is data to the span
+    walk as well, so each range is jumped whole (see `_extract_spans`).
+    Callers that strip heredoc bodies BEFORE extracting pass nothing — no
+    consumed body text remains for the walk to see.
     """
     if _SKIP_UNSAFE_TEXT.search(text) is None:
-        spans = _extract_spans(text, skip_single_quoted=True)
+        spans = _extract_spans(text, skip_single_quoted=True, regions=regions)
         if spans is not None and not any(_span_desyncs(text[s:e]) for s, e, _ in spans):
             return spans
-    return _extract_spans(text, skip_single_quoted=False)
+    return _extract_spans(text, skip_single_quoted=False, regions=regions)
 
 
 # Constructs the single-quote skip cannot model. Any match anywhere in the text
@@ -1165,8 +1222,18 @@ def _span_desyncs(span):
     return False
 
 
-def _extract_spans(text, skip_single_quoted):
+def _extract_spans(text, skip_single_quoted, regions=None):
     """The span scan behind `substitution_spans` and `substitution_span_offsets`.
+
+    `regions` (the consumed heredoc-body ranges of `text`, `_strip_heredoc`'s
+    second return) are DATA to this scan, in both loops: each range is jumped
+    whole, so a body's `#` opens no comment and its parens move the depth not
+    at all — a commit body line like `Fix the parser (#149)` otherwise read
+    as a comment, its swallowed `)` unbalanced the depth walk, the span ran
+    unterminated and the scan dropped every later span in the text. Bodies the
+    stripper never consumed (an unterminated heredoc's kept tail, a body
+    stripped inside a backtick span) have no range and stay counted
+    structurally — the known under-arm direction.
 
     With `skip_single_quoted` False this extracts every span, recording whether
     its opening delimiter sat inside a closed single-quoted region. On this
@@ -1176,7 +1243,10 @@ def _extract_spans(text, skip_single_quoted):
     whose quotes are tracked normally. It does not model the substitution
     stack of `_scan_events(bash_words=True)`, so a `#` after a `)` that closed
     a substitution is read as a word-start comment where bash would not — the
-    blanking consumer treats such spans as never-blankable anyway. It also
+    blanking consumer treats such spans as never-blankable anyway. The `$(…)`
+    depth walk applies the same word-start comment rule inside the span (a
+    `)` in the comment never closes it; the real close sits past the newline),
+    so a commented-out `)` cannot end a span early any more. It also
     returns None, meaning "fall back", on reaching a construct whose quoting
     it cannot model:
 
@@ -1195,7 +1265,16 @@ def _extract_spans(text, skip_single_quoted):
     in_double = False
     single_end = -1
     comment_end = -1
+    # Into `regions`: the first body range not yet passed. One index serves
+    # both loops — the scan's positions advance monotonically from here on.
+    body_ri = 0
     while i < end_of_text:
+        if regions:
+            while body_ri < len(regions) and regions[body_ri][1] <= i:
+                body_ri += 1
+            if body_ri < len(regions) and regions[body_ri][0] <= i:
+                i = regions[body_ri][1]  # a consumed heredoc body is data
+                continue
         ch = text[i]
         if i == single_end:
             single_end = -1
@@ -1255,9 +1334,47 @@ def _extract_spans(text, skip_single_quoted):
             in_single = i < single_end
             j = i + 2
             depth = 1
+            # Word-start tracking for the comment rule inside the span: a `#`
+            # that begins a word (after a separator, or at the span's start,
+            # which is command position) opens a comment to end-of-line, so a
+            # `)` inside the comment never closes the span and the real close
+            # sits past the newline. Same separator set the single-quote
+            # fallback's `#` rule settled; an escape pair keeps the word
+            # going. Quote state: a `#` inside '…'/"…" is literal, so the
+            # walk tracks quotes — a quoted ` #` used to read as a comment,
+            # skip the span's real `)` and leave it unterminated, which the
+            # blanking consumer then drops from its scan entirely. A quote
+            # that never closes simply stays open to end of text: the `#`s
+            # past it stay gated while the structural `)` count still ends
+            # the span, the over-read direction (a span that opened inside
+            # single quotes is inert prose to every consumer anyway). Parens
+            # still count inside quotes — the structural rule and its known
+            # under-arm (a quoted `)` ends a span early) are unchanged. A
+            # consumed heredoc body is skipped whole (`regions` above).
+            word_start = True
+            quote = None
             while j < end_of_text:
+                if regions:
+                    while body_ri < len(regions) and regions[body_ri][1] <= j:
+                        body_ri += 1
+                    if body_ri < len(regions) and regions[body_ri][0] <= j:
+                        # Body data: no comment, no depth. Without the jump a
+                        # `(#N)` body line read as a comment, swallowed its
+                        # `)` and left the span unterminated.
+                        j = regions[body_ri][1]
+                        word_start = True
+                        continue
                 if text[j] == "\\" and j + 1 < end_of_text:
                     j += 2
+                    word_start = False
+                    continue
+                if text[j] == "#" and word_start and quote is None:
+                    nl = text.find("\n", j, end_of_text)
+                    if nl == -1:
+                        j = end_of_text
+                        break
+                    j = nl + 1
+                    word_start = True
                     continue
                 if text[j] == "(":
                     depth += 1
@@ -1265,6 +1382,14 @@ def _extract_spans(text, skip_single_quoted):
                     depth -= 1
                     if depth == 0:
                         break
+                if quote is None:
+                    if text[j] == "'":
+                        quote = "'"
+                    elif text[j] == '"':
+                        quote = '"'
+                elif text[j] == quote:
+                    quote = None
+                word_start = text[j] in " \t\f\v\n;&|()"
                 j += 1
             if j >= end_of_text:
                 spans.append((i + 2, None, in_single))
@@ -1381,21 +1506,56 @@ def _terminator_re(match):
     )
 
 
+def _subst_frames(stack):
+    """The number of substitution frames (`_SUBST_CONSTRUCTS`) on `stack`:
+    the depth a heredoc opener's deferral is tagged with. Only a
+    substitution span defers an outer logical line past a newline — bash
+    hands its body to a recursive parser — while a plain `(` subshell and a
+    `case` frame are parsed by the same parser, so bash collects a pending
+    body at their next newline (`cat <<A; (` NEWLINE `A` …: the `A` line IS
+    the terminator, the body empty; the subshell's own commands follow it)."""
+    return sum(1 for kind in stack if kind in _SUBST_CONSTRUCTS)
+
+
 def _next_heredoc_line(text, pos, state):
-    """Scan `text` from `pos` for the first logical line carrying one or more
-    live heredoc openers (outside quotes, `#` comments, arithmetic and
-    backtick spans). Returns `(openers, newline_index)` where `openers` is the
-    non-empty list of `HEREDOC_OPENER` match objects on that line and
-    `newline_index` is the index of the unquoted `\\n` ending the line (or
-    `-1` if `text` ends before any newline), or `(None, -1)` when no opener is
-    found. `state` (a `_ScanState`) carries the construct stack from call to
-    call; the backtick spans this call passed are appended to `state.spans`.
+    """Scan `text` from `pos` for the first newline with heredoc openers whose
+    bodies start after it (openers read outside quotes, `#` comments,
+    arithmetic and backtick spans). Returns `(openers, newline_index)` where
+    `openers` is the non-empty list of `HEREDOC_OPENER` match objects due at
+    that line and `newline_index` is the index of the unquoted `\\n` ending it
+    (or `-1` if `text` ends first), or `(None, -1)` when no opener is found.
+    `state` (a `_ScanState`) carries the construct stack from call to call;
+    the backtick spans this call passed are appended to `state.spans`.
 
     An opener inside a backtick span is never collected for the outer line,
     and a newline inside one never ends it: bash reads the span as a string of
     its own, so its heredocs take their bodies from the span's own lines
-    (`_strip_span_bodies`)."""
-    openers = []
+    (`_strip_span_bodies`).
+
+    A newline inside a still-open `$(`-family span ends only that span's
+    INNER logical line, not the outer one: bash hands a `cat <<EOF` inside
+    the span its body at the inner line's own newline, while an opener from
+    before the span (`cat <<A; echo $(\\n… \\n)\\nBODY\\nA`) waits for the
+    newline that truly ends the outer logical command line — there, not at
+    the first newline inside the span, is where bash reads its body. Only
+    substitution spans defer like that: a plain `(` subshell or a `case`
+    frame is parsed by the same parser, so bash collects a pending body at
+    the next newline whatever those frames hold — the depth below therefore
+    counts `_SUBST_CONSTRUCTS` frames only. Each collected opener is tagged
+    with the depth it was read at; a newline returns exactly the openers at
+    or below the current depth (their inner line has ended) and leaves the
+    rest in `state.pending_openers` for the scan's next call. An opener
+    whose span closes without a newline (`echo $(cat <<EOF)`) is pending at
+    the outer depth and so reads its body after the outer line, as bash
+    does — and bash goes further: a substitution that dies with a heredoc
+    still pending leaves the body due at the NEXT PHYSICAL NEWLINE, even
+    one inside a `$(` opened after it (`echo $(cat <<A) $(\\nenv\\nA\\n)
+    \\nx\\nA`: bash warns `unterminated here-document` and makes the `env`
+    line the first body line), which is exactly what the DEPTH tag, not
+    frame identity, reproduces. Text
+    that ends with openers still pending returns them with `-1`: the caller
+    keeps the tail, the same over-arm as any unterminated heredoc."""
+    pending = state.pending_openers
     skip_until = pos
     for kind, ch, i, ctx in _scan(text, pos, descend_dq=True, state=state):
         if i < skip_until or kind != "char" or ctx[1]:
@@ -1403,16 +1563,22 @@ def _next_heredoc_line(text, pos, state):
         if ch == "<" and ctx[0] not in _NO_COMMENT:
             match = HEREDOC_OPENER.match(text, i)
             if match is not None:
-                openers.append(match)
+                pending.append((match, _subst_frames(state.stack)))
                 skip_until = match.end()
-        elif ch == "\n" and openers:
-            return openers, i
-    if openers:
-        return openers, -1
+        elif ch == "\n":
+            depth = _subst_frames(state.stack)
+            due = [match for match, d in pending if d >= depth]
+            if due:
+                pending[:] = [x for x in pending if x[1] < depth]
+                return due, i
+    if pending:
+        due = [match for match, _ in pending]
+        pending[:] = []
+        return due, -1
     return None, -1
 
 
-def _consume_bodies(text, openers, cursor, no_terminator_from):
+def _consume_bodies(text, openers, cursor, no_terminator_from, regions=None):
     """Consume the bodies of `openers`, in order, from `cursor` (just past the
     newline ending their line). Returns `(end, True)` past the last
     terminator, or `(cursor, False)` at the first body with no terminator.
@@ -1420,7 +1586,10 @@ def _consume_bodies(text, openers, cursor, no_terminator_from):
     `no_terminator_from` is the failed-terminator memo shared by every body
     search over one text: a `(indent flag, marker)` search that found nothing
     from `p` finds nothing from any later position either, so it is never
-    repeated."""
+    repeated. `regions`, when a list, also collects the `(start, end)` range
+    of each body consumed (body plus terminator, no trailing newline), the
+    ranges `_strip_heredoc` hands to the span readers that must not pair
+    delimiters across heredoc DATA."""
     for match in openers:
         key = (match.group(1) == "-", _heredoc_marker(match))
         failed = no_terminator_from.get(key)
@@ -1430,6 +1599,8 @@ def _consume_bodies(text, openers, cursor, no_terminator_from):
         if end is None:
             no_terminator_from[key] = cursor
             return cursor, False
+        if regions is not None:
+            regions.append((cursor, end.end()))
         cursor = end.end()
     return cursor, True
 
@@ -1548,12 +1719,17 @@ def strip_heredoc_bodies(text):
     quotes), outside-comment, outside-backtick, and outside-arithmetic/param
     positions using the shared scanner (`_scan`), so a
     `<<word` inside `# <<word`, `"a <<word"`, `'<<word'` or `$((1<<2))` never
-    consumes the lines that follow. Every opener on a logical line is collected
-    and their bodies are consumed in order after the unquoted newline ending
-    that line (`cmd <<A <<B` strips body A then body B), resuming the scan
-    after the last terminator. A backtick span is a string bash parses on its
-    own, so a heredoc inside one takes its body from the span's own lines:
-    each span's interior is stripped by its own recursive call.
+    consumes the lines that follow. Every opener is due at the newline of the
+    INNERMOST logical line it sits on (an opener inside any paren span reads
+    its body at that inner line's own newline; an opener from before a
+    `$(`-family span waits for the outer line — only substitution spans
+    defer, see `_next_heredoc_line`), and the openers due on one line are
+    consumed in
+    order after the unquoted newline ending it (`cmd <<A <<B` strips body A
+    then body B), resuming the scan after the last terminator. A backtick span
+    is a string bash parses on its own, so a heredoc inside one takes its body
+    from the span's own lines: each span's interior is stripped by its own
+    recursive call.
 
     An UNTERMINATED heredoc KEEPS the text after the opener rather than dropping
     it — the same over-arm direction as the sibling `strip_heredocs` in
@@ -1563,9 +1739,23 @@ def strip_heredoc_bodies(text):
     "a target after an unterminated heredoc opener still matches" in
     shellQuotes.test.ts and by the equivalent probe cases.
     """
+    return _strip_heredoc(text)[0]
+
+
+def _strip_heredoc(text):
+    """`strip_heredoc_bodies` plus what it removed: `(stripped, regions)`,
+    each region the `(start, end)` offsets in `text` of one consumed body
+    (body plus terminator, no trailing newline), in text order. MAIN-LOOP
+    bodies only — a body `_strip_span_bodies` strips inside a backtick span
+    is not listed, because a span opening there is nested inside that span's
+    interior and never reaches a top-level reader. The consumers are the
+    span readers below: `_extract_spans` pairs backticks structurally over
+    the raw text, so without the skip the fences in a markdown body paired
+    as a span and its later lines surfaced as commands."""
     if "<<" not in text:
-        return text  # no opener can match without `<<`
+        return text, []  # no opener can match without `<<`
     out = []
+    regions = []
     pos = 0
     state = _ScanState(None, len(text))
     no_terminator_from = {}
@@ -1574,18 +1764,18 @@ def strip_heredoc_bodies(text):
         openers, newline = _next_heredoc_line(text, pos, state)
         if not openers or newline == -1:
             out.append(_strip_span_bodies(text, pos, len(text), state.spans))
-            return "".join(out)
+            return "".join(out), regions
         # Keep the redirection operator(s) and the rest of the logical line
         # carrying them; only what the operators INTRODUCE is data.
         out.append(_strip_span_bodies(text, pos, newline + 1, state.spans))
         cursor, terminated = _consume_bodies(
-            text, openers, newline + 1, no_terminator_from
+            text, openers, newline + 1, no_terminator_from, regions
         )
         if not terminated:
             # Unterminated: keep everything after the last consumed body (or
             # opener line) instead of dropping it.
             out.append(text[cursor:])
-            return "".join(out)
+            return "".join(out), regions
         pos = cursor
 
 
@@ -1703,7 +1893,22 @@ _SUBSTITUTION_REST = "$(…)"
 
 def _tokens(text):
     """`_words` with each separator kept as an `_Op` naming the operator, so a
-    reader can tell a pipe (`|`, `|&`) from a list separator (`;`, `&&`, …)."""
+    reader can tell a pipe (`|`, `|&`) from a list separator (`;`, `&&`, …).
+
+    A newline inside an open `$()`-family span (`$(…)`, `<(…)`, `$((`) IS a
+    separator here: bash parses the span's interior as a script of its own,
+    so its lines are separate commands there (`out=$(cd b NEWLINE rm -rf n)`
+    runs the rm — gluing them into one argv hid it from every guard), and
+    the span's `(`/`)` ops already bound the interior as its own group, so
+    the enclosing pipeline was never continuous across it. A newline inside
+    a BACKTICK span reads as whitespace instead: the backtick delimiters are
+    word characters, so a separator there would cut the pipeline the span's
+    word belongs to (`find . -name x `cmd` | xargs` is ONE pipeline, the S3
+    pin), and the interior's later lines are surfaced separately by
+    `command_pipelines` (`_backtick_line_interiors`) — for a top-level
+    backtick span and one nested inside a `$()`. A newline
+    inside a PLAIN `(` subshell or `((` arithmetic command still separates
+    commands, as in bash."""
     events = list(_scan(text))
     tokens = []
     value = []
@@ -1733,7 +1938,9 @@ def _tokens(text):
             redirect_amp = payload == "&" and (
                 (char_at(k - 1) or "") in ("<", ">") or nxt == ">"
             )
-            if payload in " \t":
+            if payload in " \t" or (
+                payload == "\n" and ctx[1] and ctx[0] not in _SUBST_CONSTRUCTS
+            ):
                 flush()
                 started, value = False, []
             elif payload in _WORD_SEPARATORS and not redirect_amp:
@@ -2122,6 +2329,341 @@ def _reads_script_from_stdin(argv):
     return not operands or operands[0] == "-"
 
 
+def _span_is_executed(prefix, glued):
+    """True when a substitution span whose opening delimiter sits right after
+    `prefix` (with `glued` telling whether whitespace separates them) has its
+    OUTPUT executed: a bare span at command position (including behind runner
+    assignment or reserved-word prefixes), an `eval` argument, or the script argument of a
+    `bash`/`sh`-family `-c`. A span captured into a variable (`x=$(…)`) or a
+    plain argument (`echo $(…)`) does not — its output is data, and the
+    heredoc bodies inside it stay stripped.
+
+    Approximate by design: a quoted word between `eval` and the span
+    (`eval "y" `cat …``) and `bash -c "x=`cat …`"` are missed, reading as
+    inert — the same under-arm the shape had before this helper existed, at
+    depths no habitual command shape reaches."""
+    tokens = _tokens(prefix)
+    if tokens and tokens[-1] == '"' and not isinstance(tokens[-1], _Op):
+        # The span opens the quoted word: `bash -c "`cat …`"` hands the span's
+        # output to the shell as its script. It also strips the bare quote a
+        # MIS-CUT window can leave as its last token (the separator search is
+        # double-quote-aware only), so that leftover cannot read as the
+        # span's own word.
+        tokens = tokens[:-1]
+    if not tokens:
+        return True  # start of text: the span IS the command word
+    last = tokens[-1]
+    if isinstance(last, _Op):
+        return True  # a separator: the span opens the next command
+    if glued and _ASSIGNMENT.match(last):
+        return False  # `x=`cat …`` assigns the output; it is not executed
+    # Words since the last separator: pure runner/assignment/reserved-word
+    # prefixes leave the span itself at command position (`sudo `cat …``,
+    # `A=1 `cat …``, `; then `cat …``). Reserved words are dropped around the
+    # runner unwrap — `time` is both a runner and one, and either can lead —
+    # the same set `_pipelines` drops per command.
+    j = len(tokens)
+    while j > 0 and not isinstance(tokens[j - 1], _Op):
+        j -= 1
+    if all(not isinstance(t, _Op) for t in tokens[j:]):
+        argv, _ = unwrap_runners(tokens[j:])
+        while argv and argv[0] in _LEADING_KEYWORDS:
+            argv, _ = unwrap_runners(argv[1:])
+        if not argv:
+            return True
+    if last == "eval":
+        return True
+    if (
+        len(tokens) >= 2
+        and not isinstance(tokens[-2], _Op)
+        and tokens[-2].rsplit("/", 1)[-1] in _WRAPPER_SHELLS
+        and _DASH_C.match(last)
+    ):
+        return True
+    return False
+
+
+def _dq_regions(text, offsets, heredoc_regions):
+    """`(open, close)` offsets of `text`'s double-quoted regions, in order:
+    what decides whether a substitution span's opener sits INSIDE a quoted
+    word. Pairs the same characters the module's other readers
+    pair: escape pairs, single-quoted and `$'…'` regions, word-start `#`
+    comments, consumed heredoc bodies (`heredoc_regions`) and the OUTERMOST
+    substitution spans (`offsets`, from `substitution_span_offsets`) are
+    opaque to the outer lexer and jumped whole, as bash hands each to a
+    parser of its own — inside the region a backtick or `$(` span arrives
+    through that same jump list. A region that never closes runs to end of
+    text: bash reports unexpected EOF, so nothing after runs either way and
+    reading its contents as inside-quotes takes the over-arm-removal with
+    it. `$"…"` opens a region at its `"` (the `$` stays before it, so a span
+    after `$"` still OPENS the word for the caller's check), and a `#`
+    glued directly after a span's closing delimiter is a literal, not a
+    comment (`_tokens`' `$(…)#` rule).
+
+    Deliberately approximate, and toward NOT-in-quotes whenever unsure —
+    a misread span then cuts its window at a raw separator, the over-arm
+    direction.
+    Constructs the walk does not model (a `<(` process substitution's
+    interior, `${…}` expansions, a structurally desynced span that ended
+    early) can misplace a later boundary; before such a misreading can
+    UNDER-arm anything, the span it misreads must also open the misread
+    quoted word with a command-shaped window before it. That is a
+    nested-build shape no habitual command reaches — the boundary
+    `_span_is_executed` already states.
+    """
+    if '"' not in text:
+        return []
+    regions = []
+    n = len(text)
+    spans = []
+    for start, end, _in_single in offsets:
+        jump = end if end is not None else n
+        if start >= 2 and text[start - 2 : start] == "$(":
+            spans.append((start - 2, jump))
+        elif start >= 1 and text[start - 1] == "`":
+            spans.append((start - 1, jump))
+    bodies = heredoc_regions
+    bi = 0
+    si = 0
+    i = 0
+    q = None
+    literal_hash = False  # a `#` glued to a span's closing delimiter
+    while i < n:
+        if literal_hash:
+            literal_hash = False
+            if text[i] == "#":
+                i += 1
+                continue
+        while si < len(spans) and spans[si][0] < i:
+            si += 1
+        while bi < len(bodies) and bodies[bi][1] <= i:
+            bi += 1
+        if si < len(spans) and spans[si][0] == i:
+            i = spans[si][1] + 1
+            si += 1
+            literal_hash = True
+            continue
+        if bi < len(bodies) and bodies[bi][0] <= i:
+            i = bodies[bi][1]  # past the terminator line
+            bi += 1
+            continue
+        ch = text[i]
+        if ch == "\\" and i + 1 < n:
+            i += 2
+            continue
+        if q is None:
+            if ch == "'":
+                close = text.find("'", i + 1)
+                if close == -1:
+                    i += 1  # literal apostrophe: bash keeps parsing
+                    continue
+                i = close + 1
+                continue
+            if ch == "$" and text[i + 1 : i + 2] == "'":
+                _value, end = _ansi_c_span(text, i + 2)
+                if end is None:
+                    break  # bash stays inside $'…' to the end
+                i = end + 1
+                continue
+            if ch == "#":
+                prev = text[i - 1] if i else ""
+                if not prev or prev in " \t\f\v;&|()\n":
+                    newline = text.find("\n", i + 1)
+                    i = n if newline == -1 else newline + 1
+                    continue
+            if ch == '"':
+                q = i
+        elif ch == '"':
+            regions.append((q, i))
+            q = None
+        i += 1
+    if q is not None:
+        regions.append((q, n))
+    return regions
+
+
+def _last_command_boundary(text, lo, boundary, dq_regions):
+    """The last `\\n;&|` before `boundary` that sits OUTSIDE the double-quoted
+    `dq_regions` (in text order), or -1 when there is none in `[lo, boundary)`.
+
+    A separator inside an earlier quoted argument (`grep "a|b" $(…)`,
+    `echo "x; " $(…)`) is not a command boundary, and a window cut there began
+    mid-quote — the leftover quote then read as a bare token and put a data
+    span at command position. The region to skip back from is found by bisect
+    on the region starts (a restart from the last region was O(spans ×
+    regions) on dq-and-span-dense input), and the back walk skips each region
+    whole."""
+    # `(boundary, -1)` stands for `boundary` against the `(open, close)`
+    # pairs: a region never closes below 0, so an equal start compares high.
+    j = bisect.bisect_left(dq_regions, (boundary, -1)) - 1
+    k = boundary - 1
+    while k >= lo:
+        if j >= 0 and k < dq_regions[j][1]:
+            if k >= dq_regions[j][0]:
+                k = dq_regions[j][0] - 1  # inside this region: skip it whole
+                continue
+            j -= 1
+            continue
+        if text[k] in "\n;&|":
+            return k
+        k -= 1
+    return -1
+
+
+def _executed_span_interiors(text, regions=None, offsets=None):
+    """The interiors (heredoc bodies included) of spans whose output bash
+    EXECUTES. `strip_heredoc_bodies` treats a span's body as the data the
+    span's command writes; when the span's output is executed (`_span_is_executed`)
+    that data IS code, so the caller scans each returned interior as commands
+    of its own. Gated on `<<` in the interior: a span without a heredoc has
+    no body to keep. A span whose opener sits inside a stripped heredoc body
+    (the markdown-fence pairing) is skipped — the body is data, and its
+    `<<`-in-interior gate made this reader's exposure rarer than the backtick
+    reader's, not absent.
+
+    A span whose opener sits inside a DOUBLE-QUOTED word (`_dq_regions`)
+    counts as executed only when the span OPENS that word —
+    nothing but the opening `"` before it, so `-m "Subject\\n\\n$(…)"` and
+    `-m "WIP; $(…)"` are prose — AND the word is code: at command position,
+    or the argument of `eval` or a shell `-c`. The decision window is the
+    text before the QUOTE, quote-aware, so a separator inside the quoted
+    body can no longer put the span at "command position"; a raw window
+    looked back to the nearest `\\n;&|` with no notion of
+    quotes and denied exactly those commit-body shapes. `x="$(…)"` and
+    plain `echo "$(…)"` arguments keep their data verdict, and a span that
+    opens its word under `bash -c "\\`cat <<EOF …\\`"` (S4c) keeps its
+    executed one; a span deeper inside a `-c` script string
+    (`bash -c "true\\n$(…)"`) is read as data — the same under-arm tier the
+    `_span_is_executed` docstring names.
+
+    KNOWN UNDER-ARM, documented rather than handled: `<(…)`
+    process substitution fed to `source`/`.` (`source <(cat <<EOF …)`)
+    runs the body as a script, and this reader recognizes only a backtick
+    or `$(` opener, so such a span is never returned — the same family as
+    the wrapper-recursion cap below (`MAX_WRAPPER_DEPTH`). `bash <(…)` and
+    its shells are NOT part of it: they are caught one arm over, by the
+    stdin-script rule in `simple_commands` (`_reads_script_from_stdin`).
+    """
+    if "<<" not in text:
+        return []
+    if regions is None:
+        regions = _strip_heredoc(text)[1]
+    if offsets is None:
+        offsets = substitution_span_offsets(text, regions)
+    dq_regions = _dq_regions(text, offsets, regions)
+    found = []
+    ri = 0
+    dr = 0  # both `regions` and `dq_regions` are in text order
+    for start, end, in_single in offsets:
+        if in_single or end is None:
+            continue
+        while ri < len(regions) and regions[ri][1] <= start:
+            ri += 1
+        if ri < len(regions) and regions[ri][0] <= start:
+            continue  # the opener sits in heredoc DATA
+        interior = text[start:end]
+        if "<<" not in interior:
+            continue
+        if text[start - 1] == "`":
+            opener = start - 1
+        elif text[start - 2 : start] == "$(":
+            opener = start - 2
+        else:
+            continue
+        while dr < len(dq_regions) and dq_regions[dr][1] <= opener:
+            dr += 1
+        if dr < len(dq_regions) and dq_regions[dr][0] < opener:
+            # Inside a quoted word. Executed only when the span
+            # OPENS the word — nothing but the quote before it (a `$"` word
+            # begins at the `$`) — and the word itself is code (command
+            # position, `eval`, a shell `-c` argument): `_span_is_executed`
+            # decides on the text BEFORE the quote, so separators inside the
+            # quoted prose no longer reach the decision.
+            q = dq_regions[dr][0]
+            if opener != q + 1 or not (
+                q == 0 or text[q - 1] in " \t\n;&|()" or text[q - 1] == "$"
+            ):
+                continue  # data: the span sits deeper inside a quoted word
+            boundary = q
+        else:
+            boundary = opener
+        # The execution context is decided by the command the span sits in,
+        # which begins at the last separator before `boundary`, so the window
+        # back to that separator carries the whole decision. Tokenizing the
+        # FULL prefix instead made span-dense inputs quadratic, and so did
+        # reading that prefix — a `text[:opener]` slice copies it whole and
+        # an unbounded `rfind` rescans it for every span. The separator
+        # search and the window are therefore bounded to 512 chars before
+        # the boundary, and the separator candidates are the ones outside
+        # double-quoted regions (`_last_command_boundary`), so quoted prose
+        # before the span cannot mis-cut the window. A separator farther
+        # back falls out of the window, so truncation can only misread the
+        # window's FIRST word, which no decision below depends on (a leading
+        # separator op made no difference to `_span_is_executed`'s
+        # words-since-last-separator walk).
+        lo = max(0, boundary - 512)
+        cut = _last_command_boundary(text, lo, boundary, dq_regions)
+        window = text[cut:boundary] if cut != -1 else text[lo:boundary]
+        glued = opener > 0 and text[opener - 1] not in " \t"
+        if _span_is_executed(window, glued):
+            found.append(interior)
+    return found
+
+
+def _backtick_line_interiors(text, depth=0, regions=None, offsets=None):
+    """The interiors of top-level backtick spans whose LATER lines hold
+    commands, heredoc bodies stripped, for `command_pipelines` to append as
+    pipelines of their own.
+
+    `_tokens` reads a backtick span's newlines as whitespace — the span is
+    one word of the enclosing command (the backtick delimiters are word
+    characters, and a separator there would cut the enclosing pipeline: the
+    S3 pin) — which glues the interior's lines into that command's argv and
+    hides every command after the first. Bash runs each interior line in the
+    substitution subshell regardless (`echo `cmd NEWLINE env`` dumps env), so
+    this surfaces those later lines. Gated on a word-bearing line after the
+    first: a span whose later lines held only heredoc body and terminator
+    (already stripped) hides nothing, and leaving it alone keeps the S3
+    shape's pipelines byte-stable. `$()`-family spans are not collected —
+    their interior newlines are separators in `_tokens`, so their lines are
+    already visible inline — but at depth 0 each one's interior is recursed
+    into ONCE, because a backtick span nested there has its newlines glued
+    the same way and its later lines are invisible at every level. Deeper
+    nesting is not reached. A span inside double quotes IS collected:
+    backticks run inside double quotes, so its later lines are commands
+    there too, and `_tokens` reading the span as part of the enclosing
+    quoted word is exactly the glue this function undoes for them. A span
+    whose opener sits inside a stripped heredoc body is skipped — heredoc
+    DATA is not commands, and without the skip the markdown fences of a
+    `cat > README.md <<'EOF'` body paired as a span and surfaced the fenced
+    `rm -rf`.
+
+    `regions` and `offsets` (the heredoc-body regions and span offsets of
+    `text`, both in text order) may be passed by a caller that already
+    computed them — `_command_pipelines` does, so its span readers do not
+    each recompute the same two scans."""
+    if regions is None:
+        regions = _strip_heredoc(text)[1] if "<<" in text else []
+    if offsets is None:
+        offsets = substitution_span_offsets(text, regions)
+    found = []
+    ri = 0
+    for start, end, in_single in offsets:
+        if in_single or end is None:
+            continue
+        while ri < len(regions) and regions[ri][1] <= start:
+            ri += 1
+        if ri < len(regions) and regions[ri][0] <= start:
+            continue  # the opener sits in heredoc DATA
+        if text[start - 1] == "`":
+            interior = strip_heredoc_bodies(text[start:end])
+            if any(line.strip() for line in interior.split("\n")[1:]):
+                found.append(interior)
+        elif depth == 0 and text[start - 2 : start] == "$(":
+            found.extend(_backtick_line_interiors(text[start:end], depth + 1))
+    return found
+
+
 def simple_commands(text):
     """Return every simple command bash would EXECUTE from `text`, as argv
     lists of word VALUES (quotes removed, escapes resolved).
@@ -2158,9 +2700,14 @@ def simple_commands(text):
     bash, so nothing in a comment is a command and an apostrophe in it opens
     no quote.
 
-    NOT SEEN: a command inside a QUOTED substitution (`echo "$(rm -rf x)"`)
-    or a backtick span (an unquoted `$(…)` is split at its parens and seen);
-    a command a script FILE runs.
+    NOT SEEN: a command inside a QUOTED substitution whose span does not open
+    a code word (`echo "$(rm -rf x)"` stays data; a quoted span whose output
+    is executed — `eval "$(…)"`, a shell `-c` script, a span at command
+    position — is seen, `_executed_span_interiors`); a command a script FILE
+    runs. (An unquoted `$(…)` is split at its parens and seen; a backtick
+    span's later lines — top-level, or nested one `$(` level — are surfaced
+    as their own commands; a span whose output bash EXECUTES contributes its
+    heredoc bodies as commands too.)
     """
     return [argv for pipeline in command_pipelines(text) for argv in pipeline]
 
@@ -2173,12 +2720,31 @@ def command_pipelines(text):
 
 
 def _command_pipelines(text, depth):
-    body_free = strip_heredoc_bodies(text)
+    # The heredoc-body regions and substitution-span offsets are shared with
+    # both span readers below: each one used to recompute `_strip_heredoc`
+    # and `substitution_span_offsets` over the same text, on every call and
+    # every wrapper-recursion level.
+    body_free, heredoc_regions = _strip_heredoc(text)
+    offsets = substitution_span_offsets(text, heredoc_regions)
     pipelines = _pipelines(_tokens(body_free))
     if body_free != text and any(
         _reads_script_from_stdin(c) for pipeline in pipelines for c in pipeline
     ):
         pipelines = _pipelines(_tokens(text))
+    # A span whose output is EXECUTED (eval, command position, a shell -c
+    # script argument) turns its heredoc body from data into code: the body is
+    # what runs. Tokenize those interiors with the bodies kept, as commands of
+    # their own. Captured spans (`x=$(cat <<EOF …)`) and plain
+    # arguments (`echo $(cat <<EOF …)`) keep their bodies stripped as data —
+    # `_span_is_executed` draws that line, and so does a span
+    # deeper inside a quoted word.
+    for interior in _executed_span_interiors(text, heredoc_regions, offsets):
+        pipelines.extend(_pipelines(_tokens(interior)))
+    # A backtick span's interior lines are commands of their own;
+    # the glue reading keeps the enclosing pipeline whole (S3) but hides
+    # every interior line after the first, so they are appended here.
+    for interior in _backtick_line_interiors(text, 0, heredoc_regions, offsets):
+        pipelines.extend(_pipelines(_tokens(interior)))
     if depth < MAX_WRAPPER_DEPTH:
         # `pipelines` is exactly `_pipelines(_tokens(scanned text))`, so the
         # wrapper strings come from it rather than from a second tokenization;

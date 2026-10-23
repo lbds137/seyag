@@ -221,10 +221,16 @@ fi
 #     `git -c k=v grep …`. Each intervening token must be option-shaped (a
 #     leading `-`) with at most one non-dash value after it, so a plain
 #     subcommand word does not qualify (probe cases 22, 23, 24).
-#     The optional `[({]?` steps over ONE opening group character, so a grep
+#     The optional `[({\x60]?` steps over ONE opening group character, so a grep
 #     that opens a subshell or a brace group is still at command position for
-#     this check — `(grep …)` and `{ grep …; }` (probe cases 29, 30).
-CMDPOS_RE='^\s*[({]?\s*(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*(?:grep|egrep|rg|git(?:\s+-\S+(?:\s+[^\s-]\S*)?)*\s+grep)\b'
+#     this check — `(grep …)` and `{ grep …; }` (probe cases 29, 30) — and
+#     over ONE bare backtick: an assignment whose value is a span holding a
+#     heredoc (`x=… <<EOF … EOF … grep -rn "\$x" src`) leaves the CLOSING
+#     backtick at the head of the line the body-stripper's emptying produced,
+#     while bash runs the grep at command position right after the assignment
+#     (probe case 34). `\x60` follows the \x27/\x22 convention so the class
+#     survives a single-quoted bash assignment untouched.
+CMDPOS_RE='^\s*[({\x60]?\s*(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*(?:grep|egrep|rg|git(?:\s+-\S+(?:\s+[^\s-]\S*)?)*\s+grep)\b'
 
 # (b) a fixed-strings flag anywhere on the segment; combined short flags such
 #     as `-rnF` count. The prefix is the same quoted-run walk check (c) uses,

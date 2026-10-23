@@ -46,6 +46,7 @@ run 2 'rm -rf build 2>/dev/null'
 run 2 'rm -rf "$TMPDIR/scratch"'
 # Blocked: command boundaries from the shared splitter.
 run 2 $'cd /tmp\nrm -rf x'                      # a newline ends the cd
+run 2 $'x=$(cd b\nrm -rf n)'                    # a newline inside $() separates the interior's rm
 run 2 $'cd /tmp && rm -rf \\\nx'                # backslash-newline continues the rm
 run 2 'cd /tmp; rm -rf x'
 run 2 'true && (cd /tmp && rm -rf x)'
@@ -72,13 +73,13 @@ run 2 'find . -name build -print0 | xargs -0 rm -rf'
 run 2 'rm -rf node_modules dist'
 run 2 'find . -name __pycache__ -o -name build -delete'
 run 2 'find node_modules -delete'   # cache-rm-redirect judges find by -name only, so no deferral
-# Blocked: mass deletes without -r (driver decision 2026-09-27): find -exec rm, xargs/parallel rm.
+# Blocked: mass deletes without -r: find -exec rm, xargs/parallel rm.
 run 2 'find . -exec rm {} \;'
 run 2 'find ~ -type f -exec rm {} +'
 run 2 'ls | xargs rm -f'
 run 2 'ls | xargs rm'
 run 2 'parallel rm ::: a b'
-# Blocked: shapes a reviewer showed passing (round 2).
+# Blocked: wrapper-hidden mass deletes (found in review).
 run 2 'find . -name node_modules -prune; ls ~ | xargs -n 1 rm -rf'  # that find does not feed this xargs
 run 2 'xargs -a list.txt rm -rf'
 run 2 'find . -name node_modules; xargs rm -rf < list.txt'          # an earlier pipeline's find
@@ -104,7 +105,7 @@ run 2 'distrobox enter tools -- rm -rf /home/example/x'
 run 2 'coproc rm -rf /home/example/x'
 run 2 'ls | xargs --max-args 1 rm -rf'
 run 2 'ls | xargs --some-future-option 1 rm -rf'                   # unknown long option: value consumed
-# Blocked: shapes a reviewer showed passing (round 3).
+# Blocked: shapes past earlier size/command boundaries (found in review).
 run 2 "${BIGDOC}rm -rf build"                                     # a command past 128 KiB
 run 2 $'trap \'rm -rf "$tmp"\' EXIT; tmp=$(mktemp -d)'            # a trap action is a command
 run 2 "trap -- 'rm -rf build' EXIT INT"
@@ -134,6 +135,17 @@ run 0 'echo a#b; echo $#'                        # mid-word # and $# are not com
 run 0 'echo "rm -rf x"'                          # quoted text, not a command
 run 0 $'echo "cd /tmp\nrm -rf x"'                # a quoted newline is text
 run 0 $'cat > notes.md <<\'EOF\'\nrm -rf x\nEOF'  # heredoc data, not a command
+run 0 $'cat > README.md <<\'EOF\'\nClean with:\n```\nrm -rf build\n```\nEOF\n'  # fenced heredoc data is data too
+# A span deep inside a double-quoted -m word is data — the separator
+# before it sits in quoted prose, not at a command boundary. The multi-line
+# row's rm is mid-sentence there; the same-line `;` variant is the one a raw
+# window would misread.
+run 0 $'git commit -m "Subject\n\n$(cat <<EOF\nClean with: rm -rf build\nenv | cat\nEOF\n)"'  # span deep in a quoted word is data
+run 0 $'git commit -m "WIP; $(cat <<EOF\nrm -rf x\nEOF\n)"'                                    # same-line separator variant
+# A (#N) line in a heredoc BODY is data to the span walk too: it opens no
+# comment there, so the span terminates and the backtick span's second-line
+# rm (which bash runs) stays visible to the guard.
+run 2 $'git commit -m "$(cat <<EOF\nFix the parser (#149)\nEOF\n)"; echo `cd b\nrm -rf n`'
 run 0 'grep -rn "rm -rf" .'
 run 0 'npm run format'
 run 0 "trap 'rm -f lock' EXIT"                  # a trap action with a single-file rm

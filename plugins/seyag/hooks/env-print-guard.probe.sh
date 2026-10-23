@@ -446,7 +446,7 @@ expect_deny "H2b: case x in *)# it's NEWLINE env;; esac" $'case x in *)# it\'s\n
 expect_deny 'H3: echo `#\``#; env' 'echo `#\``#; env' "bulk environment dump via"
 expect_deny "M1: echo \${x:-\$(cat <<A ...)} NEWLINE env; echo 'x'" $'echo ${x:-$(cat <<A\nit\'s\nA\n)}\nenv; echo \'x\'' "bulk environment dump via"
 expect_deny 'M2: cat <<A `: <<B` NEWLINE a NEWLINE A NEWLINE env NEWLINE B' $'cat <<A `: <<B`\na\nA\nenv\nB' "bulk environment dump via"
-# Round 3: these pin regressions found in earlier rounds of this rewrite, which main did not have.
+# These pin regressions the shared splitter introduced that the pre-rewrite hook did not have.
 expect_deny "BT1: x=\`cat <<EOF NEWLINE it's NEWLINE EOF NEWLINE \` NEWLINE env; echo 'done'" $'x=`cat <<EOF\nit\'s\nEOF\n`\nenv; echo \'done\'' "bulk environment dump via"
 expect_deny "BT3: x=\`case a in a) cat <<'EOF' NEWLINE it's NEWLINE EOF NEWLINE ;; esac\` NEWLINE env; echo 'done'" $'x=`case a in a) cat <<\'EOF\'\nit\'s\nEOF\n;; esac`\nenv; echo \'done\'' "bulk environment dump via"
 expect_deny "AR1: ((echo a) ; echo b # it's NEWLINE env # don't NEWLINE )" $'((echo a) ; echo b # it\'s\nenv # don\'t\n)' "bulk environment dump via"
@@ -467,6 +467,59 @@ SYG_EPG_TRUSTED_VARS=MYDIR expect_allow 'env > $MYDIR/x (SYG_EPG_TRUSTED_VARS=MY
 SYG_EPG_TRUSTED_VARS='A-B OUT' expect_allow "env > \${OUT} (SYG_EPG_TRUSTED_VARS='A-B OUT')" 'env > ${OUT}'
 # shellcheck disable=SC2016
 SYG_EPG_TRUSTED_VARS='A-B OUT' expect_deny "env > \$AB/x (SYG_EPG_TRUSTED_VARS='A-B OUT')" 'env > $AB/x' "bulk environment dump via"
+
+# --- Substitution-span boundaries ---------------------------------------------
+# Each shape let bash run env while the lib read the text as inert. The S2
+# row's shape is bash-verified ground truth: bash prints its own unexpected-EOF
+# syntax error AND still runs the env at top level.
+expect_deny 'S1: env inside $() past a heredoc opener line' $'cat <<A; echo $(\nenv\n)\nm2\nA' "bulk environment dump via"
+expect_allow 'S1 control: plain $(x) on the opener line' $'cat <<A; echo $(x)\nm2\nA'
+expect_deny 'S2: backtick-in-dq desync runs env at top level' 'echo "`echo "`" ; env ; echo "x"' "bulk environment dump via"
+expect_allow 'S2 control: nested backtick dq, no env' 'echo "`echo hi`"'
+expect_deny 'S4a: eval of a span whose heredoc body is env' $'eval `cat <<EOF\nenv\nEOF\n`' "bulk environment dump via"
+expect_deny 'S4b: bare span at command position' $'`cat <<EOF\nenv\nEOF\n`' "bulk environment dump via"
+expect_deny 'S4c: bash -c with the span as its script' $'bash -c "`cat <<EOF\nenv\nEOF\n`"' "bulk environment dump via"
+expect_allow 'S4 control: an assignment value stays data' $'x=$(cat <<EOF\ndata\nEOF\n)'
+expect_allow 'S4 control: an echo argument stays data' $'echo $(cat <<EOF\nhello\nEOF\n)'
+expect_deny 'S4f: span after then is at command position' $'if true; then `cat <<EOF\nenv\nEOF\n`; fi' "bulk environment dump via"
+expect_deny 'S4g: span after do is at command position' $'while :; do `cat <<EOF\nenv\nEOF\n`; done' "bulk environment dump via"
+
+# --- A newline inside $() separates the interior's commands -------------------
+# env on the second
+# line runs in the substitution subshell (bash ground truth), so its dump
+# reaches the transcript even though the outer pipe filters echo's output.
+expect_deny 'env on a $() interior second line' $'echo $(true\nenv) | cut -s -d= -f1' "bulk environment dump via"
+
+# Markdown fences inside a heredoc BODY pair up as backtick spans
+# for a structural scanner, which surfaced the fenced env pipeline as a
+# command and blocked a plain file write. Heredoc bodies are data; the
+# control keeps the same text live.
+expect_allow 'fenced env pipeline inside a heredoc body is data' $'cat > notes.md <<\'EOF\'\n```sh\nenv | cat\n```\nEOF'
+expect_deny 'fenced-pipeline control: the same text as a real command' 'env | cat' "bulk environment dump via"
+
+# A span DEEP inside a double-quoted word — a commit body quoting
+# shell — is data, not commands. A raw separator window crossed the quoted
+# prose, so a newline or `;` before the span read
+# as a command boundary and the span's heredoc body surfaced as commands;
+# the span now counts as executed only when it OPENS the quoted word and
+# that word is code. The control pins the executed half of that rule in the
+# $( form; the backtick twin is S4c above.
+expect_allow 'span deep in a quoted -m word is data' $'git commit -m "Subject\n\n$(cat <<EOF\nClean with: rm -rf build\nenv | cat\nEOF\n)"'
+expect_allow 'a same-line separator in the quoted prose is data' $'git commit -m "WIP; $(cat <<EOF\nenv\nEOF\n)"'
+expect_deny 'quoted-word control: the span opening its quoted word under bash -c stays code ($ form)' $'bash -c "$(cat <<EOF\ntrue\nenv\nEOF\n)"' "bulk environment dump via"
+
+# A (#N) line in a heredoc BODY opens no comment in the span walk, so a
+# commit body carrying one keeps the span terminated and later spans
+# visible. The two rows below pin the executed contexts: a quoted eval and
+# a shell -c behind a runner both run the body bash hands them (verified
+# against bash without the sudo; the runner unwrap is the lib's own).
+expect_deny 'S4d: quoted eval of a heredoc span runs the body' $'eval "$(cat <<EOF\nenv\nEOF\n)"' "bulk environment dump via"
+expect_deny 'S4e: sudo bash -c with the span as its script' $'sudo bash -c "$(cat <<EOF\nenv\nEOF\n)"' "bulk environment dump via"
+# A heredoc body is collected at the next physical newline even when the
+# opener's substitution frame died first: bash warns `unterminated
+# here-document` and makes the env line cat's body, so env does NOT run
+# here (bash ground truth; the count-tagged deferral reproduces it).
+expect_allow 'cross-talk: a dead frame body is collected at the next physical newline' $'echo $(cat <<A) $(\nenv\nA\n)\nx\nA'
 
 # --- Fail-open on malformed JSON ---
 out=$(printf 'not json {' | env -i PATH="$PATH" HOME="$HOME" bash "$HOOK" 2>&1)
