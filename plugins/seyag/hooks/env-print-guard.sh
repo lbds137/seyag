@@ -18,7 +18,9 @@
 #        - `grep -c` (count-only)
 #      Value-preserving filters (`grep`, `head`, `tail`, `sort`, or name-keyed
 #      redactions like `sed 's/TOKEN=.*/TOKEN=…/'` or `jq del(...)`) do not
-#      satisfy the names-only requirement.
+#      satisfy the names-only requirement, and only a pure transform from
+#      `_is_pure_transform`'s allowlist may sit between the dump and the
+#      selector — anything else kills the allowance.
 #   2. `jq` reading a `.env`, `.env.*`, `*.env`, or `settings*.json` file
 #      (e.g. `settings.json`, `settings.local.json`) with any filter outside
 #      the narrow allowlist: (a) final `|`-stage `keys` / `keys_unsorted`, or
@@ -76,7 +78,9 @@
 #     downstream selector allowances, and command substitution (`$(` or
 #     backtick) disables general file-sink allowance; for `stdout_sent_off_transcript`,
 #     both fall back to the legacy `> /dev/null` exemption
-#     (`_stdout_discarded_to_devnull`).
+#     (`_stdout_discarded_to_devnull`; its `require_stderr_sink` form, used by
+#     jq sinks, demands an explicit fd-2 sink there too, closing the exemption's
+#     stdout-only form for jq).
 #   - Quoted redirects: raw commands matching `(['"\\])[0-9]*&?>` fail closed
 #     in `stdout_sent_off_transcript` (returning False without the `/dev/null`
 #     fallback, because quote stripping in `_tokens` cannot distinguish a
@@ -91,16 +95,23 @@
 #   - Downstream stdout redirects: downstream selector allowance stops when an
 #     earlier downstream segment is a transcript `tee` or carries an fd-1
 #     redirect (`>`-family on fd 1, `&>`, or a dangling `>`).
+#   - Downstream side channels: every segment between the dump and the selector
+#     must be a pure transform from `_is_pure_transform`'s allowlist — the
+#     set and its option constraints live in that one docstring. sed, awk,
+#     dd, xargs, parallel, any shell, any interpreter and jq are not in the
+#     set, so each kills the allowance; shape-based, so a harmless
+#     `sed 's/x/y/'` between the dump and the selector denies too.
 #   - jq stderr: for `jq` file sinks, the allowance applies only when stdout is
-#     sent off the transcript AND either the final stdout target is `/dev/null`
-#     (the legacy `> /dev/null` exemption, whose accidental-error-text gap stays
-#     accepted) or fd 2 is also sent to a file target or `/dev/null` in the
-#     same segment (`2>/dev/null`, `2>f`, `&>f`, `>f 2>&1`, tracked
-#     last-writer-wins with `2>&1` resolving to wherever fd 1 points at that
-#     moment); `jq` filters containing bareword `debug`, `stderr`,
-#     `input_filename`, `error`, `halt_error`, `$__loc__`, or `$__prog_args`
-#     always skip the file-sink allowance (including `> /dev/null`) because
-#     those builtins write values to stderr.
+#     sent off the transcript AND fd 2 is also sent to a file target or
+#     `/dev/null` in the same segment (`2>/dev/null`, `2>f`, `&>f`, `>f 2>&1`,
+#     tracked last-writer-wins with `2>&1` resolving to wherever fd 1 points at
+#     that moment) — a stdout-only `> /dev/null` no longer suffices, because jq
+#     error text (values from a deliberate `.K|tonumber` / `fromjson` failure)
+#     reaches the transcript on fd 2, so the legacy `> /dev/null` exemption is
+#     closed for jq sinks (non-jq commands keep it); `jq` filters containing
+#     bareword `debug`, `stderr`, `input_filename`, `error`, `halt_error`,
+#     `$__loc__`, or `$__prog_args` always skip the file-sink allowance
+#     (including `> /dev/null`) because those builtins write values to stderr.
 #   - Exception handling: allowance helpers (`is_file_target`,
 #     `stdout_sent_off_transcript`, `is_transcript_tee`, `_has_fd1_redirect`,
 #     `_has_eval_or_source`), `_SINGLE_STATEMENT`, `_TRUSTED_TARGET_VARS`, and
@@ -397,28 +408,37 @@ def is_file_target(t: str) -> bool:
     return True
 
 
-def _stdout_discarded_to_devnull(seg: list[str]) -> bool:
+def _stdout_discarded_to_devnull(seg: list[str], require_stderr_sink: bool = False) -> bool:
     """The legacy `> /dev/null` exemption, kept for commands with a substitution:
     true only when stdout goes to /dev/null and every other redirect is stderr to
-    /dev/null or a `2>&1` after it."""
+    /dev/null or a `2>&1` after it; `require_stderr_sink` (jq sinks) also demands
+    an explicit fd-2 sink — `2>/dev/null`, a `2>&1` after the null, or `&>`
+    (which sinks both fds)."""
     null_ops = (">", ">>", "1>", "1>>", "&>", "&>>")
     seen_null = False
+    seen_fd2 = False
     i = 0
     while i < len(seg):
         w = seg[i]
         if w in null_ops and i + 1 < len(seg) and seg[i + 1] == "/dev/null":
-            seen_null, i = True, i + 2
+            seen_null = True
+            if w in ("&>", "&>>"):
+                seen_fd2 = True
+            i += 2
             continue
         if w in tuple(op + "/dev/null" for op in null_ops):
             seen_null = True
+            if w.startswith("&>"):
+                seen_fd2 = True
         elif w == "2>/dev/null" or (w == "2>&1" and seen_null):
-            pass
+            seen_fd2 = True
         elif w == "2>" and i + 1 < len(seg) and seg[i + 1] == "/dev/null":
+            seen_fd2 = True
             i += 1
         elif ">" in w or "<" in w:
             return False
         i += 1
-    return seen_null
+    return seen_null and (seen_fd2 or not require_stderr_sink)
 
 
 @_fail_closed(False)
@@ -428,7 +448,7 @@ def stdout_sent_off_transcript(
     if _QUOTED_REDIRECT_RE.search(raw_cmd):
         return False
     if _HAS_PROCSUB or _HAS_CMDSUB:
-        return _stdout_discarded_to_devnull(seg)   # the legacy `> /dev/null` exemption; nothing to read back
+        return _stdout_discarded_to_devnull(seg, require_stderr_sink)   # the legacy `> /dev/null` exemption; nothing to read back
     off_transcript = False
     fd1_target: str | None = None
     fd2_off_transcript = False
@@ -511,7 +531,7 @@ def stdout_sent_off_transcript(
     if not off_transcript:
         return False
     if require_stderr_sink:
-        return fd1_target == "/dev/null" or fd2_off_transcript
+        return fd2_off_transcript   # a stdout-only `> /dev/null` no longer covers a jq sink
     return True
 
 
@@ -826,6 +846,178 @@ def _has_fd1_redirect(seg: list[str]) -> bool:
     return False
 
 
+_UNIQ_VAL_FLAGS = frozenset({
+    "-f", "-s", "-w", "--skip-fields", "--skip-chars", "--check-chars",
+})
+
+
+def _pure_operands(args: list[str], val_flags: frozenset[str] = frozenset()) -> list[str]:
+    """Positional operands: non-flag words, plus every word after `--`. A
+    word in `val_flags` (uniq's spaced `-f`/`-s`/`-w` and long forms) takes
+    the next word as its value; attached forms (`-f1`, `--skip-fields=1`)
+    are already flag words."""
+    ops: list[str] = []
+    i = 0
+    while i < len(args):
+        if args[i] == "--":
+            ops.extend(args[i + 1:])
+            break
+        if args[i] in val_flags:
+            i += 2
+            continue
+        if args[i].startswith("-") and len(args[i]) > 1:
+            i += 1
+            continue
+        ops.append(args[i])
+        i += 1
+    return ops
+
+
+_SORT_LONG_FREE = frozenset({
+    "--numeric-sort", "--numeric", "--reverse", "--unique", "--stable",
+    "--zero-terminated", "--month-sort", "--human-numeric-sort",
+    "--general-numeric-sort", "--ignore-case", "--ignore-leading-blanks",
+    "--ignore-blanks", "--dictionary-order", "--merge",
+})
+_SORT_LONG_VALUED = frozenset({
+    "--key", "--field-separator", "--buffer-size", "--parallel",
+})
+
+
+def _sort_is_pure(args: list[str]) -> bool:
+    # Short flags without `o` plus an exact long-option allowlist; the four
+    # valued knobs pass in `=` or spaced form (a spaced value lands as an
+    # inert operand word). Every other `--…` denies: `--output`'s unambiguous
+    # abbreviations (`--o`, `--out`, `--outp`) write files, `--compress-program`
+    # runs a program, and `--random-source` denies with them.
+    for a in args:
+        if a == "--":
+            return True
+        if a.startswith("--"):
+            name = a.split("=", 1)[0]
+            if name not in _SORT_LONG_FREE and name not in _SORT_LONG_VALUED:
+                return False
+        elif a.startswith("-") and len(a) > 1 and "o" in a[1:]:
+            return False
+    return True
+
+
+def _no_bytes_flag(args: list[str]) -> bool:
+    # No `-c`/`--bytes` in any form (bundled short, `=`, spaced, or a GNU
+    # abbreviation like `--b`): a byte offset cuts mid-line, and for values
+    # containing `=` the downstream selector prints value slices.
+    for a in args:
+        if a == "--":
+            return True
+        if not a.startswith("-") or len(a) <= 1:
+            continue
+        if a.startswith("--"):
+            if "--bytes".startswith(a.split("=", 1)[0]):
+                return False
+        elif "c" in a[1:]:
+            return False
+    return True
+
+
+def _no_tail_byte_operand(args: list[str]) -> bool:
+    # GNU tail still takes the traditional `+N[bcl]` first operand ("start
+    # at byte 10") — a non-dash word `_no_bytes_flag` never sees. A `c` or
+    # `b` after the leading digits is a byte offset (`+10c`, `+10b`,
+    # `+5c3`; `k`/`m` suffixes are file operands, coreutils 9.7);
+    # `+5`/`+5l` (lines) stay pure.
+    for a in args:
+        if a == "--":
+            return True
+        if not a.startswith("+"):
+            continue
+        rest = a[1:].lstrip("0123456789")
+        if "c" in rest or "b" in rest:
+            return False
+    return True
+
+
+def _no_only_matching_flag(args: list[str]) -> bool:
+    # No `-o`/`--only-matching` in any form (bundled short or a GNU
+    # abbreviation like `--only`): -o prints each pattern match, so
+    # `grep -oP '(?<==).*'` feeds the downstream selector value text.
+    for a in args:
+        if a == "--":
+            return True
+        if not a.startswith("-") or len(a) <= 1:
+            continue
+        if a.startswith("--"):
+            if "--only-matching".startswith(a.split("=", 1)[0]):
+                return False
+        elif "o" in a[1:]:
+            return False
+    return True
+
+
+@_fail_closed(False)
+def _is_pure_transform(seg: list[str]) -> bool:
+    """The one home of the pure-transform allowlist: the only segments that
+    may sit between a dump and a names-only selector. By basename after
+    `unwrap_runners(strip_redirections(seg))` (a runner prefix such as
+    `timeout 5 sort` is fine when the unwrapped command is pure; `xargs` and
+    `parallel` never are — they run the pipe's lines as commands):
+    - `cat` — any args; an operand-reading cat never touches the dump (it
+      reads its file instead of the pipe)
+    - `grep` without `-o`/`--only-matching` in any form
+      (`_no_only_matching_flag`): -o prints each pattern match, so
+      `grep -oP '(?<==).*'` feeds the selector value text
+    - `head`/`tail` without `-c`/`--bytes` in any prefix form
+      (`_no_bytes_flag`); `tail` also without the obsolete `+N[bcl]`
+      byte-offset operand (`_no_tail_byte_operand`; `+5`/`+5l` are lines)
+    - `sort` on short flags without `o` plus an exact long-option allowlist
+      (`_sort_is_pure`)
+    - `uniq` with at most one operand (`uniq IN OUT` writes OUT), with the
+      values of its value-taking flags consumed (`uniq -f 1 -` is one
+      operand, not two)
+    - `busybox` with one of those as its next word, same constraint on the
+      applet (`busybox sort -o f` impure); no other applet passes —
+      `busybox tee` escapes `is_transcript_tee`'s first-word match, so it
+      must not pass here
+    - `tee` writing only file targets — not a transform, but the
+      intermediate file tee is a file sink by design; a transcript tee has
+      already died in the walk's own check
+    `tr`, `rev` and `cut` left the set: rev reverses lines (`NAME=VAL` →
+    `LAV=EMAN`), a tr set can move the cut's `=` delimiter or a newline
+    — literally, or hidden in a tr escape — and `cut -d= -f2-` / `cut -c5-`
+    print value text or cut mid-line, so no arg shape proves the selector
+    stays names-only (the final-segment cut selector is
+    `is_names_only_selector`, outside this set). Everything else — sed/gsed
+    and awk in any form, dd, ed/ex, split, cp, jq in any mode (its
+    `debug`/`stderr` builtins write values to fd 2), any shell, any
+    interpreter — is impure by absence, over-blocking their benign
+    near-names (`perldoc`, `nodemon`) too: accepted."""
+    words, info = unwrap_runners(strip_redirections(seg))
+    if not words:
+        return False
+    if {"xargs", "parallel"} & set(info["runners"]):
+        return False
+    base = os.path.basename(words[0])
+    if base == "tee":
+        return not is_transcript_tee(seg)
+    args = words[1:]
+    if base == "busybox":
+        if not args:
+            return False
+        base, args = args[0], args[1:]
+    if base == "cat":
+        return True
+    if base == "grep":
+        return _no_only_matching_flag(args)
+    if base == "head":
+        return _no_bytes_flag(args)
+    if base == "tail":
+        return _no_bytes_flag(args) and _no_tail_byte_operand(args)
+    if base == "sort":
+        return _sort_is_pure(args)
+    if base == "uniq":
+        return len(_pure_operands(args, _UNIQ_VAL_FLAGS)) <= 1
+    return False
+
+
 def has_downstream_names_only_selector(downstream: list[list[str]]) -> bool:
     if _HAS_PROCSUB:
         return False
@@ -834,6 +1026,8 @@ def has_downstream_names_only_selector(downstream: list[list[str]]) -> bool:
             return False
         if is_names_only_selector(s):
             return True
+        if not _is_pure_transform(s):
+            return False
         if _has_fd1_redirect(s):
             return False
     return False
@@ -901,11 +1095,21 @@ for pipeline in pipelines:
             if not has_downstream_names_only_selector(downstream):
                 filt, fpath = jq_hit
                 shown_filt = filt if filt else "<empty>"
+                # The "sink both fds" remedy is wrong advice for stderr-builtin
+                # filters (round 3): those skip the file-sink allowance even
+                # with both fds sunk, so the clause is shown only outside that
+                # class.
+                sink_clause = (
+                    ""
+                    if _JQ_STDERR_BUILTIN_RE.search(filt or "")
+                    else "or sink both fds (`>/dev/null 2>&1`), "
+                )
                 print(
                     f"ENV-PRINT BLOCKED: bulk jq filter '{shown_filt}' on '{fpath}' "
                     "exposes secret/environment values in the transcript. "
                     "Query only variable names (`jq 'keys'` / `jq '.env | keys'`) or a "
                     "specific field path (e.g. `jq -r '.env.VAR_NAME'`), "
+                    f"{sink_clause}"
                     "or prefix with `SYG_ALLOW_ENV_PRINT=1` if intentional."
                 )
                 sys.exit(0)
