@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Probe for env-print-guard.sh.
 # Exercises bulk env/printenv/set dumps, downstream names-only selector
-# allowlist, value-preserving filter rejections, jq bulk vs specific/keys
-# reads on .env and settings.json, SYG_ALLOW_ENV_PRINT=1 bypass, and
-# fail-open behavior on shapes outside command_pipelines.
+# allowlist, value-preserving filter rejections, pure-transform intermediate
+# segments, jq bulk vs specific/keys reads on .env and settings.json,
+# SYG_ALLOW_ENV_PRINT=1 bypass, and fail-open behavior on shapes outside
+# command_pipelines.
 
 set -uo pipefail
 
@@ -120,6 +121,140 @@ expect_allow "env | wc -l" "env | wc -l"
 expect_allow "env | jq keys_unsorted" "env | jq keys_unsorted"
 expect_allow "printenv | wc -l" "printenv | wc -l"
 expect_allow "env | grep -c CLAUDE" "env | grep -c CLAUDE"
+# Round 7 §13: a side-channel transform between the dump and the selector kills
+# the allowance — sed's `w` writes to a file or /dev/stderr, perl/python run
+# arbitrary code. Shape-based, not semantic: the plain s/x/y/ sed denies too,
+# because guessing which sed programs are harmless is the leak this guards.
+expect_deny "env | sed w /dev/stderr | cut" "env | sed -n 'w /dev/stderr' | cut -s -d= -f1" "bulk environment dump via"
+expect_deny "env | sed s/x/y/ | cut (shape-based deny)" "env | sed -n 's/x/y/' | cut -s -d= -f1" "bulk environment dump via"
+# Review round 1: awk is unconditionally a side channel — any program can
+# redirect, pipe to a command, call system, or read with getline, so no program
+# inspection (gawk/mawk/nawk and busybox awk included; shape only). The
+# `print | "tee /dev/stderr"` row was allowed before this fix.
+# shellcheck disable=SC2016
+expect_deny "env | awk print | tee /dev/stderr | cut" 'env | awk '\''{print | "tee /dev/stderr"}'\'' | cut -s -d= -f1' "bulk environment dump via"
+# shellcheck disable=SC2016
+expect_deny "env | gawk system(logger) | cut" 'env | gawk '\''{system("logger " $0)}'\'' | cut -s -d= -f1' "bulk environment dump via"
+# shellcheck disable=SC2016
+expect_deny "env | awk system(touch) | cut" 'env | awk '\''{system("touch /tmp/x")}'\'' | cut -s -d= -f1' "bulk environment dump via"
+expect_deny "env | perl -pe 1 | cut" "env | perl -pe 1 | cut -s -d= -f1" "bulk environment dump via"
+expect_deny "env | python3 -c pass | cut" "env | python3 -c 'pass' | cut -s -d= -f1" "bulk environment dump via"
+# shellcheck disable=SC2016
+expect_deny "env | busybox awk | cut" 'env | busybox awk -F= '\''{print $1}'\'' | cut -s -d= -f1' "bulk environment dump via"
+# Review round 2: the side-channel denylist extends to same-class movers —
+# gsed and busybox sed (sed's sibling spellings), dd (of= writes through),
+# xargs (runs its stdin as commands, also behind runners), the ruby/node/lua/
+# pypy* interpreters, and sh/bash -c wrapper scripts. All shape-based, like
+# sed itself.
+expect_deny "env | gsed s/x/y/ | cut" "env | gsed -n 's/x/y/' | cut -s -d= -f1" "bulk environment dump via"
+expect_deny "env | busybox sed | cut" "env | busybox sed -n 's/x/y/' | cut -s -d= -f1" "bulk environment dump via"
+expect_deny "env | dd of=/dev/stderr | cut" "env | dd of=/dev/stderr | cut -s -d= -f1" "bulk environment dump via"
+expect_deny "env | dd of=/tmp/x | cut" "env | dd of=/tmp/x | cut -s -d= -f1" "bulk environment dump via"
+expect_deny "env | ruby -e 1 | cut" "env | ruby -e 1 | cut -s -d= -f1" "bulk environment dump via"
+expect_deny "env | node -e 0 | cut" "env | node -e 0 | cut -s -d= -f1" "bulk environment dump via"
+expect_deny "env | lua -e 1 | cut" "env | lua -e 1 | cut -s -d= -f1" "bulk environment dump via"
+expect_deny "env | pypy -c pass | cut" "env | pypy -c pass | cut -s -d= -f1" "bulk environment dump via"
+expect_deny "env | pypy3 -c pass | cut" "env | pypy3 -c pass | cut -s -d= -f1" "bulk environment dump via"
+expect_deny "env | sh -c tr | cut" "env | sh -c 'tr a-z A-Z' | cut -s -d= -f1" "bulk environment dump via"
+expect_deny "env | bash -c tr | cut" "env | bash -c 'tr a-z A-Z' | cut -s -d= -f1" "bulk environment dump via"
+expect_deny "env | xargs printenv | cut" "env | xargs printenv | cut -s -d= -f1" "bulk environment dump via"
+expect_deny "env | timeout 5 xargs printenv | cut" "env | timeout 5 xargs printenv | cut -s -d= -f1" "bulk environment dump via"
+# Review round 3: shells are a side channel in ANY form — no `-c` word needed
+# (bundled `-ec`/`-xc` flags; a plain `env | bash` runs the dump's lines as a
+# script). parallel joins xargs on the stripped-runner list, and the
+# interpreter set widens: `perl*` prefix (perl5.x), `node*` prefix (nodejs),
+# php/deno/bun/tclsh/Rscript, and the busybox sh/dd applet pairs.
+expect_deny "env | bash -ec cat>&2 | cut" "env | bash -ec 'cat >&2' | cut -s -d= -f1" "bulk environment dump via"
+expect_deny "env | sh -xc cat>&2 | cut" "env | sh -xc 'cat >&2' | cut -s -d= -f1" "bulk environment dump via"
+expect_deny "env | zsh -c cat>&2 | cut" "env | zsh -c 'cat >&2' | cut -s -d= -f1" "bulk environment dump via"
+expect_deny "env | dash -c cat>&2 | cut" "env | dash -c 'cat >&2' | cut -s -d= -f1" "bulk environment dump via"
+expect_deny "env | plain bash | cut" "env | bash | cut -s -d= -f1" "bulk environment dump via"
+expect_deny "env | parallel echo >&2 | cut" "env | parallel echo '{}' '>&2' | cut -s -d= -f1" "bulk environment dump via"
+expect_deny "env | perl5.36 -pe 1 | cut" "env | perl5.36 -pe 1 | cut -s -d= -f1" "bulk environment dump via"
+expect_deny "env | nodejs -e 0 | cut" "env | nodejs -e 0 | cut -s -d= -f1" "bulk environment dump via"
+expect_deny "env | php -r 1 | cut" "env | php -r 1 | cut -s -d= -f1" "bulk environment dump via"
+expect_deny "env | deno eval 1 | cut" "env | deno eval 1 | cut -s -d= -f1" "bulk environment dump via"
+expect_deny "env | bun -e 1 | cut" "env | bun -e 1 | cut -s -d= -f1" "bulk environment dump via"
+expect_deny "env | tclsh | cut" "env | tclsh | cut -s -d= -f1" "bulk environment dump via"
+expect_deny "env | Rscript -e 1 | cut" "env | Rscript -e 1 | cut -s -d= -f1" "bulk environment dump via"
+expect_deny "env | busybox sh -c cat>&2 | cut" "env | busybox sh -c 'cat >&2' | cut -s -d= -f1" "bulk environment dump via"
+expect_deny "env | busybox dd of=/dev/stderr | cut" "env | busybox dd of=/dev/stderr | cut -s -d= -f1" "bulk environment dump via"
+# Review round 5 (round 4's findings, owner ruling: allowlist): the
+# side-channel denylist is now `_is_pure_transform`'s pure-transform
+# ALLOWLIST — every segment between the dump and the selector must be pure,
+# and anything else kills the allowance. Round-4 finding 1 first: a middle
+# jq stage leaks via its stderr builtins (both shapes were allowed on the
+# denylist, driver runtime-confirmed on 1d2718d).
+expect_deny "env | jq -R debug | cut" "env | jq -R debug | cut -s -d= -f1" "bulk environment dump via"
+expect_deny "env | jq -R . | cut" "env | jq -R . | cut -s -d= -f1" "bulk environment dump via"
+# Round-4 finding 2's same-class movers, each now denied by not being in the
+# set: output-writing flags and operands, runner-shaped copies, unlisted
+# shells, and busybox applets beyond the pure set (busybox tee escapes
+# is_transcript_tee's first-word match).
+expect_deny "env | sort -o /dev/stderr | cut" "env | sort -o /dev/stderr | cut -s -d= -f1" "bulk environment dump via"
+expect_deny "env | sort --output=/dev/stderr | cut" "env | sort --output=/dev/stderr | cut -s -d= -f1" "bulk environment dump via"
+expect_deny "env | uniq - /dev/stderr | cut" "env | uniq - /dev/stderr | cut -s -d= -f1" "bulk environment dump via"
+expect_deny "env | cp /dev/stdin /dev/stderr | cut" "env | cp /dev/stdin /dev/stderr | cut -s -d= -f1" "bulk environment dump via"
+expect_deny "env | split --filter='cat >&2' | cut" "env | split --filter='cat >&2' | cut -s -d= -f1" "bulk environment dump via"
+expect_deny "env | ed | cut" "env | ed | cut -s -d= -f1" "bulk environment dump via"
+expect_deny "env | ex | cut" "env | ex | cut -s -d= -f1" "bulk environment dump via"
+expect_deny "env | ash -c cat>&2 | cut" "env | ash -c 'cat >&2' | cut -s -d= -f1" "bulk environment dump via"
+expect_deny "env | fish | cut" "env | fish | cut -s -d= -f1" "bulk environment dump via"
+expect_deny "env | csh | cut" "env | csh | cut -s -d= -f1" "bulk environment dump via"
+expect_deny "env | tcsh | cut" "env | tcsh | cut -s -d= -f1" "bulk environment dump via"
+expect_deny "env | busybox tee /dev/stderr | cut" "env | busybox tee /dev/stderr | cut -s -d= -f1" "bulk environment dump via"
+# The set's option boundaries as allows: the plain transforms, and a runner
+# prefix over a pure one.
+expect_allow "env | sort | cut" "env | sort | cut -s -d= -f1"
+expect_allow "env | sort -n | cut" "env | sort -n | cut -s -d= -f1"
+expect_allow "env | uniq | cut" "env | uniq | cut -s -d= -f1"
+expect_allow "env | uniq -f 1 | cut" "env | uniq -f 1 | cut -s -d= -f1"
+expect_allow "env | cat | cut" "env | cat | cut -s -d= -f1"
+expect_allow "env | cat /etc/hostname | cut" "env | cat /etc/hostname | cut -s -d= -f1"
+expect_allow "env | tail -n 5 | cut" "env | tail -n 5 | cut -s -d= -f1"
+expect_allow "env | sort --numeric-sort | cut" "env | sort --numeric-sort | cut -s -d= -f1"
+expect_allow "env | sort --parallel 2 | cut" "env | sort --parallel 2 | cut -s -d= -f1"
+# Review round 6, finding 1: delimiter-reshaping transforms leave the set.
+# rev reverses lines (NAME=VAL becomes LAV=EMAN, so field 1 is the value),
+# a tr set carrying `=` or a newline (tr "=\n" "\n=" swaps the cut delimiter
+# in place) moves it, and head/tail -c cut mid-line — each makes the
+# selector print value slices. The three r5 allow rows flip deny.
+expect_deny "env | rev | cut" "env | rev | cut -s -d= -f1" "bulk environment dump via"
+expect_deny "env | tr a-z A-Z | cut" "env | tr a-z A-Z | cut -s -d= -f1" "bulk environment dump via"
+expect_deny "env | timeout 5 tr a-z A-Z | cut" "env | timeout 5 tr a-z A-Z | cut -s -d= -f1" "bulk environment dump via"
+expect_deny "env | tr eq-nl swap | cut" 'env | tr "=\n" "\n=" | cut -s -d= -f1' "bulk environment dump via"
+expect_deny "env | tr -d eq | cut" "env | tr -d '=' | cut -s -d= -f1" "bulk environment dump via"
+expect_deny "env | tail -c +10 | cut" "env | tail -c +10 | cut -s -d= -f1" "bulk environment dump via"
+expect_deny "env | head -c 5 | cut" "env | head -c 5 | cut -s -d= -f1" "bulk environment dump via"
+# Review round 6, finding 2: sort long options are an exact allowlist —
+# `--output`'s unambiguous abbreviations and `--compress-program` are not on
+# it; a spaced value (--parallel 2, -S 1K) stays an inert operand word.
+expect_deny "env | sort --out=/dev/stderr | cut" "env | sort --out=/dev/stderr | cut -s -d= -f1" "bulk environment dump via"
+expect_deny "env | sort --o=x | cut" "env | sort --o=x | cut -s -d= -f1" "bulk environment dump via"
+expect_deny "env | sort -S 1K --compress-program=cp | cut" "env | sort -S 1K --compress-program=cp | cut -s -d= -f1" "bulk environment dump via"
+# Review round 7: the delimiter-reshaping sweep finishes. cut leaves the
+# intermediate set entirely — `cut -d= -f2-` prints value text, `cut -c5-`
+# cuts mid-line, and no arg shape proves the selector stays names-only (the
+# final-segment cut selector is is_names_only_selector, not this set) — and
+# intermediate grep denies -o/--only-matching in any form (bundled short or
+# a GNU abbreviation): -o prints each pattern match, so
+# `grep -oP '(?<==).*'` feeds the selector value text.
+expect_deny "env | cut -d= -f2- | cut" "env | cut -d= -f2- | cut -s -d= -f1" "bulk environment dump via"
+expect_deny "env | cut -c5- | cut" "env | cut -c5- | cut -s -d= -f1" "bulk environment dump via"
+expect_deny "env | grep -o . | cut" "env | grep -o . | cut -s -d= -f1" "bulk environment dump via"
+expect_deny "env | grep -oP '(?<==).*' | cut" "env | grep -oP '(?<==).*' | cut -s -d= -f1" "bulk environment dump via"
+# The remaining in-set members as intermediates, pinned so a later tightening
+# cannot break them unseen: the most common real shape (grep without -o), a
+# file tee (documented design), a pure busybox applet.
+expect_allow "env | grep CLAUDE | cut" "env | grep CLAUDE | cut -s -d= -f1"
+expect_allow "env | tee /tmp/x | cut" "env | tee /tmp/x | cut -s -d= -f1"
+expect_allow "env | busybox sort | cut" "env | busybox sort | cut -s -d= -f1"
+# Review round 8: GNU tail's traditional `+N[bcl]` first operand (default
+# _POSIX2_VERSION) is a non-dash word `_no_bytes_flag` never sees, so
+# `tail +10c` starts at byte 10 like the denied `tail -c +10`; `+5`/`+5l`
+# (lines) stay in the set.
+expect_deny "env | tail +10c | cut" "env | tail +10c | cut -s -d= -f1" "bulk environment dump via"
+expect_allow "env | tail +5 | cut" "env | tail +5 | cut -s -d= -f1"
 
 # --- Allows: keyed reads, command execution, shell options, specific jq ---
 expect_allow "printenv HOME" "printenv HOME"
@@ -139,7 +274,9 @@ expect_allow "cat cfg.json | jq -r '.env.ANTHROPIC_MODEL'" "cat cfg.json | jq -r
 # invalid jq program, errors, nothing printed
 expect_allow "jq settings.json" "jq settings.json"
 expect_allow "echo '{}' | jq .env" "echo '{}' | jq .env"
-expect_allow "jq -e . ~/.claude/settings.json >/dev/null" "jq -e . ~/.claude/settings.json >/dev/null"
+# Round 7 §10: a stdout-only `> /dev/null` no longer covers a jq sink — error
+# text from a deliberate runtime failure reaches the transcript on fd 2.
+expect_deny "jq -e . settings.json >/dev/null (fd 2 on transcript)" "jq -e . ~/.claude/settings.json >/dev/null" "bulk jq filter"
 expect_allow "env > /tmp/envsnap.txt" "env > /tmp/envsnap.txt"
 expect_allow "env >/tmp/e 2>&1" "env >/tmp/e 2>&1"
 # shellcheck disable=SC2016
@@ -250,6 +387,38 @@ expect_deny "jq . .env > /tmp/x \${BIG}>&2" "jq . .env > /tmp/x ${BIG}>&2" "bulk
 expect_deny "jq '.K|tonumber' .env >/tmp/x" "jq '.K|tonumber' .env >/tmp/x" "bulk jq filter"
 expect_deny "jq . .env > /tmp/x (stderr on transcript)" "jq . .env > /tmp/x" "bulk jq filter"
 expect_deny "jq . .env 2>&1 > /tmp/x" "jq . .env 2>&1 > /tmp/x" "bulk jq filter"
+# Round 7 §10: same closure with the legacy /dev/null target; non-jq keeps it.
+# The deny pins the "sink both fds" clause in the jq message text (round 3:
+# the clause is shown only for filters outside the stderr-builtin class).
+expect_deny "jq . .env > /dev/null (fd 2 on transcript)" "jq . .env > /dev/null" 'or sink both fds (`>/dev/null 2>&1`)'
+# Review round 3, finding 4: that clause is advice, and it is wrong advice for
+# a stderr-builtin filter — those deny even with both fds sunk. Pin that the
+# clause is absent there (expect_deny cannot assert absence itself).
+tmp_err=$(mktemp)
+out=$(payload_for "jq 'stderr' .env > /dev/null" | env -i PATH="$PATH" HOME="$HOME" bash "$HOOK" 2>"$tmp_err")
+rc=$?
+err=$(cat "$tmp_err")
+rm -f "$tmp_err"
+if [ "$rc" -eq 2 ] && printf '%s' "$err" | grep -q "ENV-PRINT BLOCKED" && ! printf '%s' "$err" | grep -qF 'sink both fds'; then
+  pass=$((pass + 1))
+else
+  echo "FAIL [jq stderr-builtin deny without the sink-both-fds clause]: expected rc=2 + ENV-PRINT BLOCKED + no 'sink both fds' on stderr, got rc=$rc stdout=$out stderr=$err" >&2
+  fail=$((fail + 1))
+fi
+expect_allow "jq . .env > /dev/null 2>/dev/null" "jq . .env > /dev/null 2>/dev/null"
+# Review round 2: the remedy the deny message advises (`>/dev/null 2>&1`),
+# allowed on the main path — spaced, and compact in a && chain.
+expect_allow "jq . .env > /dev/null 2>&1" "jq . .env > /dev/null 2>&1"
+expect_allow "jq -e . .env >/dev/null 2>&1 && echo valid" "jq -e . .env >/dev/null 2>&1 && echo valid"
+# A real non-jq dump through stdout_sent_off_transcript WITHOUT
+# require_stderr_sink: the stdout-only /dev/null sink still allows it (same
+# legacy exemption as the `env >/dev/null` row earlier in this file).
+expect_allow "printenv > /dev/null (non-jq)" "printenv > /dev/null"
+# Review round 3, finding 5: the same default pinned on the substitution path —
+# a command substitution takes stdout_sent_off_transcript down the legacy
+# `_stdout_discarded_to_devnull` walk, still without a stderr-sink requirement
+# (measured allow before pinning).
+expect_allow 'printenv > /dev/null; x=$(date) (non-jq)' 'printenv > /dev/null; x=$(date)'
 expect_allow "jq . .env > /tmp/x 2>/dev/null" "jq . .env > /tmp/x 2>/dev/null"
 expect_allow "jq . .env &> /tmp/x" "jq . .env &> /tmp/x"
 expect_allow "jq . .env > /tmp/x 2>&1" "jq . .env > /tmp/x 2>&1"
@@ -265,9 +434,17 @@ expect_allow "SYG_ALLOW_ENV_PRINT=1 jq . .env" "SYG_ALLOW_ENV_PRINT=1 jq . .env"
 # shellcheck disable=SC2016
 expect_allow "double-quoted command substitution (unsplit by command_pipelines)" 'echo "$(env)"'
 
-# A substitution elsewhere keeps the legacy jq `> /dev/null` exemption, only in its plain form.
-expect_allow 'jq -e . s.json >/dev/null && for i in $(seq 3); do :; done' 'jq -e . ~/.claude/settings.json >/dev/null && for i in $(seq 3); do :; done'
+# Round 7 §10: under a substitution the legacy `/dev/null` walk still governs,
+# but jq sinks now demand an explicit fd-2 sink there too — the plain
+# stdout-only form denies; `2>&1` after the null still sinks fd 2.
+expect_deny 'jq -e . s.json >/dev/null && for i in $(seq 3); do :; done' 'jq -e . ~/.claude/settings.json >/dev/null && for i in $(seq 3); do :; done' "bulk jq filter"
 expect_allow 'jq . .env > /dev/null 2>&1; x=$(date)' 'jq . .env > /dev/null 2>&1; x=$(date)'
+# Review round 2: one allow row per remaining seen_fd2 branch of the legacy
+# /dev/null walk — `&>` compact and spaced, `2>` compact and spaced.
+expect_allow 'jq . .env &>/dev/null; x=$(date)' 'jq . .env &>/dev/null; x=$(date)'
+expect_allow 'jq . .env &> /dev/null; x=$(date)' 'jq . .env &> /dev/null; x=$(date)'
+expect_allow 'jq . .env > /dev/null 2>/dev/null; x=$(date)' 'jq . .env > /dev/null 2>/dev/null; x=$(date)'
+expect_allow 'jq . .env > /dev/null 2> /dev/null; x=$(date)' 'jq . .env > /dev/null 2> /dev/null; x=$(date)'
 expect_deny 'jq . .env >/dev/null >&2; echo $(date)' 'jq . .env >/dev/null >&2; echo $(date)' "bulk jq filter"
 expect_deny "jq . .env '>' /dev/null" "jq . .env '>' /dev/null" "bulk jq filter"
 expect_deny 'jq . .env \> /dev/null' 'jq . .env \> /dev/null' "bulk jq filter"
