@@ -64,10 +64,10 @@
 #      `--repo`/`-R`, `GH_REPO=`, a no-PR flag (`--help`/`-h`, `--dry-run`,
 #      `--web`/`-w`), or a non-literal or unresolvable head. An earlier
 #      segment of the same command that sets GH_REPO (`export GH_REPO=…`,
-#      `declare`/`typeset`/`readonly` (not `+x`), or a bare `GH_REPO=…`
-#      assignment) is a repo override too: a standalone create stays silent,
-#      and a trailing create is not accepted (the push falls back to its own
-#      lookup, as with `-R`).
+#      `declare`/`typeset`/`readonly` (no `+x` before the assignment), or a
+#      bare `GH_REPO=…` assignment) is a repo override too: a standalone
+#      create stays silent, and a trailing create is not accepted (the push
+#      falls back to its own lookup, as with `-R`).
 #      Not covered: a GH_REPO exported in an EARLIER Bash tool call (the
 #      persistent shell) is invisible to this hook; wrapped forms (`command
 #      export`, `builtin export`, `local -x`) are not recognized either, and
@@ -189,9 +189,16 @@ def sets_gh_repo(seg):
     if cmd == "export":
         return any(w.startswith("GH_REPO=") for w in seg[i + 1 :])
     if cmd in ("declare", "typeset", "readonly"):
-        return any(w.startswith("GH_REPO=") for w in seg[i + 1 :]) and not any(
-            re.match(r"^\+[A-Za-z]*x[A-Za-z]*$", w) for w in seg[i + 1 :]
-        )
+        args = seg[i + 1 :]
+        j = next((k for k, w in enumerate(args) if w.startswith("GH_REPO=")), None)
+        if j is None:
+            return False
+        # bash 5.3, measured: a `+x` BEFORE the assignment word unexports and a
+        # later `-x` in the same command does not re-export it, while flags
+        # AFTER the word are inert for the export attribute — but they make
+        # declare EXIT 1 (`declare -x V=v +x` exports V and returns 1), so a
+        # chained `&&` after such a declare never runs.
+        return not any(re.match(r"^\+[A-Za-z]*x[A-Za-z]*$", w) for w in args[:j])
     return False
 
 
@@ -440,8 +447,9 @@ for idx, seg in enumerate(segments):
         # change which branch or repo the create used, so only an immediately
         # following, unprefixed create counts; `--head`/`-H`, `--repo`/`-R`,
         # an earlier segment's `export GH_REPO=`/`declare`/`typeset`/`readonly`
-        # (not `+x`)/assignment-only `GH_REPO=`, no-PR flags (`--help`/`-h`/
-        # `--dry-run`/`--web`/`-w`), and a push `-C` are excluded.
+        # (no `+x` before the assignment)/assignment-only `GH_REPO=`, no-PR
+        # flags (`--help`/`-h`/`--dry-run`/`--web`/`-w`), and a push `-C` are
+        # excluded.
         if (
             idx == trigger_idx + 1
             and skip_assignments(seg) == 0
@@ -480,7 +488,8 @@ for idx, seg in enumerate(segments):
     if parse_gh_pr_create(seg):
         # Standalone `gh pr create`: stay silent on a repo override (`--repo`,
         # `-R`, `GH_REPO=` or an earlier segment's `export GH_REPO=`/
-        # `declare`/`typeset`/`readonly` (not `+x`)/assignment-only
+        # `declare`/`typeset`/`readonly` (no `+x` before the assignment)/
+        # assignment-only
         # `GH_REPO=`), a no-PR flag (`--help`, `-h`, `--dry-run`, `--web`,
         # `-w`), or a non-literal `--head`/`-H`.
         i = skip_assignments(seg)

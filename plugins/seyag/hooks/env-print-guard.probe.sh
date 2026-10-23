@@ -478,5 +478,22 @@ else
   fail=$((fail + 1))
 fi
 
+# Admission is pure bash (=~), so a command whose pattern match sits late in a
+# very long text can no longer lose the verdict to a dead pipe: the old
+# `printf | grep -q` form failed OPEN when grep -q exited while printf still
+# had 200 KB in flight. The match lands at the END of the payload on purpose.
+BIGADMIT=$(printf 'x%.0s' $(seq 200000))
+# The old `printf | grep -q` form failed open when grep -q exited while the
+# payload was still in flight — so the match sits at the START here, with
+# ~200 KB of tail unread: the exact shape that raced. (A match at the end
+# would not race: grep reads the whole pipe to reach it.) `expect_deny_payload`
+# is a bash function, so the big payload crosses no exec argv limit; the file
+# keeps it out of jq's --arg for the same reason.
+TROW=$(mktemp -d)
+printf '%s' "env; printf '%s' '$BIGADMIT'" > "$TROW/longcmd.txt"
+expect_deny_payload "match at the start, 200 KB of tail still in flight" \
+  "$(jq -nc --rawfile c "$TROW/longcmd.txt" '{tool_name:"Bash",cwd:"/tmp/proj",tool_input:{command:$c}}')" \
+  "bulk environment dump via"
+
 [ "$fail" -eq 0 ] || exit 1
 echo "PASS: env-print-guard ($pass cases)"
