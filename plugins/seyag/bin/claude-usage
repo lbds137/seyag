@@ -1,7 +1,13 @@
 #!/bin/bash
 # claude-usage: the Claude plan's usage windows, shared by every session on this machine.
 #
-#   claude-usage              one line: 5h window % and reset, weekly % and reset, per-model weekly caps
+#   claude-usage              one line: 5h window % and reset, weekly % and reset, per-model weekly caps,
+#                             plus ' · extra $X.XX left of $B.BB' / '$X.XX used' / '$X.XX over $B.BB'
+#                             while the plan's paid extra usage is on, under its spend limit, and anything
+#                             was spent or the week is maxed; ' · extra off (limit reached)' or
+#                             ' · extra off (<reason>)' at a maxed week when it is limit-reached, or carries
+#                             a disabled_reason while not enabled (enabled + reason + under the limit
+#                             passes the gate, so it shows the balance)
 #   claude-usage --ok [PCT]   exit 0 if the 5h window is below PCT% (default 90), the week is under 75% and
 #                             the calling session's model (Fable) has its own weekly cap left, else 1;
 #                             CLAUDE_USAGE_EXTRA_OK=1 passes past the weekly reserve while extra usage is on
@@ -341,7 +347,7 @@ extra_usage_field() {
             (if (.spend | type) == "object" and (.spend.used | type) == "object" then .spend.used else {} end) as $u |
             {extra_usage: {
                 enabled: ($x.is_enabled == true),
-                spend_limit_reached: ($x.spend_limit_reached == true),
+                spend_limit_reached: (if ($x.spend_limit_reached | type) == "boolean" then $x.spend_limit_reached else null end),
                 disabled_reason: (if ($x.disabled_reason | type) == "string" and ($x.disabled_reason | length) > 0
                     then ($x.disabled_reason | gsub("[^A-Za-z0-9_.-]"; "_"))
                     else null end),
@@ -352,6 +358,26 @@ extra_usage_field() {
                     else null end)
             }}
         else empty end' "$cache" 2>/dev/null
+}
+
+# The extra-usage figure the plain line's ` · extra …` and an extra-usage --ok pass's
+# ` extra=…` both end in: under a valid SYG_EXTRA_USAGE_BUDGET_USD (anything else counts
+# as unset) "$X.XX over $B.BB" past it or "$X.XX left of $B.BB" under it, "$X.XX used"
+# without one. $1 is used_usd; a missing spend counts as 0.
+extra_figure() {
+    local used=${1:-0} budget=""
+    [ -n "${SYG_EXTRA_USAGE_BUDGET_USD:-}" ] \
+        && LC_ALL=C awk -v b="$SYG_EXTRA_USAGE_BUDGET_USD" 'BEGIN{exit !(b ~ /^[0-9]+([.][0-9]+)?$/)}' \
+        && budget=$SYG_EXTRA_USAGE_BUDGET_USD
+    if [ -n "$budget" ]; then
+        if LC_ALL=C awk -v u="$used" -v b="$budget" 'BEGIN{exit !(u > b)}'; then
+            LC_ALL=C awk -v u="$used" -v b="$budget" 'BEGIN{printf "$%.2f over $%.2f", u, b}'
+        else
+            LC_ALL=C awk -v u="$used" -v b="$budget" 'BEGIN{printf "$%.2f left of $%.2f", (b - u > 0) ? b - u : 0, b}'
+        fi
+    else
+        LC_ALL=C printf '$%.2f used\n' "$used"
+    fi
 }
 
 case "${1:-}" in
@@ -412,7 +438,18 @@ case "${1:-}" in
                 fi
             done < <(sed 's/, /\n/g; s/%//g' <<< "$scoped" | grep .)
         fi
-        echo "claude-usage: --ok pass lane=anthropic meter=$pass_meter 5h=${five}%<${thr}% week=${week}%${week_op}${week_reserve}% source=api${stale_note}" >&2
+        # An extra-usage pass names its balance: extra_figure() under the same budget
+        # var the plain line uses. Every other pass line stays as it was.
+        extra_bal=""
+        if [ "$pass_meter" = extra-usage ]; then
+            ex_json=$(extra_usage_field)
+            if [ -n "$ex_json" ] && [[ $ex_json != *$'\n'* ]]; then
+                ex_used=0
+                eval "$(jq -r '.extra_usage as $x | @sh "ex_used=\($x.used_usd // 0)"' <<< "$ex_json" 2>/dev/null)"
+                extra_bal=" extra=$(extra_figure "$ex_used")"
+            fi
+        fi
+        echo "claude-usage: --ok pass lane=anthropic meter=$pass_meter 5h=${five}%<${thr}% week=${week}%${week_op}${week_reserve}%${extra_bal} source=api${stale_note}" >&2
         exit 0
         ;;
     --json)
@@ -449,10 +486,39 @@ case "${1:-}" in
                 [ -n "$usd" ] && tail=" · \$$usd"
             fi
         fi
-        echo "$note$(plan_line)$tail"
+        # The extra-usage suffix: the statusline extra segment's visibility rule —
+        # "off" at a maxed week when the add-on is limit-reached, or carries a
+        # disabled_reason while not enabled (the gate reports extra=off there too;
+        # enabled + reason + under the limit passes the gate, so it renders the
+        # balance). The gate also reports extra=off below a maxed week (the 75%
+        # reserve) and for disabled-without-reason; the suffix intentionally
+        # renders those as absent or money-only. Else the balance, only while
+        # enabled and under the limit, and the week maxed or anything spent —
+        # normalized by the same extra_usage_field() --json reads;
+        # extra_figure() formats the balance.
+        extra_tail=""
+        if ex_json=$(extra_usage_field) && [ -n "$ex_json" ] && [[ $ex_json != *$'\n'* ]]; then
+            ex_enabled=false ex_lim=false ex_lim_ok=false ex_reason="" ex_used=0
+            eval "$(jq -r '.extra_usage as $x |
+                (if $x.disabled_reason == null then "" else $x.disabled_reason end) as $r |
+                @sh "ex_enabled=\($x.enabled) ex_lim=\($x.spend_limit_reached) ex_lim_ok=\($x.spend_limit_reached == false) ex_reason=\($r) ex_used=\($x.used_usd // 0)"' <<< "$ex_json" 2>/dev/null)"
+            if [ "$week" -ge 100 ] 2>/dev/null && { [ "$ex_lim" = true ] || { [ "$ex_enabled" != true ] && [ -n "$ex_reason" ]; }; }; then
+                if [ "$ex_lim" = true ]; then
+                    extra_tail=" · extra off (limit reached)"
+                else
+                    extra_tail=" · extra off ($ex_reason)"
+                fi
+            elif [ "$ex_enabled" = true ] && [ "$ex_lim_ok" = true ]; then
+                ex_show=0
+                [ "$week" -ge 100 ] 2>/dev/null && ex_show=1
+                LC_ALL=C awk -v u="$ex_used" 'BEGIN{exit !(u > 0)}' && ex_show=1
+                [ "$ex_show" = 1 ] && extra_tail=" · extra $(extra_figure "$ex_used")"
+            fi
+        fi
+        echo "$note$(plan_line)$extra_tail$tail"
         ;;
     *)
-        sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
+        sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'
         exit 2
         ;;
 esac
