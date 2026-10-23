@@ -933,7 +933,7 @@ _t0 = time.monotonic()
 command_pipelines('echo ' + '$${' * 40000 + '; env')
 _dd_elapsed = min(_dd_elapsed, time.monotonic() - _t0)
 check_all(
-    'perf: command_pipelines on 40k $${ finishes in <5s and yields env',
+    'perf: command_pipelines on 40k $${ finishes in <2s and yields env',
     [
         (_dd_elapsed < 2.0, _dd_elapsed, '< 2.0s'),
         ([['env']] in _dd_pls, _dd_pls[-1:], [[['env']]]),
@@ -949,7 +949,7 @@ command_pipelines('cat <<A\n' * 16000)
 heredoc_openers('cat <<A\n' * 16000)
 _hd_elapsed = min(_hd_elapsed, time.monotonic() - _t0)
 check_all(
-    'perf: command_pipelines and heredoc_openers on 16k unterminated <<A finishes in <5s',
+    'perf: command_pipelines and heredoc_openers on 16k unterminated <<A finishes in <2s',
     [
         (_hd_elapsed < 2.0, _hd_elapsed, '< 2.0s'),
         (len(_hd_pls) == 16000, len(_hd_pls), 16000),

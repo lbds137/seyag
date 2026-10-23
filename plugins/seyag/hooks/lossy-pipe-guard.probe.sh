@@ -547,6 +547,13 @@ run 2 "pipe-amp gh interior blocks" \
 # push pipe stays prose (strip_quoted runs on interiors like the outer scan).
 run 0 "a quoted mention of a push pipe inside a substitution is prose" \
   "git commit -m \"\$(echo 'fix: git push | tail hid errors')\""
+# A `#` that bash does not read as a comment (parameter expansion, mid-word)
+# leaves quote tracking ON, so a later single-quoted region is never blanked
+# and the real outer pipe stays visible to the stage split.
+run 2 "parameter-expansion hash does not blank the later pipe" \
+  $'n=${#f[@]}; git commit -m \'use $(\' 2>&1 | tail -5; echo \'a)\''
+run 2 "mid-word hash with an apostrophed comment does not blank the pipe" \
+  $'git commit -m a#b\'use $(\' 2>&1 | tail -5 # it\'s )'
 
 # Rejoin regression bound: N=64000 unterminated `cat <<A` lines + `git push | tail`
 # stays linear (~1.5 s; quadratic slicing ran ~10 s; assert < 5 s). (The driver's

@@ -1169,10 +1169,16 @@ def _extract_spans(text, skip_single_quoted):
     """The span scan behind `substitution_spans` and `substitution_span_offsets`.
 
     With `skip_single_quoted` False this extracts every span, recording whether
-    its opening delimiter sat inside a closed single-quoted region. With it True
-    it tracks double-quote state and skips a span opening inside a
-    single-quoted region — and returns None, meaning "fall back", on reaching a
-    construct whose quoting it cannot model:
+    its opening delimiter sat inside a closed single-quoted region. On this
+    path an unquoted `#` starts a comment only at a word start (after
+    whitespace or a separator); quote tracking pauses to the newline there and
+    resumes after, and a `#` elsewhere (`${#f[@]}`, `$#`, `a#b`) is a literal
+    whose quotes are tracked normally. It does not model the substitution
+    stack of `_scan_events(bash_words=True)`, so a `#` after a `)` that closed
+    a substitution is read as a word-start comment where bash would not — the
+    blanking consumer treats such spans as never-blankable anyway. It also
+    returns None, meaning "fall back", on reaching a construct whose quoting
+    it cannot model:
 
     - an unquoted, unescaped `#`: a comment makes its apostrophes literal, but
       whether a `#` starts one depends on word boundaries the scanner does not
@@ -1209,8 +1215,20 @@ def _extract_spans(text, skip_single_quoted):
                 if ch == "#":
                     if skip_single_quoted:
                         return None
-                    nl = text.find("\n", i + 1)
-                    comment_end = end_of_text if nl == -1 else nl
+                    # A `#` starts a comment only at a word start — after
+                    # whitespace, a separator or nothing. `${#f[@]}`, `$#` and
+                    # `a#b` are parameter expansions or mid-word text whose
+                    # quotes bash tracks fully; guessing a comment there turned
+                    # quote tracking off for the rest of the line and made a
+                    # later single-quoted region look blankable. This
+                    # approximates _scan_events(bash_words=True), which also
+                    # models the substitution stack; a false "not a comment"
+                    # only leaves quote tracking ON (the over-block direction
+                    # for the blanking consumer).
+                    prev = text[i - 1] if i else ""
+                    if not prev or prev in " \t\f\v;&|()\n":
+                        nl = text.find("\n", i + 1)
+                        comment_end = end_of_text if nl == -1 else nl
                     i += 1
                     continue
                 if ch == "'":
