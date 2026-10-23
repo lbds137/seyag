@@ -805,6 +805,23 @@ k_cmd=$(head -n 1 "$cr_cache")
 out_origin=$(strip <<< "$(fleet "$h/credit/grants.json" ANTHROPIC_ADMIN_API_KEY=fixture-admin-key SYG_CREDIT_ADMIN_URL=http://127.0.0.1:1)")
 grep -qF 'platform.claude.com $187.50 est' <<< "$out_origin" \
     && ok "balance cache: another SYG_CREDIT_ADMIN_URL keeps a separate entry" || bad "balance cache origin separation: '$out_origin'"
+# 48b3. A FAILING SYG_CREDIT_ADMIN_KEY_CMD: the render shows the ledger estimate (never
+#       the cached provider figure), and the entry it caches under its cmd key is the
+#       estimate JSON, so the next same-key render inside 60 s serves the estimate; a
+#       succeeding command after it (the ledger touched for a fresh key) is provider-exact again.
+printf '#!/bin/bash\nexit 1\n' > "$h/cr/key-fail.sh"
+chmod +x "$h/cr/key-fail.sh"
+out_fail=$(strip <<< "$(fleet "$h/credit/grants.json" SYG_CREDIT_ADMIN_KEY_CMD="$h/cr/key-fail.sh" SYG_CREDIT_ADMIN_URL="$CR" SYG_CREDIT_SETTLE_DAYS=1)")
+j_fail=$(sed -n 2p "$cr_cache")
+out_fail2=$(strip <<< "$(fleet "$h/credit/grants.json" SYG_CREDIT_ADMIN_KEY_CMD="$h/cr/key-fail.sh" SYG_CREDIT_ADMIN_URL="$CR" SYG_CREDIT_SETTLE_DAYS=1)")
+touch -d '+2 seconds' "$h/credit/fleet.jsonl"
+out_ok=$(strip <<< "$(fleet "$h/credit/grants.json" SYG_CREDIT_ADMIN_KEY_CMD="$h/cr/key-cmd.sh" SYG_CREDIT_ADMIN_URL="$CR" SYG_CREDIT_SETTLE_DAYS=0)")
+grep -qF 'platform.claude.com $187.50 est' <<< "$out_fail" && ! grep -qF '$190.71' <<< "$out_fail" \
+    && jq -e '.source=="ledger" and .estimate==true' > /dev/null <<< "$j_fail" \
+    && grep -qF 'platform.claude.com $187.50 est' <<< "$out_fail2" && ! grep -qF '$190.71' <<< "$out_fail2" \
+    && grep -qF 'platform.claude.com $190.71 · ' <<< "$out_ok" && ! grep -qF ' est' <<< "$out_ok" \
+    && ok "balance cache: a failing SYG_CREDIT_ADMIN_KEY_CMD renders the ledger estimate ('\$187.50 est'), caches the estimate JSON, and a succeeding command after it is provider-exact again" \
+    || bad "balance cache cmd failure: '$out_fail' / $j_fail / '$out_fail2' / '$out_ok'"
 # 48c. API-key lane, keyed: 200 - (9.29 provider + 1.00 bridged from 10-08) -> green
 # '$189.71 (exp 10-21, 13d)', no est, no px.
 raw=$(cr_render px-ok 2026-10-08T00:00:00Z "$h/credit/grants.json" "${px_key[@]}" <<< 1.00)
