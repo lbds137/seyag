@@ -398,23 +398,38 @@ run 2 "prefilter positive control: git commit runs python" "$PUB" "${T[@]}" PATH
 spawn_check spawned "git commit spawned python (the shim sees spawns)"
 
 # =============================================================================
-# The added layer: with git-hooks/pre-push in force, every item stays (base)
+# The added layer: with git-hooks/pre-push in force and owning the terms, the
+# commit text is handed over; every other item stays
 # =============================================================================
 # "In force" = the scratch global config's core.hooksPath is the plugin's
 # git-hooks dir (lib/prepush_state.py); the repos above are marked public.
+# The hand-over also needs the pre-push's own terms source (the global
+# seyag.privateTermsFile, so a terminal push is checked with these terms);
+# ACTIVEN drops only that, for the twin row.
 HOOKS_DIR=$(cd "$SCRIPT_DIR/../git-hooks" && pwd)
 ACTIVE="$TMP/gactive"
-printf '[core]\n\thooksPath = %s\n' "$HOOKS_DIR" >"$ACTIVE"
+printf '[core]\n\thooksPath = %s\n[seyag]\n\tprivateTermsFile = %s\n' "$HOOKS_DIR" "$TERMS" >"$ACTIVE"
+ACTIVEN="$TMP/gactive-noterms"
+printf '[core]\n\thooksPath = %s\n' "$HOOKS_DIR" >"$ACTIVEN"
 AC=(GIT_CONFIG_GLOBAL="$ACTIVE")
+ANC=(GIT_CONFIG_GLOBAL="$ACTIVEN")
 HUSKY="$TMP/husky"; mkrepo "$HUSKY" true
 git -C "$HUSKY" config core.hooksPath .husky/_
-run 2 "pre-push in force: git commit -m text item stays" "$PUB" "${T[@]}" "${AC[@]}" -- \
+run 0 "hand-over: pre-push in force, git commit -m text is the hook's" "$PUB" "${T[@]}" "${AC[@]}" -- \
   "git commit -m 'add zorbleflux'"
-assert_out "in force: the commit text matched" present "matched in: the command text"
-run 2 "pre-push in force: git tag -a -m text item stays" "$PUB" "${T[@]}" "${AC[@]}" -- \
+run 0 "hand-over: git tag -a -m text is the hook's" "$PUB" "${T[@]}" "${AC[@]}" -- \
   "git tag -a v9 -m 'zorbleflux'"
-run 2 "pre-push in force: git notes add -m text item stays" "$PUB" "${T[@]}" "${AC[@]}" -- \
+run 0 "hand-over: git notes add -m text is the hook's" "$PUB" "${T[@]}" "${AC[@]}" -- \
   "git notes add -m 'zorbleflux'"
+# No global seyag.privateTermsFile: a terminal push would run the pre-push
+# with no terms, so the guard keeps the commit text.
+run 2 "hand-over twin: no terms path recorded, the commit text stays" "$PUB" "${T[@]}" "${ANC[@]}" -- \
+  "git commit -m 'add zorbleflux'"
+assert_out "no hand-over: the commit text matched" present "matched in: the command text"
+# A clean push in the same command is covered by the pre-push at push time,
+# so the text is handed over all the same.
+run 0 "hand-over: a clean push in the same command" "$PUB" "${T[@]}" "${AC[@]}" -- \
+  "git commit -m 'add zorbleflux' && git push origin main"
 run 2 "pre-push active: a body file still blocks" "$PUB" "${T[@]}" "${AC[@]}" -- \
   "git commit -F $TMP/files/body.txt"
 run 2 "pre-push active: staged lines still block" "$STG" "${T[@]}" "${AC[@]}" -- \
@@ -640,6 +655,38 @@ run 2 "gh write (14): unknown flag before verb (gh pr --body view create) fails 
   "gh pr --body view create --title zorbleflux"
 run 2 "gh write (15): long-option value -XGET (gh api --jq -XGET -f) is not a method flag" "$PUB" "${T[@]}" -- \
   "gh api repos/x/y --jq -XGET -f title=zorbleflux"
+
+# =============================================================================
+# Read-only gh under the closed-text rule: the skip needs a clean command
+# =============================================================================
+run 0 "closed-text: gh pr list" "$PUB" "${T[@]}" -- "gh pr list # zorbleflux"
+run 0 "closed-text: gh pr view 1 --json state" "$PUB" "${T[@]}" -- \
+  "gh pr view 1 --json state # zorbleflux"
+run 0 "closed-text: gh repo view" "$PUB" "${T[@]}" -- "gh repo view # zorbleflux"
+run 0 "closed-text: an allowlisted local filter in the pipe" "$PUB" "${T[@]}" -- \
+  "gh issue list | head -5 # zorbleflux"
+run 0 "closed-text: a filter with its own flags after the read verb" "$PUB" "${T[@]}" -- \
+  "gh pr list --state merged | tail -3 # zorbleflux"
+run 2 "closed-text: a write verb still scans (gh pr edit)" "$PUB" "${T[@]}" -- \
+  "gh pr edit 1 --title zorbleflux"
+run 2 "closed-text: a write verb still scans (gh release create)" "$PUB" "${T[@]}" -- \
+  "gh release create v1 --notes zorbleflux"
+run 2 "closed-text: a gh api write method still scans" "$PUB" "${T[@]}" -- \
+  "gh api -X POST repos/x/y # zorbleflux"
+run 2 "closed-text: --web keeps the text" "$PUB" "${T[@]}" -- \
+  "gh pr list --web # zorbleflux"
+run 2 "closed-text: --hostname keeps the text" "$PUB" "${T[@]}" -- \
+  "gh pr list --hostname x # zorbleflux"
+run 2 "closed-text: -H keeps the text" "$PUB" "${T[@]}" -- \
+  "gh -H x pr list # zorbleflux"
+run 2 "closed-text: -H as a gh api header flag keeps the text too (fail closed)" "$PUB" "${T[@]}" -- \
+  "gh api -H 'Accept: application/json' repos/o/r # zorbleflux"
+run 2 "closed-text: a prefix assignment keeps the text" "$PUB" "${T[@]}" -- \
+  "FOO=1 gh pr list # zorbleflux"
+run 2 "closed-text: a swallowed second gh command keeps the text" "$PUB" "${T[@]}" -- \
+  "gh pr list; gh pr edit 1 --title zorbleflux"
+run 2 "closed-text: a push in the compound still scans what it sends" "$PMSG" "${T[@]}" -- \
+  "gh pr list && git push origin main"
 
 if [ "$FAILURES" -ne 0 ]; then
   printf '\n%d probe case(s) FAILED\n' "$FAILURES"

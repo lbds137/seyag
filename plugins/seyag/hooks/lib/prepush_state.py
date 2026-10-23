@@ -30,6 +30,11 @@ in force) and bin/seyag-git-hooks status.
 
 Any git failure reads as "not set", so a doubt never reads as enforcing.
 
+`text_owner_judge(event_cwd, terms_file)`: enforcing AND the global
+`seyag.privateTermsFile` names that terms file, so the pre-push checks
+pushes of that repo with the same terms wherever they come from — the
+condition under which private-term-guard hands its commit-text item over.
+
 No top-level side effects: importing this module runs nothing.
 """
 
@@ -177,6 +182,39 @@ def enforcing_judge(event_cwd):
         return verdicts[d]
 
     return in_force
+
+
+_global_terms = []
+
+
+def _global_terms_is(terms_file):
+    """True when the GLOBAL `seyag.privateTermsFile` — besides its env, the
+    pre-push's only terms source, and the only one that covers a push from a
+    terminal — names `terms_file` (realpaths equal). Cached per process."""
+    if not _global_terms:
+        want = os.path.realpath(terms_file) if terms_file else ""
+        got = _git("/", "config", "--global", "--type=path", "--get",
+                   "seyag.privateTermsFile") or ""
+        _global_terms.append(bool(want and got)
+                             and os.path.realpath(got) == want)
+    return _global_terms[0]
+
+
+def text_owner_judge(event_cwd, terms_file):
+    """A cached `owns(d)` for private-term-guard's commit-text hand-over:
+    the pre-push ENFORCES for `d` (`enforcing_judge`) and resolves the SAME
+    terms the guard read (`_global_terms_is`), so every push of `d`'s commits
+    — from a terminal too — is checked with these terms. Only then does the
+    guard let the pre-push own the text of a `git commit|tag|notes` there."""
+    verdicts = {}
+    in_force = enforcing_judge(event_cwd)
+
+    def owns(d):
+        if d not in verdicts:
+            verdicts[d] = in_force(d) and _global_terms_is(terms_file)
+        return verdicts[d]
+
+    return owns
 
 
 _global = []
