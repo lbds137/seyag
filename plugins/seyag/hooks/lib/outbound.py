@@ -1,11 +1,12 @@
 """What text a Bash command would send off the machine: the one walker behind
 session-url-gate.sh and private-term-guard.sh.
 
-`outbound_items(cmd, cwd, bypass_assignment, dir_filter=None)` returns
-`Item(label, text, directory, kind, sha)` records; each hook matches its own
-pattern over `text`. `label` names the source and can hold user text (a
-commit subject, a path); `kind` (`text`, `file`, `staged`, `commit-message`,
-`commit-diff`) and `sha` name it without user text. `directory` is the
+`outbound_items(cmd, cwd, bypass_assignment, dir_filter=None,
+commit_text_owner=None)` returns `Item(label, text, directory, kind, sha)`
+records; each hook matches its own pattern over `text`. `label` names the
+source and can hold user text (a commit subject, a path); `kind` (`text`,
+`file`, `staged`, `commit-message`, `commit-diff`) and `sha` name it without
+user text. `directory` is the
 directory the command producing the item runs in (the event cwd moved by
 `cd`/`pushd` words and git's `-C`, `~` expanded), for a hook that judges the
 target repo. `cd`/`pushd` are followed with redirection words dropped and
@@ -33,10 +34,17 @@ ITEMS, for every unbypassed command:
   - ("the command text", cmd): the WHOLE text, over-arm on purpose (it covers
     `-m`, heredoc and here-string bodies, `--body`, `--title`, `gh api -f
     body=…`), once per distinct directory, when a `git commit|tag|notes`
-    (global options before the subcommand skipped) or any non-read `gh`
-    command (read-only `gh` commands — the read verbs of `pr`/`issue`/`run`/
-    `repo`/`release`/`gist` in `GH_READ_SUBCOMMANDS`, `gh api` with a GET
-    method, and bare/help-only `gh` — are skipped) is present.
+    (global options before the subcommand skipped) or any non-exempt `gh`
+    command is present. A read-only `gh` command (`gh_text_exempt`: the read
+    verbs of `pr`/`issue`/`run`/`repo`/`release`/`gist` in
+    `GH_READ_SUBCOMMANDS`, `gh api` with a GET method, and bare/help-only
+    `gh`) is skipped only under the closed-text rule — no `VAR=` assignment
+    in its prefix and no `--web`/`--hostname`/`-H` flag; anything else keeps
+    the text. A `git commit|tag|notes` command whose directory
+    `commit_text_owner(d)` accepts adds no item either: private-term-guard
+    passes lib/prepush_state.py's `text_owner_judge` there, handing the
+    commit text to the enforcing pre-push (None, the default, keeps the item,
+    as session-url-gate does).
   - ("file <f>", contents): a body read from a file: `git commit|tag|notes
     -F <f>` / `--file <f>` / `--file=<f>` (also inside a short cluster such as
     `-aF f`); for `gh`: `--body-file <f>`, `--notes-file <f>`, `-F <f>` (not
@@ -303,6 +311,30 @@ def gh_is_read(argv):
     if methods:
         return all(m.upper() == "GET" for m in methods)
     return not has_field
+
+
+# The closed-text rule's forbidden gh flags: `--web`, `--hostname` (its value
+# either way) and `-H` (alone or inside a short cluster; on `gh api` the same
+# spelling is --header — still not exempt, fail closed) can aim the command
+# outside the read the verb promises.
+_GH_TEXT_EXEMPT_FLAGS = ("--web", "--hostname")
+_ASSIGN_WORD = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
+
+
+def gh_text_exempt(argv, prefix):
+    """True when a `gh` command's text is not scanned: a read command
+    (`gh_is_read`) whose prefix carries no `VAR=` assignment (an assignment
+    can change what gh runs or reads) and whose words carry none of the
+    closed-text flags. Fail closed: any other shape keeps the whole text.
+    `gh api` GET calls without a forbidden flag stay exempt as before."""
+    if any(_ASSIGN_WORD.match(w) for w in prefix):
+        return False
+    for w in argv[1:]:
+        if any(w == f or w.startswith(f + "=") for f in _GH_TEXT_EXEMPT_FLAGS):
+            return False
+        if w.startswith("-") and not w.startswith("--") and len(w) > 1 and "H" in w:
+            return False
+    return gh_is_read(argv)
 
 
 def file_values_gh(argv):
@@ -827,7 +859,8 @@ def _cd_move(prog, argv, directory, oldpwd):
     return directory, directory  # unfollowed: it left the believed dir
 
 
-def outbound_items(cmd, cwd, bypass_assignment, dir_filter=None):
+def outbound_items(cmd, cwd, bypass_assignment, dir_filter=None,
+                   commit_text_owner=None):
     items = []
     text_dirs = set()
     adds = []
@@ -868,7 +901,7 @@ def outbound_items(cmd, cwd, bypass_assignment, dir_filter=None):
                 if bypassed:
                     continue
                 if wanted(directory):
-                    if not gh_is_read(argv):
+                    if not gh_text_exempt(argv, prefix):
                         command_text(directory)
                     files(file_values_gh(argv), directory)
                 push_dir = repo_create_push_dir(argv, directory)
@@ -889,7 +922,8 @@ def outbound_items(cmd, cwd, bypass_assignment, dir_filter=None):
             if bypassed or not wanted(gdir):
                 continue
             if sub in FILE_SUBCOMMANDS:
-                command_text(gdir)
+                if commit_text_owner is None or not commit_text_owner(gdir):
+                    command_text(gdir)
                 files(file_values_git(args), gdir)
                 if sub == "commit":
                     for path, line in commit_diff.commit_lines(

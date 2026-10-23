@@ -46,7 +46,17 @@
 # added lines of the commit being made and of pushed commits, in every file.
 # Read-only gh commands (the read verbs of pr/issue/run/repo/release/gist in
 # GH_READ_SUBCOMMANDS, gh api with a GET method) do not publish, so their
-# command text is not scanned.
+# command text is not scanned — under the closed-text rule only: no `VAR=`
+# assignment in the command's own prefix, and no `--web`, `--hostname` or
+# `-H` flag; any other shape keeps the whole text scanned. A `git
+# commit|tag|notes` command also adds no command-text item where the pre-push
+# is in force AND the global seyag.privateTermsFile names this hook's terms
+# file (lib/prepush_state.py's `text_owner_judge`: a push from a terminal is
+# checked with the same terms), so the pre-push owns that text at push time —
+# except while the command text holds a pre-push bypass token the owner's
+# bypass could waive (a SYG_ALLOW_PRIVATE_TERM=1 push --no-verify beside the
+# commit): there the text stays with this hook. Body files, staged lines,
+# pushes and bypass blocks are never handed over.
 #
 # PRE-PUSH BYPASSES: where the pre-push is in force (a public repo with the
 # seyag hooks dir as its effective core.hooksPath and no alias that skips
@@ -153,7 +163,8 @@ import sys
 # An import failure exits non-zero, which the caller treats as allow (fail-open).
 sys.path.insert(0, os.environ["HOOK_LIB"])
 from outbound import bypass_block_message, outbound_items, prepush_bypasses
-from prepush_state import enforcing_judge, global_install_present, public_judge
+from prepush_state import (enforcing_judge, global_install_present, public_judge,
+                           text_owner_judge)
 from private_terms import compile_terms, context_line, masked, read_terms, spans
 
 cmd = os.fsdecode(open(3, "rb").read()).removesuffix("\n")
@@ -174,16 +185,27 @@ if not terms:
 # The repo flag of a directory; one outside any git work tree is judged by the
 # event cwd's repo (fail closed on a tracking miss).
 is_public = public_judge(payload_cwd)
+in_force = enforcing_judge(payload_cwd)
 
 # The ways past the pre-push block only where that hook is in force.
 bypass_tokens = prepush_bypasses(cmd, payload_cwd, BYPASS,
-                                 dir_filter=enforcing_judge(payload_cwd),
+                                 dir_filter=in_force,
                                  global_filter=global_install_present)
 if bypass_tokens:
     print(bypass_block_message(bypass_tokens, BYPASS))
     sys.exit(0)
 
-items = outbound_items(cmd, payload_cwd, BYPASS, dir_filter=is_public)
+# Same-text push shapes (the prepush review's MUST-FIX 1): a bypass token in
+# the text that the owner's bypass waives (SYG_ALLOW_PRIVATE_TERM=1 git push
+# --no-verify beside the commit) leaves what the push sends uncovered, so the
+# commit text stays with this hook: no hand-over while any token would count.
+owner = None if prepush_bypasses(cmd, payload_cwd, None,
+                                 dir_filter=in_force,
+                                 global_filter=global_install_present) \
+    else text_owner_judge(payload_cwd, terms_file)
+
+items = outbound_items(cmd, payload_cwd, BYPASS, dir_filter=is_public,
+                       commit_text_owner=owner)
 if not items:
     sys.exit(0)
 
