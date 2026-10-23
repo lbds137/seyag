@@ -527,6 +527,17 @@ run 2 "quoted-paren overrun span does not blank the outer pipe" \
 # (the span interior holds an unbalanced quote) is what keeps the pipe visible.
 run 2 "mid-word # before a quote does not blank the real pipe" \
   $'git commit -m a#b\'use $(\' 2>&1 | tail -5 # )'
+# A substitution interior is a pipeline bash runs; blanking hid it from the
+# stage split. The interior scan must block each form, including the quoted
+# one, which the quote strip erased before the interior scan existed.
+run 2 "unquoted \$(…) interior holds a push piped to tail" \
+  $'x=$(git push 2>&1 | tail -5); echo "$x"'
+run 2 "backtick interior holds a push piped to tail" \
+  $'out=`git push 2>&1 | tail -5`'
+run 2 "gh-rule interior: checks piped to a truncator" \
+  $'out=$(gh pr checks 5 | tail -3)'
+run 2 "quoted interior holds a push piped to tail (gap closed from main)" \
+  $'echo "$(git push 2>&1 | tail -5)"'
 
 # Rejoin regression bound: N=64000 unterminated `cat <<A` lines + `git push | tail`
 # stays linear (~1.5 s; quadratic slicing ran ~10 s; assert < 5 s). (The driver's
