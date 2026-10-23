@@ -23,11 +23,27 @@
 # bounds the miss, and a pick-shaped regex was rejected as brittle.
 #
 # Enforcement geometry mirrors the sibling Stop hooks: a deterministic scan of
-# the current turn in a bounded transcript tail, blocking at most once via the
-# native `stop_hook_active` flag. Every external doubt — no jq, no python3,
-# missing or unreadable transcript, no genuine user turn boundary in the tail,
-# or a broken regex in SYG_HANDOFF_PATHS / SYG_HANDOFF_CMDS — exits 0
-# (fail-open).
+# the current turn in a bounded transcript tail, blocking at most once per
+# turn-end via the native `stop_hook_active` flag and at most once per handoff
+# write via the fire-once memory below. Every external doubt — no jq, no
+# python3, missing or unreadable transcript, no genuine user turn boundary in
+# the tail, or a broken regex in SYG_HANDOFF_PATHS / SYG_HANDOFF_CMDS — exits
+# 0 (fail-open).
+#
+# Fire-once memory: the first reaction to a handoff write is the last.
+# Cron/scheduled prompts and stop-hook feedback arrive as isMeta user entries
+# and never bound a turn, so poll turn-ends share the last owner turn's
+# window; without memory, one write re-arms the gate at every poll stop until
+# a closing happens to name a pick. The state file
+# ${XDG_STATE_HOME:-~/.local/state}/seyag/handoff-pick-check/<transcript
+# basename>.offset holds the byte offset (decimal) of the START of the newest
+# matching write record the gate has accounted for — advanced on a fire AND on
+# a pick-accompanied pass (a picked write must not re-arm absorbed poll turns
+# either). A later evaluation blocks only when a matching write starts PAST
+# the stored offset; transcripts append only within a session, so a start
+# offset identifies a write. Unreadable, corrupt or unwritable state (the
+# directory included) fails open: the gate degrades to firing on every
+# evaluation of an unaccounted write, as it did before.
 #
 # Pinned by handoff-pick-check.probe.sh.
 #
@@ -77,10 +93,22 @@ try:
         data = f.read()
 except OSError:
     print("ok"); sys.exit()
-truncated = size > TAIL_BYTES
-lines = data.decode("utf-8", "replace").splitlines()
+base = size - len(data)  # file offset of the tail's first byte
+truncated = base > 0
+# Split the raw bytes, not the decoded text, so every record keeps its exact
+# byte offset in the file (a UTF-8 continuation byte is never 0x0A, so the
+# newline split is byte-safe) — the fire-once memory identifies a write by
+# where its record starts.
+raw_lines = data.split(b"\n")
+offsets = []
+pos = base
+for ln in raw_lines:
+    offsets.append(pos)
+    pos += len(ln) + 1
+lines = [ln.decode("utf-8", "replace") for ln in raw_lines]
 if truncated and lines:
     lines = lines[1:]  # the first line is cut mid-record
+    offsets = offsets[1:]
 
 
 # A user turn carrying real text, not a tool_result envelope — that bounds the
@@ -97,18 +125,18 @@ def is_genuine_user(entry):
 
 
 records = []
-for ln in lines:
+for off, ln in zip(offsets, lines):
     ln = ln.strip()
     if not ln:
         continue
     try:
-        records.append(json.loads(ln))
+        records.append((off, json.loads(ln)))
     except json.JSONDecodeError:
         continue
 
 turn_start = None
 for i in range(len(records) - 1, -1, -1):
-    if is_genuine_user(records[i]):
+    if is_genuine_user(records[i][1]):
         turn_start = i
         break
 
@@ -133,18 +161,42 @@ def is_handoff_write(block):
     return False
 
 
-wrote_handoff = any(
-    is_handoff_write(block)
-    for entry in turn
-    if entry.get("type") == "assistant"
-    for block in (entry.get("message", {}).get("content", []) or [])
-)
+# The newest matching write in the window (records are in file order, so the
+# last match wins); its record-start byte offset is the write's identity.
+newest_write_off = None
+for off, entry in turn:
+    if entry.get("type") != "assistant":
+        continue
+    for block in entry.get("message", {}).get("content", []) or []:
+        if is_handoff_write(block):
+            newest_write_off = off
 
-if not wrote_handoff:
+if newest_write_off is None:
     print("ok"); sys.exit()
 
+state_home = os.environ.get("XDG_STATE_HOME") or "~/.local/state"
+state_dir = os.path.join(os.path.expanduser(state_home), "seyag", "handoff-pick-check")
+state_file = os.path.join(state_dir, os.path.basename(path) + ".offset")
+
+stored = None
+try:
+    with open(state_file) as f:
+        stored = int(f.read().strip())
+except (OSError, ValueError):
+    stored = None
+
+if stored is not None and newest_write_off <= stored:
+    print("ok"); sys.exit()  # this write already fired (or was picked for)
+
+try:
+    os.makedirs(state_dir, exist_ok=True)
+    with open(state_file, "w") as f:
+        f.write(str(newest_write_off))
+except OSError:
+    pass  # fail-open: no memory → every turn-end re-fires, as before
+
 final_text = ""
-for entry in turn:
+for _, entry in turn:
     if entry.get("type") != "assistant":
         continue
     for block in entry.get("message", {}).get("content", []) or []:
