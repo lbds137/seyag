@@ -203,4 +203,30 @@ BIG=$(printf '%*s' 214000 '' | tr ' ' x)
 run 0 "33: a heredoc past 128 KiB is still stripped" "Bash" \
   "cat > notes.md <<'EOF'"$'\n'"$BIG"$'\ngrep -rn "\\$extends" src\nEOF'
 
+# --- case 34: an assignment whose span value holds a heredoc → the grep ----
+# after the emptied span still blocks. The stripper keeps the opener line and
+# empties the body inside the span, so the line the grep leads begins with
+# the span's CLOSING backtick; bash runs the grep at command position right
+# after the assignment, and check (a) steps over that backtick.
+CMD34=$(cat <<'CMDEOF'
+x=`cat <<EOF
+it's
+EOF
+` grep -rn "\$extends" src
+CMDEOF
+)
+run 2 "34: grep behind an emptied assignment-span line blocks" "Bash" "$CMD34"
+
+# --- case 35: the same shape with a plain double-quoted pattern → passes ---
+# The control half of 34: command position alone never blocks, only the
+# failing pattern shape does.
+CMD35=$(cat <<'CMDEOF'
+x=`cat <<EOF
+it's
+EOF
+` grep -rn "foo" src
+CMDEOF
+)
+run 0 "35: same shape, plain pattern passes" "Bash" "$CMD35"
+
 exit $FAILURES

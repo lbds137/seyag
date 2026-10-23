@@ -353,8 +353,8 @@ long_flags=$(python3 -c "print(' '.join(f'--flag{i} val{i}' for i in range(60)))
 # this case exists to report. `timeout` converts the hang into exit 124.
 #
 # GIT_TARGET and GH_READ_TARGET compile separately, so each gets its own call.
-bounded_run() { # <label> <command>
-  local label="$1" cmd="$2" start elapsed_ms rc
+bounded_run() { # <label> <command> [want-rc, default 0]
+  local label="$1" cmd="$2" want="${3:-0}" start elapsed_ms rc
   start=$(date +%s%N)
   jq -n --arg c "$cmd" '{tool_name:"Bash",tool_input:{command:$c}}' \
     | timeout 5 "$HOOK" >/dev/null 2>&1
@@ -363,8 +363,8 @@ bounded_run() { # <label> <command>
   if [ "$rc" -eq 124 ]; then
     printf 'FAIL  (timed out at 5s)  %s is backtracking\n' "$label"
     FAILURES=$((FAILURES + 1))
-  elif [ "$rc" -ne 0 ]; then
-    printf 'FAIL  (exit %d, expected 0)  %s\n' "$rc" "$label"
+  elif [ "$rc" -ne "$want" ]; then
+    printf 'FAIL  (exit %d, expected %d)  %s\n' "$rc" "$want" "$label"
     FAILURES=$((FAILURES + 1))
   elif [ "$elapsed_ms" -ge 2000 ]; then
     printf 'FAIL  (%dms, expected <2000ms)  %s is backtracking\n' "$elapsed_ms" "$label"
@@ -555,9 +555,38 @@ run 2 "parameter-expansion hash does not blank the later pipe" \
 run 2 "mid-word hash with an apostrophed comment does not blank the pipe" \
   $'git commit -m a#b\'use $(\' 2>&1 | tail -5 # it\'s )'
 
+# --- Span-boundary shapes ----------------------------------------------------
+# S6: the span's `)` sat inside a $() comment bash never runs, so the span
+# ended a line early and the invented boundary separated the push from its
+# filter. The lib's span walk now skips word-start comments; the guard's
+# blanking then keeps the pipeline whole. S7: the interior scan blanks a
+# nested span before its own split, so the inner span's newline cannot invent
+# a chain boundary inside the interior either.
+run 2 "S6: early-end # span does not separate the push from its filter" \
+  $'git push $(echo # )\n) | tail -5'
+run 2 "S7: nested multi-line span inside the interior keeps one pipeline" \
+  $'x=$(git push $(echo a\necho b) | tail -5)'
+run 0 "control: a single-line span assignment pipes nothing" \
+  'x=$(git push origin main)'
+# At the depth cap the interior is scanned UNBLANKED (the textual
+# split) instead of blanked with nothing left to surface what the blanking
+# hid, so nesting deeper than the cap no longer loses the innermost pipeline.
+# The 5-level row puts the pipe INSIDE a span at the cap depth (the shape
+# the per-level blanking erased); the 4-level row pins
+# that the plain shape keeps blocking too.
+run 2 "4-level nested \$( still surfaces the pushed pipeline" \
+  'x=$(a $(b $(c $(git push | tail -5))))'
+run 2 "5-level nested \$( with the pipe inside the cap-depth span still surfaces it" \
+  'x=$(a $(b $(c $(d $(git push | tail -5)))))'
+
+# A quoted # inside the span is literal (the depth walk tracks quotes),
+# so the span terminates and the interior scan sees the push pipeline; a
+# quote-blind walk left the span unterminated and dropped it.
+run 2 "quoted # inside the span keeps the interior scan" \
+  "echo \"\$(git push 2>&1 | grep -v 'a #b' | tail -5)\""
+
 # Rejoin regression bound: N=64000 unterminated `cat <<A` lines + `git push | tail`
-# stays linear (~1.5 s; quadratic slicing ran ~10 s; assert < 5 s). (The driver's
-# N=16000 benchmark: 0.605 s pre-fix, 0.346 s fixed, best of 3.) Sent via
+# stays linear (~1.5 s; quadratic slicing ran ~10 s; assert < 5 s). Sent via
 # stdin so the ~500 KiB command never hits Linux's 128 KiB MAX_ARG_STRLEN cap.
 rejoin_64k=$(python3 -c "print('cat <<A\n' * 64000 + 'git push | tail', end='')")
 rejoin_start=$(date +%s%N)
@@ -578,6 +607,16 @@ else
   printf 'PASS  (%dms, exit 2)  rejoin on 64k <<A openers stays linear (<5000ms)\n' "$rejoin_ms"
 fi
 
+# Every queued interior is blanked again over its own full text,
+# so `$(`×N nesting made the interior queue quadratic — N=20000 did not
+# finish inside a 120 s bound. The queue is now capped at the lib's
+# MAX_WRAPPER_DEPTH: past the cap an interior is scanned UNBLANKED in one
+# linear pass instead of blanked with nothing left to surface the
+# blanking's leavings, so the deep pipeline is still SEEN and the row blocks
+# within the time bound — only the per-level re-blanking stops.
+nest_20k=$(python3 -c "print('\$('*20000 + 'git push | tail -5' + ')'*20000, end='')")
+bounded_run "20k nested \$( around a pushed pipeline" "$nest_20k" 2
+
 # --- a BARE heredoc body is prose, not a pipeline -------------------------
 # The reproducer: writing up the incident this guard exists for — a body line
 # carrying a gh read, a pipe and a truncator all together — blocked the write.
@@ -587,6 +626,11 @@ fi
 run 0 "prose quoting a gh read inside a bare heredoc" 'cat <<'"'"'TAG'"'"'
 the documented example is: gh pr checks 42 | tail -30
 TAG'
+# Markdown fences inside a heredoc body pair up as backtick spans
+# for a structural scanner. This guard strips bodies before its own blanking,
+# so it was never exposed — the row pins that; the twin rows in
+# recursive-rm/env-print pin it at the lib level.
+run 0 "fenced git push | tail inside a heredoc body is data" $'cat > notes.md <<\'EOF\'\n```sh\ngit push | tail\n```\nEOF'
 # The load-bearing complement. Without it the case above only proves the guard
 # can be made quiet, not that it still fires — a fix that simply disarmed the
 # gh rule would pass the prose case identically.

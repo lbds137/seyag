@@ -60,14 +60,12 @@
 # as `head -5` does, and is not blocked. See the TRUNCATORS comment for why
 # blocking awk is worse than the gap it would close.
 #
-# KNOWN OVER-BLOCK, same treatment: an UNQUOTED subshell carrying its own pipe
-# (`git commit -m $(echo x | head -1) | cat`) is split into three stages rather
-# than two, and the middle one begins with a filter word, so the command blocks
-# even though its real trailing stage is a harmless pass-through. Heredoc
-# bodies never reach this split in any spelling; a quoted subshell is absorbed by
-# the quote strip. This cannot cause a bypass — it fails toward blocking — and
-# is named here so the next reader who hits it recognises it rather than
-# hunting a bug.
+# Subshells and the stage split: an UNQUOTED substitution carrying its own
+# pipe (`git commit -m $(echo x | head -1) | cat`) once read as three stages,
+# the middle one led by a filter, and false-blocked; the span-interior
+# blanking before the split removed that split, and the interior scan below
+# now assesses the inner pipeline on its own. Heredoc bodies never reach this
+# split in any spelling; a quoted subshell is absorbed by the quote strip.
 #
 # BOTH RULES also scan COMMAND SUBSTITUTIONS for their target, because the quote
 # strip erases a `$(…)`/backtick span nested inside a quoted argument while
@@ -196,6 +194,7 @@ import sys
 # what catches a missing lib, not runtime.
 sys.path.insert(0, os.environ["HOOK_LIB"])
 from shell_quotes import (
+    MAX_WRAPPER_DEPTH,
     heredoc_openers,
     span_overruns_quotes,
     strip_heredoc_bodies,
@@ -281,35 +280,47 @@ if _rejoin_parts:
 
 
 # Blank terminated substitution-span interiors that sit outside single quotes
-# before `strip_quoted` + chain split (keep the `$( )`/backtick delimiters,
-# replace interiors with a character that cannot be `|`, `&`, `;`, or a
-# newline) so an inner newline or operator cannot invent a chain segment or
-# stage boundary. Spans flagged inside single quotes (extracted only on
-# `substitution_spans`'s fail-closed fallback path) or left unterminated stay
-# in place so a `'use $(' … | tail # )` shape never erases a real outer pipe.
-# The same protection covers the late-end arms of the quote-desync check: a
-# quoted `(` can end a span late (the fallback re-extracts it terminated at
-# the subshell `)`, outside single quotes), and an unbalanced interior quote
-# means bash's parse continues past it — either way the span may overrun a
-# real pipeline. The `#`/case desync arms are NOT gated on: they fire on a
-# span that ended EARLY, and an early end leaves the remainder unblanked and
-# visible to the stage scan — though the invented boundary can still separate
-# a target from its filter, which is a known §20b shape, not fixed here.
-_span_parts = []
-_span_interiors = []
-_cursor = 0
-for _start, _end, _in_single in substitution_span_offsets(cmd):
-    if _in_single or _end is None or _start < _cursor:
-        continue
-    _span_interiors.append(cmd[_start:_end])
-    if span_overruns_quotes(cmd[_start:_end]):
-        continue
-    _span_parts.append(cmd[_cursor:_start])
-    _span_parts.append("X")
-    _cursor = _end
-if _span_parts:
-    _span_parts.append(cmd[_cursor:])
-    cmd = "".join(_span_parts)
+# (keep the `$( )`/backtick delimiters, replace interiors with a character
+# that cannot be `|`, `&`, `;`, or a newline) so an inner newline or operator
+# cannot invent a chain segment or stage boundary. Spans flagged inside single
+# quotes (extracted only on `substitution_spans`'s fail-closed fallback path)
+# or left unterminated stay in place so a `'use $(' … | tail # )` shape never
+# erases a real outer pipe. The same protection covers the late-end arms of
+# the quote-desync check: a quoted `(` can end a span late (the fallback
+# re-extracts it terminated at the subshell `)`, outside single quotes), and
+# an unbalanced interior quote means bash's parse continues past it — either
+# way the span may overrun a real pipeline. The `#`/case desync arms are NOT
+# gated on: they fire on a span that ended EARLY, and an early end leaves the
+# remainder unblanked and visible to the stage scan. (A word-start `#` inside
+# a span can no longer end it early at all — the lib's span walk skips
+# comments — but a `case` pattern's `)` still can; that residual is the
+# remaining early-end class.)
+def _blank_spans(text):
+    """(text with blankable span interiors replaced by `X`, those interiors).
+
+    Interiors are returned for EVERY offset-located span outside single
+    quotes, including the ones the gates below leave unblanked (unterminated,
+    overlapping, quote-overrunning): the interior scan reads those as
+    captured, which can only over-block."""
+    parts = []
+    interiors = []
+    cursor = 0
+    for start, end, in_single in substitution_span_offsets(text):
+        if in_single or end is None or start < cursor:
+            continue
+        interiors.append(text[start:end])
+        if span_overruns_quotes(text[start:end]):
+            continue
+        parts.append(text[cursor:start])
+        parts.append("X")
+        cursor = end
+    if parts:
+        parts.append(text[cursor:])
+        return "".join(parts), interiors
+    return text, interiors
+
+
+cmd, _span_interiors = _blank_spans(cmd)
 
 # Quote stripping is a single left-to-right SCAN, not a pair of regex passes:
 # the two-pass version failed on ordinary English (an apostrophe in one
@@ -567,14 +578,44 @@ def pipeline_block(text, outer=False):
 # because the inner pipe stayed visible). Scan every captured interior with the
 # same rules BEFORE the outer verdict; this also closes the older quoted-form
 # gap (`echo "$(git push | tail)"`), which strip_quoted erased on main too.
-# Overrun-skipped interiors are scanned as captured: an over-long interior can
-# only over-block (one re-run without the pipe), never under-block. Quoted
-# text inside an interior is data, not code — strip it exactly like the outer
-# scan does, so a commit message quoting a push pipe stays prose.
-for _interior in _span_interiors:
-    _body = strip_quoted(_interior)
+# Each interior is blanked AGAIN before its scan: a span nested inside it
+# carries its own newlines and operators, and pipeline_block's textual chain
+# split would otherwise invent a boundary inside the interior exactly as it
+# once did at the top level (`x=$(git push $(echo a NEWLINE echo b) | tail -5)`).
+# The interiors the blanking removes are queued and scanned in their own
+# right — blanking `$(cat $(git push | tail -5))` down to `cat $(X)` would
+# otherwise erase the pairing it exists to catch. Overrun-skipped interiors
+# are scanned as captured: an over-long interior can only over-block (one
+# re-run without the pipe), never under-block. Quoted text inside an interior
+# is data, not code — strip it exactly like the outer scan does, so a commit
+# message quoting a push pipe stays prose.
+# The queue is DEPTH-CAPPED at the lib's MAX_WRAPPER_DEPTH: every
+# queued interior re-blanks and re-scans its own full text, so `$(`×N nesting
+# was quadratic — N=20000 did not finish inside 120 s, and a hook timeout
+# fails open. Past the cap the interior is scanned UNBLANKED instead, one
+# linear pass over the whole remaining text:
+# blanking there erased the nested spans with no queue left to surface them,
+# which made DEPTH alone decide whether the innermost pipeline is seen. Now
+# it is seen at any depth; only the per-level re-blanking stops.
+# Known residual of that unblanked pass: a nested span inside the
+# past-cap interior keeps its raw newlines, so a multi-line span there can
+# still invent a chain boundary and split a pipeline again —
+# `x=$(a $(b $(c $(d $(e $(git push $(echo a\necho b) | tail -5))))))`
+# separates the push from its tail. Exotic (needs nesting past the cap), and
+# still stronger than no nested scan at all.
+_pending = [(interior, 0) for interior in _span_interiors]
+_i = 0  # index pointer: pop(0) is O(n) per interior on span-dense inputs
+while _i < len(_pending):
+    _interior, _depth = _pending[_i]
+    _i += 1
+    if _depth < MAX_WRAPPER_DEPTH:
+        _blanked, _nested_interiors = _blank_spans(_interior)
+        _pending.extend((s, _depth + 1) for s in _nested_interiors)
+    else:
+        _blanked = _interior
+    _body = strip_quoted(_blanked)
     if _body is None:
-        _body = _interior
+        _body = _blanked
     _inner = pipeline_block(_body)
     if _inner:
         print("block:" + _inner)

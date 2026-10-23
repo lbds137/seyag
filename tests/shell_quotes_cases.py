@@ -254,9 +254,14 @@ SPAN_CASES = [
         ['case a in a', 'git commit'],
     ),
     (
+        # The `)` inside the comment never closes the span (word-start
+        # `#` comment state in the $(…) depth walk); the real close is the
+        # next line's `)`, as bash parses it. The `#` desync arm still fires —
+        # this span is extracted on the fallback pass, which is the label's
+        # subject.
         'fallback: a span carrying a #',
         'echo "$(echo x # )\n)" y\' $(git commit) \'z',
-        ['echo x # ', 'git commit'],
+        ['echo x # )\n', 'git commit'],
     ),
     ('a quoted `)` inside a span ends it early', 'echo "$(echo ")" && git commit)"', ['echo "']),
 ]
@@ -271,6 +276,12 @@ OFFSET_CASES = [
         [(7, 8, False), (15, 16, False)],
     ),
     (
+        # The $(…) depth walk tracks quotes, and the apostrophe right
+        # after the opener (the single-quoted region's closer, unknowable from
+        # inside the walk) opens a quote that never closes — so the `# see )`
+        # stays gated and the structural `)` at 46 ends the span, the
+        # quote-blind behaviour. The pin that matters — in_single=True, so no
+        # consumer ever blanks it — is unchanged either way.
         'substitution_span_offsets: flags fallback span opening inside single quotes',
         "git commit -m 'use $(' 2>&1 | tail -5   # see )",
         [(21, 46, True)],
@@ -958,8 +969,8 @@ check_all(
 )
 
 # ---------------------------------------------------------------------------
-# Round 3: backtick span boundaries, `((` lookahead, case inside "$(…)", no
-# stack cap. Each input hid `env` from a scanner that bash runs it under; the
+# Backtick span boundaries, `((` lookahead, case inside "$(…)", no stack cap.
+# Each input hid `env` from a scanner that bash runs it under; the
 # check is that `env` is a command of its own.
 # ---------------------------------------------------------------------------
 ENV_VISIBLE_CASES = [
@@ -989,6 +1000,143 @@ ENV_VISIBLE_CASES = [
 for label, inp in ENV_VISIBLE_CASES:
     got = simple_commands(inp)
     report('simple_commands: ' + label, ['env'] in got, got, "a list containing ['env']")
+
+
+# ---------------------------------------------------------------------------
+# Substitution-span boundaries. Each input let bash execute something
+# an earlier reader treated as inert; the guards' probe rows pin the
+# verdicts, these pin the lib-level structures under them.
+# ---------------------------------------------------------------------------
+check_equal(
+    'S1: a heredoc body starts after the newline ending the OUTER logical '
+    'line, not one inside an open $()',
+    strip_heredoc_bodies('cat <<A; echo $(\nenv\n)\nm2\nA'),
+    'cat <<A; echo $(\nenv\n)\n',
+)
+check_equal(
+    'S1 control: a single-line $() keeps the body where it always was',
+    strip_heredoc_bodies('cat <<A; echo $(x)\nm2\nA'),
+    'cat <<A; echo $(x)\n',
+)
+check_equal(
+    'S3: a newline inside a backtick span does not cut the pipeline pairing',
+    command_pipelines('find . -name x `: <<EOF\nx\nEOF\n` | xargs echo'),
+    [[['find', '.', '-name', 'x', '`:', '<<EOF', '`'], ['xargs', 'echo']]],
+)
+check_equal(
+    'S6: a ) inside a $() comment never ends the span',
+    substitution_spans('git push $(echo # )\n) | tail -5'),
+    ['echo # )\n'],
+)
+check_equal(
+    # A newline inside a $()-family span separates the interior's
+    # commands — bash parses the span body as its own script, so it runs two
+    # echos here, not one. The outer rows and the | tail pairing are
+    # unchanged: the `(`/`)` ops already bound the interior as its own group.
+    'S7: newlines inside nested substitution spans separate the interior commands',
+    command_pipelines('x=$(git push $(echo a\necho b) | tail -5)'),
+    [[['x=$']], [['git', 'push', '$']], [['echo', 'a']], [['echo', 'b']], [['tail', '-5']]],
+)
+
+# ---------------------------------------------------------------------------
+# A newline inside a substitution span separates the interior's commands at
+# their own depth, but never cuts an enclosing pipeline. The guards' probes
+# carry the verdict-level twins of these rows.
+# ---------------------------------------------------------------------------
+for _label, _inp, _marker in [
+    ('a newline inside $() separates the interior commands (recursive-rm shape)',
+     'out=$(cd b\nrm -rf n)', ['rm', '-rf', 'n']),
+    ("...and the env dump on the interior's second line (env-print shape)",
+     'echo $(true\nenv)', ['env']),
+    ('...the backtick twin: later interior lines surface beside the glued word',
+     'echo `true\nenv`', ['env']),
+]:
+    _got = simple_commands(_inp)
+    report('simple_commands: ' + _label, _marker in _got, _got,
+           "a list containing %r" % (_marker,))
+
+check_equal(
+    'a plain ( subshell collects the heredoc body at its own newline',
+    strip_heredoc_bodies('cat <<A; (\nA\n:\n)\necho RAN-INTERIOR\nA'),
+    'cat <<A; (\n\n:\n)\necho RAN-INTERIOR\nA',
+)
+report(
+    "...so the subshell interior's commands stay visible",
+    ['echo', 'RAN-INTERIOR'] in simple_commands('cat <<A; (\nA\n:\n)\necho RAN-INTERIOR\nA'),
+    simple_commands('cat <<A; (\nA\n:\n)\necho RAN-INTERIOR\nA'),
+    "a list containing ['echo', 'RAN-INTERIOR']",
+)
+check_equal(
+    'a case frame does not defer the heredoc body either',
+    strip_heredoc_bodies('cat <<A; case x in\nA\n*) :;; esac\necho RAN-INTERIOR\nA'),
+    'cat <<A; case x in\n\n*) :;; esac\necho RAN-INTERIOR\nA',
+)
+report(
+    '...case twin keeps the marker visible',
+    ['echo', 'RAN-INTERIOR'] in simple_commands('cat <<A; case x in\nA\n*) :;; esac\necho RAN-INTERIOR\nA'),
+    simple_commands('cat <<A; case x in\nA\n*) :;; esac\necho RAN-INTERIOR\nA'),
+    "a list containing ['echo', 'RAN-INTERIOR']",
+)
+_off = substitution_span_offsets('echo "$(git push 2>&1 | grep -v \'a #b\' | tail -5)"')
+report(
+    'a quoted # inside a $(…) span does not start a comment (span terminates)',
+    len(_off) == 1 and _off[0][1] is not None, _off,
+    'one span whose end is not None',
+)
+
+
+# The value form is the glue the S3 pin already uses for a span's interior
+# text inside an enclosing word: prefix, interior, suffix concatenated.
+check_equal(
+    'a double-quoted word keeps the text before a backtick span',
+    simple_commands('git commit -m "fix `foo` bug"'),
+    [['git', 'commit', '-m', 'fix foo bug']],
+)
+check_equal(
+    '...so a path guard sees the whole target, not the span alone',
+    simple_commands('rm -rf "build/__pycache__/`x`"'),
+    [['rm', '-rf', 'build/__pycache__/x']],
+)
+check_equal(
+    'fenced code inside a heredoc body is not commands',
+    simple_commands("cat > README.md <<'EOF'\nClean with:\n```\nrm -rf build\n```\nEOF\n"),
+    [['cat', '>', 'README.md', '<<EOF']],
+)
+report(
+    # A newline inside a nested backtick span separates the commands inside
+    # it (bash parses the span's interior as its own script); glue plus
+    # top-level-only surfacing hid the rm that bash runs.
+    'a backtick nested inside $(…) surfaces its later lines again',
+    ['rm', '-rf', 'n'] in (_nested_backtick_got := simple_commands('echo $(echo `cd b\nrm -rf n`)')),
+    _nested_backtick_got,
+    "a list containing ['rm', '-rf', 'n']",
+)
+
+# ---------------------------------------------------------------------------
+# A span inside a double-quoted word counts as executed only when it OPENS
+# the word and that word is code. A raw separator window crossed quoted
+# prose, so a newline or `;` inside a quoted `-m` body read as a command
+# boundary and the span's heredoc body surfaced as commands.
+# ---------------------------------------------------------------------------
+_quoted_m_word = 'git commit -m "Subject\n\n$(cat <<EOF\nClean with: rm -rf build\nenv | cat\nEOF\n)"'
+report(
+    'a span deep inside a quoted -m word is data (env not a command)',
+    ['env'] not in (_quoted_m_got := simple_commands(_quoted_m_word)),
+    _quoted_m_got,
+    "no ['env'] command",
+)
+report(
+    '...and a same-line separator in the quoted prose keeps it data',
+    ['rm', '-rf', 'x'] not in (_quoted_m_sep_got := simple_commands('git commit -m "WIP; $(cat <<EOF\nrm -rf x\nEOF\n)"')),
+    _quoted_m_sep_got,
+    "no ['rm', '-rf', 'x'] command",
+)
+report(
+    'a span opening its quoted word under bash -c stays code',
+    ['env'] in (_quoted_m_control_got := simple_commands('bash -c "$(cat <<EOF\ntrue\nenv\nEOF\n)"')),
+    _quoted_m_control_got,
+    "a list containing ['env']",
+)
 
 
 def _timed(fn, arg):
@@ -1024,6 +1172,9 @@ _PERF_INPUTS = [
     ("\"'\" + 'a' * 130000", "'" + 'a' * 130000),
     ("'\"' + '$(' * 10000 + 'a' * 100000", '"' + '$(' * 10000 + 'a' * 100000),
     ("'`' + 'a' * 130000", '`' + 'a' * 130000),
+    # Double-quoted words mixed with `<<`-bearing spans: the executed-span
+    # walk pairs every span with a boundary search over the dq regions.
+    ("'echo \"a\" $(cat <<E)\\nE\\n' * 6000", 'echo "a" $(cat <<E)\nE\n' * 6000),
 ]
 # The same inputs with a `<<` appended, so strip_heredoc_bodies really scans
 # them (without one it returns at once: no opener can match).
@@ -1038,6 +1189,87 @@ for label, inp in _PERF_INPUTS:
             elapsed,
             '< 1.0s',
         )
+
+# ---------------------------------------------------------------------------
+# Heredoc bodies are data to the span walk (a `#` in a body opens no comment
+# and its parens count for no depth), and the executed-span decision window
+# does not cut through earlier quoted prose. The multi-line inputs were run
+# against bash before being pinned.
+# ---------------------------------------------------------------------------
+report(
+    # bash: the backtick substitution runs `rm -rf n` on its second line.
+    # A parenthesized issue-reference in the body line used to read as a
+    # comment inside the span walk,
+    # swallow its `)`, leave the span unterminated and drop every later span.
+    'a (#N) commit body does not unterminate the span and drop later spans',
+    ['rm', '-rf', 'n'] in (_r4a := simple_commands(
+        'git commit -m "$(cat <<EOF\nFix the parser (#149)\nEOF\n)"; echo `cd b\nrm -rf n`')),
+    _r4a,
+    "a list containing ['rm', '-rf', 'n']",
+)
+report(
+    # The unbalanced-paren twin of the row above (`closes #N)` — the body's
+    # `)` has no matching `(`): still data, span still terminated at its
+    # real close. Suppressing only the comment rule, but still counting body
+    # parens, would end this span early at the body's `)` instead.
+    'a (closes #N) commit body keeps the span terminated at its real close',
+    ['rm', '-rf', 'n'] in (_r4b := simple_commands(
+        'git commit -m "$(cat <<EOF\nFix parser (closes #149)\nEOF\n)"; echo `cd b\nrm -rf n`')),
+    _r4b,
+    "a list containing ['rm', '-rf', 'n']",
+)
+report(
+    # bash: the eval'd span output with the issue-reference line is itself a
+    # syntax error
+    # (the commented `)` leaves the subshell open), so nothing runs — the
+    # surfaced `env` is the over-arm direction: interior lines of an
+    # EXECUTED span are scanned as commands regardless.
+    'an eval span over a (#1) body terminates; its interior lines surface (over-arm)',
+    ['env'] in (_r4c := simple_commands('eval $(cat <<EOF\n(#1)\nenv\nEOF\n)')),
+    _r4c,
+    "a list containing ['env']",
+)
+check_equal(
+    # bash: `echo $(cat <<A) $(\nenv\nA\n)\nx\nA` warns `unterminated
+    # here-document` and makes the `env` line the first body line of the
+    # dead frame's heredoc — the pending body is collected at the NEXT
+    # PHYSICAL NEWLINE, even one inside a `$(` opened after the opener's
+    # frame died. The depth tag reproduces that; tagging by frame identity
+    # (deferring to the outer line) would let env run and diverge from bash.
+    "a dead frame's pending heredoc body is collected at the next physical newline",
+    strip_heredoc_bodies('echo $(cat <<A) $(\nenv\nA\n)\nx\nA'),
+    'echo $(cat <<A) $(\n\n)\nx\nA',
+)
+report(
+    # The window's separator candidates are the ones outside double-quoted
+    # regions: a `;` inside `"x; "` used to cut the window mid-quote, the
+    # leftover bare quote read as an empty prefix, and this data span's body
+    # surfaced as commands (an over-block for every argv guard).
+    'a data span after a same-line separator inside quoted prose stays data',
+    ['rm', '-rf', 'x'] not in (_r4d := simple_commands('echo "x; " $(cat <<EOF\nrm -rf x\nEOF\n)')),
+    _r4d,
+    "no ['rm', '-rf', 'x'] command",
+)
+report(
+    # Same rule, pipe-flavoured: the `|` inside `"a|b"` is not a boundary.
+    'a data span after a quoted pipe character in an earlier argument stays data',
+    ['rm', '-rf', 'x'] not in (_r4e := simple_commands('grep "a|b" $(cat <<EOF\nrm -rf x\nEOF\n)')),
+    _r4e,
+    "no ['rm', '-rf', 'x'] command",
+)
+for _label, _inp in [
+    # bash runs env in all three (the sudo row was verified without the
+    # sudo; the runner unwrap is the lib's own).
+    ('a quoted eval of a heredoc span executes the body',
+     'eval "$(cat <<EOF\nenv\nEOF\n)"'),
+    ('a shell -c script behind a runner',
+     'sudo bash -c "$(cat <<EOF\nenv\nEOF\n)"'),
+    ('an assignment prefix leaves a command-position backtick span executed',
+     'A=1 `cat <<EOF\nenv\nEOF\n`'),
+]:
+    _got = simple_commands(_inp)
+    report('simple_commands: ' + _label, ['env'] in _got, _got,
+           "a list containing ['env']")
 
 print("%d passed, %d failed" % (passed, failed))
 sys.exit(1 if failed else 0)
