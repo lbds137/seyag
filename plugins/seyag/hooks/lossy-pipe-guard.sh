@@ -548,6 +548,10 @@ def pipeline_block(text, outer=False):
     (SPAN_TARGET_HITS); an interior scan must not, because a span holding
     another span is that inner subshell's own text.
     """
+    # The `|&` shorthand is normalized on the outer command before its split;
+    # interior scans need the same treatment or a `|&` stage escapes the lossy
+    # match (stage_head strips only < / > redirects).
+    text = text.replace("|&", "|")
     for segment in re.split(r"&&|\|\||;|\n", text):
         stages = segment.split("|")
         for i, stage in enumerate(stages[:-1]):
@@ -564,9 +568,14 @@ def pipeline_block(text, outer=False):
 # same rules BEFORE the outer verdict; this also closes the older quoted-form
 # gap (`echo "$(git push | tail)"`), which strip_quoted erased on main too.
 # Overrun-skipped interiors are scanned as captured: an over-long interior can
-# only over-block (one re-run without the pipe), never under-block.
+# only over-block (one re-run without the pipe), never under-block. Quoted
+# text inside an interior is data, not code — strip it exactly like the outer
+# scan does, so a commit message quoting a push pipe stays prose.
 for _interior in _span_interiors:
-    _inner = pipeline_block(_interior)
+    _body = strip_quoted(_interior)
+    if _body is None:
+        _body = _interior
+    _inner = pipeline_block(_body)
     if _inner:
         print("block:" + _inner)
         raise SystemExit

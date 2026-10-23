@@ -1099,7 +1099,7 @@ def substitution_span_offsets(text):
     """
     if _SKIP_UNSAFE_TEXT.search(text) is None:
         spans = _extract_spans(text, skip_single_quoted=True)
-        if spans is not None and not any(span_desyncs(text[s:e]) for s, e, _ in spans):
+        if spans is not None and not any(_span_desyncs(text[s:e]) for s, e, _ in spans):
             return spans
     return _extract_spans(text, skip_single_quoted=False)
 
@@ -1145,7 +1145,7 @@ def span_overruns_quotes(span):
     return False
 
 
-def span_desyncs(span):
+def _span_desyncs(span):
     """True when an extracted span may have ended at the wrong character.
 
     The span scan counts `(`/`)` and backticks structurally, so a quoted `)`
