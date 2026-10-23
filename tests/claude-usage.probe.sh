@@ -56,11 +56,12 @@ fixture() {
         limits: [{kind: "weekly_scoped", percent: $m, scope: {model: {display_name: "Fable"}}}]}' \
         > "$tmp/claude-statusline/usage.json"
 }
-# fixture_extra <5h %> <week %> <fable %> <is_enabled> <spend_limit_reached> <disabled_reason|null> [<spend.used json>]
+# fixture_extra <5h %> <week %> <fable %> <is_enabled> <spend_limit_reached|omit for an absent key> <disabled_reason|null> [<spend.used json>]
 fixture_extra() {
     fixture "$1" "$2" "$3"
     jq --argjson en "$4" --argjson lim "$5" --arg dr "${6:-null}" --argjson su "${7:-null}" \
-        '. + {extra_usage: {is_enabled: $en, spend_limit_reached: $lim, disabled_reason: (if $dr == "null" or $dr == "" then null else $dr end)}}
+        '. + {extra_usage: ({is_enabled: $en, disabled_reason: (if $dr == "null" or $dr == "" then null else $dr end)}
+             + (if $lim == "omit" then {} else {spend_limit_reached: $lim} end))}
          + (if $su == null then {} else {spend: {used: $su}} end)' \
         "$tmp/claude-statusline/usage.json" > "$tmp/claude-statusline/usage.json.tmp"
     mv "$tmp/claude-statusline/usage.json.tmp" "$tmp/claude-statusline/usage.json"
@@ -100,7 +101,7 @@ out=$(run --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
 # Paid extra usage opt-in (CLAUDE_USAGE_EXTRA_OK=1): lifts only the weekly reserve while extra_usage is enabled and under spend limit.
 fixture_extra 10 98 0 true false null
 out=$(CLAUDE_USAGE_EXTRA_OK=1 run --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
-[ $rc = 0 ] && [ -z "$out" ] && [ "$err" = "claude-usage: --ok pass lane=anthropic meter=extra-usage 5h=10%<90% week=98%>=75% source=api" ] \
+[ $rc = 0 ] && [ -z "$out" ] && [ "$err" = "claude-usage: --ok pass lane=anthropic meter=extra-usage 5h=10%<90% week=98%>=75% extra=\$0.00 used source=api" ] \
     && ok "extra-usage opted in + on at week 98%: passes with meter=extra-usage" || bad "extra-usage pass: rc=$rc out=[$out] err=[$err]"
 fixture_extra 10 98 0 false false out_of_credits
 out=$(CLAUDE_USAGE_EXTRA_OK=1 run --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
@@ -161,14 +162,14 @@ expect_opt 1 "$wk98 extra=off (disabled) source=api" "extra-usage: extra_usage a
 extra_raw 10 98 '{"is_enabled": true, "spend_limit_reached": true, "disabled_reason": "x"}'
 expect_opt 1 "$wk98 extra=off (spend_limit_reached) source=api" "extra-usage: spend_limit_reached wins over disabled_reason"
 extra_raw 10 98 '{"is_enabled": true, "spend_limit_reached": false, "disabled_reason": "x"}'
-expect_opt 0 "claude-usage: --ok pass lane=anthropic meter=extra-usage 5h=10%<90% week=98%>=75% source=api" "extra-usage: on and under the limit passes whatever disabled_reason says"
+expect_opt 0 "claude-usage: --ok pass lane=anthropic meter=extra-usage 5h=10%<90% week=98%>=75% extra=\$0.00 used source=api" "extra-usage: on and under the limit passes whatever disabled_reason says"
 extra_raw 10 98 '{"is_enabled": false, "spend_limit_reached": false, "disabled_reason": "a b\nFAKE ok"}'
 expect_opt 1 "$wk98 extra=off (a_b_FAKE_ok) source=api" "extra-usage: disabled_reason reduced to [A-Za-z0-9_.-]"
 # Boundaries: 5h exactly at the threshold stays a 5h fail; the week exactly at the reserve takes the extra pass.
 extra_raw 90 98 '{"is_enabled": true, "spend_limit_reached": false}'
 expect_opt 1 "claude-usage: --ok FAIL lane=anthropic meter=5h 5h=90%>=90% week=98%>=75% source=api" "extra-usage: 5h at the threshold still fails on 5h"
 extra_raw 10 75 '{"is_enabled": true, "spend_limit_reached": false}'
-expect_opt 0 "claude-usage: --ok pass lane=anthropic meter=extra-usage 5h=10%<90% week=75%>=75% source=api" "extra-usage: week at the reserve passes on extra usage"
+expect_opt 0 "claude-usage: --ok pass lane=anthropic meter=extra-usage 5h=10%<90% week=75%>=75% extra=\$0.00 used source=api" "extra-usage: week at the reserve passes on extra usage"
 # Only exactly 1 opts in.
 for v in 0 "" 10 true; do
     extra_raw 10 98 '{"is_enabled": true, "spend_limit_reached": false}'
@@ -180,16 +181,70 @@ extra_raw 10 98 '{"is_enabled": true, "spend_limit_reached": false}'; touch -d "
 expect_opt 1 "$wk98 extra=off (stale) source=api (cache 10m old)" "extra-usage: a cache older than two TTLs fails closed"
 # Within two TTLs it still passes, with the age disclosed: 3m old with CLAUDE_USAGE_TTL=120 (> 1 TTL, < 2).
 extra_raw 10 98 '{"is_enabled": true, "spend_limit_reached": false}'; touch -d "@$(($(date +%s) - 180))" "$tmp/claude-statusline/usage.json"
-expect_opt 0 "claude-usage: --ok pass lane=anthropic meter=extra-usage 5h=10%<90% week=98%>=75% source=api (cache 3m old)" "extra-usage: a cache within two TTLs passes and discloses its age"
+expect_opt 0 "claude-usage: --ok pass lane=anthropic meter=extra-usage 5h=10%<90% week=98%>=75% extra=\$0.00 used source=api (cache 3m old)" "extra-usage: a cache within two TTLs passes and discloses its age"
 # A long TTL doesn't stretch it: with CLAUDE_USAGE_TTL=3600 the ceiling is 10 minutes (11m fails, 9m passes).
 extra_raw 10 98 '{"is_enabled": true, "spend_limit_reached": false}'; touch -d "@$(($(date +%s) - 660))" "$tmp/claude-statusline/usage.json"
 expect_opt 1 "$wk98 extra=off (stale) source=api" "extra-usage: TTL 3600, an 11m cache fails closed (10-minute ceiling)" CLAUDE_USAGE_TTL=3600
 extra_raw 10 98 '{"is_enabled": true, "spend_limit_reached": false}'; touch -d "@$(($(date +%s) - 540))" "$tmp/claude-statusline/usage.json"
-expect_opt 0 "claude-usage: --ok pass lane=anthropic meter=extra-usage 5h=10%<90% week=98%>=75% source=api" "extra-usage: TTL 3600, a 9m cache passes" CLAUDE_USAGE_TTL=3600
+expect_opt 0 "claude-usage: --ok pass lane=anthropic meter=extra-usage 5h=10%<90% week=98%>=75% extra=\$0.00 used source=api" "extra-usage: TTL 3600, a 9m cache passes" CLAUDE_USAGE_TTL=3600
 # --wait inherits the opt-in: at week 98% with extra usage on it returns at once.
 extra_raw 10 98 '{"is_enabled": true, "spend_limit_reached": false}'
 out=$(timeout 5 env CLAUDE_USAGE_EXTRA_OK=1 HOME="$tmp" XDG_CACHE_HOME="$tmp" CLAUDE_USAGE_MODEL=claude-opus-5-5 "$CU" --wait 2>/dev/null); rc=$?
 [ $rc = 0 ] && grep -q "week 98%" <<< "$out" && ok "extra-usage: --wait returns at once when opted in" || bad "extra-usage --wait: rc=$rc out=[$out]"
+
+# The balance suffix (SYG_EXTRA_USAGE_BUDGET_USD, invalid = unset): an extra-usage --ok
+# pass gains ` extra=…` after week=, and the plain line gains ` · extra …` after the plan
+# windows — "$X.XX over $B.BB" past a budget, "$X.XX left of $B.BB" under it, "$X.XX
+# used" without one; a missing spend counts as $0.00. FAIL lines and non-extra pass
+# lines are pinned byte-identical above.
+fixture_extra 10 98 0 true false null '{"currency":"USD","amount_minor":1234,"exponent":2}'
+expect_opt 0 "claude-usage: --ok pass lane=anthropic meter=extra-usage 5h=10%<90% week=98%>=75% extra=\$87.66 left of \$100.00 source=api" \
+    "extra-usage pass with a \$100 budget: gains 'extra=\$87.66 left of \$100.00'" SYG_EXTRA_USAGE_BUDGET_USD=100
+expect_opt 0 "claude-usage: --ok pass lane=anthropic meter=extra-usage 5h=10%<90% week=98%>=75% extra=\$12.34 used source=api" \
+    "extra-usage pass without a budget: gains 'extra=\$12.34 used'"
+fixture_extra 10 98 0 true false null '{"currency":"USD","amount_minor":6000,"exponent":2}'
+expect_opt 0 "claude-usage: --ok pass lane=anthropic meter=extra-usage 5h=10%<90% week=98%>=75% extra=\$60.00 over \$50.00 source=api" \
+    "extra-usage pass over budget: gains 'extra=\$60.00 over \$50.00'" SYG_EXTRA_USAGE_BUDGET_USD=50
+fixture_extra 10 98 0 true false null '{"currency":"USD","amount_minor":1234,"exponent":2}'
+expect_opt 0 "claude-usage: --ok pass lane=anthropic meter=extra-usage 5h=10%<90% week=98%>=75% extra=\$12.34 over \$0.00 source=api" \
+    "extra-usage pass with budget 0: gains 'extra=\$12.34 over \$0.00'" SYG_EXTRA_USAGE_BUDGET_USD=0
+fixture_extra 10 99 0 true false null '{"currency":"USD","amount_minor":1234,"exponent":2}'
+out=$(SYG_EXTRA_USAGE_BUDGET_USD=100 run)
+[[ $out == *' · extra $87.66 left of $100.00' ]] \
+    && ok "plain line with a budget: ' · extra \$87.66 left of \$100.00' (week < 100, spend > 0)" \
+    || bad "plain line left: $out"
+out=$(run)
+[[ $out == *' · extra $12.34 used' ]] \
+    && ok "plain line without a budget: ' · extra \$12.34 used'" || bad "plain line used-only: $out"
+fixture_extra 10 99 0 true false null '{"currency":"USD","amount_minor":6000,"exponent":2}'
+out=$(SYG_EXTRA_USAGE_BUDGET_USD=50 run)
+[[ $out == *' · extra $60.00 over $50.00' ]] \
+    && ok "plain line over budget: ' · extra \$60.00 over \$50.00'" || bad "plain line over: $out"
+fixture_extra 10 50 0 false false null
+out=$(run)
+[[ $out != *'extra'* ]] \
+    && ok "plain line hidden: disabled, no spend, week < 100 -> no suffix" || bad "plain line hidden: $out"
+# The text line's off shape: a maxed week with the limit reached flips the money
+# figure to off, and is_enabled false must not hide it (the gate's extra=off parity).
+fixture_extra 10 101 0 true true null '{"currency":"USD","amount_minor":1234,"exponent":2}'
+out=$(run)
+[[ $out == *' · extra off (limit reached)' ]] \
+    && ok "plain line: limit-reached at week >= 100 -> ' · extra off (limit reached)'" \
+    || bad "plain line off limit-reached: $out"
+# Red-first: the pre-fix code enabled-gated the whole suffix, so it rendered nothing here.
+fixture_extra 10 101 0 false false admin_disabled '{"currency":"USD","amount_minor":1234,"exponent":2}'
+out=$(run)
+[[ $out == *' · extra off (admin_disabled)' ]] \
+    && ok "plain line: disabled_reason at week >= 100 -> ' · extra off (admin_disabled)' with is_enabled false" \
+    || bad "plain line off disabled: $out"
+# Gate parity, the enabled+reason shape: the gate passes enabled + reason + under the
+# limit, so the plain line shows the balance, not off. Red-first: the pre-fix code
+# rendered ' · extra off (x)' here.
+fixture_extra 10 101 0 true false x '{"currency":"USD","amount_minor":1234,"exponent":2}'
+out=$(SYG_EXTRA_USAGE_BUDGET_USD=50 run)
+[[ $out == *' · extra $37.66 left of $50.00'* ]] && [[ $out != *'extra off'* ]] \
+    && ok "plain line: the gate passes enabled+reason under the limit, so the suffix shows the balance, not off" \
+    || bad "plain line enabled+reason: $out"
 
 # Any non-flag argument prints the usage block from the script's own header lines.
 out=$(run --help); rc=$?
@@ -323,6 +378,14 @@ ANTHROPIC_API_KEY=sk-ant-test run --ok 90 2>/dev/null; [ $? = 1 ] && ok "a stray
 CC_ROUTE_PRESET=zai run --ok 90 2>/dev/null; [ $? = 1 ] && ok "another preset's marker on the anthropic base doesn't skip the gate" || bad "zai marker: --ok should fail"
 run --ok 90 2>/dev/null; [ $? = 1 ] && ok "back on Anthropic: week 99% fails again" || bad "unrouted week 99%: --ok should fail"
 run --json | jq -e '.routed == 0' >/dev/null && ok "anthropic: --json reports routed:0" || bad "anthropic: --json routed flag"
+# Routed-lane plain line: the extra suffix rides before the z.ai tail.
+route_zai
+zai_stub api 10 20
+fixture_extra 10 101 0 true false null '{"currency":"USD","amount_minor":1234,"exponent":2}'
+out=$(run)
+[[ $out == *' · extra $12.34 used · z.ai '* ]] \
+    && ok "z.ai-routed plain line: ' · extra \$12.34 used' before the ' · z.ai ' tail" || bad "zai extra tail: $out"
+route_anthropic
 
 # Routing equivalence: the same base URL through claude-usage and the statusline lands on the
 # same lane. claude-usage's lane is read from its plain line's note; the statusline's from its
@@ -693,5 +756,49 @@ run >/dev/null
 [ "$(wc -l < "$log")" = 2 ] \
     && ok "log: two fetches with identical percentages but resets_at 5h apart log two lines" \
     || bad "log identical pct with 5h reset: want 2 lines, got $(wc -l < "$log") ($(cat "$log"))"
+
+# --- Cross-reader parity: the plain line's ` · extra …` suffix and the statusline's
+# `extra:` segment read the same shared cache, so each shape must classify the same
+# way (off / shown / hidden) in both tools. Five shapes cover the gate-parity matrix;
+# no colors asserted here.
+parity_sl_in() { # the statusline's stdin: the fixture week as seven_day.used_percentage
+    jq -cn --argjson w "$1" '{rate_limits:{five_hour:{used_percentage:10,resets_at:1790790548},
+        seven_day:{used_percentage:$w,resets_at:1791093600}},
+        context_window:{current_usage:{input_tokens:1000}},model:{display_name:"X"},cwd:"/tmp"}'
+}
+cu_extra_class() { # claude-usage's plain line -> off | shown | hidden
+    if [[ $1 == *' · extra off'* ]]; then echo off
+    elif [[ $1 == *' · extra $'* ]]; then echo shown
+    else echo hidden; fi
+}
+sl_extra_class() { # the statusline's stripped render -> off | shown | hidden
+    if [[ $1 == *'extra: off'* ]]; then echo off
+    elif [[ $1 == *'extra: $'* ]]; then echo shown
+    else echo hidden; fi
+}
+parity_case() { # parity_case <name> <fixture_extra args...>; cu_out/sl_out stay global so a
+                # case can take a follow-up assertion on its renders
+    local name=$1; shift
+    fixture_extra "$@"
+    local week=$2 c1 c2
+    cu_out=$(run)
+    sl_out=$(env HOME="$tmp" XDG_CACHE_HOME="$tmp" bash "$SL" <<< "$(parity_sl_in "$week")" | strip)
+    c1=$(cu_extra_class "$cu_out"); c2=$(sl_extra_class "$sl_out")
+    if [ "$c1" = "$c2" ]; then
+        ok "parity $name: claude-usage '$c1' == statusline '$c2'"
+    else
+        bad "parity $name: claude-usage '$c1' vs statusline '$c2' (cu: $cu_out | sl: $sl_out)"
+    fi
+}
+echo '{}' > "$tmp/.claude/settings.json" # plan lane for both readers
+parity_case "enabled+spend, week 101" 10 101 0 true false null '{"currency":"USD","amount_minor":1234,"exponent":2}'
+# The figure, not only the class: that shape's $12.34 shows in both readers' renders.
+[[ $cu_out == *'extra $12.34'* && $sl_out == *'extra: $12.34'* ]] \
+    && ok "parity enabled+spend: the \$12.34 figure shows in both readers" \
+    || bad "parity enabled+spend figure: (cu: $cu_out | sl: $sl_out)"
+parity_case "enabled+reason, week 101" 10 101 0 true false x '{"currency":"USD","amount_minor":1234,"exponent":2}'
+parity_case "disabled+reason, week 101" 10 101 0 false false admin_disabled '{"currency":"USD","amount_minor":1234,"exponent":2}'
+parity_case "disabled+no-spend, week 50" 10 50 0 false false null
+parity_case "enabled+lim-missing, week 101" 10 101 0 true omit null '{"currency":"USD","amount_minor":1234,"exponent":2}'
 
 exit $fail

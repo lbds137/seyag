@@ -77,7 +77,7 @@ route_anthropic() { jq '.env.ANTHROPIC_BASE_URL = "https://api.anthropic.com"' "
 route_or() { jq '.env.ANTHROPIC_BASE_URL = "https://openrouter.ai/api/v1"' "$h/.claude/settings.json" > "$h/.claude/settings.json.new" && mv "$h/.claude/settings.json.new" "$h/.claude/settings.json"; }
 route_host() { jq --arg u "$1" '.env.ANTHROPIC_BASE_URL = $u' "$h/.claude/settings.json" > "$h/.claude/settings.json.new" && mv "$h/.claude/settings.json.new" "$h/.claude/settings.json"; }
 render() {
-  local env_args=(-u ANTHROPIC_BASE_URL -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u SYG_CREDIT_LEDGER -u SYG_CREDIT_GRANTS -u SYG_CREDIT_FORCE -u COLUMNS -u SYG_STATUSLINE_WRAP_COLUMNS -u SYG_STATUSLINE_DEBUG -u SYG_STATUSLINE_FIT_MARGIN -u ANTHROPIC_ADMIN_API_KEY -u SYG_CREDIT_ADMIN_KEY_CMD -u SYG_CREDIT_ADMIN_URL -u SYG_CREDIT_SETTLE_DAYS)
+  local env_args=(-u ANTHROPIC_BASE_URL -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u SYG_CREDIT_LEDGER -u SYG_CREDIT_GRANTS -u SYG_CREDIT_FORCE -u COLUMNS -u SYG_STATUSLINE_WRAP_COLUMNS -u SYG_STATUSLINE_DEBUG -u SYG_STATUSLINE_FIT_MARGIN -u ANTHROPIC_ADMIN_API_KEY -u SYG_CREDIT_ADMIN_KEY_CMD -u SYG_CREDIT_ADMIN_URL -u SYG_CREDIT_SETTLE_DAYS -u SYG_EXTRA_USAGE_BUDGET_USD -u SYG_STATUSLINE_EXTRA_USAGE)
   if [ -n "${PROBE_DEBUG:-}" ]; then
     env_args+=("SYG_STATUSLINE_DEBUG=$PROBE_DEBUG")
   fi
@@ -89,6 +89,12 @@ render() {
   fi
   if [ -n "${PROBE_WRAP:-}" ]; then
     env_args+=("SYG_STATUSLINE_WRAP_COLUMNS=$PROBE_WRAP")
+  fi
+  if [ -n "${PROBE_EXTRA_BUDGET:-}" ]; then
+    env_args+=("SYG_EXTRA_USAGE_BUDGET_USD=$PROBE_EXTRA_BUDGET")
+  fi
+  if [ -n "${PROBE_EXTRA_TOGGLE:-}" ]; then
+    env_args+=("SYG_STATUSLINE_EXTRA_USAGE=$PROBE_EXTRA_TOGGLE")
   fi
   printf '%s' "$1" | env "${env_args[@]}" bash "$SL"
 }
@@ -554,7 +560,7 @@ grep -qF 'platform.claude.com $48.00 est' <<< "$out" && ! grep -qF '(exp' <<< "$
 # 40-44. Lane routing, each with rate_limits in the input. The process env decides.
 lane_in='{"rate_limits":{"five_hour":{"used_percentage":83,"resets_at":1790790548},"seven_day":{"used_percentage":56,"resets_at":1791093600}},"context_window":{"current_usage":{"input_tokens":1000}},"model":{"display_name":"X"},"cwd":"/tmp"}'
 lane() { # VAR=value ...: render lane_in under exactly these env vars
-    local env_args=(-u ANTHROPIC_BASE_URL -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u SYG_CREDIT_LEDGER -u SYG_CREDIT_GRANTS -u SYG_CREDIT_FORCE -u COLUMNS -u SYG_STATUSLINE_WRAP_COLUMNS -u SYG_STATUSLINE_DEBUG -u SYG_STATUSLINE_FIT_MARGIN -u ANTHROPIC_ADMIN_API_KEY -u SYG_CREDIT_ADMIN_KEY_CMD -u SYG_CREDIT_ADMIN_URL -u SYG_CREDIT_SETTLE_DAYS)
+    local env_args=(-u ANTHROPIC_BASE_URL -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u SYG_CREDIT_LEDGER -u SYG_CREDIT_GRANTS -u SYG_CREDIT_FORCE -u COLUMNS -u SYG_STATUSLINE_WRAP_COLUMNS -u SYG_STATUSLINE_DEBUG -u SYG_STATUSLINE_FIT_MARGIN -u ANTHROPIC_ADMIN_API_KEY -u SYG_CREDIT_ADMIN_KEY_CMD -u SYG_CREDIT_ADMIN_URL -u SYG_CREDIT_SETTLE_DAYS -u SYG_EXTRA_USAGE_BUDGET_USD -u SYG_STATUSLINE_EXTRA_USAGE)
     if [ -n "${PROBE_DEBUG:-}" ]; then
         env_args+=("SYG_STATUSLINE_DEBUG=$PROBE_DEBUG")
     fi
@@ -928,5 +934,104 @@ out=$(strip <<< "$(render "$lane_in")")
 ! grep -qF 'cols=' <<< "$out" \
     && ok "debug D3: flag unset -> no suffix" || bad "debug D3: $out"
 printf '{"env":{"ANTHROPIC_AUTH_TOKEN":"dummy-probe-token"},"modelSettings":{"glm-5.3":{"effortLevel":"high"},"glm-5.3-flash":{"effortLevel":"max"},"claude-opus-5-5":{"effortLevel":"high"}}}' > "$h/.claude/settings.json"
+
+# E0-E8. Extra-usage segment (plan lane, beside the fable cap), from the same cached
+# oauth/usage body the fable cap reads. The budget and toggle vars are scrubbed from
+# render()/lane() envs and re-added only through PROBE_EXTRA_BUDGET /
+# PROBE_EXTRA_TOGGLE: both are exported machine-side, so an ambient value must not
+# leak into renders (an env prefix on render() lands inside the -u list).
+route_anthropic
+extra_wk='{"rate_limits":{"five_hour":{"used_percentage":83,"resets_at":1790790548},"seven_day":{"used_percentage":101,"resets_at":1791093600}},"context_window":{"current_usage":{"input_tokens":1000}},"model":{"display_name":"X"},"cwd":"/tmp"}'
+extra_wklow=$(jq -c '.rate_limits.seven_day.used_percentage = 56' <<< "$extra_wk")
+extra_cache() { # extra_cache <extra_usage obj> <spend.used obj or null>: plant the oauth cache, fresh
+    jq -n --argjson x "$1" --argjson su "${2:-null}" \
+        '{limits: [], extra_usage: $x} + (if $su == null then {} else {spend: {used: $su}} end)' \
+        > "$h/cache/claude-statusline/usage.json"
+    touch "$h/cache/claude-statusline/usage.json"
+}
+# E0. Opt-out toggle: SYG_STATUSLINE_EXTRA_USAGE=0 never renders the segment; the same
+# render without it still shows the segment. Runs first on E1's planted cache shape, so
+# the without-toggle half re-uses it before E1 re-plants.
+extra_cache '{"is_enabled":true,"spend_limit_reached":false,"disabled_reason":null}' '{"currency":"USD","amount_minor":1234,"exponent":2}'
+out=$(strip <<< "$(PROBE_EXTRA_BUDGET=50 PROBE_EXTRA_TOGGLE=0 render "$extra_wk")")
+grep -q 'claude.ai 5h:' <<< "$out" && ! grep -q 'extra' <<< "$out" \
+    && ok "extra: SYG_STATUSLINE_EXTRA_USAGE=0 -> segment absent, plan windows intact" || bad "extra toggle off: $out"
+out=$(strip <<< "$(PROBE_EXTRA_BUDGET=50 render "$extra_wk")")
+grep -qF 'extra: $37.66 left' <<< "$out" \
+    && ok "extra: the same cache without the toggle still renders the segment" || bad "extra toggle unset: $out"
+# E1. left: $12.34 spent of a $50 budget -> green '$37.66 left' (25% of the budget).
+extra_cache '{"is_enabled":true,"spend_limit_reached":false,"disabled_reason":null}' '{"currency":"USD","amount_minor":1234,"exponent":2}'
+raw=$(PROBE_EXTRA_BUDGET=50 render "$extra_wk"); out=$(strip <<< "$raw")
+grep -qF 'extra: $37.66 left' <<< "$out" && grep -qF $'\x1b[32m$37.66 left' <<< "$raw" \
+    && ok "extra: \$12.34 of a \$50 budget -> green 'extra: \$37.66 left'" || bad "extra left: $out"
+# E2. over: $60 spent of $50 -> red 'over $10.00', the credit segment's over shape.
+extra_cache '{"is_enabled":true,"spend_limit_reached":false,"disabled_reason":null}' '{"currency":"USD","amount_minor":6000,"exponent":2}'
+raw=$(PROBE_EXTRA_BUDGET=50 render "$extra_wk"); out=$(strip <<< "$raw")
+grep -qF 'extra: over $10.00' <<< "$out" && grep -qF $'\x1b[31mover $10.00' <<< "$raw" \
+    && ok "extra: \$60 over a \$50 budget -> red 'extra: over \$10.00'" || bad "extra over: $out"
+# E3. used-only: no budget -> gray dollars used.
+extra_cache '{"is_enabled":true,"spend_limit_reached":false,"disabled_reason":null}' '{"currency":"USD","amount_minor":750,"exponent":2}'
+raw=$(render "$extra_wk"); out=$(strip <<< "$raw")
+grep -qF 'extra: $7.50 used' <<< "$out" && grep -qF $'\x1b[90m$7.50 used' <<< "$raw" \
+    && ok "extra: no budget -> gray 'extra: \$7.50 used'" || bad "extra used-only: $out"
+# E4. off: spend_limit_reached wins over any dollar figure at a maxed week.
+extra_cache '{"is_enabled":true,"spend_limit_reached":true,"disabled_reason":null}' '{"currency":"USD","amount_minor":1234,"exponent":2}'
+raw=$(render "$extra_wk"); out=$(strip <<< "$raw")
+grep -qF 'extra: off' <<< "$out" && grep -qF $'\x1b[31moff' <<< "$raw" \
+    && ok "extra: spend_limit_reached at week >= 100 -> red 'extra: off'" || bad "extra off: $out"
+# E4b. off, the disabled-for-reason shape: is_enabled false must not gate the
+# segment (the gate reports this same state as extra=off). Red-first: the
+# pre-fix code enabled-gated the whole segment, so it rendered nothing here.
+extra_cache '{"is_enabled":false,"spend_limit_reached":false,"disabled_reason":"admin_disabled"}' '{"currency":"USD","amount_minor":1234,"exponent":2}'
+raw=$(render "$extra_wk"); out=$(strip <<< "$raw")
+grep -qF 'extra: off' <<< "$out" && grep -qF $'\x1b[31moff' <<< "$raw" \
+    && ok "extra: disabled_reason at week >= 100 -> red 'extra: off' even with is_enabled false" || bad "extra off disabled-for-reason: $out"
+# E4c. Gate parity, the enabled+reason shape: the gate passes enabled + reason + under
+# the limit, so the display shows the balance, not off.
+extra_cache '{"is_enabled":true,"spend_limit_reached":false,"disabled_reason":"x"}' '{"currency":"USD","amount_minor":1234,"exponent":2}'
+raw=$(PROBE_EXTRA_BUDGET=50 render "$extra_wk"); out=$(strip <<< "$raw")
+grep -qF 'extra: $37.66 left' <<< "$out" && ! grep -qF 'extra: off' <<< "$out" \
+    && ok "extra: the gate passes enabled+reason under the limit, so the display shows the balance, not off" || bad "extra gate parity: $out"
+# E4d. lim-missing: spend_limit_reached absent fails closed (the gate's off:disabled),
+# so the money shapes hide the segment even enabled with spend, at a maxed week.
+extra_cache '{"is_enabled":true,"disabled_reason":null}' '{"currency":"USD","amount_minor":1234,"exponent":2}'
+raw=$(render "$extra_wk"); out=$(strip <<< "$raw")
+grep -q 'claude.ai 5h:' <<< "$out" && ! grep -q 'extra' <<< "$out" \
+    && ok "extra: enabled with spend_limit_reached missing -> segment absent (fail-closed)" || bad "extra lim-missing: $out"
+# E5. hidden: disabled with no spend -> no segment, the plan windows intact.
+extra_cache '{"is_enabled":false,"spend_limit_reached":false,"disabled_reason":null}' null
+raw=$(render "$extra_wk"); out=$(strip <<< "$raw")
+grep -q 'claude.ai 5h:' <<< "$out" && ! grep -q 'extra' <<< "$out" \
+    && ok "extra: disabled with no spend -> segment absent, plan windows intact" || bad "extra hidden: $out"
+# E6. malformed budget: the used-only fallback.
+extra_cache '{"is_enabled":true,"spend_limit_reached":false,"disabled_reason":null}' '{"currency":"USD","amount_minor":500,"exponent":2}'
+raw=$(PROBE_EXTRA_BUDGET=not-a-number render "$extra_wk"); out=$(strip <<< "$raw")
+grep -qF 'extra: $5.00 used' <<< "$out" \
+    && ok "extra: an invalid budget falls back to the used-only shape" || bad "extra bad budget: $out"
+# E7. parse error: a malformed cache loses only this segment; exit 0, no stderr.
+printf '{not json' > "$h/cache/claude-statusline/usage.json"
+touch "$h/cache/claude-statusline/usage.json"
+raw=$(render "$extra_wk" 2>"$h/extra.err"); rc=$?; out=$(strip <<< "$raw")
+[ $rc = 0 ] && [ ! -s "$h/extra.err" ] && ! grep -q 'extra' <<< "$out" && grep -q 'claude.ai 5h:' <<< "$out" \
+    && ok "extra: malformed cache -> segment absent, exit 0, no stderr" \
+    || bad "extra parse-error: rc=$rc err=[$(cat "$h/extra.err")] out=$out"
+# E8. boundary: enabled with spend at a week below 100 -> shown (the OR arm).
+extra_cache '{"is_enabled":true,"spend_limit_reached":false,"disabled_reason":null}' '{"currency":"USD","amount_minor":300,"exponent":2}'
+raw=$(render "$extra_wklow"); out=$(strip <<< "$raw")
+grep -qF 'extra: $3.00 used' <<< "$out" \
+    && ok "extra: enabled with spend at week < 100 -> shown (the OR arm)" || bad "extra boundary: $out"
+
+# Budget 0 and left-shape traffic lights: the over shape wins at b=0, and the
+# left shapes' traffic lights (62% yellow, 82% red), all on E1's cache shape.
+extra_cache '{"is_enabled":true,"spend_limit_reached":false,"disabled_reason":null}' '{"currency":"USD","amount_minor":1234,"exponent":2}'
+raw=$(PROBE_EXTRA_BUDGET=0 render "$extra_wk"); out=$(strip <<< "$raw")
+grep -qF 'extra: over $12.34' <<< "$out" && grep -qF $'\x1b[31mover $12.34' <<< "$raw" \
+    && ok "extra: budget 0 with spend -> the over shape wins at b=0" || bad "extra budget 0: $out"
+raw=$(PROBE_EXTRA_BUDGET=20 render "$extra_wk"); out=$(strip <<< "$raw")
+grep -qF $'\x1b[33m$7.66 left' <<< "$raw" \
+    && ok "extra: 62% of the budget left-shape renders yellow" || bad "extra yellow left: $out"
+raw=$(PROBE_EXTRA_BUDGET=15 render "$extra_wk"); out=$(strip <<< "$raw")
+grep -qF $'\x1b[31m$2.66 left' <<< "$raw" \
+    && ok "extra: 82% of the budget left-shape renders red" || bad "extra red left: $out"
 
 exit $fail

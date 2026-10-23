@@ -583,6 +583,71 @@ else
         c=$(pct_color "$rl_fable")
         rl_segment="$rl_segment ${gray}fable: ${reset}${c}${rl_fable}%${reset}"
     fi
+    # Extra usage (the plan's paid overflow) beside the fable cap, from the same
+    # cached oauth/usage body. The jq predicates copy claude-usage's
+    # extra_usage_field() — its semantic owner; the cache is the shared artifact,
+    # and the two readers must not drift. Red "off" at a maxed week for the two
+    # shapes the gate (--ok) reports extra=off there: spend_limit_reached, or a
+    # disabled_reason while the add-on is not enabled — enabled + reason + under
+    # the limit passes the gate, so it shows the balance, not off. The gate also
+    # reports extra=off below a maxed week (the 75% reserve) and for disabled
+    # without a reason; this display intentionally renders those as absent or
+    # money-only. Otherwise shown only while extra usage is on and the week is
+    # maxed or anything was spent: dollars left of the SYG_EXTRA_USAGE_BUDGET_USD
+    # budget (red "over" past it), dollars used without a valid budget. A parse
+    # failure loses only this segment. Opt-out: SYG_STATUSLINE_EXTRA_USAGE=0
+    # never renders it.
+    ex_seg=""
+    if [ "${SYG_STATUSLINE_EXTRA_USAGE:-}" != 0 ]; then
+        ex_enabled=false ex_lim=false ex_lim_ok=false ex_reason=false ex_used=0
+        eval "$(jq -r '
+            if type == "object" and (.extra_usage | type) == "object" then
+                .extra_usage as $x |
+                (if (.spend | type) == "object" and (.spend.used | type) == "object" then .spend.used else {} end) as $u |
+                (if $u.currency == "USD"
+                    and ($u.amount_minor | type) == "number" and ($u.amount_minor | floor) == $u.amount_minor and $u.amount_minor >= 0
+                    and ($u.exponent | type) == "number" and ($u.exponent | floor) == $u.exponent and $u.exponent >= 0 and $u.exponent <= 6
+                    then (($u.amount_minor * 100 / pow(10; $u.exponent)) | round) / 100
+                    else null end) as $used |
+                (if ($x.disabled_reason | type) == "string" and ($x.disabled_reason | length) > 0
+                    then true else false end) as $off |
+                @sh "ex_enabled=\($x.is_enabled == true) ex_lim=\($x.spend_limit_reached == true) ex_lim_ok=\($x.spend_limit_reached == false) ex_reason=\($off) ex_used=\($used // 0)"
+            else empty end' "$usage_cache" 2>/dev/null)"
+        ex_week_maxed=0
+        [ -n "$rl_7d" ] && [ "$rl_7d" -ge 100 ] 2>/dev/null && ex_week_maxed=1
+        if [ "$ex_week_maxed" = 1 ] && { [ "$ex_lim" = true ] || { [ "$ex_enabled" != true ] && [ "$ex_reason" = true ]; }; }; then
+            ex_seg="${gray}extra: ${reset}${red}off${reset}"
+        elif [ "$ex_enabled" = true ] && [ "$ex_lim_ok" = true ]; then
+            # A valid number under LC_ALL=C; anything else counts as unset.
+            ex_budget=""
+            [ -n "${SYG_EXTRA_USAGE_BUDGET_USD:-}" ] \
+                && LC_ALL=C awk -v b="$SYG_EXTRA_USAGE_BUDGET_USD" 'BEGIN{exit !(b ~ /^[0-9]+([.][0-9]+)?$/)}' \
+                && ex_budget=$SYG_EXTRA_USAGE_BUDGET_USD
+            # One arithmetic awk for the whole segment: has-spend, and with a budget
+            # the shape too — `over <fig>` past it, `left <pct> <fig>` under it; bash
+            # parses the fields. Without a budget it only reports spend; the used
+            # figure is the printf below.
+            ex_hs="" ex_shape="" ex_a="" ex_b=""
+            read -r ex_hs ex_shape ex_a ex_b <<< "$(LC_ALL=C awk -v u="$ex_used" -v b="${ex_budget:-}" 'BEGIN{
+                hs = (u > 0) ? "spend" : "nospend"
+                if (b == "") { print hs; exit }
+                if (u > b) printf "%s over %.2f\n", hs, u - b
+                else printf "%s left %d %.2f\n", hs, (b > 0) ? u * 100 / b + 0.5 : 0, (b - u > 0) ? b - u : 0
+            }')"
+            ex_has_spend=0
+            [ "$ex_hs" = spend ] && ex_has_spend=1
+            if [ "$ex_week_maxed" = 1 ] || [ "$ex_has_spend" = 1 ]; then
+                if [ -n "$ex_budget" ] && [ "$ex_shape" = over ]; then
+                    ex_seg="${gray}extra: ${reset}${red}over \$${ex_a}${reset}"
+                elif [ -n "$ex_budget" ]; then
+                    ex_seg="${gray}extra: ${reset}$(pct_color "$ex_a")\$${ex_b} left${reset}"
+                else
+                    ex_seg="${gray}extra: ${reset}${gray}\$$(LC_ALL=C printf '%.2f' "$ex_used") used${reset}"
+                fi
+            fi
+        fi
+    fi
+    [ -n "$ex_seg" ] && rl_segment="$rl_segment $ex_seg"
     output="$output${sep}${anth_brand}${anth_plan_label}${reset} ${rl_segment}"
 fi
 
