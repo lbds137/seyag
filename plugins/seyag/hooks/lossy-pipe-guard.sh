@@ -197,6 +197,7 @@ import sys
 sys.path.insert(0, os.environ["HOOK_LIB"])
 from shell_quotes import (
     heredoc_openers,
+    span_overruns_quotes,
     strip_heredoc_bodies,
     strip_quoted,
     substitution_span_offsets,
@@ -286,10 +287,19 @@ if _rejoin_parts:
 # stage boundary. Spans flagged inside single quotes (extracted only on
 # `substitution_spans`'s fail-closed fallback path) or left unterminated stay
 # in place so a `'use $(' … | tail # )` shape never erases a real outer pipe.
+# The same protection covers the late-end arms of the quote-desync check: a
+# quoted `(` can end a span late (the fallback re-extracts it terminated at
+# the subshell `)`, outside single quotes), and an unbalanced interior quote
+# means bash's parse continues past it — either way the span may overrun a
+# real pipeline. The `#`/case desync arms are NOT gated on: they fire on a
+# span that ended EARLY, and an early end leaves the remainder unblanked,
+# which keeps pipes visible (the comment-heredoc flip forms depend on that).
 _span_parts = []
 _cursor = 0
 for _start, _end, _in_single in substitution_span_offsets(cmd):
     if _in_single or _end is None or _start < _cursor:
+        continue
+    if span_overruns_quotes(cmd[_start:_end]):
         continue
     _span_parts.append(cmd[_cursor:_start])
     _span_parts.append("X")
