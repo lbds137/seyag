@@ -196,12 +196,13 @@ ledger estimate labeled source "ledger", estimate true, provider_as_of and
 ledger_bridge_days null, and provider_window_start set to the window's start
 day; it never fails the command. The fetch-attempt keys (source,
 provider_as_of, provider_window_start, ledger_bridge_days) are present whenever
-a fetch was attempted (anchored path included, with provider_unsettled_days on
-the provider success path and provider_chain_start, provider_clamped,
-provider_subday and ledger_lapsed_usd added on the unanchored provider success
-path) and absent, with estimate true, when no fetch is attempted: no key (no
-ANTHROPIC_ADMIN_API_KEY and no SYG_CREDIT_ADMIN_KEY_CMD, or an env key
-containing CR or LF), no live grant, no closed day; a missing source means
+a fetch was attempted (anchored path included, with provider_unsettled_days,
+provider_clamped and provider_subday on the provider success path, and
+provider_chain_start and ledger_lapsed_usd added on the unanchored provider
+success path) and absent, with estimate true, when no fetch is attempted: no
+key (no usable source: neither ANTHROPIC_ADMIN_API_KEY nor
+SYG_CREDIT_ADMIN_KEY_CMD, or an env key containing CR or LF with no command),
+no live grant, no closed day; a missing source means
 ledger. The sum is cached at
 ${XDG_CACHE_HOME:-~/.cache}/claude-statusline/api-credit-live.json (a JSON
 object keyed by the key's SHA-256, the origin and the window, at most 4
@@ -258,11 +259,13 @@ spend minus pre_anchor_day_usd (clamped at 0), dated at the later of the
 instant and that day's last request; (4) these are replayed as above, so
 spent_usd is the spend since the anchor, and the object gains anchor_at and
 anchor_usd. (5) With the admin key, the cost_report window runs from 00:00 UTC
-of the anchor's day to the start of today; each closed day up to the as-of day
-takes the provider's sum (the anchor's day minus pre_anchor_day_usd), later
-days the ledger's, and the replay is redone with source "provider"; a failure
-labels the ledger figure as above. The label stays "est" until a provider fetch
-covers the post-anchor days.
+of the anchor's day (clamped to 366 days before today; the anchor's day through
+the clamp replays from the ledger, provider_clamped) to the start of today;
+each closed day up to the as-of day takes the provider's sum (the anchor's day
+minus pre_anchor_day_usd), later days the ledger's, and the replay is redone
+with source "provider"; a failure labels the ledger figure as above. The label
+stays "est" while clamped, on a mid-UTC-day grant boundary in the provider
+window (the anchor's own instant exempt) or on an unsettled settle-window day.
 """
 import argparse
 import fcntl
@@ -957,12 +960,17 @@ def live_cache_path():
     return os.path.join(root, "claude-statusline", "api-credit-live.json")
 
 
+def live_lock_path():
+    return live_cache_path() + ".lock"   # guards a fetch in progress; never read as data
+
+
 def admin_key_source():
-    """("env", key) or ("cmd", cmd_string), or None when no key source is configured
-    (or the env key contains CR or LF: a CR/LF key could inject a curl -K directive)."""
+    """("env", key) or ("cmd", cmd_string), or None when no usable source is
+    configured. An env key containing CR or LF is itself unusable (it could
+    inject a curl -K directive); the command source is then tried instead."""
     key = os.environ.get("ANTHROPIC_ADMIN_API_KEY", "")
-    if key:
-        return None if "\r" in key or "\n" in key else ("env", key)
+    if key and "\r" not in key and "\n" not in key:
+        return ("env", key)
     cmd = os.environ.get("SYG_CREDIT_ADMIN_KEY_CMD", "")
     return ("cmd", cmd) if cmd else None
 
@@ -1062,11 +1070,13 @@ def provider_spend(src, start, end, now):
     """The closed-day provider spend, from the TTL cache (a JSON object keyed by
     the key's or command's SHA-256, the admin origin and the window, at most
     MAX_CACHE_ENTRIES entries) when it is under LIVE_TTL old, else fetched
-    (resolving a command key on demand) and cached. None on any fetch or
-    key-command failure, cached as {"failed": true} for LIVE_TTL (or
-    KEY_CMD_FAIL_TTL with "kind": "key-cmd" when the key command failed); cache
-    errors are ignored (a corrupt or old-format cache is refetched, never
-    trusted)."""
+    (resolving a command key on demand) and cached. One miss at a time: the
+    fetch holds a non-blocking flock at live_lock_path(), and a caller that
+    finds it held gets None (the labeled ledger fallback), not a queue; the
+    lock guards the fetch, not the value. None on any fetch or key-command
+    failure, cached as {"failed": true} for LIVE_TTL (or KEY_CMD_FAIL_TTL with
+    "kind": "key-cmd" when the key command failed); cache errors are ignored
+    (a corrupt or old-format cache is refetched, never trusted)."""
     path = live_cache_path()
     raw_id = src[1] if src[0] == "env" else "cmd\0" + src[1]
     ident = "%s %s %s %s" % (hashlib.sha256(raw_id.encode("utf-8")).hexdigest(), admin_origin(),
@@ -1100,38 +1110,54 @@ def provider_spend(src, start, end, now):
                     return {"spent": spent, "as_of": c["as_of"], "days": days}
         except (ValueError, KeyError, TypeError, AttributeError, InvalidOperation):
             pass
-    key = resolve_admin_key(src)
-    got = fetch_cost_report(key, start, end) if key else None
-    if got is not None and not all(math.isfinite(float(v)) for v in [got["spent"]] + list(got["days"].values())):
-        got = None   # e.g. "1E+400" cents: a finite Decimal, an infinite float
-    if key is None:
-        record = {"fetched_at": iso(now), "failed": True, "kind": "key-cmd"}
-    elif got is None:
-        record = {"fetched_at": iso(now), "failed": True}
-    else:
-        record = {"fetched_at": iso(now), "spent": str(got["spent"]), "as_of": got["as_of"],
-                  "days": {k: str(v) for k, v in got["days"].items()}}
-    cache.pop(ident, None)
-    if len(cache) >= MAX_CACHE_ENTRIES:
-        keep = sorted(cache, key=lambda k: cache[k].get("fetched_at", ""))[-(MAX_CACHE_ENTRIES - 1):]
-        cache = {k: cache[k] for k in keep}
-    cache[ident] = record
+    lock_fd = None
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        fd, tmp = tempfile.mkstemp(prefix=".api-credit-live.", suffix=".tmp", dir=os.path.dirname(path))
+        lock_fd = os.open(live_lock_path(), os.O_CREAT | os.O_WRONLY, 0o644)
         try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write(json.dumps(cache) + "\n")
-            os.replace(tmp, path)
-        except BaseException:
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass
-            raise
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            os.close(lock_fd)
+            lock_fd = None
+            return None   # another render is mid-fetch: the ledger estimate, not a queue
     except OSError:
-        pass   # an unwritable cache only costs the next call a fetch
-    return got
+        pass   # no lock file possible (an unwritable cache dir): fetch unlocked, as before
+    try:
+        key = resolve_admin_key(src)
+        got = fetch_cost_report(key, start, end) if key else None
+        if got is not None and not all(math.isfinite(float(v)) for v in [got["spent"]] + list(got["days"].values())):
+            got = None   # e.g. "1E+400" cents: a finite Decimal, an infinite float
+        if key is None:
+            record = {"fetched_at": iso(now), "failed": True, "kind": "key-cmd"}
+        elif got is None:
+            record = {"fetched_at": iso(now), "failed": True}
+        else:
+            record = {"fetched_at": iso(now), "spent": str(got["spent"]), "as_of": got["as_of"],
+                      "days": {k: str(v) for k, v in got["days"].items()}}
+        cache.pop(ident, None)
+        if len(cache) >= MAX_CACHE_ENTRIES:
+            keep = sorted(cache, key=lambda k: cache[k].get("fetched_at", ""))[-(MAX_CACHE_ENTRIES - 1):]
+            cache = {k: cache[k] for k in keep}
+        cache[ident] = record
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            fd, tmp = tempfile.mkstemp(prefix=".api-credit-live.", suffix=".tmp", dir=os.path.dirname(path))
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    f.write(json.dumps(cache) + "\n")
+                os.replace(tmp, path)
+            except BaseException:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+                raise
+        except OSError:
+            pass   # an unwritable cache only costs the next call a fetch
+        return got
+    finally:
+        if lock_fd is not None:
+            os.close(lock_fd)   # releases the flock: the lock dies with the fetch
 
 
 def with_provider(b, entries, grants_cfg, now):
@@ -1188,13 +1214,12 @@ def with_provider(b, entries, grants_cfg, now):
         t is not None and start < t and t.strftime("%Y-%m-%d") <= as_of and t != day_start(t)
         for g in grants_cfg[1] for t in (g["granted"], g["expires"])
     )
-    for i, g in enumerate(grants_cfg[1]):
-        g["idx"] = i
     fresh_cfg = (grants_cfg[0], [dict(g, remaining=g["amount"], lapsed=False, lapsed_usd=0.0) for g in grants_cfg[1]])
     b.update(balance(events + bridged, fresh_cfg, now))
-    by_idx = {pg["idx"]: pg for pg in fresh_cfg[1]}
-    lapsed = sum((by_idx[lg["idx"]] if lg["granted"] >= s else lg).get("lapsed_usd", 0.0)
-                 for lg in grants_cfg[1])
+    # fresh_cfg[1][i] copies grants_cfg[1][i]: pairing by position reads each copy's
+    # replayed lapse without stamping an "idx" into the caller's grant dicts.
+    lapsed = sum((pg if og["granted"] >= s else og).get("lapsed_usd", 0.0)
+                 for og, pg in zip(grants_cfg[1], fresh_cfg[1]))
     ledger_lapsed = sum(lg.get("lapsed_usd", 0.0) for lg in grants_cfg[1] if lg["granted"] < s)
     b.update({"lapsed_usd": round(lapsed, 6), "ledger_lapsed_usd": round(ledger_lapsed, 6),
               "source": "provider", "estimate": clamped or subday or unsettled > 0,
@@ -1395,7 +1420,12 @@ def anchor_day_event(day_entries, anc):
 def anchored_balance(entries, grants_cfg, now, anc):
     """The balance from an anchor: its pools plus the grants granted after it,
     minus the spend after it; provider figures for the closed days when the
-    admin key answers."""
+    admin key answers. The provider window clamps to 366 days before today as
+    with_provider's does (the anchor's day through the clamp replays from the
+    ledger, provider_clamped), and estimate is true while clamped, on a
+    mid-UTC-day grant boundary inside the provider window (provider_subday;
+    the anchor's own instant is exempt: its day's bucket is pre-corrected
+    through pre_anchor_day_usd) or on unsettled settle-window days."""
     currency, grants = grants_cfg if grants_cfg is not None else ("USD", [])
     t = anc["at"]
     day = t.strftime("%Y-%m-%d")
@@ -1413,10 +1443,15 @@ def anchored_balance(entries, grants_cfg, now, anc):
     if src is None:
         return b
     start, end = day_start(t), day_start(now)
+    clamp = end - timedelta(days=366)
+    clamped = start < clamp
+    if clamped:
+        start = clamp
+    start_day = start.strftime("%Y-%m-%d")
     if start >= end:
         return b   # no closed day since the anchor's day: nothing to fetch
     b.update({"source": "ledger", "estimate": True, "provider_as_of": None,
-              "provider_window_start": day, "ledger_bridge_days": None})
+              "provider_window_start": start_day, "ledger_bridge_days": None})
     try:
         got = provider_spend(src, start, end, now)
     except Exception:  # the balance must never fail on the live path
@@ -1424,6 +1459,12 @@ def anchored_balance(entries, grants_cfg, now, anc):
     if got is None:
         return b
     as_of, events = got["as_of"], []
+    if clamped:
+        # The window opens at the clamp: the anchor's day through the day before it
+        # replay from the ledger (the anchor day's spend pre-corrected), as
+        # with_provider's clamped bridge does.
+        events = [e for e in entries if day < e["day"] < start_day]
+        events.append(anchor_day_event(day_entries, anc))
     day_rows, unsettled, _ = settled_days(got, entries, start, end)
     for d, dk, amount in day_rows:
         when = min(d + timedelta(days=1) - timedelta(seconds=1), now)
@@ -1435,9 +1476,16 @@ def anchored_balance(entries, grants_cfg, now, anc):
     if day > as_of:
         events.append(anchor_day_event(day_entries, anc))
         used.update(e["day"] for e in day_entries)
-    b.update(balance(events + bridged, cfg(), now))
-    b.update({"source": "provider", "estimate": unsettled > 0, "provider_as_of": as_of,
-              "provider_window_start": day, "provider_unsettled_days": unsettled,
+    prov_cfg = cfg()
+    subday = any(
+        x is not None and x != t and start < x and x.strftime("%Y-%m-%d") <= as_of and x != day_start(x)
+        for g in prov_cfg[1] for x in (g["granted"], g["expires"])
+    )
+    b.update(balance(events + bridged, prov_cfg, now))
+    b.update({"source": "provider", "estimate": clamped or subday or unsettled > 0,
+              "provider_as_of": as_of, "provider_window_start": start_day,
+              "provider_clamped": clamped, "provider_subday": subday,
+              "provider_unsettled_days": unsettled,
               "ledger_bridge_days": len(used)})
     return b
 

@@ -1072,6 +1072,32 @@ be=$(lv kenv balance --json ANTHROPIC_ADMIN_API_KEY=fixture-admin-key SYG_CREDIT
 if [ ! -s "$T/key-calls" ] && jq -e '.source=="provider" and .estimate==false' <<< "$be" > /dev/null; then
   ok "SYG_CREDIT_ADMIN_KEY_CMD with ANTHROPIC_ADMIN_API_KEY set: env wins, command never run"
 else bad "SYG_CREDIT_ADMIN_KEY_CMD env precedence: calls=$(nlines "$T/key-calls") / $be"; fi
+# 31b. A CR/LF ANTHROPIC_ADMIN_API_KEY alongside a command: the env key is itself
+#      unusable (a CR/LF key could inject a curl -K directive), so the command source
+#      wins -> the provider balance, the command run once. Control: the kenv row above
+#      (a clean env key short-circuits, the command never runs).
+echo ok > "$T/cr/mode"; : > "$T/cr/hits.log"; : > "$T/key-calls"
+b=$(lv kcr balance --json ANTHROPIC_ADMIN_API_KEY=$'bad\rkey' SYG_CREDIT_ADMIN_KEY_CMD="$T/key-ok.sh")
+if [ "$(jq -c '[.remaining_usd, .source, .estimate]' <<< "$b")" = "$(jq -c '[.remaining_usd, .source, .estimate]' <<< "$ref_env")" ] \
+  && [ "$(nlines "$T/key-calls")" = 1 ] && [ "$(hits)" = 1 ]; then
+  ok "CR/LF env key + command: the command source wins -> provider balance, command run once"
+else bad "CR/LF env key + command: $b / calls=$(nlines "$T/key-calls") / hits=$(hits)"; fi
+# 31c. Cold-fetch lock: the miss path holds a non-blocking flock beside the live cache;
+#      a render finding it held runs neither the key command nor the fetch (the labeled
+#      ledger estimate, nothing cached), and a render after the release fetches.
+klock_dir="$T/cache-klock/claude-statusline"; mkdir -p "$klock_dir"
+: > "$T/key-calls"; : > "$T/cr/hits.log"
+( exec 9>"$klock_dir/api-credit-live.json.lock"; flock -x 9; sleep 2 ) & khold=$!
+sleep 0.3
+b_held=$(lv klock balance --json ANTHROPIC_ADMIN_API_KEY= SYG_CREDIT_ADMIN_KEY_CMD="$T/key-ok.sh")
+wait "$khold"
+held_calls=$(nlines "$T/key-calls"); held_hits=$(hits)
+b_free=$(lv klock balance --json ANTHROPIC_ADMIN_API_KEY= SYG_CREDIT_ADMIN_KEY_CMD="$T/key-ok.sh")
+if [ "$held_calls" = 0 ] && [ "$held_hits" = 0 ] \
+  && jq -e '.source=="ledger" and .estimate==true and .provider_as_of==null' <<< "$b_held" > /dev/null \
+  && jq -e '.source=="provider" and .estimate==false' <<< "$b_free" > /dev/null; then
+  ok "cold-fetch lock: lock held -> no key command, no fetch, ledger estimate, nothing cached; released -> provider fetch"
+else bad "cold-fetch lock: held=$b_held calls=$held_calls hits=$held_hits / free=$b_free"; fi
 
 # 32. balance --month: month-to-date spend (provider closed days + ledger bridge, else ledger)
 #     and multi-window cache (up to 4 windows; old 2-line cache treated as a miss).
@@ -1567,5 +1593,53 @@ if near "$(jq .cost_usd <<< "$elsuf")" 0.04002 \
   && jq -e '.models["m-long-20261006"].cost_usd==0.02001 and .models["m-long[1m]"].cost_usd==0.02001 and .unpriced_models==[]' <<< "$elsuf" > /dev/null; then
   ok "36: suffixed ids m-long-20261006 and m-long[1m] at prompt 1001 price on m-long's long card (0.02001 each)"
 else bad "36 long card suffixed ids: $elsuf"; fi
+
+# 37. Anchored path with SYG_CREDIT_ADMIN_KEY_CMD (case 23's fixtures, the env key
+#     empty): the command key drives the anchored provider pass; the TTL cache keeps
+#     the second render to one run.
+echo anc > "$T/cr/mode"; : > "$T/cr/hits.log"; : > "$T/key-calls"
+anc37() { lv "$1" balance --json ANTHROPIC_ADMIN_API_KEY= SYG_CREDIT_ADMIN_KEY_CMD="$T/key-ok.sh" SYG_CREDIT_LEDGER="$T/anc/pv.jsonl" SYG_CREDIT_GRANTS="$T/missing.json" SYG_CREDIT_NOW="$2"; }
+b37=$(anc37 anc37 2026-10-14T15:00:00Z)
+b37b=$(anc37 anc37 2026-10-14T15:01:00Z)
+req37=$(head -n 1 "$T/cr/hits.log" | cut -f1)
+if near "$(jq .remaining_usd <<< "$b37")" 41.5 \
+  && jq -e '.source=="provider" and .estimate==false and .provider_as_of=="2026-10-13"' <<< "$b37" > /dev/null \
+  && [ "$(jq -c '[.remaining_usd, .source]' <<< "$b37b")" = "$(jq -c '[.remaining_usd, .source]' <<< "$b37")" ] \
+  && [ "$(nlines "$T/key-calls")" = 1 ] && [[ "$req37" == *'starting_at=2026-10-12T00:00:00Z&'* ]]; then
+  ok "anchored SYG_CREDIT_ADMIN_KEY_CMD: command key -> the 41.50 provider figure, window from the anchor's day, run once across the TTL hit"
+else bad "anchored key cmd: $b37 / $b37b / calls=$(nlines "$T/key-calls") / '$req37'"; fi
+
+# 38. Anchored provider window clamped: an anchor more than 366 days back fetches from
+#     now's day minus 366 days; the anchor's day through the clamp replays from the
+#     ledger; estimate true, provider_clamped true, the window starts at the clamp day.
+echo '{"anchors":[{"amount":100,"at":"2025-06-01T12:00:00Z","pre_anchor_day_usd":0,"recorded":"2025-06-01T13:00:00Z"}]}' > "$T/anc/old.json"
+entry a 2025-09-15 2025-09-15T12:00:00Z 40 > "$T/anc/old.jsonl"
+echo '{"data":[{"starting_at":"2026-11-20T00:00:00Z","ending_at":"2026-11-21T00:00:00Z","results":[{"currency":"USD","amount":"3000"}]}],"has_more":false}' > "$T/cr/oldanc.json"
+clamp38=$(date -u -d '2026-12-01 - 366 days' +%Y-%m-%d)
+echo oldanc > "$T/cr/mode"; : > "$T/cr/hits.log"
+b38=$(lv oldanc balance --json SYG_CREDIT_LEDGER="$T/anc/old.jsonl" SYG_CREDIT_GRANTS="$T/missing.json" SYG_CREDIT_ANCHOR="$T/anc/old.json" SYG_CREDIT_NOW=2026-12-01T12:00:00Z)
+: > "$T/cr/hits.log"
+txt38=$(lv oldanc-t balance SYG_CREDIT_LEDGER="$T/anc/old.jsonl" SYG_CREDIT_GRANTS="$T/missing.json" SYG_CREDIT_ANCHOR="$T/anc/old.json" SYG_CREDIT_NOW=2026-12-01T12:00:00Z)
+req38=$(head -n 1 "$T/cr/hits.log" | cut -f1)
+if near "$(jq .remaining_usd <<< "$b38")" 30 && near "$(jq .spent_usd <<< "$b38")" 70 \
+  && jq -e --arg cd "$clamp38" '.source=="provider" and .estimate==true and .provider_clamped==true and .provider_subday==false and .provider_window_start==$cd and .provider_as_of=="2026-11-20"' <<< "$b38" > /dev/null \
+  && [[ "$req38" == *"starting_at=${clamp38}T00:00:00Z&"* ]] \
+  && [ "$(sed -n 2p <<< "$txt38")" = "spent \$70.00, lapsed \$0.00, overage \$0.00 (provider through 2026-11-20; today, lapsed and spend before $clamp38, from the ledger; anchored \$100.00 at 2025-06-01T12:00:00Z)" ]; then
+  ok "anchored clamp: anchor 100 at 2025-06-01 -> window starts $clamp38 (now - 366d), 40 pre-clamp ledger + 30 provider = spent 70, remaining 30, estimate true, basis names the clamp"
+else bad "anchored clamp: $b38 / '$txt38' / '$req38'"; fi
+
+# 39. Anchored sub-day grant boundary: a grant granted mid-UTC-day on a provider bucket
+#     day, after a mid-day anchor whose own instant is exempt (its day's bucket is
+#     pre-corrected through pre_anchor_day_usd) -> estimate true, provider_subday true.
+echo '{"anchors":[{"amount":50,"at":"2026-10-12T12:00:00Z","pre_anchor_day_usd":0,"recorded":"2026-10-12T13:00:00Z"}]}' > "$T/anc/sub.json"
+entry a 2026-10-13 2026-10-13T18:00:00Z 2.5 > "$T/anc/sub.jsonl"
+echo '{"grants":[{"amount":100,"granted":"2026-10-13T12:00:00Z","expires":"2026-12-01"}]}' > "$T/anc/sub-grants.json"
+echo '{"data":[{"starting_at":"2026-10-13T00:00:00Z","ending_at":"2026-10-14T00:00:00Z","results":[{"currency":"USD","amount":"500"}]}],"has_more":false}' > "$T/cr/subanc.json"
+echo subanc > "$T/cr/mode"; : > "$T/cr/hits.log"
+b39=$(lv subanc balance --json SYG_CREDIT_LEDGER="$T/anc/sub.jsonl" SYG_CREDIT_GRANTS="$T/anc/sub-grants.json" SYG_CREDIT_ANCHOR="$T/anc/sub.json" SYG_CREDIT_NOW=2026-10-14T15:00:00Z)
+if jq -e '.source=="provider" and .estimate==true and .provider_subday==true and .provider_clamped==false' <<< "$b39" > /dev/null \
+  && near "$(jq .remaining_usd <<< "$b39")" 145; then
+  ok "anchored sub-day grant: a 10-13T12:00 grant on the 10-13 bucket day -> estimate true, provider_subday true (the anchor's own mid-day instant exempt)"
+else bad "anchored sub-day: $b39"; fi
 
 exit $fail
