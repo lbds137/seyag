@@ -678,6 +678,60 @@ assert_api_has "-R beats GH_REPO: the flag's repo scopes the fetch" 'repos/secon
 assert_api_lacks "…and the assignment's repo reaches nothing" 'other-x'
 SHIM_REPO_EXIT=0
 
+# An assignment in an EARLIER simple command — `export GH_REPO=…` — exports
+# the variable for the rest of the shell, so it scopes a later merge exactly
+# like the prefix form. Same constraints: single-line value, -R wins, and it
+# only applies while it PRECEDES the armed invocation in the command.
+new_case; SHIM_REPO_EXIT=1; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'export GH_REPO=other-x && gh pr merge 2002 --rebase'
+assert_api_has "an earlier export GH_REPO scopes the fetch" 'repos/other-x/issues/2002/comments'
+assert_exit "…and the gate blocks on that repo's review" 2
+SHIM_REPO_EXIT=0
+
+# The ordering half of the same rule: an export AFTER the merge runs too late
+# to scope it, so the lookups stay on the cwd repo (repo view resolves it
+# here, and its fetch is the one that gates the merge).
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'gh pr merge 2002 --rebase && export GH_REPO=other-x'
+assert_api_has "an export AFTER the merge scopes nothing: the cwd repo's review gates it" 'repos/acme-widgets/cli/issues/2002/comments'
+assert_api_lacks "…and the assignment's repo reaches no fetch" 'repos/other-x'
+
+# A STANDALONE assignment (`GH_REPO=x;`) sets a shell VARIABLE, not an
+# exported one — bash exports nothing, so a later gh still reads the cwd
+# repo. Capturing it gated the merge on another repo's review. Repo view
+# fails here so the discriminator is sharp: a capture would reach the fetch
+# URL; the correct behavior is fail-open with no fetch at all.
+new_case; SHIM_REPO_EXIT=1; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'GH_REPO=other-x; gh pr merge 2002 --rebase'
+assert_exit "a standalone GH_REPO= assignment exports nothing: fail open" 0
+assert_no_fetch "…no fetch ran — nothing scoped the lookups"
+assert_api_lacks "…and the assignment's repo reaches no fetch" 'other-x'
+SHIM_REPO_EXIT=0
+
+# The behavior half of the same rule under a healthy repo view: the cwd
+# repo's review is what gates the merge.
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'GH_REPO=other-x; gh pr merge 2002 --rebase'
+assert_api_has "a standalone assignment scopes nothing: the cwd repo's review gates the merge" 'repos/acme-widgets/cli/issues/2002/comments'
+assert_api_lacks "…and the assignment's repo reaches no fetch" 'other-x'
+
+# `export -n` UN-exports: a flag-carrying export must never capture.
+new_case; SHIM_REPO_EXIT=1; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'export -n GH_REPO=other-x && gh pr merge 2002 --rebase'
+assert_exit "export -n un-exports: nothing scopes the lookups, fail open" 0
+assert_no_fetch "…no fetch ran"
+assert_api_lacks "…and the un-exported repo reaches no fetch" 'other-x'
+SHIM_REPO_EXIT=0
+
+# `export -- GH_REPO=…` exports THROUGH the `--` separator (verified on
+# this machine): a bare `--` is not a disqualifying flag — only -n, -u and
+# -p change export's meaning.
+new_case; SHIM_REPO_EXIT=1; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'export -- GH_REPO=other-x && gh pr merge 2002 --rebase'
+assert_api_has "export -- GH_REPO still captures: other-x scopes the fetch" 'repos/other-x/issues/2002/comments'
+assert_exit "…and the gate blocks on that repo's review" 2
+SHIM_REPO_EXIT=0
+
 # Unparseable input must fall back to the permissive scan, never to silence.
 # Over-arming is recoverable (the agent sees an unrelated review and retries);
 # under-arming just lets the merge through.
@@ -1164,6 +1218,89 @@ assert_view_empty "…no branch lookup ran either"
 new_case; invoke 'env -C /tmp gh pr merge 2002'
 assert_exit "env -C wrapping the merge: refused" 2
 assert_stderr_has "…with the scope-moved banner" 'MERGE SCOPE MOVED'
+
+# Separators GLUED into words (`status;`, `repo;gh`, a `{` group) and a
+# path-qualified or quoted gh word would hide real cds from the confirm
+# scan's command-position model, so the refinement would clear the refusal
+# on commands whose merge really runs from another directory. The per-word
+# separator split, the reserved-word command positions and the
+# basename/quote-aware gh match close them.
+new_case; invoke 'git status; cd ../other-repo && gh pr merge 7'
+assert_exit "glued trailing separator, cd back at command position: refused" 2
+assert_stderr_has "…with the scope-moved banner" 'MERGE SCOPE MOVED'
+assert_no_fetch "…no fetch ran"
+
+new_case; invoke '{ cd ../other-repo; gh pr merge 7; }'
+assert_exit "brace group, cd in command position: refused" 2
+assert_stderr_has "…with the scope-moved banner" 'MERGE SCOPE MOVED'
+assert_no_fetch "…no fetch ran"
+
+new_case; invoke 'cd ../other-repo;gh pr merge 7'
+assert_exit "glueless separator between cd and gh: refused" 2
+assert_stderr_has "…with the scope-moved banner" 'MERGE SCOPE MOVED'
+assert_no_fetch "…no fetch ran"
+
+new_case; invoke 'cd ../other-repo && /usr/bin/gh pr merge 7'
+assert_exit "path-qualified gh is still a merge the cd affects: refused" 2
+assert_stderr_has "…with the scope-moved banner" 'MERGE SCOPE MOVED'
+assert_no_fetch "…no fetch ran"
+
+new_case; invoke 'cd ../other-repo && "gh" pr merge 7'
+assert_exit "a quoted gh word is still the merge command: refused" 2
+assert_stderr_has "…with the scope-moved banner" 'MERGE SCOPE MOVED'
+assert_no_fetch "…no fetch ran"
+
+# The merge inside a wrapper string INHERITS the directory the top-level cd
+# moved to; neither shell level shows both events on its own, so the
+# refinement must refuse rather than clear across levels.
+new_case; invoke 'cd ../other-repo && bash -c "gh pr merge 2002"'
+assert_exit "cd at top level, merge inside bash -c: refused" 2
+assert_stderr_has "…with the scope-moved banner" 'MERGE SCOPE MOVED'
+assert_no_fetch "…no fetch ran"
+
+# The merge can also sit where this scan's levels have no eyes: a cd at
+# wrapper level 1 with the merge at level 2, or a heredoc BODY fed to a
+# stdin shell (bodies are stripped as data at every level, so no scanned
+# level shows the merge the caller's walk armed on). Blind means refuse.
+new_case; invoke "bash -c 'cd ../x && bash -c \"gh pr merge 2002\"'"
+assert_exit "cd at wrapper level 1, merge at level 2: refused" 2
+assert_stderr_has "…with the scope-moved banner" 'MERGE SCOPE MOVED'
+assert_no_fetch "…no fetch ran"
+
+new_case; invoke "$(printf "cd ../x && bash <<'EOF'\ngh pr merge 2002\nEOF")"
+assert_exit "merge in a heredoc body fed to a shell: refused" 2
+assert_stderr_has "…with the scope-moved banner" 'MERGE SCOPE MOVED'
+assert_no_fetch "…no fetch ran"
+
+new_case; invoke "$(printf "cd ../x && cat <<'EOF' | bash\ngh pr merge 2002\nEOF")"
+assert_exit "merge heredoc-piped into bash: refused" 2
+assert_stderr_has "…with the scope-moved banner" 'MERGE SCOPE MOVED'
+assert_no_fetch "…no fetch ran"
+
+# A here-string word (`<<<`) is all strip-chars: the leading-char strip used
+# to spin forever once the part emptied (the membership test stayed True),
+# hanging the hook into the harness timeout — a silent stand-down, the
+# worst failure mode. The `part and` terminator closes it; the refusal
+# rides the wrapper rule (a here-string IS a wrapper string, and the
+# top-level cd moves the shell it feeds).
+new_case; invoke "cd ../other-repo && bash <<< 'gh pr merge 2002'"
+assert_exit "cd before a here-string shell merge: refused (and does not hang)" 2
+assert_stderr_has "…with the scope-moved banner" 'MERGE SCOPE MOVED'
+assert_no_fetch "…no fetch ran"
+
+# Depth is one-directional: a cd at depth D affects every later merge at
+# depth >= D — a subshell or command substitution INHERITS the moved
+# directory, so the merge inside it runs from the cd'd directory even
+# though the depths differ. Same-depth equality cleared both of these.
+new_case; invoke 'cd ../other-repo && (gh pr merge 2002 --rebase)'
+assert_exit "cd before a merge inside a subshell: refused" 2
+assert_stderr_has "…with the scope-moved banner" 'MERGE SCOPE MOVED'
+assert_no_fetch "…no fetch ran"
+
+new_case; invoke 'cd ../other-repo && echo $(gh pr merge 2002 --rebase)'
+assert_exit "cd before a merge inside a command substitution: refused" 2
+assert_stderr_has "…with the scope-moved banner" 'MERGE SCOPE MOVED'
+assert_no_fetch "…no fetch ran"
 
 # Controls. A cd AFTER the merge is the merge's own business — the merge
 # runs first, in this cwd.
@@ -1844,6 +1981,21 @@ assert_stderr_has "…and that it lives in the SESSION environment, not this she
 assert_stderr_has "…after injecting the review" 'LGTM. No actionable findings.'
 rm -f "$ACK_FILE"
 
+# The REMINDER path's failed write is the mirror image: the reminder banner
+# already printed, the write is best-effort, so the hook fails OPEN (exit 0)
+# rather than block forever. That exit-0 path is exactly where stderr
+# reaches nobody (the header's rule), so the dropped-warning contract is
+# silence about the write: no WARNING line may claim the agent was told.
+new_case; SHIM_PR_BASE='main'; SHIM_REVIEW_JSON=''
+mkdir -p "$CASE_HOME/.local/state/seyag/pr-merge-review-check"
+: >"$ACK_FILE"
+chmod 444 "$ACK_FILE"
+invoke 'gh pr merge 2010 --rebase'
+assert_exit "reminder ack write failing on a healthy state: fails open" 0
+assert_stderr_lacks "…and no warning line claims the agent was told" 'WARNING: default-branch reminder ack write failed'
+assert_ack_lacks "…and nothing was acked through the read-only file" 'RELEASE:acme-widgets/cli:2010'
+rm -f "$ACK_FILE"
+
 # ===========================================================================
 # 9. The --delete-branch precondition
 #
@@ -2331,6 +2483,20 @@ assert_pr "…and the review gate runs normally" 2002
 new_case; SHIM_WORKTREES="$WT_CONFLICT"; SHIM_REVIEW_JSON="$LGTM"
 invoke 'gh pr merge 2002 --rebase --delete-branch -R acme-widgets/cli'
 assert_exit "-R naming the cwd repo: the precondition still fires" 2
+assert_stderr_has "…by the precondition, not the review gate" 'PR MERGE BLOCKED'
+
+# GitHub owner/repo is case-INSENSITIVE and gh accepts a HOST/OWNER/REPO
+# spelling for -R, so both of the next rows still name THIS repo; an
+# exact-string compare let them skip the local worktree check (a delete
+# that strands the branch in the other worktree).
+new_case; SHIM_WORKTREES="$WT_CONFLICT"; SHIM_REVIEW_JSON="$LGTM"
+invoke 'gh pr merge 2002 --rebase --delete-branch -R Acme-Widgets/CLI'
+assert_exit "-R naming the cwd repo in different case: the precondition still fires" 2
+assert_stderr_has "…by the precondition, not the review gate" 'PR MERGE BLOCKED'
+
+new_case; SHIM_WORKTREES="$WT_CONFLICT"; SHIM_REVIEW_JSON="$LGTM"
+invoke 'gh pr merge 2002 --rebase --delete-branch -R github.com/acme-widgets/cli'
+assert_exit "-R naming the cwd repo with a host component: the precondition still fires" 2
 assert_stderr_has "…by the precondition, not the review gate" 'PR MERGE BLOCKED'
 
 SHIM_WORKTREES=''
