@@ -60,7 +60,7 @@ mkdir -p ~/.claude/rules && ln -s ~/Projects/seyag/plugins/seyag/rules/core.md ~
 
 **What loads from where.** Claude Code keeps an install record and a cached copy under `~/.claude/plugins/cache/<marketplace>/seyag/<version>/`, but for this directory marketplace every part of the plugin (`hooks.json` and the hook scripts, agents, skills, `bin/`) loads from the source checkout (`~/Projects/seyag/plugins/seyag`) when a session starts or runs `/reload-plugins`, whatever version the record names. A running session keeps the hooks it started with until `/reload-plugins`; `/clear` does not reload hooks. So a merge to the checkout goes live in a session at its next start or `/reload-plugins`.
 
-A release is recorded with a version bump: bump `version` in `plugins/seyag/.claude-plugin/plugin.json`, commit, then:
+A release is recorded with a version bump: bump `version` in `plugins/seyag/.claude-plugin/plugin.json`, commit, bring the checkout up to date with its remote first (`git pull --ff-only` — a directory marketplace validates the checkout and re-serves the old version while it is behind), then:
 
 ```bash
 claude plugin marketplace update lbds137
