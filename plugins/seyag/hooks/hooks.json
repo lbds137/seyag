@@ -103,7 +103,8 @@
           },
           {
             "type": "command",
-            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/run.sh\" pr-merge-review-check"
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/run.sh\" pr-merge-review-check",
+            "timeout": 60
           }
         ]
       },

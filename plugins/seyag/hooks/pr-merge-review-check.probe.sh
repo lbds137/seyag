@@ -657,6 +657,27 @@ assert_no_fetch "…no fetch ran — no -R-invented repo reached one"
 assert_api_lacks "…and the multi-line value reached no lookup" 'line one'
 SHIM_REPO_EXIT=0
 
+# GH_REPO= scopes gh exactly like -R; the hook reads it off the command's
+# assignment prefix (env-prefixed form included). Repo view fails here so
+# the fetch can only carry the assignment through the scoping itself.
+new_case; SHIM_REPO_EXIT=1; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'GH_REPO=other-x gh pr merge 2002 --rebase'
+assert_api_has "an inline GH_REPO scopes the fetch" 'repos/other-x/issues/2002/comments'
+assert_exit "…and the gate blocks on that repo's review" 2
+
+new_case; SHIM_REPO_EXIT=1; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'env GH_REPO=other-x gh pr merge 2002 --rebase'
+assert_api_has "the env-prefixed GH_REPO form scopes the fetch too" 'repos/other-x/issues/2002/comments'
+assert_exit "…and blocks" 2
+
+# -R wins over GH_REPO (gh's own precedence): the flag's repo reaches the
+# fetch, the assignment's does not.
+new_case; SHIM_REPO_EXIT=1; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'GH_REPO=other-x gh pr merge 2002 -R second-x --rebase'
+assert_api_has "-R beats GH_REPO: the flag's repo scopes the fetch" 'repos/second-x/issues/2002/comments'
+assert_api_lacks "…and the assignment's repo reaches nothing" 'other-x'
+SHIM_REPO_EXIT=0
+
 # Unparseable input must fall back to the permissive scan, never to silence.
 # Over-arming is recoverable (the agent sees an unrelated review and retries);
 # under-arming just lets the merge through.
@@ -1155,6 +1176,38 @@ new_case; invoke 'echo "cd /tmp" && gh pr merge 2002 --rebase'
 assert_stderr_lacks "a cd inside quotes does not refuse" 'MERGE SCOPE MOVED'
 assert_pr "…and the merge gates normally" 2002
 
+# A cd inside a SUBSHELL cannot move the parent's directory, so the merge's
+# scope is unchanged.
+new_case; invoke '(cd /tmp && ls) && gh pr merge 2002 --rebase'
+assert_stderr_lacks "a subshell cd does not refuse" 'MERGE SCOPE MOVED'
+assert_pr "…and the merge gates normally" 2002
+
+# A pinned repository is immune to a cd by construction — resolving a named
+# repo gives the same answer from any directory. The refusal's own -R advice
+# is exactly this escape, already taken.
+new_case; invoke 'cd ../other-repo && gh pr merge 7 -R acme-widgets/cli'
+assert_stderr_lacks "a cd beside an -R pin does not refuse" 'MERGE SCOPE MOVED'
+assert_pr "…and the merge gates on the pinned repo" 7
+assert_api_has "…scoped by the -R, not the cwd" 'repos/acme-widgets/cli/issues/7/comments'
+
+# ===========================================================================
+# 2g. Fan-out merges — `gh pr merge` under xargs/parallel runs once per
+#     input; no ack cycle covers the second and later runs. Non-ackable
+#     refusal, one merge per command.
+# ===========================================================================
+printf '\n--- fan-out merges (xargs / parallel) ---\n'
+
+new_case; invoke 'echo 7 8 | xargs -n1 gh pr merge'
+assert_exit "a merge under xargs: refused" 2
+assert_stderr_has "…with the fan-out banner" 'FAN-OUT MERGE REFUSED'
+assert_stderr_has "…naming the recovery" 'one merge per review cycle'
+assert_no_fetch "…no fetch ran"
+
+# The control: fan-out around a NON-merge command refuses nothing.
+new_case; invoke 'echo 7 8 | xargs -n1 echo'
+assert_exit "xargs without a merge: allowed" 0
+assert_silent "…and silent"
+
 # ===========================================================================
 # 3. The review gate — block once per (PR, review-id), allow on retry
 # ===========================================================================
@@ -1166,7 +1219,7 @@ invoke 'gh pr merge 2002 --rebase'
 assert_exit "first call on a feature PR with a review: BLOCKS" 2
 assert_stderr_has "block names the PR" 'PR MERGE GATE — latest claude[bot] review for PR #2002'
 assert_stderr_has "block carries the review body" 'LGTM. No actionable findings.'
-assert_stderr_has "block carries the posted timestamp" 'Posted: 2026-08-08T12:00:00Z'
+assert_stderr_has "block carries both timestamps (posted + updated)" 'Posted: 2026-08-08T12:00:00Z (updated 2026-08-08T12:00:00Z)'
 assert_stderr_has "block warns against editing the ack state" 'Do NOT bypass this gate by editing the ack state'
 assert_ack_has "ack holds PR:review-id:updated_at" '2002:777:2026-08-08T12:00:00Z'
 # `stat -c` is GNU syntax, so on a platform without it the mode is unreadable.
@@ -1243,7 +1296,7 @@ SHIM_REVIEW_JSON=$(review_json 777 'Edited in place: the finding is sharper now.
 invoke 'gh pr merge 2002 --rebase'
 assert_exit "same PR, same review-id, EDITED comment (moved updated_at): BLOCKS again" 2
 assert_stderr_has "…carrying the edited body" 'Edited in place: the finding is sharper now.'
-assert_stderr_has "…and the moved timestamp" 'Posted: 2026-08-08T15:30:00Z'
+assert_stderr_has "…and the moved updated timestamp beside the original" 'Posted: 2026-08-08T12:00:00Z (updated 2026-08-08T15:30:00Z)'
 assert_ack_has "…ack holds the edited key" '2002:777:2026-08-08T15:30:00Z'
 assert_ack_has "…and the pre-edit key" '2002:777:2026-08-08T12:00:00Z'
 
@@ -1668,7 +1721,11 @@ assert_stderr_has "body containing a bare EOF line: head survives" 'before the d
 assert_stderr_has "…and the tail past it survives too" 'after the delimiter'
 
 # ===========================================================================
-# 8. Ack-state anomalies (fail closed) and write failures (fail open)
+# 8. Ack-state anomalies (fail closed). Write failures split by which ack:
+#    the REVIEW-ack write fails closed with the escape named (an allow would
+#    print a review to a stream nobody sees); the REMINDER-ack write fails
+#    open — its banner already printed on a blocking exit, best-effort by
+#    construction, so the cost is at most a duplicate reminder.
 # ===========================================================================
 printf '\n--- ack state ---\n'
 
@@ -1783,6 +1840,7 @@ invoke 'gh pr merge 2002 --rebase'
 assert_exit "review path, healthy-but-unwritable ack: BLOCKS with the escape named" 2
 assert_stderr_has "…and says why" 'ack write failed'
 assert_stderr_has "…naming the escape" 'SYG_DISABLE=guards-pr'
+assert_stderr_has "…and that it lives in the SESSION environment, not this shell" 'SESSION'
 assert_stderr_has "…after injecting the review" 'LGTM. No actionable findings.'
 rm -f "$ACK_FILE"
 
