@@ -1,8 +1,9 @@
 # shellcheck shell=bash
-# Shared claim-shape vocabulary, sourced (not executed) by the hooks that
-# scan prose for claim-shaped lines: pr-merge-review-check.sh reads the
-# comment lines a diff ADDS. A change here changes every scan that sources
-# this file — each hook's probe is the test for its half.
+# Shared claim-shape vocabulary, sourced (not executed) by the hook that
+# scans prose for claim-shaped lines: pr-merge-review-check.sh reads the
+# comment lines a diff ADDS. A second consumer — the PR-body scan — is a
+# queued port that will source this file too; a change here changes every
+# scan that sources it, and each consumer's probe is the test for its half.
 #
 # CLAIM_SHAPE_CORE_REGEX: certainty/provenance/counted-noun vocabulary common
 # to every scanning surface. Every alternative is `\b`-anchored so ordinary
@@ -18,6 +19,9 @@
 # CLAIM_CITE_EXEMPT_REGEX: a line matching either shape above is NOT flagged
 # when it also carries its own evidence (a backticked path, file:line, URL,
 # or command) or its own hedge (an explicit unverified/hypothesis marker).
+# This hook never applies the exemption — it exists for the PR-body scan's
+# prose, where a citing line is not a bare claim; the added-comment scan
+# flags every shape hit and asks for verification instead.
 # shellcheck disable=SC2034  # a sourced vocabulary file: consumers read these by name
 CLAIM_SHAPE_CORE_REGEX='\balways\b|\bnever\b|\bcannot\b|\bguaranteed\b|\bonly (place|path|caller|writer|reader)\b|\bcomes? from\b|\bderived from\b|\bpopulated (by|from)\b|\bread from\b|\bwritten (only )?by\b|\b(both|all|the) [0-9]+ |\b[0-9]+ (call sites?|tests?|files?|instances?|copies|callers?|places)\b'
 
