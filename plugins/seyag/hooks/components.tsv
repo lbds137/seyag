@@ -28,6 +28,7 @@ session-url-gate	guards-outbound
 private-term-guard	guards-outbound
 claim-shape-guard	guards-commit
 temporal-marker-guard	guards-commit
+pr-merge-review-check	guards-pr
 pr-monitor-reminder	pr-watch
 dispatch-posture-gate	dispatch
 api-credit-ledger	api-credit
@@ -36,6 +37,6 @@ classifier-ledger	classifier-ledger
 handoff-pick-check	handoff-pick-check
 status-claim-cite	status-claim-cite
 dispatch-spec-ledger-gate	dispatch-spec
-@profile	full	session rules route turn-shape context guards-shell guards-outbound guards-commit pr-watch dispatch api-credit launch-record classifier-ledger handoff-pick-check status-claim-cite dispatch-spec
-@profile	guards	guards-shell guards-outbound guards-commit context dispatch route session api-credit launch-record classifier-ledger
+@profile	full	session rules route turn-shape context guards-shell guards-outbound guards-commit guards-pr pr-watch dispatch api-credit launch-record classifier-ledger handoff-pick-check status-claim-cite dispatch-spec
+@profile	guards	guards-shell guards-outbound guards-commit guards-pr context dispatch route session api-credit launch-record classifier-ledger
 @profile	none	session api-credit launch-record classifier-ledger
