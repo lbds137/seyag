@@ -141,7 +141,7 @@ One pass, inline or one agent, reading every report of the run:
 
 ## Step 4: operationalize (the deliverable)
 
-Pick the surface by audience: one repo's contributors get that project's rules, skills or hooks; every session on this machine gets this plugin (`~/Projects/seyag`) or the shared memory. Then climb the ladder: **rule** (hard constraint) → **skill** (procedure step) → **hook or script** (deterministic trigger, mechanical correction) → **memory** (narrative or per-user context only, never a "try harder" note).
+Route by scope: a mined learning that is project-agnostic — any repo on the machine could use it — proposes itself to this plugin (`~/Projects/seyag`; a rule, guard, hook, skill or script) rather than staying in the originating repo; a repo-specific learning goes to that repo's own rules, skills or hooks; a one-off is `rejected (one-off)`, memory at most. Then climb the ladder: **rule** (hard constraint) → **skill** (procedure step) → **hook or script** (deterministic trigger, mechanical correction) → **memory** (narrative or per-user context only, never a "try harder" note).
 
 Positives take the mirror ladder: a GOOD-MOVE that a command can run becomes a script or hook with its probe, plus a trigger sentence in the rule or skill that owns the moment. One that needs judgment but recurs becomes a named step in the governing skill. RATIFIED becomes the default written into the rule or skill that governs the choice. GUARD-HELD becomes `recorded-load-bearing <trips/escapes/FPs>` in the README, or `retire-candidate` handed to the owner. A PROCEDURE becomes a script (with a probe) plus a trigger sentence where the moment happens, or a skill step when it needs judgment; a DISCOVERABILITY item becomes only the trigger sentence.
 
