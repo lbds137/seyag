@@ -37,8 +37,10 @@
 #      shape; it never runs the real filter. So the hook's jq expressions
 #      are pinned as far as "what does the script do with this shape" and
 #      not at all as "does real `gh` produce this shape".
-#   2. The pagination params (`per_page=100&direction=desc`). Their whole
-#      purpose is a property of the live API, not of this fixture.
+#   2. That `--paginate` actually walks every page and `--slurp` really wraps
+#      them — live-API behavior. The probe pins that the invocation carries
+#      both flags (log-assert below); the shim never runs the hook's jq, so
+#      the page-walking itself stays unpinned.
 #   3. Whether stderr from a blocking PreToolUse hook actually reaches the
 #      agent's context. That is a Claude Code runtime property; the probe can
 #      only assert the hook wrote it.
@@ -106,14 +108,17 @@ mkdir -p "$WORK/bin"
 # failure per FIELD (not per arm) is what lets the refs-survive-a-files-
 # failure case go red against a hook that folds both lookups into one call.
 # The api call is LOGGED, because its URL carries the extracted PR number and
-# that is the value the extraction cases assert on. Anything unrecognised
-# exits 64 rather than succeeding silently — a shim that answers a call the
-# hook does not make is how a probe ends up testing a path that no longer
-# exists.
+# that is the value the extraction cases assert on; the `pr view` calls are
+# logged too (SHIM_VIEW_LOG), because which SELECTOR the hook resolved a
+# selector-bearing invocation with is only visible in that argv. Anything
+# unrecognised exits 64 rather than succeeding silently — a shim that answers
+# a call the hook does not make is how a probe ends up testing a path that no
+# longer exists.
 cat >"$WORK/bin/gh" <<'SHIM'
 #!/bin/bash
 case "$*" in
   "pr view "*"--json "*)
+    printf '%s\n' "$*" >>"${SHIM_VIEW_LOG:-/dev/null}"
     fields=$(printf '%s\n' "$*" | sed -n 's/.*--json \([^ ]*\).*/\1/p')
     case "$fields" in
       number)
@@ -143,6 +148,10 @@ case "$*" in
     ;;
   *"/issues/"*"/comments"*)
     printf '%s\n' "$*" >>"${SHIM_API_LOG:-/dev/null}"
+    # The fixture is already in post-`--jq` shape (the shim never runs the
+    # hook's filter), so --paginate/--slurp change nothing here: their
+    # behavior is a live-API property, pinned only as presence in the logged
+    # argv by the paginate row.
     printf '%s' "${SHIM_REVIEW_JSON:-}"
     ;;
   "pr diff "*)
@@ -199,6 +208,7 @@ CASE_N=0
 STDOUT_FILE=''
 STDERR_FILE=''
 API_LOG=''
+VIEW_LOG=''
 ACK_FILE=''
 CASE_HOME=''
 LAST_EXIT=0
@@ -222,7 +232,11 @@ SHIM_WORKTREE_EXIT=0
 SHIM_PR_DIFF=''
 SHIM_DIFF_EXIT=0
 REMINDER_OVERRIDE=''
-# SYG_PR_MERGE_LIB_DIR knob (F7): pointing the hook's shell_quotes import at
+# Same pattern for the two configurable identities: an empty override means
+# the hook's defaults apply (claude[bot], the claude-code-review workflow).
+LOGIN_OVERRIDE=''
+WORKFLOW_OVERRIDE=''
+# SYG_PR_MERGE_LIB_DIR knob: pointing the hook's shell_quotes import at
 # an empty dir simulates a broken lib without touching the hook tree.
 LIB_DIR_OVERRIDE=''
 
@@ -236,9 +250,11 @@ new_case() {
   mkdir -p "$CASE_HOME"
   ACK_FILE="$CASE_HOME/.local/state/seyag/pr-merge-review-check/ack"
   API_LOG="$WORK/api.$CASE_N"
+  VIEW_LOG="$WORK/view.$CASE_N"
   STDOUT_FILE="$WORK/out.$CASE_N"
   STDERR_FILE="$WORK/err.$CASE_N"
   : >"$API_LOG"
+  : >"$VIEW_LOG"
 }
 
 payload() { jq -nc --arg c "$1" '{tool_name:"Bash",tool_input:{command:$c}}'; }
@@ -253,6 +269,7 @@ invoke() {
     HOME="$CASE_HOME" \
     PATH="$WORK/bin:$PATH" \
     SHIM_API_LOG="$API_LOG" \
+    SHIM_VIEW_LOG="$VIEW_LOG" \
     SHIM_PR_BASE="$SHIM_PR_BASE" \
     SHIM_PR_HEAD="$SHIM_PR_HEAD" \
     SHIM_PR_AUTHOR="$SHIM_PR_AUTHOR" \
@@ -272,6 +289,8 @@ invoke() {
     SHIM_PR_DIFF="$SHIM_PR_DIFF" \
     SHIM_DIFF_EXIT="$SHIM_DIFF_EXIT" \
     SYG_MERGE_REVIEW_RELEASE_REMINDER="${REMINDER_OVERRIDE:-}" \
+    SYG_MERGE_REVIEW_LOGIN="${LOGIN_OVERRIDE:-}" \
+    SYG_MERGE_REVIEW_WORKFLOW="${WORKFLOW_OVERRIDE:-}" \
     SYG_PR_MERGE_LIB_DIR="${LIB_DIR_OVERRIDE:-}" \
     bash "$HOOK" >"$STDOUT_FILE" 2>"$STDERR_FILE"
   LAST_EXIT=$?
@@ -288,6 +307,7 @@ invoke_via_runner() {
     PATH="$WORK/bin:$PATH" \
     SYG_DISABLE="$disable" \
     SHIM_API_LOG="$API_LOG" \
+    SHIM_VIEW_LOG="$VIEW_LOG" \
     SHIM_PR_BASE="$SHIM_PR_BASE" \
     SHIM_PR_HEAD="$SHIM_PR_HEAD" \
     SHIM_PR_AUTHOR="$SHIM_PR_AUTHOR" \
@@ -307,6 +327,8 @@ invoke_via_runner() {
     SHIM_PR_DIFF="$SHIM_PR_DIFF" \
     SHIM_DIFF_EXIT="$SHIM_DIFF_EXIT" \
     SYG_MERGE_REVIEW_RELEASE_REMINDER="${REMINDER_OVERRIDE:-}" \
+    SYG_MERGE_REVIEW_LOGIN="${LOGIN_OVERRIDE:-}" \
+    SYG_MERGE_REVIEW_WORKFLOW="${WORKFLOW_OVERRIDE:-}" \
     SYG_PR_MERGE_LIB_DIR="${LIB_DIR_OVERRIDE:-}" \
     bash "$RUNNER" pr-merge-review-check >"$STDOUT_FILE" 2>"$STDERR_FILE"
   LAST_EXIT=$?
@@ -324,6 +346,7 @@ invoke_in() {
       HOME="$CASE_HOME" \
       PATH="$WORK/bin:$PATH" \
       SHIM_API_LOG="$API_LOG" \
+      SHIM_VIEW_LOG="$VIEW_LOG" \
       SHIM_PR_BASE="$SHIM_PR_BASE" \
       SHIM_PR_HEAD="$SHIM_PR_HEAD" \
       SHIM_PR_AUTHOR="$SHIM_PR_AUTHOR" \
@@ -343,16 +366,21 @@ invoke_in() {
       SHIM_PR_DIFF="$SHIM_PR_DIFF" \
       SHIM_DIFF_EXIT="$SHIM_DIFF_EXIT" \
       SYG_MERGE_REVIEW_RELEASE_REMINDER="${REMINDER_OVERRIDE:-}" \
+      SYG_MERGE_REVIEW_LOGIN="${LOGIN_OVERRIDE:-}" \
+      SYG_MERGE_REVIEW_WORKFLOW="${WORKFLOW_OVERRIDE:-}" \
       SYG_PR_MERGE_LIB_DIR="${LIB_DIR_OVERRIDE:-}" \
       bash "$HOOK"
   ) >"$STDOUT_FILE" 2>"$STDERR_FILE"
   LAST_EXIT=$?
 }
 
-# review_json <id> <body> — a fixture already in post-`--jq` shape.
+# review_json <id> <body> [updated_at] — a fixture already in post-`--jq`
+# shape (the shim never runs the hook's filter). updated_at defaults to
+# created_at; passing a different one models a review that EDITED its comment
+# in place.
 review_json() {
-  jq -nc --arg i "$1" --arg b "$2" \
-    '{id:($i|tonumber),created_at:"2026-08-08T12:00:00Z",body:$b}'
+  jq -nc --arg i "$1" --arg b "$2" --arg u "${3:-2026-08-08T12:00:00Z}" \
+    '{id:($i|tonumber),created_at:"2026-08-08T12:00:00Z",updated_at:$u,body:$b}'
 }
 
 ok() { printf 'PASS  %s\n' "$1"; }
@@ -418,11 +446,36 @@ assert_ack_lacks() {
 }
 # assert_api_has <label> <fixed-string> — pin the REVIEW FETCH URL itself
 # (the api log line), beyond just the PR number assert_pr extracts from it.
-# Used by the -R scoping row: the point is WHICH repository was asked.
+# Used by the -R scoping row and the paginate row. The `--` separator keeps a
+# flag-shaped fixed string (e.g. `--paginate --slurp`) a pattern, not an
+# option.
 assert_api_has() {
-  if grep -qF "$2" "$API_LOG"; then ok "$1"; else
+  if grep -qF -- "$2" "$API_LOG"; then ok "$1"; else
     bad "$1 (api log missing: $2)"
   fi
+}
+# assert_view_has <label> <fixed-string> — pin the argv of a `gh pr view`
+# call. The selector rows need it: which argument the hook resolved the PR
+# with is only visible there, and the served number alone cannot tell a
+# selector resolution from the numberless branch lookup.
+assert_view_has() {
+  if grep -qF -- "$2" "$VIEW_LOG"; then ok "$1"; else
+    bad "$1 (view log missing: $2)"
+  fi
+}
+# assert_view_empty <label> — no `gh pr view` ran at all: the selector
+# resolution is a network call, and a compound refusal must precede it.
+assert_view_empty() {
+  if [ ! -s "$VIEW_LOG" ]; then ok "$1"; else
+    bad "$1 (view log non-empty: $(tr '\n' ';' <"$VIEW_LOG"))"
+  fi
+}
+# assert_api_lacks <label> <fixed-string> — the negative half of
+# assert_api_has: a repository (or flag) that must NOT appear in the fetch.
+assert_api_lacks() {
+  if grep -qF -- "$2" "$API_LOG"; then
+    bad "$1 (api log should NOT contain: $2)"
+  else ok "$1"; fi
 }
 
 LGTM=$(review_json 777 'LGTM. No actionable findings.')
@@ -532,16 +585,16 @@ assert_no_fetch "command text carrying the phrase does not arm the gate"
 new_case; invoke 'GH_TOKEN=x gh pr merge 2002'
 assert_pr "an env-assignment prefix still reaches the merge invocation" 2002
 
-# Round 2, finding 2: the command word is matched by basename, so a
+# The command word is matched by basename, so a
 # path-qualified gh (`/usr/bin/gh`, a mise shim path) is a real invocation.
 new_case; SHIM_REVIEW_JSON="$LGTM"
 invoke '/usr/bin/gh pr merge 2002'
 assert_pr "a path-qualified gh still arms the gate" 2002
 assert_exit "…and blocks under a review fixture" 2
 
-# Round 2, finding 3: the cheap reject must not eat shapes the tokenizer
+# The cheap reject must not eat shapes the tokenizer
 # would have parsed — a quoted command word and a backslash continuation are
-# real invocations. (The bare-`merge` widening also costs this section a
+# real invocations. (The bare-`merge` substring also costs this section a
 # python spawn on `gh pr merge-queue` above; that is the accepted prefilter
 # trade.)
 new_case; invoke '"gh" pr merge 2002'
@@ -550,7 +603,7 @@ assert_pr 'a quoted command word still arms the gate' 2002
 new_case; invoke "$(printf 'gh pr \\\nmerge 2002')"
 assert_pr 'a line continuation between pr and merge still arms the gate' 2002
 
-# Round 2, finding 4: a value token after a value-taking flag is not a PR
+# A value token after a value-taking flag is not a PR
 # number. `-s -t 2026` leaves no bare number, so the NUMBERLESS arm fires
 # (fake gh serves 4242); `-b 9 7` and `--subject 2024 2002` skip the flag's
 # value and arm the bare number.
@@ -565,7 +618,7 @@ assert_pr '…the digit after a short value flag is skipped, the bare one arms' 
 new_case; invoke 'gh pr merge --subject 2024 2002'
 assert_pr '…same for a long value flag (--subject)' 2002
 
-# Round 2, finding 5: -R scopes every lookup to the named repo. The shim's
+# -R scopes every lookup to the named repo. The shim's
 # repo view is made to FAIL here, so the review fetch can only carry
 # other-x through the -R threading itself — the sharpest form of the assert.
 new_case; SHIM_REPO_EXIT=1
@@ -580,7 +633,7 @@ SHIM_REPO_EXIT=0
 new_case; invoke 'gh pr merge 2002 --body "unbalanced'
 assert_pr "unbalanced quotes fall back to the legacy scan rather than arming nothing" 2002
 
-# Round 2, finding 7: a broken shell_quotes IMPORT must take the same legacy
+# A broken shell_quotes IMPORT must take the same legacy
 # fallback, not silently disarm the gate. Simulated by pointing the import's
 # lib dir at an empty directory via the SYG_PR_MERGE_LIB_DIR knob — the hook
 # tree itself stays intact.
@@ -643,7 +696,7 @@ assert_pr "an empty argument does not end the PR-number scan" 2002
 # runs both sides unconditionally and in order, so the FIRST is the one that
 # executes first and the one whose review must be surfaced.
 new_case; invoke 'gh pr merge 1; gh pr merge 2002'
-assert_pr "semicolon-chained real invocations: the FIRST one arms the gate" 1
+assert_stderr_has "…the banner names the FIRST invocation as the armed one" '1 2002'
 assert_stderr_has "…and the SECOND one is why the compound is refused" 'ONE MERGE PER COMMAND'
 
 # ===========================================================================
@@ -673,8 +726,10 @@ assert_exit "two real merges in one command: refused" 2
 assert_stderr_has "…with the one-merge-per-command banner" 'ONE MERGE PER COMMAND'
 assert_stderr_has "…naming the first PR" '2197'
 assert_stderr_has "…and the second" '2198'
-assert_pr "…and the gate still resolved the first as the armed one" 2197
-assert_ack_lacks "…and nothing is acked, so the same command refuses again" '2197:777'
+# The refusal runs BEFORE any network call (it needs only the local
+# extraction), so a refused compound costs no review round trip.
+assert_no_fetch "…and no review fetch ran first — the refusal needs nothing from the network"
+assert_ack_lacks "…and nothing is acked, so the same command refuses again" '2197:777:2026-08-08T12:00:00Z'
 
 # The discriminator. A decoy is not a second invocation, and counting it would
 # reintroduce the over-arm the extraction was rewritten to remove — against a
@@ -692,13 +747,12 @@ assert_pr "…and gates normally" 2002
 # spelling one half `bash -c`.
 new_case; invoke 'bash -c "gh pr merge 2001" && gh pr merge 2002'
 assert_stderr_has "a wrapped merge beside a plain one is a compound" 'ONE MERGE PER COMMAND'
-# The armed PR is the plain one: the shared splitter surfaces wrapper-interior
-# commands AFTER the top-level ones, so list order — not execution order —
-# picks the armed PR here. The source hook resolved 2001 by execution order;
-# both merges are real and the refusal blocks the whole command either way, so
-# no merge reaches its ack cycle ungated. Pinned so the delta is a decision,
-# not a drift.
-assert_pr "…armed on the top-level invocation (list order; the refusal blocks both)" 2002
+# The banner names the resolved PRs in LIST order: the shared splitter surfaces
+# wrapper-interior commands AFTER the top-level ones, so list order — not
+# execution order — picks the armed PR here. Both merges are real and the
+# refusal blocks the whole command either way, so no merge reaches its ack
+# cycle ungated. Pinned so the delta is a decision, not a drift.
+assert_stderr_has "…armed on the top-level invocation (list order; the refusal blocks both)" '2002 2001'
 
 # Both merges inside ONE nested shell string — the count has to survive the
 # wrapper recursion, not just the top level.
@@ -762,9 +816,10 @@ assert_pr "seven levels still arm — depth-independent at the cap" 2002
 
 # ORDERING, list-order side. The shared splitter surfaces wrapper interiors
 # after every top-level command, so a plain merge that genuinely comes first
-# still wins over a later wrapped one.
+# still wins over a later wrapped one — visible in the refusal banner's PR
+# list, since a compound is refused before any fetch runs.
 new_case; invoke 'gh pr merge 2001 && bash -c "gh pr merge 2002"'
-assert_pr "a plain merge before a wrapped one still wins" 2001
+assert_stderr_has "a plain merge before a wrapped one still wins" '2001 2002'
 
 # Bash keywords that open a command position. `if`/`while`/`until` are the
 # easy half to drop; `then`/`do` the other.
@@ -778,24 +833,24 @@ assert_pr 'a merge directly after `if` is at a command position' 2002
 new_case; invoke 'while gh pr merge 2002; do echo retry; done'
 assert_pr 'same after `while`' 2002
 
-# Re-pinned for the compound rule. A bare merge chained beside a real one used to arm
+# A bare merge chained beside a real one used to arm
 # the numbered PR and let the bare half infer its own PR and run ungated;
 # under the compound rule the numberless invocation counts toward
-# one-merge-per-command, so this is a REFUSAL. The fallback-vs-refusal
-# precedence — the refusal wins — was decided by the runtime review.
+# one-merge-per-command, so this is a REFUSAL, and the refusal wins over the
+# fallback.
 new_case; SHIM_REVIEW_JSON="$LGTM"
 invoke 'gh pr merge && gh pr merge 2002'
 assert_exit "a bare merge beside a real one is refused as a compound" 2
 assert_stderr_has "…with the one-merge-per-command banner" 'ONE MERGE PER COMMAND'
 assert_stderr_has "…naming the numberless invocation as one of the merges" 'a numberless merge (gh infers the PR from the current branch)'
-assert_ack_lacks "…and nothing is acked, so the refusal is not ackable past" '2002:777'
+assert_ack_lacks "…and nothing is acked, so the refusal is not ackable past" '2002:777:2026-08-08T12:00:00Z'
 
 new_case; SHIM_REVIEW_JSON="$LGTM"
 invoke 'gh pr merge; gh pr merge 2002'
 assert_exit "same across a semicolon separator: refused as a compound" 2
 assert_stderr_has "…with the one-merge-per-command banner" 'ONE MERGE PER COMMAND'
 assert_stderr_has "…naming the numberless invocation as one of the merges" 'a numberless merge (gh infers the PR from the current branch)'
-assert_ack_lacks "…and nothing is acked" '2002:777'
+assert_ack_lacks "…and nothing is acked" '2002:777:2026-08-08T12:00:00Z'
 
 # Glued punctuation still opens a command position (a subshell).
 new_case; invoke 'pnpm test &&( gh pr merge 2002 )'
@@ -877,16 +932,15 @@ invoke 'gh pr merge --rebase'
 assert_exit "numberless merge with a failing lookup: allowed" 0
 assert_no_fetch "failing lookup: no fetch"
 
-# Re-pinned for the compound rule: this row asserted the bare half "does not trigger
-# the fallback" while the numbered PR armed — the exact hole the runtime-review
-# compound rule closes (the bare half infers its own PR and would merge
-# ungated). It is a compound refusal now, not a silent arming; the
-# fallback-vs-refusal precedence was decided by the runtime review.
+# A bare merge beside a numbered one is a compound
+# refusal, not a silent arming: the bare half infers its own PR and would
+# merge ungated, which the one-merge-per-command rule refuses; the refusal
+# wins over the fallback.
 new_case; invoke 'gh pr merge && gh pr merge 2002'
 assert_exit "a bare merge beside a numbered one is a compound refusal" 2
 assert_stderr_has "…with the one-merge-per-command banner" 'ONE MERGE PER COMMAND'
 assert_stderr_has "…naming the numberless invocation as one of the merges" 'a numberless merge (gh infers the PR from the current branch)'
-assert_ack_lacks "…and nothing is acked, so the same command refuses again" '2002:777'
+assert_ack_lacks "…and nothing is acked, so the same command refuses again" '2002:777:2026-08-08T12:00:00Z'
 
 # Mention-only shapes: a quoted body, and an unquoted echo argument. Neither
 # is an invocation, so no fallback may fire — this is the discriminator that
@@ -901,6 +955,134 @@ assert_exit "a phrase inside a quoted body stays a no-op" 0
 assert_no_fetch "quoted-body mention: no fetch"
 
 # ===========================================================================
+# 2e. Selector merges — `gh pr merge <branch|url|#N>` names its own PR
+#
+# gh accepts `number | url | branch` as the merge argument (a leading `#` is
+# stripped), so a positional non-flag argument is a selector, not a
+# numberless invocation: treating it as numberless resolved the CWD branch's
+# PR instead — from main the lookup failed and the merge ran ungated; from
+# another PR's branch the gate surfaced and acked the WRONG PR's review. The
+# hook resolves the selector with `gh pr view <selector>`, fail-open on
+# lookup failure, exactly like the numberless arm. The served number alone
+# cannot tell the two apart, so these rows assert the view argv too
+# (assert_view_has): the selector must be the argument the hook passed.
+# ===========================================================================
+printf '\n--- selector merges (branch / URL / #N) ---\n'
+
+SHIM_PR_BASE='develop'
+SHIM_REVIEW_JSON="$LGTM"
+
+# A branch selector from a non-PR branch: fake gh resolves feature-x → 4242
+# and the gate arms THAT PR (the numberless cwd lookup would have failed and
+# stood down here).
+new_case; SHIM_NUMBER_EXIT=0; SHIM_PR_NUMBER=4242
+invoke 'gh pr merge feature-x --rebase'
+assert_view_has "a branch selector is passed to gh pr view" 'feature-x'
+assert_pr "…and arms the PR it names" 4242
+assert_exit "…and blocks to surface its review" 2
+assert_stderr_has "…naming the resolved PR" 'PR #4242'
+SHIM_NUMBER_EXIT=1; SHIM_PR_NUMBER=''
+
+# A URL selector naming a DIFFERENT PR than the cwd branch would resolve: the
+# gate must arm the URL's PR, and the selector — not a branch inference —
+# must be the argument gh pr view saw.
+new_case; SHIM_NUMBER_EXIT=0; SHIM_PR_NUMBER=7
+invoke 'gh pr merge https://github.com/acme-widgets/cli/pull/7 --rebase'
+assert_view_has "a URL selector is passed to gh pr view" 'https://github.com/acme-widgets/cli/pull/7'
+assert_pr "…and arms the URL's PR" 7
+assert_exit "…and blocks to surface its review" 2
+SHIM_NUMBER_EXIT=1; SHIM_PR_NUMBER=''
+
+# A URL selector carries its OWN repository, and gh resolves the PR there
+# even beside a -R — so every hook lookup must scope to the URL's repo, not
+# the cwd's or the -R's. Fetching the cwd repo's same-numbered PR would
+# surface and ack the WRONG review (or none, and an ungated merge). The
+# shim's repo view is made to FAIL here so the fetch can only carry the
+# URL's repo through the SELECTOR_REPO threading (same trick as the -R row).
+new_case; SHIM_REPO_EXIT=1; SHIM_NUMBER_EXIT=0; SHIM_PR_NUMBER=9500
+invoke 'gh pr merge https://github.com/cli/cli/pull/9500 --rebase'
+assert_view_has "the URL selector is passed to gh pr view" 'https://github.com/cli/cli/pull/9500'
+assert_pr "…and arms the URL's PR" 9500
+assert_api_has "…and the review fetch is scoped to the URL's OWN repo" 'repos/cli/cli/issues/9500/comments'
+SHIM_REPO_EXIT=0; SHIM_NUMBER_EXIT=1; SHIM_PR_NUMBER=''
+
+# The URL's repo wins over an explicit -R on the same command — gh resolves
+# it that way, and the -R must not leak into any lookup.
+new_case; SHIM_REPO_EXIT=1; SHIM_NUMBER_EXIT=0; SHIM_PR_NUMBER=9500
+invoke 'gh pr merge https://github.com/cli/cli/pull/9500 --rebase -R other-x'
+assert_api_has "…URL beside -R: the fetch still scopes to the URL's repo" 'repos/cli/cli/issues/9500/comments'
+assert_api_lacks "…and the -R repo never reaches a lookup" 'other-x'
+SHIM_REPO_EXIT=0; SHIM_NUMBER_EXIT=1; SHIM_PR_NUMBER=''
+
+# A `#N` selector (quoted — bare, # opens a comment): gh strips the # and
+# arms N.
+new_case; SHIM_NUMBER_EXIT=0; SHIM_PR_NUMBER=7
+invoke 'gh pr merge "#7" --rebase'
+assert_view_has "a #N selector is passed through for gh to strip" '#7'
+assert_pr "…and arms N" 7
+assert_exit "…and blocks to surface its review" 2
+SHIM_NUMBER_EXIT=1; SHIM_PR_NUMBER=''
+
+# Selector resolution fails (unknown branch, gh blip): fail open, same as
+# the numberless fallback.
+new_case; SHIM_NUMBER_EXIT=1
+invoke 'gh pr merge feature-x --rebase'
+assert_exit "selector merge with a failing lookup: allowed" 0
+assert_no_fetch "failing selector lookup: no fetch"
+
+# Selector invocations are compounds too: a selector beside a numbered merge
+# used to arm only the numbered PR while the selector merge resolved its own
+# PR and ran ungated. Refused now — and the refusal PRECEDES the selector
+# resolution (a network call), so nothing is resolved and nothing fetched.
+new_case; invoke 'gh pr merge feature-x && gh pr merge 2002'
+assert_exit "a selector merge beside a numbered one: refused as a compound" 2
+assert_stderr_has "…with the one-merge-per-command banner" 'ONE MERGE PER COMMAND'
+assert_stderr_has "…naming the selector invocation generically" '+ a merge naming its PR by branch or URL'
+assert_no_fetch "…no review fetch ran — the refusal precedes every network call"
+assert_view_empty "…and no selector was resolved — the refusal precedes the resolution too"
+
+# Two selector merges: same refusal, both named generically.
+new_case; invoke 'gh pr merge feature-a && gh pr merge feature-b'
+assert_exit "two selector merges in one command: refused" 2
+assert_stderr_has "…with the one-merge-per-command banner" 'ONE MERGE PER COMMAND'
+assert_stderr_has "…naming both selector invocations" \
+  '+ a merge naming its PR by branch or URL + a merge naming its PR by branch or URL'
+assert_stderr_has "…with the count naming both invocations" 'one review out of 2'
+assert_no_fetch "…nothing fetched"
+assert_view_empty "…nothing resolved"
+
+# Selector + bare numberless (no numbered merge at all): still a compound —
+# each half would resolve a different PR with no ack cycle of its own.
+new_case; invoke 'gh pr merge feature-x && gh pr merge'
+assert_exit "a selector merge beside a bare numberless one: refused" 2
+assert_stderr_has "…with the one-merge-per-command banner" 'ONE MERGE PER COMMAND'
+assert_stderr_has "…naming the numberless half" 'a numberless merge (gh infers the PR from the current branch)'
+assert_stderr_has "…and the selector half" '+ a merge naming its PR by branch or URL'
+assert_no_fetch "…nothing fetched"
+assert_view_empty "…nothing resolved"
+
+# The honest breakdown for a mixed triple: two bare merges beside one
+# selector merge names TWO numberless invocations and ONE selector
+# invocation, and the total is three — one clause per real invocation, not
+# one per kind.
+new_case; invoke 'gh pr merge && gh pr merge && gh pr merge feature-x'
+assert_exit "two bare merges beside a selector merge: refused" 2
+assert_stderr_has "…naming BOTH numberless invocations and the selector one" \
+  '+ a numberless merge (gh infers the PR from the current branch) + a numberless merge (gh infers the PR from the current branch) + a merge naming its PR by branch or URL'
+assert_stderr_has "…with the honest total" 'one review out of 3'
+assert_no_fetch "…nothing fetched"
+assert_view_empty "…nothing resolved"
+
+# The boundary the selector clause must NOT cross: two BARE numberless
+# merges stay unrefused — both resolve the same cwd-branch PR, so one ack
+# cycle covers both. (The view log is non-empty here: the resolution ran.)
+new_case; SHIM_NUMBER_EXIT=0; SHIM_PR_NUMBER=4242
+invoke 'gh pr merge && gh pr merge'
+assert_stderr_lacks "two bare numberless merges are not a compound" 'ONE MERGE PER COMMAND'
+assert_pr "…the shared branch PR arms normally" 4242
+SHIM_NUMBER_EXIT=1; SHIM_PR_NUMBER=''
+
+# ===========================================================================
 # 3. The review gate — block once per (PR, review-id), allow on retry
 # ===========================================================================
 printf '\n--- review gate: block, ack, retry ---\n'
@@ -913,7 +1095,7 @@ assert_stderr_has "block names the PR" 'PR MERGE GATE — latest claude[bot] rev
 assert_stderr_has "block carries the review body" 'LGTM. No actionable findings.'
 assert_stderr_has "block carries the posted timestamp" 'Posted: 2026-08-08T12:00:00Z'
 assert_stderr_has "block warns against editing the ack state" 'Do NOT bypass this gate by editing the ack state'
-assert_ack_has "ack holds PR:review-id" '2002:777'
+assert_ack_has "ack holds PR:review-id:updated_at" '2002:777:2026-08-08T12:00:00Z'
 # `stat -c` is GNU syntax, so on a platform without it the mode is unreadable.
 # That FAILS rather than skips, deliberately: an assertion that did not run must
 # never report as one that passed, and this one covers the permissions of a
@@ -946,26 +1128,65 @@ invoke 'gh pr merge 2003 --rebase'
 assert_exit "different PR, same review-id: BLOCKS (PR half of the key)" 2
 assert_pr "…and it fetched the other PR" 2003
 
+# The fetch must reach the NEWEST review on a busy PR: this endpoint ignores
+# sort/direction, so the flags that walk every page and slurp them into one
+# array are the whole fix. The shim cannot model pagination and never runs
+# the hook's jq (the fixture is already post-filter shape); the row pins the
+# invocation carries both flags, log-asserted on the api call.
+new_case; SHIM_REVIEW_JSON="$LGTM"
+invoke 'gh pr merge 2002 --rebase'
+assert_api_has "…the review fetch walks every page (paginate + slurp)" '--paginate --slurp'
+assert_api_has "…and runs one jq across the slurped pages" '[.[][]'
+assert_pr "…and the fixture still reaches the gate" 2002
+
+# Configurable reviewer identity: SYG_MERGE_REVIEW_LOGIN. The fetch filter
+# and the banner carry the override; the default (claude[bot]) is what every
+# other row runs under.
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"; LOGIN_OVERRIDE='release-bot[bot]'
+invoke 'gh pr merge 2002 --rebase'
+assert_api_has "…the fetch filters on the configured login" 'release-bot[bot]'
+assert_stderr_has "…and the banner names it, not the default bot" 'latest release-bot[bot] review for PR #2002'
+assert_exit "…and the gate still blocks" 2
+LOGIN_OVERRIDE=''
+
 SHIM_REVIEW_JSON=$(review_json 888 'Round 2: one finding.')
 invoke 'gh pr merge 2002 --rebase'
 assert_exit "same PR, NEW review-id: BLOCKS again (review half of the key)" 2
 assert_stderr_has "…carrying the new review body" 'Round 2: one finding.'
-assert_ack_has "ack now holds the new key too" '2002:888'
-assert_ack_has "…and still holds the old one" '2002:777'
+assert_ack_has "ack now holds the new key too" '2002:888:2026-08-08T12:00:00Z'
+assert_ack_has "…and still holds the old one" '2002:777:2026-08-08T12:00:00Z'
+
+# The third half of the key. Sticky and edit-in-place review modes UPDATE one
+# comment: the id stays, updated_at moves. Keying on the id alone read the
+# edit as already acked and let the merge through carrying the OLD body.
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'gh pr merge 2002 --rebase'
+assert_exit "first call blocks" 2
+invoke 'gh pr merge 2002 --rebase'
+assert_exit "retry after ack: ALLOWS" 0
+SHIM_REVIEW_JSON=$(review_json 777 'Edited in place: the finding is sharper now.' '2026-08-08T15:30:00Z')
+invoke 'gh pr merge 2002 --rebase'
+assert_exit "same PR, same review-id, EDITED comment (moved updated_at): BLOCKS again" 2
+assert_stderr_has "…carrying the edited body" 'Edited in place: the finding is sharper now.'
+assert_stderr_has "…and the moved timestamp" 'Posted: 2026-08-08T15:30:00Z'
+assert_ack_has "…ack holds the edited key" '2002:777:2026-08-08T15:30:00Z'
+assert_ack_has "…and the pre-edit key" '2002:777:2026-08-08T12:00:00Z'
 
 # Ack lookups are EXACT-line matches, and that is load-bearing rather than
-# stylistic: relaxed to a substring match, a key that is a prefix of one
+# stylistic: relaxed to a substring match, a key that is a SUBSTRING of one
 # already in the file reads as "already acked" and the merge proceeds with no
 # review injected — the exact outcome this hook exists to prevent. The ack
 # state accumulates across every PR the session touches, so a collision only
-# needs two PR/review numbers where one pair's key is a prefix of another's.
-new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON=$(review_json 7770 'Review with the longer id.')
+# needs two PR numbers where one is a suffix of the other: with the same
+# review id and timestamp, the shorter key becomes a substring of the longer
+# one, and only exact-line matching tells the two merges apart.
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
 invoke 'gh pr merge 2002 --rebase'
-assert_ack_has "ack holds the longer key" '2002:7770'
-SHIM_REVIEW_JSON=$(review_json 777 'A DIFFERENT review whose key is a prefix of the acked one.')
-invoke 'gh pr merge 2002 --rebase'
-assert_exit "a key that is a PREFIX of an acked key still BLOCKS" 2
-assert_stderr_has "…and injects its own review" 'A DIFFERENT review whose key is a prefix'
+assert_ack_has "ack holds the PR-2002 key" '2002:777:2026-08-08T12:00:00Z'
+invoke 'gh pr merge 2 --rebase'
+assert_exit "a PR whose key is a SUBSTRING of an acked key still BLOCKS" 2
+assert_stderr_has "…and injects its own review" 'LGTM. No actionable findings.'
+assert_ack_has "…and acks under its own key" '2:777:2026-08-08T12:00:00Z'
 
 # Same property on the release key, which has its own lookup — now scoped by
 # repo identity, so the same PR number in another repository cannot ack this
@@ -1020,7 +1241,7 @@ assert_stderr_has "reminder banner present" 'DEFAULT-BRANCH MERGE'
 assert_stderr_has "…naming the default branch" 'default branch (main)'
 assert_stderr_has "default reminder text shown (one neutral sentence)" "run this project's post-merge steps"
 assert_ack_has "release key acked" 'RELEASE:acme-widgets/cli:2010'
-assert_ack_has "review key acked too" '2010:777'
+assert_ack_has "review key acked too" '2010:777:2026-08-08T12:00:00Z'
 
 # The reminder text is the project's own: the env var replaces the default
 # sentence entirely — the default must NOT also print.
@@ -1169,6 +1390,17 @@ assert_stderr_has "…the header names the likely workflow self-skip" \
 assert_stderr_has "…the detail names the edited workflow file" \
   'This PR changes .github/workflows/claude-code-review.yml'
 assert_stderr_has "…and the reminder is still there" 'DEFAULT-BRANCH MERGE'
+SHIM_PR_EDITS_WORKFLOW='false'
+
+# Configurable workflow path: SYG_MERGE_REVIEW_WORKFLOW. The self-skip detail
+# names the CONFIGURED file, not the default spelling.
+new_case; SHIM_PR_BASE='main'; SHIM_REVIEW_JSON=''; SHIM_PR_EDITS_WORKFLOW='true'
+WORKFLOW_OVERRIDE='.github/workflows/other-review.yml'
+invoke 'gh pr merge 2031 --rebase'
+assert_exit "workflow-path override: BLOCKS for the reminder" 2
+assert_stderr_has "…the detail names the configured workflow path" 'This PR changes .github/workflows/other-review.yml'
+assert_stderr_lacks "…not the default spelling" 'claude-code-review.yml'
+WORKFLOW_OVERRIDE=''
 SHIM_PR_EDITS_WORKFLOW='false'
 
 new_case; SHIM_PR_BASE='main'; SHIM_REVIEW_JSON=''; SHIM_PR_AUTHOR='app/dependabot'
@@ -1383,7 +1615,7 @@ if [ "$(md5sum "$VICTIM" | cut -d' ' -f1)" = "$VICTIM_BEFORE" ]; then
 else
   bad "the hook wrote through the symlink (victim bytes changed)"
 fi
-assert_ack_lacks "…and no ack line was written" '2002:777'
+assert_ack_lacks "…and no ack line was written" '2002:777:2026-08-08T12:00:00Z'
 # The retry blocks again — the anomaly is not ackable past.
 invoke 'gh pr merge 2002 --rebase'
 assert_exit "retry with the symlink still planted: blocks again" 2
@@ -1408,7 +1640,7 @@ assert_stderr_has "…the reminder still prints" 'DEFAULT-BRANCH MERGE'
 assert_stderr_has "…and the state warning says so" 'ack state is unusable'
 rm -rf "$ACK_FILE"
 
-# Round 2, finding 6: a symlink at the state DIRECTORY is the same
+# A symlink at the state DIRECTORY is the same
 # write-through class as one at the file — the ack would land in whatever
 # the link points at. Fail closed, name the dir, leave the victim untouched.
 new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
@@ -1439,7 +1671,7 @@ else
   bad "the hook wrote through the seyag-dir symlink"
 fi
 
-# Round 2, finding 9: a regular file where the state DIRECTORY belongs is a
+# A regular file where the state DIRECTORY belongs is a
 # NAMED fault, not a generic write failure (which fails open).
 new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
 mkdir -p "$CASE_HOME/.local/state/seyag"
@@ -1447,16 +1679,16 @@ mkdir -p "$CASE_HOME/.local/state/seyag"
 invoke 'gh pr merge 2002 --rebase'
 assert_exit "regular file where the state dir belongs: BLOCKS (fail closed)" 2
 assert_stderr_has "…naming the fault" 'exists and is not a directory'
-assert_ack_lacks "…and nothing was written anywhere" '2002:777'
+assert_ack_lacks "…and nothing was written anywhere" '2002:777:2026-08-08T12:00:00Z'
 
-# Round 2, finding 8: a pre-existing wide state dir self-heals to 700 on the
+# A pre-existing wide state dir self-heals to 700 on the
 # next blocking write (-m only applies at creation).
 new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
 WIDE_DIR="$CASE_HOME/.local/state/seyag/pr-merge-review-check"
 mkdir -p "$WIDE_DIR"; chmod 755 "$WIDE_DIR"; : >"$ACK_FILE"
 invoke 'gh pr merge 2002 --rebase'
 assert_exit "wide state dir: still blocks normally" 2
-assert_ack_has "…and the ack write happened" '2002:777'
+assert_ack_has "…and the ack write happened" '2002:777:2026-08-08T12:00:00Z'
 if [ "$(stat -c '%a' "$WIDE_DIR")" = "700" ]; then
   ok "the wide state dir self-healed to 700"
 else
@@ -1512,7 +1744,7 @@ assert_stderr_has "…and gives a fix" 'git worktree remove'
 # review round trip and the agent reads the precondition alone rather than
 # hunting for it under an injected review.
 assert_no_fetch "…without fetching the review first"
-assert_ack_lacks "…and writes no review ack" '2002:777'
+assert_ack_lacks "…and writes no review ack" '2002:777:2026-08-08T12:00:00Z'
 
 # Not ackable, and this pair is what says so. The review gate's whole contract
 # is "block once, then allow"; inheriting that here would make the guard
@@ -1599,7 +1831,7 @@ assert_pr "…and the merge still reaches the review gate" 2002
 new_case; SHIM_WORKTREES="$WT_CONFLICT"
 invoke 'gh pr merge 2001 --rebase && gh pr merge 2002 -d'
 assert_stderr_lacks "a LATER merge's flag is not attributed to the armed one" 'PR MERGE BLOCKED'
-assert_pr "…and the gate still arms on the first invocation" 2001
+assert_stderr_has "…it is still refused as a compound (the refusal precedes every network call)" 'ONE MERGE PER COMMAND'
 
 # …and the converse, so the case above cannot pass by the flag check simply
 # being broken: when the ARMED invocation is the one carrying the flag, it fires.
@@ -1769,6 +2001,17 @@ new_case; SHIM_WORKTREES="$WT_CLEAN"
 invoke "$(printf 'gh pr merge --title "line one\nline two" 2002 --rebase')"
 assert_pr "a PR number past a multi-line quoted value still resolves" 2002
 
+# The REPO value carries the same hazard one line earlier: a quoted multi-line
+# --repo value emitted raw would shift every extraction line after the fifth
+# (the protocol reads the scope off line 5), and a truthy corrupted scope
+# would silently SKIP the delete-branch precondition below — a block becoming
+# an unblock. The capture refuses multi-line values: repo stays empty, the
+# lookups scope to the cwd repo, and the extraction is unshifted.
+new_case; SHIM_WORKTREES="$WT_CONFLICT"; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke "$(printf 'gh pr merge 2002 --repo "line one\nline two" --rebase --delete-branch')"
+assert_stderr_has "a multi-line --repo value assigns nothing, so the precondition still runs" 'PR MERGE BLOCKED'
+assert_api_lacks "…and no corrupted value reached any fetch" 'line one'
+
 # The control that keeps the pair honest: the same command with a single-line
 # value behaved correctly even while the multi-line form was broken, so a
 # fixture without the embedded newline proves nothing about this boundary.
@@ -1925,6 +2168,16 @@ assert_stderr_has "…and the path is printed whole" '/tmp/my worktree'
 # alone let that through.
 assert_stderr_has "…and the remove suggestion is quoted" "git worktree remove '/tmp/my worktree'"
 assert_stderr_has "…as is the detach suggestion" "git -C '/tmp/my worktree' checkout --detach"
+
+# A cross-repo merge (-R) skips the worktree check entirely: the local
+# worktrees belong to THIS checkout's repo and cannot safely answer for
+# another repo's head branch — a same-named local branch (feat/example, held
+# by wt-a here) would be a false, non-ackable block with no recovery path.
+# The review gate still runs for the -R-scoped merge.
+new_case; SHIM_WORKTREES="$WT_CONFLICT"; SHIM_REVIEW_JSON="$LGTM"
+invoke 'gh pr merge 2002 --rebase --delete-branch -R other-x'
+assert_stderr_lacks "a cross-repo -R merge skips the local worktree check" 'PR MERGE BLOCKED'
+assert_pr "…and the review gate runs normally" 2002
 
 SHIM_WORKTREES=''
 

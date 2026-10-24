@@ -1,8 +1,9 @@
 #!/bin/bash
 # PreToolUse hook: before `gh pr merge <N>`, fetch the latest claude[bot] review
 # comment for that PR and dump its content into Claude's context. Blocks the
-# merge on first invocation per (PR, review-comment-id); allows on retry once
-# the same review-comment-id has been "acked" (i.e., already injected once).
+# merge on first invocation per (PR, review-comment-id, its updated_at);
+# allows on retry once that same review comment has been "acked" (i.e.,
+# already injected once).
 #
 # This enforces context-presence of the review before any merge call lands.
 # The agent can still ignore what it sees — but the content is structurally
@@ -16,9 +17,12 @@
 # prints into a void. This hook fires on the same `gh pr merge` command and
 # blocks, and blocking-path stderr does reach the agent.
 #
-# A numberless `gh pr merge` (gh infers the PR from the current branch) arms
-# the gate too: the PR number is resolved with the same `gh pr view` gh
-# itself would use, in this hook's cwd. Any lookup failure fails open.
+# A `gh pr merge` naming its PR some other way arms the gate too. gh accepts
+# `number | url | branch` as the selector (a leading `#` is stripped), so a
+# positional non-flag argument is resolved with the same `gh pr view <selector>`
+# gh itself would use. Only an invocation with NO positional argument at all is
+# numberless: gh then infers the PR from the current branch, and the hook
+# resolves it the same way, in this hook's cwd. Any lookup failure fails open.
 #
 # Fail-open surfaces: gh lookups that cannot run (the gate only means
 # something when there is content to surface or a reminder to deliver), the
@@ -72,20 +76,14 @@ COMMAND=$(jq -r '.tool_input.command // empty' <<<"$INPUT" 2>/dev/null || echo "
 # and every other command in the session — on a RAM-constrained machine, for
 # a check that is irrelevant to all of them. The tokenizer below only ever
 # runs on a command that at least mentions the phrase.
-# Held in a variable rather than written inline: an unquoted `[[ =~ ]]` regex
-# whose bracket expression contains `(` derails bash's own parser, and it fails
-# at the END of the file with a misleading "unexpected EOF" rather than here.
-# Deliberately PERMISSIVE: it only decides whether to spawn python, and the
-# tokenizer does the real work. Requiring a boundary before `gh` made it
-# reject quote-wrapped invocations (`bash -c "gh pr merge N"`) before anything
-# could look at them. Round 2 widened it further: the phrase test also
-# required a plain `gh` and plain whitespace, so a quoted command word
-# (`"gh" pr merge N`) and a backslash continuation (`gh pr \<newline>merge N`)
-# died here and never reached the tokenizer. The bare `|merge` arm accepts
-# ANY command mentioning merge — over-matching costs one python spawn,
+# Deliberately PERMISSIVE: a bare substring test on `merge`. It only decides
+# whether to spawn python, and the tokenizer does the real work; every real
+# `gh pr merge` invocation mentions `merge`, so a substring test cannot
+# under-match one, however quoting or line continuations hide the words. The
+# cost is one python spawn for any command that merely mentions merge (`git
+# merge`, `git merge-base`, prose) — over-matching costs a spawn,
 # under-matching costs a merge.
-MERGE_PHRASE_RE='gh["'\''"[:space:]\\]+pr[[:space:]\\]+merge|merge'
-if ! [[ "$COMMAND" =~ $MERGE_PHRASE_RE ]]; then
+if [[ "$COMMAND" != *merge* ]]; then
     exit 0
 fi
 
@@ -96,11 +94,19 @@ LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib"
 # (or, for a numberless invocation, the first one's flag). Line 3: every PR
 # number the precise scan resolved, space-separated — the compound refusal
 # counts them. Line 4: "numberless" when a real `gh pr merge` invocation
-# exists whose arguments carry no PR-number token (gh then infers the PR from
-# the current branch); a phrase that merely MENTIONS the merge in a
-# non-command position sets nothing on this line, so a quoted body or another
-# command's argument never triggers the numberless fallback. Line 5: the
-# -R/--repo value the invocation scoped itself with, "" for the cwd repo.
+# exists whose arguments carry neither a PR-number token NOR a positional
+# selector (gh then infers the PR from the current branch); a phrase that
+# merely MENTIONS the merge in a non-command position sets nothing on this
+# line, so a quoted body or another command's argument never triggers the
+# numberless fallback. Line 5: the -R/--repo value the invocation scoped
+# itself with, "" for the cwd repo. Line 6: the positional selector (a
+# branch, URL or #N argument) of the first invocation that carries one, ""
+# when none does; it names the PR only when line 1 is empty. Line 7: how
+# many `gh pr merge` invocations the precise scan saw at all — numbered,
+# selector and numberless alike; the compound refusal keys off it. Line 8:
+# "<owner>/<repo>" when the selector is a GitHub PR URL (the URL carries its
+# own repository), "" otherwise. Line 9: how many of the invocations are
+# numberless.
 # A broken shell_quotes import falls back to the permissive raw scan (it
 # over-arms rather than disarms); the one residual fail-open left is python3
 # itself missing — no tokenizer exists then, `|| MERGE_EXTRACT=""` stands the
@@ -112,17 +118,25 @@ import sys
 
 cmd = os.fsdecode(open(3, "rb").read()).removesuffix("\n")
 
-# Cheap reject before any parsing: no phrase, no gate. Keeps the common Bash
-# call (which is not a merge) off the parsing path entirely. Mirrors the
-# bash-level MERGE_PHRASE_RE in the invoking script; keep the two in step —
-# the same widening there (quoted `gh`, backslash continuations, and the
-# bare-`merge` arm that makes under-matching impossible).
-if not re.search(r'gh["\'\s\\]+pr[\s\\]+merge|merge', cmd):
+# Cheap reject before any parsing: no `merge` substring, no gate. Keeps the
+# common Bash call (which is not a merge) off the parsing path entirely, and
+# mirrors the bash-level substring test in the invoking script: every real
+# `gh pr merge` invocation mentions `merge`, so this cannot under-match one.
+if "merge" not in cmd:
     sys.exit(0)
 
 # `str.isdigit()` is true for superscripts and Arabic-Indic digits; the
 # number scan wants the strictly-ASCII kind gh accepts.
 ASCII_DIGITS = re.compile(r"[0-9]+")
+
+# A GitHub PR URL selector: gh resolves it against the URL's OWN repository,
+# overriding even a -R on the same command. Prefix-match (no end anchor) so a
+# trailing /files or anchor still names the PR; scheme and www. optional
+# because gh accepts the bare host form too.
+PR_URL_RE = re.compile(
+    r"^(?:https?://)?(?:www\.)?github\.com/([^/\s]+)/([^/\s]+)/pull/[0-9]+",
+    re.IGNORECASE,
+)
 
 # `--delete-branch` and its shorthand. ANCHORED to a whole token, which is
 # what scopes it: `--body "remove the -d flag"` is one token carrying spaces,
@@ -210,8 +224,8 @@ def legacy_scan(text):
     PR it did not ask about and retries. Under-arming is not: the merge just
     proceeds. So when the parse cannot run, take the noisy option.
 
-    Skips the token after a value-taking SHORT flag (runtime-review finding 4: a
-    `gh pr merge -t 2026` armed PR 2026 here too). Residual gap, deliberate:
+    Skips the token after a value-taking SHORT flag (a `gh pr merge -t 2026`
+    armed PR 2026 here too). Residual gap, deliberate:
     long forms are not known to a raw text scan — `--anything 9 7` can still
     read 9 — because guessing which longs take values is how the number walk
     in scan_invocations earns its exactness; the precise scan knows the set.
@@ -269,20 +283,32 @@ def scan_invocations(text):
     """Every `gh pr merge` invocation in `text`, as the shared splitter sees
     bash execute it.
 
-    Returns (merges, numberless, first_flag, repo):
+    Returns (merges, numberless, first_flag, repo, selector, invoke_count,
+    selector_repo, numberless_count):
     - merges: (number, delete_flag) per invocation whose arguments carry a
       bare PR-number token, in the splitter's command order;
     - numberless: True when a real invocation exists whose arguments carry NO
-      number token;
+      number token and NO positional selector;
     - first_flag: the delete flag of the first invocation seen — the armed
       one when the numberless path ends up arming;
     - repo: the LAST -R/--repo value seen (gh lets the later flag win); ""
-      when the invocation never scopes a repository.
+      when the invocation never scopes a repository;
+    - selector: the first invocation's positional non-flag, non-value
+      argument (a branch, URL or #N — gh accepts all three as the PR
+      selector); "" when no invocation carries one;
+    - invoke_count: how many `gh pr merge` invocations the precise scan saw
+      at all — numbered, selector and numberless alike. The compound refusal
+      keys off it: a selector invocation beside any other is a compound too;
+    - selector_repo: "<owner>/<repo>" when the selector is a GitHub PR URL
+      (the URL carries its own repository); "" for a branch, a #N, or no
+      selector;
+    - numberless_count: how many of the invocations are numberless — the
+      compound refusal prints one clause per numberless invocation.
 
     The command word is matched by BASENAME, not literally: `/usr/bin/gh pr
-    merge 7` and a mise shim path are real invocations (runtime-review finding 2).
+    merge 7` and a mise shim path are real invocations.
 
-    VALUE TOKENS ARE NOT PR NUMBERS (runtime-review finding 4): the number walk
+    VALUE TOKENS ARE NOT PR NUMBERS: the number walk
     skips the token immediately following a value-taking flag — `-t 2026` is
     a subject, `-b 9 7` merges PR 7, `--subject 2024 2002` merges PR 2002 —
     per VALUE_TAKING_SHORTS and LONG_VALUE_FLAGS via token_value_role.
@@ -298,31 +324,45 @@ def scan_invocations(text):
     """
     merges = []
     numberless = False
+    numberless_count = 0
     first_flag = False
     seen = False
     repo = ""
+    selector = ""
+    selector_repo = ""
+    invoke_count = 0
     for argv in simple_commands(text):
         argv = unwrap_runners(argv)[0]
         if not argv or os.path.basename(argv[0]) != "gh" \
                 or argv[1:3] != ["pr", "merge"]:
             continue
         args = strip_redirections(argv[3:])
+        invoke_count += 1
         flag = any(carries_delete_flag(a) for a in args)
         if not seen:
             seen = True
             first_flag = flag
         number = None
+        sel = None
         pending = ""  # "value" | "repo" while the NEXT token is a flag's value
         for a in args:
             if pending:
                 if pending == "repo":
-                    repo = a
+                    # SINGLE-LINE values only, the same rule as the selector
+                    # capture below: an owner/repo never spans lines, while a
+                    # quoted multi-line --repo value does — and a newline on
+                    # line 5 of the extraction would shift every line after
+                    # it. Such a value assigns nothing, so the lookups scope
+                    # to the cwd repo.
+                    if "\n" not in a:
+                        repo = a
                 pending = ""
                 continue
             role, glued = token_value_role(a)
             if role == "repo":
                 if glued is not None:
-                    repo = glued
+                    if "\n" not in glued:
+                        repo = glued
                 else:
                     pending = "repo"
                 continue
@@ -336,11 +376,30 @@ def scan_invocations(text):
                 # the end of the invocation — a `-R` after the PR number
                 # still scopes the lookups.
                 continue
+            # A positional non-flag token (a branch, a URL, a #N — an empty
+            # argument is not one) is gh's PR selector; it names the PR the
+            # same way a bare number does, so the invocation is NOT
+            # numberless. SINGLE-LINE tokens only: a real selector (branch
+            # name, URL, #N) never spans lines, while a quoted multi-line
+            # value of some long flag the walk does not know does — and a
+            # newline in the selector would corrupt the line-oriented
+            # extraction protocol below. Such a token counts for nothing
+            # here, so its invocation stays numberless.
+            if a and "\n" not in a and not a.startswith("-") and sel is None:
+                sel = a
         if number is None:
-            numberless = True
+            if sel is None:
+                numberless = True
+                numberless_count += 1
         else:
             merges.append((number, flag))
-    return merges, numberless, first_flag, repo
+        if sel is not None and not selector:
+            selector = sel
+            url = PR_URL_RE.match(sel)
+            if url:
+                selector_repo = f"{url.group(1)}/{url.group(2)}"
+    return merges, numberless, first_flag, repo, selector, invoke_count, \
+        selector_repo, numberless_count
 
 
 def deep_wrapper_args(text):
@@ -373,8 +432,8 @@ def deep_wrapper_args(text):
 
 
 def extract(text):
-    """(number, delete_flag, all_numbers, numberless, repo) for `text`'s
-    merges.
+    """(number, delete_flag, all_numbers, numberless, repo, selector,
+    invoke_count, selector_repo, numberless_count) for `text`'s merges.
 
     Resolution order, each step only when the previous found nothing:
     1. the precise invocation scan;
@@ -384,33 +443,37 @@ def extract(text):
     3. the raw textual scan over strings past the wrapper-depth cap;
     4. nothing — the caller decides on numberless.
 
-    Steps 2 and 3 resolve at most one number and report NO delete flag and
-    NO repo: they exist to OVER-arm, and the not-ackable delete-branch guard,
-    the compound refusal and -R scoping must never hang off an over-arm —
-    a false block with no way out, or a lookup against a repo a textual
-    scan guessed at.
+    Steps 2 and 3 resolve at most one number and report NO delete flag,
+    NO repo, NO selector, NO invocation count and NO selector repo: they
+    exist to OVER-arm, and the not-ackable delete-branch guard, the compound
+    refusal, -R scoping and selector resolution must never hang off an
+    over-arm — a false block with no way out, or a lookup against a repo or
+    selector a textual scan guessed at.
     """
     try:
-        merges, numberless, first_flag, repo = scan_invocations(text)
+        merges, numberless, first_flag, repo, selector, invoke_count, \
+            selector_repo, numberless_count = scan_invocations(text)
     except Exception:
-        return legacy_scan(text) + (False, "")
+        return legacy_scan(text) + (False, "", "", 0, "", 0)
     if merges:
         number, flag = merges[0]
-        return number, flag, [m[0] for m in merges], numberless, repo
+        return number, flag, [m[0] for m in merges], numberless, repo, \
+            selector, invoke_count, selector_repo, numberless_count
     if strip_quoted(text) is None:
-        return legacy_scan(text) + (False, "")
+        return legacy_scan(text) + (False, "", "", 0, "", 0)
     for s in deep_wrapper_args(text):
         capped = strip_heredoc_bodies(s)
         m = re.search(r"gh\s+pr\s+merge\s+[\"']*(\d+)", capped)
         if m:
-            return m.group(1), False, [m.group(1)], False, ""
-    return "", first_flag, [], numberless, repo
+            return m.group(1), False, [m.group(1)], False, "", "", 0, "", 0
+    return "", first_flag, [], numberless, repo, selector, invoke_count, \
+        selector_repo, numberless_count
 
 
 # The import sits HERE, not at the top: an import-time failure (a corrupt or
 # missing shell_quotes.py, an unset SYG_LIB_DIR) must fall back to the legacy
 # scan rather than exit non-zero into the shell's `|| MERGE_EXTRACT=""` and
-# silently arm nothing — the runtime-review finding 7 disarm. The functions above
+# silently arm nothing. The functions above
 # only touch shell_quotes names at CALL time, so defining them first is safe.
 try:
     sys.path.insert(0, os.environ["SYG_LIB_DIR"])
@@ -432,7 +495,8 @@ except Exception:
     sys.exit(0)
 
 try:
-    number, flag, all_numbers, numberless, repo = extract(cmd)
+    number, flag, all_numbers, numberless, repo, selector, invoke_count, \
+        selector_repo, numberless_count = extract(cmd)
 except Exception:
     # The whole extraction, not just one stage. Anything escaping here would
     # exit non-zero, hit the shell's `|| MERGE_EXTRACT=""`, and silently arm
@@ -440,27 +504,56 @@ except Exception:
     number, flag, all_numbers = legacy_scan(cmd)
     numberless = False
     repo = ""
+    selector = ""
+    invoke_count = 0
+    selector_repo = ""
+    numberless_count = 0
 print(number)
 print("1" if flag else "0")
 print(" ".join(all_numbers))
 print("numberless" if numberless else "")
 print(repo)
+print(selector)
+print(invoke_count)
+print(selector_repo)
+print(numberless_count)
 PY
 ) || MERGE_EXTRACT=""
 
 # Line 1: the PR number. Line 2: 1 when the armed invocation carries the
 # delete-branch flag. Line 3: every PR number the precise command-position
 # scan resolved, space-separated. Line 4: "numberless" when a numberless
-# invocation exists. Line 5: the -R/--repo scope ("" = the cwd repo). All
-# empty when the extraction produced nothing.
+# invocation exists. Line 5: the -R/--repo scope ("" = the cwd repo). Line 6:
+# the positional selector, "" when the invocation names no PR that way.
+# Line 7: the precise scan's total `gh pr merge` invocation count. Line 8:
+# the selector's own repository when the selector is a GitHub PR URL.
+# Line 9: the numberless invocation count. All empty when the extraction
+# produced nothing.
 PR_NUM=$(printf '%s\n' "$MERGE_EXTRACT" | sed -n '1p')
 MERGE_DELETES_BRANCH=$(printf '%s\n' "$MERGE_EXTRACT" | sed -n '2p')
 MERGE_ALL_PRS=$(printf '%s\n' "$MERGE_EXTRACT" | sed -n '3p')
 MERGE_NUMBERLESS=$(printf '%s\n' "$MERGE_EXTRACT" | sed -n '4p')
 MERGE_COUNT=$(printf '%s\n' "$MERGE_ALL_PRS" | wc -w)
 REPO_ARG=$(printf '%s\n' "$MERGE_EXTRACT" | sed -n '5p')
+MERGE_SELECTOR=$(printf '%s\n' "$MERGE_EXTRACT" | sed -n '6p')
+MERGE_INVOKE_COUNT=$(printf '%s\n' "$MERGE_EXTRACT" | sed -n '7p')
+SELECTOR_REPO=$(printf '%s\n' "$MERGE_EXTRACT" | sed -n '8p')
+MERGE_NUMBERLESS_COUNT=$(printf '%s\n' "$MERGE_EXTRACT" | sed -n '9p')
 
-# -R/--repo scoping (runtime-review finding 5): every gh lookup the hook makes must
+# A URL selector carries its OWN repository, and gh resolves the PR there
+# even beside a -R (the URL wins). Mirror that here: the URL's repo OVERRIDES
+# any -R from the command before the scope args are built, so the resolution,
+# resolve_repo, the review fetch, the no-review reason and the diff scan all
+# read the URL's repo. Scoping them to the cwd or -R repo instead would fetch
+# that repo's same-numbered PR — surfacing and acking the WRONG review, or
+# none at all and an ungated merge. The delete-branch worktree check skips
+# this shape for the same reason: local worktrees cannot answer for the
+# URL's repo.
+if [ -n "$SELECTOR_REPO" ]; then
+    REPO_ARG="$SELECTOR_REPO"
+fi
+
+# -R/--repo scoping: every gh lookup the hook makes must
 # look at the repository the invocation named, not whatever the cwd resolves
 # to — otherwise `gh pr merge 7 -R other/x` fetches the cwd repo's #7 review
 # and the other repo's merge runs ungated. Read off the arg vector (line 5),
@@ -470,20 +563,109 @@ if [ -n "$REPO_ARG" ]; then
     REPO_SCOPE_ARGS=(-R "$REPO_ARG")
 fi
 
-# No PR number: either the command only mentioned the phrase without
-# invoking it (nothing to gate on), or it invoked `gh pr merge` with no
-# number — gh then infers the PR from the current branch, so resolve the
-# number the same way, in this hook's cwd. Any lookup failure (not a PR
-# branch, gh missing or unauthenticated) fails open: exit 0, no gate.
-if [ -z "$PR_NUM" ]; then
-    if [ "$MERGE_NUMBERLESS" != "numberless" ]; then
-        exit 0
+RULE='━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
+
+# COMPOUND MERGE REFUSAL. Arming the gate on the FIRST merge in a command is
+# right as far as it goes — and observed insufficient: a single call chaining
+# two merges fired the gate for the first PR only, and the second merged with
+# no ack cycle of its own. The gate is attention-independent by design, so a
+# shape that silently halves its coverage is a hole, not a nit.
+#
+# NOT ACKABLE, on purpose. Acking would let the identical command through on
+# the retry and reproduce the hole exactly; the way past this is to run one
+# merge per command, which is also what makes each PR's review reachable.
+# Recovery costs one extra Bash call, so the direction is safe.
+#
+# Placed BEFORE every other decision the hook makes: the selector/numberless
+# PR resolution just below is a network call, and so are the delete-branch
+# precondition's ref lookup, resolve_repo and the review fetch. The refusal
+# needs only what the extraction resolved locally, so it must not pay for
+# round trips it refuses to use; running it first also keeps a PR with no
+# review comment — which exits 0 further down — from carrying a second merge
+# through on that path.
+#
+# Counts only what the PRECISE command-position scan resolved. The fallback
+# paths (the raw scan, the depth cap) exist to over-arm, and they report at
+# most one invocation for exactly this reason: hanging a refusal with no ack
+# past it off a deliberate over-arm leaves no way out.
+#
+# A NUMBERLESS invocation beside a numbered one is one of these compounds
+# too (`gh pr merge 7 && gh pr merge` armed only #7; the bare merge inferred
+# its own PR from the branch and ran ungated). So is a SELECTOR invocation
+# beside any other (`gh pr merge feature-x && gh pr merge 7` armed only #7;
+# the selector merge resolves its own PR and runs with no ack cycle). The
+# refusal fires on more-than-one numbered merge, (numbered AND numberless),
+# or (more than one invocation AND a selector present); the banner names
+# every numberless invocation and every selector invocation, one generic
+# clause each — a selector names a PR, but not one the gate armed. A
+# GENUINELY single numberless or selector merge still arms its PR normally
+# — this changes refusal, not arming. Two BARE numberless merges in one
+# command stay unrefused: both resolve the same cwd-branch PR, so one ack
+# cycle covers both.
+if [ "${MERGE_COUNT:-0}" -gt 1 ] 2>/dev/null \
+    || { [ "${MERGE_COUNT:-0}" -ge 1 ] 2>/dev/null \
+        && [ "$MERGE_NUMBERLESS" = "numberless" ]; } \
+    || { [ "${MERGE_INVOKE_COUNT:-0}" -gt 1 ] 2>/dev/null \
+        && [ -n "$MERGE_SELECTOR" ]; }; then
+    REFUSAL_PRS="$MERGE_ALL_PRS"
+    REFUSAL_TOTAL="$MERGE_COUNT"
+    # One clause per invocation kind, count-derived, so a triple like two
+    # bare merges beside a selector merge breaks down honestly.
+    NUMBERLESS_MERGES=${MERGE_NUMBERLESS_COUNT:-0}
+    while [ "$NUMBERLESS_MERGES" -gt 0 ]; do
+        REFUSAL_PRS="${REFUSAL_PRS:+$REFUSAL_PRS }+ a numberless merge (gh infers the PR from the current branch)"
+        REFUSAL_TOTAL=$((REFUSAL_TOTAL + 1))
+        NUMBERLESS_MERGES=$((NUMBERLESS_MERGES - 1))
+    done
+    if [ -n "$MERGE_SELECTOR" ]; then
+        # Selector invocations = everything the precise scan saw that is
+        # neither numbered nor numberless.
+        SELECTOR_MERGES=$((MERGE_INVOKE_COUNT - MERGE_COUNT))
+        SELECTOR_MERGES=$((SELECTOR_MERGES - ${MERGE_NUMBERLESS_COUNT:-0}))
+        while [ "$SELECTOR_MERGES" -gt 0 ]; do
+            REFUSAL_PRS="${REFUSAL_PRS:+$REFUSAL_PRS }+ a merge naming its PR by branch or URL"
+            REFUSAL_TOTAL=$((REFUSAL_TOTAL + 1))
+            SELECTOR_MERGES=$((SELECTOR_MERGES - 1))
+        done
     fi
-    PR_NUM=$(gh pr view "${REPO_SCOPE_ARGS[@]}" --json number -q .number 2>/dev/null || echo "")
-    [[ "$PR_NUM" =~ ^[0-9]+$ ]] || exit 0
+    {
+        printf '%s\n' "$RULE"
+        printf 'ONE MERGE PER COMMAND — compound merge refused\n'
+        printf '%s\n\n' "$RULE"
+        printf 'This command invokes `gh pr merge` more than once: %s\n\n' "$REFUSAL_PRS"
+        printf 'The review gate arms on the FIRST invocation only, so every merge after it\n'
+        printf 'would run without its own review-ack cycle — the check would report green\n'
+        printf 'having read one review out of %s.\n\n' "$REFUSAL_TOTAL"
+        printf 'Run them as separate calls, one PR per command, so each merge is gated:\n'
+        printf '  gh pr merge <first>    # read its review, then retry\n'
+        printf '  gh pr merge <second>\n\n'
+        printf 'This refusal is not ackable — retrying the same compound command reproduces\n'
+        printf 'the same gap. Nothing was acked, so no state needs undoing.\n'
+        printf '%s\n' "$RULE"
+    } >&2
+    exit 2
 fi
 
-RULE='━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
+# No PR number: either the command only mentioned the phrase without invoking
+# it (nothing to gate on), or it invoked `gh pr merge` naming its PR some
+# other way. gh accepts `number | url | branch` as the argument (a leading
+# `#` is stripped), so a positional selector is resolved with the same
+# `gh pr view <selector>` gh itself would use — REPO_SCOPE_ARGS rides along:
+# gh prefers a URL selector's own repository, and -R scopes a branch
+# selector's lookup. Only an invocation with NO positional argument at all is
+# numberless: gh then infers the PR from the current branch, resolved the
+# same way in this hook's cwd. Any lookup failure (unknown branch, not a PR
+# branch, gh missing or unauthenticated) fails open: exit 0, no gate.
+if [ -z "$PR_NUM" ]; then
+    if [ -n "$MERGE_SELECTOR" ]; then
+        PR_NUM=$(gh pr view "$MERGE_SELECTOR" "${REPO_SCOPE_ARGS[@]}" --json number -q .number 2>/dev/null || echo "")
+    elif [ "$MERGE_NUMBERLESS" = "numberless" ]; then
+        PR_NUM=$(gh pr view "${REPO_SCOPE_ARGS[@]}" --json number -q .number 2>/dev/null || echo "")
+    else
+        exit 0
+    fi
+    [[ "$PR_NUM" =~ ^[0-9]+$ ]] || exit 0
+fi
 
 # Ack state. The per-(PR, review-comment-id) acks and the per-PR
 # default-branch-reminder acks live in ONE line-oriented file under the
@@ -513,12 +695,12 @@ ACK_STATE_FAULT=""
 # ACK_STATE_FAULT for the caller to print.
 #
 # The never-write-through-a-symlink invariant covers the DIRECTORIES on the
-# path too (runtime-review finding 6): a symlink at STATE_DIR or at the seyag-level
+# path too: a symlink at STATE_DIR or at the seyag-level
 # parent lets a planted directory become the ack store, exactly like a
 # symlink at the file did — the file-level check alone tested the FILE, which
 # through a directory link is just the attacker's choice of target. A
-# non-directory sitting where STATE_DIR belongs is the same fail-closed class
-# (runtime-review finding 9): the mkdir would fail as a generic write fault instead
+# non-directory sitting where STATE_DIR belongs is the same fail-closed class:
+# the mkdir would fail as a generic write fault instead
 # of a named one, and the generic path fails OPEN.
 ack_state_usable() {
     ACK_STATE_FAULT=""
@@ -558,7 +740,7 @@ ack_append() {
     ack_state_usable || return 1
     # shellcheck disable=SC2174  # -m on the deepest dir is the intent: parents keep their distro modes, the state dir itself is 700 (pinned by the probe)
     mkdir -p -m 700 "$STATE_DIR" 2>/dev/null || return 1
-    # -m only applies at CREATION (runtime-review finding 8): a pre-existing state
+    # -m only applies at CREATION: a pre-existing state
     # dir left wide (755, by an older version or by hand) self-heals here.
     chmod 700 "$STATE_DIR" 2>/dev/null || true
     (umask 077; printf '%s\n' "$1" >>"$STATE_FILE") 2>/dev/null
@@ -691,7 +873,11 @@ release_reminder_due() {
 # the quoted-prose false-positive class the arg-vector parse exists to
 # eliminate, reintroduced one check later — and because this guard is NOT
 # ackable, a false block is not a recoverable annoyance.
-if [ "$MERGE_DELETES_BRANCH" = "1" ]; then
+# The whole check is skipped when the invocation scopes ANOTHER repository
+# (-R/--repo): the local worktrees belong to this checkout's repo and cannot
+# safely answer for another repo's head branch — a same-named local branch
+# would be a false, non-ackable block with no recovery path.
+if [ "$MERGE_DELETES_BRANCH" = "1" ] && [ -z "$REPO_ARG" ]; then
     resolve_pr_view
     # Every step below fails open to "no conflict": no head ref (gh blip),
     # not a git repo, no worktree holds the branch. Blocking a merge on a
@@ -819,83 +1005,38 @@ release_block_then_exit() {
     exit 0
 }
 
-# Fetch the most recent claude[bot] comment on this PR. Pull body + id +
-# created_at so the ack key is stable per-comment (a fresh review re-runs
-# the gate).
+# Fetch the most recent reviewer comment on this PR. Pull body + id +
+# updated_at so the ack key re-arms when a review EDITS its comment in place
+# (a fresh review re-runs the gate too).
 #
-# `?per_page=100&direction=desc` is required: GitHub defaults to 30 items per
-# page in ASCENDING order. A busy PR with many review rounds + bot noise can
-# push the latest claude[bot] comment past position 100 in an ascending ask.
-# With `direction=desc` we get the 100 MOST RECENT comments — the latest
-# claude[bot] review is realistically always in that window. Without these
-# params, the filter would silently surface an OLDER review (fires but
+# `--paginate --slurp` is required. This endpoint accepts per_page (and page)
+# but not sort/direction — those belong to the repository-wide comments
+# listing, which a `direction=desc` here silently ignored — so a single ask
+# returns the FIRST (oldest) page, and on a busy PR the newest review sits
+# past it: the filter would silently surface an OLDER review (fires but
 # injects the wrong content — the worst failure mode for this gate).
+# `--paginate` walks every page and `--slurp` hands them over as one outer
+# array, so a single jq selects across all of them and sort_by|last picks the
+# NEWEST matching comment.
+#
+# The reviewer identity is configurable: SYG_MERGE_REVIEW_LOGIN overrides the
+# default `claude[bot]` for repos whose review comes from another bot. The
+# login reaches the filter as a jq-ENCODED literal, never spliced text:
+# `gh api --jq` takes no --arg, and raw interpolation would let a crafted
+# value write filter code. `jq -n --arg v` JSON-encodes the value, so any
+# bytes in it stay data.
 REVIEW_JSON=""
+REVIEW_LOGIN="${SYG_MERGE_REVIEW_LOGIN:-claude[bot]}"
+REVIEW_LOGIN_JSON=$(jq -n --arg v "$REVIEW_LOGIN" '$v')
 resolve_repo
 # -R scoping: prefer the RESOLVED nameWithOwner (canonical spelling of the
 # -R target); fall back to REPO_ARG itself when repo view failed, so a
 # lookup blip does not silently unscope the fetch back to the cwd repo.
 REPO_FOR_FETCH="${REPO:-$REPO_ARG}"
 if [ -n "$REPO_FOR_FETCH" ]; then
-    REVIEW_JSON=$(gh api "repos/${REPO_FOR_FETCH}/issues/${PR_NUM}/comments?per_page=100&direction=desc" \
-        --jq '[.[] | select(.user.login == "claude[bot]")] | sort_by(.created_at) | last' \
+    REVIEW_JSON=$(gh api --paginate --slurp "repos/${REPO_FOR_FETCH}/issues/${PR_NUM}/comments?per_page=100" \
+        --jq "[.[][] | select(.user.login == ${REVIEW_LOGIN_JSON})] | sort_by(.created_at) | last" \
         2>/dev/null || echo "")
-fi
-
-# COMPOUND MERGE REFUSAL. Everything above arms the gate on the FIRST merge
-# in the command, which is right as far as it goes — and observed
-# insufficient: a single call chaining two merges fired the gate for the
-# first PR only, and the second merged with no ack cycle of its own. The
-# gate is attention-independent by design, so a shape that silently halves
-# its coverage is a hole, not a nit.
-#
-# NOT ACKABLE, on purpose. Acking would let the identical command through on
-# the retry and reproduce the hole exactly; the way past this is to run one
-# merge per command, which is also what makes each PR's review reachable.
-# Recovery costs one extra Bash call, so the direction is safe.
-#
-# Placed AFTER the review fetch and BEFORE the no-review early exit below.
-# After, so the block can name the PRs the scan resolved and the extraction
-# stays observable; before, so a PR with no review comment — which exits 0 a
-# few lines down — cannot carry a second merge through on that path.
-#
-# Counts only what the PRECISE command-position scan resolved. The fallback
-# paths (the raw scan, the depth cap) exist to over-arm, and they report at
-# most one invocation for exactly this reason: hanging a refusal with no ack
-# past it off a deliberate over-arm leaves no way out.
-#
-# Round 2 widened the count: a NUMBERLESS invocation beside a numbered one is
-# one of these compounds too (`gh pr merge 7 && gh pr merge` armed only #7;
-# the bare merge inferred its own PR from the branch and ran ungated). The
-# refusal fires on more-than-one numbered merge OR (numbered AND numberless),
-# and the banner names the numberless invocation as one of the merges. A
-# GENUINELY single numberless merge still arms the branch PR normally — this
-# changes refusal, not arming.
-if [ "${MERGE_COUNT:-0}" -gt 1 ] 2>/dev/null \
-    || { [ "${MERGE_COUNT:-0}" -ge 1 ] 2>/dev/null \
-        && [ "$MERGE_NUMBERLESS" = "numberless" ]; }; then
-    REFUSAL_PRS="$MERGE_ALL_PRS"
-    REFUSAL_TOTAL="$MERGE_COUNT"
-    if [ "$MERGE_NUMBERLESS" = "numberless" ]; then
-        REFUSAL_PRS="${REFUSAL_PRS:+$REFUSAL_PRS }+ a numberless merge (gh infers the PR from the current branch)"
-        REFUSAL_TOTAL=$((MERGE_COUNT + 1))
-    fi
-    {
-        printf '%s\n' "$RULE"
-        printf 'ONE MERGE PER COMMAND — compound merge refused\n'
-        printf '%s\n\n' "$RULE"
-        printf 'This command invokes `gh pr merge` more than once: %s\n\n' "$REFUSAL_PRS"
-        printf 'The review gate arms on the FIRST invocation only, so every merge after it\n'
-        printf 'would run without its own review-ack cycle — the check would report green\n'
-        printf 'having read one review out of %s.\n\n' "$REFUSAL_TOTAL"
-        printf 'Run them as separate calls, one PR per command, so each merge is gated:\n'
-        printf '  gh pr merge <first>    # read its review, then retry\n'
-        printf '  gh pr merge <second>\n\n'
-        printf 'This refusal is not ackable — retrying the same compound command reproduces\n'
-        printf 'the same gap. Nothing was acked, so no state needs undoing.\n'
-        printf '%s\n' "$RULE"
-    } >&2
-    exit 2
 fi
 
 # No claude[bot] review comment on this PR (yet, or ever). Allow the merge —
@@ -922,15 +1063,20 @@ fi
 # `dependabot[bot]` is matched too. A PR whose base is not the default
 # branch still exits 0 silently — release_block_then_exit prints nothing
 # there.
-REVIEW_WORKFLOW_PATH=".github/workflows/claude-code-review.yml"
+# Configurable: SYG_MERGE_REVIEW_WORKFLOW overrides the review workflow file
+# whose self-edit explains a missing review (repos name it differently).
+# Like the login above, it reaches its jq filter as an ENCODED literal, not
+# spliced text.
+REVIEW_WORKFLOW_PATH="${SYG_MERGE_REVIEW_WORKFLOW:-.github/workflows/claude-code-review.yml}"
+REVIEW_WF_JSON=$(jq -n --arg v "$REVIEW_WORKFLOW_PATH" '$v')
 no_review_reason() {
     NO_REVIEW_HEADER="no review comment found"
     NO_REVIEW_DETAIL=""
     release_reminder_due || return 0
     local facts pr_author pr_edits_review_workflow
     facts=$(timeout 10 gh pr view "${REPO_SCOPE_ARGS[@]}" "$PR_NUM" --json author,files \
-        --jq '(.author.login // ""),
-              ([.files[]?.path] | any(. == "'"$REVIEW_WORKFLOW_PATH"'") | tostring)' \
+        --jq "(.author.login // \"\"),
+              ([.files[]?.path] | any(. == ${REVIEW_WF_JSON}) | tostring)" \
         2>/dev/null) || facts=""
     pr_author=$(printf '%s\n' "$facts" | sed -n '1p')
     pr_edits_review_workflow=$(printf '%s\n' "$facts" | sed -n '2p')
@@ -956,7 +1102,7 @@ if [ -z "$REVIEW_JSON" ] || [ "$REVIEW_JSON" = "null" ]; then
 fi
 
 REVIEW_ID=$(jq -r '.id // empty' <<<"$REVIEW_JSON")
-REVIEW_TS=$(jq -r '.created_at // empty' <<<"$REVIEW_JSON")
+REVIEW_TS=$(jq -r '.updated_at // empty' <<<"$REVIEW_JSON")
 REVIEW_BODY=$(jq -r '.body // empty' <<<"$REVIEW_JSON")
 
 if [ -z "$REVIEW_ID" ] || [ -z "$REVIEW_BODY" ]; then
@@ -977,9 +1123,15 @@ fi
 # correct if `set -e` ever arrives.
 ORIGIN_HITS=$(grep -icE 'pre-?existing|pre-?dates|not a regression|not introduced (by|in) this|existing behavior|consistent with existing|already (present|existed)' <<<"$REVIEW_BODY" || true)
 
-# Per-(PR, comment-id) key. A fresh review (different comment-id) forces
-# re-engagement; a retry after ack proceeds.
-ACK_KEY="${PR_NUM}:${REVIEW_ID}"
+# Per-(PR, comment-id, updated_at) key. A fresh review (different
+# comment-id) forces re-engagement, and so does an EDIT: sticky and
+# edit-in-place review modes update one comment, keeping the id but moving
+# updated_at — the moved timestamp re-arms the gate carrying the new body. A
+# retry after ack proceeds. Scoped to the comment the fetch PICKED (the
+# newest by created_at — that sort is deliberate, so an edit to an OLDER
+# comment cannot outrank the newest round and re-arm the gate on it): an
+# edit re-arms only when it is the picked comment that moved.
+ACK_KEY="${PR_NUM}:${REVIEW_ID}:${REVIEW_TS}"
 
 # Acked-retry path: the review has already been surfaced for this comment-id,
 # so the review gate itself is satisfied. The default-branch reminder is
@@ -1057,7 +1209,7 @@ RELEASE_DUE=0
 if release_reminder_due; then RELEASE_DUE=1; fi
 {
     printf '%s\n' "$RULE"
-    printf 'PR MERGE GATE — latest claude[bot] review for PR #%s\n' "$PR_NUM"
+    printf 'PR MERGE GATE — latest %s review for PR #%s\n' "$REVIEW_LOGIN" "$PR_NUM"
     printf 'Posted: %s\n' "$REVIEW_TS"
     printf '%s\n\n' "$RULE"
     printf '%s\n\n' "$REVIEW_BODY"
