@@ -593,8 +593,10 @@ else
     # reports extra=off below a maxed week (the 75% reserve) and for disabled
     # without a reason; this display intentionally renders those as absent or
     # money-only. Otherwise shown only while extra usage is on and the week is
-    # maxed or anything was spent: dollars left of the SYG_EXTRA_USAGE_BUDGET_USD
-    # budget (red "over" past it), dollars used without a valid budget. A parse
+    # maxed or anything was spent: dollars left of the budget — SYG_EXTRA_USAGE_TOML
+    # (a toml with bought_usd and optional used_usd_at_anchor, re-read on every
+    # render) when it parses, else SYG_EXTRA_USAGE_BUDGET_USD — red "over" past
+    # it, dollars used without either. A parse
     # failure loses only this segment. Opt-out: SYG_STATUSLINE_EXTRA_USAGE=0
     # never renders it.
     ex_seg=""
@@ -618,19 +620,75 @@ else
         if [ "$ex_week_maxed" = 1 ] && { [ "$ex_lim" = true ] || { [ "$ex_enabled" != true ] && [ "$ex_reason" = true ]; }; }; then
             ex_seg="${gray}extra: ${reset}${red}off${reset}"
         elif [ "$ex_enabled" = true ] && [ "$ex_lim_ok" = true ]; then
-            # A valid number under LC_ALL=C; anything else counts as unset.
-            ex_budget=""
-            [ -n "${SYG_EXTRA_USAGE_BUDGET_USD:-}" ] \
-                && LC_ALL=C awk -v b="$SYG_EXTRA_USAGE_BUDGET_USD" 'BEGIN{exit !(b ~ /^[0-9]+([.][0-9]+)?$/)}' \
-                && ex_budget=$SYG_EXTRA_USAGE_BUDGET_USD
+            # Budget: SYG_EXTRA_USAGE_TOML first — a toml with `bought_usd = N` and
+            # optional `used_usd_at_anchor = M`, read fresh on every render because
+            # the launch-baked env goes stale when the budget changes under running
+            # sessions; the toml is the live figure. Both numbers must match the
+            # same LC_ALL=C numeric rule as the env fallback, and a bad one
+            # invalidates the source; the first VALID value of each key wins.
+            # Anything invalid, or a set-but-missing file,
+            # falls through to SYG_EXTRA_USAGE_BUDGET_USD exactly as before. One
+            # awk pass, no network: this runs on every prompt tick.
+            ex_budget="" ex_anchor=0 ex_tb="" ex_ta=""
+            if [ -n "${SYG_EXTRA_USAGE_TOML:-}" ] && [ -f "$SYG_EXTRA_USAGE_TOML" ]; then
+                eval "$(LC_ALL=C awk '
+                    /^[[:space:]]*bought_usd[[:space:]]*=/ {
+                        v = $0
+                        sub(/^[[:space:]]*bought_usd[[:space:]]*=[[:space:]]*/, "", v)
+                        sub(/[[:space:]]*#.*$/, "", v)
+                        sub(/[[:space:]]+$/, "", v)
+                        if (v ~ /^[0-9]+([.][0-9]+)?$/ && ex_tb == "") ex_tb = v
+                    }
+                    /^[[:space:]]*used_usd_at_anchor[[:space:]]*=/ {
+                        v = $0
+                        sub(/^[[:space:]]*used_usd_at_anchor[[:space:]]*=[[:space:]]*/, "", v)
+                        sub(/[[:space:]]*#.*$/, "", v)
+                        sub(/[[:space:]]+$/, "", v)
+                        if (v !~ /^[0-9]+([.][0-9]+)?$/) ex_bad = 1
+                        else if (ex_ta == "") ex_ta = v
+                    }
+                    END {
+                        if (ex_tb != "" && !ex_bad) {
+                            print "ex_tb=" ex_tb
+                            if (ex_ta != "") print "ex_ta=" ex_ta
+                        }
+                    }' "$SYG_EXTRA_USAGE_TOML" 2>/dev/null)"
+                # The anchor only ever rides a toml budget: the env has no anchor concept.
+                if [ -n "$ex_tb" ]; then
+                    ex_budget=$ex_tb
+                    [ -n "$ex_ta" ] && ex_anchor=$ex_ta
+                fi
+            fi
+            if [ -z "$ex_budget" ]; then
+                # A valid number under LC_ALL=C; anything else counts as unset.
+                [ -n "${SYG_EXTRA_USAGE_BUDGET_USD:-}" ] \
+                    && LC_ALL=C awk -v b="$SYG_EXTRA_USAGE_BUDGET_USD" 'BEGIN{exit !(b ~ /^[0-9]+([.][0-9]+)?$/)}' \
+                    && ex_budget=$SYG_EXTRA_USAGE_BUDGET_USD
+            fi
+            # A stale anchor — the API reporting less than used_usd_at_anchor —
+            # means the toml needs re-anchoring. The file's own consumer refuses
+            # in that state rather than compute a nonsense remaining, and so
+            # does this render: the budget drops to the used-only shape instead
+            # of showing more left than was bought. Only an anchor actually read
+            # from the toml can go stale; the env budget has no anchor concept.
+            if [ -n "$ex_ta" ] \
+                && LC_ALL=C awk -v u="$ex_used" -v a="$ex_anchor" 'BEGIN{exit !(u < a)}'; then
+                ex_budget=""
+            fi
             # One arithmetic awk for the whole segment: has-spend, and with a budget
             # the shape too — `over <fig>` past it, `left <pct> <fig>` under it; bash
-            # parses the fields. Without a budget it only reports spend; the used
-            # figure is the printf below.
+            # parses the fields. With a budget, u is spend since the anchor: the
+            # anchor file's own consumer computes remaining as
+            # bought_usd - (used - used_usd_at_anchor), so that delta is what the
+            # budget math sees (default anchor 0). has-spend stays the raw API
+            # figure — spend happened or it did not, whatever the anchor says.
+            # Without a budget it only reports spend; the used figure is the
+            # printf below.
             ex_hs="" ex_shape="" ex_a="" ex_b=""
-            read -r ex_hs ex_shape ex_a ex_b <<< "$(LC_ALL=C awk -v u="$ex_used" -v b="${ex_budget:-}" 'BEGIN{
+            read -r ex_hs ex_shape ex_a ex_b <<< "$(LC_ALL=C awk -v u="$ex_used" -v a="$ex_anchor" -v b="${ex_budget:-}" 'BEGIN{
                 hs = (u > 0) ? "spend" : "nospend"
                 if (b == "") { print hs; exit }
+                u -= a
                 if (u > b) printf "%s over %.2f\n", hs, u - b
                 else printf "%s left %d %.2f\n", hs, (b > 0) ? u * 100 / b + 0.5 : 0, (b - u > 0) ? b - u : 0
             }')"
@@ -647,7 +705,11 @@ else
             fi
         fi
     fi
-    [ -n "$ex_seg" ] && rl_segment="$rl_segment $ex_seg"
+    # Prepend, not append: the line truncates on the right on a narrow (phone)
+    # render, and the extra figure is what a maxed-week owner is watching — it
+    # must survive ahead of the plan windows. ex_seg is empty unless the week is
+    # maxed or anything was spent, so quiet days render byte-identically.
+    [ -n "$ex_seg" ] && rl_segment="$ex_seg $rl_segment"
     output="$output${sep}${anth_brand}${anth_plan_label}${reset} ${rl_segment}"
 fi
 
