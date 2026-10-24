@@ -30,11 +30,16 @@ printf '#!/bin/bash\ntouch %q\n' "$TMP/python-spawned" > "$TMP/stub/python3"
 chmod +x "$TMP/pt.sh" "$TMP/stub/python3"
 printf '{"type":"assistant","timestamp":"2026-10-10T10:00:00Z","requestId":"req-1","message":{"model":"m-a","id":"msg-1","usage":{"input_tokens":1000000,"output_tokens":0}}}\n' > "$TMP/tx/S.jsonl"
 payload='{"session_id":"S","transcript_path":"'"$TMP/tx/S.jsonl"'","hook_event_name":"Stop"}'
+# The hook's early pre-filter exits can close stdin before the writer finishes;
+# a printf pipe then dies with EPIPE and pipefail fails the row (a race, seen
+# in CI). Feed the payload from a file: a regular-file redirect has no writer
+# to break, and the hook reads the same bytes.
+printf '%s' "$payload" > "$TMP/payload"
 
 # run CMD... with a clean env plus the case's variables (VARS array).
 run() {
-  OUT=$(printf '%s' "$payload" | env -i PATH="${RPATH:-$PATH}" HOME="$TMP/home" PYTHONDONTWRITEBYTECODE=1 \
-    CLAUDE_PROJECT_DIR="$TMP/proj" "${VARS[@]}" "$@" 2>"$TMP/err")
+  OUT=$(env -i PATH="${RPATH:-$PATH}" HOME="$TMP/home" PYTHONDONTWRITEBYTECODE=1 \
+    CLAUDE_PROJECT_DIR="$TMP/proj" "${VARS[@]}" "$@" < "$TMP/payload" 2>"$TMP/err")
   RC=$?
 }
 
