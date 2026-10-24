@@ -143,62 +143,114 @@ PR_URL_RE = re.compile(
 )
 
 # GH_REPO= scopes every gh call like -R does. Read only from the command's
-# PREFIX (before the gh word): a --body value that merely looks like an
-# assignment must never scope anything.
+# PREFIX (before the gh word) or from an `export GH_REPO=` command EARLIER
+# in the text than the armed invocation: a --body value that merely looks
+# like an assignment must never scope anything, and neither may a
+# standalone `GH_REPO=x` (bash exports it nowhere) nor an export carrying
+# -n/-u/-p.
 GH_REPO_ASSIGN = re.compile(r"^GH_REPO=(.+)$")
 
 _CHDIR_CMDS = ("cd", "pushd", "popd")
-_CMD_SEPARATORS = ("&&", "||", ";", ";;", "|", "&", "|&")
+_CMD_SEPARATORS = ("&&", "||", ";;", "|&", "|", "&", ";")
+# Words that OPEN a command position themselves: after `{`, `then`, `do`,
+# `else`, `!` (and the other flow keywords, plus the `command`/`builtin`
+# prefixes) the NEXT word is a command again — `{ cd x; …` and
+# `if cd x; then …` run a real cd that a separator-only model missed.
+_CMD_OPENERS = ("{", "}", "then", "else", "elif", "do", "!", "if", "while",
+                "until", "time", "coproc", "command", "builtin")
+# A separator GLUED into a whitespace word (`status;`, `repo;gh`, `dir&&gh`)
+# still separates in bash, so every word is split on its separator
+# boundaries before the walk. Longest first, or `&&` reads as two `&`.
+_WORD_SEPARATORS = re.compile(r"(&&|\|\||;;|\|&|[|;&])")
 
 def chdir_affects_merge(text):
     """Whether a directory change REALLY precedes a merge in `text` — the
-    refinement that keeps the scope-moved refusal off subshell shapes: a cd
-    inside `( ... )`, in a comment, inside quotes, or in another command's
-    arguments cannot move the merge's directory, and a cd at a DIFFERENT
-    paren depth than the merge does not either. True when a command-position
-    cd/pushd/popd at the SAME depth as a `gh pr merge` precedes it. Quoted
-    spans and heredoc bodies are neutralized first (data, not commands);
-    wrapper strings are judged in their own right, because what runs inside
-    `bash -c`/`eval` is that string's own shell. Unparseable input returns
-    True — the refusal is the safe direction."""
-    def scan(s):
-        events = []  # (order, depth, kind) — kind "cd" | "merge"
+    refinement that keeps the scope-moved refusal off subshell shapes.
+
+    FAIL-TOWARD-REFUSING: the refinement may clear the refusal only on
+    positive proof — a modeled `gh pr merge` (gh matched by BASENAME, a
+    quoted command word resolved back to its value) and every
+    cd/pushd/popd that precedes it accounted for. A cd in a comment, inside
+    quotes as DATA (an argument), or in another command's arguments cannot
+    move the merge's directory, and neither can a cd AFTER the merge or at
+    a SHALLOWER paren depth than it (a child scope's directory change
+    cannot leak up); a cd at the merge's depth or ANY DEEPER one can,
+    because subshells and command substitutions inherit the moved
+    directory. Anything the
+    scan cannot model — an unterminated quote, a view that will not
+    resolve, a merge its levels cannot see at all (the caller's walk found
+    one, but no scanned level shows it: a cd at wrapper level 1 with the
+    merge at level 2, a heredoc body fed to a stdin shell), or a top-level
+    cd with the merge inside a wrapper string (the wrapper's shell INHERITS
+    the moved directory, and neither level shows both events) — returns
+    True and the refusal stands. Wrapper strings are judged in their own
+    right, because what runs inside `bash -c`/`eval` is that string's own
+    shell; heredoc bodies are neutralized first (data, not commands)."""
+    def scan(view, values):
+        """One shell level: (real merge seen, depth-0 cd seen, cd before a
+        real merge at the same depth)."""
+        events = []  # (order, depth, kind) — kind "cd" | "gh" | "merge"
         order = 0
         depth = 0
-        for line in s.split("\n"):
+        ph = 0  # quoted-span values consumed so far: resolution runs in
+        #         view order, so every part (skipped ones included) counts.
+        for line in view.split("\n"):
             cmd_pos = True
-            for word in line.split():
-                while word[:1] in "$<>":
-                    word = word[1:]
-                opens = 0
-                while word.startswith("("):
-                    opens += 1
-                    word = word[1:]
-                if word.startswith("#"):
-                    break  # comment: the rest of the line is not commands
-                closes = 0
-                while word.endswith(")"):
-                    closes += 1
-                    word = word[:-1]
-                depth += opens
-                if opens:
-                    cmd_pos = True
-                if word:
-                    if cmd_pos and word in _CHDIR_CMDS:
-                        events.append((order, depth, "cd"))
-                        order += 1
-                    elif word == "gh":
-                        events.append((order, depth, "gh"))
-                        order += 1
-                    elif word == "merge":
-                        events.append((order, depth, "merge"))
-                        order += 1
-                    else:
-                        order += 1
-                    cmd_pos = word in _CMD_SEPARATORS
-                if closes:
-                    depth -= closes
-                    cmd_pos = True
+            words = line.split()
+            stop = False
+            for wi, word in enumerate(words):
+                parts = _WORD_SEPARATORS.split(word)
+                for pi, part in enumerate(parts):
+                    if not part:
+                        continue
+                    if part in _CMD_SEPARATORS:
+                        cmd_pos = True
+                        continue
+                    if part.startswith("#"):
+                        # Comment: the rest of the line is not commands, but
+                        # its placeholders still count toward resolution.
+                        ph += " ".join(
+                            parts[pi:] + words[wi + 1:]).count(QUOTED_SPAN)
+                        stop = True
+                        break
+                    # `part and` is load-bearing: `<<<` strips to "" and
+                    # `""[:1] in "$<>"` is True, so without the guard this
+                    # loop never terminates — the hook hangs into the
+                    # harness timeout and degrades to a silent stand-down.
+                    while part and part[0] in "$<>":
+                        part = part[1:]
+                    opens = 0
+                    while part.startswith("("):
+                        opens += 1
+                        part = part[1:]
+                    closes = 0
+                    while part.endswith(")"):
+                        closes += 1
+                        part = part[:-1]
+                    depth += opens
+                    if opens:
+                        cmd_pos = True
+                    if part:
+                        resolved, ph = resolve_placeholders(part, values, ph)
+                        base = os.path.basename(resolved)
+                        if cmd_pos and base in _CHDIR_CMDS:
+                            events.append((order, depth, "cd"))
+                            order += 1
+                        elif base == "gh":
+                            events.append((order, depth, "gh"))
+                            order += 1
+                        elif resolved == "merge":
+                            events.append((order, depth, "merge"))
+                            order += 1
+                        else:
+                            order += 1
+                        cmd_pos = part in _CMD_SEPARATORS \
+                            or part in _CMD_OPENERS
+                    if closes:
+                        depth -= closes
+                        cmd_pos = True
+                if stop:
+                    break
         merges = [i for i, e in enumerate(events) if e[2] == "merge"]
         ghs = [i for i, e in enumerate(events) if e[2] == "gh"]
         # Only a `merge` two words after a `gh` (`gh pr merge`; the middle
@@ -207,21 +259,53 @@ def chdir_affects_merge(text):
         real_merges = [m for m in merges
                        if any(events[m][0] - events[g][0] == 2
                               for g in ghs)]
-        return any(e[2] == "cd" and e[1] == events[m][1]
-                   for i, e in enumerate(events)
-                   if e[2] == "cd"
-                   for m in real_merges
-                   if m > i)
+        # Depth is one-directional: a cd at depth D affects every LATER
+        # merge at depth >= D, because a subshell or command substitution
+        # inherits the moved directory. Only a merge at a SHALLOWER depth
+        # is out of reach — a child's directory change cannot leak up.
+        affects = any(e[2] == "cd" and e[1] <= events[m][1]
+                      for i, e in enumerate(events)
+                      if e[2] == "cd"
+                      for m in real_merges
+                      if m > i)
+        top_cd = any(e[2] == "cd" and e[1] == 0 for e in events)
+        return bool(real_merges), top_cd, affects
 
-    view = strip_quoted(strip_heredoc_bodies(text))
-    if view is None:
-        return True
-    if scan(view):
+    def level(s):
+        indexed = strip_quoted_indexed(strip_heredoc_bodies(s))
+        if indexed is None:
+            return None
+        return scan(indexed[0], indexed[1])
+
+    top = level(text)
+    if top is None or top[2]:
         return True
     try:
-        return any(scan(s) for s in wrapped_command_strings(text))
+        wrappers = wrapped_command_strings(text)
     except Exception:
         return True
+    wrapper_merge = False
+    for s in wrappers:
+        w = level(s)
+        if w is None or w[2]:
+            return True
+        wrapper_merge = wrapper_merge or w[0]
+    # MODEL-COVERAGE MISMATCH: the caller's walk armed this refinement on a
+    # merge it saw, yet NO scanned level (top + wrappers) shows a real
+    # merge — the merge hides where this scan has no eyes: a cd at wrapper
+    # level 1 with the merge at level 2, a heredoc BODY fed to a stdin
+    # shell (bodies are data at every level), a nesting the wrapper walk
+    # does not descend into. Blind means refuse: clearing here would let a
+    # merge the scan cannot see run from a directory it did not check.
+    if not top[0] and not wrapper_merge:
+        return True
+    # A top-level cd with the merge inside a wrapper: the wrapper's shell
+    # starts where the parent left it, so the cd DOES move that merge. The
+    # reverse (wrapper cd, top merge) cannot reach the caller's chdir flag
+    # (the splitter lists a wrapper's commands after the top level), so
+    # this is the only cross-level pairing the refinement owes an answer
+    # to — and refusing is the safe direction.
+    return bool(top[1] and wrapper_merge)
 
 # `--delete-branch` and its shorthand. ANCHORED to a whole token, which is
 # what scopes it: `--body "remove the -d flag"` is one token carrying spaces,
@@ -382,8 +466,10 @@ def scan_invocations(text):
       one when the numberless path ends up arming;
     - repo: the LAST -R/--repo value seen (gh lets the later flag win); ""
       when the invocation never scopes a repository — except that a GH_REPO=
-      assignment prefix scopes the same way and fills in when no -R did
-      (-R wins over GH_REPO, gh's own precedence);
+      assignment scopes the same way and fills in when no -R did (-R wins
+      over GH_REPO, gh's own precedence): either the invocation's own PREFIX
+      (before the gh word) or an `export GH_REPO=` command (no -n/-u/-p)
+      EARLIER in the text than the armed (first) invocation;
     - selector: the first invocation's positional non-flag, non-value
       argument (a branch, URL or #N — gh accepts all three as the PR
       selector); "" when no invocation carries one;
@@ -399,8 +485,10 @@ def scan_invocations(text):
       like `env -C` wrapping the merge itself) precedes the merge in the
       same command — the merge's repository is then unresolvable from this
       hook's cwd, and the caller refuses rather than resolve the wrong
-      repo's PR. A cd inside a SUBSHELL (different paren depth than the
-      merge) does not count: it cannot move the merge's directory;
+      repo's PR. A cd at a DEEPER scope than the merge (a subshell cd
+      beside a top-level merge) does not count: a child's directory change
+      cannot leak up; a cd at the merge's own depth or shallower does,
+      because the merge inherits the moved directory;
     - fanout: True when a merge runs under xargs/parallel — once per input,
       so no single ack cycle can cover it.
 
@@ -435,9 +523,27 @@ def scan_invocations(text):
     chdir_runner = False
     fanout = False
     gh_repo_env = ""
+    first_repo_env = ""
     chdir_seen = False
     for raw in simple_commands(text):
         argv, runinfo = unwrap_runners(raw)
+        # A GH_REPO= assignment in an EARLIER simple command — `export
+        # GH_REPO=…` — exports the variable for the rest of the shell, so
+        # it scopes every later gh exactly like the prefix form below. An
+        # export carrying -n, -u or -p never counts (each changes export's
+        # meaning: un-export, nameref, all-variables); a bare `--`
+        # separator passes through, because bash exports through it. A
+        # standalone `GH_REPO=…` assignment sets a shell variable bash does
+        # not export (children see nothing), so it never scopes either.
+        # Recorded in list order; the FIRST merge invocation snapshots it,
+        # so an assignment AFTER the merge never scopes it. Single-line
+        # values only, same rule as -R.
+        if argv and os.path.basename(argv[0]) == "export" \
+                and not any(t in ("-n", "-u", "-p") for t in argv[1:]):
+            for tok in argv[1:]:
+                m = GH_REPO_ASSIGN.match(tok)
+                if m and "\n" not in m.group(1):
+                    gh_repo_env = m.group(1)
         if argv and os.path.basename(argv[0]) in ("cd", "pushd", "popd"):
             # A directory change before the merge (in list order) makes the
             # merge's repository unresolvable from this hook's cwd.
@@ -460,8 +566,9 @@ def scan_invocations(text):
             fanout = True
         # GH_REPO= scopes gh like -R. PREFIX only (before the gh word), so a
         # --body value shaped like an assignment never scopes anything; a
-        # single-line value only, like -R's own capture. Last invocation
-        # wins, and -R wins over GH_REPO (gh's own precedence).
+        # single-line value only, like -R's own capture. Within one
+        # invocation the last assignment wins, and -R wins over GH_REPO
+        # (gh's own precedence).
         for tok in raw:
             if os.path.basename(tok) == "gh":
                 break
@@ -528,6 +635,7 @@ def scan_invocations(text):
             merges.append((number, flag))
         if first:
             first_flag = flag
+            first_repo_env = gh_repo_env
         if sel is not None and not selector:
             selector = sel
             url = PR_URL_RE.match(sel)
@@ -538,8 +646,11 @@ def scan_invocations(text):
         # another command's arguments — none of them can move the merge.
         chdir_cd = False
     chdir = chdir_cd or chdir_runner
-    if not repo and gh_repo_env:
-        repo = gh_repo_env
+    if not repo and first_repo_env:
+        # The assignment captured at the ARMED (first) invocation — the one
+        # whose PR the lookups resolve; a later assignment came too late to
+        # scope it.
+        repo = first_repo_env
     return merges, numberless, first_flag, repo, selector, invoke_count, \
         selector_repo, numberless_count, chdir, fanout
 
@@ -626,9 +737,12 @@ try:
     sys.path.insert(0, os.environ["SYG_LIB_DIR"])
     from shell_quotes import (  # noqa: E402
         MAX_WRAPPER_DEPTH,
+        QUOTED_SPAN,
+        resolve_placeholders,
         simple_commands,
         strip_heredoc_bodies,
         strip_quoted,
+        strip_quoted_indexed,
         strip_redirections,
         unwrap_runners,
         wrapped_command_strings,
@@ -1128,16 +1242,31 @@ cwd_repo_slug() {
     esac
 }
 
+# GitHub owner/repo is case-INSENSITIVE, and gh also accepts a
+# HOST/OWNER/REPO spelling for -R, so `-R Owner/Repo` and
+# `-R github.com/owner/repo` name this repo as surely as the exact slug.
+# The same-repo compare below normalizes both sides: lowercased, a leading
+# host component (the only three-part form gh accepts) dropped.
+repo_slug_normalized() {
+    local slug
+    slug=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+    case "$slug" in
+        */*/*) slug=${slug#*/} ;;
+    esac
+    printf '%s\n' "$slug"
+}
+
 # The whole check is skipped when the invocation scopes a DIFFERENT
 # repository (-R/--repo, or a URL selector's own repo): the local worktrees
 # belong to this checkout's repo and cannot safely answer for another
 # repo's head branch — a same-named local branch would be a false,
-# non-ackable block with no recovery path. An -R naming THIS repo is the
-# same merge as an unscoped one, so the guard applies to it too.
+# non-ackable block with no recovery path. An -R naming THIS repo — in any
+# spelling gh accepts — is the same merge as an unscoped one, so the guard
+# applies to it too.
 if [ "$MERGE_DELETES_BRANCH" = "1" ]; then
     GUARD_APPLIES=1
     if [ -n "$REPO_ARG" ]; then
-        [ "$REPO_ARG" = "$(cwd_repo_slug)" ] || GUARD_APPLIES=0
+        [ "$(repo_slug_normalized "$REPO_ARG")" = "$(repo_slug_normalized "$(cwd_repo_slug)")" ] || GUARD_APPLIES=0
     fi
     if [ "$GUARD_APPLIES" = "1" ]; then
     resolve_pr_view
@@ -1263,7 +1392,9 @@ release_block_then_exit() {
             exit 2
         fi
         # Healthy state, failed write — fail open rather than block forever.
-        printf 'WARNING: default-branch reminder ack write failed (%s) — allowing merge\n' "$STATE_FILE" >&2
+        # No warning: this is the exit-0 path, where stderr reaches nobody
+        # (the header's rule), so the line would be a log nobody reads; the
+        # cost is at most a repeated reminder on the next attempt.
     fi
     exit 0
 }
