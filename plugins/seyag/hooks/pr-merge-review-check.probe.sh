@@ -32,15 +32,16 @@
 #
 # --- what this probe does NOT pin -------------------------------------------
 #
-#   1. The `--jq` output-shape contract. The `gh` shim dispatches on the
-#      command text and returns a fixture that is ALREADY in post-`--jq`
-#      shape; it never runs the real filter. So the hook's jq expressions
-#      are pinned as far as "what does the script do with this shape" and
-#      not at all as "does real `gh` produce this shape".
-#   2. That `--paginate` actually walks every page and `--slurp` really wraps
-#      them — live-API behavior. The probe pins that the invocation carries
-#      both flags (log-assert below); the shim never runs the hook's jq, so
-#      the page-walking itself stays unpinned.
+#   1. The `--jq` output-shape contract on the `pr view`/`repo view` calls:
+#      the shim dispatches on the command text and returns fixtures already
+#      in post-`--jq` shape; it never runs those filters. The REVIEW fetch
+#      is different: gh there pipes its slurped pages to a real jq inside
+#      the hook, so the api fixtures are raw single-page comment shapes (the
+#      shim wraps them) and that filter really runs under the probe.
+#   2. That `--paginate` actually walks every page — live-API behavior. The
+#      probe pins that the invocation carries both flags (log-assert below)
+#      and that the slurped shape parses; the page-walking itself stays
+#      unpinned.
 #   3. Whether stderr from a blocking PreToolUse hook actually reaches the
 #      agent's context. That is a Claude Code runtime property; the probe can
 #      only assert the hook wrote it.
@@ -148,11 +149,13 @@ case "$*" in
     ;;
   *"/issues/"*"/comments"*)
     printf '%s\n' "$*" >>"${SHIM_API_LOG:-/dev/null}"
-    # The fixture is already in post-`--jq` shape (the shim never runs the
-    # hook's filter), so --paginate/--slurp change nothing here: their
-    # behavior is a live-API property, pinned only as presence in the logged
-    # argv by the paginate row.
-    printf '%s' "${SHIM_REVIEW_JSON:-}"
+    # The hook pipes gh's output to a REAL jq, so the fixture must be the
+    # RAW shape --slurp produces: an outer array of PAGES, each page an
+    # array of comments. The fixture is one comment object, so the shim
+    # wraps it twice (one page holding that comment). Pagination itself
+    # (many pages) is a live-API property, pinned only as the flags'
+    # presence in the logged argv.
+    printf '[[%s]]' "${SHIM_REVIEW_JSON:-}"
     ;;
   "pr diff "*)
     # The added-comment claim scan's input. SHIM_DIFF_EXIT non-zero with no
@@ -197,6 +200,11 @@ case "$*" in
   # EMPTY value too, so a case setting SHIM_CURRENT_TREE='' to simulate a failed
   # `rev-parse` would silently get `/repo` back and test nothing.
   "rev-parse --show-toplevel") printf '%s\n' "${SHIM_CURRENT_TREE-/repo}" ;;
+  # The cwd-repo slug the delete-branch guard compares a -R against. Derived
+  # from SHIM_REPO so a row that changes the served repo changes the remote
+  # with it; an unrecognised remote question still exits 64 (the unparseable
+  # → same-repo → guard-stays-on path).
+  "remote get-url origin") printf 'https://github.com/%s.git\n' "${SHIM_REPO:-acme-widgets/cli}" ;;
   "worktree list --porcelain") printf '%s' "${SHIM_WORKTREES:-}" ;;
   *) echo "git shim: unexpected invocation: $*" >&2; exit 64 ;;
 esac
@@ -374,13 +382,16 @@ invoke_in() {
   LAST_EXIT=$?
 }
 
-# review_json <id> <body> [updated_at] — a fixture already in post-`--jq`
-# shape (the shim never runs the hook's filter). updated_at defaults to
-# created_at; passing a different one models a review that EDITED its comment
-# in place.
+# review_json <id> <body> [updated_at] [login] — a fixture in RAW comment
+# shape: the shim wraps it into the slurped single-page array and the hook's
+# real jq filters it, so the fields must be the real ones (user.login
+# included). updated_at defaults to created_at (a different value models a
+# review that EDITED its comment in place); login defaults to the hook's
+# default reviewer.
 review_json() {
   jq -nc --arg i "$1" --arg b "$2" --arg u "${3:-2026-08-08T12:00:00Z}" \
-    '{id:($i|tonumber),created_at:"2026-08-08T12:00:00Z",updated_at:$u,body:$b}'
+    --arg l "${4:-claude[bot]}" \
+    '{id:($i|tonumber),user:{login:$l},created_at:"2026-08-08T12:00:00Z",updated_at:$u,body:$b}'
 }
 
 ok() { printf 'PASS  %s\n' "$1"; }
@@ -625,6 +636,25 @@ new_case; SHIM_REPO_EXIT=1
 invoke 'gh pr merge 2002 -R other-x'
 assert_pr "a -R-scoped merge still resolves and gates the PR" 2002
 assert_api_has "…and the review fetch URL is scoped to the -R repo" 'repos/other-x/issues/2002/comments'
+SHIM_REPO_EXIT=0
+
+# A multi-line --repo value is a quoted blob, not an owner/repo: it assigns
+# nothing (the lookups scope to the cwd repo) and must not shift the
+# line-oriented extraction — every line after the repo line would read the
+# wrong value.
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke "$(printf 'gh pr merge 2002 --repo "line one\nline two"')"
+assert_pr "a multi-line --repo value assigns nothing; the gate arms the command's PR" 2002
+assert_api_has "…and the fetch scopes to the cwd repo, not an -R-invented one" 'repos/acme-widgets/cli/issues/2002/comments'
+assert_exit "…and blocks normally" 2
+# The discriminator for a leaked multi-line value: with the repo view
+# failing, a leaked value would fall through to the fetch URL itself.
+# Guarded, the hook has no repo to fetch from and fails open.
+new_case; SHIM_REPO_EXIT=1
+invoke "$(printf 'gh pr merge 2002 --repo "line one\nline two"')"
+assert_exit "repo view failing: fail open" 0
+assert_no_fetch "…no fetch ran — no -R-invented repo reached one"
+assert_api_lacks "…and the multi-line value reached no lookup" 'line one'
 SHIM_REPO_EXIT=0
 
 # Unparseable input must fall back to the permissive scan, never to silence.
@@ -1083,6 +1113,49 @@ assert_pr "…the shared branch PR arms normally" 4242
 SHIM_NUMBER_EXIT=1; SHIM_PR_NUMBER=''
 
 # ===========================================================================
+# 2f. Scope-moved merges — a directory change before the merge in the same
+#     command. The hook's cwd is then not the merge's cwd, so resolving
+#     here fetches the WRONG repo's PR (or none → ungated). Non-ackable
+#     refusal, before any network call; the escape is to run the merge from
+#     the target directory or with -R naming that repo.
+# ===========================================================================
+printf '\n--- scope-moved merges (cd before the merge) ---\n'
+
+SHIM_PR_BASE='develop'
+SHIM_REVIEW_JSON="$LGTM"
+
+new_case; invoke 'cd ../other-repo && gh pr merge 7'
+assert_exit "a cd before a numbered merge: refused" 2
+assert_stderr_has "…with the scope-moved banner" 'MERGE SCOPE MOVED'
+assert_stderr_has "…naming the -R escape" 'gh pr merge <PR> -R <owner>/<repo>'
+assert_no_fetch "…no fetch ran"
+assert_view_empty "…and nothing was resolved"
+
+# The numberless worktree-cd shape: the branch lookup would run against the
+# hook's cwd and fail open — an ungated merge.
+new_case; invoke 'cd .claude/worktrees/x && gh pr merge'
+assert_exit "a cd before a numberless merge: refused" 2
+assert_stderr_has "…with the scope-moved banner" 'MERGE SCOPE MOVED'
+assert_no_fetch "…no fetch ran"
+assert_view_empty "…no branch lookup ran either"
+
+# A chdir RUNNER wrapping the merge itself is the same shape.
+new_case; invoke 'env -C /tmp gh pr merge 2002'
+assert_exit "env -C wrapping the merge: refused" 2
+assert_stderr_has "…with the scope-moved banner" 'MERGE SCOPE MOVED'
+
+# Controls. A cd AFTER the merge is the merge's own business — the merge
+# runs first, in this cwd.
+new_case; invoke 'gh pr merge 2002 --rebase && cd ..'
+assert_stderr_lacks "a cd AFTER the merge does not refuse" 'MERGE SCOPE MOVED'
+assert_pr "…and the merge gates normally" 2002
+
+# A cd inside a QUOTED string is data, not a directory change.
+new_case; invoke 'echo "cd /tmp" && gh pr merge 2002 --rebase'
+assert_stderr_lacks "a cd inside quotes does not refuse" 'MERGE SCOPE MOVED'
+assert_pr "…and the merge gates normally" 2002
+
+# ===========================================================================
 # 3. The review gate — block once per (PR, review-id), allow on retry
 # ===========================================================================
 printf '\n--- review gate: block, ack, retry ---\n'
@@ -1129,23 +1202,25 @@ assert_exit "different PR, same review-id: BLOCKS (PR half of the key)" 2
 assert_pr "…and it fetched the other PR" 2003
 
 # The fetch must reach the NEWEST review on a busy PR: this endpoint ignores
-# sort/direction, so the flags that walk every page and slurp them into one
-# array are the whole fix. The shim cannot model pagination and never runs
-# the hook's jq (the fixture is already post-filter shape); the row pins the
-# invocation carries both flags, log-asserted on the api call.
+# sort/direction, so walking every page is the whole fix. The shim cannot
+# model pagination, but the hook's REAL jq runs on the wrapped fixture — a
+# dropped --paginate/--slurp or a broken pipe shows up as a missing review.
 new_case; SHIM_REVIEW_JSON="$LGTM"
 invoke 'gh pr merge 2002 --rebase'
 assert_api_has "…the review fetch walks every page (paginate + slurp)" '--paginate --slurp'
-assert_api_has "…and runs one jq across the slurped pages" '[.[][]'
-assert_pr "…and the fixture still reaches the gate" 2002
+assert_pr "…and the piped jq still yields the newest matching comment" 2002
 
 # Configurable reviewer identity: SYG_MERGE_REVIEW_LOGIN. The fetch filter
-# and the banner carry the override; the default (claude[bot]) is what every
-# other row runs under.
-new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"; LOGIN_OVERRIDE='release-bot[bot]'
+# and the banner carry the override; the fixture's comment is posted by the
+# override login, so the row proves the FILTER threading too — with the
+# default login wired in, the comment would be filtered out and no review
+# would surface.
+new_case; SHIM_PR_BASE='develop'
+SHIM_REVIEW_JSON=$(review_json 777 'LGTM from the release bot.' '2026-08-08T12:00:00Z' 'release-bot[bot]')
+LOGIN_OVERRIDE='release-bot[bot]'
 invoke 'gh pr merge 2002 --rebase'
-assert_api_has "…the fetch filters on the configured login" 'release-bot[bot]'
-assert_stderr_has "…and the banner names it, not the default bot" 'latest release-bot[bot] review for PR #2002'
+assert_stderr_has "…the banner names the configured login, not the default bot" 'latest release-bot[bot] review for PR #2002'
+assert_stderr_has "…and the override login's review is the one surfaced" 'LGTM from the release bot.'
 assert_exit "…and the gate still blocks" 2
 LOGIN_OVERRIDE=''
 
@@ -1210,7 +1285,7 @@ invoke 'gh pr merge 2002 --rebase'
 assert_exit "no review comment: allowed" 0
 assert_silent "no review: silent on a feature PR"
 
-new_case; SHIM_REVIEW_JSON='null'
+new_case; SHIM_REVIEW_JSON='[]'
 invoke 'gh pr merge 2002 --rebase'
 assert_exit "jq returned the literal null: allowed" 0
 assert_silent "literal null: silent"
@@ -1220,7 +1295,7 @@ invoke 'gh pr merge 2002 --rebase'
 assert_exit "review comment with an empty body: allowed" 0
 assert_silent "unparseable review: silent"
 
-new_case; SHIM_REVIEW_JSON='{"created_at":"2026-08-08T12:00:00Z","body":"has a body but no id"}'
+new_case; SHIM_REVIEW_JSON='{"user":{"login":"claude[bot]"},"created_at":"2026-08-08T12:00:00Z","updated_at":"2026-08-08T12:00:00Z","body":"has a body but no id"}'
 invoke 'gh pr merge 2002 --rebase'
 assert_exit "review comment with no id: allowed" 0
 assert_silent "missing id: silent"
@@ -1272,7 +1347,7 @@ assert_silent "…and silent"
 # OTHER no-usable-review exit — same exit code, same silence, different reason
 # line. Only a default-branch PR, where a reason line actually prints, can tell
 # the two apart.
-new_case; SHIM_REVIEW_JSON='null'
+new_case; SHIM_REVIEW_JSON='[]'
 invoke 'gh pr merge 2010 --rebase'
 assert_exit "default-branch PR, jq returned literal null: BLOCKS for the reminder" 2
 assert_stderr_has "…reported as an ABSENT review, not an unparseable one" 'no review comment found'
@@ -1695,17 +1770,20 @@ else
   bad "the state dir mode is $(stat -c '%a' "$WIDE_DIR"), expected 700"
 fi
 
-# A HEALTHY state file whose write fails (read-only): fail OPEN — blocking
-# forever on an environment fault gives the agent no way out. The review was
-# already injected, so the content is in context.
+# A HEALTHY state file whose write fails (read-only): fail CLOSED, with the
+# escape named. An allow here would print the review to a stream nobody
+# sees (stderr reaches the agent only on the blocking path) and silently
+# no-op the gate for as long as the fault lasts. SYG_DISABLE=guards-pr is
+# the way out of the block while the state path is fixed.
 new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
 mkdir -p "$CASE_HOME/.local/state/seyag/pr-merge-review-check"
 : >"$ACK_FILE"
 chmod 444 "$ACK_FILE"
 invoke 'gh pr merge 2002 --rebase'
-assert_exit "review path, healthy-but-unwritable ack: allows rather than blocking forever" 0
+assert_exit "review path, healthy-but-unwritable ack: BLOCKS with the escape named" 2
 assert_stderr_has "…and says why" 'ack write failed'
-assert_stderr_has "…after injecting the review anyway" 'LGTM. No actionable findings.'
+assert_stderr_has "…naming the escape" 'SYG_DISABLE=guards-pr'
+assert_stderr_has "…after injecting the review" 'LGTM. No actionable findings.'
 rm -f "$ACK_FILE"
 
 # ===========================================================================
@@ -1848,16 +1926,26 @@ invoke 'gh pr merge 2002 --rebase --delete-branch=true'
 assert_exit "explicit --delete-branch=true is the same flag: blocked" 2
 assert_stderr_has "…by the precondition" 'PR MERGE BLOCKED'
 
-# The negative that keeps the `=` boundary honest: `=false` is still the flag
-# being PRESENT as far as this guard is concerned. Over-arming on an explicit
-# opt-out is the safe direction (a block the reader can dismiss), and pretending
-# to parse the value would mean reimplementing pflag's bool grammar here.
+# pflag's `--flag=value` form for booleans: `=false` is an explicit opt-out
+# and must NOT arm the guard — blocking on it is a false block the reader
+# has to dismiss. `=true` (the row above this one) does arm it.
 new_case; SHIM_WORKTREES="$WT_CONFLICT"
 invoke 'gh pr merge 2002 --rebase --delete-branch=false'
-assert_exit "--delete-branch=false also blocks — the value is not parsed" 2
-# The banner, not just exit 2: the review gate blocks with the same code, so the
-# exit assertion alone stays green even with the `=` boundary removed.
-assert_stderr_has "…by the precondition" 'PR MERGE BLOCKED'
+assert_stderr_lacks "--delete-branch=false is an explicit opt-out: guard does not fire" 'PR MERGE BLOCKED'
+assert_pr "…and the merge reaches the review gate" 2002
+
+# A flag-shaped token consumed as a VALUE is not the flag: `--body -d` passes
+# "-d" as the body. The delete check runs inside the value-aware walk, so
+# the token is skipped exactly the way the PR-number walk skips it.
+new_case; SHIM_WORKTREES="$WT_CONFLICT"
+invoke 'gh pr merge 2002 --rebase --body -d'
+assert_stderr_lacks "a -d consumed as a flag's value is not the delete flag" 'PR MERGE BLOCKED'
+assert_pr "…and the merge reaches the review gate" 2002
+
+new_case; SHIM_WORKTREES="$WT_CONFLICT"
+invoke 'gh pr merge 2002 --rebase -t -d'
+assert_stderr_lacks "same for a short value flag (-t -d)" 'PR MERGE BLOCKED'
+assert_pr "…and the merge reaches the review gate" 2002
 
 # The asymmetric git failure: rev-parse fails, worktree list succeeds. Without
 # an explicit empty-CURRENT_TREE check the comparison is `path != ""`, true for
@@ -2178,6 +2266,14 @@ new_case; SHIM_WORKTREES="$WT_CONFLICT"; SHIM_REVIEW_JSON="$LGTM"
 invoke 'gh pr merge 2002 --rebase --delete-branch -R other-x'
 assert_stderr_lacks "a cross-repo -R merge skips the local worktree check" 'PR MERGE BLOCKED'
 assert_pr "…and the review gate runs normally" 2002
+
+# The converse: -R naming THIS repo (the cwd's own owner/name, served by the
+# git shim's remote) is the same merge as an unscoped one, so the worktree
+# guard applies to it too.
+new_case; SHIM_WORKTREES="$WT_CONFLICT"; SHIM_REVIEW_JSON="$LGTM"
+invoke 'gh pr merge 2002 --rebase --delete-branch -R acme-widgets/cli'
+assert_exit "-R naming the cwd repo: the precondition still fires" 2
+assert_stderr_has "…by the precondition, not the review gate" 'PR MERGE BLOCKED'
 
 SHIM_WORKTREES=''
 

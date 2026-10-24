@@ -25,10 +25,11 @@
 # resolves it the same way, in this hook's cwd. Any lookup failure fails open.
 #
 # Fail-open surfaces: gh lookups that cannot run (the gate only means
-# something when there is content to surface or a reminder to deliver), the
-# ack-state write on a HEALTHY state file (blocking forever on a full disk
-# gives the agent no way out), and a missing claim-shape lib (the hook stands
-# down entirely). The ack state itself fails CLOSED: a symlink or an
+# something when there is content to surface or a reminder to deliver), and
+# a missing claim-shape lib (the hook stands down entirely). The ack-state
+# WRITE on a healthy state file fails CLOSED with the escape named: an
+# allow would print the review to a stream nobody sees. The ack state
+# itself fails CLOSED: a symlink or an
 # unreadable file at the state path is treated as NOT acked and is never
 # written through — see the state section below.
 
@@ -106,7 +107,8 @@ LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib"
 # selector and numberless alike; the compound refusal keys off it. Line 8:
 # "<owner>/<repo>" when the selector is a GitHub PR URL (the URL carries its
 # own repository), "" otherwise. Line 9: how many of the invocations are
-# numberless.
+# numberless. Line 10: "chdir" when a directory change (cd/pushd, or a
+# chdir runner like `env -C`) precedes the merge in the same command.
 # A broken shell_quotes import falls back to the permissive raw scan (it
 # over-arms rather than disarms); the one residual fail-open left is python3
 # itself missing — no tokenizer exists then, `|| MERGE_EXTRACT=""` stands the
@@ -162,6 +164,7 @@ PR_URL_RE = re.compile(
 # proceeds ungated and deletes the branch, the one direction this file must
 # never fail in.
 DELETE_FLAG_LONG = re.compile(r"^--delete-branch(?:=|$)")
+DELETE_FLAG_OFF = re.compile(r"^--delete-branch=false$")
 SHORT_CLUSTER = re.compile(r"^-([A-Za-z]+)$")
 
 # `gh pr merge`'s VALUE-taking shorthands. pflag glues a value onto a short
@@ -198,13 +201,16 @@ def carries_delete_flag(token):
     carries the flag (`r` is boolean); `-bd` does not (`d` is `-b`'s value);
     `-db` does (`d` precedes the value-taker).
 
-    Known gap, unfixed: a value passed as a SEPARATE token (`-t -drafty`) is
-    still scanned as an argument, because the walk has no notion of a token
-    consumed by the previous one. pflag rejects a `-`-leading token as a value
-    in most shapes, and the failure direction is an over-arm.
+    The long form parses pflag's `=value` for the documented boolean:
+    `--delete-branch=false` is an explicit opt-out and NOT the flag; `=true`
+    and any other value are.
+
+    A value passed as a SEPARATE token (`-t -drafty`, `--body -d`) is not
+    this function's to catch: the caller's pending-aware walk skips tokens
+    consumed by the previous flag, and only unconsumed tokens reach here.
     """
     if DELETE_FLAG_LONG.match(token):
-        return True
+        return not DELETE_FLAG_OFF.match(token)
     cluster = SHORT_CLUSTER.match(token)
     if cluster is None:
         return False
@@ -284,7 +290,7 @@ def scan_invocations(text):
     bash execute it.
 
     Returns (merges, numberless, first_flag, repo, selector, invoke_count,
-    selector_repo, numberless_count):
+    selector_repo, numberless_count, chdir):
     - merges: (number, delete_flag) per invocation whose arguments carry a
       bare PR-number token, in the splitter's command order;
     - numberless: True when a real invocation exists whose arguments carry NO
@@ -303,7 +309,12 @@ def scan_invocations(text):
       (the URL carries its own repository); "" for a branch, a #N, or no
       selector;
     - numberless_count: how many of the invocations are numberless — the
-      compound refusal prints one clause per numberless invocation.
+      compound refusal prints one clause per numberless invocation;
+    - chdir: True when a directory change (cd/pushd/popd, or a chdir runner
+      like `env -C` wrapping the merge itself) precedes the merge in the
+      same command — the merge's repository is then unresolvable from this
+      hook's cwd, and the caller refuses rather than resolve the wrong
+      repo's PR.
 
     The command word is matched by BASENAME, not literally: `/usr/bin/gh pr
     merge 7` and a mise shim path are real invocations.
@@ -331,20 +342,30 @@ def scan_invocations(text):
     selector = ""
     selector_repo = ""
     invoke_count = 0
-    for argv in simple_commands(text):
-        argv = unwrap_runners(argv)[0]
+    chdir = False
+    chdir_seen = False
+    for raw in simple_commands(text):
+        argv, runinfo = unwrap_runners(raw)
+        if argv and os.path.basename(argv[0]) in ("cd", "pushd", "popd"):
+            # A directory change before the merge (in list order) makes the
+            # merge's repository unresolvable from this hook's cwd.
+            chdir_seen = True
+            continue
         if not argv or os.path.basename(argv[0]) != "gh" \
                 or argv[1:3] != ["pr", "merge"]:
             continue
         args = strip_redirections(argv[3:])
         invoke_count += 1
-        flag = any(carries_delete_flag(a) for a in args)
-        if not seen:
-            seen = True
-            first_flag = flag
+        # The merge itself under a chdir runner (env -C, sudo -D) is the
+        # same unresolvable-scope shape.
+        if chdir_seen or runinfo.get("chdir"):
+            chdir = True
+        first = not seen
+        seen = True
         number = None
         sel = None
         pending = ""  # "value" | "repo" while the NEXT token is a flag's value
+        flag = False
         for a in args:
             if pending:
                 if pending == "repo":
@@ -357,7 +378,11 @@ def scan_invocations(text):
                     if "\n" not in a:
                         repo = a
                 pending = ""
+                # A token consumed as the previous flag's VALUE is not a
+                # flag itself — `--body -d` arms nothing.
                 continue
+            if carries_delete_flag(a):
+                flag = True
             role, glued = token_value_role(a)
             if role == "repo":
                 if glued is not None:
@@ -393,13 +418,15 @@ def scan_invocations(text):
                 numberless_count += 1
         else:
             merges.append((number, flag))
+        if first:
+            first_flag = flag
         if sel is not None and not selector:
             selector = sel
             url = PR_URL_RE.match(sel)
             if url:
                 selector_repo = f"{url.group(1)}/{url.group(2)}"
     return merges, numberless, first_flag, repo, selector, invoke_count, \
-        selector_repo, numberless_count
+        selector_repo, numberless_count, chdir
 
 
 def deep_wrapper_args(text):
@@ -433,7 +460,8 @@ def deep_wrapper_args(text):
 
 def extract(text):
     """(number, delete_flag, all_numbers, numberless, repo, selector,
-    invoke_count, selector_repo, numberless_count) for `text`'s merges.
+    invoke_count, selector_repo, numberless_count, chdir) for `text`'s
+    merges.
 
     Resolution order, each step only when the previous found nothing:
     1. the precise invocation scan;
@@ -444,30 +472,31 @@ def extract(text):
     4. nothing — the caller decides on numberless.
 
     Steps 2 and 3 resolve at most one number and report NO delete flag,
-    NO repo, NO selector, NO invocation count and NO selector repo: they
-    exist to OVER-arm, and the not-ackable delete-branch guard, the compound
-    refusal, -R scoping and selector resolution must never hang off an
-    over-arm — a false block with no way out, or a lookup against a repo or
-    selector a textual scan guessed at.
+    NO repo, NO selector, NO invocation count, NO selector repo and NO
+    chdir: they exist to OVER-arm, and the not-ackable delete-branch guard,
+    the compound refusal, -R scoping, selector resolution and the chdir
+    refusal must never hang off an over-arm — a false block with no way
+    out, or a lookup against a repo or selector a textual scan guessed at.
     """
     try:
         merges, numberless, first_flag, repo, selector, invoke_count, \
-            selector_repo, numberless_count = scan_invocations(text)
+            selector_repo, numberless_count, chdir = scan_invocations(text)
     except Exception:
-        return legacy_scan(text) + (False, "", "", 0, "", 0)
+        return legacy_scan(text) + (False, "", "", 0, "", 0, False)
     if merges:
         number, flag = merges[0]
         return number, flag, [m[0] for m in merges], numberless, repo, \
-            selector, invoke_count, selector_repo, numberless_count
+            selector, invoke_count, selector_repo, numberless_count, chdir
     if strip_quoted(text) is None:
-        return legacy_scan(text) + (False, "", "", 0, "", 0)
+        return legacy_scan(text) + (False, "", "", 0, "", 0, False)
     for s in deep_wrapper_args(text):
         capped = strip_heredoc_bodies(s)
         m = re.search(r"gh\s+pr\s+merge\s+[\"']*(\d+)", capped)
         if m:
-            return m.group(1), False, [m.group(1)], False, "", "", 0, "", 0
+            return m.group(1), False, [m.group(1)], False, "", "", 0, "", \
+                0, False
     return "", first_flag, [], numberless, repo, selector, invoke_count, \
-        selector_repo, numberless_count
+        selector_repo, numberless_count, chdir
 
 
 # The import sits HERE, not at the top: an import-time failure (a corrupt or
@@ -496,7 +525,7 @@ except Exception:
 
 try:
     number, flag, all_numbers, numberless, repo, selector, invoke_count, \
-        selector_repo, numberless_count = extract(cmd)
+        selector_repo, numberless_count, chdir = extract(cmd)
 except Exception:
     # The whole extraction, not just one stage. Anything escaping here would
     # exit non-zero, hit the shell's `|| MERGE_EXTRACT=""`, and silently arm
@@ -508,6 +537,7 @@ except Exception:
     invoke_count = 0
     selector_repo = ""
     numberless_count = 0
+    chdir = False
 print(number)
 print("1" if flag else "0")
 print(" ".join(all_numbers))
@@ -517,6 +547,7 @@ print(selector)
 print(invoke_count)
 print(selector_repo)
 print(numberless_count)
+print("chdir" if chdir else "")
 PY
 ) || MERGE_EXTRACT=""
 
@@ -527,8 +558,9 @@ PY
 # the positional selector, "" when the invocation names no PR that way.
 # Line 7: the precise scan's total `gh pr merge` invocation count. Line 8:
 # the selector's own repository when the selector is a GitHub PR URL.
-# Line 9: the numberless invocation count. All empty when the extraction
-# produced nothing.
+# Line 9: the numberless invocation count. Line 10: "chdir" when a directory
+# change precedes the merge in the same command. All empty when the
+# extraction produced nothing.
 PR_NUM=$(printf '%s\n' "$MERGE_EXTRACT" | sed -n '1p')
 MERGE_DELETES_BRANCH=$(printf '%s\n' "$MERGE_EXTRACT" | sed -n '2p')
 MERGE_ALL_PRS=$(printf '%s\n' "$MERGE_EXTRACT" | sed -n '3p')
@@ -539,6 +571,7 @@ MERGE_SELECTOR=$(printf '%s\n' "$MERGE_EXTRACT" | sed -n '6p')
 MERGE_INVOKE_COUNT=$(printf '%s\n' "$MERGE_EXTRACT" | sed -n '7p')
 SELECTOR_REPO=$(printf '%s\n' "$MERGE_EXTRACT" | sed -n '8p')
 MERGE_NUMBERLESS_COUNT=$(printf '%s\n' "$MERGE_EXTRACT" | sed -n '9p')
+MERGE_CHDIR=$(printf '%s\n' "$MERGE_EXTRACT" | sed -n '10p')
 
 # A URL selector carries its OWN repository, and gh resolves the PR there
 # even beside a -R (the URL wins). Mirror that here: the URL's repo OVERRIDES
@@ -646,6 +679,39 @@ if [ "${MERGE_COUNT:-0}" -gt 1 ] 2>/dev/null \
     exit 2
 fi
 
+# SCOPE-MOVED REFUSAL. A directory change (cd/pushd/popd, or a chdir runner
+# like `env -C` wrapping the merge itself) before the merge in the SAME
+# command means this hook cannot know which repository the merge targets:
+# resolving in its own cwd fetches the WRONG repo's PR — the review of a PR
+# that is not the one merging, or none, and the merge runs ungated. The same
+# class of hole as -R scoping, caught one command-shape earlier.
+#
+# NOT ACKABLE, for the same reason as the compound refusal: the way past is
+# to run the merge from the directory it targets (or with -R naming that
+# repo), which is also what makes the review reachable, and recovery costs
+# one extra Bash call. Placed with the compound refusal — before any network
+# call, because it needs only the local extraction.
+if [ "$MERGE_CHDIR" = "chdir" ]; then
+    {
+        printf '%s\n' "$RULE"
+        printf 'MERGE SCOPE MOVED — merge after a directory change refused\n'
+        printf '%s\n\n' "$RULE"
+        printf 'This command changes directory before `gh pr merge`, so the PR cannot be\n'
+        printf 'resolved against the directory the merge will run in. Resolving from this\n'
+        printf 'hook'\''s cwd would surface the WRONG repository'\''s review — or none — and let\n'
+        printf 'the merge through ungated.\n\n'
+        printf 'Run the merge from the directory it targets, as its own command:\n'
+        printf '  cd <target-dir>\n'
+        printf '  gh pr merge <PR>\n'
+        printf 'or, without changing directory, name the repository explicitly:\n'
+        printf '  gh pr merge <PR> -R <owner>/<repo>\n\n'
+        printf 'This refusal is not ackable — retrying the same shape reproduces the same\n'
+        printf 'wrong-scope risk. Nothing was acked, so no state needs undoing.\n'
+        printf '%s\n' "$RULE"
+    } >&2
+    exit 2
+fi
+
 # No PR number: either the command only mentioned the phrase without invoking
 # it (nothing to gate on), or it invoked `gh pr merge` naming its PR some
 # other way. gh accepts `number | url | branch` as the argument (a leading
@@ -655,12 +721,14 @@ fi
 # selector's lookup. Only an invocation with NO positional argument at all is
 # numberless: gh then infers the PR from the current branch, resolved the
 # same way in this hook's cwd. Any lookup failure (unknown branch, not a PR
-# branch, gh missing or unauthenticated) fails open: exit 0, no gate.
+# branch, gh missing or unauthenticated) fails open: exit 0, no gate. Every
+# lookup runs under `timeout 10`, so a HUNG gh fails into this file's chosen
+# direction rather than the harness's.
 if [ -z "$PR_NUM" ]; then
     if [ -n "$MERGE_SELECTOR" ]; then
-        PR_NUM=$(gh pr view "$MERGE_SELECTOR" "${REPO_SCOPE_ARGS[@]}" --json number -q .number 2>/dev/null || echo "")
+        PR_NUM=$(timeout 10 gh pr view "$MERGE_SELECTOR" "${REPO_SCOPE_ARGS[@]}" --json number -q .number 2>/dev/null || echo "")
     elif [ "$MERGE_NUMBERLESS" = "numberless" ]; then
-        PR_NUM=$(gh pr view "${REPO_SCOPE_ARGS[@]}" --json number -q .number 2>/dev/null || echo "")
+        PR_NUM=$(timeout 10 gh pr view "${REPO_SCOPE_ARGS[@]}" --json number -q .number 2>/dev/null || echo "")
     else
         exit 0
     fi
@@ -774,7 +842,7 @@ resolve_pr_view() {
     [ "$PR_VIEW_RESOLVED" = 1 ] && return 0
     PR_VIEW_RESOLVED=1
     local view
-    view=$(gh pr view "${REPO_SCOPE_ARGS[@]}" "$PR_NUM" --json baseRefName,headRefName \
+    view=$(timeout 10 gh pr view "${REPO_SCOPE_ARGS[@]}" "$PR_NUM" --json baseRefName,headRefName \
         --jq '(.baseRefName // ""), (.headRefName // "")' \
         2>/dev/null || echo "")
     PR_BASE=$(printf '%s\n' "$view" | sed -n '1p')
@@ -799,7 +867,7 @@ resolve_repo() {
     # repo, and its nameWithOwner confirms/refines REPO (the ack key below
     # carries the resolved spelling). With -R and a failing lookup, REPO
     # stays empty and the review fetch below falls back to REPO_ARG.
-    view=$(gh repo view "${REPO_SCOPE_ARGS[@]}" --json nameWithOwner,defaultBranchRef \
+    view=$(timeout 10 gh repo view "${REPO_SCOPE_ARGS[@]}" --json nameWithOwner,defaultBranchRef \
         --jq '(.nameWithOwner // ""), (.defaultBranchRef.name // "")' \
         2>/dev/null || echo "")
     REPO=$(printf '%s\n' "$view" | sed -n '1p')
@@ -873,11 +941,42 @@ release_reminder_due() {
 # the quoted-prose false-positive class the arg-vector parse exists to
 # eliminate, reintroduced one check later — and because this guard is NOT
 # ackable, a false block is not a recoverable annoyance.
-# The whole check is skipped when the invocation scopes ANOTHER repository
-# (-R/--repo): the local worktrees belong to this checkout's repo and cannot
-# safely answer for another repo's head branch — a same-named local branch
-# would be a false, non-ackable block with no recovery path.
-if [ "$MERGE_DELETES_BRANCH" = "1" ] && [ -z "$REPO_ARG" ]; then
+# The cwd repository's owner/name, parsed LOCALLY from the git remote — no
+# network, no gh. Handles the https and ssh URL shapes (scheme, user@host,
+# host:path, trailing .git and /); anything unparseable yields "" and the
+# caller treats that as SAME-repo (the guard stays on — the safe direction,
+# and the escape is dropping a redundant -R).
+cwd_repo_slug() {
+    local url
+    url=$(git remote get-url origin 2>/dev/null \
+        || git remote get-url "$(git remote 2>/dev/null | sed -n 1p)" 2>/dev/null \
+        || echo "")
+    [ -n "$url" ] || { printf '\n'; return 0; }
+    url=${url#ssh://}; url=${url#http://}; url=${url#https://}
+    url=${url#git@}
+    case "$url" in
+        *:*) url=${url#*:} ;;  # scp form: the host rides the colon
+        *) url=${url#*/} ;;    # plain form: the leading component is the host
+    esac
+    url=${url%/}; url=${url%.git}
+    case "$url" in
+        */*) printf '%s/%s\n' "${url%/*}" "${url##*/}" ;;
+        *) printf '\n' ;;
+    esac
+}
+
+# The whole check is skipped when the invocation scopes a DIFFERENT
+# repository (-R/--repo, or a URL selector's own repo): the local worktrees
+# belong to this checkout's repo and cannot safely answer for another
+# repo's head branch — a same-named local branch would be a false,
+# non-ackable block with no recovery path. An -R naming THIS repo is the
+# same merge as an unscoped one, so the guard applies to it too.
+if [ "$MERGE_DELETES_BRANCH" = "1" ]; then
+    GUARD_APPLIES=1
+    if [ -n "$REPO_ARG" ]; then
+        [ "$REPO_ARG" = "$(cwd_repo_slug)" ] || GUARD_APPLIES=0
+    fi
+    if [ "$GUARD_APPLIES" = "1" ]; then
     resolve_pr_view
     # Every step below fails open to "no conflict": no head ref (gh blip),
     # not a git repo, no worktree holds the branch. Blocking a merge on a
@@ -939,6 +1038,7 @@ if [ "$MERGE_DELETES_BRANCH" = "1" ] && [ -z "$REPO_ARG" ]; then
             } >&2
             exit 2
         fi
+    fi
     fi
 fi
 
@@ -1009,33 +1109,33 @@ release_block_then_exit() {
 # updated_at so the ack key re-arms when a review EDITS its comment in place
 # (a fresh review re-runs the gate too).
 #
-# `--paginate --slurp` is required. This endpoint accepts per_page (and page)
-# but not sort/direction — those belong to the repository-wide comments
-# listing, which a `direction=desc` here silently ignored — so a single ask
-# returns the FIRST (oldest) page, and on a busy PR the newest review sits
-# past it: the filter would silently surface an OLDER review (fires but
-# injects the wrong content — the worst failure mode for this gate).
-# `--paginate` walks every page and `--slurp` hands them over as one outer
-# array, so a single jq selects across all of them and sort_by|last picks the
-# NEWEST matching comment.
+# `--paginate --slurp` is required, and so is the PIPE to jq: gh rejects
+# `--slurp` together with `--jq` ("the --slurp option is not supported with
+# --jq or --template"), and asking for `--jq` anyway makes the whole fetch
+# fail into the no-review path — a silently inert gate. Piping keeps both:
+# gh emits every page wrapped in one outer array, and jq selects across all
+# of them. The pagination itself is the point: this endpoint accepts
+# per_page (and page) but not sort/direction — those belong to the
+# repository-wide comments listing — so a single ask returns the FIRST
+# (oldest) page, and on a busy PR the newest review sits past it: the filter
+# would silently surface an OLDER review (fires but injects the wrong
+# content — the worst failure mode for this gate). sort_by|last picks the
+# NEWEST matching comment across every page.
 #
 # The reviewer identity is configurable: SYG_MERGE_REVIEW_LOGIN overrides the
 # default `claude[bot]` for repos whose review comes from another bot. The
-# login reaches the filter as a jq-ENCODED literal, never spliced text:
-# `gh api --jq` takes no --arg, and raw interpolation would let a crafted
-# value write filter code. `jq -n --arg v` JSON-encodes the value, so any
-# bytes in it stay data.
+# login reaches jq as a --arg VALUE — data, not filter text.
 REVIEW_JSON=""
 REVIEW_LOGIN="${SYG_MERGE_REVIEW_LOGIN:-claude[bot]}"
-REVIEW_LOGIN_JSON=$(jq -n --arg v "$REVIEW_LOGIN" '$v')
 resolve_repo
 # -R scoping: prefer the RESOLVED nameWithOwner (canonical spelling of the
 # -R target); fall back to REPO_ARG itself when repo view failed, so a
 # lookup blip does not silently unscope the fetch back to the cwd repo.
 REPO_FOR_FETCH="${REPO:-$REPO_ARG}"
 if [ -n "$REPO_FOR_FETCH" ]; then
-    REVIEW_JSON=$(gh api --paginate --slurp "repos/${REPO_FOR_FETCH}/issues/${PR_NUM}/comments?per_page=100" \
-        --jq "[.[][] | select(.user.login == ${REVIEW_LOGIN_JSON})] | sort_by(.created_at) | last" \
+    REVIEW_JSON=$(timeout 10 gh api --paginate --slurp "repos/${REPO_FOR_FETCH}/issues/${PR_NUM}/comments?per_page=100" 2>/dev/null \
+        | jq --arg login "$REVIEW_LOGIN" \
+            '[.[][] | select(.user.login == $login)] | sort_by(.created_at) | last' \
         2>/dev/null || echo "")
 fi
 
@@ -1157,7 +1257,7 @@ fi
 # scan silently produces nothing. A diff fetch that fails must never block a
 # merge nor warn about itself; the gate's subject is the review, not the
 # diff.
-PR_DIFF=$(gh pr diff "${REPO_SCOPE_ARGS[@]}" "$PR_NUM" 2>/dev/null || echo "")
+PR_DIFF=$(timeout 10 gh pr diff "${REPO_SCOPE_ARGS[@]}" "$PR_NUM" 2>/dev/null || echo "")
 
 # The comment lines this diff ADDS, filtered to claim vocabulary in three
 # classes: certainty, provenance, and counted nouns. This is the surface the
@@ -1274,15 +1374,18 @@ if ! ack_state_usable; then
     printf 'Nothing was written through it.\n' >&2
     exit 2
 fi
-# Fail-open if the write itself fails (disk full, unwritable directory):
-# blocking on retry would infinite-loop because the next call would also
-# fail to write, never see the ack, and re-block. The review has already
-# been injected to stderr, so the agent has seen the content — the
-# trade-off is "this PR's gate effectively no-ops until the system fault is
-# fixed" rather than "agent stuck blocked indefinitely."
+# Fail-CLOSED if the write itself fails (disk full, unwritable directory).
+# Blocking here does not dead-end the agent: the escape is
+# SYG_DISABLE=guards-pr, which stands the hook down for the one merge that
+# must run while the state path is fixed. Exiting 0 instead would rest on
+# "the review was already injected to stderr" — but stderr reaches the
+# agent only on the BLOCKING path, so an allow prints a review nobody sees
+# and silently defeats the gate for as long as the fault lasts.
 if ! ack_append "$ACK_KEY"; then
-    printf 'WARNING: pr-merge-review-check ack write failed (%s) — allowing merge to avoid infinite block; investigate the state directory\n' "$STATE_FILE" >&2
-    exit 0
+    printf 'WARNING: pr-merge-review-check ack write failed (%s) — the merge stays blocked\n' "$STATE_FILE" >&2
+    printf 'so this review is not lost to a stream nobody sees. Fix the state directory,\n' >&2
+    printf 'or run this merge outside the gate with SYG_DISABLE=guards-pr.\n' >&2
+    exit 2
 fi
 # Ack the default-branch reminder too when it was just shown, so a later
 # call on this PR (a fresh review re-arming the gate, or a no-review path)
