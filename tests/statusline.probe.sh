@@ -77,7 +77,7 @@ route_anthropic() { jq '.env.ANTHROPIC_BASE_URL = "https://api.anthropic.com"' "
 route_or() { jq '.env.ANTHROPIC_BASE_URL = "https://openrouter.ai/api/v1"' "$h/.claude/settings.json" > "$h/.claude/settings.json.new" && mv "$h/.claude/settings.json.new" "$h/.claude/settings.json"; }
 route_host() { jq --arg u "$1" '.env.ANTHROPIC_BASE_URL = $u' "$h/.claude/settings.json" > "$h/.claude/settings.json.new" && mv "$h/.claude/settings.json.new" "$h/.claude/settings.json"; }
 render() {
-  local env_args=(-u ANTHROPIC_BASE_URL -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u SYG_CREDIT_LEDGER -u SYG_CREDIT_GRANTS -u SYG_CREDIT_FORCE -u COLUMNS -u SYG_STATUSLINE_WRAP_COLUMNS -u SYG_STATUSLINE_DEBUG -u SYG_STATUSLINE_FIT_MARGIN -u ANTHROPIC_ADMIN_API_KEY -u SYG_CREDIT_ADMIN_KEY_CMD -u SYG_CREDIT_ADMIN_URL -u SYG_CREDIT_SETTLE_DAYS -u SYG_EXTRA_USAGE_BUDGET_USD -u SYG_STATUSLINE_EXTRA_USAGE)
+  local env_args=(-u ANTHROPIC_BASE_URL -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u SYG_CREDIT_LEDGER -u SYG_CREDIT_GRANTS -u SYG_CREDIT_FORCE -u COLUMNS -u SYG_STATUSLINE_WRAP_COLUMNS -u SYG_STATUSLINE_DEBUG -u SYG_STATUSLINE_FIT_MARGIN -u ANTHROPIC_ADMIN_API_KEY -u SYG_CREDIT_ADMIN_KEY_CMD -u SYG_CREDIT_ADMIN_URL -u SYG_CREDIT_SETTLE_DAYS -u SYG_EXTRA_USAGE_BUDGET_USD -u SYG_EXTRA_USAGE_TOML -u SYG_STATUSLINE_EXTRA_USAGE)
   if [ -n "${PROBE_DEBUG:-}" ]; then
     env_args+=("SYG_STATUSLINE_DEBUG=$PROBE_DEBUG")
   fi
@@ -92,6 +92,9 @@ render() {
   fi
   if [ -n "${PROBE_EXTRA_BUDGET:-}" ]; then
     env_args+=("SYG_EXTRA_USAGE_BUDGET_USD=$PROBE_EXTRA_BUDGET")
+  fi
+  if [ -n "${PROBE_EXTRA_TOML:-}" ]; then
+    env_args+=("SYG_EXTRA_USAGE_TOML=$PROBE_EXTRA_TOML")
   fi
   if [ -n "${PROBE_EXTRA_TOGGLE:-}" ]; then
     env_args+=("SYG_STATUSLINE_EXTRA_USAGE=$PROBE_EXTRA_TOGGLE")
@@ -560,7 +563,7 @@ grep -qF 'platform.claude.com $48.00 est' <<< "$out" && ! grep -qF '(exp' <<< "$
 # 40-44. Lane routing, each with rate_limits in the input. The process env decides.
 lane_in='{"rate_limits":{"five_hour":{"used_percentage":83,"resets_at":1790790548},"seven_day":{"used_percentage":56,"resets_at":1791093600}},"context_window":{"current_usage":{"input_tokens":1000}},"model":{"display_name":"X"},"cwd":"/tmp"}'
 lane() { # VAR=value ...: render lane_in under exactly these env vars
-    local env_args=(-u ANTHROPIC_BASE_URL -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u SYG_CREDIT_LEDGER -u SYG_CREDIT_GRANTS -u SYG_CREDIT_FORCE -u COLUMNS -u SYG_STATUSLINE_WRAP_COLUMNS -u SYG_STATUSLINE_DEBUG -u SYG_STATUSLINE_FIT_MARGIN -u ANTHROPIC_ADMIN_API_KEY -u SYG_CREDIT_ADMIN_KEY_CMD -u SYG_CREDIT_ADMIN_URL -u SYG_CREDIT_SETTLE_DAYS -u SYG_EXTRA_USAGE_BUDGET_USD -u SYG_STATUSLINE_EXTRA_USAGE)
+    local env_args=(-u ANTHROPIC_BASE_URL -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u SYG_CREDIT_LEDGER -u SYG_CREDIT_GRANTS -u SYG_CREDIT_FORCE -u COLUMNS -u SYG_STATUSLINE_WRAP_COLUMNS -u SYG_STATUSLINE_DEBUG -u SYG_STATUSLINE_FIT_MARGIN -u ANTHROPIC_ADMIN_API_KEY -u SYG_CREDIT_ADMIN_KEY_CMD -u SYG_CREDIT_ADMIN_URL -u SYG_CREDIT_SETTLE_DAYS -u SYG_EXTRA_USAGE_BUDGET_USD -u SYG_EXTRA_USAGE_TOML -u SYG_STATUSLINE_EXTRA_USAGE)
     if [ -n "${PROBE_DEBUG:-}" ]; then
         env_args+=("SYG_STATUSLINE_DEBUG=$PROBE_DEBUG")
     fi
@@ -953,9 +956,10 @@ out=$(strip <<< "$(render "$lane_in")")
 printf '{"env":{"ANTHROPIC_AUTH_TOKEN":"dummy-probe-token"},"modelSettings":{"glm-5.3":{"effortLevel":"high"},"glm-5.3-flash":{"effortLevel":"max"},"claude-opus-5-5":{"effortLevel":"high"}}}' > "$h/.claude/settings.json"
 
 # E0-E8. Extra-usage segment (plan lane, beside the fable cap), from the same cached
-# oauth/usage body the fable cap reads. The budget and toggle vars are scrubbed from
-# render()/lane() envs and re-added only through PROBE_EXTRA_BUDGET /
-# PROBE_EXTRA_TOGGLE: both are exported machine-side, so an ambient value must not
+# oauth/usage body the fable cap reads. The budget, toml-path and toggle vars are
+# scrubbed from render()/lane() envs and re-added only through PROBE_EXTRA_BUDGET /
+# PROBE_EXTRA_TOML / PROBE_EXTRA_TOGGLE: all three are exported or settable
+# machine-side, so an ambient value must not
 # leak into renders (an env prefix on render() lands inside the -u list).
 route_anthropic
 extra_wk='{"rate_limits":{"five_hour":{"used_percentage":83,"resets_at":1790790548},"seven_day":{"used_percentage":101,"resets_at":1791093600}},"context_window":{"current_usage":{"input_tokens":1000}},"model":{"display_name":"X"},"cwd":"/tmp"}'
@@ -1037,6 +1041,58 @@ extra_cache '{"is_enabled":true,"spend_limit_reached":false,"disabled_reason":nu
 raw=$(render "$extra_wklow"); out=$(strip <<< "$raw")
 grep -qF 'extra: $3.00 used' <<< "$out" \
     && ok "extra: enabled with spend at week < 100 -> shown (the OR arm)" || bad "extra boundary: $out"
+# E9. Order: the extra segment renders BEFORE the plan windows. The line truncates
+# on the right on a phone, and the extra figure is the one a maxed-week owner
+# watches, so it must survive first. Prefix-length comparison on the stripped
+# line (ASCII, so length orders like an offset).
+extra_cache '{"is_enabled":true,"spend_limit_reached":false,"disabled_reason":null}' '{"currency":"USD","amount_minor":1234,"exponent":2}'
+out=$(strip <<< "$(PROBE_EXTRA_BUDGET=50 render "$extra_wk")")
+ex_off=${out%%'extra: '*}
+wk_off=${out%%'5h: '*}
+[ "$ex_off" != "$out" ] && [ "$wk_off" != "$out" ] && [ "${#ex_off}" -lt "${#wk_off}" ] \
+    && ok "extra: the segment renders before the plan windows (offset of 'extra:' < offset of '5h:')" \
+    || bad "extra order: extra@${#ex_off} 5h@${#wk_off} out=$out"
+# E10. The toml is the live budget and wins over a stale launch-baked env:
+# bought 200 re-read fresh beats the stale env 150 -> 200 - 12.34 = 187.66, not 137.66.
+printf 'bought_usd = 200.0\n' > "$h/extra.toml"
+raw=$(PROBE_EXTRA_BUDGET=150 PROBE_EXTRA_TOML="$h/extra.toml" render "$extra_wk"); out=$(strip <<< "$raw")
+grep -qF 'extra: $187.66 left' <<< "$out" && ! grep -qF 'extra: $137.66 left' <<< "$out" \
+    && ok "extra: a toml budget read fresh wins over the stale env (200 - 12.34, not 150 - 12.34)" \
+    || bad "extra toml wins: $out"
+# E11. Anchor: bought 200 anchored when 50 had been spent; the API now reports 62.34
+# total. The anchor file's consumer computes remaining as
+# bought_usd - (used - used_usd_at_anchor) = 200 - (62.34 - 50) = 187.66.
+printf 'bought_usd = 200.0\nused_usd_at_anchor = 50\n' > "$h/extra-anchor.toml"
+extra_cache '{"is_enabled":true,"spend_limit_reached":false,"disabled_reason":null}' '{"currency":"USD","amount_minor":6234,"exponent":2}'
+raw=$(PROBE_EXTRA_TOML="$h/extra-anchor.toml" render "$extra_wk"); out=$(strip <<< "$raw")
+grep -qF 'extra: $187.66 left' <<< "$out" \
+    && ok "extra: used_usd_at_anchor anchors the spend (200 - (62.34 - 50) = 187.66)" \
+    || bad "extra anchor: $out"
+# E12. Invalid toml falls through to the env budget, not to used-only: a TOML string
+# is not a number, so the source is invalid and the stale env renders.
+extra_cache '{"is_enabled":true,"spend_limit_reached":false,"disabled_reason":null}' '{"currency":"USD","amount_minor":1234,"exponent":2}'
+printf 'bought_usd = "200"\n' > "$h/extra-bad.toml"
+raw=$(PROBE_EXTRA_BUDGET=150 PROBE_EXTRA_TOML="$h/extra-bad.toml" render "$extra_wk"); out=$(strip <<< "$raw")
+grep -qF 'extra: $137.66 left' <<< "$out" \
+    && ok "extra: an invalid toml number falls through to the env budget" \
+    || bad "extra bad toml: $out"
+# E13. A set-but-missing toml path falls back to the env budget, not no-budget
+# (on E12's cache shape).
+raw=$(PROBE_EXTRA_BUDGET=150 PROBE_EXTRA_TOML="$h/extra-missing.toml" render "$extra_wk"); out=$(strip <<< "$raw")
+grep -qF 'extra: $137.66 left' <<< "$out" && ! grep -qF 'extra: $12.34 used' <<< "$out" \
+    && ok "extra: a missing toml file falls back to the env budget, not used-only" \
+    || bad "extra missing toml: $out"
+# E14. A stale anchor refuses: the API reporting less than used_usd_at_anchor
+# means the toml needs re-anchoring (its consumer refuses in that state), so the
+# budget drops to the used-only shape instead of showing more left than bought
+# — and a set env budget is not consulted either (anchor toml: bought 200,
+# anchor 50; the API now reports 12.34 total; without the guard it would render
+# $237.66 left).
+extra_cache '{"is_enabled":true,"spend_limit_reached":false,"disabled_reason":null}' '{"currency":"USD","amount_minor":1234,"exponent":2}'
+raw=$(PROBE_EXTRA_BUDGET=150 PROBE_EXTRA_TOML="$h/extra-anchor.toml" render "$extra_wk"); out=$(strip <<< "$raw")
+grep -qF 'extra: $12.34 used' <<< "$out" && ! grep -qF '$237.66 left' <<< "$out" \
+    && ok "extra: used below the anchor drops the budget to used-only, env not consulted (stale toml)" \
+    || bad "extra stale anchor: $out"
 
 # Budget 0 and left-shape traffic lights: the over shape wins at b=0, and the
 # left shapes' traffic lights (62% yellow, 82% red), all on E1's cache shape.
