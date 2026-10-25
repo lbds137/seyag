@@ -558,15 +558,23 @@ else
     # cached copy; refresh it in the background so the statusline never waits
     # on the network.
     usage_cache="${XDG_CACHE_HOME:-$HOME/.cache}/claude-statusline/usage.json"
+    usage_refreshing="$usage_cache.refreshing"
     usage_ttl=120
     cache_age=$(( $(date +%s) - $(stat -c %Y "$usage_cache" 2>/dev/null || echo 0) ))
-    if [ "$cache_age" -ge "$usage_ttl" ] && command -v curl &>/dev/null; then
+    if [ "$cache_age" -ge "$usage_ttl" ] \
+        && [ "$(( $(date +%s) - $(stat -c %Y "$usage_refreshing" 2>/dev/null || echo 0) ))" -ge "$usage_ttl" ] \
+        && command -v curl &>/dev/null; then
         mkdir -p "${usage_cache%/*}"
-        # Touch first so concurrent renders inside the TTL don't stack fetches.
-        touch "$usage_cache"
+        # Debounce on a sidecar marker so concurrent renders inside the TTL don't
+        # stack fetches; the marker is left in place and ages out (a stale marker
+        # after a failed or killed fetch retries after TTL — the same throttle,
+        # deliberate), while a successful fetch's mv freshens usage_cache.
+        touch "$usage_refreshing"
         (
             tok=$(jq -r '.claudeAiOauth.accessToken // empty' "$HOME/.claude/.credentials.json" 2>/dev/null)
-            [ -z "$tok" ] && exit 0
+            if [ -z "$tok" ]; then
+                exit 0
+            fi
             tmp="$usage_cache.tmp.$$"
             if curl -sf -m 10 https://api.anthropic.com/api/oauth/usage \
                 -H "Authorization: Bearer $tok" -H "anthropic-beta: oauth-2025-04-20" \
@@ -715,23 +723,35 @@ fi
 
 # Fleet-wide prepaid API credit: on every lane but the API-key lane (which shows
 # it beside its own label), when both SYG_CREDIT_LEDGER and SYG_CREDIT_GRANTS are
-# set and a live (unexpired) grant exists, the remaining balance follows the
-# vendor segment in one of two shapes: `$X.XX est` while it is the ledger estimate,
-# the bare `$X.XX` when it is provider-exact (estimate false, the admin key in the
-# render env). Red at $0.00. Silent on any error or empty answer.
+# set and a live grant has remaining >= SYG_CREDIT_DUST_FLOOR_USD (default 0.15;
+# anything under the floor hides), the gray remaining balance (`$X.XX est`, or bare
+# `$X.XX` when provider-exact) renders only on urgency: fresh (<usage_ttl, 120s)
+# oauth/usage plan week (weekly_all) >= 75, or days_left <= 7 (75 and 7 are
+# deliberate constants, not knobs). Silent on error or empty answer.
 if [ "$vendor_lane" != anthropic-api ] && [ -n "${SYG_CREDIT_LEDGER:-}" ] && [ -n "${SYG_CREDIT_GRANTS:-}" ]; then
     fleet_json=$(credit_balance_json)
-    fleet_remaining="" fleet_est=true
+    fleet_remaining="" fleet_days="" fleet_est=true
     [ -n "$fleet_json" ] && eval "$(jq -r '
         @sh "fleet_remaining=\(if (.live_grants // 0) > 0 and (.remaining_usd | type) == "number" then .remaining_usd else "" end)",
+        @sh "fleet_days=\(.days_left // "")",
         @sh "fleet_est=\(.estimate != false)"
     ' <<< "$fleet_json" 2>/dev/null)"
-    if [ -n "$fleet_remaining" ] && fleet_fmt=$(LC_ALL=C printf '%.2f' "$fleet_remaining" 2>/dev/null); then
-        fleet_color="$gray"
-        [ "$fleet_fmt" = "0.00" ] && fleet_color="$red"
+    fleet_floor=0.15
+    [ -n "${SYG_CREDIT_DUST_FLOOR_USD:-}" ] \
+        && LC_ALL=C awk -v f="$SYG_CREDIT_DUST_FLOOR_USD" 'BEGIN{exit !(f ~ /^[0-9]+([.][0-9]+)?$/)}' \
+        && fleet_floor=$SYG_CREDIT_DUST_FLOOR_USD
+    fleet_ucache="${XDG_CACHE_HOME:-$HOME/.cache}/claude-statusline/usage.json"
+    fleet_uage=$(( $(date +%s) - $(stat -c %Y "$fleet_ucache" 2>/dev/null || echo 0) ))
+    fleet_wk=""
+    [ "$fleet_uage" -lt "${usage_ttl:-120}" ] && fleet_wk=$(jq -r '[.limits[]? | select(.kind == "weekly_all") | .percent][0] // empty' "$fleet_ucache" 2>/dev/null)
+    # Non-integer fleet_days fails the -le compare toward hiding, deliberately.
+    if [ -n "$fleet_remaining" ] \
+        && LC_ALL=C awk -v r="$fleet_remaining" -v f="$fleet_floor" 'BEGIN{exit !(r + 0 >= f + 0)}' \
+        && { LC_ALL=C awk -v w="$fleet_wk" 'BEGIN{exit !(w ~ /^[0-9]+([.][0-9]+)?$/ && w + 0 >= 75)}' || [ "${fleet_days:-99}" -le 7 ] 2>/dev/null; } \
+        && fleet_fmt=$(LC_ALL=C printf '%.2f' "$fleet_remaining" 2>/dev/null); then
         fleet_esttag=""
         [ "$fleet_est" = false ] || fleet_esttag=" est"
-        output="$output${sep}${anth_brand}${anth_api_label}${reset} ${fleet_color}\$${fleet_fmt}${fleet_esttag}${reset}"
+        output="$output${sep}${anth_brand}${anth_api_label}${reset} ${gray}\$${fleet_fmt}${fleet_esttag}${reset}"
     fi
 fi
 

@@ -62,7 +62,7 @@ printf '{"env":{"ANTHROPIC_AUTH_TOKEN":"dummy-probe-token"},"modelSettings":{"gl
 export HOME="$h" XDG_CACHE_HOME="$h/cache" XDG_STATE_HOME="$h/state" XDG_STATE_HOME="$h/state"
 export ZAI_SPEND_PROJECTS="$h/projects/empty" ZAI_SPEND_PEAK_UTC="0-24"
 # The API-credit segments read these from the process env; a caller's values must not leak in.
-unset SYG_CREDIT_LEDGER SYG_CREDIT_GRANTS SYG_CREDIT_WHEN SYG_CREDIT_FORCE SYG_CREDIT_NOW SYG_CREDIT_ROUTE SYG_CREDIT_ADMIN_URL ANTHROPIC_ADMIN_API_KEY SYG_CREDIT_ADMIN_KEY_CMD SYG_CREDIT_ANCHOR SYG_CREDIT_SETTLE_DAYS
+unset SYG_CREDIT_LEDGER SYG_CREDIT_GRANTS SYG_CREDIT_WHEN SYG_CREDIT_FORCE SYG_CREDIT_NOW SYG_CREDIT_ROUTE SYG_CREDIT_ADMIN_URL ANTHROPIC_ADMIN_API_KEY SYG_CREDIT_ADMIN_KEY_CMD SYG_CREDIT_ANCHOR SYG_CREDIT_SETTLE_DAYS SYG_CREDIT_DUST_FLOOR_USD
 
 cat > "$h/quota.json" <<'EOF'
 {"code":200,"success":true,"data":{"limits":[
@@ -77,7 +77,7 @@ route_anthropic() { jq '.env.ANTHROPIC_BASE_URL = "https://api.anthropic.com"' "
 route_or() { jq '.env.ANTHROPIC_BASE_URL = "https://openrouter.ai/api/v1"' "$h/.claude/settings.json" > "$h/.claude/settings.json.new" && mv "$h/.claude/settings.json.new" "$h/.claude/settings.json"; }
 route_host() { jq --arg u "$1" '.env.ANTHROPIC_BASE_URL = $u' "$h/.claude/settings.json" > "$h/.claude/settings.json.new" && mv "$h/.claude/settings.json.new" "$h/.claude/settings.json"; }
 render() {
-  local env_args=(-u ANTHROPIC_BASE_URL -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u SYG_CREDIT_LEDGER -u SYG_CREDIT_GRANTS -u SYG_CREDIT_FORCE -u COLUMNS -u SYG_STATUSLINE_WRAP_COLUMNS -u SYG_STATUSLINE_DEBUG -u SYG_STATUSLINE_FIT_MARGIN -u ANTHROPIC_ADMIN_API_KEY -u SYG_CREDIT_ADMIN_KEY_CMD -u SYG_CREDIT_ADMIN_URL -u SYG_CREDIT_SETTLE_DAYS -u SYG_EXTRA_USAGE_BUDGET_USD -u SYG_EXTRA_USAGE_TOML -u SYG_STATUSLINE_EXTRA_USAGE)
+  local env_args=(-u ANTHROPIC_BASE_URL -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u SYG_CREDIT_LEDGER -u SYG_CREDIT_GRANTS -u SYG_CREDIT_FORCE -u SYG_CREDIT_DUST_FLOOR_USD -u COLUMNS -u SYG_STATUSLINE_WRAP_COLUMNS -u SYG_STATUSLINE_DEBUG -u SYG_STATUSLINE_FIT_MARGIN -u ANTHROPIC_ADMIN_API_KEY -u SYG_CREDIT_ADMIN_KEY_CMD -u SYG_CREDIT_ADMIN_URL -u SYG_CREDIT_SETTLE_DAYS -u SYG_EXTRA_USAGE_BUDGET_USD -u SYG_EXTRA_USAGE_TOML -u SYG_STATUSLINE_EXTRA_USAGE)
   if [ -n "${PROBE_DEBUG:-}" ]; then
     env_args+=("SYG_STATUSLINE_DEBUG=$PROBE_DEBUG")
   fi
@@ -563,7 +563,7 @@ grep -qF 'platform.claude.com $48.00 est' <<< "$out" && ! grep -qF '(exp' <<< "$
 # 40-44. Lane routing, each with rate_limits in the input. The process env decides.
 lane_in='{"rate_limits":{"five_hour":{"used_percentage":83,"resets_at":1790790548},"seven_day":{"used_percentage":56,"resets_at":1791093600}},"context_window":{"current_usage":{"input_tokens":1000}},"model":{"display_name":"X"},"cwd":"/tmp"}'
 lane() { # VAR=value ...: render lane_in under exactly these env vars
-    local env_args=(-u ANTHROPIC_BASE_URL -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u SYG_CREDIT_LEDGER -u SYG_CREDIT_GRANTS -u SYG_CREDIT_FORCE -u COLUMNS -u SYG_STATUSLINE_WRAP_COLUMNS -u SYG_STATUSLINE_DEBUG -u SYG_STATUSLINE_FIT_MARGIN -u ANTHROPIC_ADMIN_API_KEY -u SYG_CREDIT_ADMIN_KEY_CMD -u SYG_CREDIT_ADMIN_URL -u SYG_CREDIT_SETTLE_DAYS -u SYG_EXTRA_USAGE_BUDGET_USD -u SYG_EXTRA_USAGE_TOML -u SYG_STATUSLINE_EXTRA_USAGE)
+    local env_args=(-u ANTHROPIC_BASE_URL -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u SYG_CREDIT_LEDGER -u SYG_CREDIT_GRANTS -u SYG_CREDIT_FORCE -u SYG_CREDIT_DUST_FLOOR_USD -u COLUMNS -u SYG_STATUSLINE_WRAP_COLUMNS -u SYG_STATUSLINE_DEBUG -u SYG_STATUSLINE_FIT_MARGIN -u ANTHROPIC_ADMIN_API_KEY -u SYG_CREDIT_ADMIN_KEY_CMD -u SYG_CREDIT_ADMIN_URL -u SYG_CREDIT_SETTLE_DAYS -u SYG_EXTRA_USAGE_BUDGET_USD -u SYG_EXTRA_USAGE_TOML -u SYG_STATUSLINE_EXTRA_USAGE)
     if [ -n "${PROBE_DEBUG:-}" ]; then
         env_args+=("SYG_STATUSLINE_DEBUG=$PROBE_DEBUG")
     fi
@@ -661,34 +661,136 @@ raw=$(lane SYG_CREDIT_WHEN=MY_ROUTE=metered MY_ROUTE=other ANTHROPIC_API_KEY=sk-
 grep -qF "$plan_label 5h:" <<< "$raw" && ! grep -q 'platform.claude.com' <<< "$out" \
     && ok "lane: SYG_CREDIT_WHEN mismatch with a non-empty key -> plan lane 'claude.ai'" || bad "lane WHEN mismatch: $out"
 
-# 47. Fleet credit segment on non-API-key lanes: needs both vars and a live grant.
+# 47. Fleet credit segment on non-API-key lanes (v3.1): needs both vars, a live
+# grant with remaining >= SYG_CREDIT_DUST_FLOOR_USD (default 0.15), and urgency
+# (fresh oauth cache weekly_all >= 75 or days_left <= 7).
 printf '{"session_id":"f1","day":"2026-10-07","first_ts":"2026-10-07T10:00:00Z","last_ts":"2026-10-07T10:00:00Z","cost_usd":12.5,"source":"transcript"}\n' > "$h/credit/fleet.jsonl"
 echo '{"grants":[{"amount":200,"granted":"2026-10-01","expires":"2026-10-05"}]}' > "$h/credit/expired.json"
 echo '{"grants":[{"amount":12.5,"granted":"2026-10-01","expires":"2026-10-21"}]}' > "$h/credit/spent.json"
+echo '{"grants":[{"amount":12.55,"granted":"2026-10-01","expires":"2026-11-07"}]}' > "$h/credit/dust-far.json"
+echo '{"grants":[{"amount":12.55,"granted":"2026-10-01","expires":"2026-10-11"}]}' > "$h/credit/dust-near.json"
+echo '{"grants":[{"amount":12.44,"granted":"2026-10-01","expires":"2026-10-11"}]}' > "$h/credit/debt.json"
+echo '{"grants":[{"amount":200,"granted":"2026-10-01","expires":"2026-10-15"}]}' > "$h/credit/near7.json"
+echo '{"grants":[{"amount":200,"granted":"2026-10-01","expires":"2026-10-16"}]}' > "$h/credit/open8.json"
+echo '{"grants":[{"amount":12.7,"granted":"2026-10-01","expires":"2026-10-21"}]}' > "$h/credit/c20.json"
+echo '{"grants":[{"amount":12.6,"granted":"2026-10-01","expires":"2026-10-21"}]}' > "$h/credit/c10.json"
 fleet() { # grants-path-or-empty [VAR=value ...]: render the plan-lane input with the fleet vars
     lane SYG_CREDIT_LEDGER="$h/credit/fleet.jsonl" ${1:+SYG_CREDIT_GRANTS="$1"} SYG_CREDIT_NOW=2026-10-08T00:00:00Z "${@:2}"
 }
+fleet_wk() { # percent: stub fresh usage.json with weekly_all=percent (plus Fable weekly_scoped)
+    printf '{"limits":[{"kind":"weekly_all","percent":%s},{"kind":"weekly_scoped","percent":89,"scope":{"model":{"display_name":"Fable"}}}]}\n' "$1" \
+        > "$h/cache/claude-statusline/usage.json"
+    touch "$h/cache/claude-statusline/usage.json"
+}
+# Row 1: dust HIDDEN (0.05 balance at week 20 / 30d, and at week 80 / 3d).
+fleet_wk 20
+out_d1=$(strip <<< "$(fleet "$h/credit/dust-far.json")")
+fleet_wk 80
+out_d2=$(strip <<< "$(fleet "$h/credit/dust-near.json")")
+! grep -qE 'platform\.claude\.com| est' <<< "$out_d1$out_d2" && grep -q 'claude.ai 5h:' <<< "$out_d1" \
+    && ok "fleet row 1 (dust hidden): \$0.05 at week 20 / 30d and at week 80 / 3d -> no segment" || bad "fleet row 1: d1='$out_d1' d2='$out_d2'"
+# Row 2: zero and negative HIDDEN (0.00, -0.06, and planted -3.21 in the balance cache, ALSO under week 80 -> no segment; rewrites old red-0.00 row).
+fleet_wk 80
+out_z=$(strip <<< "$(fleet "$h/credit/spent.json")")
+out_debt=$(strip <<< "$(fleet "$h/credit/debt.json")")
+{ head -n 1 "$h/cache/claude-statusline/api-credit-balance.json"; echo '{"live_grants":1,"remaining_usd":-3.21,"days_left":3}'; } > "$h/cache/claude-statusline/api-credit-balance.json.new" \
+    && mv "$h/cache/claude-statusline/api-credit-balance.json.new" "$h/cache/claude-statusline/api-credit-balance.json"
+out_neg=$(strip <<< "$(fleet "$h/credit/debt.json")")
+rm -f "$h/cache/claude-statusline/api-credit-balance.json"
+! grep -qE 'platform\.claude\.com| est|-0\.06|3\.21' <<< "$out_z$out_debt$out_neg" && grep -q 'claude.ai 5h:' <<< "$out_z" \
+    && ok "fleet row 2 (zero and negative hidden): \$0.00, -\$0.06 and cached -\$3.21 under week 80 -> no segment" || bad "fleet row 2: z='$out_z' debt='$out_debt' neg='$out_neg'"
+# Row 3: direct-low SHOWN (healthy 187.50, far 13d expiry, stubbed week 75 -> gray segment).
+fleet_wk 75
 raw=$(fleet "$h/credit/grants.json"); out=$(strip <<< "$raw")
 grep -qE 'claude\.ai 5h:.* · platform\.claude\.com \$187\.50 est · session ' <<< "$out" \
     && grep -qF "$anth_label"$' \x1b[90m$187.50 est\x1b[0m' <<< "$raw" \
-    && ok "fleet: plan lane + ledger + grants -> gray 'platform.claude.com \$187.50 est' after claude.ai, before session" || bad "fleet plan: $out"
+    && ok "fleet row 3 (direct-low shown): \$187.50, 13d expiry, week 75 -> gray 'platform.claude.com \$187.50 est' after claude.ai, before session" || bad "fleet row 3: $out"
+route_zai
+raw=$(fleet "$h/credit/grants.json"); out=$(strip <<< "$raw")
+grep -qE 'z\.ai .* · platform\.claude\.com \$187\.50 est · session ' <<< "$out" \
+    && ok "fleet: z.ai lane + both vars + week 75 -> segment after the z.ai segment" || bad "fleet zai: $out"
+route_anthropic
+# Row 4: near-expiry SHOWN (healthy 187.50, week 20, days_left 7 -> gray segment).
+fleet_wk 20
+raw=$(fleet "$h/credit/near7.json"); out=$(strip <<< "$raw")
+grep -qE 'claude\.ai 5h:.* · platform\.claude\.com \$187\.50 est · session ' <<< "$out" \
+    && grep -qF "$anth_label"$' \x1b[90m$187.50 est\x1b[0m' <<< "$raw" \
+    && ok "fleet row 4 (near-expiry shown): \$187.50, week 20, days_left 7 -> gray 'platform.claude.com \$187.50 est'" || bad "fleet row 4: $out"
+# Row 5: healthy-with-direct-open HIDDEN (above floor, week 74, days 8 -> no segment) + purpose canary (SYG_CREDIT_DUST_FLOOR_USD=200).
+fleet_wk 74
+out_r5=$(strip <<< "$(fleet "$h/credit/open8.json")")
+! grep -qE 'platform\.claude\.com| est' <<< "$out_r5" && grep -q 'claude.ai 5h:' <<< "$out_r5" \
+    && ok "fleet row 5 (healthy-with-direct-open hidden): \$187.50, week 74, days 8 -> no segment" || bad "fleet row 5: $out_r5"
+out_pc=$(strip <<< "$(fleet "$h/credit/open8.json" SYG_CREDIT_DUST_FLOOR_USD=200)")
+! grep -qE 'platform\.claude\.com| est' <<< "$out_pc" && grep -q 'claude.ai 5h:' <<< "$out_pc" \
+    && ok "fleet purpose canary: \$187.50 with SYG_CREDIT_DUST_FLOOR_USD=200 (week 74, days 8) -> no segment" || bad "fleet purpose canary: $out_pc"
+# Row 6: stale/missing/corrupt usage cache -> HIDDEN even with week 80 in the stale body.
+fleet_wk 80
+touch -d '-180 seconds' "$h/cache/claude-statusline/usage.json"
+route_zai
+out_stale_zai=$(strip <<< "$(fleet "$h/credit/grants.json")")
+route_anthropic
+touch -d '-180 seconds' "$h/cache/claude-statusline/usage.json"
+out_stale=$(strip <<< "$(fleet "$h/credit/grants.json")")
+rm -f "$h/cache/claude-statusline/usage.json"
+out_miss=$(strip <<< "$(fleet "$h/credit/grants.json")")
+printf '{not json' > "$h/cache/claude-statusline/usage.json"; touch "$h/cache/claude-statusline/usage.json"
+out_bad=$(strip <<< "$(fleet "$h/credit/grants.json")")
+! grep -qE 'platform\.claude\.com| est' <<< "$out_stale_zai$out_stale$out_miss$out_bad" && grep -q 'claude.ai 5h:' <<< "$out_stale" \
+    && ok "fleet row 6 (stale/missing/corrupt usage cache hidden): week 80 past 120s TTL, missing or unparseable -> no segment" || bad "fleet row 6: zai='$out_stale_zai' stale='$out_stale' miss='$out_miss' bad='$out_bad'"
+# Row 6b: a failed refresh attempt on a stale week-80 cache must not freshen its mtime
+# (the probe HOME has no OAuth credentials file, so the background subshell exits before curl;
+# a second plan-lane render immediately after must still see the cache as stale and hide the segment).
+fleet_wk 80
+touch -d '-180 seconds' "$h/cache/claude-statusline/usage.json"
+out_r1=$(strip <<< "$(fleet "$h/credit/grants.json")")
+out_r2=$(strip <<< "$(fleet "$h/credit/grants.json")")
+! grep -qE 'platform\.claude\.com| est' <<< "$out_r1$out_r2" && grep -q 'claude.ai 5h:' <<< "$out_r2" \
+    && ok "fleet row 6b (unrefreshed stale cache stays stale): stale week 80 re-rendered after a no-op refresh -> no segment" \
+    || bad "fleet row 6b: r1='$out_r1' r2='$out_r2'"
+# Row 6c: a failed refresh attempt stays debounced inside the TTL (marker persists, 1 curl call across 2 renders, segment hidden).
+fleet_wk 80
+touch -d '-180 seconds' "$h/cache/claude-statusline/usage.json"
+printf '{"claudeAiOauth":{"accessToken":"probe-oauth-token"}}\n' > "$h/.claude/.credentials.json"
+rm -f "$h/cache/claude-statusline/usage.json.refreshing"
+mkdir -p "$h/curl-bin"
+printf '#!/bin/bash\necho fetch >> "%s/curl-hits.log"\necho "{}"\nexit 0\n' "$h" > "$h/curl-bin/curl"
+chmod +x "$h/curl-bin/curl"
+: > "$h/curl-hits.log"
+out_db1=$(strip <<< "$(fleet "$h/credit/grants.json" PATH="$h/curl-bin:$PATH")")
+for _ in $(seq 1 50); do [ -s "$h/curl-hits.log" ] && break; sleep 0.05; done
+sleep 0.05
+out_db2=$(strip <<< "$(fleet "$h/credit/grants.json" PATH="$h/curl-bin:$PATH")")
+sleep 0.1
+rm -f "$h/.claude/.credentials.json"
+curl_hits=$(wc -l < "$h/curl-hits.log" | tr -d ' ')
+[ "$curl_hits" = 1 ] && ! grep -qE 'platform\.claude\.com| est' <<< "$out_db1$out_db2" && grep -q 'claude.ai 5h:' <<< "$out_db2" \
+    && ok "fleet row 6c (failed refresh stays debounced): 1 curl call across 2 renders inside TTL, segment stays hidden" \
+    || bad "fleet row 6c: hits=$curl_hits db1='$out_db1' db2='$out_db2'"
+# Floor env override honored + invalid env fallback + silent rows.
+fleet_wk 80
+out_c20_def=$(strip <<< "$(fleet "$h/credit/c20.json")")
+out_c20_hi=$(strip <<< "$(fleet "$h/credit/c20.json" SYG_CREDIT_DUST_FLOOR_USD=0.25)")
+out_c10_def=$(strip <<< "$(fleet "$h/credit/c10.json")")
+out_c10_lo=$(strip <<< "$(fleet "$h/credit/c10.json" SYG_CREDIT_DUST_FLOOR_USD=0.05)")
+out_c10_bad=$(strip <<< "$(fleet "$h/credit/c10.json" SYG_CREDIT_DUST_FLOOR_USD=not-a-number)")
+grep -qF 'platform.claude.com $0.20 est' <<< "$out_c20_def" && ! grep -qE 'platform\.claude\.com| est' <<< "$out_c20_hi" \
+    && ! grep -qE 'platform\.claude\.com| est' <<< "$out_c10_def" && grep -qF 'platform.claude.com $0.10 est' <<< "$out_c10_lo" \
+    && ! grep -qE 'platform\.claude\.com| est' <<< "$out_c10_bad" \
+    && ok "fleet floor env: SYG_CREDIT_DUST_FLOOR_USD=0.25 hides \$0.20, =0.05 shows \$0.10, invalid falls back to 0.15" \
+    || bad "fleet floor env: 20def='$out_c20_def' 20hi='$out_c20_hi' 10def='$out_c10_def' 10lo='$out_c10_lo' 10bad='$out_c10_bad'"
 raw=$(fleet "$h/credit/expired.json"); out=$(strip <<< "$raw")
 ! grep -qE 'platform\.claude\.com| est' <<< "$out" && grep -q 'claude.ai 5h:' <<< "$out" \
     && ok "fleet: expired-only grants -> no segment" || bad "fleet expired: $out"
 raw=$(fleet ""); out=$(strip <<< "$raw")
 ! grep -qE 'platform\.claude\.com| est' <<< "$out" && grep -q 'claude.ai 5h:' <<< "$out" \
     && ok "fleet: SYG_CREDIT_GRANTS unset -> no segment" || bad "fleet no grants: $out"
-raw=$(fleet "$h/credit/spent.json"); out=$(strip <<< "$raw")
-grep -qF 'platform.claude.com $0.00 est' <<< "$out" && grep -qF $'\x1b[31m$0.00 est' <<< "$raw" \
-    && ok "fleet: live grant fully spent -> red '\$0.00 est'" || bad "fleet zero: $out"
-route_zai
-raw=$(fleet "$h/credit/grants.json"); out=$(strip <<< "$raw")
-grep -qE 'z\.ai .* · platform\.claude\.com \$187\.50 est · session ' <<< "$out" \
-    && ok "fleet: z.ai lane + both vars -> segment after the z.ai segment" || bad "fleet zai: $out"
-route_anthropic
+# Copy exists so 48d's render has a fresh-week cache under XDG_CACHE_HOME="$h/cache-fail".
+mkdir -p "$h/cache-fail/claude-statusline" && cp -p "$h/cache/claude-statusline/usage.json" "$h/cache-fail/claude-statusline/usage.json" && touch "$h/cache-fail/claude-statusline/usage.json"
 
 # 48. Balance cache: a matching key under 60s is reused (a sentinel planted in the
 # cache shows); a ledger mtime change or a cache older than 60s is a miss.
+fleet_wk 80
 jq 'del(.env.ANTHROPIC_BASE_URL)' "$h/.claude/settings.json" > "$h/.claude/settings.json.new" && mv "$h/.claude/settings.json.new" "$h/.claude/settings.json"
 cr_cache="$h/cache/claude-statusline/api-credit-balance.json"
 plant() { { head -n 1 "$cr_cache"; echo '{"live_grants":1,"remaining_usd":123.45}'; } > "$cr_cache.new" && mv "$cr_cache.new" "$cr_cache"; }
@@ -848,6 +950,7 @@ grep -qF 'platform.claude.com $0.00 · ' <<< "$out" && grep -qF $'\x1b[31m$0.00\
     && ok "api-key lane provider-exact zero: red '\$0.00', no est, no px" || bad "api-key provider-exact zero: $out"
 # 48d. Provider failure (the mock answers 401): the estimate shapes return. A fresh
 # cache dir, so neither api-credit's live-sum cache nor the balance cache answers.
+fleet_wk 80
 echo 401 > "$h/cr/mode"
 hits0=$(wc -l < "$h/cr/hits.log")
 out_f=$(strip <<< "$(fleet "$h/credit/grants.json" "${px_key[@]}" XDG_CACHE_HOME="$h/cache-fail")")
