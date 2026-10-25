@@ -13,6 +13,10 @@
 # Ported from Tzurot's .claude/hooks/lossy-pipe-guard.probe.sh; the gh wrapper
 # cases were rewritten for SYG_LOSSY_PIPE_GH_WRAPPERS.
 #
+# Suite-family note (accepted false negative): a quoted script path such as
+# `bash "tests/run-probes.sh" | tail` collapses to `bash S` under `strip_quoted`
+# before `SUITE_TARGET` runs and is missed.
+#
 # Usage: hooks/lossy-pipe-guard.probe.sh   (from anywhere)
 
 set -uo pipefail
@@ -683,7 +687,10 @@ SUITE_ERR=$(printf '%s' 'bash tests/run-probes.sh -j 4 | tail -30' \
 if grep -qF "LOSSY PIPE GUARD — check-suite output truncated" <<<"$SUITE_ERR" \
   && grep -qF "grep -E '^(FAIL|ERROR|ok:)'" <<<"$SUITE_ERR" \
   && grep -qF "redirect to a file and read it whole" <<<"$SUITE_ERR" \
-  && grep -qF "SYG_LOSSY_PIPE_SUITES=0" <<<"$SUITE_ERR"; then
+  && grep -qF 'pytest -q > "${CLAUDE_JOB_DIR:-/tmp}/suite-$$.out" 2>&1; rc=$?; cat "${CLAUDE_JOB_DIR:-/tmp}/suite-$$.out"; echo "rc=$rc"' <<<"$SUITE_ERR" \
+  && ! grep -qF "&& cat" <<<"$SUITE_ERR" \
+  && grep -qF "A project that does not want this family" <<<"$SUITE_ERR" \
+  && grep -qF "sets SYG_LOSSY_PIPE_SUITES=0 in settings.json env." <<<"$SUITE_ERR"; then
   printf 'PASS  (banner)  check-suite block prints check-suite banner and remedies\n'
 else
   printf 'FAIL  (banner missing check-suite header/remedies)  check-suite block banner\n'
@@ -707,6 +714,13 @@ run 2 "check-suite: uv run pytest piped to head"                 'uv run pytest 
 run 2 "check-suite: npx vitest piped to tail"                    'npx vitest run | tail -20'
 run 2 "check-suite: cargo test piped to tail"                    'cargo test | tail -20'
 run 2 "check-suite: go test piped to head"                       'go test ./... | head -20'
+run 2 "check-suite: substitution arm echo \"\$(pytest -q)\" | tail" 'echo "$(pytest -q)" | tail'
+run 2 "check-suite: env-assignment prefix FOO=1 pytest | tail"   'FOO=1 pytest | tail'
+run 2 "check-suite: chained invocation cd x && pytest | tail"    'cd x && pytest | tail'
+# Accepted command-wide over-block (consistent with git/gh): substitution_spans_matching
+# scans raw_cmd command-wide, so a suite in $(...) arms the suite rule for an
+# unrelated truncated pipeline in another segment.
+run 2 "check-suite: command-wide substitution over-block"        'x=$(pytest --version); ls | head'
 run 0 "check-suite: run-probes piped to grep predicate allowed"  'bash tests/run-probes.sh -j 4 | grep "^FAIL"'
 run 0 "check-suite: run-probes unpiped allowed"                  'bash tests/run-probes.sh -j 4'
 # Mentions of suite tokens in argument position (wc/ls/cat/git log/grep) are

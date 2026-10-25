@@ -13,11 +13,12 @@
 #       word-bounded).
 #
 # Toggle: when SYG_HANDOFF_PATHS or SYG_HANDOFF_CMDS is set, matches those
-# patterns; when both are unset or empty (unwired), falls back to default
-# handoff file paths (HANDOFF.md, handoff.md) and appends a one-line setup hint
-# naming SYG_HANDOFF_PATHS and SYG_HANDOFF_CMDS so an unwired deployment is
-# visible rather than silently inert. SYG_DISABLE=handoff-pick-check turns the
-# component off.
+# patterns (replacing the built-in path defaults); when both are unset or empty
+# (unwired), falls back to default handoff file paths (HANDOFF.md, handoff.md)
+# and appends a one-line setup hint naming SYG_HANDOFF_PATHS and
+# SYG_HANDOFF_CMDS (and the built-in pattern to keep the defaults while
+# silencing the hint) so an unwired deployment is visible rather than silently
+# inert. SYG_DISABLE=handoff-pick-check turns the component off.
 #
 # Known false negative, accepted: a closing using `keep` in an ordinary sense
 # (e.g. "I will keep the old flag") counts as a pick under the word-bounded
@@ -247,7 +248,9 @@ proceeds).
 (the seyag rules, rules/core.md § "Sessions and handoffs")
 MSG
 if [ "$VERDICT" = "missing:unwired" ]; then
-  echo "Setup hint: SYG_HANDOFF_PATHS and SYG_HANDOFF_CMDS are unset; set them in settings.json env to wire your project's handoff paths and commands." >&2
+  cat >&2 << 'HINT'
+Setup hint: SYG_HANDOFF_PATHS and SYG_HANDOFF_CMDS are unset; set them in settings.json env to wire your project's handoff paths and commands (to keep the built-in defaults and silence this hint, set SYG_HANDOFF_PATHS to the built-in pattern `(^|/)(?:HANDOFF\.md|handoff\.md)$`).
+HINT
 fi
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" >&2
 exit 2

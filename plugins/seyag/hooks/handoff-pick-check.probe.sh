@@ -233,7 +233,8 @@ check 2 "unwired env: default HANDOFF.md write + no pick blocks with banner + se
   'HANDOFF PICK' \
   '/clear \(unrelated next unit\)' \
   'SYG_HANDOFF_PATHS' \
-  'SYG_HANDOFF_CMDS'
+  'SYG_HANDOFF_CMDS' \
+  'HANDOFF\\\.md\|handoff\\\.md'
 
 mktx_file "$TMP/unwired-lower-nopick.jsonl" "Write" "/tmp/fixture/proj/handoff.md" \
   "Wrote handoff.md for the next session."
@@ -241,7 +242,8 @@ check 2 "unwired env: default lowercase handoff.md write + no pick blocks with b
   "$TMP/unwired-lower-nopick.jsonl" "" \
   'HANDOFF PICK' \
   'SYG_HANDOFF_PATHS' \
-  'SYG_HANDOFF_CMDS'
+  'SYG_HANDOFF_CMDS' \
+  'HANDOFF\\\.md\|handoff\\\.md'
 
 mktx_file "$TMP/unwired-role-nopick.jsonl" "Edit" "/tmp/fixture/notes/roles/widget.md" \
   "Updated the role handoff for the next session."
@@ -252,5 +254,14 @@ mktx_file "$TMP/unwired-handoff-pick.jsonl" "Write" "/tmp/fixture/proj/HANDOFF.m
   "Wrote HANDOFF.md for the next session. Pick: /clear."
 check 0 "unwired env: default HANDOFF.md write + pick token passes" \
   "$TMP/unwired-handoff-pick.jsonl" "" '!.'
+
+# Setting EITHER env var replaces (does not extend) the built-in path defaults:
+# with only SYG_HANDOFF_CMDS set, a write to HANDOFF.md does not trip DEFAULT_HANDOFF_PATHS.
+export SYG_HANDOFF_CMDS='myrole --set'
+mktx_file "$TMP/cmds-only-handoff-nopick.jsonl" "Write" "/tmp/fixture/proj/HANDOFF.md" \
+  "Wrote HANDOFF.md for the next session."
+check 0 "replace semantics: only SYG_HANDOFF_CMDS set drops the HANDOFF.md path default" \
+  "$TMP/cmds-only-handoff-nopick.jsonl" "" '!.'
+unset SYG_HANDOFF_CMDS
 
 [ "$fail" = 0 ] && echo "ALL PASS" || { echo "FAILURES"; exit 1; }
