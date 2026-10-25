@@ -478,5 +478,21 @@ assert_err_contains "case 20b: inline error prints literal expected heading 'Exp
 assert_err_contains "case 20b: inline error quotes the near-miss heading 'Found heading:    ## ## Premise ledger'" \
   "Found heading:    ## ## Premise ledger"
 
+cat >"$FIXTURE/.claude/dispatch/fenced-comment.md" <<'EOF'
+# Unit: fenced comment only
+
+## Task
+```bash
+# check the premise ledger
+echo ok
+```
+EOF
+
+run 2 "case 20c: spec file with only a fenced '# check the premise ledger' comment blocks" \
+  "$(agent_payload "Execute .claude/dispatch/fenced-comment.md")" \
+  "$FIXTURE" "-" "$HEADLINE_MISSING"
+# Accepted limitation (not asserted): the near-miss hint may quote the fenced
+# comment — line matching cannot see fence context. Only the block is pinned.
+
 echo "failures: $FAILURES"
 exit "$FAILURES"

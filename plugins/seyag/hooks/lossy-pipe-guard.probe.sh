@@ -13,9 +13,11 @@
 # Ported from Tzurot's .claude/hooks/lossy-pipe-guard.probe.sh; the gh wrapper
 # cases were rewritten for SYG_LOSSY_PIPE_GH_WRAPPERS.
 #
-# Suite-family note (accepted false negative): a quoted script path such as
+# Suite-family note (accepted false negatives): a quoted script path such as
 # `bash "tests/run-probes.sh" | tail` collapses to `bash S` under `strip_quoted`
-# before `SUITE_TARGET` runs and is missed.
+# before `SUITE_TARGET` runs and is missed; bare-target runners (`npm test`,
+# `yarn test`, `pnpm test`, `make test`) and `nice`/`sudo` prefixes are also not
+# matched.
 #
 # Usage: hooks/lossy-pipe-guard.probe.sh   (from anywhere)
 
@@ -685,7 +687,7 @@ SUITE_ERR=$(printf '%s' 'bash tests/run-probes.sh -j 4 | tail -30' \
   | jq -Rs '{tool_name:"Bash",tool_input:{command:.}}' \
   | "$HOOK" 2>&1 >/dev/null)
 if grep -qF "LOSSY PIPE GUARD — check-suite output truncated" <<<"$SUITE_ERR" \
-  && grep -qF "grep -E '^(FAIL|ERROR|ok:)'" <<<"$SUITE_ERR" \
+  && grep -qF "grep -E '^(PASS|FAIL)'" <<<"$SUITE_ERR" \
   && grep -qF "redirect to a file and read it whole" <<<"$SUITE_ERR" \
   && grep -qF 'pytest -q > "${CLAUDE_JOB_DIR:-/tmp}/suite-$$.out" 2>&1; rc=$?; cat "${CLAUDE_JOB_DIR:-/tmp}/suite-$$.out"; echo "rc=$rc"' <<<"$SUITE_ERR" \
   && ! grep -qF "&& cat" <<<"$SUITE_ERR" \
@@ -716,6 +718,8 @@ run 2 "check-suite: cargo test piped to tail"                    'cargo test | t
 run 2 "check-suite: go test piped to head"                       'go test ./... | head -20'
 run 2 "check-suite: substitution arm echo \"\$(pytest -q)\" | tail" 'echo "$(pytest -q)" | tail'
 run 2 "check-suite: env-assignment prefix FOO=1 pytest | tail"   'FOO=1 pytest | tail'
+run 2 "check-suite: timeout 600 pytest -q piped to tail"         'timeout 600 pytest -q | tail -20'
+run 2 "check-suite: time bash tests/run-probes.sh piped to tail" 'time bash tests/run-probes.sh | tail -5'
 run 2 "check-suite: chained invocation cd x && pytest | tail"    'cd x && pytest | tail'
 # Accepted command-wide over-block (consistent with git/gh): substitution_spans_matching
 # scans raw_cmd command-wide, so a suite in $(...) arms the suite rule for an
@@ -728,6 +732,7 @@ run 0 "check-suite: run-probes unpiped allowed"                  'bash tests/run
 run 0 "check-suite mention: wc -l x.probe.sh piped to tail"      'wc -l x.probe.sh | tail'
 run 0 "check-suite mention: ls tests/*.probe.sh piped to head"   'ls tests/*.probe.sh | head'
 run 0 "check-suite mention: cat pytest.ini piped to head"        'cat pytest.ini | head'
+run 0 "check-suite mention: timeout 600 cat pytest.ini to head"  'timeout 600 cat pytest.ini | head -20'
 run 0 "check-suite mention: git log -- jest.config.js to head"   'git log -- jest.config.js | head'
 run 0 "check-suite mention: grep -rn pytest pyproject.toml"      'grep -rn pytest pyproject.toml | head'
 # SYG_LOSSY_PIPE_SUITES=0 disables the check-suite family while leaving gh/git on.

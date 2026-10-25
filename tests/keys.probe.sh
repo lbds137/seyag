@@ -86,9 +86,20 @@ e=$(run "$K" set DELTA_KEY </dev/null 2>&1); rc=$?
 e=$(printf 'fix\xffture' | run "$K" set DELTA_KEY 2>&1); rc=$?
 [ $rc = 1 ] && [ "$e" = "keys: the value for DELTA_KEY is not UTF-8 text; nothing stored" ] && [ "$(md5sum "$S")" = "$sum" ] \
   && ok "a non-UTF-8 value -> exit 1, one clean line, store unchanged" || bad "non-utf8 rc $rc: $e"
-e=$(run "$K" set DELTA_KEY <&- 2>&1); rc=$?
 # "(stdin is closed)" vs plain: depends on the interpreter's closed-fd-0 behavior.
-[ $rc = 1 ] && { [ "$e" = "keys: no value given for DELTA_KEY (stdin is closed); nothing stored" ] || [ "$e" = "keys: no value given for DELTA_KEY; nothing stored" ]; } && [ "$(md5sum "$S")" = "$sum" ] \
+# The sentinel runs under run()'s own env -i PATH=/usr/bin:/bin so it resolves the
+# SAME python3 keys' shebang resolves — the caller's PATH may hold a different
+# interpreter whose sys.stdin classifies a closed fd 0 differently.
+STDIN_NONE=$(env -i HOME="$T/home" PATH=/usr/bin:/bin XDG_RUNTIME_DIR="$T/run" \
+  SYG_KEYS_STORE="$S" SYG_KEYS_CREDS_CMD="$MOCK" MOCK_LOG="$LOG" \
+  python3 -c 'import sys; print(sys.stdin is None)' <&- 2>/dev/null)
+if [ "$STDIN_NONE" = "True" ]; then
+  expected_closed_err="keys: no value given for DELTA_KEY (stdin is closed); nothing stored"
+else
+  expected_closed_err="keys: no value given for DELTA_KEY; nothing stored"
+fi
+e=$(run "$K" set DELTA_KEY <&- 2>&1); rc=$?
+[ $rc = 1 ] && [ "$e" = "$expected_closed_err" ] && [ "$(md5sum "$S")" = "$sum" ] \
   && ok "a closed stdin -> exit 1, one clean line, store unchanged" || bad "closed stdin rc $rc: $e"
 printf 'fixture\tkey with  spaces \n' | run "$K" set THETA_KEY >/dev/null || bad "set THETA_KEY"
 [ "$(run "$K" get THETA_KEY; echo .)" = "$(printf 'fixturekey with  spaces\n.')" ] \
