@@ -12,10 +12,12 @@
 #       `/clear`, `/compact`, or the standalone word `keep` (case-insensitive,
 #       word-bounded).
 #
-# Toggle: when BOTH SYG_HANDOFF_PATHS and SYG_HANDOFF_CMDS are unset or empty,
-# the hook is inert and exits 0 before reading stdin or the transcript. The
-# component is in the full profile only and ships inert; machine wiring (the
-# settings.json `env` block) is what turns it on.
+# Toggle: when SYG_HANDOFF_PATHS or SYG_HANDOFF_CMDS is set, matches those
+# patterns; when both are unset or empty (unwired), falls back to default
+# handoff file paths (HANDOFF.md, handoff.md) and appends a one-line setup hint
+# naming SYG_HANDOFF_PATHS and SYG_HANDOFF_CMDS so an unwired deployment is
+# visible rather than silently inert. SYG_DISABLE=handoff-pick-check turns the
+# component off.
 #
 # Known false negative, accepted: a closing using `keep` in an ordinary sense
 # (e.g. "I will keep the old flag") counts as a pick under the word-bounded
@@ -51,8 +53,6 @@
 
 set -uo pipefail
 
-[ -n "${SYG_HANDOFF_PATHS:-}${SYG_HANDOFF_CMDS:-}" ] || exit 0
-
 INPUT=$(cat)
 
 # Already blocked once this turn-end → allow the stop (no infinite loop).
@@ -76,10 +76,20 @@ def compile_opt(var):
         return None
 
 
-paths_re = compile_opt("SYG_HANDOFF_PATHS")
-cmds_re = compile_opt("SYG_HANDOFF_CMDS")
-if paths_re is None and cmds_re is None:
-    print("ok"); sys.exit()
+DEFAULT_HANDOFF_PATHS = re.compile(
+    r"(^|/)(?:HANDOFF\.md|handoff\.md)$"
+)
+raw_paths = os.environ.get("SYG_HANDOFF_PATHS", "")
+raw_cmds = os.environ.get("SYG_HANDOFF_CMDS", "")
+wired = bool(raw_paths or raw_cmds)
+if wired:
+    paths_re = compile_opt("SYG_HANDOFF_PATHS")
+    cmds_re = compile_opt("SYG_HANDOFF_CMDS")
+    if paths_re is None and cmds_re is None:
+        print("ok"); sys.exit()
+else:
+    paths_re = DEFAULT_HANDOFF_PATHS
+    cmds_re = None
 
 path = os.environ["TRANSCRIPT"]
 # Read only the tail: a long session's transcript can be hundreds of MB, and this
@@ -205,11 +215,19 @@ for _, entry in turn:
 
 PICK_RE = re.compile(r"(?<![\w/])/(?:clear|compact)\b|\bkeep\b", re.I)
 
-print("ok" if PICK_RE.search(final_text) else "missing")
+if PICK_RE.search(final_text):
+    print("ok")
+elif wired:
+    print("missing")
+else:
+    print("missing:unwired")
 PYEOF
 ) || exit 0
 
-[ "$VERDICT" = "missing" ] || exit 0
+case "$VERDICT" in
+  missing | missing:unwired) ;;
+  *) exit 0 ;;
+esac
 
 cat >&2 << 'MSG'
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -227,6 +245,9 @@ If this write was not a unit-closing handoff, say so in one line and
 stop again (this gate fires only once per turn — the next stop
 proceeds).
 (the seyag rules, rules/core.md § "Sessions and handoffs")
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 MSG
+if [ "$VERDICT" = "missing:unwired" ]; then
+  echo "Setup hint: SYG_HANDOFF_PATHS and SYG_HANDOFF_CMDS are unset; set them in settings.json env to wire your project's handoff paths and commands." >&2
+fi
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" >&2
 exit 2

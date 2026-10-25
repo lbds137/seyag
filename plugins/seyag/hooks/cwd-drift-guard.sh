@@ -42,6 +42,10 @@
 # toplevel, so it is not drift. When in doubt this hook allows: it may only
 # ever ADD a block on an unambiguous mistake.
 #
+# COMMAND-TEXT SCOPE ONLY: this guard matches the command text's paths only; a
+# wrapper script (or any child process) committing in a different checkout is
+# outside its surface — see the delegation skill's wrapper caveat.
+#
 # EFFECTIVE CWD. A command that OPENS with `cd <dir>` runs its later steps from
 # <dir>, so that target (resolved lexically) is judged instead of the payload
 # cwd. A target this cannot read with certainty (a variable, substitution,

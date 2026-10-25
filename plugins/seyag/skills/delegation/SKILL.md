@@ -125,6 +125,7 @@ It resets only when the SHA exists, the tree is clean, the branch is the agent's
 - **Right after dispatch**, run `git worktree list`: a new tree must be listed. Only the main tree listed means the worker shares your tree; freeze your own checkout/pull/rebase/merge until it reports.
 - **A `SendMessage` resume can silently drop isolation.** Before resuming, confirm the worker's tree still exists (a no-edit worker's tree is gone: dispatch fresh). As soon as the resume returns, re-run `git worktree list` and `git branch --show-current`, and treat the diff as suspect until both look right.
 - **A bare worktree has no dependencies or build output.** Step 0 runs the project's install and build first, or the first gate fails for reasons unrelated to the diff.
+- **A hand-made worktree may need pre-provisioning before the worker's first gate.** The machine's conventions cover per-worktree allow-list settings and dependency symlinks (e.g. `node_modules`); the driver provisions at dispatch, and step 0 reports what was missing.
 - **Git state comes only from a command the worker just ran**, never from loaded context: the session-start snapshot is hours stale and workers have reported it as current.
 
 ## When the worker reports
@@ -176,6 +177,7 @@ Post-session cleanup is one command: `safe-worktree-clean --repo <repo>` (dry ru
 - **A headless worker can deadlock in a max_tokens thinking loop**: turns end `stop_reason: max_tokens` on empty thinking with no tool_use while the job still shows running. When its transcript (the newest jsonl under `~/.claude/projects/<slug-of-the-worker's-cwd>/` — a hand-made worktree has its own slug, and the main project's newest file is usually the driver's own session) stops growing or shows consecutive empty max_tokens turns, stop it through the runner that launched it (its own stop or kill command), verify the tree, and re-dispatch on the strongest tier (the alias that reaches it; see the routed-gateway check in § Roles). When edits exist in the tree, the flagged-stop bullet above governs; any scheduled watch the driver sets on a running worker should re-check transcript growth.
 - **A worker-tier unit that ships a semantic defect** moves that unit class to the strongest tier, and the project records the defect where its tier evidence lives. Move it back only when the analysis blames spec or scope rather than the tier.
 - **A main-tree gate that catches what the worktree gates missed** goes into every future spec's gate list.
+- **Command-text guards cannot see through wrapper scripts.** A `bash script.sh` call inside a worktree cwd leaves the command clean while the child commits; verify the staged diff yourself after any wrapper run.
 - **Review-round cap ~6 per PR.** Past it, stop iterating in this context: hand the open findings plus the round history to a fresh implementer, or bring the owner the round ledger when the scope looks wrong rather than the execution.
 - If a reviewer or the worker catches you mis-reporting the unit, say so first (core rules § Reviews are collaborators).
 

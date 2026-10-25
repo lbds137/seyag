@@ -314,7 +314,7 @@ Before each round's consolidated message:
 
 ## Relationship to the rules
 
-- **The merge gate is the project's own ship flow.** This procedure governs iteration _before_ that gate; nothing here loosens it.
+- **The merge gate is the project's own ship flow.** This procedure governs iteration _before_ that gate; nothing here loosens it. The moment a push creates or updates a PR, arm its CI+review watcher (`pr-ci-wait <PR> --sha <head-sha>`, a seyag-shipped bin on PATH, under the Monitor/background pattern) — never a hand-rolled sleep/poll loop.
 - **seyag core.md § Safety** ("Never modify a test, lint rule or guard just to get past it") remains in force. The test-suite gate in rule 3 fails closed — a trivial-shape edit that breaks tests is escalated, not covered up by modifying tests.
 - **seyag core.md § Fix what you touch, file what you find / Everything not done gets a disposition** governs where every deferred, rejected or dismissed finding lands — this skill's dispositions route into that surface, and none of them may end in _neither_.
 - **seyag:delegation** owns the dispatch of review-round fixes (rule 3a) and the fresh-context handoff at the hard cap (rule 5a).

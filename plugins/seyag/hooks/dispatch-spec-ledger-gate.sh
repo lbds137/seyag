@@ -60,22 +60,25 @@ SPEC_RE="${SYG_DISPATCH_SPEC_RE:-$DEFAULT_SPEC_RE}"
 RULE='━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
 
 block_missing_section() {
-  local suffix="$1" target="$2"
-  cat >&2 <<EOF
-$RULE
-DISPATCH SPEC — no \`## Premise ledger\` section$suffix
-$RULE
-  $target
-
-Every dispatched implementation spec must carry a \`## Premise ledger\`
-section: one \`- \` bullet row per runtime premise the spec asserts, naming
+  local suffix="$1" target="$2" near_miss="${3:-}"
+  near_miss="${near_miss%$'\r'}"
+  # shellcheck disable=SC2016
+  printf '%s\nDISPATCH SPEC — no `## Premise ledger` section%s\n%s\n  %s\n' \
+    "$RULE" "$suffix" "$RULE" "$target" >&2
+  if [ -n "$near_miss" ]; then
+    printf '  Found heading:    %s\n' "$near_miss" >&2
+  fi
+  printf '  Expected heading: ## Premise ledger\n\n' >&2
+  cat >&2 <<'EOF'
+Every dispatched implementation spec must carry a `## Premise ledger`
+section: one `- ` bullet row per runtime premise the spec asserts, naming
 the read or probe that established it (a backticked command/token or a
-slash-bearing \`path/to/file.ext[:line]\` reference). An inline prompt
-(\`isolation: "worktree"\`) is a spec too, when \`SYG_DISPATCH_SPEC_INLINE=1\`.
-See the seyag \`delegation\` skill (\`## Premise ledger\`).
+slash-bearing `path/to/file.ext[:line]` reference). An inline prompt
+(`isolation: "worktree"`) is a spec too, when `SYG_DISPATCH_SPEC_INLINE=1`.
+See the seyag `delegation` skill (`## Premise ledger`).
 
-$RULE
 EOF
+  printf '%s\n' "$RULE" >&2
   exit 2
 }
 
@@ -145,7 +148,8 @@ if [ -n "$RESOLVED_PATH" ]; then
     exit 0
   fi
   if [ "$GREP_RC" -eq 1 ]; then
-    block_missing_section "" "$RESOLVED_PATH"
+    NEAR_MISS=$(grep -iE '^[[:space:]]*#.*premise[[:space:]]+ledger' "$RESOLVED_PATH" 2>/dev/null | head -n 1 || true)
+    block_missing_section "" "$RESOLVED_PATH" "$NEAR_MISS"
   fi
   CHECK_TEXT=$(cat "$RESOLVED_PATH" 2>/dev/null || echo "")
   if [ -z "$CHECK_TEXT" ]; then
@@ -164,7 +168,8 @@ else
     exit 0
   fi
   if [ "$GREP_RC" -eq 1 ]; then
-    block_missing_section " (inline prompt)" "(inline prompt, isolation: worktree)"
+    NEAR_MISS=$(grep -iE '^[[:space:]]*#.*premise[[:space:]]+ledger' <<<"$PROMPT" 2>/dev/null | head -n 1 || true)
+    block_missing_section " (inline prompt)" "(inline prompt, isolation: worktree)" "$NEAR_MISS"
   fi
   CHECK_TEXT="$PROMPT"
   TARGET_LABEL="(inline prompt, isolation: worktree)"
