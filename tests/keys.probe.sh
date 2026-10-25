@@ -87,7 +87,8 @@ e=$(printf 'fix\xffture' | run "$K" set DELTA_KEY 2>&1); rc=$?
 [ $rc = 1 ] && [ "$e" = "keys: the value for DELTA_KEY is not UTF-8 text; nothing stored" ] && [ "$(md5sum "$S")" = "$sum" ] \
   && ok "a non-UTF-8 value -> exit 1, one clean line, store unchanged" || bad "non-utf8 rc $rc: $e"
 e=$(run "$K" set DELTA_KEY <&- 2>&1); rc=$?
-[ $rc = 1 ] && [ "$e" = "keys: no value given for DELTA_KEY (stdin is closed); nothing stored" ] && [ "$(md5sum "$S")" = "$sum" ] \
+# "(stdin is closed)" vs plain: depends on the interpreter's closed-fd-0 behavior.
+[ $rc = 1 ] && { [ "$e" = "keys: no value given for DELTA_KEY (stdin is closed); nothing stored" ] || [ "$e" = "keys: no value given for DELTA_KEY; nothing stored" ]; } && [ "$(md5sum "$S")" = "$sum" ] \
   && ok "a closed stdin -> exit 1, one clean line, store unchanged" || bad "closed stdin rc $rc: $e"
 printf 'fixture\tkey with  spaces \n' | run "$K" set THETA_KEY >/dev/null || bad "set THETA_KEY"
 [ "$(run "$K" get THETA_KEY; echo .)" = "$(printf 'fixturekey with  spaces\n.')" ] \
