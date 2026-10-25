@@ -170,7 +170,9 @@ for _ in $(seq 50); do [ -e "$T/held" ] && break; sleep 0.1; done
 e=$(run SYG_KEYS_LOCK_WAIT_S=0.3 "$K" get BETA_KEY 2>&1); rc=$?
 [ $rc = 1 ] && grep -qF 'the TPM is busy or stuck' <<<"$e" && ok "a held lock past the wait fails loudly" || bad "lock rc $rc: $e"
 wait
-e=$(timeout 5 env -i HOME="$T/home" PATH=/usr/bin:/bin XDG_RUNTIME_DIR="$T/run" SYG_KEYS_STORE="$S" \
+# The outer timeout catches a hang (the flock holder sleeps 2s), not speed: a
+# loaded shared runner needs more than the 5s this once assumed.
+e=$(timeout 20 env -i HOME="$T/home" PATH=/usr/bin:/bin XDG_RUNTIME_DIR="$T/run" SYG_KEYS_STORE="$S" \
   SYG_KEYS_CREDS_CMD="$MOCK" MOCK_LOG="$LOG" SYG_KEYS_LOCK_WAIT_S=nan "$K" get BETA_KEY 2>&1); rc=$?
 [ $rc = 2 ] && [ "$e" = "keys: SYG_KEYS_LOCK_WAIT_S='nan' is not a finite, non-negative number of seconds (keys --help for usage)" ] \
   && ok "a non-finite lock wait is a usage error, not a hang" || bad "nan wait rc $rc: $e"

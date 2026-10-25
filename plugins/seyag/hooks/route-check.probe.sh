@@ -150,10 +150,16 @@ if command -v timeout >/dev/null 2>&1; then
   start=$SECONDS
   expect_banner "timeout (stub sleeps 20, timeout 1)" "timed out after 1s" SYG_ROUTE_REQUIRED=1 SYG_ROUTE_CHECK_CMD="$TMP/stubs/sleep.sh" SYG_ROUTE_CHECK_OK=ok SYG_ROUTE_CHECK_TIMEOUT=1
   [ $((SECONDS - start)) -lt 10 ] && ok "timeout returned well before the stub's 20s" || bad "timeout took $((SECONDS - start))s"
-  stub termtrap.sh 'trap "" TERM' "sleep 20" "echo ok"
+  stub termtrap.sh 'trap "" TERM' "sleep 60 >/dev/null 2>&1" "echo ok"
   start=$SECONDS
   expect_banner "TERM-ignoring command is killed after the grace (timeout 1)" "timed out after 1s" SYG_ROUTE_REQUIRED=1 SYG_ROUTE_CHECK_CMD="$TMP/stubs/termtrap.sh" SYG_ROUTE_CHECK_OK=ok SYG_ROUTE_CHECK_TIMEOUT=1
-  [ $((SECONDS - start)) -lt 6 ] && ok "TERM-ignoring stub returned in under 6s" || bad "TERM-ignoring stub stalled the hook for $((SECONDS - start))s"
+  # The bound catches a hang (the stub sleeps 60 behind a 1s timeout + grace
+  # kill), not speed: a loaded shared runner needs well over the 6s this once
+  # assumed for hook startup + timeout + TERM + KILL. The bound (30s) must stay
+  # UNDER the stub's sleep (60s) — a lost -k then stalls past the bound and goes red.
+  # The sleep redirects its output so it never holds the hook's capture pipe: a
+  # coreutils whose -k kills only the direct child would otherwise read as a 60s stall.
+  [ $((SECONDS - start)) -lt 30 ] && ok "TERM-ignoring stub returned before the bound (not a hang)" || bad "TERM-ignoring stub stalled the hook for $((SECONDS - start))s"
 else
   echo "skip: no timeout binary; timeout case not run"
 fi
