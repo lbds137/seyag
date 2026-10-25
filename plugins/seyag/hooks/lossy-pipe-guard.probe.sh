@@ -20,9 +20,9 @@ set -uo pipefail
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 HOOK="$SCRIPT_DIR/lossy-pipe-guard.sh"
 
-# Hermetic by default: a wrapper list set in the caller's environment would
-# change the verdicts below. Only run_wrappers sets it, for one call.
-unset SYG_LOSSY_PIPE_GH_WRAPPERS
+# Hermetic by default: a wrapper list or suite toggle set in the caller's
+# environment would change the verdicts below.
+unset SYG_LOSSY_PIPE_GH_WRAPPERS SYG_LOSSY_PIPE_SUITES
 
 FAILURES=0
 
@@ -672,6 +672,78 @@ run 0 "awk NR truncation is a NAMED gap"      'gh pr checks 2000 | awk "NR<=5"'
 run 0 "pre-check: pipe but no git token"      'ls -la | tail'
 run 0 "pre-check: git commit but no pipe"     'git commit --amend --no-edit'
 run 2 "pre-check: tokens split across a &&"   'echo commit && git push | tail'
+
+# --- check-suite commands × TRUNCATION only -------------------------------
+# Project check/probe suites and test runners piped into head/tail/sed drop
+# failing rows earlier in the output; predicate selection (grep/awk) stays allowed.
+run 2 "check-suite: bash tests/run-probes.sh -j 4 piped to tail" 'bash tests/run-probes.sh -j 4 | tail -30'
+SUITE_ERR=$(printf '%s' 'bash tests/run-probes.sh -j 4 | tail -30' \
+  | jq -Rs '{tool_name:"Bash",tool_input:{command:.}}' \
+  | "$HOOK" 2>&1 >/dev/null)
+if grep -qF "LOSSY PIPE GUARD — check-suite output truncated" <<<"$SUITE_ERR" \
+  && grep -qF "grep -E '^(FAIL|ERROR|ok:)'" <<<"$SUITE_ERR" \
+  && grep -qF "redirect to a file and read it whole" <<<"$SUITE_ERR" \
+  && grep -qF "SYG_LOSSY_PIPE_SUITES=0" <<<"$SUITE_ERR"; then
+  printf 'PASS  (banner)  check-suite block prints check-suite banner and remedies\n'
+else
+  printf 'FAIL  (banner missing check-suite header/remedies)  check-suite block banner\n'
+  FAILURES=$((FAILURES + 1))
+fi
+GH_ERR=$(printf '%s' 'gh pr checks 2000 | tail -30' \
+  | jq -Rs '{tool_name:"Bash",tool_input:{command:.}}' \
+  | "$HOOK" 2>&1 >/dev/null)
+if grep -qF "LOSSY PIPE GUARD — gh read output truncated" <<<"$GH_ERR" \
+  && grep -qF "gh pr checks N | awk" <<<"$GH_ERR"; then
+  printf 'PASS  (banner)  gh read block keeps its exact gh banner\n'
+else
+  printf 'FAIL  (banner missing gh read header/remedies)  gh read block banner\n'
+  FAILURES=$((FAILURES + 1))
+fi
+run 2 "check-suite: individual .probe.sh piped to head"          'bash tests/hook-wiring.probe.sh | head -20'
+run 2 "check-suite: pytest piped to tail"                        'pytest -q | tail -20'
+run 2 "check-suite: vitest piped to sed"                         "vitest run | sed -n '1,20p'"
+run 2 "check-suite: python3 -m pytest piped to tail"             'python3 -m pytest -q | tail -20'
+run 2 "check-suite: uv run pytest piped to head"                 'uv run pytest | head -20'
+run 2 "check-suite: npx vitest piped to tail"                    'npx vitest run | tail -20'
+run 2 "check-suite: cargo test piped to tail"                    'cargo test | tail -20'
+run 2 "check-suite: go test piped to head"                       'go test ./... | head -20'
+run 0 "check-suite: run-probes piped to grep predicate allowed"  'bash tests/run-probes.sh -j 4 | grep "^FAIL"'
+run 0 "check-suite: run-probes unpiped allowed"                  'bash tests/run-probes.sh -j 4'
+# Mentions of suite tokens in argument position (wc/ls/cat/git log/grep) are
+# ordinary reads, not suite invocations, and must not block when truncated.
+run 0 "check-suite mention: wc -l x.probe.sh piped to tail"      'wc -l x.probe.sh | tail'
+run 0 "check-suite mention: ls tests/*.probe.sh piped to head"   'ls tests/*.probe.sh | head'
+run 0 "check-suite mention: cat pytest.ini piped to head"        'cat pytest.ini | head'
+run 0 "check-suite mention: git log -- jest.config.js to head"   'git log -- jest.config.js | head'
+run 0 "check-suite mention: grep -rn pytest pyproject.toml"      'grep -rn pytest pyproject.toml | head'
+# SYG_LOSSY_PIPE_SUITES=0 disables the check-suite family while leaving gh/git on.
+printf '%s' 'bash tests/run-probes.sh -j 4 | tail -30' \
+  | jq -Rs '{tool_name:"Bash",tool_input:{command:.}}' \
+  | SYG_LOSSY_PIPE_SUITES=0 "$HOOK" >/dev/null 2>&1
+if [ $? -eq 0 ]; then
+  printf 'PASS  (exit 0)  SYG_LOSSY_PIPE_SUITES=0 disables check-suite family\n'
+else
+  printf 'FAIL  SYG_LOSSY_PIPE_SUITES=0 should allow check-suite truncation\n'
+  FAILURES=$((FAILURES + 1))
+fi
+printf '%s' 'echo gh pr && pytest -q | tail -20' \
+  | jq -Rs '{tool_name:"Bash",tool_input:{command:.}}' \
+  | SYG_LOSSY_PIPE_SUITES=0 "$HOOK" >/dev/null 2>&1
+if [ $? -eq 0 ]; then
+  printf 'PASS  (exit 0)  SYG_LOSSY_PIPE_SUITES=0 disables suite rule in python too\n'
+else
+  printf 'FAIL  SYG_LOSSY_PIPE_SUITES=0 should disable suite rule in python scan\n'
+  FAILURES=$((FAILURES + 1))
+fi
+printf '%s' 'gh pr checks 2000 | tail -30' \
+  | jq -Rs '{tool_name:"Bash",tool_input:{command:.}}' \
+  | SYG_LOSSY_PIPE_SUITES=0 "$HOOK" >/dev/null 2>&1
+if [ $? -eq 2 ]; then
+  printf 'PASS  (exit 2)  SYG_LOSSY_PIPE_SUITES=0 keeps gh read rule blocking\n'
+else
+  printf 'FAIL  SYG_LOSSY_PIPE_SUITES=0 must not disable gh read rule\n'
+  FAILURES=$((FAILURES + 1))
+fi
 
 # --- malformed / non-Bash input fails OPEN --------------------------------
 printf '{"tool_name":"Read","tool_input":{"file_path":"x"}}' | "$HOOK" >/dev/null 2>&1

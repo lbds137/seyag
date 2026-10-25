@@ -16,6 +16,14 @@
 #      blocks here — grep/awk/jq stay allowed, and that asymmetry is the whole
 #      design (see the two filter sets below).
 #
+#   3. check-suite commands  ×  head|tail|sed (rule name `suite`, toggle
+#      SYG_LOSSY_PIPE_SUITES=0 disables the family; default on)
+#      A test or probe suite (`run-probes`, `*.probe.sh`, `pytest`, `vitest`,
+#      `jest`, `cargo test`, `go test`) invoked at the start of a stage (or
+#      behind an env/runner prefix) and piped into `head`/`tail`/`sed` masks
+#      earlier failing rows the same way. Mentions in argument position
+#      (`wc -l x.probe.sh | tail`, `cat pytest.ini | head`) stay allowed.
+#
 # Background: the seyag rules (rules/core.md § Lossy steps are for known
 # output shapes) name grep/head/tail/sed pipes as the lossy steps that turn a
 # failure into "no data". A prose rule relies on agent attention across
@@ -146,6 +154,11 @@ mentions_target() { # <text> — 0 when the text could carry a rule's target
   case "$1" in
     *git*commit*|*git*push*|*gh*pr*|*gh*run*|*gh*api*) return 0 ;;
   esac
+  if [ "${SYG_LOSSY_PIPE_SUITES:-1}" != "0" ]; then
+    case "$1" in
+      *run-probes*|*.probe.sh*|*pytest*|*vitest*|*jest*|*"cargo test"*|*"go test"*) return 0 ;;
+    esac
+  fi
   local w
   for w in "${GH_WRAPPERS[@]}"; do
     [[ "$1" == *"$w"* ]] && return 0
@@ -522,21 +535,56 @@ if re.search(r"(?i)\bcomments?\b|\breviews?\b", raw_cmd):
     GH_READ_PARTS.append(r"\bgh" + GH_FLAGS + r"\s+api(?![-\w])")
 GH_READ_TARGET = re.compile("(?i)" + "|".join(GH_READ_PARTS))
 
-# The gh half of the substitution scan (see SPAN_CARRIES_GIT_TARGET above for
-# the full reasoning and the accepted command-wide over-block). Symmetric with
-# git: `echo "$(gh pr checks 2000)" | tail` truncates a gh read exactly as the
-# direct pipe would, and without this the captured read hides from the stage
-# scan. Pinned by "quoted substitution hides the gh read from the pipe scan" in
-# lossy-pipe-guard.probe.sh.
+# Rule 3's targets: project check/probe suites and test runners, anchored at an
+# invocation position in the stage (stage start, after [;&|\n(] + whitespace, or
+# after an env/runner prefix) so a token mentioned in argument position (after
+# cat, wc, ls, grep, git log --) never matches. Disabled when
+# SYG_LOSSY_PIPE_SUITES=0 (default on).
+SUITE_RUNNER = (
+    r"(?:[A-Za-z_][A-Za-z0-9_]*=\S*"
+    r"|env(?![-\w=])(?:\s+-+[^-\s]\S*)*"
+    r"|(?:bash|sh|python3?|uv|uvx|npx|pnpm|npm|yarn)(?![-\w=])(?:\s+-+[^-\s]\S*)*(?:\s+(?:run|exec)(?![-\w=]))?"
+    r")"
+)
+SUITE_TARGET = re.compile(
+    r"(?i)(?:^|[;&|\n(])\s*(?:" + SUITE_RUNNER + r"\s+)*"
+    r"(?<![-\w])(?:"
+    r"(?:[A-Za-z0-9._/-]+/)?(?:run-probes(?:\.sh)?|pytest|vitest|jest)"
+    r"|[A-Za-z0-9._/-]*\.probe\.sh"
+    r"|cargo\s+test"
+    r"|go\s+test"
+    r")(?![-\w])"
+)
+SUITES_ENABLED = os.environ.get("SYG_LOSSY_PIPE_SUITES", "1") != "0"
+
+# The gh and suite halves of the substitution scan (see SPAN_CARRIES_GIT_TARGET
+# above for the full reasoning and the accepted command-wide over-block).
+# Symmetric with git: `echo "$(gh pr checks 2000)" | tail` truncates a gh read
+# exactly as the direct pipe would, and without this the captured read hides
+# from the stage scan. Pinned by "quoted substitution hides the gh read from the
+# pipe scan" in lossy-pipe-guard.probe.sh.
 SPAN_CARRIES_GH_TARGET = substitution_spans_matching(
     raw_cmd, lambda span: GH_READ_TARGET.search(span) is not None
 )
-SPAN_TARGET_HITS = {"git": SPAN_CARRIES_GIT_TARGET, "gh": SPAN_CARRIES_GH_TARGET}
+SPAN_CARRIES_SUITE_TARGET = (
+    substitution_spans_matching(
+        raw_cmd, lambda span: SUITE_TARGET.search(span) is not None
+    )
+    if SUITES_ENABLED
+    else False
+)
+SPAN_TARGET_HITS = {
+    "git": SPAN_CARRIES_GIT_TARGET,
+    "gh": SPAN_CARRIES_GH_TARGET,
+    "suite": SPAN_CARRIES_SUITE_TARGET,
+}
 
-# (target, lossy-stage, rule-name). Two different lossy sets is exactly why
-# this is a list of pairs rather than one target regex: rule 1 blocks any
-# filter, rule 2 blocks only truncation.
+# (target, lossy-stage, rule-name). Different lossy sets and banners are why
+# this is a list of triples rather than one target regex: rule 1 blocks any
+# filter, rules 2 and 3 block only truncation with family-specific remedies.
 RULES = [(GIT_TARGET, FILTERS, "git"), (GH_READ_TARGET, TRUNCATORS, "gh")]
+if SUITES_ENABLED:
+    RULES.append((SUITE_TARGET, TRUNCATORS, "suite"))
 
 # A leading REDIRECT does not stop a stage from being a filter. `git push |
 # 2>&1 tail -20` is valid bash and identical in effect to putting the redirect
@@ -630,7 +678,7 @@ PYEOF
 ) || exit 0
 
 case "$VERDICT" in
-  block:git | block:gh) ;;
+  block:git | block:gh | block:suite) ;;
   *) exit 0 ;;
 esac
 
@@ -653,6 +701,25 @@ output shapes):
 This block stopped the WHOLE command: nothing in its && chain ran,
 including any `git add` or test step before the commit. Re-run the
 full chain with no pipe after any commit/push step.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+MSG
+elif [ "$VERDICT" = "block:suite" ]; then
+  cat >&2 << 'MSG'
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+LOSSY PIPE GUARD — check-suite output truncated
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+This pipes a check/probe or test suite into head/tail/sed — a
+positional cut, which drops earlier failing rows and cannot tell you
+what it discarded.
+
+Truncation is blocked; SELECTION is not. Pipe into a predicate, or
+redirect to a file and read it whole:
+
+  bash tests/run-probes.sh -j 4 | grep -E '^(FAIL|ERROR|ok:)'
+  pytest -q > /tmp/suite.out 2>&1 && cat /tmp/suite.out
+
+Or run the suite unfiltered (set SYG_LOSSY_PIPE_SUITES=0 in
+settings.json env to disable the check-suite family).
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 MSG
 else

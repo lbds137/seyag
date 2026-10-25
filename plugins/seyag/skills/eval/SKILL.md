@@ -26,6 +26,10 @@ Write the design down — in the result doc's own skeleton — and freeze it. Re
 
 One arm at a time; nothing is pushed mid-eval; the best passing arm's branch is kept and the others are removed only on the owner's yes. Arms run through the project's own gates where the unit class has them — and an arm that cannot reach its gates records that as an arm condition, with what the gate would plausibly have caught marked as inference. The orchestrator or measuring session edits nothing itself. The dispatch machinery itself (specs, worktrees, feedback rounds, transfer) is the `delegation` skill's; this skill fixes what is measured, not how workers are run.
 
+## Review packet
+
+For a comparison, the orchestrator — never an arm — assembles one blind-review packet for a single review pass: every arm's full diff, randomized arm labels with the label-to-arm mapping recorded on disk apart from the reviewer's brief, the frozen severity vocabulary and weights, and the named anchor arm (for noise-band re-scoring or a fresh pass's tie-back, per Verdict). The reviewer sees the spec and the anonymized diffs in one pass and nothing identifying which model or harness produced which arm.
+
 ## Verdict
 
 Apply the frozen rule to the recorded numbers and say which side each number falls on. Failures are quoted verbatim with their causes; inference is marked as inference, including "the gate would plausibly have caught this". "Cannot decide" is a real verdict — it names the blocker (sample too small, gates unrunnable, noise band larger than the gap) and the condition that would reopen the question. Score differences inside the pass's measured noise band decide nothing. An arm that lands after the pass ran joins a FRESH pass that re-scores one stable arm as an anchor; it still compares only within that pass. Scores in one result doc are never compared with another's — a question spanning two docs is a new eval with both as arms.

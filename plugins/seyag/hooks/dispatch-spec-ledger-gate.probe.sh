@@ -451,5 +451,32 @@ run 2 "case 19b: ~/.claude/dispatch/no-ledger.md expands ~/ to HOME and blocks n
 assert_err_contains "case 19b: block names the expanded HOME path" \
   "$TMPDIR_PROBE/home/.claude/dispatch/no-ledger.md"
 
+# --- Case 20: doubled '## ## Premise ledger' heading blocks and quotes expected heading
+cat >"$FIXTURE/.claude/dispatch/doubled-heading.md" <<'EOF'
+# Unit: doubled heading typo
+
+## Task
+Implement the widget.
+
+## ## Premise ledger
+- row with a valid cite in `hooks.json`
+EOF
+
+run 2 "case 20a: doubled '## ## Premise ledger' heading in spec file blocks" \
+  "$(agent_payload "Execute .claude/dispatch/doubled-heading.md")" \
+  "$FIXTURE" "-" "$HEADLINE_MISSING"
+assert_err_contains "case 20a: error prints literal expected heading 'Expected heading: ## Premise ledger'" \
+  "Expected heading: ## Premise ledger"
+assert_err_contains "case 20a: error quotes the near-miss heading 'Found heading:    ## ## Premise ledger'" \
+  "Found heading:    ## ## Premise ledger"
+
+run 2 "case 20b: doubled '## ## Premise ledger' heading in inline worktree prompt blocks" \
+  "$(agent_payload "$(cat "$FIXTURE/.claude/dispatch/doubled-heading.md")" "worktree")" \
+  "$FIXTURE" "-" "$HEADLINE_MISSING_INLINE" "1"
+assert_err_contains "case 20b: inline error prints literal expected heading 'Expected heading: ## Premise ledger'" \
+  "Expected heading: ## Premise ledger"
+assert_err_contains "case 20b: inline error quotes the near-miss heading 'Found heading:    ## ## Premise ledger'" \
+  "Found heading:    ## ## Premise ledger"
+
 echo "failures: $FAILURES"
 exit "$FAILURES"

@@ -1,15 +1,16 @@
 #!/bin/bash
 # Fixture check for handoff-pick-check.sh — run after ANY edit to the hook.
 # Asserts the exit-code table over synthetic transcripts: a turn that writes a
-# handoff (via a Bash command matching SYG_HANDOFF_CMDS or an Edit/Write whose
-# file_path matches SYG_HANDOFF_PATHS) blocks unless the closing message names
+# handoff (via a Bash command matching SYG_HANDOFF_CMDS, an Edit/Write whose
+# file_path matches SYG_HANDOFF_PATHS, or when unwired the narrow built-in
+# default HANDOFF.md / handoff.md) blocks unless the closing message names
 # one of the pick tokens (/clear, /compact, or the standalone word keep).
-# Unmatched tool calls, an earlier turn's write, both env vars unset/empty
-# (the inert default), stop_hook_active re-stops, and missing/broken inputs all
-# stay silent. Fire-once memory: a fired (or pick-accompanied) write never
-# re-arms the poll turn-ends absorbed after it, a NEW write past the stored
-# offset re-arms, isMeta cron prompts do not bound the turn, and state
-# failures (corrupt content, unwritable dir) fail open.
+# Unmatched tool calls, an earlier turn's write, unwired non-default paths
+# (including docs/roles/admin.md), stop_hook_active re-stops, and
+# missing/broken inputs all stay silent. Fire-once memory: a fired (or
+# pick-accompanied) write never re-arms the poll turn-ends absorbed after it,
+# a NEW write past the stored offset re-arms, isMeta cron prompts do not bound
+# the turn, and state failures (corrupt content, unwritable dir) fail open.
 #
 # Usage: plugins/seyag/hooks/handoff-pick-check.probe.sh   (from repo root)
 
@@ -75,7 +76,9 @@ check 2 "Bash handoff write + no pick token blocks" "$TMP/bash-nopick.jsonl" "" 
   'keep \(reply due within the hour; warm cache\)' \
   'never schedule wakeups to keep the cache warm' \
   'and is every owner directive from this session on disk\?' \
-  'once per turn'
+  'once per turn' \
+  '!SYG_HANDOFF_PATHS' \
+  '!SYG_HANDOFF_CMDS'
 
 # --- 2. Same Bash handoff write + each pick token → exit 0 --------------------
 mktx_bash "$TMP/bash-keep.jsonl" "myrole --set widget --handoff 'unit 3 done'" \
@@ -143,12 +146,16 @@ check 0 "handoff write in an earlier turn does not trigger this turn" "$TMP/earl
 check 0 "stop_hook_active true allows the re-stop" "$TMP/bash-nopick.jsonl" true
 unset SYG_HANDOFF_PATHS SYG_HANDOFF_CMDS
 
-# --- 7. Inert toggle: both env vars unset or empty → exit 0 -------------------
-check 0 "both env vars unset → inert even on a matching Bash call with no pick" "$TMP/bash-nopick.jsonl" "" '!.'
-check 0 "both env vars unset → inert even on a matching Edit call with no pick" "$TMP/edit-nopick.jsonl" "" '!.'
+# --- 7. Unwired non-default paths and Bash calls stay silent → exit 0 ---------
+check 0 "unwired env: Bash call with no SYG_HANDOFF_CMDS stays silent" "$TMP/bash-nopick.jsonl" "" '!.'
+check 0 "unwired env: non-default path Edit stays silent" "$TMP/edit-nopick.jsonl" "" '!.'
+
+mktx_file "$TMP/unwired-docs-role.jsonl" "Edit" "/tmp/fixture/proj/docs/roles/admin.md" \
+  "Documented the admin RBAC role permissions."
+check 0 "unwired env: docs/roles/admin.md write stays silent (narrowed default)" "$TMP/unwired-docs-role.jsonl" "" '!.'
 
 export SYG_HANDOFF_PATHS="" SYG_HANDOFF_CMDS=""
-check 0 "both env vars empty → inert" "$TMP/bash-nopick.jsonl" "" '!.'
+check 0 "both env vars empty: non-default Bash call stays silent" "$TMP/bash-nopick.jsonl" "" '!.'
 unset SYG_HANDOFF_PATHS SYG_HANDOFF_CMDS
 
 # --- 8. Fail-open on broken ERE or missing/empty transcript -------------------
@@ -216,5 +223,34 @@ check 2 "unwritable state dir still fires (fail-open)" "$TMP/bash-nopick.jsonl" 
   'HANDOFF PICK' '!Traceback'
 export XDG_STATE_HOME="$TMP/state"
 unset SYG_HANDOFF_CMDS
+
+# --- 12. Unwired-state fallback: default handoff write + setup hint -----------
+unset SYG_HANDOFF_PATHS SYG_HANDOFF_CMDS
+mktx_file "$TMP/unwired-handoff-nopick.jsonl" "Write" "/tmp/fixture/proj/HANDOFF.md" \
+  "Wrote HANDOFF.md for the next session."
+check 2 "unwired env: default HANDOFF.md write + no pick blocks with banner + setup hint" \
+  "$TMP/unwired-handoff-nopick.jsonl" "" \
+  'HANDOFF PICK' \
+  '/clear \(unrelated next unit\)' \
+  'SYG_HANDOFF_PATHS' \
+  'SYG_HANDOFF_CMDS'
+
+mktx_file "$TMP/unwired-lower-nopick.jsonl" "Write" "/tmp/fixture/proj/handoff.md" \
+  "Wrote handoff.md for the next session."
+check 2 "unwired env: default lowercase handoff.md write + no pick blocks with banner + setup hint" \
+  "$TMP/unwired-lower-nopick.jsonl" "" \
+  'HANDOFF PICK' \
+  'SYG_HANDOFF_PATHS' \
+  'SYG_HANDOFF_CMDS'
+
+mktx_file "$TMP/unwired-role-nopick.jsonl" "Edit" "/tmp/fixture/notes/roles/widget.md" \
+  "Updated the role handoff for the next session."
+check 0 "unwired env: roles/*.md write stays silent unless SYG_HANDOFF_PATHS wires it" \
+  "$TMP/unwired-role-nopick.jsonl" "" '!.'
+
+mktx_file "$TMP/unwired-handoff-pick.jsonl" "Write" "/tmp/fixture/proj/HANDOFF.md" \
+  "Wrote HANDOFF.md for the next session. Pick: /clear."
+check 0 "unwired env: default HANDOFF.md write + pick token passes" \
+  "$TMP/unwired-handoff-pick.jsonl" "" '!.'
 
 [ "$fail" = 0 ] && echo "ALL PASS" || { echo "FAILURES"; exit 1; }
