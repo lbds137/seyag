@@ -23,6 +23,9 @@
 #      behind an env/runner prefix) and piped into `head`/`tail`/`sed` masks
 #      earlier failing rows the same way. Mentions in argument position
 #      (`wc -l x.probe.sh | tail`, `cat pytest.ini | head`) stay allowed.
+#      Accepted false negative: a quoted script path (`bash "tests/run-probes.sh"
+#      | tail`) collapses to `bash S` under `strip_quoted` before `SUITE_TARGET`
+#      runs and is missed.
 #
 # Background: the seyag rules (rules/core.md § Lossy steps are for known
 # output shapes) name grep/head/tail/sed pipes as the lossy steps that turn a
@@ -716,10 +719,10 @@ Truncation is blocked; SELECTION is not. Pipe into a predicate, or
 redirect to a file and read it whole:
 
   bash tests/run-probes.sh -j 4 | grep -E '^(FAIL|ERROR|ok:)'
-  pytest -q > /tmp/suite.out 2>&1 && cat /tmp/suite.out
+  pytest -q > "${CLAUDE_JOB_DIR:-/tmp}/suite-$$.out" 2>&1; rc=$?; cat "${CLAUDE_JOB_DIR:-/tmp}/suite-$$.out"; echo "rc=$rc"
 
-Or run the suite unfiltered (set SYG_LOSSY_PIPE_SUITES=0 in
-settings.json env to disable the check-suite family).
+Or run the suite unfiltered. A project that does not want this family
+sets SYG_LOSSY_PIPE_SUITES=0 in settings.json env.
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 MSG
 else
