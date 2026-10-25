@@ -29,6 +29,7 @@ private-term-guard	guards-outbound
 claim-shape-guard	guards-commit
 temporal-marker-guard	guards-commit
 pr-merge-review-check	guards-pr
+pr-body-ref-gate	guards-pr
 pr-monitor-reminder	pr-watch
 dispatch-posture-gate	dispatch
 api-credit-ledger	api-credit

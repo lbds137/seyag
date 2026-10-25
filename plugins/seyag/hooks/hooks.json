@@ -105,6 +105,11 @@
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/run.sh\" pr-merge-review-check",
             "timeout": 60
+          },
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/run.sh\" pr-body-ref-gate",
+            "timeout": 60
           }
         ]
       },
