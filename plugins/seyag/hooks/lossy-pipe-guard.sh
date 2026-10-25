@@ -23,9 +23,10 @@
 #      behind an env/runner prefix) and piped into `head`/`tail`/`sed` masks
 #      earlier failing rows the same way. Mentions in argument position
 #      (`wc -l x.probe.sh | tail`, `cat pytest.ini | head`) stay allowed.
-#      Accepted false negative: a quoted script path (`bash "tests/run-probes.sh"
+#      Accepted false negatives: a quoted script path (`bash "tests/run-probes.sh"
 #      | tail`) collapses to `bash S` under `strip_quoted` before `SUITE_TARGET`
-#      runs and is missed.
+#      runs and is missed; bare-target runners (`npm test`, `yarn test`,
+#      `pnpm test`, `make test`) and `nice`/`sudo` prefixes are also not matched.
 #
 # Background: the seyag rules (rules/core.md § Lossy steps are for known
 # output shapes) name grep/head/tail/sed pipes as the lossy steps that turn a
@@ -546,6 +547,8 @@ GH_READ_TARGET = re.compile("(?i)" + "|".join(GH_READ_PARTS))
 SUITE_RUNNER = (
     r"(?:[A-Za-z_][A-Za-z0-9_]*=\S*"
     r"|env(?![-\w=])(?:\s+-+[^-\s]\S*)*"
+    r"|timeout(?![-\w=])\s+\S+"
+    r"|time(?![-\w=])"
     r"|(?:bash|sh|python3?|uv|uvx|npx|pnpm|npm|yarn)(?![-\w=])(?:\s+-+[^-\s]\S*)*(?:\s+(?:run|exec)(?![-\w=]))?"
     r")"
 )
@@ -718,7 +721,7 @@ what it discarded.
 Truncation is blocked; SELECTION is not. Pipe into a predicate, or
 redirect to a file and read it whole:
 
-  bash tests/run-probes.sh -j 4 | grep -E '^(FAIL|ERROR|ok:)'
+  bash tests/run-probes.sh -j 4 | grep -E '^(PASS|FAIL)'
   pytest -q > "${CLAUDE_JOB_DIR:-/tmp}/suite-$$.out" 2>&1; rc=$?; cat "${CLAUDE_JOB_DIR:-/tmp}/suite-$$.out"; echo "rc=$rc"
 
 Or run the suite unfiltered. A project that does not want this family

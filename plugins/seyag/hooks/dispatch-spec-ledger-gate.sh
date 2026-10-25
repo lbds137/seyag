@@ -148,6 +148,8 @@ if [ -n "$RESOLVED_PATH" ]; then
     exit 0
   fi
   if [ "$GREP_RC" -eq 1 ]; then
+    # Near-miss hint is best-effort: line matching cannot see fence context, so
+    # a fenced code comment (`# check the premise ledger`) can be quoted too.
     NEAR_MISS=$(grep -iE '^[[:space:]]*#.*premise[[:space:]]+ledger' "$RESOLVED_PATH" 2>/dev/null | head -n 1 || true)
     block_missing_section "" "$RESOLVED_PATH" "$NEAR_MISS"
   fi
@@ -168,6 +170,7 @@ else
     exit 0
   fi
   if [ "$GREP_RC" -eq 1 ]; then
+    # Same best-effort limitation as the file branch above.
     NEAR_MISS=$(grep -iE '^[[:space:]]*#.*premise[[:space:]]+ledger' <<<"$PROMPT" 2>/dev/null | head -n 1 || true)
     block_missing_section " (inline prompt)" "(inline prompt, isolation: worktree)" "$NEAR_MISS"
   fi
