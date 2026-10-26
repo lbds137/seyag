@@ -76,10 +76,41 @@ case "$plugin_real" in
   *) plugin_rel=$plugin_real ;;
 esac
 
-release_iso=$(git -C "$repo_root" log -1 --format=%cI -S"\"$version\"" -- "$plugin_rel" 2>/dev/null) \
+release_sha=$(git -C "$repo_root" log -1 --format=%H -S"\"$version\"" -- "$plugin_rel" 2>/dev/null) \
   || die "git log failed in $repo_root"
-[ -n "$release_iso" ] || die "no release commit found for version \"$version\" in $plugin_rel"
-release_sec=$(date -u -d "$release_iso" +%s 2>/dev/null) || die "cannot parse release time: $release_iso"
+[ -n "$release_sha" ] || die "no release commit found for version \"$version\" in $plugin_rel"
+commit_ver=$(git -C "$repo_root" show "$release_sha:$plugin_rel" 2>/dev/null | jq -r '.version // empty' 2>/dev/null)
+[ "$commit_ver" = "$version" ] || die "no release commit found for version \"$version\" in $plugin_rel"
+release_iso=$(git -C "$repo_root" log -1 --format=%cI "$release_sha" 2>/dev/null) \
+  || die "git log failed in $repo_root"
+commit_sec=$(date -u -d "$release_iso" +%s 2>/dev/null) || die "cannot parse release time: $release_iso"
+
+received_sec=""
+mapfile -t reflog_lines < <(git -C "$repo_root" log -g --date=iso-strict --format='%H%x09%gd' HEAD 2>/dev/null)
+for (( idx=${#reflog_lines[@]} - 1; idx >= 0; idx-- )); do
+  IFS=$'\t' read -r entry_sha entry_gd <<<"${reflog_lines[$idx]}"
+  case "$entry_gd" in
+    "HEAD@{"*"}")
+      entry_iso=${entry_gd#"HEAD@{"}
+      entry_iso=${entry_iso%"}"}
+      ;;
+    *) continue ;;
+  esac
+  entry_sec=$(date -u -d "$entry_iso" +%s 2>/dev/null) || continue
+  [ "$entry_sec" -ge "$commit_sec" ] || continue
+  if git -C "$repo_root" merge-base --is-ancestor "$release_sha" "$entry_sha" 2>/dev/null; then
+    received_sec=$entry_sec
+    break
+  fi
+done
+if [ -z "$received_sec" ]; then
+  echo "plugin-release-check: reflog gave no checkout-received time; using the commit time" >&2
+  release_sec=$commit_sec
+elif [ "$received_sec" -gt "$commit_sec" ]; then
+  release_sec=$received_sec
+else
+  release_sec=$commit_sec
+fi
 release_min=$(date -u -d "@$release_sec" '+%Y-%m-%dT%H:%MZ')
 
 agents_cmd=${PLUGIN_RELEASE_AGENTS_CMD:-claude agents --json}
@@ -145,10 +176,7 @@ while IFS= read -r row; do
         and .type == "user"
         and (.message | type) == "object"
         and (.message.content | type) == "string"
-        and (
-          (.message.content | startswith("<command-name>/reload-plugins</command-name>"))
-          or (.message.content | startswith("<command-name>/clear</command-name>"))
-        )
+        and (.message.content | test("^\\s*(<command-message>[^<]*</command-message>\\s*)?<command-name>/(reload-plugins|clear)</command-name>"))
         and (.timestamp | type) == "string"
         and (.timestamp | length) > 0
       )

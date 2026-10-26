@@ -62,7 +62,7 @@ cat > "$PJSON" <<'EOF'
 EOF
 git -C "$R" add plugins/demo/.claude-plugin/plugin.json
 GIT_AUTHOR_DATE="2026-10-26T12:00:00Z" GIT_COMMITTER_DATE="2026-10-26T12:00:00Z" \
-  git -C "$R" -c user.name=probe -c user.email=probe@example.invalid commit -qm "release 0.4.1"
+  git -C "$R" -c user.name=probe -c user.email=probe@example.invalid commit -qm "release 0.4.1"; SHA_041=$(git -C "$R" rev-parse HEAD)
 
 # Later commit touching plugin.json with bare 0.4.1 in prose (not `"0.4.1"` count change):
 # pins that `-S'"0.4.1"'` keeps the bump commit rather than matching the later prose-only touch.
@@ -71,7 +71,7 @@ cat > "$PJSON" <<'EOF'
 EOF
 git -C "$R" add plugins/demo/.claude-plugin/plugin.json
 GIT_AUTHOR_DATE="2026-10-26T13:00:00Z" GIT_COMMITTER_DATE="2026-10-26T13:00:00Z" \
-  git -C "$R" -c user.name=probe -c user.email=probe@example.invalid commit -qm "docs note on 0.4.1"
+  git -C "$R" -c user.name=probe -c user.email=probe@example.invalid commit -qm "docs note on 0.4.1"; SHA_DOCS=$(git -C "$R" rev-parse HEAD)
 
 PRE_MS=$(ms_of "2026-10-26T11:00:00Z")
 BOUND_MS=$(ms_of "2026-10-26T12:00:00Z")
@@ -297,6 +297,29 @@ EOF
   fi
 }
 
+canary_12() {
+  local sid="00000000-0000-4000-8000-000000000012" tf="$T/projects/proj-a/00000000-0000-4000-8000-000000000012.jsonl" acmd out1 rc1 out2 rc2 out3 rc3
+  acmd="printf '%s' '[{\"pid\":112,\"name\":\"c12-gap\",\"sessionId\":\"$sid\",\"startedAt\":$PRE_MS}]'"
+  git -C "$R" reflog expire --expire=all --all; GIT_AUTHOR_DATE="2026-10-26T12:40:00Z" GIT_COMMITTER_DATE="2026-10-26T12:40:00Z" git -C "$R" reset --hard "$SHA_041" >/dev/null
+  printf '{"type":"user","timestamp":"2026-10-26T12:20:00Z","message":{"content":"<command-name>/reload-plugins</command-name>"}}\n' > "$tf"; out1=$(run_prc "$acmd" "$T/projects" --plugin-json "$PJSON" 2>&1); rc1=$?
+  printf '{"type":"user","timestamp":"2026-10-26T12:50:00Z","message":{"content":"<command-name>/reload-plugins</command-name>"}}\n' > "$tf"; out2=$(run_prc "$acmd" "$T/projects" --plugin-json "$PJSON" 2>&1); rc2=$?
+  printf '{"type":"user","timestamp":"2026-10-26T12:20:00Z","message":{"content":"<command-name>/reload-plugins</command-name>"}}\n' > "$tf"; out3=$(run_prc "$acmd" "$T/projects" --plugin-json "$PJSON" 2>&1); rc3=$?
+  rm -f "$tf"; git -C "$R" reflog expire --expire=all --all; GIT_AUTHOR_DATE="2026-10-26T12:00:00Z" GIT_COMMITTER_DATE="2026-10-26T12:00:00Z" git -C "$R" reset --hard "$SHA_DOCS" >/dev/null
+  [ "$rc1" -eq 1 ] && [ "$rc2" -eq 0 ] && [ "$rc3" -eq 1 ] && grep -qxF "c12-gap stale started 2026-10-26T11:00Z, last refresh 2026-10-26T12:20Z < release 2026-10-26T12:40Z" <<<"$out1" \
+    && grep -qxF "c12-gap current started 2026-10-26T11:00Z, refreshed 2026-10-26T12:50Z >= release 2026-10-26T12:40Z" <<<"$out2" && grep -qxF "c12-gap stale started 2026-10-26T11:00Z, last refresh 2026-10-26T12:20Z < release 2026-10-26T12:40Z" <<<"$out3" \
+    && ok "canary 12: reload at 12:20Z before 12:40Z checkout pull is stale (12:50Z flips current, 12:20Z reverts stale)" || bad "canary 12: merge->pull gap (rc1=$rc1 rc2=$rc2 rc3=$rc3 out1=$(tr '\n' '|' <<<"$out1"))"
+}
+canary_13() {
+  local out rc; out=$(run_prc "echo '[]'" "$T/projects" --plugin-json "$PJSON" --version 0.4.0 2>&1); rc=$?
+  [ "$rc" -eq 2 ] && grep -qF 'no release commit found for version "0.4.0"' <<<"$out" && ok "canary 13: superseded --version 0.4.0 exits 2 instead of reporting removal commit" || bad "canary 13: superseded --version 0.4.0 (rc=$rc out=$(tr '\n' '|' <<<"$out"))"
+}
+canary_14() {
+  local sid="00000000-0000-4000-8000-000000000014" tf="$T/projects/proj-a/00000000-0000-4000-8000-000000000014.jsonl" out rc
+  printf '{"type":"user","timestamp":"2026-10-26T12:22:00Z","message":{"content":"<command-message>reload-plugins</command-message>\\n<command-name>/reload-plugins</command-name>"}}\n' > "$tf"
+  out=$(run_prc "printf '%s' '[{\"pid\":114,\"name\":\"c14-msgfirst\",\"sessionId\":\"$sid\",\"startedAt\":$PRE_MS}]'" "$T/projects" --plugin-json "$PJSON" 2>&1); rc=$?; rm -f "$tf"
+  [ "$rc" -eq 0 ] && grep -qxF "c14-msgfirst current started 2026-10-26T11:00Z, refreshed 2026-10-26T12:22Z >= release 2026-10-26T12:00Z" <<<"$out" && ok "canary 14: command-message-first /reload-plugins line makes pre-release session current" || bad "canary 14: command-message-first /reload-plugins (rc=$rc out=$(tr '\n' '|' <<<"$out"))"
+}
+
 canary_1
 canary_2
 canary_3
@@ -308,6 +331,7 @@ canary_8
 canary_9
 canary_10
 canary_11
+canary_12; canary_13; canary_14
 
 # ==============================================================================
 # BOUNDARY, MULTI-FILE, MALFORMED ROW, AND ERROR CASES
@@ -361,8 +385,6 @@ else
 fi
 
 # Exit-2 usage and data errors; --plugin-json= and --version= forms also work.
-# (Current version only: for a superseded version, git log -1 -S returns the
-# commit where its count LAST changed — the removal, not the introduction.)
 out=$(run_prc "echo '[]'" "$T/projects" "--plugin-json=$PJSON" "--version=0.4.1" 2>&1); rc=$?
 [ "$rc" -eq 0 ] && grep -qxF "plugin-release-check: demo-plugin 0.4.1 (release 2026-10-26T12:00Z)" <<<"$out" \
   && ok "--plugin-json= and --version= forms select the 0.4.1 release time" \
@@ -436,8 +458,11 @@ check_mutant 5 's/projects_dir=\${PLUGIN_RELEASE_PROJECTS:-\$HOME\/\.claude\/pro
 # 6. Require --version flag (drop plugin.json version fallback).
 check_mutant 6 's/if \[ -z "\$version" \]; then/if false; then/'
 # 9. Drop the string-content filter on .message.content.
-check_mutant 9 's/and (\.message\.content | type) == "string"/and true/; s/(.message.content | startswith("<command-name>\/reload-plugins<\/command-name>"))/((.message.content | tostring) | contains("reload-plugins<\/command-name>"))/'
+check_mutant 9 's/and (\.message\.content | type) == "string"/and true/; s/(\.message\.content | test(".*"))/((.message.content | tostring) | contains("reload-plugins<\/command-name>"))/'
 # 10. Remove `/clear` from the refresh pattern set.
-check_mutant 10 's/or (\.message\.content | startswith("<command-name>\/clear<\/command-name>"))/or false/'
+check_mutant 10 's/(reload-plugins|clear)/(reload-plugins)/'
+check_mutant 12 's/release_sec=\$received_sec/release_sec=\$commit_sec/'
+check_mutant 13 's/\[ "\$commit_ver" = "\$version" \]/true/'
+check_mutant 14 's/test(".*")/startswith("<command-name>\/reload-plugins<\/command-name>")/'
 
 exit "$fail"
