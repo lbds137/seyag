@@ -86,7 +86,13 @@ check() {
     payload=$(printf '%s' "$cmd" | jq -Rs --arg t "$tool" --arg d "$cwd" --arg s "$sess" \
       '{tool_name:$t,tool_input:{command:.},cwd:$d,session_id:$s}')
   fi
-  printf '%s' "$payload" | SYG_CWD_DRIFT_WORKTREE="${SYG_CWD_DRIFT_WORKTREE:-}" bash "$HOOK" >/dev/null 2>&1
+  # Ambient SYG_CWD_DRIFT_WORKTREE must not leak into rows: force-clear it,
+  # except the toggle row (TOGGLE_OFF=1) which pins the =0 opt-out.
+  if [ "${TOGGLE_OFF:-0}" = 1 ]; then
+    printf '%s' "$payload" | SYG_CWD_DRIFT_WORKTREE=0 bash "$HOOK" >/dev/null 2>&1
+  else
+    printf '%s' "$payload" | env -u SYG_CWD_DRIFT_WORKTREE bash "$HOOK" >/dev/null 2>&1
+  fi
   got=$?
   count=$((count + 1))
   if [ "$got" != "$expected" ]; then
@@ -254,8 +260,8 @@ SESSION=s-escape check 0 "linked worktree: later state-changing subcommand in sa
 
 count=$((count + 1))
 if [ -f "$XDG_STATE_HOME/seyag/cwd-drift-guard/s-escape" ] \
-  && grep -qxF "$WT" "$XDG_STATE_HOME/seyag/cwd-drift-guard/s-escape"; then
-  echo "ok   [state]: state file records warned effective cwd ($WT)"
+  && [ "$(cat "$XDG_STATE_HOME/seyag/cwd-drift-guard/s-escape")" = "$WT" ]; then
+  echo "ok   [state]: state file records the last warned effective cwd ($WT)"
 else
   echo "FAIL [state]: state file missing or wrong content for s-escape"
   fail=1
@@ -263,7 +269,7 @@ fi
 
 SESSION=s-escape check 2 "linked worktree: switching to another worktree in same session warns again" "git commit -m x" "$WT2"
 SESSION=s-escape check 0 "linked worktree: second call in second worktree allows" "git commit -m x" "$WT2"
-SESSION=s-escape check 0 "linked worktree: returning to first worktree after cwd change does not re-warn" "git commit -m x" "$WT"
+SESSION=s-escape check 2 "linked worktree: returning to first worktree after cwd change re-warns (last-value memo)" "git commit -m x" "$WT"
 SESSION=s-escape check 2 "linked worktree: subdir inside worktree is a distinct effective cwd and warns" "git commit -m x" "$WT/pkg/sub"
 SESSION=s-other  check 2 "linked worktree: a different session id warns independently" "git commit -m x" "$WT"
 
@@ -276,12 +282,15 @@ WT_BANNER=$(jq -nc --arg d "$ROOT" --arg c "cd $WT && git commit -m x" --arg s "
   '{tool_name:"Bash",tool_input:{command:$c},cwd:$d,session_id:$s}' | bash "$HOOK" 2>&1 >/dev/null)
 WT_BANNER_RC=$?
 count=$((count + 1))
+# The banner prints MAIN_TREE as the worktree toplevel's realpath; derive the
+# same value so the greps hold behind symlinked TMP dirs too.
+MAIN_TREE_REAL=$(realpath "$ROOT")
 if [ "$WT_BANNER_RC" = 2 ] \
   && grep -qF "$WT" <<<"$WT_BANNER" \
   && grep -qF "probe-fixture" <<<"$WT_BANNER" \
-  && grep -qF "$ROOT" <<<"$WT_BANNER" \
-  && grep -qF "anchor the git step: git -C \"$ROOT\" commit" <<<"$WT_BANNER" \
-  && grep -qF "cd \"$ROOT\" first." <<<"$WT_BANNER" \
+  && grep -qF "$MAIN_TREE_REAL" <<<"$WT_BANNER" \
+  && grep -qF "anchor the git step: git -C \"$MAIN_TREE_REAL\" commit" <<<"$WT_BANNER" \
+  && grep -qF "cd \"$MAIN_TREE_REAL\" first." <<<"$WT_BANNER" \
   && grep -qE 're-running|same command|warn-once' <<<"$WT_BANNER"; then
   echo "ok   [banner]: linked-worktree block message names both trees, branch, repair, and confirm-once"
 else
@@ -330,9 +339,11 @@ check 0 "linked worktree: git notes show allows" "git notes show" "$WT"
 check 0 "linked worktree: git stash list allows" "git stash list" "$WT"
 check 0 "linked worktree: git stash show allows" "git stash show" "$WT"
 check 0 "linked worktree: git push --dry-run allows" "git push origin HEAD --dry-run" "$WT"
+check 0 "linked worktree: git push -n (short form) allows" "git push -n origin HEAD" "$WT"
+check 0 "linked worktree: bare git notes (list) allows" "git notes" "$WT"
 
 # Toggle and session_id fail-open rows:
-SYG_CWD_DRIFT_WORKTREE=0 check 0 "linked worktree: SYG_CWD_DRIFT_WORKTREE=0 disables the rule" "git commit -m x" "$WT"
+TOGGLE_OFF=1 check 0 "linked worktree: SYG_CWD_DRIFT_WORKTREE=0 disables the rule" "git commit -m x" "$WT"
 SESSION=__NONE__ check 0 "linked worktree: missing session_id in payload fails open" "git commit -m x" "$WT"
 SESSION=../x     check 0 "linked worktree: invalid session_id (../x) fails open" "git commit -m x" "$WT"
 
@@ -362,19 +373,22 @@ else
   fail=1
 fi
 
-# Unwritable or unreadable state fails OPEN (exit 0):
+# Unwritable or unreadable state fails OPEN (exit 0). Skipped as root: the
+# permission bits do not bind root, so the rows would false-fail.
 echo not-a-dir >"$TMP/state-file"
 XDG_STATE_HOME="$TMP/state-file" SESSION=s-badbase \
   check 0 "unwritable state base (file at XDG_STATE_HOME) fails open" "git commit -m x" "$WT"
 
-touch "$XDG_STATE_HOME/seyag/cwd-drift-guard/s-unreadable"
-chmod 000 "$XDG_STATE_HOME/seyag/cwd-drift-guard/s-unreadable"
-SESSION=s-unreadable check 0 "unreadable state file (000) fails open" "git commit -m x" "$WT"
-chmod 600 "$XDG_STATE_HOME/seyag/cwd-drift-guard/s-unreadable"
+if [ "$(id -u)" != 0 ]; then
+  touch "$XDG_STATE_HOME/seyag/cwd-drift-guard/s-unreadable"
+  chmod 000 "$XDG_STATE_HOME/seyag/cwd-drift-guard/s-unreadable"
+  SESSION=s-unreadable check 0 "unreadable state file (000) fails open" "git commit -m x" "$WT"
+  chmod 600 "$XDG_STATE_HOME/seyag/cwd-drift-guard/s-unreadable"
 
-chmod 500 "$XDG_STATE_HOME/seyag/cwd-drift-guard"
-SESSION=s-rodir check 0 "unwritable state dir (500) fails open" "git commit -m x" "$WT"
-chmod 700 "$XDG_STATE_HOME/seyag/cwd-drift-guard"
+  chmod 500 "$XDG_STATE_HOME/seyag/cwd-drift-guard"
+  SESSION=s-rodir check 0 "unwritable state dir (500) fails open" "git commit -m x" "$WT"
+  chmod 700 "$XDG_STATE_HOME/seyag/cwd-drift-guard"
+fi
 
 # --- A command past 128 KiB (Linux's cap on one env string) --------------
 BIG=$(printf '%*s' 214000 '' | tr ' ' x)

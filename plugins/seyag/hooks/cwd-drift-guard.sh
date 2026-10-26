@@ -30,16 +30,21 @@
 #     worktree (`--git-dir` differs from `--git-common-dir`), a bare
 #     state-changing git subcommand (`commit`, `tag`, `notes`, `merge`,
 #     `rebase`, `reset`, `cherry-pick`, `revert`, `stash`, `am`, `checkout`,
-#     `switch`, `branch`, `push`) blocks ONCE per `(session_id, effective_cwd)`;
-#     its read-only forms do not (bare `branch` or listing flags only, `tag`
-#     with no args or `-l`/`--list`, `notes`/`stash` with `list` or `show`
-#     next, `push` with `--dry-run`). Warned cwds accumulate one per line in
-#     `${XDG_STATE_HOME:-$HOME/.local/state}/seyag/cwd-drift-guard/<session_id>`;
-#     a repeat in the same session and effective cwd passes, and an unreadable
-#     state file or an unwritable state dir fails open (a missing file is
-#     simply the first warn). SYG_CWD_DRIFT_WORKTREE=0 disables this rule (any
-#     other value or unset = on). Requires git >= 2.5 (--git-common-dir in
-#     the shared rev-parse); on older git the whole hook is inert.
+#     `switch`, `branch`, `push`) blocks once per arrival; its read-only forms
+#     do not (bare `branch` or listing flags only, `tag` with no args or
+#     `-l`/`--list`, `notes` with no args or `list`/`show` next, `stash` with
+#     `list` or `show` next, `push` with `-n`/`--dry-run`). The last warned
+#     effective cwd is recorded in
+#     `${XDG_STATE_HOME:-$HOME/.local/state}/seyag/cwd-drift-guard/<session_id>`
+#     (last-value memo, one line): it blocks once per arrival; a repeat in the
+#     same session and effective cwd passes, and an unreadable state file or an
+#     unwritable state dir fails open (a missing file is simply the first warn).
+#     Known bound: a session that drifts back into an already-warned worktree
+#     without an intervening warn elsewhere passes — inherent to any memo; the
+#     confirm-once banner is the mitigation. SYG_CWD_DRIFT_WORKTREE=0 disables
+#     this rule (any other value or unset = on). Requires git >= 2.5
+#     (--git-common-dir in the shared rev-parse); on older git the whole hook
+#     is inert.
 #
 # Tokens that cannot be judged this way are SKIPPED (allowed): an absolute path;
 # one starting with `~`, `-` or `:` (git pathspec magic); one containing a glob
@@ -52,9 +57,11 @@
 # none.
 #
 # Deliberately NARROW. `pnpm`/`npm` from a subdir never block; `git status`,
-# `git log` with no pathspec never block; a linked worktree's ROOT is its own
-# toplevel, so it is not drift. When in doubt this hook allows: it may only
-# ever ADD a block on an unambiguous mistake.
+# `git log` with no pathspec never block; for pathspec drift, a linked
+# worktree's ROOT is its own toplevel, so it is not drift. (The linked-worktree
+# rule below is the deliberate exception: it warns once on arrival because a
+# wrong-tree commit is expensive.) For the pathspec rules, when in doubt this
+# hook allows: they may only ever ADD a block on an unambiguous mistake.
 #
 # COMMAND-TEXT SCOPE ONLY: this guard matches the command text's paths only; a
 # wrapper script (or any child process) committing in a different checkout is
@@ -375,34 +382,37 @@ def wt_read_only(subcmd, rest):
     if subcmd == "tag":
         # No args, or an explicit list flag.
         return not rest or any(w in ("-l", "--list") for w in rest)
-    if subcmd in ("notes", "stash"):
+    if subcmd == "notes":
+        # Bare `git notes` lists; `list`/`show` as the next word also reads.
+        return not rest or rest[0] in ("list", "show")
+    if subcmd == "stash":
         # `list`/`show` as the next word; bare `git stash` still pushes.
         return bool(rest) and rest[0] in ("list", "show")
     if subcmd == "push":
-        return "--dry-run" in rest
+        return any(w in ("--dry-run", "-n") for w in rest)
     return False
 
 
 def warn_once_worktree():
-    """The state file is a set of warned effective cwds, one per line: block
-    iff eff is absent, appending it (the whole set rewritten atomically) on
-    the block."""
+    """Last-value memo (one line = last warned effective cwd; known bound in
+    header): block iff stored != eff, writing eff alone atomically on block."""
     if not session_id or not state_dir or not re.match(r"^[A-Za-z0-9._-]+$", session_id) or session_id in (".", ".."):
         return False
     state_file = os.path.join(state_dir, session_id)
-    warned = []
+    stored = None
     try:
         with open(state_file, "r", encoding="utf-8", errors="replace") as f:
-            warned = [cwd for cwd in (ln.rstrip("\r\n") for ln in f) if cwd]
+            stored = f.readline().rstrip("\r\n")
     except FileNotFoundError:
         pass
     except OSError:
         return False
-    if eff in warned:
+    if stored == eff:
         return False
     tmp_path = None
     try:
         os.makedirs(state_dir, exist_ok=True)
+        # a session silent for 7 days can have its memo pruned by another session's write — it re-warns (fail-safe direction).
         cutoff = time.time() - 7 * 86400
         try:
             for entry in os.scandir(state_dir):
@@ -416,7 +426,7 @@ def warn_once_worktree():
         fd, tmp_path = tempfile.mkstemp(prefix=".tmp.", dir=state_dir)
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write("".join(line + "\n" for line in warned + [eff]))
+                f.write(eff + "\n")
         except Exception:
             try:
                 os.unlink(tmp_path)
