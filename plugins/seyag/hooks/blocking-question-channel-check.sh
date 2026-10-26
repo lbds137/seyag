@@ -24,6 +24,11 @@
 # Known false-positive shape, accepted the same way (costs one acknowledged
 # turn): a closing inline code span whose content ends in "?" ("Run `foo?`").
 #
+# With the Stop envelope's last_assistant_message as the closing text: the
+# harness truncates long values (they end "… [+N chars]"), and a closing
+# question cut by the truncation no longer ends the message — missed, the
+# fail-open direction this hook already accepts.
+#
 # The seyag rules (rules/core.md): blocking questions go through a formal
 # channel.
 #
@@ -53,8 +58,10 @@ ACTIVE=$(jq -r '.stop_hook_active // false' <<<"$INPUT" 2>/dev/null || echo "fal
 
 TRANSCRIPT=$(jq -r '.transcript_path // empty' <<<"$INPUT" 2>/dev/null || echo "")
 [ -z "$TRANSCRIPT" ] || [ ! -f "$TRANSCRIPT" ] && exit 0
+# Stop envelope's last_assistant_message: closing text before the async transcript catches up.
+LAM=$(jq -r '.last_assistant_message // empty' <<<"$INPUT" 2>/dev/null || echo "")
 
-VERDICT=$(TRANSCRIPT="$TRANSCRIPT" python3 << 'PYEOF'
+VERDICT=$(TRANSCRIPT="$TRANSCRIPT" LAM="$LAM" python3 << 'PYEOF'
 import json, os, re, sys
 
 path = os.environ["TRANSCRIPT"]
@@ -126,15 +133,20 @@ used_formal_channel = any(
 if used_formal_channel:
     print("ok"); sys.exit()
 
-# The final assistant text = last text block anywhere (robust to the
-# boundary-not-found case; it is always the closing message we read to end).
-final_text = ""
-for entry in records:
-    if entry.get("type") != "assistant":
-        continue
-    for block in entry.get("message", {}).get("content", []) or []:
-        if block.get("type") == "text":
-            final_text = block.get("text", "")
+# Closing text: the Stop envelope's last_assistant_message when present, else
+# the last text block anywhere (robust to the boundary-not-found case; it is
+# always the closing message we read to end).
+lam = os.environ.get("LAM", "")
+if lam.strip():
+    final_text = lam
+else:
+    final_text = ""
+    for entry in records:
+        if entry.get("type") != "assistant":
+            continue
+        for block in entry.get("message", {}).get("content", []) or []:
+            if block.get("type") == "text":
+                final_text = block.get("text", "")
 
 # Question shape: the LAST non-empty line ends with a question mark. Position is
 # the discriminator — a `?` mid-message is ordinary prose (a rhetorical aside, a

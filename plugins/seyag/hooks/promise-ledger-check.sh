@@ -14,6 +14,13 @@
 # line-leading queue label) to keep false positives low; the same-turn ledger
 # write suppresses the common "promised AND filed in the same breath" case.
 #
+# Closing text comes from the Stop envelope's last_assistant_message (with the
+# transcript tail as fallback): the harness truncates long values (they end
+# "… [+N chars]"), and a trailing promise cut by the truncation turns a
+# should-block turn into a pass. Accepted: judging the transcript instead when
+# the field is present re-reads stale prior-turn closings — the false fires
+# that motivated the field.
+#
 # What counts as a ledger write (same turn only):
 #   - an Edit / Write / MultiEdit whose file_path matches the ledger regex.
 #     Default: (^|/)(backlog/|tracker/|CURRENT\.md|BACKLOG\.md|TODO\.md|claude-memory/roles/)
@@ -51,8 +58,10 @@ ACTIVE=$(jq -r '.stop_hook_active // false' <<<"$INPUT" 2>/dev/null || echo "fal
 
 TRANSCRIPT=$(jq -r '.transcript_path // empty' <<<"$INPUT" 2>/dev/null || echo "")
 [ -z "$TRANSCRIPT" ] || [ ! -f "$TRANSCRIPT" ] && exit 0
+# Stop envelope's last_assistant_message: closing text before the async transcript catches up.
+LAM=$(jq -r '.last_assistant_message // empty' <<<"$INPUT" 2>/dev/null || echo "")
 
-VERDICT=$(TRANSCRIPT="$TRANSCRIPT" python3 << 'PYEOF'
+VERDICT=$(TRANSCRIPT="$TRANSCRIPT" LAM="$LAM" python3 << 'PYEOF'
 import json, os, re, sys
 
 path = os.environ["TRANSCRIPT"]
@@ -181,15 +190,20 @@ wrote_ledger = any(
     for block in (entry.get("message", {}).get("content", []) or [])
 )
 
-# (b) the final assistant text = last text block ANYWHERE (robust to the
-# boundary-not-found case; it's always the closing message we read to end).
-final_text = ""
-for entry in records:
-    if entry.get("type") != "assistant":
-        continue
-    for block in entry.get("message", {}).get("content", []) or []:
-        if block.get("type") == "text":
-            final_text = block.get("text", "")
+# (b) closing text: the Stop envelope's last_assistant_message when present,
+# else the last text block ANYWHERE (robust to the boundary-not-found case;
+# it's always the closing message we read to end).
+lam = os.environ.get("LAM", "")
+if lam.strip():
+    final_text = lam
+else:
+    final_text = ""
+    for entry in records:
+        if entry.get("type") != "assistant":
+            continue
+        for block in entry.get("message", {}).get("content", []) or []:
+            if block.get("type") == "text":
+                final_text = block.get("text", "")
 
 if wrote_ledger or not final_text.strip():
     print("ok"); sys.exit()

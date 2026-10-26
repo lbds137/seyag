@@ -25,6 +25,10 @@
 # match; the convention states the pick explicitly ("Pick: keep"), block-once
 # bounds the miss, and a pick-shaped regex was rejected as brittle.
 #
+# Known residual, accepted: the envelope's last_assistant_message is truncated
+# for long closings (it ends "… [+N chars]"); a pick token cut by the
+# truncation still blocks — the fail-closed direction this gate prefers.
+#
 # Enforcement geometry mirrors the sibling Stop hooks: a deterministic scan of
 # the current turn in a bounded transcript tail, blocking at most once per
 # turn-end via the native `stop_hook_active` flag and at most once per handoff
@@ -62,8 +66,10 @@ ACTIVE=$(jq -r '.stop_hook_active // false' <<<"$INPUT" 2>/dev/null || echo "fal
 
 TRANSCRIPT=$(jq -r '.transcript_path // empty' <<<"$INPUT" 2>/dev/null || echo "")
 [ -z "$TRANSCRIPT" ] || [ ! -f "$TRANSCRIPT" ] && exit 0
+# Stop envelope's last_assistant_message: closing text before the async transcript catches up.
+LAM=$(jq -r '.last_assistant_message // empty' <<<"$INPUT" 2>/dev/null || echo "")
 
-VERDICT=$(TRANSCRIPT="$TRANSCRIPT" python3 << 'PYEOF'
+VERDICT=$(TRANSCRIPT="$TRANSCRIPT" LAM="$LAM" python3 << 'PYEOF'
 import json, os, re, sys
 
 
@@ -206,13 +212,19 @@ try:
 except OSError:
     pass  # fail-open: no memory → every turn-end re-fires, as before
 
-final_text = ""
-for _, entry in turn:
-    if entry.get("type") != "assistant":
-        continue
-    for block in entry.get("message", {}).get("content", []) or []:
-        if isinstance(block, dict) and block.get("type") == "text":
-            final_text = block.get("text", "")
+# Closing text: the Stop envelope's last_assistant_message when present, else
+# the turn's last text block from the transcript.
+lam = os.environ.get("LAM", "")
+if lam.strip():
+    final_text = lam
+else:
+    final_text = ""
+    for _, entry in turn:
+        if entry.get("type") != "assistant":
+            continue
+        for block in entry.get("message", {}).get("content", []) or []:
+            if isinstance(block, dict) and block.get("type") == "text":
+                final_text = block.get("text", "")
 
 PICK_RE = re.compile(r"(?<![\w/])/(?:clear|compact)\b|\bkeep\b", re.I)
 

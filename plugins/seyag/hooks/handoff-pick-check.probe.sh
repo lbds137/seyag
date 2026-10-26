@@ -264,4 +264,52 @@ check 0 "replace semantics: only SYG_HANDOFF_CMDS set drops the HANDOFF.md path 
   "$TMP/cmds-only-handoff-nopick.jsonl" "" '!.'
 unset SYG_HANDOFF_CMDS
 
+# --- 13. Stop envelope last_assistant_message (transcript lag) ----------------
+export SYG_HANDOFF_CMDS='myrole --set'
+{
+  echo '{"type":"user","isMeta":null,"message":{"content":"go"}}'
+  echo '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"myrole --set widget --handoff '\''unit 3 done'\''"}}]}}'
+} > "$TMP/lag-pick.jsonl"
+echo "{\"stop_hook_active\":false,\"transcript_path\":\"$TMP/lag-pick.jsonl\",\"last_assistant_message\":\"Handoff on disk. Pick: keep.\"}" \
+  | bash "$HOOK" >/dev/null 2>"$TMP/stderr.out"
+got=$?
+if [ "$got" != 0 ] || grep -q Traceback "$TMP/stderr.out"; then echo "FAIL [$got≠0]: last_assistant_message pick passes when transcript lacks closing text"; fail=1
+else echo "ok   [0]: last_assistant_message pick passes when transcript lacks closing text"; fi
+
+{
+  echo '{"type":"user","isMeta":null,"message":{"content":"go"}}'
+  echo '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"myrole --set widget --handoff '\''unit 3 done'\''"}}]}}'
+} > "$TMP/lag-nopick.jsonl"
+echo "{\"stop_hook_active\":false,\"transcript_path\":\"$TMP/lag-nopick.jsonl\",\"last_assistant_message\":\"Unit 3 is landed and the handoff is written to disk.\"}" \
+  | bash "$HOOK" >/dev/null 2>"$TMP/stderr.out"
+got=$?
+if [ "$got" != 2 ] || grep -q Traceback "$TMP/stderr.out"; then echo "FAIL [$got≠2]: last_assistant_message without pick still blocks when transcript lacks closing text"; fail=1
+else echo "ok   [2]: last_assistant_message without pick still blocks when transcript lacks closing text"; fi
+
+# Empty LAM (older payloads) falls back to the transcript closing.
+{
+  echo '{"type":"user","isMeta":null,"message":{"content":"go"}}'
+  echo '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"myrole --set widget --handoff '\''unit 3 done'\''"}}]}}'
+  echo '{"type":"assistant","message":{"content":[{"type":"text","text":"Handoff on disk. Pick: /clear for the next unit."}]}}'
+} > "$TMP/empick.jsonl"
+echo "{\"stop_hook_active\":false,\"transcript_path\":\"$TMP/empick.jsonl\",\"last_assistant_message\":\"\"}" \
+  | bash "$HOOK" >/dev/null 2>"$TMP/stderr.out"
+got=$?
+if [ "$got" != 0 ] || grep -q Traceback "$TMP/stderr.out"; then echo "FAIL [$got≠0]: empty last_assistant_message falls back to the transcript closing"; fail=1
+else echo "ok   [0]: empty last_assistant_message falls back to the transcript closing"; fi
+
+# A truncated LAM (the harness's "… [+N chars]" suffix) with the pick cut
+# still blocks: the accepted fail-closed residual (header note). Fresh
+# transcript: a reused one is already accounted for by the fire-once offset.
+{
+  echo '{"type":"user","isMeta":null,"message":{"content":"go"}}'
+  echo '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"myrole --set widget --handoff '\''unit 3 done'\''"}}]}}'
+} > "$TMP/lag-trunc.jsonl"
+echo "{\"stop_hook_active\":false,\"transcript_path\":\"$TMP/lag-trunc.jsonl\",\"last_assistant_message\":\"Handoff on disk. Pick: k… [+40 chars]\"}" \
+  | bash "$HOOK" >/dev/null 2>"$TMP/stderr.out"
+got=$?
+if [ "$got" != 2 ] || grep -q Traceback "$TMP/stderr.out"; then echo "FAIL [$got≠2]: truncated last_assistant_message with the pick cut still blocks"; fail=1
+else echo "ok   [2]: truncated last_assistant_message with the pick cut still blocks"; fi
+unset SYG_HANDOFF_CMDS
+
 [ "$fail" = 0 ] && echo "ALL PASS" || { echo "FAILURES"; exit 1; }
