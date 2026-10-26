@@ -24,7 +24,7 @@ bad() { echo "FAIL: $1"; fail=1; }
 
 # Hermetic environment: strip any ambient override and place a poison `claude`
 # binary first on PATH so any un-overridden invocation fails loudly.
-unset PLUGIN_RELEASE_AGENTS_CMD PLUGIN_RELEASE_PROJECTS
+unset PLUGIN_RELEASE_AGENTS_CMD PLUGIN_RELEASE_PROJECTS PLUGIN_RELEASE_UPSTREAM_REF PLUGIN_RELEASE_FETCH
 FAKEBIN="$T/fakebin"
 mkdir -p "$FAKEBIN" "$T/home/.claude/projects" "$T/projects/proj-a" "$T/projects/proj-b"
 cat > "$FAKEBIN/claude" <<'EOF'
@@ -54,7 +54,7 @@ cat > "$PJSON" <<'EOF'
 EOF
 git -C "$R" add plugins/demo/.claude-plugin/plugin.json
 GIT_AUTHOR_DATE="2026-10-26T10:00:00Z" GIT_COMMITTER_DATE="2026-10-26T10:00:00Z" \
-  git -C "$R" -c user.name=probe -c user.email=probe@example.invalid commit -qm "release 0.4.0"
+  git -C "$R" -c user.name=probe -c user.email=probe@example.invalid commit -qm "release 0.4.0"; SHA_040=$(git -C "$R" rev-parse HEAD)
 
 # Release 0.4.1's commit time is the GIT_*_DATE value on the commit below.
 cat > "$PJSON" <<'EOF'
@@ -72,6 +72,11 @@ EOF
 git -C "$R" add plugins/demo/.claude-plugin/plugin.json
 GIT_AUTHOR_DATE="2026-10-26T13:00:00Z" GIT_COMMITTER_DATE="2026-10-26T13:00:00Z" \
   git -C "$R" -c user.name=probe -c user.email=probe@example.invalid commit -qm "docs note on 0.4.1"; SHA_DOCS=$(git -C "$R" rev-parse HEAD)
+
+git clone -q --bare "$R" "$T/origin.git"
+git -C "$R" remote add origin "$T/origin.git"
+git -C "$R" fetch -q origin
+git -C "$R" branch -q --set-upstream-to=origin/main main
 
 PRE_MS=$(ms_of "2026-10-26T11:00:00Z")
 BOUND_MS=$(ms_of "2026-10-26T12:00:00Z")
@@ -417,6 +422,106 @@ out=$(env -u PLUGIN_RELEASE_AGENTS_CMD PLUGIN_RELEASE_PROJECTS="$T/projects" "$P
 [ "$rc" -eq 2 ] && grep -qF "agents command failed" <<<"$out" \
   && ok "default agents command path runs claude (poison fires) and dies exit 2" \
   || bad "default agents cmd: rc=$rc out=[$out]"
+
+# ==============================================================================
+# UPSTREAM VERSION COMPARISON (EXIT 3 WHEN BEHIND, NOTES ON FETCH/REF/AHEAD)
+# ==============================================================================
+git clone -q "$T/origin.git" "$T/pusher"
+cat > "$T/pusher/plugins/demo/.claude-plugin/plugin.json" <<'EOF'
+{"name": "demo-plugin", "version": "0.5.0"}
+EOF
+git -C "$T/pusher" add plugins/demo/.claude-plugin/plugin.json
+GIT_AUTHOR_DATE="2026-10-26T14:00:00Z" GIT_COMMITTER_DATE="2026-10-26T14:00:00Z" \
+  git -C "$T/pusher" -c user.name=probe -c user.email=probe@example.invalid commit -qm "release 0.5.0"
+SHA_050=$(git -C "$T/pusher" rev-parse HEAD)
+
+# (a) behind + fetch on: local 0.4.1, upstream 0.5.0 -> exit 3, output names
+# `checkout behind upstream (0.4.1 < 0.5.0`, and agents command is NEVER called
+# (the poison-claude canary proves this when PLUGIN_RELEASE_AGENTS_CMD is unset).
+git -C "$T/pusher" push -q origin main
+git -C "$R" update-ref refs/remotes/origin/main "$SHA_DOCS"
+out=$(env -u PLUGIN_RELEASE_AGENTS_CMD PLUGIN_RELEASE_PROJECTS="$T/projects" "$PRC" --plugin-json "$PJSON" 2>&1); rc=$?
+if [ "$rc" -eq 3 ] \
+  && grep -qF "checkout behind upstream (0.4.1 < 0.5.0" <<<"$out" \
+  && ! grep -qF "poison-claude" <<<"$out"; then
+  ok "upstream (a) behind + fetch on: exits 3, names 0.4.1 < 0.5.0, never calls agents command"
+else
+  bad "upstream (a) behind + fetch on: rc=$rc out=[$(tr '\n' '|' <<<"$out")]"
+fi
+
+# (b) behind + PLUGIN_RELEASE_FETCH=0 with a current tracking ref -> exit 3.
+git -C "$T/origin.git" update-ref refs/heads/main "$SHA_DOCS"
+git -C "$R" update-ref refs/remotes/origin/main "$SHA_050"
+out=$(PLUGIN_RELEASE_FETCH=0 run_prc "echo '[]'" "$T/projects" --plugin-json "$PJSON" --version 0.5.0 2>&1); rc=$?
+if [ "$rc" -eq 3 ] \
+  && grep -qF "checkout behind upstream (0.4.1 < 0.5.0" <<<"$out"; then
+  ok "upstream (b) behind + PLUGIN_RELEASE_FETCH=0 with moved tracking ref: exits 3"
+else
+  bad "upstream (b) behind + PLUGIN_RELEASE_FETCH=0: rc=$rc out=[$(tr '\n' '|' <<<"$out")]"
+fi
+
+# (c) behind + dead fetch (remote points at a nonexistent path) -> stderr note,
+# still exit 3 via the last-fetched tracking ref.
+git -C "$R" remote set-url origin "$T/nonexistent-origin.git"
+out=$(run_prc "echo '[]'" "$T/projects" --plugin-json "$PJSON" 2>&1); rc=$?
+git -C "$R" remote set-url origin "$T/origin.git"
+if [ "$rc" -eq 3 ] \
+  && grep -qF "fetch failed; comparing against the last-fetched upstream ref" <<<"$out" \
+  && grep -qF "checkout behind upstream (0.4.1 < 0.5.0" <<<"$out"; then
+  ok "upstream (c) behind + dead fetch: prints fetch-failed stderr note and still exits 3"
+else
+  bad "upstream (c) behind + dead fetch: rc=$rc out=[$(tr '\n' '|' <<<"$out")]"
+fi
+
+# (d) local == upstream -> today's behavior, exit per sessions, no behind line.
+git -C "$T/origin.git" update-ref refs/heads/main "$SHA_DOCS"
+git -C "$R" update-ref refs/remotes/origin/main "$SHA_DOCS"
+out=$(run_prc "printf '%s' '[{\"pid\":201,\"name\":\"up-eq\",\"sessionId\":\"00000000-0000-4000-8000-000000000201\",\"startedAt\":$POST_MS}]'" "$T/projects" --plugin-json "$PJSON" 2>&1); rc=$?
+if [ "$rc" -eq 0 ] \
+  && ! grep -qF "checkout behind upstream" <<<"$out" \
+  && grep -qxF "up-eq current started 2026-10-26T12:10Z >= release 2026-10-26T12:00Z" <<<"$out"; then
+  ok "upstream (d) local == upstream: runs sessions walk and exits per sessions with no behind line"
+else
+  bad "upstream (d) local == upstream: rc=$rc out=[$(tr '\n' '|' <<<"$out")]"
+fi
+
+# (e) checkout ahead -> stderr note naming both versions, sessions walk runs.
+git -C "$T/origin.git" update-ref refs/heads/main "$SHA_040"
+out=$(run_prc "printf '%s' '[{\"pid\":202,\"name\":\"up-ahead\",\"sessionId\":\"00000000-0000-4000-8000-000000000202\",\"startedAt\":$POST_MS}]'" "$T/projects" --plugin-json "$PJSON" 2>&1); rc=$?
+git -C "$T/origin.git" update-ref refs/heads/main "$SHA_DOCS"
+git -C "$R" update-ref refs/remotes/origin/main "$SHA_DOCS"
+if [ "$rc" -eq 0 ] \
+  && grep -qF "checkout ahead of upstream (0.4.1 > 0.4.0" <<<"$out" \
+  && grep -qxF "up-ahead current started 2026-10-26T12:10Z >= release 2026-10-26T12:00Z" <<<"$out"; then
+  ok "upstream (e) checkout ahead: prints stderr note naming 0.4.1 and 0.4.0 and runs sessions walk"
+else
+  bad "upstream (e) checkout ahead: rc=$rc out=[$(tr '\n' '|' <<<"$out")]"
+fi
+
+# (f) no remote / unresolvable ref -> stderr note, sessions walk runs.
+git -C "$R" remote remove origin
+out=$(run_prc "printf '%s' '[{\"pid\":203,\"name\":\"up-noref\",\"sessionId\":\"00000000-0000-4000-8000-000000000203\",\"startedAt\":$POST_MS}]'" "$T/projects" --plugin-json "$PJSON" 2>&1); rc=$?
+git -C "$R" remote add origin "$T/origin.git"
+git -C "$R" fetch -q origin
+git -C "$R" branch -q --set-upstream-to=origin/main main
+if [ "$rc" -eq 0 ] \
+  && grep -qF "cannot resolve upstream ref @{upstream}; skipping upstream comparison" <<<"$out" \
+  && ! grep -qF "fetch failed" <<<"$out" \
+  && grep -qxF "up-noref current started 2026-10-26T12:10Z >= release 2026-10-26T12:00Z" <<<"$out"; then
+  ok "upstream (f) no remote / unresolvable ref: prints stderr note, no fetch-failed note, runs sessions walk"
+else
+  bad "upstream (f) no remote / unresolvable ref: rc=$rc out=[$(tr '\n' '|' <<<"$out")]"
+fi
+
+# (g) PLUGIN_RELEASE_UPSTREAM_REF honored: custom ref value (second branch) -> exit 3.
+git -C "$T/pusher" push -q origin HEAD:refs/heads/next-release
+out=$(PLUGIN_RELEASE_UPSTREAM_REF=origin/next-release run_prc "echo '[]'" "$T/projects" --plugin-json "$PJSON" 2>&1); rc=$?
+if [ "$rc" -eq 3 ] \
+  && grep -qF "checkout behind upstream (0.4.1 < 0.5.0 at origin/next-release); pull the checkout and re-run" <<<"$out"; then
+  ok "upstream (g) PLUGIN_RELEASE_UPSTREAM_REF honored: custom branch ref exits 3"
+else
+  bad "upstream (g) PLUGIN_RELEASE_UPSTREAM_REF: rc=$rc out=[$(tr '\n' '|' <<<"$out")]"
+fi
 
 # ==============================================================================
 # CLAIM CANARY MUTATION RED-TAIL CONTROLS (1, 2, 3, 4, 5, 6, 9, 10)
