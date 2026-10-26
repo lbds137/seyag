@@ -143,23 +143,40 @@ if [ -z "$REASON" ]; then
     REASON="the project dir $PROJ does not exist"
   else
     TO=()
-    # -k: a command that ignores TERM is killed 2s later, so it cannot stall the hook.
+    # -k: a command that ignores TERM is killed 2s later. The output goes to a
+    # temp file, not a captured pipe: the wait ends when the direct command
+    # exits (or is killed), even if a background child it left behind keeps
+    # the fd open — a pipe would stall the hook until that child exits.
+    # Pure bash: noclobber-exclusive create and the $(<) builtin read, so a
+    # stripped PATH (no mktemp, no cat) still passes. Without rm the file is
+    # left behind, harmless.
     command -v timeout >/dev/null 2>&1 && TO=(timeout -k 2 "$T")
-    OUT=$(cd "$PROJ" 2>/dev/null && "${TO[@]+"${TO[@]}"}" bash -c "$CMD" </dev/null 2>/dev/null)
-    RC=$?
-    if [ "$RC" = 127 ]; then
-      REASON="the route check command was not found (exit 127)"
-    elif { [ "$RC" = 124 ] || [ "$RC" = 137 ]; } && [ "${#TO[@]}" -gt 0 ]; then
-      REASON="the route check command timed out after ${T}s"
-    elif [ "$RC" != 0 ]; then
-      REASON="the route check command exited $RC"
-    elif [ -z "$OUT" ]; then
-      REASON="the route check command printed nothing"
+    OUTF=""
+    for i in 1 2 3; do
+      cand="${TMPDIR:-/tmp}/route-check.$$.$i.$RANDOM"
+      ( set -C; : >"$cand" ) 2>/dev/null && { OUTF=$cand; break; }
+    done
+    if [ -z "$OUTF" ]; then
+      REASON="could not create a temp file for the route check output"
     else
-      LINE="${OUT%%$'\n'*}"
-      read -r WORD _ <<<"$LINE"
-      if [ "${WORD:-}" != "$OKW" ]; then
-        REASON="the route check command's first word was '${WORD:0:80}', not '${OKW:0:80}'"
+      (cd "$PROJ" 2>/dev/null && exec "${TO[@]+"${TO[@]}"}" bash -c "$CMD") >"$OUTF" </dev/null 2>/dev/null
+      RC=$?
+      OUT=$(<"$OUTF")
+      rm -f "$OUTF"
+      if [ "$RC" = 127 ]; then
+        REASON="the route check command was not found (exit 127)"
+      elif { [ "$RC" = 124 ] || [ "$RC" = 137 ]; } && [ "${#TO[@]}" -gt 0 ]; then
+        REASON="the route check command timed out after ${T}s"
+      elif [ "$RC" != 0 ]; then
+        REASON="the route check command exited $RC"
+      elif [ -z "$OUT" ]; then
+        REASON="the route check command printed nothing"
+      else
+        LINE="${OUT%%$'\n'*}"
+        read -r WORD _ <<<"$LINE"
+        if [ "${WORD:-}" != "$OKW" ]; then
+          REASON="the route check command's first word was '${WORD:0:80}', not '${OKW:0:80}'"
+        fi
       fi
     fi
   fi
