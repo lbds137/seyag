@@ -5,15 +5,25 @@
 #
 # Usage:
 #   plugin-release-check --plugin-json <path/to/plugin.json> [--version <ver>]
+#   (upstream comparison reads the file's version even when --version is passed)
 #
 # Environment overrides:
-#   PLUGIN_RELEASE_AGENTS_CMD   command returning the `claude agents --json` array
-#   PLUGIN_RELEASE_PROJECTS     projects root (default: $HOME/.claude/projects)
+#   PLUGIN_RELEASE_AGENTS_CMD    command returning the `claude agents --json` array
+#   PLUGIN_RELEASE_PROJECTS      projects root (default: $HOME/.claude/projects)
+#   PLUGIN_RELEASE_UPSTREAM_REF  upstream ref to compare against (default: @{upstream})
+#   PLUGIN_RELEASE_FETCH         fetch before upstream compare (default: 1; 0 disables fetch —
+#                                the fetch is network and updates remote-tracking refs, so
+#                                opt out wherever a caller should stay offline)
 #
 # Exit codes:
 #   0  every live session is current
 #   1  at least one live session is stale
 #   2  usage or data error
+#   3  the checkout's plugin.json version is older than upstream's
+#
+# The version comparison is GNU sort -V (version sort), not semver: suffixes
+# order by version-sort, so `1.0.0-rc1` sorts AFTER `1.0.0` and build
+# metadata orders strictly where semver calls it equal.
 
 set -uo pipefail
 shopt -s nullglob
@@ -21,6 +31,10 @@ shopt -s nullglob
 die() {
   echo "plugin-release-check: $*" >&2
   exit 2
+}
+
+ver_lt() {
+  [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -n 1)" = "$1" ]
 }
 
 plugin_json=""
@@ -75,6 +89,34 @@ case "$plugin_real" in
   "$repo_root"/*) plugin_rel=${plugin_real#"$repo_root"/} ;;
   *) plugin_rel=$plugin_real ;;
 esac
+
+local_ver=$(jq -r 'if (.version | type) == "string" and (.version | length) > 0 then .version else empty end' "$plugin_json" 2>/dev/null)
+[ -n "$local_ver" ] || local_ver=$version
+# A literal @{upstream} inside ${var:-...} leaks a trailing } when var is
+# set (SC1083); keep the default out of the expansion.
+default_upstream_ref='@{upstream}'
+upstream_ref=${PLUGIN_RELEASE_UPSTREAM_REF:-$default_upstream_ref}
+fetch_enabled=${PLUGIN_RELEASE_FETCH:-1}
+if [ "$fetch_enabled" != "0" ]; then
+  # GIT_TERMINAL_PROMPT=0: a credentialed remote must never hang the tool on
+  # a prompt; a failed fetch degrades to the last-fetched ref with a note.
+  if ! GIT_TERMINAL_PROMPT=0 git -C "$repo_root" fetch --quiet --all 2>/dev/null; then
+    echo "plugin-release-check: fetch failed; comparing against the last-fetched upstream ref" >&2
+  fi
+fi
+if ! git -C "$repo_root" rev-parse --verify --quiet "$upstream_ref^{commit}" >/dev/null 2>&1; then
+  echo "plugin-release-check: cannot resolve upstream ref $upstream_ref; skipping upstream comparison" >&2
+else
+  upstream_ver=$(git -C "$repo_root" show "$upstream_ref:$plugin_rel" 2>/dev/null | jq -r '.version // empty' 2>/dev/null)
+  if [ -z "$upstream_ver" ]; then
+    echo "plugin-release-check: cannot read version from $upstream_ref:$plugin_rel; skipping upstream comparison" >&2
+  elif ver_lt "$local_ver" "$upstream_ver"; then
+    printf 'plugin-release-check: checkout behind upstream (%s < %s at %s); pull the checkout and re-run\n' "$local_ver" "$upstream_ver" "$upstream_ref"
+    exit 3
+  elif ver_lt "$upstream_ver" "$local_ver"; then
+    printf 'plugin-release-check: checkout ahead of upstream (%s > %s at %s); continuing with local version\n' "$local_ver" "$upstream_ver" "$upstream_ref" >&2
+  fi
+fi
 
 release_sha=$(git -C "$repo_root" log -1 --format=%H -S"\"$version\"" -- "$plugin_rel" 2>/dev/null) \
   || die "git log failed in $repo_root"
