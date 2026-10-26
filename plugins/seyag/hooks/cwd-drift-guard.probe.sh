@@ -73,18 +73,22 @@ count=0
 # check <expected-exit> <label> <command> <cwd|__NONE__>
 # TOOL=<name> in the caller's environment overrides tool_name (default Bash).
 # SESSION=<id> overrides session_id (default probe-<count>; __NONE__ omits it).
+# AGENT=<id> sets agent_id (default __NONE__, which omits it).
 # SYG_CWD_DRIFT_WORKTREE=<val> forwards the worktree toggle to the hook.
 check() {
-  local expected="$1" label="$2" cmd="$3" cwd="$4" tool="${TOOL:-Bash}" sess="${SESSION:-probe-$count}" payload got
+  local expected="$1" label="$2" cmd="$3" cwd="$4" tool="${TOOL:-Bash}" sess="${SESSION:-probe-$count}" agent="${AGENT:-__NONE__}" payload got
   # The command reaches jq on stdin, not argv, so a case past 128 KiB is not capped by exec.
   if [ "$cwd" = "__NONE__" ]; then
     payload=$(printf '%s' "$cmd" | jq -Rs --arg t "$tool" '{tool_name:$t,tool_input:{command:.}}')
   elif [ "$sess" = "__NONE__" ]; then
     payload=$(printf '%s' "$cmd" | jq -Rs --arg t "$tool" --arg d "$cwd" \
       '{tool_name:$t,tool_input:{command:.},cwd:$d}')
-  else
+  elif [ "$agent" = "__NONE__" ]; then
     payload=$(printf '%s' "$cmd" | jq -Rs --arg t "$tool" --arg d "$cwd" --arg s "$sess" \
       '{tool_name:$t,tool_input:{command:.},cwd:$d,session_id:$s}')
+  else
+    payload=$(printf '%s' "$cmd" | jq -Rs --arg t "$tool" --arg d "$cwd" --arg s "$sess" --arg a "$agent" \
+      '{tool_name:$t,tool_input:{command:.},cwd:$d,session_id:$s,agent_id:$a}')
   fi
   # Ambient SYG_CWD_DRIFT_WORKTREE must not leak into rows: force-clear it,
   # except the toggle row (TOGGLE_OFF=1) which pins the =0 opt-out.
@@ -273,6 +277,13 @@ SESSION=s-escape check 2 "linked worktree: returning to first worktree after cwd
 SESSION=s-escape check 2 "linked worktree: subdir inside worktree is a distinct effective cwd and warns" "git commit -m x" "$WT/pkg/sub"
 SESSION=s-other  check 2 "linked worktree: a different session id warns independently" "git commit -m x" "$WT"
 
+# Parallel subagent workers share session_id but carry distinct agent_id values:
+AGENT=wa SESSION=s-par check 2 "parallel workers: agent A blocks in WT" "git commit -m x" "$WT"
+AGENT=wa SESSION=s-par check 0 "agent A second call allows" "git commit -m x" "$WT"
+AGENT=wb SESSION=s-par check 2 "parallel workers: agent B blocks in WT2 independently" "git commit -m x" "$WT2"
+AGENT=wb SESSION=s-par check 0 "agent B second call allows" "git commit -m x" "$WT2"
+AGENT=wa SESSION=s-par check 0 "agent A still allows after B's warn" "git commit -m x" "$WT"
+
 # Leading `cd <worktree>` with payload cwd in the main checkout:
 SESSION=s-cd check 2 "cd <worktree> && git commit from main checkout blocks once" "cd $WT && git commit -m x" "$ROOT"
 SESSION=s-cd check 0 "cd <worktree> && git commit second time in same session allows" "cd $WT && git commit -m x" "$ROOT"
@@ -331,9 +342,10 @@ check 0 "linked worktree: git diff allows" "git diff" "$WT"
 check 0 "linked worktree: git add at worktree root allows" "git add docs/x.md" "$WT"
 check 0 "linked worktree: git fetch allows" "git fetch" "$WT"
 check 0 "linked worktree: bare git branch (read-only) allows" "git branch" "$WT"
-check 0 "linked worktree: git branch read-only flags allow" "git branch -a -r -l --list --show-current -v -vv" "$WT"
+check 0 "linked worktree: git branch read-only flags allow" "git branch -a --all -r --remotes -l --list --show-current -v -vv --verbose" "$WT"
 check 0 "linked worktree: bare git tag (read-only) allows" "git tag" "$WT"
 check 0 "linked worktree: git tag -l / --list allows" "git tag -l" "$WT"
+check 0 "linked worktree: git tag -n allows" "git tag -n" "$WT"
 check 0 "linked worktree: git notes list allows" "git notes list" "$WT"
 check 0 "linked worktree: git notes show allows" "git notes show" "$WT"
 check 0 "linked worktree: git stash list allows" "git stash list" "$WT"
@@ -346,6 +358,7 @@ check 0 "linked worktree: bare git notes (list) allows" "git notes" "$WT"
 TOGGLE_OFF=1 check 0 "linked worktree: SYG_CWD_DRIFT_WORKTREE=0 disables the rule" "git commit -m x" "$WT"
 SESSION=__NONE__ check 0 "linked worktree: missing session_id in payload fails open" "git commit -m x" "$WT"
 SESSION=../x     check 0 "linked worktree: invalid session_id (../x) fails open" "git commit -m x" "$WT"
+AGENT=../x       check 0 "linked worktree: invalid agent_id (../x) fails open" "git commit -m x" "$WT"
 
 # Rule is invisible off linked worktrees, and anchored commands pass:
 check 0 "main checkout root: bare git commit allows (not a linked worktree)" "git commit -m x" "$ROOT"
