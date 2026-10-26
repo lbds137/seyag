@@ -1,0 +1,171 @@
+#!/bin/bash
+# plugin-release-check: report whether every live Claude Code session on the
+# machine is running the current release of a plugin; exit nonzero when any
+# session is stale.
+#
+# Usage:
+#   plugin-release-check --plugin-json <path/to/plugin.json> [--version <ver>]
+#
+# Environment overrides:
+#   PLUGIN_RELEASE_AGENTS_CMD   command returning the `claude agents --json` array
+#   PLUGIN_RELEASE_PROJECTS     projects root (default: $HOME/.claude/projects)
+#
+# Exit codes:
+#   0  every live session is current
+#   1  at least one live session is stale
+#   2  usage or data error
+
+set -uo pipefail
+shopt -s nullglob
+
+die() {
+  echo "plugin-release-check: $*" >&2
+  exit 2
+}
+
+plugin_json=""
+version=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --plugin-json)
+      [ $# -ge 2 ] || die "--plugin-json requires a path"
+      plugin_json=$2
+      shift 2
+      ;;
+    --plugin-json=*)
+      plugin_json=${1#--plugin-json=}
+      [ -n "$plugin_json" ] || die "--plugin-json requires a path"
+      shift
+      ;;
+    --version)
+      [ $# -ge 2 ] || die "--version requires a value"
+      version=$2
+      shift 2
+      ;;
+    --version=*)
+      version=${1#--version=}
+      [ -n "$version" ] || die "--version requires a value"
+      shift
+      ;;
+    *)
+      die "usage: plugin-release-check --plugin-json <path/to/plugin.json> [--version <ver>]"
+      ;;
+  esac
+done
+
+[ -n "$plugin_json" ] || die "missing --plugin-json <path/to/plugin.json>"
+if [ ! -f "$plugin_json" ] || [ ! -r "$plugin_json" ]; then
+  die "unreadable plugin.json: $plugin_json"
+fi
+jq -e 'type == "object"' "$plugin_json" >/dev/null 2>&1 \
+  || die "invalid JSON in plugin.json: $plugin_json"
+
+plugin_name=$(jq -r 'if (.name | type) == "string" and (.name | length) > 0 then .name else "plugin" end' "$plugin_json" 2>/dev/null)
+if [ -z "$version" ]; then
+  version=$(jq -r 'if (.version | type) == "string" and (.version | length) > 0 then .version else empty end' "$plugin_json" 2>/dev/null)
+fi
+[ -n "$version" ] || die "no version field in $plugin_json"
+
+plugin_real=$(realpath -e -- "$plugin_json" 2>/dev/null) || die "cannot resolve path: $plugin_json"
+plugin_dir=$(dirname -- "$plugin_real")
+repo_root=$(git -C "$plugin_dir" rev-parse --show-toplevel 2>/dev/null) \
+  || die "not inside a git repository: $plugin_json"
+repo_root=$(realpath -e -- "$repo_root" 2>/dev/null) || die "cannot resolve repo root: $repo_root"
+case "$plugin_real" in
+  "$repo_root"/*) plugin_rel=${plugin_real#"$repo_root"/} ;;
+  *) plugin_rel=$plugin_real ;;
+esac
+
+release_iso=$(git -C "$repo_root" log -1 --format=%cI -S"\"$version\"" -- "$plugin_rel" 2>/dev/null) \
+  || die "git log failed in $repo_root"
+[ -n "$release_iso" ] || die "no release commit found for version \"$version\" in $plugin_rel"
+release_sec=$(date -u -d "$release_iso" +%s 2>/dev/null) || die "cannot parse release time: $release_iso"
+release_min=$(date -u -d "@$release_sec" '+%Y-%m-%dT%H:%MZ')
+
+agents_cmd=${PLUGIN_RELEASE_AGENTS_CMD:-claude agents --json}
+agents_raw=$(bash -c "$agents_cmd" 2>/dev/null) || die "agents command failed: $agents_cmd"
+jq -e 'type == "array"' <<<"$agents_raw" >/dev/null 2>&1 \
+  || die "agents command output is not a JSON array"
+
+projects_dir=${PLUGIN_RELEASE_PROJECTS:-$HOME/.claude/projects}
+
+printf 'plugin-release-check: %s %s (release %s)\n' "$plugin_name" "$version" "$release_min"
+
+any_stale=0
+while IFS= read -r row; do
+  [ -n "$row" ] || continue
+  row_name=$(jq -r 'if (.name | type) == "string" and (.name | length) > 0 then .name else "<unnamed>" end' <<<"$row")
+  row_valid=$(jq -r '
+    if (.sessionId | type) == "string"
+       and (.sessionId | length) > 0
+       and (.sessionId | contains("/") | not)
+       and (.startedAt | type) == "number"
+       and (.startedAt >= 0)
+       and (.startedAt < 4102444800000)
+    then "ok" else "bad" end
+  ' <<<"$row")
+  if [ "$row_valid" != "ok" ]; then
+    printf '%s stale malformed session row (missing sessionId or startedAt; release %s)\n' "$row_name" "$release_min"
+    any_stale=1
+    continue
+  fi
+
+  session_id=$(jq -r '.sessionId' <<<"$row")
+  started_ms=$(jq -r '.startedAt | floor' <<<"$row")
+  started_sec=$((started_ms / 1000))
+  if ! started_min=$(date -u -d "@$started_sec" '+%Y-%m-%dT%H:%MZ' 2>/dev/null); then
+    printf '%s stale malformed session row (invalid startedAt %s; release %s)\n' "$row_name" "$started_ms" "$release_min"
+    any_stale=1
+    continue
+  fi
+
+  if [ "$started_sec" -ge "$release_sec" ]; then
+    printf '%s current started %s >= release %s\n' "$row_name" "$started_min" "$release_min"
+    continue
+  fi
+
+  files=("$projects_dir"/*/"$session_id".jsonl)
+  if [ ${#files[@]} -eq 0 ]; then
+    printf '%s stale started %s < release %s (no transcript file found)\n' "$row_name" "$started_min" "$release_min"
+    any_stale=1
+    continue
+  fi
+
+  max_refresh_sec=""
+  while IFS= read -r ts; do
+    [ -n "$ts" ] || continue
+    ts_sec=$(date -u -d "$ts" +%s 2>/dev/null) || continue
+    if [ -z "$max_refresh_sec" ] || [ "$ts_sec" -gt "$max_refresh_sec" ]; then
+      max_refresh_sec=$ts_sec
+    fi
+  done < <(jq -R -r '
+    fromjson?
+    | select(
+        type == "object"
+        and .type == "user"
+        and (.message | type) == "object"
+        and (.message.content | type) == "string"
+        and (
+          (.message.content | startswith("<command-name>/reload-plugins</command-name>"))
+          or (.message.content | startswith("<command-name>/clear</command-name>"))
+        )
+        and (.timestamp | type) == "string"
+        and (.timestamp | length) > 0
+      )
+    | .timestamp
+  ' "${files[@]}" 2>/dev/null)
+
+  if [ -z "$max_refresh_sec" ]; then
+    printf '%s stale started %s < release %s (transcript found, no refresh line)\n' "$row_name" "$started_min" "$release_min"
+    any_stale=1
+  elif [ "$max_refresh_sec" -ge "$release_sec" ]; then
+    refresh_min=$(date -u -d "@$max_refresh_sec" '+%Y-%m-%dT%H:%MZ')
+    printf '%s current started %s, refreshed %s >= release %s\n' "$row_name" "$started_min" "$refresh_min" "$release_min"
+  else
+    refresh_min=$(date -u -d "@$max_refresh_sec" '+%Y-%m-%dT%H:%MZ')
+    printf '%s stale started %s, last refresh %s < release %s\n' "$row_name" "$started_min" "$refresh_min" "$release_min"
+    any_stale=1
+  fi
+done < <(jq -c '.[] | select(type == "object" and .pid != null)' <<<"$agents_raw")
+
+exit "$any_stale"
