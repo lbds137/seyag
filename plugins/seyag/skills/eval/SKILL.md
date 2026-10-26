@@ -20,7 +20,8 @@ Write the design down — in the result doc's own skeleton — and freeze it. Re
 3. **Arm conditions are part of the result.** Every arm records its harness: interactive vs headless, tools available, sandbox and read scope, wrapper or runner version, effort level, gates reachable or not, driver-capable vs headless-only, and commands the harness offers only to some roles (a first-party-only advisor command is a harness fact). An arm's number measures the model as that harness allows it at that version — never the model alone. A lane restricted to certain roles is a harness property of its arms.
 4. **Harness control arms.** When an arm runs in a restricted harness, add a same-model control arm where one exists (the same model through an unrestricted harness). For a unit class the harness does not bias — a self-contained task with no user in the loop — a headless run of an interactive product should match its interactive twin, which is what makes the pair a clean control. Holding the model fixed isolates the harness penalty, which a cross-family comparison otherwise confounds with model differences. Where billing route is the only difference, add the cheap expected-equal sanity arm.
 5. **Metrics, scoring and the decision rule — fixed before results.** For comparisons: one blind reviewer, fresh context, label order randomized and recorded apart from the brief, ONE review pass per comparison — scores compare only within a pass (reviewer noise between passes is routinely 1–2 points on identical diffs); the pass's own noise band is measured by re-scoring one diff inside it, and a gap smaller than that band decides nothing; severity weights stated; a decision rule that can output "cannot decide", with what would decide it.
-6. **Cost capture per arm.** Meter deltas, dollars, quota points, wall seconds — before and after readings; shared meters make every delta an upper bound, and the doc says so; aborted tries are counted too. Review and orchestration costs are recorded apart from arm costs, never inside an arm's mean.
+6. **Gate-proof mutation (comparisons).** A comparison's design names its gate-proof mutation before any arm runs: one concrete defect in a class the metric or blind reviewer must catch, cut strictly inside one arm's artifact, to be injected after the arms run and before the verdict. Freeze what a miss means with the decision rule: if the metric or review pass misses the injected defect, it cannot decide on that class, and the verdict is bounded and says so.
+7. **Cost capture per arm.** Meter deltas, dollars, quota points, wall seconds — before and after readings; shared meters make every delta an upper bound, and the doc says so; aborted tries are counted too. Review and orchestration costs are recorded apart from arm costs, never inside an arm's mean.
 
 ## Running
 
@@ -29,6 +30,10 @@ One arm at a time; nothing is pushed mid-eval; the best passing arm's branch is 
 ## Review packet
 
 For a comparison, the orchestrator — never an arm — assembles one blind-review packet for a single review pass: every arm's full diff, randomized arm labels with the label-to-arm mapping recorded on disk apart from the reviewer's brief, the frozen severity vocabulary and weights, and the named anchor arm (for noise-band re-scoring or a fresh pass's tie-back, per Verdict). The reviewer sees the spec and the anonymized diffs in one pass and nothing identifying which model or harness produced which arm.
+
+## Gate proof
+
+For a comparison, before the verdict, prove the gate can fire: inject the frozen gate-proof mutation into ONE arm's copy (never both, never the anchor), re-run the metric or review pass element that must catch it, record both the clean and mutated runs in the result doc, and restore the copy. A mutation the gate fails to catch is a result, not a failed eval — the verdict reports the gate as blind to that defect class and bounds its conclusion accordingly. Never let the mutation reach a pushed branch, a transferred tree, or a second pass's inputs.
 
 ## Verdict
 
