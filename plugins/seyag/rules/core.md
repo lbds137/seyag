@@ -50,7 +50,7 @@ On the Anthropic lane she drives from her phone, often by voice (Remote Control)
 - Never quietly narrow, widen or transform the request. Announce a scope change before making it; she should not discover it afterwards.
 
 ### Fix what you touch, file what you find
-- Inside the change, fix missing tests, unclear names, stale comments and smells in the lines you edit. Beyond it, file a task in the project's tracking surface (backlog, board, TODO file, or the report); never silently do it or drop it.
+- Inside the change, fix missing tests, unclear names, stale comments and smells in the lines you edit. Beyond it, file a task in the project's tracking surface (backlog, board, TODO file, the report, or the skill named by settings env `SYG_TRACKING_SURFACE`); never silently do it or drop it.
 - Never dismiss a problem as "pre-existing". That explains how it got there; it is not a reason to ignore it.
 - A deliberate design choice you decline to refactor (current code is fine, the extraction would be over-abstraction) needs no entry. A known defect you are not fixing now always needs one. When unsure which it is, file it.
 
