@@ -7,7 +7,8 @@
 # differs on purpose: CC_ROUTE_PRESET here, a non-empty ANTHROPIC_API_KEY there), and that
 # usage-sweep --points consumes the readings log it writes. Also: the caller's model read from its
 # session transcript, and --json's scoped string escaping. Also: --all's three lane lines and their
-# degrades, --json's lane fields, and OpenRouter dollars read-only from the statusline's credits cache.
+# degrades, --json's lane fields, OpenRouter dollars read-only from the statusline's credits cache,
+# and per-deployment z.ai week reserve overrides (CLAUDE_USAGE_ZAI_WEEK_RESERVE_CMD / _WEEK_RESERVE).
 # Usage: tests/claude-usage.probe.sh   (from anywhere; never touches the real cache, settings or API)
 
 set -uo pipefail
@@ -329,6 +330,85 @@ run --ok 90 2>/dev/null; [ $? = 0 ] && ok "z.ai 5h 79%: passes" || bad "z.ai 5h 
 run --ok 50 2>/dev/null; [ $? = 1 ] && ok "z.ai 5h 79% with --ok 50: a lower PCT still wins" || bad "z.ai --ok 50: should fail at 79%"
 CLAUDE_USAGE_ZAI_FIVE_CAP=70 run --ok 90 2>/dev/null; [ $? = 1 ] && ok "z.ai 5h 79% with CLAUDE_USAGE_ZAI_FIVE_CAP=70: fails" || bad "z.ai cap override 70: --ok should fail at 79%"
 CLAUDE_USAGE_ZAI_FIVE_CAP=7x run --ok 90 2>/dev/null; [ $? = 0 ] && ok "z.ai 5h 79% with a non-integer cap: default 80 applies" || bad "z.ai cap '7x': --ok should pass at 79%"
+# Per-deployment z.ai week reserve: CLAUDE_USAGE_ZAI_WEEK_RESERVE_CMD (1..99, trimmed, wins in
+# success and failure; invalid/non-zero notes and falls back to week_reserve) and static
+# CLAUDE_USAGE_ZAI_WEEK_RESERVE (when CMD is unset/empty). Scoped to the z.ai --ok branch only.
+zwr_note() { printf 'claude-usage: CLAUDE_USAGE_ZAI_WEEK_RESERVE_CMD gave no usable reserve (exit %s); z.ai week reserve falls back to week_reserve (%s)\n%s' "$1" "$2" "$3"; }
+zai_stub api 10 85
+zai_fail75="claude-usage: --ok FAIL lane=zai meter=week 5h=10%<80% week=85%>=75% source=api"
+out=$(CLAUDE_USAGE_ZAI_WEEK_RESERVE_CMD='echo 98' run --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 0 ] && [ -z "$out" ] && [ "$err" = "claude-usage: --ok pass lane=zai meter=zai-5h 5h=10%<80% week=85%<98% source=api" ] \
+    && ok "z.ai week 85% with CLAUDE_USAGE_ZAI_WEEK_RESERVE_CMD='echo 98': passes with 98% verdict" \
+    || bad "z.ai CMD 98 pass: rc=$rc out=[$out] err=[$err]"
+out=$(CLAUDE_USAGE_ZAI_WEEK_RESERVE=70 CLAUDE_USAGE_ZAI_WEEK_RESERVE_CMD='echo 98' run --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 0 ] && [ -z "$out" ] && [ "$err" = "claude-usage: --ok pass lane=zai meter=zai-5h 5h=10%<80% week=85%<98% source=api" ] \
+    && ok "z.ai CMD wins over static CLAUDE_USAGE_ZAI_WEEK_RESERVE=70 on success" \
+    || bad "z.ai CMD over static success: rc=$rc out=[$out] err=[$err]"
+zai_stub api 10 98
+out=$(CLAUDE_USAGE_ZAI_WEEK_RESERVE_CMD='echo 98' run --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 1 ] && [ -z "$out" ] && [ "$err" = "claude-usage: --ok FAIL lane=zai meter=week 5h=10%<80% week=98%>=98% source=api" ] \
+    && ok "z.ai week 98% with CMD='echo 98': fails with week=98%>=98% verdict" \
+    || bad "z.ai CMD 98 fail: rc=$rc out=[$out] err=[$err]"
+out=$(CLAUDE_USAGE_ZAI_WEEK_RESERVE_CMD='printf " \t099\n "' run --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 0 ] && [ -z "$out" ] && [ "$err" = "claude-usage: --ok pass lane=zai meter=zai-5h 5h=10%<80% week=98%<99% source=api" ] \
+    && ok "z.ai CMD trims outer whitespace and base-10 parses 099 (upper bound 99)" \
+    || bad "z.ai CMD pad/099: rc=$rc out=[$out] err=[$err]"
+zai_stub api 10 1
+out=$(CLAUDE_USAGE_ZAI_WEEK_RESERVE_CMD='echo 1' run --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 1 ] && [ -z "$out" ] && [ "$err" = "claude-usage: --ok FAIL lane=zai meter=week 5h=10%<80% week=1%>=1% source=api" ] \
+    && ok "z.ai CMD lower bound 1: week 1% fails with week=1%>=1%" \
+    || bad "z.ai CMD 1 bound: rc=$rc out=[$out] err=[$err]"
+zai_stub api 10 85
+out=$(CLAUDE_USAGE_ZAI_WEEK_RESERVE=98 CLAUDE_USAGE_ZAI_WEEK_RESERVE_CMD='echo 98; exit 7' run --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 1 ] && [ -z "$out" ] && [ "$err" = "$(zwr_note 7 75 "$zai_fail75")" ] \
+    && ok "z.ai CMD non-zero exit (7): notes exit 7, ignores static=98, falls back to week_reserve (75)" \
+    || bad "z.ai CMD exit 7 fallback: rc=$rc out=[$out] err=[$err]"
+out=$(CLAUDE_USAGE_ZAI_WEEK_RESERVE_CMD='echo 100' run --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 1 ] && [ -z "$out" ] && [ "$err" = "$(zwr_note 0 75 "$zai_fail75")" ] \
+    && ok "z.ai CMD out-of-range 100: notes exit 0 and falls back to week_reserve (75)" \
+    || bad "z.ai CMD 100 fallback: rc=$rc out=[$out] err=[$err]"
+for bad_cmd in 'true' 'echo 0' 'echo "9 8"' 'echo lots'; do
+    out=$(CLAUDE_USAGE_ZAI_WEEK_RESERVE=98 CLAUDE_USAGE_ZAI_WEEK_RESERVE_CMD="$bad_cmd" run --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+    [ $rc = 1 ] && [ -z "$out" ] && [ "$err" = "$(zwr_note 0 75 "$zai_fail75")" ] \
+        && ok "z.ai CMD invalid ($bad_cmd): notes exit 0, ignores static, falls back to 75" \
+        || bad "z.ai CMD invalid ($bad_cmd): rc=$rc out=[$out] err=[$err]"
+done
+out=$(CLAUDE_USAGE_WEEK_RESERVE=90 CLAUDE_USAGE_ZAI_WEEK_RESERVE_CMD='exit 3' run --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 0 ] && [ -z "$out" ] && [ "$err" = "$(zwr_note 3 90 "claude-usage: --ok pass lane=zai meter=zai-5h 5h=10%<80% week=85%<90% source=api")" ] \
+    && ok "z.ai CMD failure falls back to overridden shared week_reserve (90)" \
+    || bad "z.ai CMD fallback to 90: rc=$rc out=[$out] err=[$err]"
+out=$(CLAUDE_USAGE_ZAI_WEEK_RESERVE=090 CLAUDE_USAGE_ZAI_WEEK_RESERVE_CMD='' run --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 0 ] && [ -z "$out" ] && [ "$err" = "claude-usage: --ok pass lane=zai meter=zai-5h 5h=10%<80% week=85%<90% source=api" ] \
+    && ok "z.ai static CLAUDE_USAGE_ZAI_WEEK_RESERVE=090 (empty CMD): passes with 90% verdict" \
+    || bad "z.ai static 090 pass: rc=$rc out=[$out] err=[$err]"
+out=$(CLAUDE_USAGE_ZAI_WEEK_RESERVE=80 run --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 1 ] && [ -z "$out" ] && [ "$err" = "claude-usage: --ok FAIL lane=zai meter=week 5h=10%<80% week=85%>=80% source=api" ] \
+    && ok "z.ai static CLAUDE_USAGE_ZAI_WEEK_RESERVE=80: fails with week=85%>=80% verdict" \
+    || bad "z.ai static 80 fail: rc=$rc out=[$out] err=[$err]"
+out=$(CLAUDE_USAGE_ZAI_WEEK_RESERVE=7x run --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 1 ] && [ -z "$out" ] && [ "$err" = "$zai_fail75" ] \
+    && ok "z.ai static non-integer '7x': default week_reserve (75) applies" \
+    || bad "z.ai static 7x: rc=$rc out=[$out] err=[$err]"
+out=$(timeout 5 env CLAUDE_USAGE_ZAI_WEEK_RESERVE_CMD='echo 98' HOME="$tmp" XDG_CACHE_HOME="$tmp" CLAUDE_USAGE_MODEL=claude-opus-5-5 "$CU" --wait 2>"$tmp/wait-zai.err"); rc=$?
+[ $rc = 0 ] && grep -q "z.ai-routed" <<< "$out" \
+    && [ "$(cat "$tmp/wait-zai.err")" = "claude-usage: --ok pass lane=zai meter=zai-5h 5h=10%<50% week=85%<98% source=api" ] \
+    && ok "z.ai --wait at week 85% with CMD='echo 98': returns at once with 98% wake verdict" \
+    || bad "z.ai --wait CMD 98 (rc $rc): out=[$out] err=[$(cat "$tmp/wait-zai.err")]"
+rm -f "$tmp/zwr-ran"
+out=$(ANTHROPIC_BASE_URL='' CLAUDE_USAGE_ZAI_WEEK_RESERVE=100 CLAUDE_USAGE_ZAI_WEEK_RESERVE_CMD="touch '$tmp/zwr-ran'; echo 99" run --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 1 ] && [ ! -e "$tmp/zwr-ran" ] && [ "$err" = "claude-usage: --ok FAIL lane=anthropic meter=week 5h=10%<90% week=99%>=75% source=api" ] \
+    && ok "plan lane --ok ignores ZAI_WEEK_RESERVE and never runs ZAI_WEEK_RESERVE_CMD" \
+    || bad "plan lane isolation: rc=$rc ran=$([ -e "$tmp/zwr-ran" ] && echo 1 || echo 0) err=[$err]"
+CLAUDE_USAGE_ZAI_WEEK_RESERVE_CMD="touch '$tmp/zwr-ran'; echo 98" run >/dev/null
+CLAUDE_USAGE_ZAI_WEEK_RESERVE_CMD="touch '$tmp/zwr-ran'; echo 98" run --json >/dev/null
+CLAUDE_USAGE_ZAI_WEEK_RESERVE_CMD="touch '$tmp/zwr-ran'; echo 98" run --all >/dev/null
+[ ! -e "$tmp/zwr-ran" ] && ok "plain line, --json and --all on z.ai lane never run ZAI_WEEK_RESERVE_CMD" \
+    || bad "non-gate invocation ran ZAI_WEEK_RESERVE_CMD"
+rm -f "$tmp/zwr-ran"
+zai_stub local 10 85
+CLAUDE_USAGE_ZAI_WEEK_RESERVE_CMD="touch '$tmp/zwr-ran'; echo 98" run --ok 90 >/dev/null 2>&1
+[ ! -e "$tmp/zwr-ran" ] && ok "z.ai FAIL-OPEN estimate path never runs ZAI_WEEK_RESERVE_CMD" \
+    || bad "FAIL-OPEN path ran ZAI_WEEK_RESERVE_CMD"
 zai_stub local 10 308
 out=$(run --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
 [ $rc = 0 ] && [ -z "$out" ] && [ "$err" = "claude-usage: --ok pass lane=zai meter=zai-5h source=estimate FAIL-OPEN: z.ai quota API unavailable, local estimate never blocks; gate passes" ] \

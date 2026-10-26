@@ -12,8 +12,8 @@
 #                             the calling session's model (Fable) has its own weekly cap left, else 1;
 #                             CLAUDE_USAGE_EXTRA_OK=1 passes past the weekly reserve while extra usage is on
 #                             and under its spend limit (cache at most 2 TTLs or 10 min old);
-#                             on the z.ai lane the same thresholds apply to z.ai's own quota, with the
-#                             5h one capped at 80% (Tzurot's guests get the band above it);
+#                             on the z.ai lane the same thresholds apply to z.ai's own quota, with the 5h one capped at 80% (Tzurot's
+#                             guests get the band above it) and the week reserve overridable via CLAUDE_USAGE_ZAI_WEEK_RESERVE_CMD (integer 1-99, must return promptly) or CLAUDE_USAGE_ZAI_WEEK_RESERVE;
 #                             other routed lanes (OpenRouter, a Console API key) pass at once (see below);
 #                             prints one verdict line to stderr (lane, meter, value, threshold,
 #                             source=api|estimate|none; says FAIL-OPEN when it passed on an estimate)
@@ -53,6 +53,12 @@ week_reserve=75
 # CLAUDE_USAGE_ZAI_FIVE_CAP overrides it; a non-integer value keeps the default.
 zai_five_cap=80
 [[ ${CLAUDE_USAGE_ZAI_FIVE_CAP:-} =~ ^[0-9]+$ ]] && zai_five_cap=$((10#$CLAUDE_USAGE_ZAI_FIVE_CAP))
+# A deployment's z.ai weekly posture can differ from the shared week_reserve and change while the
+# machine runs (e.g. banked one-time quota resets lifting the weekly cap until spent), so the z.ai
+# --ok branch checks CLAUDE_USAGE_ZAI_WEEK_RESERVE_CMD (bash -c per gate check, trimmed stdout
+# integer 1-99; wins the slot in success and failure, falling back to week_reserve with a stderr
+# note when unusable) and static CLAUDE_USAGE_ZAI_WEEK_RESERVE (when CMD is unset/empty). The plan
+# lane never sees either var, and non-gate runs never fork the command.
 
 refresh() {
     local age tok tmp
@@ -186,15 +192,27 @@ if [ "${1:-}" = --ok ] && [ "$routed" = 1 ]; then
         exit 0
     fi
     zfive=$(jq -r '.five_hour_pct // 0' <<< "$zai"); zweek=$(jq -r '.week_pct // 0' <<< "$zai")
+    zai_week_reserve=$week_reserve
+    if [ -n "${CLAUDE_USAGE_ZAI_WEEK_RESERVE_CMD:-}" ]; then
+        zwr_out=$(bash -c "$CLAUDE_USAGE_ZAI_WEEK_RESERVE_CMD" 2>/dev/null); zwr_rc=$?
+        zwr_out=${zwr_out#"${zwr_out%%[![:space:]]*}"}; zwr_out=${zwr_out%"${zwr_out##*[![:space:]]}"}
+        if [ "$zwr_rc" -eq 0 ] && [[ "$zwr_out" =~ ^[0-9]+$ ]] && [ "$zwr_out" -ge 1 ] && [ "$zwr_out" -le 99 ]; then
+            zai_week_reserve=$((10#$zwr_out))
+        else
+            echo "claude-usage: CLAUDE_USAGE_ZAI_WEEK_RESERVE_CMD gave no usable reserve (exit $zwr_rc); z.ai week reserve falls back to week_reserve ($week_reserve)" >&2
+        fi
+    elif [[ ${CLAUDE_USAGE_ZAI_WEEK_RESERVE:-} =~ ^[0-9]+$ ]]; then
+        zai_week_reserve=$((10#$CLAUDE_USAGE_ZAI_WEEK_RESERVE))
+    fi
     zlimit=${2:-90}; [ "$zlimit" -gt "$zai_five_cap" ] 2>/dev/null && zlimit=$zai_five_cap
-    if ! { [ "$zfive" -lt "$zlimit" ] && [ "$zweek" -lt "$week_reserve" ]; } 2>/dev/null; then
+    if ! { [ "$zfive" -lt "$zlimit" ] && [ "$zweek" -lt "$zai_week_reserve" ]; } 2>/dev/null; then
         zfive_op=">="; [ "$zfive" -lt "$zlimit" ] 2>/dev/null && zfive_op="<"
-        zweek_op=">="; [ "$zweek" -lt "$week_reserve" ] 2>/dev/null && zweek_op="<"
+        zweek_op=">="; [ "$zweek" -lt "$zai_week_reserve" ] 2>/dev/null && zweek_op="<"
         zmeter="zai-5h"; [ "$zfive" -lt "$zlimit" ] 2>/dev/null && zmeter="week"
-        echo "claude-usage: --ok FAIL lane=zai meter=$zmeter 5h=${zfive}%${zfive_op}${zlimit}% week=${zweek}%${zweek_op}${week_reserve}% source=api" >&2
+        echo "claude-usage: --ok FAIL lane=zai meter=$zmeter 5h=${zfive}%${zfive_op}${zlimit}% week=${zweek}%${zweek_op}${zai_week_reserve}% source=api" >&2
         exit 1
     fi
-    echo "claude-usage: --ok pass lane=zai meter=zai-5h 5h=${zfive}%<${zlimit}% week=${zweek}%<${week_reserve}% source=api" >&2
+    echo "claude-usage: --ok pass lane=zai meter=zai-5h 5h=${zfive}%<${zlimit}% week=${zweek}%<${zai_week_reserve}% source=api" >&2
     exit 0
 fi
 
