@@ -380,4 +380,48 @@ else
   echo "FAIL: no transcript_path key did not pass"; fail=1
 fi
 
+# Stop envelope last_assistant_message (transcript lag).
+{
+  echo '{"type":"user","isMeta":null,"message":{"content":"go"}}'
+  printf '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Edit","input":{"file_path":"%s"}}]}}\n' "$PROJ/backlog/now.md"
+  printf '{"type":"assistant","message":{"content":[{"type":"text","text":%s}]}}\n' \
+    "$(printf '%s' "I'll add the sync gate later once the schema settles." | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')"
+  echo '{"type":"user","isMeta":null,"message":{"content":"ship it"}}'
+} > "$TMP/lag-clear.jsonl"
+echo "{\"stop_hook_active\":false,\"transcript_path\":\"$TMP/lag-clear.jsonl\",\"last_assistant_message\":\"Done — the fix is in and tests are green.\"}" \
+  | bash "$HOOK" >/dev/null 2>"$TMP/stderr.out"
+got=$?
+if [ "$got" != 0 ] || grep -q Traceback "$TMP/stderr.out"; then echo "FAIL [$got≠0]: last_assistant_message clean close passes when transcript lacks closing text"; fail=1
+else echo "ok   [0]: last_assistant_message clean close passes when transcript lacks closing text"; fi
+
+{
+  echo '{"type":"user","isMeta":null,"message":{"content":"go"}}'
+} > "$TMP/lag-promise.jsonl"
+echo "{\"stop_hook_active\":false,\"transcript_path\":\"$TMP/lag-promise.jsonl\",\"last_assistant_message\":\"I'll add the sync gate later once the schema settles.\"}" \
+  | bash "$HOOK" >/dev/null 2>"$TMP/stderr.out"
+got=$?
+if [ "$got" != 2 ] || grep -q Traceback "$TMP/stderr.out"; then echo "FAIL [$got≠2]: last_assistant_message promise blocks when transcript lacks closing text"; fail=1
+else echo "ok   [2]: last_assistant_message promise blocks when transcript lacks closing text"; fi
+
+# Empty LAM (older payloads) falls back to the transcript closing: a deferring
+# close still blocks (no ledger write in the fixture).
+{
+  echo '{"type":"user","isMeta":null,"message":{"content":"go"}}'
+  printf '{"type":"assistant","message":{"content":[{"type":"text","text":%s}]}}\n' \
+    "$(printf '%s' "I'll add the sync gate later once the schema settles." | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')"
+} > "$TMP/empromise.jsonl"
+echo "{\"stop_hook_active\":false,\"transcript_path\":\"$TMP/empromise.jsonl\",\"last_assistant_message\":\"\"}" \
+  | bash "$HOOK" >/dev/null 2>"$TMP/stderr.out"
+got=$?
+if [ "$got" != 2 ] || grep -q Traceback "$TMP/stderr.out"; then echo "FAIL [$got≠2]: empty last_assistant_message falls back to the deferring transcript closing"; fail=1
+else echo "ok   [2]: empty last_assistant_message falls back to the deferring transcript closing"; fi
+
+# A truncated LAM with the deferral marker cut passes: the accepted false-pass
+# residual (header note). The untruncated text blocks, per the row above.
+echo "{\"stop_hook_active\":false,\"transcript_path\":\"$TMP/lag-promise.jsonl\",\"last_assistant_message\":\"I'll add the sync gate… [+34 chars]\"}" \
+  | bash "$HOOK" >/dev/null 2>"$TMP/stderr.out"
+got=$?
+if [ "$got" != 0 ] || grep -q Traceback "$TMP/stderr.out"; then echo "FAIL [$got≠0]: truncated last_assistant_message with the marker cut passes (accepted residual)"; fail=1
+else echo "ok   [0]: truncated last_assistant_message with the marker cut passes (accepted residual)"; fi
+
 [ "$fail" = 0 ] && echo "ALL PASS" || { echo "FAILURES"; exit 1; }

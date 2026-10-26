@@ -272,4 +272,49 @@ export SYG_BQ_PENDING_MARKERS='['
 check 0 "broken SYG_BQ_PENDING_MARKERS regex fails open" "$TMP/m1.jsonl"
 unset SYG_BQ_PENDING_MARKERS
 
+# --- 13. Stop envelope last_assistant_message (transcript lag) ----------------
+{
+  echo '{"type":"user","isMeta":null,"message":{"content":"go"}}'
+  echo '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"AskUserQuestion","input":{}}]}}'
+  printf '{"type":"assistant","message":{"content":[{"type":"text","text":%s}]}}\n' \
+    "$(jsonstr "Both approaches work here. Should I use X or Y?")"
+  echo '{"type":"user","isMeta":null,"message":{"content":"option 1"}}'
+} > "$TMP/lag-clear.jsonl"
+echo "{\"stop_hook_active\":false,\"transcript_path\":\"$TMP/lag-clear.jsonl\",\"last_assistant_message\":\"Applied option 1 — all checks are green.\"}" \
+  | "$HOOK" >/dev/null 2>"$TMP/stderr.out"
+got=$?
+if [ "$got" != 0 ] || grep -q Traceback "$TMP/stderr.out"; then echo "FAIL [$got≠0]: last_assistant_message statement passes when transcript lacks closing text"; fail=1
+else echo "ok   [0]: last_assistant_message statement passes when transcript lacks closing text"; fi
+
+{
+  echo '{"type":"user","isMeta":null,"message":{"content":"go"}}'
+} > "$TMP/lag-ask.jsonl"
+echo "{\"stop_hook_active\":false,\"transcript_path\":\"$TMP/lag-ask.jsonl\",\"last_assistant_message\":\"Both approaches work here. Should I use X or Y?\"}" \
+  | "$HOOK" >/dev/null 2>"$TMP/stderr.out"
+got=$?
+if [ "$got" != 2 ] || grep -q Traceback "$TMP/stderr.out"; then echo "FAIL [$got≠2]: last_assistant_message closing question blocks when transcript lacks closing text"; fail=1
+else echo "ok   [2]: last_assistant_message closing question blocks when transcript lacks closing text"; fi
+
+# Empty LAM (older payloads) falls back to the transcript's last text block;
+# a statement closing stays a pass.
+{
+  echo '{"type":"user","isMeta":null,"message":{"content":"go"}}'
+  echo '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"AskUserQuestion","input":{}}]}}'
+  echo '{"type":"assistant","message":{"content":[{"type":"text","text":"Applied option 1 — all checks are green."}]}}'
+  echo '{"type":"user","isMeta":null,"message":{"content":"next"}}'
+} > "$TMP/emask.jsonl"
+echo "{\"stop_hook_active\":false,\"transcript_path\":\"$TMP/emask.jsonl\",\"last_assistant_message\":\"\"}" \
+  | "$HOOK" >/dev/null 2>"$TMP/stderr.out"
+got=$?
+if [ "$got" != 0 ] || grep -q Traceback "$TMP/stderr.out"; then echo "FAIL [$got≠0]: empty last_assistant_message falls back to the transcript closing"; fail=1
+else echo "ok   [0]: empty last_assistant_message falls back to the transcript closing"; fi
+
+# A truncated LAM ends in the "… [+N chars]" suffix, not "?": the cut
+# question is missed — the accepted fail-open residual (header note).
+echo "{\"stop_hook_active\":false,\"transcript_path\":\"$TMP/lag-ask.jsonl\",\"last_assistant_message\":\"Both approaches work here. Should I use X or Y… [+9 chars]\"}" \
+  | "$HOOK" >/dev/null 2>"$TMP/stderr.out"
+got=$?
+if [ "$got" != 0 ] || grep -q Traceback "$TMP/stderr.out"; then echo "FAIL [$got≠0]: truncated last_assistant_message misses the cut question (accepted fail-open)"; fail=1
+else echo "ok   [0]: truncated last_assistant_message misses the cut question (accepted fail-open)"; fi
+
 [ "$fail" = 0 ] && echo "ALL PASS" || { echo "FAILURES"; exit 1; }
