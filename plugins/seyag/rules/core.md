@@ -115,6 +115,7 @@ On the Anthropic lane she drives from her phone, often by voice (Remote Control)
 - A line number computed before an edit to the same file is stale. Find the target again by its content.
 - In `sed` replacements, `&` inserts the matched text, so a literal `&&` in the replacement corrupts the file. Use the Edit tool for long or `&`-bearing replacements, then grep for the old token.
 - An Edit target is Read with the Read tool first, even in auto mode, whose prompt prefers cat and sed for reading: Edit refuses a file this conversation hasn't Read, and a Bash view doesn't count. Bash edits stay for the shapes the guards allow.
+- After a blocked compound command, the fix on disk is not the fix in the index: a hook block cancels the whole chain, and earlier staging survives it — `git status --short` / `git diff --cached` before retrying.
 
 ### A changed premise sweeps its prose
 - After a design change, a premise correction, or a review finding against something you wrote, find stale prose by GREPPING the old claim's distinctive tokens across code, comments, docs and tracker entries. Stale prose still reads fluently, so re-reading misses it.
