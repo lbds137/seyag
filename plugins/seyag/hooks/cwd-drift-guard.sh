@@ -26,6 +26,16 @@
 #     is the leftover of an earlier drifted write (`pkg/sub/docs/x.md` created
 #     by mistake): without this, C exists in the cwd, the rule above allows,
 #     and `git add docs/x.md` quietly stages the stray.
+#   - Linked worktree (warn-once): when the effective cwd belongs to a linked
+#     worktree (`--git-dir` differs from `--git-common-dir`), a bare
+#     state-changing git subcommand (`commit`, `tag`, `notes`, `merge`,
+#     `rebase`, `reset`, `cherry-pick`, `revert`, `stash`, `am`, `checkout`,
+#     `switch`, `branch`, `push`) blocks ONCE per `(session_id, effective_cwd)`
+#     and records the warned effective cwd in
+#     `${XDG_STATE_HOME:-$HOME/.local/state}/seyag/cwd-drift-guard/<session_id>`.
+#     A repeat in the same session and effective cwd passes; an unreadable
+#     state file or an unwritable state dir fails open (a missing file is
+#     simply the first warn).
 #
 # Tokens that cannot be judged this way are SKIPPED (allowed): an absolute path;
 # one starting with `~`, `-` or `:` (git pathspec magic); one containing a glob
@@ -131,17 +141,51 @@ if printf '%s' "$CMD_HEAD" | grep -E '^cd[[:space:]]' >/dev/null; then
   LEADING_CD=1
 fi
 
-# ROOT and the drift test in one git call. `--show-prefix` is the cwd's path
-# below the toplevel: empty at the root, and empty at a linked WORKTREE's root
-# too (its toplevel is itself), which is how the original's worktree-root
-# exemption carries over. It also sidesteps comparing path strings, which a
-# symlinked cwd would defeat. Not a repo, a missing directory, or the inside of
-# `.git` → git fails → allow.
-REPO_INFO=$(git -C "$EFFECTIVE_CWD" rev-parse --show-toplevel --show-prefix 2>/dev/null) || exit 0
+# ROOT, the drift test, and the linked-worktree test in one git call.
+# `--show-prefix` is the cwd's path below the toplevel: empty at the root, and
+# empty at a linked WORKTREE's root too (its toplevel is itself), which is how
+# the original's worktree-root exemption carries over for pathspecs. It also
+# sidesteps comparing path strings, which a symlinked cwd would defeat.
+# `--git-dir` vs `--git-common-dir` distinguishes a linked worktree from the
+# main working tree. Not a repo, a missing directory, or the inside of `.git`
+# → git fails → allow.
+REPO_INFO=$(git -C "$EFFECTIVE_CWD" rev-parse --show-toplevel --show-prefix --git-dir --git-common-dir 2>/dev/null) || exit 0
 ROOT=$(printf '%s\n' "$REPO_INFO" | sed -n '1p')
 PREFIX=$(printf '%s\n' "$REPO_INFO" | sed -n '2p')
+GIT_DIR=$(printf '%s\n' "$REPO_INFO" | sed -n '3p')
+COMMON_DIR=$(printf '%s\n' "$REPO_INFO" | sed -n '4p')
 [ -n "$ROOT" ] || exit 0
-[ -n "$PREFIX" ] || exit 0
+
+LINKED_WT=0
+MAIN_TREE=""
+if [ -n "$GIT_DIR" ] && [ -n "$COMMON_DIR" ] && [ "$GIT_DIR" != "$COMMON_DIR" ]; then
+  case "$GIT_DIR" in
+    /*) ;;
+    *) GIT_DIR="$EFFECTIVE_CWD/$GIT_DIR" ;;
+  esac
+  case "$COMMON_DIR" in
+    /*) ;;
+    *) COMMON_DIR="$EFFECTIVE_CWD/$COMMON_DIR" ;;
+  esac
+  GIT_DIR_REAL=$(realpath "$GIT_DIR" 2>/dev/null || echo "")
+  COMMON_DIR_REAL=$(realpath "$COMMON_DIR" 2>/dev/null || echo "")
+  if [ -n "$GIT_DIR_REAL" ] && [ -n "$COMMON_DIR_REAL" ] && [ "$GIT_DIR_REAL" != "$COMMON_DIR_REAL" ]; then
+    LINKED_WT=1
+    # Assumes the standard <repo>/.git layout; exotic layouts (bare-adjacent,
+    # --separate-git-dir) can name a wrong parenthetical path in the banner —
+    # the primary repair stays layout-independent.
+    MAIN_TREE=$(dirname "$COMMON_DIR_REAL" 2>/dev/null || echo "")
+  fi
+fi
+[ -n "$PREFIX" ] || [ "$LINKED_WT" -eq 1 ] || exit 0
+
+SESSION_ID=""
+STATE_DIR=""
+if [ "$LINKED_WT" -eq 1 ]; then
+  SESSION_ID=$(jq -r '.session_id // empty' <<<"$INPUT" 2>/dev/null || echo "")
+  STATE_BASE="${XDG_STATE_HOME:-${HOME:-}/.local/state}"
+  STATE_DIR="$STATE_BASE/seyag/cwd-drift-guard"
+fi
 
 # The scan. It reads the QUOTE-STRIPPED command (the shared scanner in
 # lib/shell_quotes.py), so argument CONTENT (a commit message, a quoted example
@@ -151,19 +195,24 @@ PREFIX=$(printf '%s\n' "$REPO_INFO" | sed -n '2p')
 # placeholder is a private-use character, so a quoted token is recognizable and
 # skipped, where strip_quoted's `S` would read as a file named S.
 #
-# Prints each blocking token on its own line; prints nothing to allow. A python
-# or import failure is also "nothing" (`|| exit 0`), matching the fail-safe.
+# Prints each blocking token on its own line (or `__WT_BLOCK__:<subcmd>` for the
+# linked-worktree rule); prints nothing to allow. A python or import failure is
+# also "nothing" (`|| exit 0`), matching the fail-safe.
 #
 # The command goes to python on fd 3, never through the environment: Linux caps
 # one env string at 128 KiB (MAX_ARG_STRLEN), and python failing to exec would
 # fail open.
 HOOK_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib"
 BLOCKED=$(HOOK_LIB="$HOOK_LIB" EFF="$EFFECTIVE_CWD" ROOT="$ROOT" \
-  LEADING_CD="$LEADING_CD" PYTHONDONTWRITEBYTECODE=1 python3 3<<<"$CMD" << 'PYEOF'
+  LEADING_CD="$LEADING_CD" HAS_PREFIX="${PREFIX:+1}" LINKED_WT="$LINKED_WT" \
+  SESSION_ID="$SESSION_ID" STATE_DIR="$STATE_DIR" \
+  PYTHONDONTWRITEBYTECODE=1 python3 3<<<"$CMD" << 'PYEOF'
 import os
 import re
 import subprocess
 import sys
+import tempfile
+import time
 
 sys.path.insert(0, os.environ["HOOK_LIB"])
 from shell_quotes import (
@@ -177,6 +226,10 @@ cmd = os.fsdecode(open(3, "rb").read()).removesuffix("\n")
 eff = os.environ["EFF"]
 root = os.environ["ROOT"]
 leading_cd = os.environ.get("LEADING_CD") == "1"
+has_prefix = os.environ.get("HAS_PREFIX") == "1"
+linked_wt = os.environ.get("LINKED_WT") == "1"
+session_id = os.environ.get("SESSION_ID", "")
+state_dir = os.environ.get("STATE_DIR", "")
 
 stripped = strip_quoted_indexed(strip_heredoc_bodies(cmd))
 if stripped is None:
@@ -291,7 +344,61 @@ def cwd_has_tracked():
     return _cwd_tracked[0]
 
 
+STATE_CHANGING = {
+    "commit", "tag", "notes", "merge", "rebase", "reset", "cherry-pick",
+    "revert", "stash", "am", "checkout", "switch", "branch", "push",
+}
+
+
+def warn_once_worktree():
+    if not session_id or not state_dir or not re.match(r"^[A-Za-z0-9._-]+$", session_id) or session_id in (".", ".."):
+        return False
+    state_file = os.path.join(state_dir, session_id)
+    try:
+        with open(state_file, "r", encoding="utf-8", errors="replace") as f:
+            last_cwd = f.read().rstrip("\r\n")
+    except FileNotFoundError:
+        last_cwd = None
+    except OSError:
+        return False
+    if last_cwd == eff:
+        return False
+    tmp_path = None
+    try:
+        os.makedirs(state_dir, exist_ok=True)
+        cutoff = time.time() - 7 * 86400
+        try:
+            for entry in os.scandir(state_dir):
+                try:
+                    if entry.is_file(follow_symlinks=False) and entry.stat(follow_symlinks=False).st_mtime < cutoff:
+                        os.unlink(entry.path)
+                except OSError:
+                    pass
+        except OSError:
+            pass
+        fd, tmp_path = tempfile.mkstemp(prefix=".tmp.", dir=state_dir)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(eff + "\n")
+        except Exception:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            return False
+        os.replace(tmp_path, state_file)
+    except OSError:
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+        return False
+    return True
+
+
 blocked = []
+wt_subcmd = ""
 first_segment = True
 for words in segments:
     k = command_start(words)
@@ -321,6 +428,11 @@ for words in segments:
     if anchored or j >= len(args) or args[j] == "--":
         continue
     # args[j] is the subcommand; judge what follows it.
+    subcmd = args[j].lower()
+    if linked_wt and not wt_subcmd and subcmd in STATE_CHANGING:
+        wt_subcmd = subcmd
+    if not has_prefix:
+        continue
     after_dd = False
     skip_next = False
     for w in args[j + 1 :]:
@@ -344,10 +456,37 @@ for words in segments:
         if why:
             blocked.append(f"{w}   ({why})")
 
-sys.stdout.write("\n".join(blocked))
+if blocked:
+    sys.stdout.write("\n".join(blocked))
+elif wt_subcmd and warn_once_worktree():
+    sys.stdout.write(f"__WT_BLOCK__:{wt_subcmd}")
 PYEOF
 ) || exit 0
 [ -n "$BLOCKED" ] || exit 0
+
+if [[ "$BLOCKED" == __WT_BLOCK__:* ]]; then
+  WT_SUBCMD="${BLOCKED#__WT_BLOCK__:}"
+  WT_BRANCH=$(git -C "$EFFECTIVE_CWD" branch --show-current 2>/dev/null || echo "")
+  [ -n "$WT_BRANCH" ] || WT_BRANCH="(detached HEAD)"
+  cat >&2 << MSG
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+CWD-DRIFT GUARD — linked-worktree command blocked (warn-once)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+The effective cwd belongs to a linked worktree rather than the main
+working tree, and this command runs a bare 'git $WT_SUBCMD':
+    effective cwd:     $EFFECTIVE_CWD (branch '$WT_BRANCH')
+    main working tree: $MAIN_TREE (payload cwd: $SHELL_CWD)
+
+If you meant the main working tree:
+  - anchor the git step: git -C "\$(git rev-parse --show-toplevel)" $WT_SUBCMD ...
+    (when invoked from the main checkout, or git -C "$MAIN_TREE" $WT_SUBCMD ...), or
+  - cd "$MAIN_TREE" first.
+If you meant the linked worktree, re-running the same command from the
+same cwd will pass (warn-once per session and effective cwd).
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+MSG
+  exit 2
+fi
 
 REL="${PREFIX%/}"
 TOKENS=$(printf '%s\n' "$BLOCKED" | sed 's/^/    /')
