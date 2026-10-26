@@ -36,9 +36,11 @@ trap 'rm -rf "$TMP"' EXIT
 # Hermetic: git must not find a repo above the fixture (the temp dir could sit
 # inside one), so a "not a repo" case means what it says.
 export GIT_CEILING_DIRECTORIES="$TMP"
+export XDG_STATE_HOME="$TMP/state"
 ROOT="$TMP/root"
 SUB="$ROOT/pkg/sub"
 WT="$TMP/wt"
+WT2="$TMP/wt2"
 NOREPO="$TMP/norepo"
 
 mkdir -p "$ROOT/src" "$ROOT/docs" "$ROOT/.github" "$SUB" "$ROOT/pkg/other/docs" \
@@ -57,8 +59,9 @@ git -C "$ROOT" add -A >/dev/null 2>&1
 git -C "$ROOT" -c user.email=probe@example.invalid -c user.name=probe \
   commit -q -m init >/dev/null 2>&1
 git -C "$ROOT" worktree add -q -b probe-fixture "$WT" >/dev/null 2>&1
+git -C "$ROOT" worktree add -q -b probe-fixture-2 "$WT2" >/dev/null 2>&1
 
-if [ ! -e "$WT/.git" ] || [ ! -e "$WT/docs/x.md" ] || [ ! -d "$WT/pkg/sub" ]; then
+if [ ! -e "$WT/.git" ] || [ ! -e "$WT/docs/x.md" ] || [ ! -d "$WT/pkg/sub" ] || [ ! -e "$WT2/.git" ]; then
   # Without the fixture every case below would pass or fail for the wrong
   # reason.
   echo "FAIL [setup]: could not build the fixture repo and worktree"
@@ -69,14 +72,18 @@ fail=0
 count=0
 # check <expected-exit> <label> <command> <cwd|__NONE__>
 # TOOL=<name> in the caller's environment overrides tool_name (default Bash).
+# SESSION=<id> overrides session_id (default probe-<count>; __NONE__ omits it).
 check() {
-  local expected="$1" label="$2" cmd="$3" cwd="$4" tool="${TOOL:-Bash}" payload got
+  local expected="$1" label="$2" cmd="$3" cwd="$4" tool="${TOOL:-Bash}" sess="${SESSION:-probe-$count}" payload got
   # The command reaches jq on stdin, not argv, so a case past 128 KiB is not capped by exec.
   if [ "$cwd" = "__NONE__" ]; then
     payload=$(printf '%s' "$cmd" | jq -Rs --arg t "$tool" '{tool_name:$t,tool_input:{command:.}}')
-  else
+  elif [ "$sess" = "__NONE__" ]; then
     payload=$(printf '%s' "$cmd" | jq -Rs --arg t "$tool" --arg d "$cwd" \
       '{tool_name:$t,tool_input:{command:.},cwd:$d}')
+  else
+    payload=$(printf '%s' "$cmd" | jq -Rs --arg t "$tool" --arg d "$cwd" --arg s "$sess" \
+      '{tool_name:$t,tool_input:{command:.},cwd:$d,session_id:$s}')
   fi
   printf '%s' "$payload" | bash "$HOOK" >/dev/null 2>&1
   got=$?
@@ -236,6 +243,119 @@ PATH="$FAKE:$PATH" check 0 "a failing root-side git check allows (never adds a b
 # from there resolves exactly as it does from the main checkout's root.
 check 0 "a worktree ROOT is a git toplevel, not drift" "git diff docs/x.md" "$WT"
 check 2 "a subdir INSIDE a worktree is still drift" "git add docs/x.md" "$WT/pkg/sub"
+
+# --- Linked worktree state-changing git subcommands (warn-once) ----------
+# A bare state-changing git command landing in a linked worktree blocks once
+# per (session_id, effective_cwd), naming both trees, the branch, and the repair.
+SESSION=s-escape check 2 "linked worktree: bare git commit blocks on first call" "git commit -m x" "$WT"
+SESSION=s-escape check 0 "linked worktree: bare git commit allows on second call (warn-once)" "git commit -m x" "$WT"
+SESSION=s-escape check 0 "linked worktree: later state-changing subcommand in same cwd+session allows" "git push" "$WT"
+
+count=$((count + 1))
+if [ -f "$XDG_STATE_HOME/seyag/cwd-drift-guard/s-escape" ] \
+  && [ "$(cat "$XDG_STATE_HOME/seyag/cwd-drift-guard/s-escape")" = "$WT" ]; then
+  echo "ok   [state]: state file records warned effective cwd ($WT)"
+else
+  echo "FAIL [state]: state file missing or wrong content for s-escape"
+  fail=1
+fi
+
+SESSION=s-escape check 2 "linked worktree: switching to another worktree in same session warns again" "git commit -m x" "$WT2"
+SESSION=s-escape check 0 "linked worktree: second call in second worktree allows" "git commit -m x" "$WT2"
+SESSION=s-escape check 2 "linked worktree: returning to first worktree after cwd change warns again" "git commit -m x" "$WT"
+SESSION=s-escape check 2 "linked worktree: subdir inside worktree is a distinct effective cwd and warns" "git commit -m x" "$WT/pkg/sub"
+SESSION=s-other  check 2 "linked worktree: a different session id warns independently" "git commit -m x" "$WT"
+
+# Leading `cd <worktree>` with payload cwd in the main checkout:
+SESSION=s-cd check 2 "cd <worktree> && git commit from main checkout blocks once" "cd $WT && git commit -m x" "$ROOT"
+SESSION=s-cd check 0 "cd <worktree> && git commit second time in same session allows" "cd $WT && git commit -m x" "$ROOT"
+
+# Banner text assertions (names effective cwd, branch, payload/main tree, repair, confirm-once):
+WT_BANNER=$(jq -nc --arg d "$ROOT" --arg c "cd $WT && git commit -m x" --arg s "s-banner" \
+  '{tool_name:"Bash",tool_input:{command:$c},cwd:$d,session_id:$s}' | bash "$HOOK" 2>&1 >/dev/null)
+WT_BANNER_RC=$?
+count=$((count + 1))
+if [ "$WT_BANNER_RC" = 2 ] \
+  && grep -qF "$WT" <<<"$WT_BANNER" \
+  && grep -qF "probe-fixture" <<<"$WT_BANNER" \
+  && grep -qF "$ROOT" <<<"$WT_BANNER" \
+  && grep -qF 'git -C "$(git rev-parse --show-toplevel)"' <<<"$WT_BANNER" \
+  && grep -qE 're-running|same command|warn-once' <<<"$WT_BANNER"; then
+  echo "ok   [banner]: linked-worktree block message names both trees, branch, repair, and confirm-once"
+else
+  echo "FAIL [banner]: linked-worktree block message missing required fields (rc=$WT_BANNER_RC)"
+  fail=1
+fi
+
+# Every state-changing subcommand in the list triggers the block:
+for subcmd_case in \
+  "tag:git tag v1" \
+  "notes:git notes add -m note" \
+  "merge:git merge main" \
+  "rebase:git rebase main" \
+  "reset:git reset --hard" \
+  "cherry-pick:git cherry-pick HEAD" \
+  "revert:git revert HEAD" \
+  "stash:git stash" \
+  "am:git am patch.mbox" \
+  "checkout:git checkout -b feat" \
+  "switch:git switch main" \
+  "branch:git branch feat" \
+  "push:git push origin HEAD"
+do
+  sc_name="${subcmd_case%%:*}"
+  sc_cmd="${subcmd_case#*:}"
+  check 2 "linked worktree state-changing subcommand ($sc_name) blocks" "$sc_cmd" "$WT"
+done
+check 2 "linked worktree: git -c key=val before state-changing subcommand still blocks" \
+  "git -c user.name=probe commit -m x" "$WT"
+
+# Read-only and index-only subcommands in a linked worktree never trigger the rule:
+check 0 "linked worktree: git status allows" "git status" "$WT"
+check 0 "linked worktree: git log allows" "git log --oneline -5" "$WT"
+check 0 "linked worktree: git diff allows" "git diff" "$WT"
+check 0 "linked worktree: git add at worktree root allows" "git add docs/x.md" "$WT"
+check 0 "linked worktree: git fetch allows" "git fetch" "$WT"
+
+# Rule is invisible off linked worktrees, and anchored commands pass:
+check 0 "main checkout root: bare git commit allows (not a linked worktree)" "git commit -m x" "$ROOT"
+check 0 "main checkout subdir: bare git commit with no pathspec allows" "git commit -m x" "$SUB"
+check 0 "cd back to main checkout from worktree allows" "cd $ROOT && git commit -m x" "$WT"
+check 0 "linked worktree: git -C <main> commit allows (anchored)" "git -C $ROOT commit -m x" "$WT"
+check 0 "linked worktree: git --git-dir=<main>/.git commit allows (anchored)" \
+  "git --git-dir=$ROOT/.git commit -m x" "$WT"
+check 0 "linked worktree: git -C \"\$(git rev-parse --show-toplevel)\" commit allows" \
+  "git -C \"\$(git rev-parse --show-toplevel)\" commit -m x" "$WT"
+
+# 7-day state file pruning on write:
+mkdir -p "$XDG_STATE_HOME/seyag/cwd-drift-guard"
+echo "$WT" >"$XDG_STATE_HOME/seyag/cwd-drift-guard/stale-sess"
+echo "$WT" >"$XDG_STATE_HOME/seyag/cwd-drift-guard/fresh-sess"
+touch -d '8 days ago' "$XDG_STATE_HOME/seyag/cwd-drift-guard/stale-sess"
+touch -d '2 days ago' "$XDG_STATE_HOME/seyag/cwd-drift-guard/fresh-sess"
+SESSION=s-prune check 2 "linked worktree: write triggers prune of >7d state files" "git commit -m x" "$WT"
+count=$((count + 1))
+if [ ! -e "$XDG_STATE_HOME/seyag/cwd-drift-guard/stale-sess" ] \
+  && [ -e "$XDG_STATE_HOME/seyag/cwd-drift-guard/fresh-sess" ]; then
+  echo "ok   [prune]: >7d state file pruned and <7d state file preserved"
+else
+  echo "FAIL [prune]: expected stale-sess removed and fresh-sess kept"
+  fail=1
+fi
+
+# Unwritable or unreadable state fails OPEN (exit 0):
+echo not-a-dir >"$TMP/state-file"
+XDG_STATE_HOME="$TMP/state-file" SESSION=s-badbase \
+  check 0 "unwritable state base (file at XDG_STATE_HOME) fails open" "git commit -m x" "$WT"
+
+touch "$XDG_STATE_HOME/seyag/cwd-drift-guard/s-unreadable"
+chmod 000 "$XDG_STATE_HOME/seyag/cwd-drift-guard/s-unreadable"
+SESSION=s-unreadable check 0 "unreadable state file (000) fails open" "git commit -m x" "$WT"
+chmod 600 "$XDG_STATE_HOME/seyag/cwd-drift-guard/s-unreadable"
+
+chmod 500 "$XDG_STATE_HOME/seyag/cwd-drift-guard"
+SESSION=s-rodir check 0 "unwritable state dir (500) fails open" "git commit -m x" "$WT"
+chmod 700 "$XDG_STATE_HOME/seyag/cwd-drift-guard"
 
 # --- A command past 128 KiB (Linux's cap on one env string) --------------
 BIG=$(printf '%*s' 214000 '' | tr ' ' x)
