@@ -73,6 +73,7 @@ count=0
 # check <expected-exit> <label> <command> <cwd|__NONE__>
 # TOOL=<name> in the caller's environment overrides tool_name (default Bash).
 # SESSION=<id> overrides session_id (default probe-<count>; __NONE__ omits it).
+# SYG_CWD_DRIFT_WORKTREE=<val> forwards the worktree toggle to the hook.
 check() {
   local expected="$1" label="$2" cmd="$3" cwd="$4" tool="${TOOL:-Bash}" sess="${SESSION:-probe-$count}" payload got
   # The command reaches jq on stdin, not argv, so a case past 128 KiB is not capped by exec.
@@ -85,7 +86,7 @@ check() {
     payload=$(printf '%s' "$cmd" | jq -Rs --arg t "$tool" --arg d "$cwd" --arg s "$sess" \
       '{tool_name:$t,tool_input:{command:.},cwd:$d,session_id:$s}')
   fi
-  printf '%s' "$payload" | bash "$HOOK" >/dev/null 2>&1
+  printf '%s' "$payload" | SYG_CWD_DRIFT_WORKTREE="${SYG_CWD_DRIFT_WORKTREE:-}" bash "$HOOK" >/dev/null 2>&1
   got=$?
   count=$((count + 1))
   if [ "$got" != "$expected" ]; then
@@ -253,7 +254,7 @@ SESSION=s-escape check 0 "linked worktree: later state-changing subcommand in sa
 
 count=$((count + 1))
 if [ -f "$XDG_STATE_HOME/seyag/cwd-drift-guard/s-escape" ] \
-  && [ "$(cat "$XDG_STATE_HOME/seyag/cwd-drift-guard/s-escape")" = "$WT" ]; then
+  && grep -qxF "$WT" "$XDG_STATE_HOME/seyag/cwd-drift-guard/s-escape"; then
   echo "ok   [state]: state file records warned effective cwd ($WT)"
 else
   echo "FAIL [state]: state file missing or wrong content for s-escape"
@@ -262,7 +263,7 @@ fi
 
 SESSION=s-escape check 2 "linked worktree: switching to another worktree in same session warns again" "git commit -m x" "$WT2"
 SESSION=s-escape check 0 "linked worktree: second call in second worktree allows" "git commit -m x" "$WT2"
-SESSION=s-escape check 2 "linked worktree: returning to first worktree after cwd change warns again" "git commit -m x" "$WT"
+SESSION=s-escape check 0 "linked worktree: returning to first worktree after cwd change does not re-warn" "git commit -m x" "$WT"
 SESSION=s-escape check 2 "linked worktree: subdir inside worktree is a distinct effective cwd and warns" "git commit -m x" "$WT/pkg/sub"
 SESSION=s-other  check 2 "linked worktree: a different session id warns independently" "git commit -m x" "$WT"
 
@@ -279,7 +280,8 @@ if [ "$WT_BANNER_RC" = 2 ] \
   && grep -qF "$WT" <<<"$WT_BANNER" \
   && grep -qF "probe-fixture" <<<"$WT_BANNER" \
   && grep -qF "$ROOT" <<<"$WT_BANNER" \
-  && grep -qF 'git -C "$(git rev-parse --show-toplevel)"' <<<"$WT_BANNER" \
+  && grep -qF "anchor the git step: git -C \"$ROOT\" commit" <<<"$WT_BANNER" \
+  && grep -qF "cd \"$ROOT\" first." <<<"$WT_BANNER" \
   && grep -qE 're-running|same command|warn-once' <<<"$WT_BANNER"; then
   echo "ok   [banner]: linked-worktree block message names both trees, branch, repair, and confirm-once"
 else
@@ -307,6 +309,9 @@ do
   sc_cmd="${subcmd_case#*:}"
   check 2 "linked worktree state-changing subcommand ($sc_name) blocks" "$sc_cmd" "$WT"
 done
+check 2 "linked worktree: git branch -d stays blocked" "git branch -d feat" "$WT"
+check 2 "linked worktree: git branch -D stays blocked" "git branch -D feat" "$WT"
+check 2 "linked worktree: git stash pop stays blocked" "git stash pop" "$WT"
 check 2 "linked worktree: git -c key=val before state-changing subcommand still blocks" \
   "git -c user.name=probe commit -m x" "$WT"
 
@@ -316,6 +321,20 @@ check 0 "linked worktree: git log allows" "git log --oneline -5" "$WT"
 check 0 "linked worktree: git diff allows" "git diff" "$WT"
 check 0 "linked worktree: git add at worktree root allows" "git add docs/x.md" "$WT"
 check 0 "linked worktree: git fetch allows" "git fetch" "$WT"
+check 0 "linked worktree: bare git branch (read-only) allows" "git branch" "$WT"
+check 0 "linked worktree: git branch read-only flags allow" "git branch -a -r -l --list --show-current -v -vv" "$WT"
+check 0 "linked worktree: bare git tag (read-only) allows" "git tag" "$WT"
+check 0 "linked worktree: git tag -l / --list allows" "git tag -l" "$WT"
+check 0 "linked worktree: git notes list allows" "git notes list" "$WT"
+check 0 "linked worktree: git notes show allows" "git notes show" "$WT"
+check 0 "linked worktree: git stash list allows" "git stash list" "$WT"
+check 0 "linked worktree: git stash show allows" "git stash show" "$WT"
+check 0 "linked worktree: git push --dry-run allows" "git push origin HEAD --dry-run" "$WT"
+
+# Toggle and session_id fail-open rows:
+SYG_CWD_DRIFT_WORKTREE=0 check 0 "linked worktree: SYG_CWD_DRIFT_WORKTREE=0 disables the rule" "git commit -m x" "$WT"
+SESSION=__NONE__ check 0 "linked worktree: missing session_id in payload fails open" "git commit -m x" "$WT"
+SESSION=../x     check 0 "linked worktree: invalid session_id (../x) fails open" "git commit -m x" "$WT"
 
 # Rule is invisible off linked worktrees, and anchored commands pass:
 check 0 "main checkout root: bare git commit allows (not a linked worktree)" "git commit -m x" "$ROOT"

@@ -30,12 +30,16 @@
 #     worktree (`--git-dir` differs from `--git-common-dir`), a bare
 #     state-changing git subcommand (`commit`, `tag`, `notes`, `merge`,
 #     `rebase`, `reset`, `cherry-pick`, `revert`, `stash`, `am`, `checkout`,
-#     `switch`, `branch`, `push`) blocks ONCE per `(session_id, effective_cwd)`
-#     and records the warned effective cwd in
-#     `${XDG_STATE_HOME:-$HOME/.local/state}/seyag/cwd-drift-guard/<session_id>`.
-#     A repeat in the same session and effective cwd passes; an unreadable
+#     `switch`, `branch`, `push`) blocks ONCE per `(session_id, effective_cwd)`;
+#     its read-only forms do not (bare `branch` or listing flags only, `tag`
+#     with no args or `-l`/`--list`, `notes`/`stash` with `list` or `show`
+#     next, `push` with `--dry-run`). Warned cwds accumulate one per line in
+#     `${XDG_STATE_HOME:-$HOME/.local/state}/seyag/cwd-drift-guard/<session_id>`;
+#     a repeat in the same session and effective cwd passes, and an unreadable
 #     state file or an unwritable state dir fails open (a missing file is
-#     simply the first warn).
+#     simply the first warn). SYG_CWD_DRIFT_WORKTREE=0 disables this rule (any
+#     other value or unset = on). Requires git >= 2.5 (--git-common-dir in
+#     the shared rev-parse); on older git the whole hook is inert.
 #
 # Tokens that cannot be judged this way are SKIPPED (allowed): an absolute path;
 # one starting with `~`, `-` or `:` (git pathspec magic); one containing a glob
@@ -152,30 +156,37 @@ fi
 REPO_INFO=$(git -C "$EFFECTIVE_CWD" rev-parse --show-toplevel --show-prefix --git-dir --git-common-dir 2>/dev/null) || exit 0
 ROOT=$(printf '%s\n' "$REPO_INFO" | sed -n '1p')
 PREFIX=$(printf '%s\n' "$REPO_INFO" | sed -n '2p')
-GIT_DIR=$(printf '%s\n' "$REPO_INFO" | sed -n '3p')
-COMMON_DIR=$(printf '%s\n' "$REPO_INFO" | sed -n '4p')
+# WT_-prefixed so the names can never collide with git's own GIT_DIR /
+# COMMON_DIR environment variables (a child git reads those).
+WT_GIT_DIR=$(printf '%s\n' "$REPO_INFO" | sed -n '3p')
+WT_COMMON_DIR=$(printf '%s\n' "$REPO_INFO" | sed -n '4p')
 [ -n "$ROOT" ] || exit 0
 
 LINKED_WT=0
 MAIN_TREE=""
-if [ -n "$GIT_DIR" ] && [ -n "$COMMON_DIR" ] && [ "$GIT_DIR" != "$COMMON_DIR" ]; then
-  case "$GIT_DIR" in
+if [ -n "$WT_GIT_DIR" ] && [ -n "$WT_COMMON_DIR" ] && [ "$WT_GIT_DIR" != "$WT_COMMON_DIR" ]; then
+  case "$WT_GIT_DIR" in
     /*) ;;
-    *) GIT_DIR="$EFFECTIVE_CWD/$GIT_DIR" ;;
+    *) WT_GIT_DIR="$EFFECTIVE_CWD/$WT_GIT_DIR" ;;
   esac
-  case "$COMMON_DIR" in
+  case "$WT_COMMON_DIR" in
     /*) ;;
-    *) COMMON_DIR="$EFFECTIVE_CWD/$COMMON_DIR" ;;
+    *) WT_COMMON_DIR="$EFFECTIVE_CWD/$WT_COMMON_DIR" ;;
   esac
-  GIT_DIR_REAL=$(realpath "$GIT_DIR" 2>/dev/null || echo "")
-  COMMON_DIR_REAL=$(realpath "$COMMON_DIR" 2>/dev/null || echo "")
-  if [ -n "$GIT_DIR_REAL" ] && [ -n "$COMMON_DIR_REAL" ] && [ "$GIT_DIR_REAL" != "$COMMON_DIR_REAL" ]; then
+  WT_GIT_DIR_REAL=$(realpath "$WT_GIT_DIR" 2>/dev/null || echo "")
+  WT_COMMON_DIR_REAL=$(realpath "$WT_COMMON_DIR" 2>/dev/null || echo "")
+  if [ -n "$WT_GIT_DIR_REAL" ] && [ -n "$WT_COMMON_DIR_REAL" ] && [ "$WT_GIT_DIR_REAL" != "$WT_COMMON_DIR_REAL" ]; then
     LINKED_WT=1
     # Assumes the standard <repo>/.git layout; exotic layouts (bare-adjacent,
     # --separate-git-dir) can name a wrong parenthetical path in the banner —
     # the primary repair stays layout-independent.
-    MAIN_TREE=$(dirname "$COMMON_DIR_REAL" 2>/dev/null || echo "")
+    MAIN_TREE=$(dirname "$WT_COMMON_DIR_REAL" 2>/dev/null || echo "")
   fi
+fi
+# SYG_CWD_DRIFT_WORKTREE=0 disables the linked-worktree rule entirely; any
+# other value or unset leaves it on.
+if [ "${SYG_CWD_DRIFT_WORKTREE:-}" = "0" ]; then
+  LINKED_WT=0
 fi
 [ -n "$PREFIX" ] || [ "$LINKED_WT" -eq 1 ] || exit 0
 
@@ -349,19 +360,45 @@ STATE_CHANGING = {
     "revert", "stash", "am", "checkout", "switch", "branch", "push",
 }
 
+# Read-only forms of otherwise state-changing subcommands — the worktree rule
+# must not fire on them. Deliberately minimal: every form listed here has its
+# probe row.
+BRANCH_LIST_FLAGS = {"-a", "-r", "-l", "--list", "--show-current", "-v", "-vv"}
+
+
+def wt_read_only(subcmd, rest):
+    """True when this invocation of a state-changing subcommand only reads
+    (rest = every word after the subcommand)."""
+    if subcmd == "branch":
+        # Bare, or listing flags only: no positional, nothing created/deleted.
+        return all(w in BRANCH_LIST_FLAGS for w in rest)
+    if subcmd == "tag":
+        # No args, or an explicit list flag.
+        return not rest or any(w in ("-l", "--list") for w in rest)
+    if subcmd in ("notes", "stash"):
+        # `list`/`show` as the next word; bare `git stash` still pushes.
+        return bool(rest) and rest[0] in ("list", "show")
+    if subcmd == "push":
+        return "--dry-run" in rest
+    return False
+
 
 def warn_once_worktree():
+    """The state file is a set of warned effective cwds, one per line: block
+    iff eff is absent, appending it (the whole set rewritten atomically) on
+    the block."""
     if not session_id or not state_dir or not re.match(r"^[A-Za-z0-9._-]+$", session_id) or session_id in (".", ".."):
         return False
     state_file = os.path.join(state_dir, session_id)
+    warned = []
     try:
         with open(state_file, "r", encoding="utf-8", errors="replace") as f:
-            last_cwd = f.read().rstrip("\r\n")
+            warned = [cwd for cwd in (ln.rstrip("\r\n") for ln in f) if cwd]
     except FileNotFoundError:
-        last_cwd = None
+        pass
     except OSError:
         return False
-    if last_cwd == eff:
+    if eff in warned:
         return False
     tmp_path = None
     try:
@@ -379,7 +416,7 @@ def warn_once_worktree():
         fd, tmp_path = tempfile.mkstemp(prefix=".tmp.", dir=state_dir)
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write(eff + "\n")
+                f.write("".join(line + "\n" for line in warned + [eff]))
         except Exception:
             try:
                 os.unlink(tmp_path)
@@ -429,7 +466,7 @@ for words in segments:
         continue
     # args[j] is the subcommand; judge what follows it.
     subcmd = args[j].lower()
-    if linked_wt and not wt_subcmd and subcmd in STATE_CHANGING:
+    if linked_wt and not wt_subcmd and subcmd in STATE_CHANGING and not wt_read_only(subcmd, args[j + 1 :]):
         wt_subcmd = subcmd
     if not has_prefix:
         continue
@@ -475,11 +512,11 @@ CWD-DRIFT GUARD — linked-worktree command blocked (warn-once)
 The effective cwd belongs to a linked worktree rather than the main
 working tree, and this command runs a bare 'git $WT_SUBCMD':
     effective cwd:     $EFFECTIVE_CWD (branch '$WT_BRANCH')
-    main working tree: $MAIN_TREE (payload cwd: $SHELL_CWD)
+    main working tree: $MAIN_TREE
+    payload cwd:       $SHELL_CWD
 
 If you meant the main working tree:
-  - anchor the git step: git -C "\$(git rev-parse --show-toplevel)" $WT_SUBCMD ...
-    (when invoked from the main checkout, or git -C "$MAIN_TREE" $WT_SUBCMD ...), or
+  - anchor the git step: git -C "$MAIN_TREE" $WT_SUBCMD ..., or
   - cd "$MAIN_TREE" first.
 If you meant the linked worktree, re-running the same command from the
 same cwd will pass (warn-once per session and effective cwd).
