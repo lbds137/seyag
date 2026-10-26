@@ -164,6 +164,15 @@ else
   echo "skip: no timeout binary; timeout case not run"
 fi
 
+# A command that exits at once but leaves a background child holding the
+# capture fd: a pipe capture waits on the fd, so the hook stalls the child's
+# whole life even though the command itself finished. The bound must stay
+# UNDER the child's sleep (40s) — a stall goes past it and reds.
+stub orphan.sh 'echo ok' '( sleep 40 ) &'
+start=$SECONDS
+expect_silent "orphan child holding stdout does not stall the hook" SYG_ROUTE_REQUIRED=1 SYG_ROUTE_CHECK_CMD="$TMP/stubs/orphan.sh" SYG_ROUTE_CHECK_OK=ok SYG_ROUTE_CHECK_TIMEOUT=5
+[ $((SECONDS - start)) -lt 30 ] && ok "orphan stub returned before the bound (not a stall)" || bad "orphan stub stalled the hook for $((SECONDS - start))s"
+
 # --- output shape -----------------------------------------------------------
 run SYG_ROUTE_REQUIRED=1 "${FAILING[@]}"
 jq -e '(.systemMessage | type == "string" and startswith("Route check failed: ")) and (.hookSpecificOutput.additionalContext | type == "string")' <<<"$OUT" >/dev/null 2>&1 \
