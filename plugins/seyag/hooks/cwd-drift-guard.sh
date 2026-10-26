@@ -32,19 +32,21 @@
 #     `rebase`, `reset`, `cherry-pick`, `revert`, `stash`, `am`, `checkout`,
 #     `switch`, `branch`, `push`) blocks once per arrival; its read-only forms
 #     do not (bare `branch` or listing flags only, `tag` with no args or
-#     `-l`/`--list`, `notes` with no args or `list`/`show` next, `stash` with
-#     `list` or `show` next, `push` with `-n`/`--dry-run`). The last warned
+#     `-l`/`--list`/`-n`, `notes` with no args or `list`/`show` next, `stash`
+#     with `list` or `show` next, `push` with `-n`/`--dry-run`). The last warned
 #     effective cwd is recorded in
 #     `${XDG_STATE_HOME:-$HOME/.local/state}/seyag/cwd-drift-guard/<session_id>`
-#     (last-value memo, one line): it blocks once per arrival; a repeat in the
-#     same session and effective cwd passes, and an unreadable state file or an
-#     unwritable state dir fails open (a missing file is simply the first warn).
+#     (or `<session_id>.<agent_id>` when `agent_id` is present; last-value memo,
+#     one line): it blocks once per arrival; a repeat in the same session/agent
+#     and effective cwd passes, and an unreadable state file or an unwritable
+#     state dir fails open (a missing file is simply the first warn).
 #     Known bound: a session that drifts back into an already-warned worktree
 #     without an intervening warn elsewhere passes — inherent to any memo; the
-#     confirm-once banner is the mitigation. SYG_CWD_DRIFT_WORKTREE=0 disables
-#     this rule (any other value or unset = on). Requires git >= 2.5
-#     (--git-common-dir in the shared rev-parse); on older git the whole hook
-#     is inert.
+#     confirm-once banner is the mitigation. `--work-tree=`/`GIT_DIR=`-style
+#     anchoring from a worktree cwd is likewise treated as bare (one warn).
+#     SYG_CWD_DRIFT_WORKTREE=0 disables this rule (any other value or unset =
+#     on). Requires git >= 2.5 (--git-common-dir in the shared rev-parse); on
+#     older git the whole hook is inert.
 #
 # Tokens that cannot be judged this way are SKIPPED (allowed): an absolute path;
 # one starting with `~`, `-` or `:` (git pathspec magic); one containing a glob
@@ -201,6 +203,16 @@ SESSION_ID=""
 STATE_DIR=""
 if [ "$LINKED_WT" -eq 1 ]; then
   SESSION_ID=$(jq -r '.session_id // empty' <<<"$INPUT" 2>/dev/null || echo "")
+  AGENT_ID=$(jq -r '.agent_id // empty' <<<"$INPUT" 2>/dev/null || echo "")
+  if [[ ! "$SESSION_ID" =~ ^[A-Za-z0-9._-]+$ ]] || [ "$SESSION_ID" = "." ] || [ "$SESSION_ID" = ".." ]; then
+    SESSION_ID=""
+  elif [ -n "$AGENT_ID" ]; then
+    if [[ ! "$AGENT_ID" =~ ^[A-Za-z0-9._-]+$ ]] || [ "$AGENT_ID" = "." ] || [ "$AGENT_ID" = ".." ]; then
+      SESSION_ID=""
+    else
+      SESSION_ID="$SESSION_ID.$AGENT_ID"
+    fi
+  fi
   STATE_BASE="${XDG_STATE_HOME:-${HOME:-}/.local/state}"
   STATE_DIR="$STATE_BASE/seyag/cwd-drift-guard"
 fi
@@ -370,18 +382,23 @@ STATE_CHANGING = {
 # Read-only forms of otherwise state-changing subcommands — the worktree rule
 # must not fire on them. Deliberately minimal: every form listed here has its
 # probe row.
-BRANCH_LIST_FLAGS = {"-a", "-r", "-l", "--list", "--show-current", "-v", "-vv"}
+BRANCH_LIST_FLAGS = {
+    "-a", "--all", "-r", "--remotes", "-l", "--list",
+    "--show-current", "-v", "-vv", "--verbose",
+}
 
 
 def wt_read_only(subcmd, rest):
     """True when this invocation of a state-changing subcommand only reads
-    (rest = every word after the subcommand)."""
+    (rest = every word after the subcommand). Combined short flags (-av) and
+    value-taking flags (--contains X, --sort=…) still block — a known bound,
+    one retry each."""
     if subcmd == "branch":
         # Bare, or listing flags only: no positional, nothing created/deleted.
         return all(w in BRANCH_LIST_FLAGS for w in rest)
     if subcmd == "tag":
         # No args, or an explicit list flag.
-        return not rest or any(w in ("-l", "--list") for w in rest)
+        return not rest or any(w in ("-l", "--list", "-n") for w in rest)
     if subcmd == "notes":
         # Bare `git notes` lists; `list`/`show` as the next word also reads.
         return not rest or rest[0] in ("list", "show")
