@@ -1831,6 +1831,79 @@ assert_api_has "…and scopes the fetch to other-x" 'repos/other-x/issues/2002/c
 assert_exit "…and blocks on other-x's review" 2
 SHIM_REPO_EXIT=0
 
+# --- split-sub prefix across child-context merges & shared-list over-refusal --
+# bash 5.3 measured (`env -i` grounding from round 4): bash runs `gh pr merge`
+# with the `$(calc)`-resolved `GH_REPO` inside a pipeline or `&`-backgrounded
+# subshell, so a split-substitution prefix on a piped or backgrounded merge
+# must refuse as `MERGE SCOPE UNRESOLVABLE` before any network call rather than
+# silently gating the cwd repo. A child merge with no split-sub prefix
+# (`true | gh pr merge 2002`) keeps gating the cwd repo.
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'GH_REPO=$(calc) gh pr merge 2002 --rebase 2>&1 | tail -5'
+assert_exit "piped merge with non-literal GH_REPO=\$(calc) prefix: refused" 2
+assert_stderr_has "…with the unresolvable-scope banner" 'MERGE SCOPE UNRESOLVABLE'
+assert_no_fetch "…no fetch ran"
+assert_api_lacks "…no repos/ lookup in the api log" 'repos/'
+assert_ack_lacks "…and no ack line written" '2002:777:2026-08-08T12:00:00Z'
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'GH_REPO=$(calc) gh pr merge 2002 --rebase &'
+assert_exit "backgrounded merge with non-literal GH_REPO=\$(calc) prefix: refused" 2
+assert_stderr_has "…with the unresolvable-scope banner" 'MERGE SCOPE UNRESOLVABLE'
+assert_no_fetch "…no fetch ran"
+assert_api_lacks "…no repos/ lookup in the api log" 'repos/'
+assert_ack_lacks "…and no ack line written" '2002:777:2026-08-08T12:00:00Z'
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'true | gh pr merge 2002 --rebase'
+assert_stderr_lacks "child merge with no split-sub prefix does not refuse as unresolvable" 'MERGE SCOPE UNRESOLVABLE'
+assert_api_has "…and gates the cwd repo normally" 'repos/acme-widgets/cli/issues/2002/comments'
+assert_exit "…blocking on the cwd repo's review" 2
+
+# Two-occurrence split-sub cursor alignment: first split-sub is in child
+# context and second is unpiped.
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'GH_REPO=$(calc) gh pr merge 2>&1 | tail -5; GH_REPO=$(calc2) gh pr merge'
+assert_exit "two-occurrence split-sub merges (first child/piped, second unpiped): refused at the first" 2
+assert_stderr_has "…with the unresolvable-scope banner" 'MERGE SCOPE UNRESOLVABLE'
+assert_no_fetch "…no fetch ran"
+assert_api_lacks "…no repos/ lookup in the api log" 'repos/'
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'GH_REPO=$(calc) true & GH_REPO=$(calc2) gh pr merge 2002 --rebase'
+assert_exit "child split-sub before an unpiped split-sub merge keeps cursor aligned: refused" 2
+assert_stderr_has "…with the unresolvable-scope banner" 'MERGE SCOPE UNRESOLVABLE'
+assert_no_fetch "…no fetch ran"
+assert_api_lacks "…no repos/ lookup in the api log" 'repos/'
+assert_ack_lacks "…and no ack line written" '2002:777:2026-08-08T12:00:00Z'
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'GH_REPO=$(calc) true & GH_REPO=$(calc2); gh pr merge 2002 --rebase'
+assert_stderr_lacks "child split-sub prefix on non-merge does not leak or misalign later standalone GH_REPO=\$(calc2);" 'MERGE SCOPE UNRESOLVABLE'
+assert_api_has "…and the unpiped merge gates the cwd repo" 'repos/acme-widgets/cli/issues/2002/comments'
+assert_exit "…blocking on the cwd repo's review" 2
+
+# Accepted fail-safe over-refusal: when `export GH_REPO=x` and `gh pr merge`
+# share a backgrounded and-or list or a piped compound, both commands carry
+# `in_child` True (`child_gh_repo_exported` + in-child merge -> refusal) even
+# though bash 5.3 (`env -i`) resolves `x` inside the shared subshell.
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'export GH_REPO=other-x && gh pr merge 2002 --rebase &'
+assert_exit "shared backgrounded and-or list export GH_REPO + gh pr merge (accepted fail-safe over-refusal): refused" 2
+assert_stderr_has "…with the unresolvable-scope banner" 'MERGE SCOPE UNRESOLVABLE'
+assert_no_fetch "…no fetch ran"
+assert_api_lacks "…no repos/ lookup in the api log" 'repos/'
+assert_ack_lacks "…and no ack line written" '2002:777:2026-08-08T12:00:00Z'
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'if true; then export GH_REPO=other-x; gh pr merge 2002 --rebase; fi | cat'
+assert_exit "shared piped if-compound export GH_REPO + gh pr merge (accepted fail-safe over-refusal): refused" 2
+assert_stderr_has "…with the unresolvable-scope banner" 'MERGE SCOPE UNRESOLVABLE'
+assert_no_fetch "…no fetch ran"
+assert_api_lacks "…no repos/ lookup in the api log" 'repos/'
+assert_ack_lacks "…and no ack line written" '2002:777:2026-08-08T12:00:00Z'
+
 # ===========================================================================
 # 3. The review gate — block once per (PR, review-id), allow on retry
 # ===========================================================================
