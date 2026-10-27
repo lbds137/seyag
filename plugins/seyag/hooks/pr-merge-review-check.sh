@@ -763,8 +763,9 @@ def scan_invocations(text):
                         gh_repo_bare = val
             elif argv:
                 cmd_base = base0
-                if cmd_base == "unset":
-                    # `unset GH_REPO` removes the variable entirely: the
+                if cmd_base == "unset" and "-f" not in argv[1:]:
+                    # `unset GH_REPO` removes the variable entirely (unless `-f`
+                    # targets a shell function): the
                     # exported scope ends AND a later bare `export GH_REPO`
                     # exports nothing — so the remembered bare assignment is
                     # forgotten too, and a bare `export GH_REPO` afterwards
@@ -774,6 +775,7 @@ def scan_invocations(text):
                     if any(tok == "GH_REPO" for tok in argv[1:]):
                         gh_repo_env = ""
                         gh_repo_exported = False
+                        gh_repo_unresolvable = False
                         gh_repo_bare = None
                 elif cmd_base == "export" \
                         and "-n" in argv[1:] \
@@ -787,6 +789,7 @@ def scan_invocations(text):
                     # ambiguous and the shape is not covered.
                     gh_repo_env = ""
                     gh_repo_exported = False
+                    gh_repo_unresolvable = False
                 elif cmd_base in ("export", "declare", "typeset", "readonly") \
                         and not any(t in ("-n", "-u", "-p") for t in argv[1:]):
                     exported = (cmd_base == "export")
@@ -827,6 +830,19 @@ def scan_invocations(text):
                             elif not gh_repo_exported:
                                 gh_repo_exported = True
                                 gh_repo_unresolvable = True
+                        elif tok == "GH_REPO" and plus_x:
+                            gh_repo_env = ""
+                            gh_repo_exported = False
+                            gh_repo_unresolvable = False
+        elif (
+            gh_repo_exported
+            and not argv
+            and not runinfo.get("runners")
+            and len(raw) == 1
+        ):
+            m = GH_REPO_ASSIGN.match(raw[0])
+            if m and "\n" not in m.group(1):
+                child_gh_repo_exported = True
         elif argv:
             cmd_base = base0
             if cmd_base in ("export", "declare", "typeset", "readonly") \

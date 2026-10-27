@@ -605,7 +605,12 @@ def _bash_scan(text, start, bound, descend, st, in_bt):
                 continue
             what, p, extra, value = res
             if what == "close":
-                yield ("quoted", value, q, ctx)
+                q_ctx = ctx
+                if not descend and not ctx[2] and "$(" in value:
+                    sub = _dq_run(text, j, p, True, st)
+                    if sub is not None and sub[0] == "subst" and not sub[2][1]:
+                        q_ctx = ("dq_subst", in_bt, True)
+                yield ("quoted", value, q, q_ctx)
                 word_start = False
                 prev = ""
                 lone_dollar = False
@@ -2163,32 +2168,25 @@ def _pipelines(tokens):
     per simple command, leading reserved words dropped). Commands joined by
     `|`/`|&` share a pipeline; every other operator ends one. Empty commands
     vanish."""
-    pipelines = []
-    pipeline = []
-    current = []
-    for token in tokens + [_Op(";")]:
-        if isinstance(token, _Op):
-            while current and current[0] in _LEADING_KEYWORDS:
-                current = current[1:]
-            if current:
-                pipeline.append(current)
-            current = []
-            if token not in _PIPE_OPS and pipeline:
-                pipelines.append(pipeline)
-                pipeline = []
-        else:
-            current.append(token)
-    return pipelines
+    ctx_tokens = [
+        t if isinstance(t, (_Op, tuple)) else (t, False) for t in tokens
+    ]
+    return [
+        [argv for argv, _ in pipeline]
+        for pipeline in _pipelines_context(ctx_tokens)
+    ]
 
 
 def _pipelines_context(tokens, force_child=False):
     """Like `_pipelines`, but over `(word, in_child)` pairs from
     `_tokens(text, with_context=True)`; each simple command is `(argv, in_child)`
     where `in_child` is True when the command occurs inside a subshell, command
-    substitution, or process substitution (or when `force_child` is True)."""
+    substitution, or process substitution, in a multi-command pipeline, or as a
+    backgrounded `&` command (or when `force_child` is True)."""
     pipelines = []
     pipeline = []
     current = []
+    piped = False
     for token in tokens + [_Op(";")]:
         if isinstance(token, _Op):
             while current and current[0][0] in _LEADING_KEYWORDS:
@@ -2197,9 +2195,15 @@ def _pipelines_context(tokens, force_child=False):
                 in_child = force_child or current[0][1]
                 pipeline.append(([w for w, _ in current], in_child))
             current = []
-            if token not in _PIPE_OPS and pipeline:
-                pipelines.append(pipeline)
-                pipeline = []
+            if token in _PIPE_OPS:
+                piped = True
+            else:
+                if pipeline:
+                    if piped or len(pipeline) > 1 or token == "&":
+                        pipeline = [(argv, True) for argv, _ in pipeline]
+                    pipelines.append(pipeline)
+                    pipeline = []
+                piped = False
         else:
             current.append(token)
     return pipelines
@@ -2761,7 +2765,8 @@ def simple_commands_context(text):
     """Like `simple_commands`, but returns `[(argv, in_child_context), ...]`
     where `in_child_context` is True when the simple command occurs inside
     `(…)` subshell parens, `$(…)` command substitution, backtick `` `…` ``
-    command substitution, or `<(…)`/`>(…)` process substitution."""
+    command substitution, `<(…)`/`>(…)` process substitution, a multi-command
+    pipeline (`a | b`), or a `&`-backgrounded command."""
     return [
         item
         for pipeline in _command_pipelines_context(text, 0)
@@ -2777,6 +2782,10 @@ def command_pipelines(text):
 
 
 def _command_pipelines_context(text, depth):
+    # The heredoc-body regions and substitution-span offsets are shared with
+    # both span readers below: each one used to recompute `_strip_heredoc`
+    # and `substitution_span_offsets` over the same text, on every call and
+    # every wrapper-recursion level.
     body_free, heredoc_regions = _strip_heredoc(text)
     offsets = substitution_span_offsets(text, heredoc_regions)
     pipelines = _pipelines_context(_tokens(body_free, with_context=True))
@@ -2784,39 +2793,6 @@ def _command_pipelines_context(text, depth):
         _reads_script_from_stdin(c) for pipeline in pipelines for c, _ in pipeline
     ):
         pipelines = _pipelines_context(_tokens(text, with_context=True))
-    # `plain_pipelines` is built AFTER the interior extensions below, so the
-    # wrapper walk descends into `bash -c`/`eval` strings that live inside
-    # executed-span and backtick-line interiors — the same order
-    # `_command_pipelines` uses (its list is complete before `_wrapped_strings`
-    # runs). Building it earlier dropped those interior wrappers from the
-    # recursion entirely.
-    for interior in _executed_span_interiors(text, heredoc_regions, offsets):
-        pipelines.extend(
-            _pipelines_context(_tokens(interior, with_context=True), force_child=True)
-        )
-    for interior in _backtick_line_interiors(text, 0, heredoc_regions, offsets):
-        pipelines.extend(
-            _pipelines_context(_tokens(interior, with_context=True), force_child=True)
-        )
-    plain_pipelines = [[c for c, _ in pipeline] for pipeline in pipelines]
-    if depth < MAX_WRAPPER_DEPTH:
-        for inner in _wrapped_strings(plain_pipelines):
-            pipelines.extend(_command_pipelines_context(inner, depth + 1))
-    return pipelines
-
-
-def _command_pipelines(text, depth):
-    # The heredoc-body regions and substitution-span offsets are shared with
-    # both span readers below: each one used to recompute `_strip_heredoc`
-    # and `substitution_span_offsets` over the same text, on every call and
-    # every wrapper-recursion level.
-    body_free, heredoc_regions = _strip_heredoc(text)
-    offsets = substitution_span_offsets(text, heredoc_regions)
-    pipelines = _pipelines(_tokens(body_free))
-    if body_free != text and any(
-        _reads_script_from_stdin(c) for pipeline in pipelines for c in pipeline
-    ):
-        pipelines = _pipelines(_tokens(text))
     # A span whose output is EXECUTED (eval, command position, a shell -c
     # script argument) turns its heredoc body from data into code: the body is
     # what runs. Tokenize those interiors with the bodies kept, as commands of
@@ -2825,16 +2801,29 @@ def _command_pipelines(text, depth):
     # `_span_is_executed` draws that line, and so does a span
     # deeper inside a quoted word.
     for interior in _executed_span_interiors(text, heredoc_regions, offsets):
-        pipelines.extend(_pipelines(_tokens(interior)))
+        pipelines.extend(
+            _pipelines_context(_tokens(interior, with_context=True), force_child=True)
+        )
     # A backtick span's interior lines are commands of their own;
     # the glue reading keeps the enclosing pipeline whole (S3) but hides
     # every interior line after the first, so they are appended here.
     for interior in _backtick_line_interiors(text, 0, heredoc_regions, offsets):
-        pipelines.extend(_pipelines(_tokens(interior)))
+        pipelines.extend(
+            _pipelines_context(_tokens(interior, with_context=True), force_child=True)
+        )
+    # `plain_pipelines` is built AFTER the interior extensions above, so the
+    # wrapper walk descends into `bash -c`/`eval` strings that live inside
+    # executed-span and backtick-line interiors. Building it earlier dropped
+    # those interior wrappers from the recursion entirely.
+    plain_pipelines = [[c for c, _ in pipeline] for pipeline in pipelines]
     if depth < MAX_WRAPPER_DEPTH:
-        # `pipelines` is exactly `_pipelines(_tokens(scanned text))`, so the
-        # wrapper strings come from it rather than from a second tokenization;
-        # the list is complete before the loop extends `pipelines`.
-        for inner in _wrapped_strings(pipelines):
-            pipelines.extend(_command_pipelines(inner, depth + 1))
+        for inner in _wrapped_strings(plain_pipelines):
+            pipelines.extend(_command_pipelines_context(inner, depth + 1))
     return pipelines
+
+
+def _command_pipelines(text, depth):
+    return [
+        [argv for argv, _ in pipeline]
+        for pipeline in _command_pipelines_context(text, depth)
+    ]

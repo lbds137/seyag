@@ -34,6 +34,7 @@ from shell_quotes import (  # noqa: E402
     span_overruns_quotes,
     command_pipelines,
     simple_commands,
+    simple_commands_context,
     strip_redirections,
     substitution_spans_matching,
     unwrap_runners,
@@ -1297,6 +1298,46 @@ for _label, _inp in [
            == [a for p in command_pipelines(_inp) for a in p],
            simple_commands(_inp),
            "equal to command_pipelines flattened")
+
+# Direct unit rows for `simple_commands_context`'s `in_child` flag across
+# child-shell vs current-shell constructs and pipeline/background operators.
+for _label, _inp, _want in [
+    ('subshell parens (a) -> child True',
+     '(a)',
+     [(['a'], True)]),
+    ('command substitution $(a) -> inner command child True',
+     '$(a)',
+     [(['$'], False), (['a'], True)]),
+    ('backtick command substitution `a` -> child True',
+     '`a`',
+     [(['`a`'], True)]),
+    ('process substitution <(a) -> inner command child True',
+     '<(a)',
+     [(['<'], False), (['a'], True)]),
+    ('double-quoted command substitution "$(a)" -> child True',
+     '"$(a)"',
+     [(['$(a)'], True)]),
+    ('arithmetic expansion $((1)) -> child False',
+     '$((1))',
+     [(['$'], False), (['1'], False)]),
+    ('brace group { a; } -> child False',
+     '{ a; }',
+     [(['a'], False)]),
+    ('case arm case x in y) a;; esac -> child False',
+     'case x in y) a;; esac',
+     [(['case', 'x', 'in', 'y'], False), (['a'], False), (['esac'], False)]),
+    ('multi-command pipeline a | b -> each element child True',
+     'a | b',
+     [(['a'], True), (['b'], True)]),
+    ('backgrounded command a & b -> a child True, b child False',
+     'a & b',
+     [(['a'], True), (['b'], False)]),
+    ('trailing backgrounded command a & -> child True',
+     'a &',
+     [(['a'], True)]),
+]:
+    _got = simple_commands_context(_inp)
+    report('simple_commands_context: ' + _label, _got == _want, _got, _want)
 
 print("%d passed, %d failed" % (passed, failed))
 sys.exit(1 if failed else 0)

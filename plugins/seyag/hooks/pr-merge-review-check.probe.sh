@@ -1678,6 +1678,70 @@ assert_stderr_lacks "export -n GH_REPO=x stays not-covered: no refusal, no captu
 assert_api_has "…the merge gates on the cwd repo" 'repos/acme-widgets/cli/issues/2002/comments'
 assert_api_lacks "…other-x reaches no fetch" 'repos/other-x'
 
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+# Fix 1a: `export GH_REPO=other-x | true; gh pr merge 2002 --rebase` runs each
+# element of a multi-command pipeline in a subshell — the export does not
+# reach the merge.
+invoke 'export GH_REPO=other-x | true; gh pr merge 2002 --rebase'
+assert_stderr_lacks "pipelined export GH_REPO=other-x | true does not capture into later merge" 'MERGE SCOPE UNRESOLVABLE'
+assert_api_has "…the merge gates on the cwd repo" 'repos/acme-widgets/cli/issues/2002/comments'
+assert_api_lacks "…the pipeline's repo reaches no fetch" 'repos/other-x'
+assert_exit "…and the gate blocks on the cwd repo's review" 2
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+# Fix 1b: `export GH_REPO=other-x & gh pr merge 2002 --rebase` runs the
+# `&`-terminated command in a background subshell — the export does not
+# reach the foreground merge.
+invoke 'export GH_REPO=other-x & gh pr merge 2002 --rebase'
+assert_stderr_lacks "backgrounded export GH_REPO=other-x & does not capture into foreground merge" 'MERGE SCOPE UNRESOLVABLE'
+assert_api_has "…the merge gates on the cwd repo" 'repos/acme-widgets/cli/issues/2002/comments'
+assert_api_lacks "…the backgrounded export's repo reaches no fetch" 'repos/other-x'
+assert_exit "…and the gate blocks on the cwd repo's review" 2
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+# Fix 2: `declare +x GH_REPO` (bare, no value) un-exports GH_REPO while
+# keeping the shell variable — mirrors `export -n GH_REPO`.
+invoke 'export GH_REPO=other-x && declare +x GH_REPO && gh pr merge 2002 --rebase'
+assert_stderr_lacks "declare +x GH_REPO un-exports: no unresolvable refusal" 'MERGE SCOPE UNRESOLVABLE'
+assert_api_has "…the merge gates on the cwd repo" 'repos/acme-widgets/cli/issues/2002/comments'
+assert_api_lacks "…other-x reaches no fetch" 'repos/other-x'
+assert_exit "…and the gate blocks on the cwd repo's review" 2
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+# Fix 3: a child-context bare reassignment when GH_REPO is already exported
+# (`export GH_REPO=other-a && (GH_REPO=other-b; gh pr merge 2002 --rebase)`)
+# updates the exported value inside the subshell — the in-child merge refuses
+# instead of gating the stale parent repo.
+invoke 'export GH_REPO=other-a && (GH_REPO=other-b; gh pr merge 2002 --rebase)'
+assert_exit "child bare GH_REPO= reassignment over exported GH_REPO with in-child merge: refused" 2
+assert_stderr_has "…with the unresolvable-scope banner" 'MERGE SCOPE UNRESOLVABLE'
+assert_no_fetch "…no fetch ran"
+assert_api_lacks "…neither parent nor child repo reaches a fetch" 'repos/'
+assert_lacks_ack "…no ack written"
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+# Fix 4: `unset GH_REPO` and `export -n GH_REPO` clear `gh_repo_unresolvable`
+# after a value-less `export GH_REPO` — bash exports nothing by merge time.
+invoke 'export GH_REPO && unset GH_REPO && gh pr merge 2002 --rebase'
+assert_stderr_lacks "unset GH_REPO after bare export GH_REPO clears unresolvable: no refusal" 'MERGE SCOPE UNRESOLVABLE'
+assert_api_has "…the merge gates on the cwd repo" 'repos/acme-widgets/cli/issues/2002/comments'
+assert_exit "…and the gate blocks on the cwd repo's review" 2
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'export GH_REPO && export -n GH_REPO && gh pr merge 2002 --rebase'
+assert_stderr_lacks "export -n GH_REPO after bare export GH_REPO clears unresolvable: no refusal" 'MERGE SCOPE UNRESOLVABLE'
+assert_api_has "…the merge gates on the cwd repo" 'repos/acme-widgets/cli/issues/2002/comments'
+assert_exit "…and the gate blocks on the cwd repo's review" 2
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"; SHIM_REPO_EXIT=1
+# Fix 5: `unset -f GH_REPO` removes a shell function, not the variable — the
+# exported GH_REPO scope stands.
+invoke 'export GH_REPO=other-x && unset -f GH_REPO && gh pr merge 2002 --rebase'
+assert_stderr_lacks "unset -f GH_REPO keeps the exported variable scope" 'MERGE SCOPE UNRESOLVABLE'
+assert_api_has "…other-x still scopes the fetch" 'repos/other-x/issues/2002/comments'
+assert_exit "…and the gate blocks on other-x's review" 2
+SHIM_REPO_EXIT=0
+
 # --- backtick-glue strip on captured values ----------------------------------
 # A backtick-span interior keeps its closing delimiter glued to the last
 # word: `-R a/b` at the end of a span arrives as `a/b\``. The strip is
