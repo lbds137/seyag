@@ -486,4 +486,37 @@ err_span3600=$(env -i HOME="$T" PATH=/usr/bin:/bin CLAUDE_PROJECTS_DIR="$T/span-
   && ok "--max-span 3600: drops ~2h intervals, exits 1 for <3 intervals" \
   || bad "--max-span 3600 failed (rc $rc): $err_span3600"
 
+# --- advisor_message iterations in message.usage.iterations[] ---
+mkdir -p "$T/advisor-projects/slugA"
+line_adv() { # id ts exec_in exec_out adv_in adv_out adv_cr adv_cw
+  printf '{"type":"assistant","timestamp":"%s","requestId":"r-%s","message":{"id":"%s","model":"claude-sonnet-4-6","content":[{"type":"text"}],"usage":{"input_tokens":%s,"output_tokens":%s,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"iterations":[{"type":"advisor_message","model":"claude-opus-4-6","input_tokens":%s,"output_tokens":%s,"cache_read_input_tokens":%s,"cache_creation_input_tokens":%s},{"type":"tool_use","model":"claude-haiku-4","input_tokens":9000,"output_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}]}}}\n' \
+    "$2" "$1" "$1" "$3" "$4" "$5" "$6" "$7" "$8"
+}
+{ line_adv m_adv 2026-09-24T02:00:00Z 100 10 200 20 1000 80
+  line_adv m_adv 2026-09-24T02:00:00Z 100 20 200 40 1000 80
+} > "$T/advisor-projects/slugA/s1.jsonl"
+j_adv=$(env -i HOME="$T" PATH=/usr/bin:/bin CLAUDE_PROJECTS_DIR="$T/advisor-projects" "$US" --since 2026-09-24T01:15Z --json)
+# Executor sonnet: 100*1 + 20*5 = 200. Advisor opus at max output (40): 200*1 + 40*5 + 1000*0.1 + 80*1.25 = 600.
+[ "$(jq -r '[.by_model["claude-opus-4-6"].weighted, .by_model["claude-sonnet-4-6"].weighted] | join(",")' <<<"$j_adv")" = "600,200" ] \
+  && ok "advisor_message iteration tokens land under the advisor model (opus 600), not the executor (sonnet 200)" \
+  || bad "advisor model attribution: $(jq -c .by_model <<<"$j_adv")"
+[ "$(jq -r '[(.by_model | keys | join(",")), .total_weighted] | join(" ")' <<<"$j_adv")" = "claude-opus-4-6,claude-sonnet-4-6 800" ] \
+  && ok "non-advisor_message iteration entries are ignored (only opus+sonnet counted, total 800)" \
+  || bad "non-advisor iteration filter: $(jq -c '{models: (.by_model | keys), total: .total_weighted}' <<<"$j_adv")"
+[ "$(jq -r '[.messages_counted, .by_model["claude-opus-4-6"].msgs, .by_model["claude-opus-4-6"].output, .by_model["claude-sonnet-4-6"].output] | join(",")' <<<"$j_adv")" = "2,1,40,20" ] \
+  && ok "streaming duplicate with grown advisor iteration is counted once at max output_tokens (opus 40, sonnet 20)" \
+  || bad "advisor streaming dedupe: $(jq -c '{messages_counted, by_model}' <<<"$j_adv")"
+
+# Placement pin: executor FLAT across snapshots (20 -> 20, the strict > keep-max skips the
+# parent re-store) while the advisor grows (20 -> 40). If the advisor loop were nested inside
+# the parent's keep-max `if`, the grown advisor row would be skipped and opus would cap at 500.
+mkdir -p "$T/advisor-flat-projects/slugA"
+{ line_adv m_flat 2026-09-24T02:00:00Z 100 20 200 20 1000 80
+  line_adv m_flat 2026-09-24T02:00:00Z 100 20 200 40 1000 80
+} > "$T/advisor-flat-projects/slugA/s1.jsonl"
+j_flat=$(env -i HOME="$T" PATH=/usr/bin:/bin CLAUDE_PROJECTS_DIR="$T/advisor-flat-projects" "$US" --since 2026-09-24T01:15Z --json)
+[ "$(jq -r '.by_model["claude-opus-4-6"].weighted' <<<"$j_flat")" = "600" ] \
+  && ok "advisor rows re-store even when the parent's keep-max skips (executor flat 20->20, advisor 20->40: opus 600, not 500)" \
+  || bad "advisor placement (parent-skipped snapshot): $(jq -c .by_model <<<"$j_flat")"
+
 exit $fail
