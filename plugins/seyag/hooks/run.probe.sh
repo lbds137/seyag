@@ -11,6 +11,8 @@
 #      a missing registry, an unknown profile or a broken resolver fails toward on
 #   8. event mode (run.sh --event <Event>): matcher selection, parallel runs, and
 #      the merge of blocks, context, systemMessage and stderr in hooks.json order
+#   9. stdin contract: every skip path drains the caller's pipe (a >64KB payload
+#      makes a non-draining exit deterministic), and the exec path consumes
 # Uses throwaway fake hooks placed next to run.sh in temp copies, so the real
 # hooks are never involved (except the one real SessionStart case in 8).
 #
@@ -554,5 +556,40 @@ else
   echo "FAIL [rc $RC, out '$OUT']: event: real SessionStart context should start with 'seyag plugin '"
   fail=1
 fi
+
+# --- 9. stdin contract: a skipped run.sh still drains the caller's pipe --------
+BIG='{"tool_name":"Bash","tool_input":{"command":"true","description":"'
+BIG+=$(head -c 190000 /dev/zero | tr '\0' a)
+BIG+='"}}'
+drain_row() { # $1 want-rc, $2 label, $3 got-rc
+  if [ "$3" = "$1" ]; then
+    echo "ok   [$3]: $2"
+  else
+    echo "FAIL [rc $3, want $1]: $2"
+    fail=1
+  fi
+}
+
+printf '%s' "$BIG" | CLAUDE_PROJECT_DIR="$TMP/proj-without" runsh SYG_DISABLE=guards-shell lossy-pipe-guard >/dev/null 2>&1
+drain_row 0 "stdin >64KB, disabled component skip: caller's pipe is drained (no SIGPIPE)" "$?"
+
+printf '%s' "$BIG" | CLAUDE_PROJECT_DIR="$TMP/proj-with" runsh fake-guard >/dev/null 2>&1
+drain_row 0 "stdin >64KB, project copy wins skip: caller's pipe is drained (no SIGPIPE)" "$?"
+
+mkplug plugin-unreadable-hj
+: > "$TMP/plugin-unreadable-hj/hooks/hooks.json"
+chmod 000 "$TMP/plugin-unreadable-hj/hooks/hooks.json"
+printf '%s' "$BIG" | CLAUDE_PROJECT_DIR="$TMP/proj-without" bash "$TMP/plugin-unreadable-hj/hooks/run.sh" --event PreToolUse >/dev/null 2>&1
+drain_row 0 "stdin >64KB, event mode unreadable hooks.json skip: caller's pipe is drained (no SIGPIPE)" "$?"
+chmod 600 "$TMP/plugin-unreadable-hj/hooks/hooks.json"
+
+mkdir -p "$TMP/stdin-nojq-bin"
+ln -s "$(command -v bash)" "$TMP/stdin-nojq-bin/bash"
+ln -s "$(command -v dirname)" "$TMP/stdin-nojq-bin/dirname"
+printf '%s' "$BIG" | PATH="$TMP/stdin-nojq-bin" CLAUDE_PROJECT_DIR="$TMP/proj-without" bash "$TMP/plugin/hooks/run.sh" --event PreToolUse >/dev/null 2>&1
+drain_row 0 "stdin >64KB, event mode missing jq skip: caller's pipe is drained (no SIGPIPE)" "$?"
+
+printf '%s' "$BIG" | CLAUDE_PROJECT_DIR="$TMP/proj-without" runsh fake-guard >/dev/null 2>&1
+drain_row 2 "stdin >64KB, exec path control: the hook consumes the payload and blocks with 2" "$?"
 
 exit $fail
