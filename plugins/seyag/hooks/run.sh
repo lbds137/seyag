@@ -64,8 +64,14 @@ syg_hook_ready() {
   return 0
 }
 
+# A caller writes the payload down a pipe; a skip path that exits without
+# consuming can SIGPIPE it (deterministic at >64KiB). Builtin read avoids a fork
+# on this hot path; JSON payloads carry no NUL byte, so one `read -d ''` drains
+# to EOF.
+syg_drain_stdin() { IFS= read -r -d '' _SYG_DRAINED_ || true; }
+
 if [ "${1:-}" != --event ]; then
-  syg_hook_ready "${1:-}" || exit 0
+  syg_hook_ready "${1:-}" || { syg_drain_stdin; exit 0; }
   exec bash "$SYG_HOOK"
 fi
 
@@ -92,9 +98,9 @@ fi
 #   whole event when jq or hooks.json is missing, or the event is unknown. An
 #   unparsable hooks.json says so on stderr.
 EVENT=${2:-}
-command -v jq >/dev/null 2>&1 || exit 0
+command -v jq >/dev/null 2>&1 || { syg_drain_stdin; exit 0; }
 DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-[ -r "$DIR/hooks.json" ] || exit 0
+[ -r "$DIR/hooks.json" ] || { syg_drain_stdin; exit 0; }
 PAYLOAD=$(cat)
 
 # The payload goes to jq on stdin from the printf builtin (a Write payload can
