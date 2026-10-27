@@ -647,6 +647,24 @@ def scan_invocations(text):
             return val + "("
         return val
 
+    def parse_x_flags(cmd_base, args):
+        exported = cmd_base == "export"
+        plus_x = False
+        for tok in args:
+            if tok == "--" or tok == "GH_REPO" or GH_REPO_ASSIGN.match(tok):
+                break
+            if (
+                tok.startswith("-")
+                and not tok.startswith("--")
+                and "x" in tok[1:]
+            ):
+                exported = True
+                plus_x = False
+            elif tok.startswith("+") and "x" in tok[1:]:
+                exported = False
+                plus_x = True
+        return exported, plus_x
+
     def consume_split_sub_is_prefix():
         # Distinguish `GH_REPO=$(...) gh pr merge ...` (prefix on the next
         # same-shell command) from `GH_REPO=$(...); gh pr merge ...` (a
@@ -787,24 +805,22 @@ def scan_invocations(text):
                     # children see nothing afterwards). `export -n GH_REPO=x`
                     # stays unhandled — its assign-and-unexport combination is
                     # ambiguous and the shape is not covered.
+                    # Combined flags like `export -fn GH_REPO` fall to the
+                    # general arm (exact-token `-n` does not match); measured
+                    # harmless in bash 5.3 (`env -i`): bash errors
+                    # `GH_REPO: not a function` and the variable stays
+                    # exported, so the capture stands.
                     gh_repo_env = ""
                     gh_repo_exported = False
                     gh_repo_unresolvable = False
                 elif cmd_base in ("export", "declare", "typeset", "readonly") \
                         and not any(t in ("-n", "-u", "-p") for t in argv[1:]):
-                    exported = (cmd_base == "export")
-                    plus_x = False
-                    for tok in argv[1:]:
-                        if tok == "--" or tok == "GH_REPO" \
-                                or GH_REPO_ASSIGN.match(tok):
-                            break
-                        if tok.startswith("-") and not tok.startswith("--") \
-                                and "x" in tok[1:]:
-                            exported = True
-                            plus_x = False
-                        elif tok.startswith("+") and "x" in tok[1:]:
-                            exported = False
-                            plus_x = True
+                    # `local -x GH_REPO=…` inside a function body is not
+                    # covered (measured, bash 5.3, `env -i`: the local scope
+                    # dies at function return, so a merge after the function
+                    # sees no GH_REPO; a merge inside the body is not a
+                    # one-liner shape this hook reads).
+                    exported, plus_x = parse_x_flags(cmd_base, argv[1:])
                     for tok_i, tok in enumerate(argv[1:]):
                         m = GH_REPO_ASSIGN.match(tok)
                         if m and "\n" not in m.group(1):
@@ -847,16 +863,7 @@ def scan_invocations(text):
             cmd_base = base0
             if cmd_base in ("export", "declare", "typeset", "readonly") \
                     and not any(t in ("-n", "-u", "-p") for t in argv[1:]):
-                exported = (cmd_base == "export")
-                for tok in argv[1:]:
-                    if tok == "--" or tok == "GH_REPO" \
-                            or GH_REPO_ASSIGN.match(tok):
-                        break
-                    if tok.startswith("-") and not tok.startswith("--") \
-                            and "x" in tok[1:]:
-                        exported = True
-                    elif tok.startswith("+") and "x" in tok[1:]:
-                        exported = False
+                exported, _ = parse_x_flags(cmd_base, argv[1:])
                 if exported and any(
                     tok == "GH_REPO"
                     or (

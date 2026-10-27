@@ -1335,6 +1335,48 @@ for _label, _inp, _want in [
     ('trailing backgrounded command a & -> child True',
      'a &',
      [(['a'], True)]),
+    # bash 5.3 measured (`env -i`): `&` backgrounds the whole preceding and-or
+    # list (`export V=x && true &`), and backgrounded or piped compounds
+    # (`{ export V=x; } &`, `if true; then export V=x; fi | cat`) run their
+    # interior commands in a child subshell; bare unpiped, unbackgrounded
+    # compounds and foreground and-or lists keep same-shell (`in_child` False)
+    # semantics.
+    ('backgrounded and-or list a && b & c -> a and b child True, c child False',
+     'a && b & c',
+     [(['a'], True), (['b'], True), (['c'], False)]),
+    ('sequential backgrounded commands a & b & c -> a and b child True, c child False',
+     'a & b & c',
+     [(['a'], True), (['b'], True), (['c'], False)]),
+    ('semicolon before backgrounded command a; b & c -> a child False, b child True, c child False',
+     'a; b & c',
+     [(['a'], False), (['b'], True), (['c'], False)]),
+    ('backgrounded brace group { a; } & b -> a child True, b child False',
+     '{ a; } & b',
+     [(['a'], True), (['b'], False)]),
+    ('piped brace group { a; } | b; c -> a and b child True, c child False',
+     '{ a; } | b; c',
+     [(['a'], True), (['b'], True), (['c'], False)]),
+    ('piped if compound if true; then a; fi | b; c -> compound and pipe child True, c child False',
+     'if true; then a; fi | b; c',
+     [(['true'], True), (['a'], True), (['fi'], True), (['b'], True), (['c'], False)]),
+    ('bare brace group followed by command { a; }; b -> child False',
+     '{ a; }; b',
+     [(['a'], False), (['b'], False)]),
+    ('bare if compound followed by command if true; then a; fi; b -> child False',
+     'if true; then a; fi; b',
+     [(['true'], False), (['a'], False), (['fi'], False), (['b'], False)]),
+    ('foreground and-or list followed by command a && b; c -> child False',
+     'a && b; c',
+     [(['a'], False), (['b'], False), (['c'], False)]),
+    ('bare while compound followed by command while true; do a; break; done; b -> child False',
+     'while true; do a; break; done; b',
+     [(['true'], False), (['a'], False), (['break'], False), (['done'], False), (['b'], False)]),
+    ('bare for compound followed by command for i in 1; do a; done; b -> child False',
+     'for i in 1; do a; done; b',
+     [(['for', 'i', 'in', '1'], False), (['a'], False), (['done'], False), (['b'], False)]),
+    ('bare case compound followed by command case x in x) a;; esac; b -> child False',
+     'case x in x) a;; esac; b',
+     [(['case', 'x', 'in', 'x'], False), (['a'], False), (['esac'], False), (['b'], False)]),
 ]:
     _got = simple_commands_context(_inp)
     report('simple_commands_context: ' + _label, _got == _want, _got, _want)
