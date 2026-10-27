@@ -1282,5 +1282,21 @@ for _label, _inp in [
     report('simple_commands: ' + _label, ['env'] in _got, _got,
            "a list containing ['env']")
 
+# Byte-identity rows: `simple_commands` must equal `command_pipelines`
+# flattened, including when a wrapper string lives INSIDE a backtick-line or
+# executed-span interior — the context reader's wrapper walk descends into
+# interiors (built after them, matching `_command_pipelines`' order).
+for _label, _inp in [
+    ('a wrapper inside a backtick-line interior',
+     'echo `true\nbash -c "gh pr merge 5"`'),
+    ('a wrapper inside an executed heredoc span',
+     'eval "$(cat <<EOF\nbash -c \'gh pr merge 5\'\nEOF\n)"'),
+]:
+    report('simple_commands == command_pipelines flat: ' + _label,
+           simple_commands(_inp)
+           == [a for p in command_pipelines(_inp) for a in p],
+           simple_commands(_inp),
+           "equal to command_pipelines flattened")
+
 print("%d passed, %d failed" % (passed, failed))
 sys.exit(1 if failed else 0)

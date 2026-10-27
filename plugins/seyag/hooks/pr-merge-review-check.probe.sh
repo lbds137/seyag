@@ -638,6 +638,25 @@ assert_pr "a -R-scoped merge still resolves and gates the PR" 2002
 assert_api_has "…and the review fetch URL is scoped to the -R repo" 'repos/other-x/issues/2002/comments'
 SHIM_REPO_EXIT=0
 
+# Two-part owner/repo and three-part HOST/OWNER/REPO -R forms when `gh repo
+# view` fails: the fetch fallback strips a leading host component so the REST
+# path is `repos/<owner>/<repo>/...` rather than a 404 `repos/github.com/...`,
+# while leaving a plain two-part `owner/repo` intact.
+new_case; SHIM_REPO_EXIT=1; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'gh pr merge 2002 -R other-x/repo-x --rebase'
+assert_pr "plain two-part -R with repo view failing still resolves PR" 2002
+assert_api_has "…and the fallback fetch URL keeps owner/repo intact" 'repos/other-x/repo-x/issues/2002/comments'
+assert_exit "…and blocks on that repo's review" 2
+SHIM_REPO_EXIT=0
+
+new_case; SHIM_REPO_EXIT=1; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'gh pr merge 2002 -R github.com/other-x/repo-x --rebase'
+assert_pr "host-form -R with repo view failing still resolves PR" 2002
+assert_api_has "…and the fallback fetch URL strips the leading host" 'repos/other-x/repo-x/issues/2002/comments'
+assert_api_lacks "…so github.com does not reach the REST path" 'github.com'
+assert_exit "…and blocks on that repo's review" 2
+SHIM_REPO_EXIT=0
+
 # A multi-line --repo value is a quoted blob, not an owner/repo: it assigns
 # nothing (the lookups scope to the cwd repo) and must not shift the
 # line-oriented extraction — every line after the repo line would read the
@@ -730,6 +749,90 @@ new_case; SHIM_REPO_EXIT=1; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
 invoke 'export -- GH_REPO=other-x && gh pr merge 2002 --rebase'
 assert_api_has "export -- GH_REPO still captures: other-x scopes the fetch" 'repos/other-x/issues/2002/comments'
 assert_exit "…and the gate blocks on that repo's review" 2
+SHIM_REPO_EXIT=0
+
+# Child-context exports ignored (measured, bash 5.3, `env -i`: subshell
+# `(...)`, `$(...)`, and backtick exports die with the child shell and do not
+# reach the parent's later `gh pr merge`).
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke '(export GH_REPO=other-x) && gh pr merge 2002 --rebase'
+assert_api_has "subshell export dies with the child: fetch scopes to the cwd repo" 'repos/acme-widgets/cli/issues/2002/comments'
+assert_api_lacks "…and the subshell's repo reaches no fetch" 'repos/other-x'
+assert_exit "…and the gate blocks on the cwd repo's review" 2
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke '$(export GH_REPO=other-x) && gh pr merge 2002 --rebase'
+assert_api_has "command-substitution export dies with the child: fetch scopes to the cwd repo" 'repos/acme-widgets/cli/issues/2002/comments'
+assert_api_lacks "…and the substitution's repo reaches no fetch" 'repos/other-x'
+assert_exit "…and the gate blocks on the cwd repo's review" 2
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke '`export GH_REPO=other-x` && gh pr merge 2002 --rebase'
+assert_api_has "backtick export dies with the child: fetch scopes to the cwd repo" 'repos/acme-widgets/cli/issues/2002/comments'
+assert_api_lacks "…and the backtick's repo reaches no fetch" 'repos/other-x'
+assert_exit "…and the gate blocks on the cwd repo's review" 2
+
+# Control: a wrapper shell (`bash -c '…'`) runs its commands in one inner
+# shell, so its `export GH_REPO=…` DOES reach the merge inside it (no
+# child-context filter on wrapper interiors).
+new_case; SHIM_REPO_EXIT=1; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke "bash -c 'export GH_REPO=other-x; gh pr merge 2002 --rebase'"
+assert_api_has "control: export inside bash -c scopes the merge in that same wrapper shell" 'repos/other-x/issues/2002/comments'
+assert_exit "…and the gate blocks on that repo's review" 2
+SHIM_REPO_EXIT=0
+
+# `declare`/`typeset`/`readonly` capture (measured, bash 5.3, `env -i`: `-x`
+# before the assignment word exports; last x-flag before the word wins; flags
+# after the word are inert for the export attribute).
+new_case; SHIM_REPO_EXIT=1; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'declare -x GH_REPO=other-x && gh pr merge 2002 --rebase'
+assert_api_has "declare -x GH_REPO scopes the fetch" 'repos/other-x/issues/2002/comments'
+assert_exit "…and blocks on that repo's review" 2
+SHIM_REPO_EXIT=0
+
+new_case; SHIM_REPO_EXIT=1; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'typeset -x GH_REPO=other-x && gh pr merge 2002 --rebase'
+assert_api_has "typeset -x GH_REPO scopes the fetch" 'repos/other-x/issues/2002/comments'
+assert_exit "…and blocks on that repo's review" 2
+SHIM_REPO_EXIT=0
+
+new_case; SHIM_REPO_EXIT=1; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'readonly -x GH_REPO=other-x && gh pr merge 2002 --rebase'
+assert_api_has "readonly -x GH_REPO scopes the fetch" 'repos/other-x/issues/2002/comments'
+assert_exit "…and blocks on that repo's review" 2
+SHIM_REPO_EXIT=0
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'declare GH_REPO=other-x && gh pr merge 2002 --rebase'
+assert_api_has "declare without -x does not export: fetch stays on the cwd repo" 'repos/acme-widgets/cli/issues/2002/comments'
+assert_api_lacks "…and other-x reaches no fetch" 'repos/other-x'
+assert_exit "…and blocks on the cwd repo's review" 2
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'declare -x +x GH_REPO=other-x && gh pr merge 2002 --rebase'
+assert_api_has "declare -x +x (last x-flag wins, +x clears export): fetch stays on the cwd repo" 'repos/acme-widgets/cli/issues/2002/comments'
+assert_api_lacks "…and other-x reaches no fetch" 'repos/other-x'
+assert_exit "…and blocks on the cwd repo's review" 2
+
+new_case; SHIM_REPO_EXIT=1; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'declare +x -x GH_REPO=other-x && gh pr merge 2002 --rebase'
+assert_api_has "declare +x -x (last x-flag wins, -x exports): fetch scopes to other-x" 'repos/other-x/issues/2002/comments'
+assert_exit "…and blocks on that repo's review" 2
+SHIM_REPO_EXIT=0
+
+# Bare-assignment state (measured, bash 5.3, `env -i`: reassigning an
+# exported var updates children's view; `GH_REPO=x; export GH_REPO` exports x).
+new_case; SHIM_REPO_EXIT=1; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'export GH_REPO=first-x && GH_REPO=second-x && gh pr merge 2002 --rebase'
+assert_api_has "reassigning an exported GH_REPO updates the scope to second-x" 'repos/second-x/issues/2002/comments'
+assert_api_lacks "…and the overwritten first-x value reaches no fetch" 'first-x'
+assert_exit "…and blocks on second-x's review" 2
+SHIM_REPO_EXIT=0
+
+new_case; SHIM_REPO_EXIT=1; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'GH_REPO=second-x && export GH_REPO && gh pr merge 2002 --rebase'
+assert_api_has "bare assignment promoted by a later export GH_REPO scopes to second-x" 'repos/second-x/issues/2002/comments'
+assert_exit "…and blocks on second-x's review" 2
 SHIM_REPO_EXIT=0
 
 # Unparseable input must fall back to the permissive scan, never to silence.
@@ -1344,6 +1447,253 @@ assert_no_fetch "…no fetch ran"
 new_case; invoke 'echo 7 8 | xargs -n1 echo'
 assert_exit "xargs without a merge: allowed" 0
 assert_silent "…and silent"
+
+# ===========================================================================
+# 2h. Unresolvable-scope merges — a bare `export GH_REPO` / `declare -x
+#     GH_REPO` with no prior assignment in this command (measured, bash 5.3,
+#     `env -i`: exports whatever inherited value the shell had, unknown to
+#     this hook) or a dynamic `-R`/`--repo`/`GH_REPO=` value (`$(...)`,
+#     backticks, `<(...)`, `$VAR`). Non-ackable refusal, exit 2, before any
+#     network call.
+# ===========================================================================
+printf '\n--- unresolvable-scope merges (dynamic / bare-export repo scope) ---\n'
+
+SHIM_PR_BASE='develop'
+SHIM_REVIEW_JSON="$LGTM"
+
+new_case; invoke 'export GH_REPO && gh pr merge 2002 --rebase'
+assert_exit "bare export GH_REPO with no prior assignment: refused" 2
+assert_stderr_has "…with the unresolvable-scope banner" 'MERGE SCOPE UNRESOLVABLE'
+assert_no_fetch "…no fetch ran"
+assert_api_lacks "…no repos/ lookup in the api log" 'repos/'
+assert_ack_lacks "…and no ack line written" '2002:777:2026-08-08T12:00:00Z'
+
+new_case; invoke 'declare -x GH_REPO && gh pr merge 2002 --rebase'
+assert_exit "bare declare -x GH_REPO with no prior assignment: refused" 2
+assert_stderr_has "…with the unresolvable-scope banner" 'MERGE SCOPE UNRESOLVABLE'
+assert_no_fetch "…no fetch ran"
+assert_api_lacks "…no repos/ lookup in the api log" 'repos/'
+assert_ack_lacks "…and no ack line written" '2002:777:2026-08-08T12:00:00Z'
+
+new_case; invoke 'GH_REPO=$(calc) gh pr merge 2002 --rebase'
+assert_exit "non-literal GH_REPO=\$(calc) prefix: refused" 2
+assert_stderr_has "…with the unresolvable-scope banner" 'MERGE SCOPE UNRESOLVABLE'
+assert_no_fetch "…no fetch ran"
+assert_api_lacks "…no repos/ lookup in the api log" 'repos/'
+assert_ack_lacks "…and no ack line written" '2002:777:2026-08-08T12:00:00Z'
+
+new_case; invoke "gh pr merge 2002 -R '\$(calc)' --rebase"
+assert_exit "non-literal -R '\$(calc)': refused" 2
+assert_stderr_has "…with the unresolvable-scope banner" 'MERGE SCOPE UNRESOLVABLE'
+assert_no_fetch "…no fetch ran"
+assert_api_lacks "…no repos/ lookup in the api log" 'repos/'
+assert_ack_lacks "…and no ack line written" '2002:777:2026-08-08T12:00:00Z'
+
+# Precedence control: a literal -R shadows a dynamic GH_REPO= prefix (gh's
+# own precedence), so the winning scope is literal and the merge is NOT
+# refused. Empty review fixture on develop so a non-refused merge exits 0
+# (distinguishable from the exit-2 refusal).
+new_case; SHIM_REPO_EXIT=1; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON=''
+invoke 'GH_REPO=$(calc) gh pr merge 2002 -R other-x --rebase'
+assert_stderr_lacks "literal -R shadows dynamic GH_REPO: no unresolvable refusal" 'MERGE SCOPE UNRESOLVABLE'
+assert_api_has "…and the fetch scopes to the literal -R repo" 'repos/other-x/issues/2002/comments'
+assert_exit "…and exits 0 per the empty-review fixture (not 2)" 0
+SHIM_REPO_EXIT=0; SHIM_REVIEW_JSON="$LGTM"
+
+# ===========================================================================
+# 2i. Fix-round pins — position-scoped split-sub prefix check, sibling
+#     child-context export + merge refusal, declare +x assignment linkage,
+#     and fold-in dynamic/process-substitution shapes (measured, bash 5.3,
+#     `env -i`; reviewer-run inputs).
+# ===========================================================================
+printf '\n--- fix-round pins (split-sub scope, child-sibling export, +x linkage, fold-in shapes) ---\n'
+
+SHIM_PR_BASE='develop'
+SHIM_REVIEW_JSON="$LGTM"
+
+# Fix 1 (reviewer-run failing inputs): a `# ... GH_REPO=$(pick) for CI`
+# comment or a quoted `--body 'see GH_REPO=$(x) docs'` argument beside a
+# standalone `GH_REPO=$(pick);` must not flip the standalone bare assignment
+# into a prefix assignment on `gh pr merge` (measured, bash 5.3, `env -i`:
+# bare `GH_REPO=$(pick);` before `;` stays unexported, so the merge scopes
+# to the cwd repo).
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke "$(printf '# export the repo dynamically: GH_REPO=$(pick) for CI\nGH_REPO=$(pick); gh pr merge 2002 --rebase')"
+assert_stderr_lacks "comment mentioning GH_REPO=\$(pick) before a bare GH_REPO=\$(pick); does not refuse" 'MERGE SCOPE UNRESOLVABLE'
+assert_api_has "…and the merge gates on the cwd repo" 'repos/acme-widgets/cli/issues/2002/comments'
+assert_exit "…and blocks on the cwd repo's review" 2
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke "GH_REPO=\$(pick); gh pr merge 2002 --body 'see GH_REPO=\$(x) docs' --rebase"
+assert_stderr_lacks "quoted --body mentioning GH_REPO=\$(x) after a bare GH_REPO=\$(pick); does not refuse" 'MERGE SCOPE UNRESOLVABLE'
+assert_api_has "…and the merge gates on the cwd repo" 'repos/acme-widgets/cli/issues/2002/comments'
+assert_exit "…and blocks on the cwd repo's review" 2
+
+# Fix 2 (reviewer-run failing inputs): an `export GH_REPO=...` and `gh pr merge`
+# inside the SAME child construct (subshell `(...)` or backtick span) scopes
+# the merge to that exported repo in bash (measured, bash 5.3, `env -i`), so
+# ignoring the child export would silently gate the cwd repo while merging
+# the other repo's PR. Refused as unresolvable.
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke '(export GH_REPO=other-x; gh pr merge 2002 --rebase)'
+assert_exit "sibling export GH_REPO + gh pr merge inside one subshell: refused" 2
+assert_stderr_has "…with the unresolvable-scope banner" 'MERGE SCOPE UNRESOLVABLE'
+assert_no_fetch "…no fetch ran"
+assert_api_lacks "…no repos/ lookup in the api log" 'repos/'
+assert_ack_lacks "…and no ack line written" '2002:777:2026-08-08T12:00:00Z'
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke '`export GH_REPO=other-x; gh pr merge 2002 --rebase`'
+assert_exit "sibling export GH_REPO + gh pr merge inside one backtick span: refused" 2
+assert_stderr_has "…with the unresolvable-scope banner" 'MERGE SCOPE UNRESOLVABLE'
+assert_no_fetch "…no fetch ran"
+assert_api_lacks "…no repos/ lookup in the api log" 'repos/'
+assert_ack_lacks "…and no ack line written" '2002:777:2026-08-08T12:00:00Z'
+
+# Known over-approximation (accepted direction): `(export GH_REPO=a);
+# (gh pr merge N)` across two separate child constructs — where bash 5.3
+# scopes nothing — also refuses, because `simple_commands_context`'s flat
+# list does not distinguish construct boundaries; the escape (drop the
+# parens or pass literal -R) costs one command.
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke '(export GH_REPO=other-x); (gh pr merge 2002 --rebase)'
+assert_exit "child export followed by a separate child merge (accepted over-approximation): refused" 2
+assert_stderr_has "…with the unresolvable-scope banner" 'MERGE SCOPE UNRESOLVABLE'
+assert_no_fetch "…no fetch ran"
+assert_api_lacks "…no repos/ lookup in the api log" 'repos/'
+assert_ack_lacks "…and no ack line written" '2002:777:2026-08-08T12:00:00Z'
+
+# Fix 3 (reviewer-run failing input): `declare +x GH_REPO=other-x` clears
+# the export attribute but still assigns the variable (measured, bash 5.3,
+# `env -i`), so a later bare `export GH_REPO` promotes `other-x` and scopes
+# the merge rather than hitting the unresolvable refusal.
+new_case; SHIM_REPO_EXIT=1; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'declare +x GH_REPO=other-x && export GH_REPO && gh pr merge 2002 --rebase'
+assert_stderr_lacks "declare +x GH_REPO=other-x promoted by export GH_REPO: no unresolvable refusal" 'MERGE SCOPE UNRESOLVABLE'
+assert_api_has "…and the fetch scopes to other-x" 'repos/other-x/issues/2002/comments'
+assert_exit "…and blocks on other-x's review" 2
+SHIM_REPO_EXIT=0
+
+# Fold-in pins (review follow-up 1 + 5): `-R $VAR` refusal, unquoted
+# backtick `-R` refusal, `<(...)`/`>(...)` -R refusal shapes, and
+# `<(...)`/`>(...)` child-context export-ignore rows (measured, bash 5.3,
+# `env -i`; verified live by the reviewer).
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'gh pr merge 2002 -R $VAR --rebase'
+assert_exit "non-literal -R \$VAR: refused" 2
+assert_stderr_has "…with the unresolvable-scope banner" 'MERGE SCOPE UNRESOLVABLE'
+assert_no_fetch "…no fetch ran"
+assert_api_lacks "…no repos/ lookup in the api log" 'repos/'
+assert_ack_lacks "…and no ack line written" '2002:777:2026-08-08T12:00:00Z'
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'gh pr merge 2002 -R `calc` --rebase'
+assert_exit "non-literal unquoted backtick -R \`calc\`: refused" 2
+assert_stderr_has "…with the unresolvable-scope banner" 'MERGE SCOPE UNRESOLVABLE'
+assert_no_fetch "…no fetch ran"
+assert_api_lacks "…no repos/ lookup in the api log" 'repos/'
+assert_ack_lacks "…and no ack line written" '2002:777:2026-08-08T12:00:00Z'
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+# The SPACED value is the shape that carries a real value in bash: a GLUED
+# `-R<(calc)` parses as the flag `-R` PLUS a stdin redirection, so gh gets no
+# -R argument at all and the merge cannot run — nothing to pin there.
+invoke 'gh pr merge 2002 -R $(calc) --rebase'
+assert_exit "non-literal spaced -R \$(calc): refused" 2
+assert_stderr_has "…with the unresolvable-scope banner" 'MERGE SCOPE UNRESOLVABLE'
+assert_no_fetch "…no fetch ran"
+assert_api_lacks "…no repos/ lookup in the api log" 'repos/'
+assert_ack_lacks "…and no ack line written" '2002:777:2026-08-08T12:00:00Z'
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+# A process substitution as an ASSIGNMENT VALUE assigns a /dev/fd path —
+# a literal string the hook cannot resolve a repository from, and a merge
+# that would fail in gh anyway; refusing it early is the honest direction.
+invoke 'GH_REPO=<(calc) gh pr merge 2002 --rebase'
+assert_exit "non-literal proc-subst assignment value GH_REPO=<(calc): refused" 2
+assert_stderr_has "…with the unresolvable-scope banner" 'MERGE SCOPE UNRESOLVABLE'
+assert_no_fetch "…no fetch ran"
+assert_api_lacks "…no repos/ lookup in the api log" 'repos/'
+assert_ack_lacks "…and no ack line written" '2002:777:2026-08-08T12:00:00Z'
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke '<(export GH_REPO=other-x) && gh pr merge 2002 --rebase'
+assert_stderr_lacks "input process-substitution <(export GH_REPO=...) does not refuse a top-level merge" 'MERGE SCOPE UNRESOLVABLE'
+assert_api_has "…process-substitution <(export GH_REPO=...) dies with the child: fetch scopes to the cwd repo" 'repos/acme-widgets/cli/issues/2002/comments'
+assert_api_lacks "…and the process substitution's repo reaches no fetch" 'repos/other-x'
+assert_exit "…and the gate blocks on the cwd repo's review" 2
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke '>(export GH_REPO=other-x) && gh pr merge 2002 --rebase'
+assert_stderr_lacks "output process-substitution >(export GH_REPO=...) does not refuse a top-level merge" 'MERGE SCOPE UNRESOLVABLE'
+assert_api_has "…process-substitution >(export GH_REPO=...) dies with the child: fetch scopes to the cwd repo" 'repos/acme-widgets/cli/issues/2002/comments'
+assert_api_lacks "…and the process substitution's repo reaches no fetch" 'repos/other-x'
+assert_exit "…and the gate blocks on the cwd repo's review" 2
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+# The same glue artifact on a `cd`: a backtick-span interior's cd arrives as
+# argv[0] = `cd, and the merge inside the substitution really does run from
+# the moved directory — the scope-moved refusal applies to it.
+invoke '`cd ../other-repo && gh pr merge 2002 --rebase`'
+assert_exit "backtick-glued cd before a merge: refused" 2
+assert_stderr_has "…with the scope-moved banner" 'MERGE SCOPE MOVED'
+assert_no_fetch "…no fetch ran"
+
+# --- un-export arms (unset / export -n) -------------------------------------
+# bash 5.3 measured (`env -i`): `unset GH_REPO` removes the variable entirely
+# (a later bare `export GH_REPO` exports nothing); `export -n GH_REPO`
+# un-exports but the shell variable survives (a later bare `export GH_REPO`
+# re-exports it). bash parses a GLUED `-R<(calc)` as the flag plus a stdin
+# redirection — gh receives no -R value and the merge cannot run — so the
+# value-shaped rows use spaced/quoted forms.
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'export GH_REPO=other-x && unset GH_REPO && gh pr merge 2002 --rebase'
+assert_stderr_lacks "unset GH_REPO clears the captured scope: no unresolvable refusal" 'MERGE SCOPE UNRESOLVABLE'
+assert_api_has "…the merge gates on the cwd repo (nothing exported)" 'repos/acme-widgets/cli/issues/2002/comments'
+assert_api_lacks "…other-x reaches no fetch" 'repos/other-x'
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'export GH_REPO=other-x && export -n GH_REPO && gh pr merge 2002 --rebase'
+assert_stderr_lacks "export -n GH_REPO un-exports: no unresolvable refusal" 'MERGE SCOPE UNRESOLVABLE'
+assert_api_has "…the merge gates on the cwd repo" 'repos/acme-widgets/cli/issues/2002/comments'
+assert_api_lacks "…other-x reaches no fetch" 'repos/other-x'
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+# Accepted fail-safe over-approximation: after `unset GH_REPO` a bare
+# `export GH_REPO` exports nothing, so bash would gate the merge unscoped —
+# the hook refuses instead (the value-less-export arm cannot tell the
+# variable was unset). Escape: drop the no-op export. Pinned as the
+# documented direction.
+invoke 'unset GH_REPO && export GH_REPO && gh pr merge 2002 --rebase'
+assert_exit "export GH_REPO after unset: refused (accepted fail-safe)" 2
+assert_stderr_has "…with the unresolvable-scope banner" 'MERGE SCOPE UNRESOLVABLE'
+assert_no_fetch "…no fetch ran"
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+# `export -n GH_REPO=x` is not covered (ambiguous assign-and-unexport); the
+# hook captures nothing, which matches bash (nothing reaches children).
+invoke 'export -n GH_REPO=other-x && gh pr merge 2002 --rebase'
+assert_stderr_lacks "export -n GH_REPO=x stays not-covered: no refusal, no capture" 'MERGE SCOPE UNRESOLVABLE'
+assert_api_has "…the merge gates on the cwd repo" 'repos/acme-widgets/cli/issues/2002/comments'
+assert_api_lacks "…other-x reaches no fetch" 'repos/other-x'
+
+# --- backtick-glue strip on captured values ----------------------------------
+# A backtick-span interior keeps its closing delimiter glued to the last
+# word: `-R a/b` at the end of a span arrives as `a/b\``. The strip is
+# parser-artifact correction — bash's own value has no backtick.
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"; SHIM_REPO='other-x/repo-x'
+# Backtick glue stripped from the -R value: a command-position span's last
+# word arrives as `other-x/repo-x` (closing delimiter glued), and bash's own
+# value has no backtick — the literal slug must scope the fetch.
+invoke '`gh pr merge 2002 -R other-x/repo-x`'
+assert_stderr_lacks "backtick glue is stripped from the -R value: no spurious dynamic-scope banner" 'MERGE SCOPE UNRESOLVABLE'
+assert_api_has "…the literal slug scopes the fetch" 'repos/other-x/repo-x/issues/2002/comments'
+assert_exit "…and the gate blocks on that repo's review" 2
+# SHIM_REPO is a script-global the harness passes per case: restore the
+# default so later cases resolve against acme-widgets/cli again.
+SHIM_REPO='acme-widgets/cli'
 
 # ===========================================================================
 # 3. The review gate — block once per (PR, review-id), allow on retry
@@ -2498,6 +2848,34 @@ new_case; SHIM_WORKTREES="$WT_CONFLICT"; SHIM_REVIEW_JSON="$LGTM"
 invoke 'gh pr merge 2002 --rebase --delete-branch -R github.com/acme-widgets/cli'
 assert_exit "-R naming the cwd repo with a host component: the precondition still fires" 2
 assert_stderr_has "…by the precondition, not the review gate" 'PR MERGE BLOCKED'
+
+# An unparseable cwd remote (`SHIM_REPO=weird` makes the git shim serve
+# `https://github.com/weird.git`, which `cwd_repo_slug` parses to empty)
+# keeps the delete-branch guard ON even when `-R` is passed — the safe
+# direction, matching `cwd_repo_slug`'s contract.
+new_case; SHIM_REPO='weird'; SHIM_WORKTREES="$WT_CONFLICT"; SHIM_REVIEW_JSON="$LGTM"
+invoke 'gh pr merge 2002 --rebase --delete-branch -R acme-widgets/cli'
+assert_exit "unparseable cwd remote with -R acme-widgets/cli: precondition stays on and blocks" 2
+assert_stderr_has "…by the precondition, not the review gate" 'PR MERGE BLOCKED'
+assert_stderr_has "…names the branch" 'feat/example'
+assert_stderr_has "…names the offending worktree path" "$OTHER_TREE"
+assert_no_fetch "…without fetching the review first"
+
+new_case; SHIM_REPO='weird'; SHIM_WORKTREES="$WT_CONFLICT"; SHIM_REVIEW_JSON="$LGTM"
+invoke 'gh pr merge 2002 --rebase --delete-branch -R other-x/repo-x'
+assert_exit "unparseable cwd remote with -R other-x/repo-x: precondition also stays on (empty cwd slug)" 2
+assert_stderr_has "…by the precondition, not the review gate" 'PR MERGE BLOCKED'
+assert_no_fetch "…without fetching the review first"
+SHIM_REPO='acme-widgets/cli'
+
+# Control: with a parseable cwd remote and the same worktree conflict
+# fixture, `-R other-x/repo-x` (a genuinely different repo) turns the guard
+# off and proceeds to the review gate.
+new_case; SHIM_WORKTREES="$WT_CONFLICT"; SHIM_REVIEW_JSON="$LGTM"
+invoke 'gh pr merge 2002 --rebase --delete-branch -R other-x/repo-x'
+assert_stderr_lacks "control: cross-repo -R other-x/repo-x skips the local worktree check" 'PR MERGE BLOCKED'
+assert_pr "…and the review gate runs normally" 2002
+assert_exit "…exiting per the review fixture" 2
 
 SHIM_WORKTREES=''
 
