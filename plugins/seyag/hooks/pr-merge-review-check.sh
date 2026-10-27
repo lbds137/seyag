@@ -110,7 +110,9 @@ LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib"
 # numberless. Line 10: "chdir" when a directory change (cd/pushd, or a
 # chdir runner like `env -C`) precedes the merge in the same command.
 # Line 11: "fanout" when a merge runs under xargs/parallel (once per
-# input).
+# input). Line 12: "unresolvable" when the winning repository scope is an
+# exported GH_REPO with no literal value in this command or a non-literal
+# -R/--repo/GH_REPO= value ($(), backticks, <(), $VAR).
 # A broken shell_quotes import falls back to the permissive raw scan (it
 # over-arms rather than disarms); the one residual fail-open left is python3
 # itself missing — no tokenizer exists then, `|| MERGE_EXTRACT=""` stands the
@@ -142,12 +144,22 @@ PR_URL_RE = re.compile(
     re.IGNORECASE,
 )
 
-# GH_REPO= scopes every gh call like -R does. Read only from the command's
-# PREFIX (before the gh word) or from an `export GH_REPO=` command EARLIER
-# in the text than the armed invocation: a --body value that merely looks
-# like an assignment must never scope anything, and neither may a
-# standalone `GH_REPO=x` (bash exports it nowhere) nor an export carrying
-# -n/-u/-p.
+# GH_REPO= scopes every gh call like -R does. Read from the command's PREFIX
+# (before the gh word) or from an earlier same-shell command (child-context
+# subshells `(...)`, command substitutions `$(...)`/backticks, and process
+# substitutions `<(...)`/`>(...)` are ignored for a top-level merge because
+# their exports never reach the parent shell; if the armed merge ITSELF runs
+# in a child context after an earlier child-context GH_REPO export/declare -x,
+# the command is refused as unresolvable): `export GH_REPO=val`,
+# `declare`/`typeset`/`readonly` with `-x` effective (no -n/-u/-p), and
+# bare-assignment linkage (`export GH_REPO=a && GH_REPO=b`, or
+# `GH_REPO=b && export GH_REPO`). A standalone `GH_REPO=x` with no export in
+# this command stays unexported; a bare `export GH_REPO` / `declare -x GH_REPO`
+# with no prior assignment in this command (or a non-literal
+# `$()`/backtick/`<()`/`$VAR` winning scope) is refused as unresolvable. Not
+# covered (same cross-call class as `cd` in an earlier Bash tool call):
+# `GH_REPO` exported in an earlier Bash call and reassigned by a bare
+# `GH_REPO=b` here.
 GH_REPO_ASSIGN = re.compile(r"^GH_REPO=(.+)$")
 
 _CHDIR_CMDS = ("cd", "pushd", "popd")
@@ -232,7 +244,11 @@ def chdir_affects_merge(text):
                         cmd_pos = True
                     if part:
                         resolved, ph = resolve_placeholders(part, values, ph)
-                        base = os.path.basename(resolved)
+                        # A backtick-span interior keeps its opening delimiter
+                        # glued to the first word (`cd`, `gh`), while the view
+                        # here does not strip backtick spans — bash's own argv
+                        # has no backtick, so strip it before the basename.
+                        base = os.path.basename(resolved).lstrip("`")
                         if cmd_pos and base in _CHDIR_CMDS:
                             events.append((order, depth, "cd"))
                             order += 1
@@ -457,7 +473,7 @@ def scan_invocations(text):
     bash execute it.
 
     Returns (merges, numberless, first_flag, repo, selector, invoke_count,
-    selector_repo, numberless_count, chdir, fanout):
+    selector_repo, numberless_count, chdir, fanout, unresolvable):
     - merges: (number, delete_flag) per invocation whose arguments carry a
       bare PR-number token, in the splitter's command order;
     - numberless: True when a real invocation exists whose arguments carry NO
@@ -468,8 +484,10 @@ def scan_invocations(text):
       when the invocation never scopes a repository — except that a GH_REPO=
       assignment scopes the same way and fills in when no -R did (-R wins
       over GH_REPO, gh's own precedence): either the invocation's own PREFIX
-      (before the gh word) or an `export GH_REPO=` command (no -n/-u/-p)
-      EARLIER in the text than the armed (first) invocation;
+      (before the gh word) or an earlier same-shell (`in_child_context` False)
+      `export` / `declare -x` / `typeset -x` / `readonly -x` (no -n/-u/-p) or
+      bare-assignment linkage (`export GH_REPO=a && GH_REPO=b`, `GH_REPO=b &&
+      export GH_REPO`) EARLIER in the text than the armed (first) invocation;
     - selector: the first invocation's positional non-flag, non-value
       argument (a branch, URL or #N — gh accepts all three as the PR
       selector); "" when no invocation carries one;
@@ -490,7 +508,12 @@ def scan_invocations(text):
       cannot leak up; a cd at the merge's own depth or shallower does,
       because the merge inherits the moved directory;
     - fanout: True when a merge runs under xargs/parallel — once per input,
-      so no single ack cycle can cover it.
+      so no single ack cycle can cover it;
+    - unresolvable: True when the winning repository scope is an exported
+      GH_REPO with no literal value in this command (`export GH_REPO` /
+      `declare -x GH_REPO`), an armed merge in a child context preceded by a
+      child-context GH_REPO export/declare -x, or a non-literal
+      -R/--repo/GH_REPO= value (`$(...)`, backticks, `<(...)`, `$VAR`).
 
     The command word is matched by BASENAME, not literally: `/usr/bin/gh pr
     merge 7` and a mise shim path are real invocations.
@@ -523,33 +546,316 @@ def scan_invocations(text):
     chdir_runner = False
     fanout = False
     gh_repo_env = ""
+    gh_repo_bare = None
+    gh_repo_exported = False
+    gh_repo_unresolvable = False
+    child_gh_repo_exported = False
     first_repo_env = ""
+    first_env_unresolvable = False
+    first_prefix_repo = ""
+    pending_prefix_repo = None
     chdir_seen = False
-    for raw in simple_commands(text):
+    commands = simple_commands_context(text)
+
+    def _strip_comments_for_view(s):
+        out = []
+        i = 0
+        n = len(s)
+        q = None
+        while i < n:
+            ch = s[i]
+            if q is None:
+                if ch == "\\" and i + 1 < n:
+                    out.append(s[i : i + 2])
+                    i += 2
+                    continue
+                if ch in "\"'":
+                    q = ch
+                    out.append(ch)
+                    i += 1
+                    continue
+                if ch == "#" and (i == 0 or s[i - 1] in " \t\n;&|()"):
+                    nl = s.find("\n", i)
+                    if nl == -1:
+                        break
+                    i = nl
+                    continue
+            elif q == '"':
+                if ch == "\\" and i + 1 < n:
+                    out.append(s[i : i + 2])
+                    i += 2
+                    continue
+                if ch == '"':
+                    q = None
+            else:
+                if ch == "'":
+                    q = None
+            out.append(ch)
+            i += 1
+        return "".join(out)
+
+    def _quote_stripped_view(s):
+        uncommented = _strip_comments_for_view(strip_heredoc_bodies(s))
+        indexed = strip_quoted_indexed(uncommented)
+        return indexed[0] if indexed is not None else uncommented
+
+    view_parts = [_quote_stripped_view(text)]
+    level_strs = [text]
+    for _ in range(MAX_WRAPPER_DEPTH):
+        nxt_strs = []
+        for s in level_strs:
+            try:
+                for w in wrapped_command_strings(s):
+                    view_parts.append(_quote_stripped_view(w))
+                    nxt_strs.append(w)
+            except Exception:
+                pass
+        level_strs = nxt_strs
+        if not level_strs:
+            break
+    sub_view = "\n".join(view_parts)
+    sub_pos = 0
+    _SPLIT_SUB_AT_RE = re.compile(r"GH_REPO=[^\s;&|()]*[\$<>]\(")
+
+    def is_nonliteral_repo(val):
+        return bool(
+            "$(" in val
+            or "`" in val
+            or "<(" in val
+            or ">(" in val
+            or re.search(r"\$[A-Za-z_{0-9*@?#!-]", val)
+        )
+
+    def bt_strip(val):
+        # A backtick-span interior keeps its closing delimiter glued to the
+        # last word, so a captured value can end in a stray `` ` `` that bash
+        # never passes (`` gh pr merge 5 -R a/b `` inside a span arrives with
+        # the value as `` a/b` ``). Strip it before literalness checks and
+        # before the value is stored — the glue is parser artifact, not
+        # content; bash's own value has no backtick.
+        return val.rstrip("`")
+
+    def normalize_sub_val(idx, val):
+        # `_tokens` splits an unquoted `$(...)` or `<(...)` at its `(` op,
+        # leaving the trailing `$` or `<` at the end of `commands[idx]` and
+        # the interior in `commands[idx + 1]` (`in_child_context` True).
+        if (
+            val.endswith(("$", "<", ">"))
+            and idx + 1 < len(commands)
+            and commands[idx + 1][1]
+        ):
+            return val + "("
+        return val
+
+    def consume_split_sub_is_prefix():
+        # Distinguish `GH_REPO=$(...) gh pr merge ...` (prefix on the next
+        # same-shell command) from `GH_REPO=$(...); gh pr merge ...` (a
+        # separate bare-assignment command before a separator), attributing
+        # the post-paren check to THIS split-sub assignment's own occurrence
+        # in the quote- and comment-stripped view (`strip_quoted_indexed`).
+        # LIMIT: the cursor assumes `sub_view` (built breadth-first over
+        # wrapper levels) lists the occurrences in the same order the command
+        # list (depth-first recursion) consumes them. Two NESTED wrappers
+        # that each hold a split-sub `GH_REPO=$(…)` can pair a verdict with
+        # the wrong occurrence — the misfire is a spurious or missed refusal,
+        # never a wrong-repo capture; pinned by the split-sub rows.
+        nonlocal sub_pos
+        i = sub_pos
+        n = len(sub_view)
+        paren_depth = 0
+        in_bt = False
+        while i < n:
+            ch = sub_view[i]
+            if ch == "`":
+                in_bt = not in_bt
+                i += 1
+                continue
+            if not in_bt:
+                if ch == "(":
+                    paren_depth += 1
+                    i += 1
+                    continue
+                if ch == ")":
+                    paren_depth = max(0, paren_depth - 1)
+                    i += 1
+                    continue
+                if paren_depth == 0 and (
+                    i == 0 or sub_view[i - 1] in " \t\n;&|()"
+                ):
+                    m_sub = _SPLIT_SUB_AT_RE.match(sub_view, i)
+                    if m_sub is not None:
+                        depth = 1
+                        k = m_sub.end()
+                        while k < n and depth > 0:
+                            if sub_view[k] == "(":
+                                depth += 1
+                            elif sub_view[k] == ")":
+                                depth -= 1
+                            k += 1
+                        sub_pos = k
+                        while k < n and sub_view[k] in " \t":
+                            k += 1
+                        return k < n and sub_view[k] not in ";&|\n)'\""
+            i += 1
+        sub_pos = n
+        return False
+
+    for idx, (raw, in_child) in enumerate(commands):
         argv, runinfo = unwrap_runners(raw)
-        # A GH_REPO= assignment in an EARLIER simple command — `export
-        # GH_REPO=…` — exports the variable for the rest of the shell, so
-        # it scopes every later gh exactly like the prefix form below. An
-        # export carrying -n, -u or -p never counts (each changes export's
-        # meaning: un-export, nameref, all-variables); a bare `--`
-        # separator passes through, because bash exports through it. A
-        # standalone `GH_REPO=…` assignment sets a shell variable bash does
-        # not export (children see nothing), so it never scopes either.
-        # Recorded in list order; the FIRST merge invocation snapshots it,
-        # so an assignment AFTER the merge never scopes it. Single-line
-        # values only, same rule as -R.
-        if argv and os.path.basename(argv[0]) == "export" \
-                and not any(t in ("-n", "-u", "-p") for t in argv[1:]):
-            for tok in argv[1:]:
-                m = GH_REPO_ASSIGN.match(tok)
+        # A backtick-span interior keeps its delimiters glued to the first and
+        # last words (argv[0] = `export` or `gh`, last token = --rebase`), so
+        # EVERY basename check below strips the leading delimiters — bash's
+        # own argv has no backtick; the glue is a splitter artifact. Parens
+        # are token separators and never glue; only the backtick shape needs
+        # this.
+        base0 = os.path.basename(argv[0]).lstrip("`") if argv else ""
+        prefix_from_split_sub = None
+        if not in_child and pending_prefix_repo is not None:
+            prefix_from_split_sub = pending_prefix_repo
+            pending_prefix_repo = None
+        split_sub_prefix = False
+        if not in_child and raw:
+            last_m = GH_REPO_ASSIGN.match(raw[-1])
+            if (
+                last_m
+                and "\n" not in last_m.group(1)
+                and normalize_sub_val(idx, last_m.group(1)) != last_m.group(1)
+            ):
+                split_sub_prefix = consume_split_sub_is_prefix()
+        # Earlier simple-command `GH_REPO` tracking (same shell only:
+        # `in_child` is True inside `(...)`, `$(...)`, backticks, and
+        # `<(...)`/`>(...)`, whose environment changes never leak up to the
+        # parent shell).
+        # - `export` and `declare`/`typeset`/`readonly` with `-x` effective
+        #   (no -n/-u/-p; `-x` sets and `+x` clears export status across flags
+        #   before `--` and before the first GH_REPO word) export GH_REPO for
+        #   subsequent commands in the same shell.
+        # - Bare `GH_REPO=val` (`not argv`, no runner): if GH_REPO is already
+        #   exported in this command, bash updates the exported value in
+        #   place; otherwise record `gh_repo_bare` in case a later `export
+        #   GH_REPO` / `declare -x GH_REPO` promotes it (and `declare +x
+        #   GH_REPO=val` likewise records `gh_repo_bare` when unexported).
+        # - Bare `export GH_REPO` / `declare -x GH_REPO` with no `=`: promotes
+        #   a prior `gh_repo_bare` in this command, or marks the env scope
+        #   unresolvable when no prior assignment exists in this command.
+        # - When `in_child` is True, a child-context `GH_REPO` export /
+        #   `declare -x` is ignored for top-level merges, but recorded in
+        #   `child_gh_repo_exported`: if the armed merge ITSELF runs with
+        #   `in_child` True after such an export (`(export GH_REPO=other-x;
+        #   gh pr merge N)` or a backtick-span sibling), the command is
+        #   refused as unresolvable rather than silently gating the cwd repo.
+        #   Known over-approximation (accepted): `(export GH_REPO=a);
+        #   (gh pr merge N)` across two separate child constructs also refuses
+        #   because the flat command list does not distinguish construct
+        #   boundaries; the escape (drop the parens or pass literal -R) costs
+        #   one command, same as the chdir refusal's.
+        if not in_child:
+            if not argv and not runinfo.get("runners") and len(raw) == 1:
+                m = GH_REPO_ASSIGN.match(raw[0])
                 if m and "\n" not in m.group(1):
-                    gh_repo_env = m.group(1)
-        if argv and os.path.basename(argv[0]) in ("cd", "pushd", "popd"):
+                    val = bt_strip(normalize_sub_val(idx, m.group(1)))
+                    if val != m.group(1) and split_sub_prefix:
+                        pending_prefix_repo = val
+                    elif gh_repo_exported:
+                        gh_repo_env = val
+                        gh_repo_unresolvable = False
+                    else:
+                        gh_repo_bare = val
+            elif argv:
+                cmd_base = base0
+                if cmd_base == "unset":
+                    # `unset GH_REPO` removes the variable entirely: the
+                    # exported scope ends AND a later bare `export GH_REPO`
+                    # exports nothing — so the remembered bare assignment is
+                    # forgotten too, and a bare `export GH_REPO` afterwards
+                    # hits the unresolvable refusal (bash exports nothing, so
+                    # that refusal is the fail-safe over-approximation; the
+                    # escape is dropping the no-op export, pinned by a row).
+                    if any(tok == "GH_REPO" for tok in argv[1:]):
+                        gh_repo_env = ""
+                        gh_repo_exported = False
+                        gh_repo_bare = None
+                elif cmd_base == "export" \
+                        and "-n" in argv[1:] \
+                        and any(tok == "GH_REPO" for tok in argv[1:]):
+                    # `export -n GH_REPO` UN-exports: the shell variable
+                    # survives (a later bare `export GH_REPO` re-exports it),
+                    # so the remembered bare assignment stays; only the
+                    # exported scope clears. bash 5.3 measured (`env -i`:
+                    # children see nothing afterwards). `export -n GH_REPO=x`
+                    # stays unhandled — its assign-and-unexport combination is
+                    # ambiguous and the shape is not covered.
+                    gh_repo_env = ""
+                    gh_repo_exported = False
+                elif cmd_base in ("export", "declare", "typeset", "readonly") \
+                        and not any(t in ("-n", "-u", "-p") for t in argv[1:]):
+                    exported = (cmd_base == "export")
+                    plus_x = False
+                    for tok in argv[1:]:
+                        if tok == "--" or tok == "GH_REPO" \
+                                or GH_REPO_ASSIGN.match(tok):
+                            break
+                        if tok.startswith("-") and not tok.startswith("--") \
+                                and "x" in tok[1:]:
+                            exported = True
+                            plus_x = False
+                        elif tok.startswith("+") and "x" in tok[1:]:
+                            exported = False
+                            plus_x = True
+                    for tok_i, tok in enumerate(argv[1:]):
+                        m = GH_REPO_ASSIGN.match(tok)
+                        if m and "\n" not in m.group(1):
+                            val = (
+                                normalize_sub_val(idx, m.group(1))
+                                if tok_i == len(argv) - 2
+                                else m.group(1)
+                            )
+                            if exported:
+                                gh_repo_env = val
+                                gh_repo_exported = True
+                                gh_repo_unresolvable = False
+                            elif gh_repo_exported and not plus_x:
+                                gh_repo_env = val
+                                gh_repo_unresolvable = False
+                            else:
+                                gh_repo_bare = val
+                        elif tok == "GH_REPO" and exported:
+                            if gh_repo_bare is not None:
+                                gh_repo_env = gh_repo_bare
+                                gh_repo_exported = True
+                                gh_repo_unresolvable = False
+                            elif not gh_repo_exported:
+                                gh_repo_exported = True
+                                gh_repo_unresolvable = True
+        elif argv:
+            cmd_base = base0
+            if cmd_base in ("export", "declare", "typeset", "readonly") \
+                    and not any(t in ("-n", "-u", "-p") for t in argv[1:]):
+                exported = (cmd_base == "export")
+                for tok in argv[1:]:
+                    if tok == "--" or tok == "GH_REPO" \
+                            or GH_REPO_ASSIGN.match(tok):
+                        break
+                    if tok.startswith("-") and not tok.startswith("--") \
+                            and "x" in tok[1:]:
+                        exported = True
+                    elif tok.startswith("+") and "x" in tok[1:]:
+                        exported = False
+                if exported and any(
+                    tok == "GH_REPO"
+                    or (
+                        (m := GH_REPO_ASSIGN.match(tok)) is not None
+                        and "\n" not in m.group(1)
+                    )
+                    for tok in argv[1:]
+                ):
+                    child_gh_repo_exported = True
+        if argv and base0 in ("cd", "pushd", "popd"):
             # A directory change before the merge (in list order) makes the
             # merge's repository unresolvable from this hook's cwd.
             chdir_seen = True
             continue
-        if not argv or os.path.basename(argv[0]) != "gh" \
+        if not argv or base0 != "gh" \
                 or argv[1:3] != ["pr", "merge"]:
             continue
         args = strip_redirections(argv[3:])
@@ -569,19 +875,20 @@ def scan_invocations(text):
         # single-line value only, like -R's own capture. Within one
         # invocation the last assignment wins, and -R wins over GH_REPO
         # (gh's own precedence).
+        prefix_repo = prefix_from_split_sub or ""
         for tok in raw:
             if os.path.basename(tok) == "gh":
                 break
             m = GH_REPO_ASSIGN.match(tok)
             if m and "\n" not in m.group(1):
-                gh_repo_env = m.group(1)
+                prefix_repo = bt_strip(m.group(1))
         first = not seen
         seen = True
         number = None
         sel = None
         pending = ""  # "value" | "repo" while the NEXT token is a flag's value
         flag = False
-        for a in args:
+        for ai, a in enumerate(args):
             if pending:
                 if pending == "repo":
                     # SINGLE-LINE values only, the same rule as the selector
@@ -591,7 +898,13 @@ def scan_invocations(text):
                     # it. Such a value assigns nothing, so the lookups scope
                     # to the cwd repo.
                     if "\n" not in a:
-                        repo = a
+                        repo = (
+                            bt_strip(
+                                normalize_sub_val(idx, a)
+                                if ai == len(args) - 1
+                                else a
+                            )
+                        )
                 pending = ""
                 # A token consumed as the previous flag's VALUE is not a
                 # flag itself — `--body -d` arms nothing.
@@ -602,7 +915,13 @@ def scan_invocations(text):
             if role == "repo":
                 if glued is not None:
                     if "\n" not in glued:
-                        repo = glued
+                        repo = (
+                            bt_strip(
+                                normalize_sub_val(idx, glued)
+                                if ai == len(args) - 1
+                                else glued
+                            )
+                        )
                 else:
                     pending = "repo"
                 continue
@@ -635,7 +954,11 @@ def scan_invocations(text):
             merges.append((number, flag))
         if first:
             first_flag = flag
+            first_prefix_repo = prefix_repo
             first_repo_env = gh_repo_env
+            first_env_unresolvable = gh_repo_unresolvable or (
+                in_child and child_gh_repo_exported
+            )
         if sel is not None and not selector:
             selector = sel
             url = PR_URL_RE.match(sel)
@@ -646,13 +969,32 @@ def scan_invocations(text):
         # another command's arguments — none of them can move the merge.
         chdir_cd = False
     chdir = chdir_cd or chdir_runner
-    if not repo and first_repo_env:
-        # The assignment captured at the ARMED (first) invocation — the one
-        # whose PR the lookups resolve; a later assignment came too late to
-        # scope it.
-        repo = first_repo_env
+    # Precedence (matching gh): URL selector_repo > -R/--repo > prefix
+    # GH_REPO= > earlier exported GH_REPO. Refuse when the WINNING source is
+    # unresolvable or non-literal; a shadowed lower-precedence dynamic source
+    # (`GH_REPO=$(calc) gh pr merge 2002 -R other-x`) does not refuse.
+    unresolvable = False
+    if seen:
+        if selector_repo:
+            pass
+        elif repo:
+            if is_nonliteral_repo(repo):
+                unresolvable = True
+                repo = ""
+        elif first_prefix_repo:
+            if is_nonliteral_repo(first_prefix_repo):
+                unresolvable = True
+            else:
+                repo = first_prefix_repo
+        elif first_env_unresolvable:
+            unresolvable = True
+        elif first_repo_env:
+            if is_nonliteral_repo(first_repo_env):
+                unresolvable = True
+            else:
+                repo = first_repo_env
     return merges, numberless, first_flag, repo, selector, invoke_count, \
-        selector_repo, numberless_count, chdir, fanout
+        selector_repo, numberless_count, chdir, fanout, unresolvable
 
 
 def deep_wrapper_args(text):
@@ -686,8 +1028,8 @@ def deep_wrapper_args(text):
 
 def extract(text):
     """(number, delete_flag, all_numbers, numberless, repo, selector,
-    invoke_count, selector_repo, numberless_count, chdir, fanout) for
-    `text`'s merges.
+    invoke_count, selector_repo, numberless_count, chdir, fanout,
+    unresolvable) for `text`'s merges.
 
     Resolution order, each step only when the previous found nothing:
     1. the precise invocation scan;
@@ -698,34 +1040,35 @@ def extract(text):
     4. nothing — the caller decides on numberless.
 
     Steps 2 and 3 resolve at most one number and report NO delete flag,
-    NO repo, NO selector, NO invocation count, NO selector repo, NO chdir
-    and NO fanout: they exist to OVER-arm, and the not-ackable
-    delete-branch guard, the compound refusal, -R scoping, selector
-    resolution, the chdir refusal and the fan-out refusal must never hang
-    off an over-arm — a false block with no way out, or a lookup against a
-    repo or selector a textual scan guessed at.
+    NO repo, NO selector, NO invocation count, NO selector repo, NO chdir,
+    NO fanout and NO unresolvable: they exist to OVER-arm, and the
+    not-ackable delete-branch guard, the compound refusal, -R scoping,
+    selector resolution, the chdir refusal, the fan-out refusal and the
+    unresolvable-scope refusal must never hang off an over-arm — a false
+    block with no way out, or a lookup against a repo or selector a textual
+    scan guessed at.
     """
     try:
         merges, numberless, first_flag, repo, selector, invoke_count, \
-            selector_repo, numberless_count, chdir, fanout = \
+            selector_repo, numberless_count, chdir, fanout, unresolvable = \
             scan_invocations(text)
     except Exception:
-        return legacy_scan(text) + (False, "", "", 0, "", 0, False, False)
+        return legacy_scan(text) + (False, "", "", 0, "", 0, False, False, False)
     if merges:
         number, flag = merges[0]
         return number, flag, [m[0] for m in merges], numberless, repo, \
             selector, invoke_count, selector_repo, numberless_count, \
-            chdir, fanout
+            chdir, fanout, unresolvable
     if strip_quoted(text) is None:
-        return legacy_scan(text) + (False, "", "", 0, "", 0, False, False)
+        return legacy_scan(text) + (False, "", "", 0, "", 0, False, False, False)
     for s in deep_wrapper_args(text):
         capped = strip_heredoc_bodies(s)
         m = re.search(r"gh\s+pr\s+merge\s+[\"']*(\d+)", capped)
         if m:
             return m.group(1), False, [m.group(1)], False, "", "", 0, "", \
-                0, False, False
+                0, False, False, False
     return "", first_flag, [], numberless, repo, selector, invoke_count, \
-        selector_repo, numberless_count, chdir, fanout
+        selector_repo, numberless_count, chdir, fanout, unresolvable
 
 
 # The import sits HERE, not at the top: an import-time failure (a corrupt or
@@ -739,7 +1082,7 @@ try:
         MAX_WRAPPER_DEPTH,
         QUOTED_SPAN,
         resolve_placeholders,
-        simple_commands,
+        simple_commands_context,
         strip_heredoc_bodies,
         strip_quoted,
         strip_quoted_indexed,
@@ -752,8 +1095,10 @@ except Exception:
     print(number)
     print("1" if flag else "0")
     print(" ".join(all_numbers))
-    # All ten lines, empty where empty — the bash reader's sed expects the
+    # All twelve lines, empty where empty — the bash reader's sed expects the
     # full protocol, same as the extract-exception fallback below.
+    print("")
+    print("")
     print("")
     print("")
     print("")
@@ -765,7 +1110,8 @@ except Exception:
 
 try:
     number, flag, all_numbers, numberless, repo, selector, invoke_count, \
-        selector_repo, numberless_count, chdir, fanout = extract(cmd)
+        selector_repo, numberless_count, chdir, fanout, unresolvable = \
+        extract(cmd)
 except Exception:
     # The whole extraction, not just one stage. Anything escaping here would
     # exit non-zero, hit the shell's `|| MERGE_EXTRACT=""`, and silently arm
@@ -779,6 +1125,7 @@ except Exception:
     numberless_count = 0
     chdir = False
     fanout = False
+    unresolvable = False
 print(number)
 print("1" if flag else "0")
 print(" ".join(all_numbers))
@@ -790,6 +1137,7 @@ print(selector_repo)
 print(numberless_count)
 print("chdir" if chdir else "")
 print("fanout" if fanout else "")
+print("unresolvable" if unresolvable else "")
 PY
 ) || MERGE_EXTRACT=""
 
@@ -803,8 +1151,9 @@ PY
 # the selector's own repository when the selector is a GitHub PR URL.
 # Line 9: the numberless invocation count. Line 10: "chdir" when a directory
 # change precedes the merge in the same command. Line 11: "fanout" when a
-# merge runs under xargs/parallel. All empty when the extraction produced
-# nothing.
+# merge runs under xargs/parallel. Line 12: "unresolvable" when the winning
+# repository scope is an unresolvable export/declare -x GH_REPO or non-literal
+# -R/--repo/GH_REPO= value. All empty when the extraction produced nothing.
 PR_NUM=$(printf '%s\n' "$MERGE_EXTRACT" | sed -n '1p')
 MERGE_DELETES_BRANCH=$(printf '%s\n' "$MERGE_EXTRACT" | sed -n '2p')
 MERGE_ALL_PRS=$(printf '%s\n' "$MERGE_EXTRACT" | sed -n '3p')
@@ -817,6 +1166,7 @@ SELECTOR_REPO=$(printf '%s\n' "$MERGE_EXTRACT" | sed -n '8p')
 MERGE_NUMBERLESS_COUNT=$(printf '%s\n' "$MERGE_EXTRACT" | sed -n '9p')
 MERGE_CHDIR=$(printf '%s\n' "$MERGE_EXTRACT" | sed -n '10p')
 MERGE_FANOUT=$(printf '%s\n' "$MERGE_EXTRACT" | sed -n '11p')
+MERGE_UNRESOLVABLE=$(printf '%s\n' "$MERGE_EXTRACT" | sed -n '12p')
 
 # A URL selector carries its OWN repository, and gh resolves the PR there
 # even beside a -R (the URL wins). Mirror that here: the URL's repo OVERRIDES
@@ -987,6 +1337,40 @@ if [ "$MERGE_FANOUT" = "fanout" ]; then
     exit 2
 fi
 
+# UNRESOLVABLE-SCOPE REFUSAL. When the winning repository scope comes from a
+# bare `export GH_REPO` / `declare -x GH_REPO` (with no literal assignment in
+# the same command), a child-context merge preceded by a child-context
+# `GH_REPO` export/`declare -x`, or a non-literal `-R`/`--repo`/`GH_REPO=`
+# value (`$(...)`, backticks, `<(...)`, `$VAR`), this hook cannot resolve
+# which repository the merge targets: falling back to the cwd repository would
+# fetch the WRONG repo's review — or none — and let the merge through
+# ungated.
+#
+# NOT ACKABLE, for the same reason as the scope-moved refusal above: pass a
+# literal repository slug on the merge command, which also makes the review
+# reachable in one retry. Placed with the other refusals, before any network
+# call.
+if [ "$MERGE_UNRESOLVABLE" = "unresolvable" ]; then
+    {
+        printf '%s\n' "$RULE"
+        printf 'MERGE SCOPE UNRESOLVABLE — dynamic repository scope refused\n'
+        printf '%s\n\n' "$RULE"
+        printf 'This command scopes `gh pr merge` with a `GH_REPO` or `-R`/`--repo` value that\n'
+        printf 'cannot be resolved statically (an exported `GH_REPO` with no literal value in\n'
+        printf 'this command, or a shell expansion such as `$(...)` or `$VAR`). Falling back\n'
+        printf 'to this hook'\''s cwd would surface the WRONG repository'\''s review — or none —\n'
+        printf 'and let the merge through ungated.\n\n'
+        printf 'Pass a literal repository slug on the merge command:\n'
+        printf '  gh pr merge <PR> -R <owner>/<repo>\n'
+        printf 'or as a literal prefix assignment:\n'
+        printf '  GH_REPO=<owner>/<repo> gh pr merge <PR>\n\n'
+        printf 'This refusal is not ackable — retrying the same shape reproduces the same\n'
+        printf 'wrong-scope risk. Nothing was acked, so no state needs undoing.\n'
+        printf '%s\n' "$RULE"
+    } >&2
+    exit 2
+fi
+
 # No PR number: either the command only mentioned the phrase without invoking
 # it (nothing to gate on), or it invoked `gh pr merge` naming its PR some
 # other way. gh accepts `number | url | branch` as the argument (a leading
@@ -1026,9 +1410,12 @@ fi
 #
 # Write failures on a healthy state file split by WHICH ack: the review ack
 # fails CLOSED with the escape named (an allow would print a review to a
-# stream nobody sees); the reminder ack fails OPEN — its banner has already
-# printed on a blocking exit, best-effort by construction, so a failed
-# reminder write costs at most a duplicate reminder.
+# stream nobody sees); the reminder ack fails OPEN — when its append fails
+# inside release_block_then_exit, the hook takes exit 0 and stderr on an
+# exit-0 hook reaches nobody, so the reminder banner printed above is lost
+# for that attempt (and for retries while the write fault persists).
+# Failing open is still right so a broken state write never blocks merges
+# forever.
 STATE_BASE="${XDG_STATE_HOME:-$HOME/.local/state}"
 SEYAG_DIR="$STATE_BASE/seyag"
 STATE_DIR="$SEYAG_DIR/pr-merge-review-check"
@@ -1221,8 +1608,10 @@ release_reminder_due() {
 # The cwd repository's owner/name, parsed LOCALLY from the git remote — no
 # network, no gh. Handles the https and ssh URL shapes (scheme, user@host,
 # host:path, trailing .git and /); anything unparseable yields "" and the
-# caller treats that as SAME-repo (the guard stays on — the safe direction,
-# and the escape is dropping a redundant -R).
+# caller treats that as SAME-repo (the guard stays on — the safe direction;
+# when -R names this repo the escape is dropping the redundant -R, though
+# with a non-GitHub cwd remote a different-repo -R has no one-command escape
+# — the block is the documented safe direction there).
 cwd_repo_slug() {
     local url
     url=$(git remote get-url origin 2>/dev/null \
@@ -1245,15 +1634,20 @@ cwd_repo_slug() {
 # GitHub owner/repo is case-INSENSITIVE, and gh also accepts a
 # HOST/OWNER/REPO spelling for -R, so `-R Owner/Repo` and
 # `-R github.com/owner/repo` name this repo as surely as the exact slug.
-# The same-repo compare below normalizes both sides: lowercased, a leading
-# host component (the only three-part form gh accepts) dropped.
-repo_slug_normalized() {
-    local slug
-    slug=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+# `repo_slug_hoststrip` drops a leading host component (the only three-part
+# form gh accepts), used by both the same-repo compare below (lowercased via
+# `repo_slug_normalized`) and the review-fetch fallback when `gh repo view`
+# fails (`repos/github.com/owner/repo/...` is a 404 REST path).
+repo_slug_hoststrip() {
+    local slug=$1
     case "$slug" in
         */*/*) slug=${slug#*/} ;;
     esac
     printf '%s\n' "$slug"
+}
+
+repo_slug_normalized() {
+    repo_slug_hoststrip "$1" | tr '[:upper:]' '[:lower:]'
 }
 
 # The whole check is skipped when the invocation scopes a DIFFERENT
@@ -1262,11 +1656,17 @@ repo_slug_normalized() {
 # repo's head branch — a same-named local branch would be a false,
 # non-ackable block with no recovery path. An -R naming THIS repo — in any
 # spelling gh accepts — is the same merge as an unscoped one, so the guard
-# applies to it too.
+# applies to it too. When the cwd remote is absent or unparseable (`cwd`
+# empty), the guard ALSO stays on (same-repo direction, matching
+# `cwd_repo_slug`'s contract above). The escape depends on the case: a
+# same-repo -R can simply be dropped, but with a non-GitHub cwd remote a
+# different-repo -R has no one-command escape — the block stands as the
+# documented safe direction.
 if [ "$MERGE_DELETES_BRANCH" = "1" ]; then
     GUARD_APPLIES=1
-    if [ -n "$REPO_ARG" ]; then
-        [ "$(repo_slug_normalized "$REPO_ARG")" = "$(repo_slug_normalized "$(cwd_repo_slug)")" ] || GUARD_APPLIES=0
+    CWD_SLUG=$(cwd_repo_slug)
+    if [ -n "$REPO_ARG" ] && [ -n "$CWD_SLUG" ]; then
+        [ "$(repo_slug_normalized "$REPO_ARG")" = "$(repo_slug_normalized "$CWD_SLUG")" ] || GUARD_APPLIES=0
     fi
     if [ "$GUARD_APPLIES" = "1" ]; then
     resolve_pr_view
@@ -1393,8 +1793,9 @@ release_block_then_exit() {
         fi
         # Healthy state, failed write — fail open rather than block forever.
         # No warning: this is the exit-0 path, where stderr reaches nobody
-        # (the header's rule), so the line would be a log nobody reads; the
-        # cost is at most a repeated reminder on the next attempt.
+        # (the header's rule), so both a warning line and the reminder banner
+        # printed above are lost for this attempt (and for retries while the
+        # write fault persists); failing open avoids blocking merges forever.
     fi
     exit 0
 }
@@ -1423,9 +1824,10 @@ REVIEW_JSON=""
 REVIEW_LOGIN="${SYG_MERGE_REVIEW_LOGIN:-claude[bot]}"
 resolve_repo
 # -R scoping: prefer the RESOLVED nameWithOwner (canonical spelling of the
-# -R target); fall back to REPO_ARG itself when repo view failed, so a
-# lookup blip does not silently unscope the fetch back to the cwd repo.
-REPO_FOR_FETCH="${REPO:-$REPO_ARG}"
+# -R target); fall back to REPO_ARG itself (host component stripped so
+# `-R github.com/owner/repo` builds a valid REST path) when repo view failed,
+# so a lookup blip does not silently unscope the fetch back to the cwd repo.
+REPO_FOR_FETCH="${REPO:-$(repo_slug_hoststrip "$REPO_ARG")}"
 if [ -n "$REPO_FOR_FETCH" ]; then
     REVIEW_JSON=$(timeout 10 gh api --paginate --slurp "repos/${REPO_FOR_FETCH}/issues/${PR_NUM}/comments?per_page=100" 2>/dev/null \
         | jq --arg login "$REVIEW_LOGIN" \
@@ -1683,10 +2085,12 @@ if ! ack_append "$ACK_KEY"; then
     printf 'environment (settings/launch) — not from this shell.\n' >&2
     exit 2
 fi
-# Ack the default-branch reminder too when it was just shown, so a later
-# call on this PR (a fresh review re-arming the gate, or a no-review path)
-# does not repeat it. Best-effort: a failure here costs a duplicate
-# reminder, never a block.
+# Ack the default-branch reminder too when it was just shown, so the retry
+# after this review block (or a fresh review re-arming the gate) sees it
+# already recorded. Best-effort (`|| true` before `exit 2`): this exit is
+# already blocking for the review, so a failed reminder append here never
+# adds another block (if the write fault persists on the acked-retry path,
+# release_block_then_exit fails open and the retry's reminder banner is lost).
 if [ "$RELEASE_DUE" = 1 ]; then
     ack_append "$RELEASE_KEY" || true
 fi

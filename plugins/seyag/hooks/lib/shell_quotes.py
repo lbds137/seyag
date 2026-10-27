@@ -276,6 +276,9 @@ _CASE_OPEN = frozenset(("case_word", "case_in", "case_cmd"))
 _SUBST_CONSTRUCTS = frozenset(
     ("subst", "proc_subst", "arith_subst", "dq_subst", "dq_arith_subst")
 )
+_CHILD_CONSTRUCTS = frozenset(
+    ("subshell", "subst", "proc_subst", "dq_subst", "backtick")
+)
 _COMMAND_CONTEXTS = frozenset(
     (None, "subshell", "subst", "proc_subst", "dq_subst", "backtick", "case_cmd")
 )
@@ -565,7 +568,10 @@ def _bash_scan(text, start, bound, descend, st, in_bt):
     `_ScanState`; `in_bt` marks a backtick span's own scan, whose bound is the
     span's closing backtick."""
     stack = st.stack
-    ctx = (stack[-1] if stack else None, in_bt)
+    child_depth = (1 if in_bt else 0) + sum(
+        1 for k in stack if k in _CHILD_CONSTRUCTS
+    )
+    ctx = (stack[-1] if stack else None, in_bt, child_depth > 0)
     word_start = True
     cmd_pos = True
     word_begin = -1
@@ -608,7 +614,9 @@ def _bash_scan(text, start, bound, descend, st, in_bt):
                 k, is_arith = extra
                 kind = "dq_arith_subst" if is_arith else "dq_subst"
                 stack.append(kind)
-                ctx = (kind, in_bt)
+                if kind in _CHILD_CONSTRUCTS:
+                    child_depth += 1
+                ctx = (kind, in_bt, child_depth > 0)
                 word_start = True
                 cmd_pos = True
                 word_begin = -1
@@ -721,16 +729,18 @@ def _bash_scan(text, start, bound, descend, st, in_bt):
             if word_begin < 0:
                 word_begin = i
             word_plain = False
-            yield ("char", "`", i, ctx)
             end = _backtick_end(text, i + 1, n, st)
             if end >= 0:
+                bt_ctx = (ctx[0], ctx[1], True)
+                yield ("char", "`", i, bt_ctx)
                 st.spans.append((i + 1, end))
                 yield from _bash_scan(
                     text, i + 1, end, descend, _ScanState("backtick", end - i), True
                 )
-                yield ("char", "`", end, ctx)
+                yield ("char", "`", end, bt_ctx)
                 i = end + 1
             else:
+                yield ("char", "`", i, ctx)
                 i += 1  # no closing backtick: a literal character
             word_start = False
             prev = "`"
@@ -746,7 +756,7 @@ def _bash_scan(text, start, bound, descend, st, in_bt):
                     cmd_pos,
                 )
                 word_begin = -1
-                ctx = (stack[-1] if stack else None, in_bt)
+                ctx = (stack[-1] if stack else None, in_bt, child_depth > 0)
             if ch == "(":
                 top = ctx[0]
                 yield ("char", ch, i, ctx)
@@ -772,7 +782,9 @@ def _bash_scan(text, start, bound, descend, st, in_bt):
                     kind = "subshell"
                 if kind is not None:
                     stack.append(kind)
-                    ctx = (kind, in_bt)
+                    if kind in _CHILD_CONSTRUCTS:
+                        child_depth += 1
+                    ctx = (kind, in_bt, child_depth > 0)
                 word_start = True
                 cmd_pos = True
             elif ch == ")":
@@ -781,23 +793,25 @@ def _bash_scan(text, start, bound, descend, st, in_bt):
                     # The `)` ending a case pattern; a command follows.
                     yield ("char", ch, i, ctx)
                     stack[-1] = "case_cmd"
-                    ctx = ("case_cmd", in_bt)
+                    ctx = ("case_cmd", in_bt, child_depth > 0)
                     word_start = True
                     cmd_pos = True
                 elif top == "pat_paren":
                     yield ("char", ch, i, ctx)
                     stack.pop()
-                    ctx = (stack[-1] if stack else None, in_bt)
+                    ctx = (stack[-1] if stack else None, in_bt, child_depth > 0)
                     word_start = False
                 else:
                     # A `case` still open here never saw its `esac`.
                     while top in _CASE_OPEN:
                         stack.pop()
                         top = stack[-1] if stack else None
-                    ctx = (top, in_bt)
+                    ctx = (top, in_bt, child_depth > 0)
                     yield ("char", ch, i, ctx)
                     closed = stack.pop() if top in _PAREN_CLOSES else None
-                    ctx = (stack[-1] if stack else None, in_bt)
+                    if closed in _CHILD_CONSTRUCTS:
+                        child_depth -= 1
+                    ctx = (stack[-1] if stack else None, in_bt, child_depth > 0)
                     cmd_pos = False
                     if closed in ("dq_subst", "dq_arith_subst"):
                         word_start = False
@@ -823,7 +837,7 @@ def _bash_scan(text, start, bound, descend, st, in_bt):
                         ):
                             # `;;`, `;&`, `;;&` end a clause; patterns follow.
                             stack[-1] = "case_pat"
-                            ctx = ("case_pat", in_bt)
+                            ctx = ("case_pat", in_bt, child_depth > 0)
             prev = ch
             lone_dollar = False
             i += 1
@@ -839,11 +853,11 @@ def _bash_scan(text, start, bound, descend, st, in_bt):
         if ch == "{":
             if lone_dollar:
                 stack.append("param")
-                ctx = ("param", in_bt)
+                ctx = ("param", in_bt, child_depth > 0)
         elif ch == "}":
             if ctx[0] == "param":
                 stack.pop()
-                ctx = (stack[-1] if stack else None, in_bt)
+                ctx = (stack[-1] if stack else None, in_bt, child_depth > 0)
         word_start = False
         lone_dollar = (ch == "$") and not lone_dollar
         prev = ch
@@ -1891,9 +1905,12 @@ _PIPE_OPS = ("|", "|&")
 _SUBSTITUTION_REST = "$(…)"
 
 
-def _tokens(text):
+def _tokens(text, with_context=False):
     """`_words` with each separator kept as an `_Op` naming the operator, so a
     reader can tell a pipe (`|`, `|&`) from a list separator (`;`, `&&`, …).
+    When `with_context` is True, each non-operator token is `(word, in_child)`
+    where `in_child` is True if the word started inside a child-shell construct
+    (`subshell`, `subst`, `proc_subst`, `dq_subst`, `backtick`).
 
     A newline inside an open `$()`-family span (`$(…)`, `<(…)`, `$((`) IS a
     separator here: bash parses the span's interior as a script of its own,
@@ -1913,10 +1930,12 @@ def _tokens(text):
     tokens = []
     value = []
     started = False
+    word_child = False
 
     def flush():
         if started:
-            tokens.append("".join(value))
+            word = "".join(value)
+            tokens.append((word, word_child) if with_context else word)
 
     def char_at(k):
         if 0 <= k < len(events) and events[k][0] == "char":
@@ -1931,7 +1950,7 @@ def _tokens(text):
             # empty argument, and dropping it would shift the `-c` lookahead.
             # A `run` is a stretch of plain word characters.
             if not started:
-                started, value = True, []
+                started, value, word_child = True, [], ctx[2]
             value.append(payload)
         elif kind == "char":
             nxt = char_at(k + 1)
@@ -1961,10 +1980,12 @@ def _tokens(text):
                     after = events[k + 1] if k + 1 < len(events) else None
                     if after and (after[0] in ("quoted", "escape", "run") or (
                             after[0] == "char" and after[1] not in " \t\n;&|()<>")):
-                        tokens.append(_SUBSTITUTION_REST)
+                        tokens.append(
+                            (_SUBSTITUTION_REST, ctx[2]) if with_context else _SUBSTITUTION_REST
+                        )
             else:
                 if not started:
-                    started, value = True, []
+                    started, value, word_child = True, [], ctx[2]
                 value.append(payload)
         # A `continuation` splices the lines with nothing between them, so it
         # neither ends the current word nor contributes to it.
@@ -2151,6 +2172,30 @@ def _pipelines(tokens):
                 current = current[1:]
             if current:
                 pipeline.append(current)
+            current = []
+            if token not in _PIPE_OPS and pipeline:
+                pipelines.append(pipeline)
+                pipeline = []
+        else:
+            current.append(token)
+    return pipelines
+
+
+def _pipelines_context(tokens, force_child=False):
+    """Like `_pipelines`, but over `(word, in_child)` pairs from
+    `_tokens(text, with_context=True)`; each simple command is `(argv, in_child)`
+    where `in_child` is True when the command occurs inside a subshell, command
+    substitution, or process substitution (or when `force_child` is True)."""
+    pipelines = []
+    pipeline = []
+    current = []
+    for token in tokens + [_Op(";")]:
+        if isinstance(token, _Op):
+            while current and current[0][0] in _LEADING_KEYWORDS:
+                current = current[1:]
+            if current:
+                in_child = force_child or current[0][1]
+                pipeline.append(([w for w, _ in current], in_child))
             current = []
             if token not in _PIPE_OPS and pipeline:
                 pipelines.append(pipeline)
@@ -2709,7 +2754,19 @@ def simple_commands(text):
     as their own commands; a span whose output bash EXECUTES contributes its
     heredoc bodies as commands too.)
     """
-    return [argv for pipeline in command_pipelines(text) for argv in pipeline]
+    return [argv for argv, _ in simple_commands_context(text)]
+
+
+def simple_commands_context(text):
+    """Like `simple_commands`, but returns `[(argv, in_child_context), ...]`
+    where `in_child_context` is True when the simple command occurs inside
+    `(…)` subshell parens, `$(…)` command substitution, backtick `` `…` ``
+    command substitution, or `<(…)`/`>(…)` process substitution."""
+    return [
+        item
+        for pipeline in _command_pipelines_context(text, 0)
+        for item in pipeline
+    ]
 
 
 def command_pipelines(text):
@@ -2717,6 +2774,35 @@ def command_pipelines(text):
     list of argv lists `|`/`|&` join, in order. A consumer that must know what
     feeds a command's stdin (`find … | xargs rm`) reads this."""
     return _command_pipelines(text, 0)
+
+
+def _command_pipelines_context(text, depth):
+    body_free, heredoc_regions = _strip_heredoc(text)
+    offsets = substitution_span_offsets(text, heredoc_regions)
+    pipelines = _pipelines_context(_tokens(body_free, with_context=True))
+    if body_free != text and any(
+        _reads_script_from_stdin(c) for pipeline in pipelines for c, _ in pipeline
+    ):
+        pipelines = _pipelines_context(_tokens(text, with_context=True))
+    # `plain_pipelines` is built AFTER the interior extensions below, so the
+    # wrapper walk descends into `bash -c`/`eval` strings that live inside
+    # executed-span and backtick-line interiors — the same order
+    # `_command_pipelines` uses (its list is complete before `_wrapped_strings`
+    # runs). Building it earlier dropped those interior wrappers from the
+    # recursion entirely.
+    for interior in _executed_span_interiors(text, heredoc_regions, offsets):
+        pipelines.extend(
+            _pipelines_context(_tokens(interior, with_context=True), force_child=True)
+        )
+    for interior in _backtick_line_interiors(text, 0, heredoc_regions, offsets):
+        pipelines.extend(
+            _pipelines_context(_tokens(interior, with_context=True), force_child=True)
+        )
+    plain_pipelines = [[c for c, _ in pipeline] for pipeline in pipelines]
+    if depth < MAX_WRAPPER_DEPTH:
+        for inner in _wrapped_strings(plain_pipelines):
+            pipelines.extend(_command_pipelines_context(inner, depth + 1))
+    return pipelines
 
 
 def _command_pipelines(text, depth):
