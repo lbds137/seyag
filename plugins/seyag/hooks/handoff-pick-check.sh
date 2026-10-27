@@ -6,9 +6,9 @@
 #   (a) A tool_use block in the current turn wrote a handoff: an Edit, Write,
 #       MultiEdit or NotebookEdit whose `.input.file_path` (or
 #       `.input.notebook_path`) matches SYG_HANDOFF_PATHS (a Python regex) and,
-#       on the wired SYG_HANDOFF_PATHS branch, whose `.input` carries a string
-#       matching SYG_HANDOFF_SECTIONS (a multiline Python regex, default
-#       `^##[ \t]*(?:Handoff|Next)\b`), or a Bash tool_use whose
+#       on the wired SYG_HANDOFF_PATHS branch, whose `.input` strings or
+#       resolved file section matches SYG_HANDOFF_SECTIONS (a multiline Python
+#       regex, default `^##[ \t]*(?:Handoff|Next)\b`), or a Bash tool_use whose
 #       `.input.command` matches SYG_HANDOFF_CMDS (a Python regex, e.g.
 #       `myrole --set`).
 #   (b) The turn's final assistant text contains none of the pick tokens:
@@ -31,9 +31,19 @@
 # Known false negative, accepted: a closing using `keep` in an ordinary sense
 # (e.g. "I will keep the old flag") counts as a pick under the word-bounded
 # match; the convention states the pick explicitly ("Pick: keep"), block-once
-# bounds the miss, and a pick-shaped regex was rejected as brittle. An Edit
-# inside a Handoff/Next section whose old/new strings carry no heading line
-# also passes silently.
+# bounds the miss, and a pick-shaped regex was rejected as brittle. In-section
+# Edit/MultiEdit writes without heading lines in their input strings are
+# resolved from the file on disk (capped at 1 MiB): a `new_string`/`old_string`
+# whose first in-file occurrence lies under a different section than the edited
+# one (short or repeated strings) can misresolve; a deletion (`new_string`
+# absent, empty, or whitespace-only) whose `old_string` is absent from disk
+# passes silently (unlocatable post-edit), while other unresolvable edits fire
+# (fail-closed); partially-invalid bytes decode with `errors="replace"` and
+# resolve normally (only a wholly-unreadable first MiB fails closed); and the
+# 1 MiB cap is not detected — strings beyond it simply resolve as not-found
+# (deletions pass, other edits fire); and a `#` line inside a fenced code
+# block resolves as a section that cannot match (the block machinery is
+# disproportionate for a block-once gate).
 #
 # Known residual, accepted: the envelope's last_assistant_message is truncated
 # for long closings (it ends "… [+N chars]"); a pick token cut by the
@@ -134,6 +144,7 @@ path = os.environ["TRANSCRIPT"]
 # Read only the tail: a long session's transcript can be hundreds of MB, and this
 # runs at every turn end. Same bound as the sibling Stop hooks.
 TAIL_BYTES = 4_000_000
+FILE_BYTES = 1_048_576
 try:
     with open(path, "rb") as f:
         f.seek(0, os.SEEK_END)
@@ -194,6 +205,9 @@ if turn_start is None:
 turn = records[turn_start:]
 
 
+HEADING_RE = re.compile(r"^[ \t]*#{1,6}[ \t].*", re.MULTILINE)
+
+
 def iter_strings(obj):
     if isinstance(obj, str):
         yield obj
@@ -203,6 +217,29 @@ def iter_strings(obj):
     elif isinstance(obj, list):
         for item in obj:
             yield from iter_strings(item)
+
+
+def item_fires(item, text):
+    if not isinstance(item, dict):
+        return True
+    new_str = item.get("new_string")
+    is_deletion = not (isinstance(new_str, str) and new_str.strip())
+    p = -1
+    for key in ("new_string", "old_string"):
+        s = item.get(key)
+        if isinstance(s, str) and s.strip():
+            p = text.find(s)
+            if p != -1:
+                break
+    if p == -1:
+        return not is_deletion
+    section = None
+    for m in HEADING_RE.finditer(text):
+        if m.start() <= p:
+            section = m.group(0)
+        else:
+            break
+    return bool(section is not None and sections_re.search(section.lstrip()))
 
 
 def is_handoff_write(block):
@@ -218,7 +255,25 @@ def is_handoff_write(block):
             return False
         if sections_re is None or DEFAULT_HANDOFF_PATHS.search(fp):
             return True
-        return any(sections_re.search(s) for s in iter_strings(inp))
+        if any(sections_re.search(s) for s in iter_strings(inp)):
+            return True
+        if name == "Edit":
+            items = [inp]
+        elif name == "MultiEdit":
+            edits = inp.get("edits")
+            if not isinstance(edits, list) or not edits:
+                return True
+            items = edits
+        else:
+            return False
+        try:
+            with open(fp, "rb") as f:
+                text = f.read(FILE_BYTES).decode("utf-8", "replace")
+        except OSError:
+            return True
+        if not text.strip("\ufffd"):
+            return True
+        return any(item_fires(it, text) for it in items)
     if name == "Bash" and cmds_re is not None:
         cmd = inp.get("command")
         return isinstance(cmd, str) and bool(cmds_re.search(cmd))

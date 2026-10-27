@@ -48,6 +48,8 @@ mktx_file() { # $1=out $2=tool_name $3=file_path $4=text [$5=new_string/content 
   printf '{"type":"assistant","message":{"content":[{"type":"text","text":%s}]}}\n' "$(jsonstr "$4")" >> "$1"
 }
 
+mkfile() { mkdir -p "$(dirname "$1")" && printf '%s' "$2" > "$1"; }
+
 fail=0
 check() { # $1=expected_exit $2=label $3=transcript $4=stop_active $5+=stderr regexes
   # Each regex must match the captured stderr; a regex prefixed with "!" must NOT.
@@ -321,7 +323,8 @@ unset SYG_HANDOFF_CMDS
 
 # --- 14. Section narrowing (SYG_HANDOFF_SECTIONS) -----------------------------
 export SYG_HANDOFF_PATHS='team-roles/.*\.md$'
-mktx_file "$TMP/sec-fp-nonhandoff.jsonl" "Edit" "/tmp/fixture/team-roles/widget.md" \
+mkfile "$TMP/team-roles/widget.md" $'# Widget\n\n## Needs Owner\n- first bullet\n\n## Next\n- ship unit 4\n'
+mktx_file "$TMP/sec-fp-nonhandoff.jsonl" "Edit" "$TMP/team-roles/widget.md" \
   "Added one bullet to the non-handoff section." \
   $'## Needs Owner\n- first bullet\n- added bullet' \
   $'## Needs Owner\n- first bullet'
@@ -360,9 +363,11 @@ check 0 "wired Write with heading-free content + no pick passes" \
 check 2 "wired MultiEdit with one edits[] item carrying ## Next + no pick blocks" \
   "$TMP/sec-multiedit-hit.jsonl"
 
+mkfile "$TMP/team-roles/widget.md" $'# Widget\n\n## Needs Owner\n- a\n- b\n- c\n- d\n'
 {
   echo '{"type":"user","isMeta":null,"message":{"content":"go"}}'
-  echo '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"MultiEdit","input":{"file_path":"/tmp/fixture/team-roles/widget.md","edits":[{"old_string":"- a","new_string":"- b"},{"old_string":"- c","new_string":"- d"}]}}]}}'
+  printf '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"MultiEdit","input":{"file_path":%s,"edits":[{"old_string":"- a","new_string":"- b"},{"old_string":"- c","new_string":"- d"}]}}]}}\n' \
+    "$(jsonstr "$TMP/team-roles/widget.md")"
   echo '{"type":"assistant","message":{"content":[{"type":"text","text":"Applied multi-edit to bullets."}]}}'
 } > "$TMP/sec-multiedit-miss.jsonl"
 check 0 "wired MultiEdit with no edits[] item carrying a section + no pick passes" \
@@ -391,7 +396,8 @@ mktx_file "$TMP/sec-custom-hit.jsonl" "Edit" "/tmp/fixture/team-roles/widget.md"
 check 2 "custom SYG_HANDOFF_SECTIONS: Edit touching ## Status blocks" \
   "$TMP/sec-custom-hit.jsonl"
 
-mktx_file "$TMP/sec-custom-replaces-default.jsonl" "Edit" "/tmp/fixture/team-roles/widget.md" \
+mkfile "$TMP/team-roles/widget.md" $'# Widget\n\n## Needs Owner\n- first bullet\n\n## Next\n- item\n- ship unit 4\n'
+mktx_file "$TMP/sec-custom-replaces-default.jsonl" "Edit" "$TMP/team-roles/widget.md" \
   "Updated next section." \
   $'## Next\n- item' "old"
 check 0 "custom SYG_HANDOFF_SECTIONS replaces default: Edit touching only ## Next passes" \
@@ -433,7 +439,7 @@ check 2 "unwired built-in HANDOFF.md Write with heading-free content still block
   'SYG_HANDOFF_PATHS' \
   'SYG_HANDOFF_CMDS'
 
-# --- 15. Round-1 refinements: broken SECTIONS vs CMDS, built-in path exemption, in-section FN ---
+# --- 15. Round-1 refinements: broken SECTIONS vs CMDS, built-in path exemption ---
 export SYG_HANDOFF_PATHS='team-roles/.*\.md$' SYG_HANDOFF_CMDS='myrole --set' SYG_HANDOFF_SECTIONS='['
 mktx_bash "$TMP/r1-broken-cmds.jsonl" "myrole --set widget --handoff 'unit 5 done'" \
   "Handoff recorded via CLI."
@@ -463,11 +469,86 @@ check 0 "wired built-in pattern does not match non-default role path (control)" 
 unset SYG_HANDOFF_PATHS
 
 export SYG_HANDOFF_PATHS='team-roles/.*\.md$'
-mktx_file "$TMP/r3-insection.jsonl" "Edit" "/tmp/fixture/team-roles/widget.md" \
+mkfile "$TMP/team-roles/widget.md" $'# Widget\n\n## Needs Owner\n- b1\n\n## Next\n- ship unit 4\n'
+mktx_file "$TMP/r3-insection.jsonl" "Edit" "$TMP/team-roles/widget.md" \
   "Updated handoff bullet." \
   "- unit 4 shipped; next: unit 5" "- ship unit 4"
-check 0 "accepted false negative: in-section Edit without heading line in old/new passes" \
+check 2 "r3-insection: deliberate old_string-fallback pin (pre-edit file: old_string present, new_string absent)" \
   "$TMP/r3-insection.jsonl"
+unset SYG_HANDOFF_PATHS
+
+# --- 16. Disk-based section resolution (locator) ------------------------------
+export SYG_HANDOFF_PATHS='r4-roles/.*\.md$'
+mkfile "$TMP/r4-roles/widget.md" $'# Widget\n\n## Needs Owner\n- b1\n\n## Next\n- unit 4 shipped; next: unit 5\n'
+mktx_file "$TMP/r4-locator-fire.jsonl" "Edit" "$TMP/r4-roles/widget.md" \
+  "Updated handoff bullet." \
+  "- unit 4 shipped; next: unit 5" "- ship unit 4"
+check 2 "r4-locator-fire: in-section Edit under ## Next on disk + no pick blocks" \
+  "$TMP/r4-locator-fire.jsonl"
+
+mkfile "$TMP/r4-roles/widget.md" $'# Widget\n\n## Needs Owner\n- b1 confirmed\n\n## Next\n- ship unit 4\n'
+mktx_file "$TMP/r4-locator-pass.jsonl" "Edit" "$TMP/r4-roles/widget.md" \
+  "Confirmed bullet under non-handoff section." \
+  "- b1 confirmed" "- b1"
+check 0 "r4-locator-pass: in-section Edit under ## Needs Owner on disk + no pick passes" \
+  "$TMP/r4-locator-pass.jsonl"
+
+mktx_file "$TMP/r4-missing-file.jsonl" "Edit" "$TMP/r4-roles/missing.md" \
+  "Edited a file no longer on disk." \
+  "- new line" "- old line"
+check 2 "r4-missing-file: wired Edit to missing file on disk fails closed (blocks)" \
+  "$TMP/r4-missing-file.jsonl"
+
+mkfile "$TMP/r4-roles/rewritten.md" $'# Widget\n\n## Needs Owner\n- completely rewritten section\n'
+mktx_file "$TMP/r4-not-found.jsonl" "Edit" "$TMP/r4-roles/rewritten.md" \
+  "Edited a region later rewritten." \
+  "- gone new" "- gone old"
+check 2 "r4-not-found: wired Edit whose old/new strings are absent from disk fails closed (blocks)" \
+  "$TMP/r4-not-found.jsonl"
+
+mktx_file "$TMP/r4-short-circuit.jsonl" "Edit" "$TMP/r4-roles/widget.md" \
+  "Updated next section with heading." \
+  $'## Next\n- ship unit 5' "- ship unit 4"
+check 2 "r4-short-circuit: wired Edit carrying ## Next in new_string blocks via short-circuit" \
+  "$TMP/r4-short-circuit.jsonl"
+
+mkfile "$TMP/r4-roles/widget.md" $'# Widget\n\n## Needs Owner\n- b1 confirmed\n\n## Next\n- unit 4 shipped; next: unit 5\n'
+{
+  echo '{"type":"user","isMeta":null,"message":{"content":"go"}}'
+  printf '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"MultiEdit","input":{"file_path":%s,"edits":[{"old_string":"- b1","new_string":"- b1 confirmed"},{"old_string":"- ship unit 4","new_string":"- unit 4 shipped; next: unit 5"}]}}]}}\n' \
+    "$(jsonstr "$TMP/r4-roles/widget.md")"
+  echo '{"type":"assistant","message":{"content":[{"type":"text","text":"Applied multi-edit to role file."}]}}'
+} > "$TMP/r4-multiedit.jsonl"
+check 2 "r4-multiedit: wired MultiEdit with one in-section item under ## Next on disk + no pick blocks" \
+  "$TMP/r4-multiedit.jsonl"
+
+mkfile "$TMP/r4-roles/priority.md" $'# Widget\n\n## Needs Owner\n- ship unit 4\n\n## Next\n- unit 4 shipped\n'
+mktx_file "$TMP/r4-priority.jsonl" "Edit" "$TMP/r4-roles/priority.md" \
+  "Moved the bullet between sections." \
+  "- unit 4 shipped" "- ship unit 4"
+check 2 "r4-priority: both strings on disk under different sections resolve new_string first" \
+  "$TMP/r4-priority.jsonl"
+
+mkfile "$TMP/r4-roles/delete-pass.md" $'# Widget\n\n## Needs Owner\n'
+mktx_file "$TMP/r4-delete-pass.jsonl" "Edit" "$TMP/r4-roles/delete-pass.md" \
+  "Removed obsolete bullet." \
+  "" "- b1"
+check 0 "r4-delete-pass: unlocatable deletion (old_string absent post-edit) passes (deletion residual)" \
+  "$TMP/r4-delete-pass.jsonl"
+
+mkfile "$TMP/r4-roles/delete-fire.md" $'# Widget\n\n## Needs Owner\n- b1\n\n## Next\n- duplicated line\n'
+mktx_file "$TMP/r4-delete-fire.jsonl" "Edit" "$TMP/r4-roles/delete-fire.md" \
+  "Removed duplicate bullet." \
+  "" "- duplicated line"
+check 2 "r4-delete-fire: deletion whose old_string still appears under ## Next on disk blocks" \
+  "$TMP/r4-delete-fire.jsonl"
+
+mkfile "$TMP/r4-roles/newstring-pass.md" $'# Widget\n\n## Needs Owner\n- b1 confirmed\n\n## Next\n- ship unit 4\n'
+mktx_file "$TMP/r4-newstring-pass.jsonl" "Edit" "$TMP/r4-roles/newstring-pass.md" \
+  "Replaced bullet under non-handoff section." \
+  "- b1 confirmed" "- gone"
+check 0 "r4-newstring-pass: found new_string under ## Needs Owner dominates missing old_string and passes" \
+  "$TMP/r4-newstring-pass.jsonl"
 unset SYG_HANDOFF_PATHS
 
 [ "$fail" = 0 ] && echo "ALL PASS" || { echo "FAILURES"; exit 1; }
