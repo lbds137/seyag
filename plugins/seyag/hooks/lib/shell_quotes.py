@@ -2163,6 +2163,23 @@ _REDIRECT_OPERATOR = re.compile(r"^\d*(?:<<<|<<-?|<>|<|>>|>|&>>?)$")
 _REDIRECT_WORD = re.compile(r"^\d*(?:<|>|&>)")
 
 
+# Compound-command opener words mapped to their closing reserved words.
+# Tracked on the raw token stream before `_LEADING_KEYWORDS` strips leading
+# `{`/`}`/`if`/`while`/`until` words, so piped compounds (`{ …; } | cmd`,
+# `if …; fi | cmd`) and `&`-backgrounded compounds/and-or lists mark their
+# interior pipelines as child-context commands while bare compounds keep
+# same-shell semantics.
+_COMPOUND_OPENERS = {
+    "{": "}",
+    "if": "fi",
+    "while": "done",
+    "until": "done",
+    "for": "done",
+    "case": "esac",
+}
+_COMPOUND_CLOSERS = frozenset(_COMPOUND_OPENERS.values())
+
+
 def _pipelines(tokens):
     """Group `_tokens` output into pipelines, each a list of argv lists (one
     per simple command, leading reserved words dropped). Commands joined by
@@ -2181,21 +2198,56 @@ def _pipelines_context(tokens, force_child=False):
     """Like `_pipelines`, but over `(word, in_child)` pairs from
     `_tokens(text, with_context=True)`; each simple command is `(argv, in_child)`
     where `in_child` is True when the command occurs inside a subshell, command
-    substitution, or process substitution, in a multi-command pipeline, or as a
-    backgrounded `&` command (or when `force_child` is True)."""
+    substitution, or process substitution, in a multi-command pipeline (including
+    a piped compound command), or in a `&`-backgrounded and-or list (including a
+    backgrounded compound command), or when `force_child` is True."""
     pipelines = []
     pipeline = []
     current = []
     piped = False
+    and_or_start = 0
+    # Stack of open compounds/subshells: `[closer_word, compound_start,
+    # inner_and_or_start, opened_piped]`. While non-empty, interior list
+    # separators (`;`, `\n`, `;;`, …) advance the innermost frame's
+    # `inner_and_or_start` rather than the top-level `and_or_start`, so a
+    # trailing `&` or `|`/`|&` after the compound closer marks the pipelines
+    # inside the compound as child-context.
+    compound_stack = []
+    closed_compound_start = None
+    at_cmd_start = True
+
+    def _mark_child_from(start):
+        for idx in range(start, len(pipelines)):
+            pipelines[idx] = [(argv, True) for argv, _ in pipelines[idx]]
+
     for token in tokens + [_Op(";")]:
         if isinstance(token, _Op):
+            if token == "(":
+                idx = len(pipelines)
+                opened_piped = piped or bool(
+                    compound_stack and compound_stack[-1][3]
+                )
+                compound_stack.append([")", idx, idx, opened_piped])
+            inside_piped_compound = bool(
+                compound_stack and compound_stack[-1][3]
+            )
             while current and current[0][0] in _LEADING_KEYWORDS:
                 current = current[1:]
             if current:
-                in_child = force_child or current[0][1]
+                in_child = (
+                    force_child or inside_piped_compound or current[0][1]
+                )
                 pipeline.append(([w for w, _ in current], in_child))
             current = []
+            popped_paren = False
+            if token == ")" and compound_stack and compound_stack[-1][0] == ")":
+                _closer, c_start, _ao_start, c_piped = compound_stack.pop()
+                if c_piped:
+                    _mark_child_from(c_start)
+                popped_paren = True
             if token in _PIPE_OPS:
+                if closed_compound_start is not None:
+                    _mark_child_from(closed_compound_start)
                 piped = True
             else:
                 if pipeline:
@@ -2204,7 +2256,56 @@ def _pipelines_context(tokens, force_child=False):
                     pipelines.append(pipeline)
                     pipeline = []
                 piped = False
+                if token == "&":
+                    ao_start = (
+                        compound_stack[-1][2]
+                        if compound_stack
+                        else and_or_start
+                    )
+                    _mark_child_from(ao_start)
+                    if compound_stack:
+                        compound_stack[-1][2] = len(pipelines)
+                    else:
+                        and_or_start = len(pipelines)
+                elif (
+                    token not in ("&&", "||")
+                    and token != "("
+                    and not popped_paren
+                ):
+                    if compound_stack:
+                        compound_stack[-1][2] = len(pipelines)
+                    else:
+                        and_or_start = len(pipelines)
+            closed_compound_start = None
+            at_cmd_start = True
         else:
+            w = token[0]
+            if at_cmd_start:
+                if w in _COMPOUND_OPENERS:
+                    idx = len(pipelines)
+                    opened_piped = piped or bool(
+                        compound_stack and compound_stack[-1][3]
+                    )
+                    compound_stack.append(
+                        [_COMPOUND_OPENERS[w], idx, idx, opened_piped]
+                    )
+                elif (
+                    w in _COMPOUND_CLOSERS
+                    and compound_stack
+                    and compound_stack[-1][0] == w
+                ):
+                    _closer, c_start, _ao_start, c_piped = (
+                        compound_stack.pop()
+                    )
+                    if c_piped:
+                        _mark_child_from(c_start)
+                        token = (token[0], True)
+                    if (
+                        closed_compound_start is None
+                        or c_start < closed_compound_start
+                    ):
+                        closed_compound_start = c_start
+                at_cmd_start = w in _LEADING_KEYWORDS
             current.append(token)
     return pipelines
 
@@ -2766,7 +2867,8 @@ def simple_commands_context(text):
     where `in_child_context` is True when the simple command occurs inside
     `(…)` subshell parens, `$(…)` command substitution, backtick `` `…` ``
     command substitution, `<(…)`/`>(…)` process substitution, a multi-command
-    pipeline (`a | b`), or a `&`-backgrounded command."""
+    pipeline (`a | b`, including a piped compound command), or a
+    `&`-backgrounded and-or list (including a backgrounded compound command)."""
     return [
         item
         for pipeline in _command_pipelines_context(text, 0)

@@ -1759,6 +1759,78 @@ assert_exit "…and the gate blocks on that repo's review" 2
 # default so later cases resolve against acme-widgets/cli again.
 SHIM_REPO='acme-widgets/cli'
 
+# --- backgrounded and-or lists & piped/backgrounded compounds ----------------
+# bash 5.3 measured (`env -i`): `&` backgrounds the entire preceding and-or
+# list (`export GH_REPO=x && true &` runs both commands in a background
+# subshell, leaving GH_REPO unset in the foreground), and a backgrounded or
+# piped compound command (`{ export GH_REPO=x; } &`, `if true; then export
+# GH_REPO=x; fi | cat`) likewise runs its interior in a child subshell. Bare
+# (unpiped, unbackgrounded) compounds and foreground and-or lists execute in
+# the current shell, so their exports survive to the following merge.
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'export GH_REPO=other-x && true & gh pr merge 2002 --rebase'
+assert_stderr_lacks "backgrounded and-or list export GH_REPO=other-x && true & does not capture into foreground merge" 'MERGE SCOPE UNRESOLVABLE'
+assert_api_has "…the merge gates on the cwd repo" 'repos/acme-widgets/cli/issues/2002/comments'
+assert_api_lacks "…the backgrounded list's repo reaches no fetch" 'repos/other-x'
+assert_exit "…and the gate blocks on the cwd repo's review" 2
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke '{ export GH_REPO=other-x; } & gh pr merge 2002 --rebase'
+assert_stderr_lacks "backgrounded brace group { export GH_REPO=other-x; } & does not capture into foreground merge" 'MERGE SCOPE UNRESOLVABLE'
+assert_api_has "…the merge gates on the cwd repo" 'repos/acme-widgets/cli/issues/2002/comments'
+assert_api_lacks "…the backgrounded brace group's repo reaches no fetch" 'repos/other-x'
+assert_exit "…and the gate blocks on the cwd repo's review" 2
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'if true; then export GH_REPO=other-x; fi | cat; gh pr merge 2002 --rebase'
+assert_stderr_lacks "piped if-compound export GH_REPO=other-x | cat does not capture into later merge" 'MERGE SCOPE UNRESOLVABLE'
+assert_api_has "…the merge gates on the cwd repo" 'repos/acme-widgets/cli/issues/2002/comments'
+assert_api_lacks "…the piped compound's repo reaches no fetch" 'repos/other-x'
+assert_exit "…and the gate blocks on the cwd repo's review" 2
+
+new_case; SHIM_REPO_EXIT=1; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke '{ export GH_REPO=other-x; }; gh pr merge 2002 --rebase'
+assert_stderr_lacks "bare brace group { export GH_REPO=other-x; }; keeps same-shell capture" 'MERGE SCOPE UNRESOLVABLE'
+assert_api_has "…and scopes the fetch to other-x" 'repos/other-x/issues/2002/comments'
+assert_exit "…and blocks on other-x's review" 2
+SHIM_REPO_EXIT=0
+
+new_case; SHIM_REPO_EXIT=1; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'if true; then export GH_REPO=other-x; fi; gh pr merge 2002 --rebase'
+assert_stderr_lacks "bare if-compound export GH_REPO=other-x; fi; keeps same-shell capture" 'MERGE SCOPE UNRESOLVABLE'
+assert_api_has "…and scopes the fetch to other-x" 'repos/other-x/issues/2002/comments'
+assert_exit "…and blocks on other-x's review" 2
+SHIM_REPO_EXIT=0
+
+new_case; SHIM_REPO_EXIT=1; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'export GH_REPO=other-x && true; gh pr merge 2002 --rebase'
+assert_stderr_lacks "foreground and-or list export GH_REPO=other-x && true; keeps same-shell capture" 'MERGE SCOPE UNRESOLVABLE'
+assert_api_has "…and scopes the fetch to other-x" 'repos/other-x/issues/2002/comments'
+assert_exit "…and blocks on other-x's review" 2
+SHIM_REPO_EXIT=0
+
+new_case; SHIM_REPO_EXIT=1; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'while true; do export GH_REPO=other-x; break; done; gh pr merge 2002 --rebase'
+assert_stderr_lacks "bare while-compound export GH_REPO=other-x; break; done; keeps same-shell capture" 'MERGE SCOPE UNRESOLVABLE'
+assert_api_has "…and scopes the fetch to other-x" 'repos/other-x/issues/2002/comments'
+assert_exit "…and blocks on other-x's review" 2
+SHIM_REPO_EXIT=0
+
+new_case; SHIM_REPO_EXIT=1; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'for i in 1; do export GH_REPO=other-x; done; gh pr merge 2002 --rebase'
+assert_stderr_lacks "bare for-compound export GH_REPO=other-x; done; keeps same-shell capture" 'MERGE SCOPE UNRESOLVABLE'
+assert_api_has "…and scopes the fetch to other-x" 'repos/other-x/issues/2002/comments'
+assert_exit "…and blocks on other-x's review" 2
+SHIM_REPO_EXIT=0
+
+new_case; SHIM_REPO_EXIT=1; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'case x in x) export GH_REPO=other-x;; esac; gh pr merge 2002 --rebase'
+assert_stderr_lacks "bare case-compound export GH_REPO=other-x;; esac; keeps same-shell capture" 'MERGE SCOPE UNRESOLVABLE'
+assert_api_has "…and scopes the fetch to other-x" 'repos/other-x/issues/2002/comments'
+assert_exit "…and blocks on other-x's review" 2
+SHIM_REPO_EXIT=0
+
 # ===========================================================================
 # 3. The review gate — block once per (PR, review-id), allow on retry
 # ===========================================================================
