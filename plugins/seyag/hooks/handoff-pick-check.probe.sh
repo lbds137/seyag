@@ -34,10 +34,17 @@ mktx_bash() { # $1=out $2=command $3=text
 }
 
 # Build a transcript: one user turn + an Edit/Write tool_use + a final text block.
-mktx_file() { # $1=out $2=tool_name $3=file_path $4=text
+mktx_file() { # $1=out $2=tool_name $3=file_path $4=text [$5=new_string/content [$6=old_string]]
+  local body="${5-$'## Handoff\nnext steps'}" old="${6-}"
   : > "$1"
   echo '{"type":"user","isMeta":null,"message":{"content":"go"}}' >> "$1"
-  printf '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"%s","input":{"file_path":%s}}]}}\n' "$2" "$(jsonstr "$3")" >> "$1"
+  if [ "$2" = "Write" ]; then
+    printf '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"%s","input":{"file_path":%s,"content":%s}}]}}\n' \
+      "$2" "$(jsonstr "$3")" "$(jsonstr "$body")" >> "$1"
+  else
+    printf '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"%s","input":{"file_path":%s,"old_string":%s,"new_string":%s}}]}}\n' \
+      "$2" "$(jsonstr "$3")" "$(jsonstr "$old")" "$(jsonstr "$body")" >> "$1"
+  fi
   printf '{"type":"assistant","message":{"content":[{"type":"text","text":%s}]}}\n' "$(jsonstr "$4")" >> "$1"
 }
 
@@ -61,7 +68,7 @@ check() { # $1=expected_exit $2=label $3=transcript $4=stop_active $5+=stderr re
 
 # Hermetic: ambient machine config must not leak into the probe, and the
 # fire-once memory's state lives under the fixture tmp, never ~/.local/state.
-unset SYG_HANDOFF_PATHS SYG_HANDOFF_CMDS
+unset SYG_HANDOFF_PATHS SYG_HANDOFF_CMDS SYG_HANDOFF_SECTIONS
 export XDG_STATE_HOME="$TMP/state"
 
 # --- 1. Handoff via Bash matching SYG_HANDOFF_CMDS + no pick → exit 2 ---------
@@ -311,5 +318,156 @@ got=$?
 if [ "$got" != 2 ] || grep -q Traceback "$TMP/stderr.out"; then echo "FAIL [$got≠2]: truncated last_assistant_message with the pick cut still blocks"; fail=1
 else echo "ok   [2]: truncated last_assistant_message with the pick cut still blocks"; fi
 unset SYG_HANDOFF_CMDS
+
+# --- 14. Section narrowing (SYG_HANDOFF_SECTIONS) -----------------------------
+export SYG_HANDOFF_PATHS='team-roles/.*\.md$'
+mktx_file "$TMP/sec-fp-nonhandoff.jsonl" "Edit" "/tmp/fixture/team-roles/widget.md" \
+  "Added one bullet to the non-handoff section." \
+  $'## Needs Owner\n- first bullet\n- added bullet' \
+  $'## Needs Owner\n- first bullet'
+check 0 "FP-class: wired Edit to non-handoff section (## Needs Owner bullet) + no pick passes" \
+  "$TMP/sec-fp-nonhandoff.jsonl"
+
+mktx_file "$TMP/sec-edit-new-handoff.jsonl" "Edit" "/tmp/fixture/team-roles/widget.md" \
+  "Updated the handoff section." \
+  $'## Handoff\n- ship unit 4' "old bullet"
+check 2 "wired Edit with ## Handoff in new_string + no pick blocks" \
+  "$TMP/sec-edit-new-handoff.jsonl"
+
+mktx_file "$TMP/sec-edit-old-next.jsonl" "Edit" "/tmp/fixture/team-roles/widget.md" \
+  "Cleared the next steps section." \
+  "- done" $'## Next\n- ship unit 4'
+check 2 "wired Edit with ## Next in old_string (section rewrite) + no pick blocks" \
+  "$TMP/sec-edit-old-next.jsonl"
+
+mktx_file "$TMP/sec-write-next.jsonl" "Write" "/tmp/fixture/team-roles/widget.md" \
+  "Wrote the role file." \
+  $'# Widget\n\n## Next\n- ship unit 4'
+check 2 "wired Write with ## Next in content + no pick blocks" \
+  "$TMP/sec-write-next.jsonl"
+
+mktx_file "$TMP/sec-write-nohead.jsonl" "Write" "/tmp/fixture/team-roles/widget.md" \
+  "Wrote plain notes." \
+  "plain body without any matching section heading"
+check 0 "wired Write with heading-free content + no pick passes" \
+  "$TMP/sec-write-nohead.jsonl"
+
+{
+  echo '{"type":"user","isMeta":null,"message":{"content":"go"}}'
+  echo '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"MultiEdit","input":{"file_path":"/tmp/fixture/team-roles/widget.md","edits":[{"old_string":"- a","new_string":"- b"},{"old_string":"old","new_string":"## Next\n- ship unit 4"}]}}]}}'
+  echo '{"type":"assistant","message":{"content":[{"type":"text","text":"Applied multi-edit."}]}}'
+} > "$TMP/sec-multiedit-hit.jsonl"
+check 2 "wired MultiEdit with one edits[] item carrying ## Next + no pick blocks" \
+  "$TMP/sec-multiedit-hit.jsonl"
+
+{
+  echo '{"type":"user","isMeta":null,"message":{"content":"go"}}'
+  echo '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"MultiEdit","input":{"file_path":"/tmp/fixture/team-roles/widget.md","edits":[{"old_string":"- a","new_string":"- b"},{"old_string":"- c","new_string":"- d"}]}}]}}'
+  echo '{"type":"assistant","message":{"content":[{"type":"text","text":"Applied multi-edit to bullets."}]}}'
+} > "$TMP/sec-multiedit-miss.jsonl"
+check 0 "wired MultiEdit with no edits[] item carrying a section + no pick passes" \
+  "$TMP/sec-multiedit-miss.jsonl"
+
+{
+  echo '{"type":"user","isMeta":null,"message":{"content":"go"}}'
+  echo '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"NotebookEdit","input":{"notebook_path":"/tmp/fixture/team-roles/widget.md","new_source":"## Handoff\n- notebook state"}}]}}'
+  echo '{"type":"assistant","message":{"content":[{"type":"text","text":"Updated notebook cell."}]}}'
+} > "$TMP/sec-notebook-hit.jsonl"
+check 2 "wired NotebookEdit with new_source carrying ## Handoff + no pick blocks" \
+  "$TMP/sec-notebook-hit.jsonl"
+
+{
+  echo '{"type":"user","isMeta":null,"message":{"content":"go"}}'
+  echo '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"NotebookEdit","input":{"notebook_path":"/tmp/fixture/team-roles/widget.md","new_source":"print(42)"}}]}}'
+  echo '{"type":"assistant","message":{"content":[{"type":"text","text":"Updated notebook code cell."}]}}'
+} > "$TMP/sec-notebook-miss.jsonl"
+check 0 "wired NotebookEdit without handoff section + no pick passes" \
+  "$TMP/sec-notebook-miss.jsonl"
+
+export SYG_HANDOFF_SECTIONS='^## Status\b'
+mktx_file "$TMP/sec-custom-hit.jsonl" "Edit" "/tmp/fixture/team-roles/widget.md" \
+  "Updated status section." \
+  $'## Status\n- green' "old"
+check 2 "custom SYG_HANDOFF_SECTIONS: Edit touching ## Status blocks" \
+  "$TMP/sec-custom-hit.jsonl"
+
+mktx_file "$TMP/sec-custom-replaces-default.jsonl" "Edit" "/tmp/fixture/team-roles/widget.md" \
+  "Updated next section." \
+  $'## Next\n- item' "old"
+check 0 "custom SYG_HANDOFF_SECTIONS replaces default: Edit touching only ## Next passes" \
+  "$TMP/sec-custom-replaces-default.jsonl"
+unset SYG_HANDOFF_SECTIONS
+
+export SYG_HANDOFF_SECTIONS=""
+mktx_file "$TMP/sec-empty-disables.jsonl" "Edit" "/tmp/fixture/team-roles/widget.md" \
+  "Added one bullet to the non-handoff section." \
+  $'## Needs Owner\n- first bullet\n- added bullet' \
+  $'## Needs Owner\n- first bullet'
+check 2 "empty SYG_HANDOFF_SECTIONS disables narrowing: non-handoff Edit blocks" \
+  "$TMP/sec-empty-disables.jsonl"
+unset SYG_HANDOFF_SECTIONS
+
+export SYG_HANDOFF_SECTIONS='['
+mktx_file "$TMP/sec-broken-regex.jsonl" "Edit" "/tmp/fixture/team-roles/widget.md" \
+  "Updated handoff section." \
+  $'## Handoff\n- ship unit 4' "old"
+check 0 "broken SYG_HANDOFF_SECTIONS regex fails open" \
+  "$TMP/sec-broken-regex.jsonl" "" '!Traceback'
+unset SYG_HANDOFF_SECTIONS SYG_HANDOFF_PATHS
+
+export SYG_HANDOFF_PATHS='team-roles/.*\.md$'
+export SYG_HANDOFF_CMDS='myrole --set'
+mktx_bash "$TMP/sec-bash-untouched.jsonl" "myrole --set widget --handoff 'unit 5 done'" \
+  "Handoff recorded via CLI."
+check 2 "Bash branch untouched by default section narrowing: SYG_HANDOFF_CMDS still blocks" \
+  "$TMP/sec-bash-untouched.jsonl"
+unset SYG_HANDOFF_CMDS SYG_HANDOFF_PATHS
+
+unset SYG_HANDOFF_PATHS SYG_HANDOFF_CMDS SYG_HANDOFF_SECTIONS
+mktx_file "$TMP/sec-unwired-headingfree.jsonl" "Write" "/tmp/fixture/proj/HANDOFF.md" \
+  "Wrote HANDOFF.md for the next session." \
+  "Plain handoff notes with no markdown section headings at all."
+check 2 "unwired built-in HANDOFF.md Write with heading-free content still blocks with setup hint" \
+  "$TMP/sec-unwired-headingfree.jsonl" "" \
+  'HANDOFF PICK' \
+  'SYG_HANDOFF_PATHS' \
+  'SYG_HANDOFF_CMDS'
+
+# --- 15. Round-1 refinements: broken SECTIONS vs CMDS, built-in path exemption, in-section FN ---
+export SYG_HANDOFF_PATHS='team-roles/.*\.md$' SYG_HANDOFF_CMDS='myrole --set' SYG_HANDOFF_SECTIONS='['
+mktx_bash "$TMP/r1-broken-cmds.jsonl" "myrole --set widget --handoff 'unit 5 done'" \
+  "Handoff recorded via CLI."
+check 2 "broken SYG_HANDOFF_SECTIONS disables file branch only; SYG_HANDOFF_CMDS still blocks" \
+  "$TMP/r1-broken-cmds.jsonl"
+unset SYG_HANDOFF_CMDS
+
+mktx_file "$TMP/r1-broken-file.jsonl" "Edit" "/tmp/fixture/team-roles/widget.md" \
+  "Updated handoff section." \
+  $'## Handoff\n- ship unit 5' "old"
+check 0 "broken SYG_HANDOFF_SECTIONS with CMDS unset leaves file branch inert" \
+  "$TMP/r1-broken-file.jsonl" "" '!Traceback'
+unset SYG_HANDOFF_PATHS SYG_HANDOFF_SECTIONS
+
+export SYG_HANDOFF_PATHS='(^|/)(?:HANDOFF\.md|handoff\.md)$'
+mktx_file "$TMP/r2-built-in-wired.jsonl" "Write" "/tmp/fixture/proj/HANDOFF.md" \
+  "Wrote HANDOFF.md for the next session." \
+  "Plain handoff notes with no markdown section headings at all."
+check 2 "wired built-in HANDOFF.md path stays path-only (heading-free Write blocks)" \
+  "$TMP/r2-built-in-wired.jsonl"
+
+mktx_file "$TMP/r2-built-in-still-fp.jsonl" "Edit" "/tmp/fixture/team-roles/widget.md" \
+  "Updated role file." \
+  $'## Handoff\n- ship unit 5' "old"
+check 0 "wired built-in pattern does not match non-default role path (control)" \
+  "$TMP/r2-built-in-still-fp.jsonl"
+unset SYG_HANDOFF_PATHS
+
+export SYG_HANDOFF_PATHS='team-roles/.*\.md$'
+mktx_file "$TMP/r3-insection.jsonl" "Edit" "/tmp/fixture/team-roles/widget.md" \
+  "Updated handoff bullet." \
+  "- unit 4 shipped; next: unit 5" "- ship unit 4"
+check 0 "accepted false negative: in-section Edit without heading line in old/new passes" \
+  "$TMP/r3-insection.jsonl"
+unset SYG_HANDOFF_PATHS
 
 [ "$fail" = 0 ] && echo "ALL PASS" || { echo "FAILURES"; exit 1; }
