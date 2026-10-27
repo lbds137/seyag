@@ -519,4 +519,24 @@ j_flat=$(env -i HOME="$T" PATH=/usr/bin:/bin CLAUDE_PROJECTS_DIR="$T/advisor-fla
   && ok "advisor rows re-store even when the parent's keep-max skips (executor flat 20->20, advisor 20->40: opus 600, not 500)" \
   || bad "advisor placement (parent-skipped snapshot): $(jq -c .by_model <<<"$j_flat")"
 
+# --- positive control: real advisor record shape (invented ids) ---
+# One real reply: the same usage block repeats on 6 transcript records (same message id +
+# requestId); executor iterations carry type "message" with model:null and must stay
+# uncounted; usage carries top-level keys the sweep never reads; content carries
+# server_tool_use + advisor_tool_result blocks.
+mkdir -p "$T/advisor-ctl-projects/slugA"
+ctl_line() { # $1 = file
+  for _ in 1 2 3 4 5 6; do
+    printf '{"type":"assistant","timestamp":"2026-09-24T03:00:00Z","requestId":"r-ctl","message":{"id":"msg_ctl","model":"claude-sonnet-5-5","content":[{"type":"server_tool_use","name":"advisor"},{"type":"advisor_tool_result","content":{"type":"advisor_redacted_result","encrypted_content":"x"}}],"usage":{"input_tokens":10,"output_tokens":200,"cache_read_input_tokens":150000,"cache_creation_input_tokens":1500,"server_tool_use":{"web_search_requests":1},"fallback_credit":true,"iterations":[{"type":"message","model":null,"input_tokens":2,"output_tokens":124,"cache_read_input_tokens":157618,"cache_creation_input_tokens":1796},{"type":"advisor_message","model":"claude-opus-5-5","input_tokens":160048,"output_tokens":4747,"cache_read_input_tokens":0,"cache_creation_input_tokens":0},{"type":"message","model":null,"input_tokens":2,"output_tokens":523,"cache_read_input_tokens":159414,"cache_creation_input_tokens":1102}]}}}\n'
+  done > "$1"
+}
+ctl_line "$T/advisor-ctl-projects/slugA/s1.jsonl"
+j_ctl=$(env -i HOME="$T" PATH=/usr/bin:/bin CLAUDE_PROJECTS_DIR="$T/advisor-ctl-projects" "$US" --since 2026-09-24T02:15Z --json)
+[ "$(jq -r '[.by_model["claude-opus-5-5"].output, .by_model["claude-opus-5-5"].msgs] | join(",")' <<<"$j_ctl")" = "4747,1" ] \
+  && ok "real-shape control: advisor opus 4747 counted once across the 6-record repeat" \
+  || bad "real-shape advisor dedupe: $(jq -c .by_model <<<"$j_ctl")"
+[ "$(jq -r '[([.by_model | keys[]] | sort | join(",")), .messages_counted, .by_model["claude-sonnet-5-5"].output] | join(" ")' <<<"$j_ctl")" = "claude-opus-5-5,claude-sonnet-5-5 2 200" ] \
+  && ok "real-shape control: executor sonnet 200 from top-level only; null-model iterations uncounted; odd usage keys ignored" \
+  || bad "real-shape executor/null-iterations: $(jq -c '{messages_counted, by_model}' <<<"$j_ctl")"
+
 exit $fail
