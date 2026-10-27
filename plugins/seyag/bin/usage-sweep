@@ -635,6 +635,22 @@ def main():
                     if prev_rep is None or usage["output_tokens"] > prev_rep[4]["output_tokens"]:
                         report_replies[key] = (slug, scope, session, msg.get("model") or "?", usage, rep_epoch)
 
+                # Advisor-tool sub-inference rides usage.iterations[] (type
+                # "advisor_message"), each entry with its own model and token
+                # fields; the top-level usage above covers the executor only.
+                for idx, it in enumerate(u.get("iterations") or []):
+                    if not isinstance(it, dict) or it.get("type") != "advisor_message":
+                        continue
+                    it_key = (*key, idx)
+                    it_usage = {k: it.get(k) or 0 for k in USAGE_FIELDS}
+                    prev_it = replies.get(it_key)
+                    if prev_it is None or it_usage["output_tokens"] > prev_it[4]["output_tokens"]:
+                        replies[it_key] = (slug, scope, session, it.get("model") or "?", it_usage, rep_epoch)
+                    if is_report_folder and in_report_window:
+                        prev_it_rep = report_replies.get(it_key)
+                        if prev_it_rep is None or it_usage["output_tokens"] > prev_it_rep[4]["output_tokens"]:
+                            report_replies[it_key] = (slug, scope, session, it.get("model") or "?", it_usage, rep_epoch)
+
     by_model = defaultdict(lambda: defaultdict(float))
     by_slug = defaultdict(float)
     by_scope = defaultdict(float)
