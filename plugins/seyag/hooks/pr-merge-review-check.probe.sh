@@ -1904,6 +1904,29 @@ assert_no_fetch "…no fetch ran"
 assert_api_lacks "…no repos/ lookup in the api log" 'repos/'
 assert_ack_lacks "…and no ack line written" '2002:777:2026-08-08T12:00:00Z'
 
+# --- split-sub prefix preceded by earlier assignments or runner words ---------
+# bash 5.3 measured (`env -i` grounding): earlier assignment words
+# (`GH_FORCE_TTY=1 GH_REPO=$(calc) gh ...`) or runner words (`env
+# GH_REPO=$(calc) gh ...`) before the split `GH_REPO=$(...)` prefix still pass
+# the `$(calc)`-resolved `GH_REPO` into `gh pr merge`, so both shapes must
+# refuse as `MERGE SCOPE UNRESOLVABLE` before any network call.
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'GH_FORCE_TTY=1 GH_REPO=$(calc) gh pr merge 2002 --rebase'
+assert_exit "split-sub GH_REPO=\$(calc) prefix preceded by another assignment: refused" 2
+assert_stderr_has "…with the unresolvable-scope banner" 'MERGE SCOPE UNRESOLVABLE'
+assert_no_fetch "…no fetch ran"
+assert_api_lacks "…no repos/ lookup in the api log" 'repos/'
+assert_ack_lacks "…and no ack line written" '2002:777:2026-08-08T12:00:00Z'
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'env GH_REPO=$(calc) gh pr merge 2002 --rebase'
+assert_exit "split-sub GH_REPO=\$(calc) prefix preceded by env runner: refused" 2
+assert_stderr_has "…with the unresolvable-scope banner" 'MERGE SCOPE UNRESOLVABLE'
+assert_no_fetch "…no fetch ran"
+assert_api_lacks "…no repos/ lookup in the api log" 'repos/'
+assert_ack_lacks "…and no ack line written" '2002:777:2026-08-08T12:00:00Z'
+
 # ===========================================================================
 # 3. The review gate — block once per (PR, review-id), allow on retry
 # ===========================================================================

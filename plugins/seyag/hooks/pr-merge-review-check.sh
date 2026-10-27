@@ -803,6 +803,20 @@ def scan_invocations(text):
                         gh_repo_unresolvable = False
                     else:
                         gh_repo_bare = val
+            elif split_sub_prefix:
+                # Split-sub prefix preceded by earlier assignments or runner
+                # words (`FOO=1 GH_REPO=$(...) gh ...`, `env GH_REPO=$(...)
+                # gh ...`): the command after the substitution interior still
+                # inherits the non-literal GH_REPO (directly or via the runner
+                # invoking the merge).
+                m = GH_REPO_ASSIGN.match(raw[-1])
+                if m and "\n" not in m.group(1):
+                    val = bt_strip(normalize_sub_val(idx, m.group(1)))
+                    if val != m.group(1):
+                        pending_prefix_repo = val
+                        pending_prefix_target_idx = (
+                            idx + 1 + split_sub_interior
+                        )
             elif argv:
                 cmd_base = base0
                 if cmd_base == "unset" and "-f" not in argv[1:]:
@@ -883,6 +897,13 @@ def scan_invocations(text):
                     pending_prefix_target_idx = idx + 1 + split_sub_interior
                 elif gh_repo_exported:
                     child_gh_repo_exported = True
+        elif split_sub_prefix:
+            m = GH_REPO_ASSIGN.match(raw[-1])
+            if m and "\n" not in m.group(1):
+                val = bt_strip(normalize_sub_val(idx, m.group(1)))
+                if val != m.group(1):
+                    pending_prefix_repo = val
+                    pending_prefix_target_idx = idx + 1 + split_sub_interior
         elif argv:
             cmd_base = base0
             if cmd_base in ("export", "declare", "typeset", "readonly") \
