@@ -554,6 +554,7 @@ def scan_invocations(text):
     first_env_unresolvable = False
     first_prefix_repo = ""
     pending_prefix_repo = None
+    pending_prefix_target_idx = None
     chdir_seen = False
     commands = simple_commands_context(text)
 
@@ -667,10 +668,13 @@ def scan_invocations(text):
 
     def consume_split_sub_is_prefix():
         # Distinguish `GH_REPO=$(...) gh pr merge ...` (prefix on the next
-        # same-shell command) from `GH_REPO=$(...); gh pr merge ...` (a
-        # separate bare-assignment command before a separator), attributing
+        # command after the substitution interior, whether top-level or in a
+        # pipeline/background subshell) from `GH_REPO=$(...); gh pr merge ...`
+        # (a separate bare-assignment command before a separator), attributing
         # the post-paren check to THIS split-sub assignment's own occurrence
-        # in the quote- and comment-stripped view (`strip_quoted_indexed`).
+        # in the quote- and comment-stripped view (`strip_quoted_indexed`) and
+        # returning `(is_prefix, interior_cmd_count)` so the hand-off lands on
+        # the command immediately following the substitution's interior.
         # LIMIT: the cursor assumes `sub_view` (built breadth-first over
         # wrapper levels) lists the occurrences in the same order the command
         # list (depth-first recursion) consumes them. Two NESTED wrappers
@@ -680,7 +684,6 @@ def scan_invocations(text):
         nonlocal sub_pos
         i = sub_pos
         n = len(sub_view)
-        paren_depth = 0
         in_bt = False
         while i < n:
             ch = sub_view[i]
@@ -688,35 +691,33 @@ def scan_invocations(text):
                 in_bt = not in_bt
                 i += 1
                 continue
-            if not in_bt:
-                if ch == "(":
-                    paren_depth += 1
-                    i += 1
-                    continue
-                if ch == ")":
-                    paren_depth = max(0, paren_depth - 1)
-                    i += 1
-                    continue
-                if paren_depth == 0 and (
-                    i == 0 or sub_view[i - 1] in " \t\n;&|()"
-                ):
-                    m_sub = _SPLIT_SUB_AT_RE.match(sub_view, i)
-                    if m_sub is not None:
-                        depth = 1
-                        k = m_sub.end()
-                        while k < n and depth > 0:
-                            if sub_view[k] == "(":
-                                depth += 1
-                            elif sub_view[k] == ")":
-                                depth -= 1
-                            k += 1
-                        sub_pos = k
-                        while k < n and sub_view[k] in " \t":
-                            k += 1
-                        return k < n and sub_view[k] not in ";&|\n)'\""
+            if not in_bt and (
+                i == 0 or sub_view[i - 1] in " \t\n;&|()"
+            ):
+                m_sub = _SPLIT_SUB_AT_RE.match(sub_view, i)
+                if m_sub is not None:
+                    depth = 1
+                    k = m_sub.end()
+                    while k < n and depth > 0:
+                        if sub_view[k] == "(":
+                            depth += 1
+                        elif sub_view[k] == ")":
+                            depth -= 1
+                        k += 1
+                    interior = sub_view[m_sub.end() : max(m_sub.end(), k - 1)]
+                    sub_pos = m_sub.end()
+                    while k < n and sub_view[k] in " \t":
+                        k += 1
+                    is_prefix = k < n and sub_view[k] not in ";&|\n)'\""
+                    n_interior = (
+                        max(1, len(simple_commands_context(interior)))
+                        if is_prefix
+                        else 0
+                    )
+                    return is_prefix, n_interior
             i += 1
         sub_pos = n
-        return False
+        return False, 0
 
     for idx, (raw, in_child) in enumerate(commands):
         argv, runinfo = unwrap_runners(raw)
@@ -728,21 +729,29 @@ def scan_invocations(text):
         # this.
         base0 = os.path.basename(argv[0]).lstrip("`") if argv else ""
         prefix_from_split_sub = None
-        if not in_child and pending_prefix_repo is not None:
+        if (
+            pending_prefix_repo is not None
+            and idx == pending_prefix_target_idx
+        ):
             prefix_from_split_sub = pending_prefix_repo
             pending_prefix_repo = None
+            pending_prefix_target_idx = None
         split_sub_prefix = False
-        if not in_child and raw:
+        split_sub_interior = 0
+        if raw:
             last_m = GH_REPO_ASSIGN.match(raw[-1])
             if (
                 last_m
                 and "\n" not in last_m.group(1)
                 and normalize_sub_val(idx, last_m.group(1)) != last_m.group(1)
             ):
-                split_sub_prefix = consume_split_sub_is_prefix()
+                split_sub_prefix, split_sub_interior = (
+                    consume_split_sub_is_prefix()
+                )
         # Earlier simple-command `GH_REPO` tracking (same shell only:
         # `in_child` is True inside `(...)`, `$(...)`, backticks, and
-        # `<(...)`/`>(...)`, whose environment changes never leak up to the
+        # `<(...)`/`>(...)`, plus multi-command pipelines and `&`-backgrounded
+        # lists/compounds, whose environment changes never leak up to the
         # parent shell).
         # - `export` and `declare`/`typeset`/`readonly` with `-x` effective
         #   (no -n/-u/-p; `-x` sets and `+x` clears export status across flags
@@ -752,7 +761,12 @@ def scan_invocations(text):
         #   exported in this command, bash updates the exported value in
         #   place; otherwise record `gh_repo_bare` in case a later `export
         #   GH_REPO` / `declare -x GH_REPO` promotes it (and `declare +x
-        #   GH_REPO=val` likewise records `gh_repo_bare` when unexported).
+        #   GH_REPO=val` likewise records `gh_repo_bare` when unexported). A
+        #   split-substitution prefix (`GH_REPO=$(...) cmd`) is recorded in
+        #   `pending_prefix_repo` for the command immediately following the
+        #   substitution's interior commands (`pending_prefix_target_idx`),
+        #   even when `in_child` is True (piped or `&`-backgrounded merges run
+        #   with the prefix-resolved GH_REPO inside their subshell).
         # - Bare `export GH_REPO` / `declare -x GH_REPO` with no `=`: promotes
         #   a prior `gh_repo_bare` in this command, or marks the env scope
         #   unresolvable when no prior assignment exists in this command.
@@ -765,8 +779,15 @@ def scan_invocations(text):
         #   Known over-approximation (accepted): `(export GH_REPO=a);
         #   (gh pr merge N)` across two separate child constructs also refuses
         #   because the flat command list does not distinguish construct
-        #   boundaries; the escape (drop the parens or pass literal -R) costs
-        #   one command, same as the chdir refusal's.
+        #   boundaries, and a shared backgrounded list or piped compound
+        #   (`export GH_REPO=x && gh pr merge N &`, `if c; then export
+        #   GH_REPO=x; gh pr merge N; fi | cat`) likewise refuses as
+        #   unresolvable even though bash resolves `x` inside the subshell
+        #   (fail-safe over-refusal); the escape (drop the parens/subshell or
+        #   pass literal -R) costs one command, same as the chdir refusal's.
+        #   Compound-tracker openers not covered: `select … done`,
+        #   `function f { … }` (`{` is not at command start after `function f`),
+        #   and `coproc { … }` (whose body always runs in a subshell).
         if not in_child:
             if not argv and not runinfo.get("runners") and len(raw) == 1:
                 m = GH_REPO_ASSIGN.match(raw[0])
@@ -774,6 +795,9 @@ def scan_invocations(text):
                     val = bt_strip(normalize_sub_val(idx, m.group(1)))
                     if val != m.group(1) and split_sub_prefix:
                         pending_prefix_repo = val
+                        pending_prefix_target_idx = (
+                            idx + 1 + split_sub_interior
+                        )
                     elif gh_repo_exported:
                         gh_repo_env = val
                         gh_repo_unresolvable = False
@@ -850,15 +874,15 @@ def scan_invocations(text):
                             gh_repo_env = ""
                             gh_repo_exported = False
                             gh_repo_unresolvable = False
-        elif (
-            gh_repo_exported
-            and not argv
-            and not runinfo.get("runners")
-            and len(raw) == 1
-        ):
+        elif not argv and not runinfo.get("runners") and len(raw) == 1:
             m = GH_REPO_ASSIGN.match(raw[0])
             if m and "\n" not in m.group(1):
-                child_gh_repo_exported = True
+                val = bt_strip(normalize_sub_val(idx, m.group(1)))
+                if val != m.group(1) and split_sub_prefix:
+                    pending_prefix_repo = val
+                    pending_prefix_target_idx = idx + 1 + split_sub_interior
+                elif gh_repo_exported:
+                    child_gh_repo_exported = True
         elif argv:
             cmd_base = base0
             if cmd_base in ("export", "declare", "typeset", "readonly") \
