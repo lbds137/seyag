@@ -4,8 +4,11 @@
 #
 # Trigger — both conditions must hold in the current turn:
 #   (a) A tool_use block in the current turn wrote a handoff: an Edit, Write,
-#       MultiEdit or NotebookEdit whose `.input.file_path` matches
-#       SYG_HANDOFF_PATHS (a Python regex), or a Bash tool_use whose
+#       MultiEdit or NotebookEdit whose `.input.file_path` (or
+#       `.input.notebook_path`) matches SYG_HANDOFF_PATHS (a Python regex) and,
+#       on the wired SYG_HANDOFF_PATHS branch, whose `.input` carries a string
+#       matching SYG_HANDOFF_SECTIONS (a multiline Python regex, default
+#       `^##[ \t]*(?:Handoff|Next)\b`), or a Bash tool_use whose
 #       `.input.command` matches SYG_HANDOFF_CMDS (a Python regex, e.g.
 #       `myrole --set`).
 #   (b) The turn's final assistant text contains none of the pick tokens:
@@ -18,12 +21,19 @@
 # and appends a one-line setup hint naming SYG_HANDOFF_PATHS and
 # SYG_HANDOFF_CMDS (and the built-in pattern to keep the defaults while
 # silencing the hint) so an unwired deployment is visible rather than silently
-# inert. SYG_DISABLE=handoff-pick-check turns the component off.
+# inert. On the wired SYG_HANDOFF_PATHS branch, SYG_HANDOFF_SECTIONS narrows
+# file-tool matches to inputs carrying a matching section heading (unset uses
+# the case-sensitive default `^##[ \t]*(?:Handoff|Next)\b`; set-but-empty `""`
+# disables narrowing for path-only matching; the built-in default paths, even
+# when wired, and SYG_HANDOFF_CMDS Bash writes are not narrowed).
+# SYG_DISABLE=handoff-pick-check turns the component off.
 #
 # Known false negative, accepted: a closing using `keep` in an ordinary sense
 # (e.g. "I will keep the old flag") counts as a pick under the word-bounded
 # match; the convention states the pick explicitly ("Pick: keep"), block-once
-# bounds the miss, and a pick-shaped regex was rejected as brittle.
+# bounds the miss, and a pick-shaped regex was rejected as brittle. An Edit
+# inside a Handoff/Next section whose old/new strings carry no heading line
+# also passes silently.
 #
 # Known residual, accepted: the envelope's last_assistant_message is truncated
 # for long closings (it ends "… [+N chars]"); a pick token cut by the
@@ -34,8 +44,10 @@
 # turn-end via the native `stop_hook_active` flag and at most once per handoff
 # write via the fire-once memory below. Every external doubt — no jq, no
 # python3, missing or unreadable transcript, no genuine user turn boundary in
-# the tail, or a broken regex in SYG_HANDOFF_PATHS / SYG_HANDOFF_CMDS — exits
-# 0 (fail-open).
+# the tail, or a broken regex in SYG_HANDOFF_PATHS / SYG_HANDOFF_CMDS /
+# SYG_HANDOFF_SECTIONS (a broken SYG_HANDOFF_SECTIONS disables the file branch
+# like a broken SYG_HANDOFF_PATHS, never the SYG_HANDOFF_CMDS gate) — exits 0
+# (fail-open).
 #
 # Fire-once memory: the first reaction to a handoff write is the last.
 # Cron/scheduled prompts and stop-hook feedback arrive as isMeta user entries
@@ -86,6 +98,9 @@ def compile_opt(var):
 DEFAULT_HANDOFF_PATHS = re.compile(
     r"(^|/)(?:HANDOFF\.md|handoff\.md)$"
 )
+DEFAULT_HANDOFF_SECTIONS = re.compile(
+    r"^##[ \t]*(?:Handoff|Next)\b", re.MULTILINE
+)
 raw_paths = os.environ.get("SYG_HANDOFF_PATHS", "")
 raw_cmds = os.environ.get("SYG_HANDOFF_CMDS", "")
 wired = bool(raw_paths or raw_cmds)
@@ -94,9 +109,26 @@ if wired:
     cmds_re = compile_opt("SYG_HANDOFF_CMDS")
     if paths_re is None and cmds_re is None:
         print("ok"); sys.exit()
+    if paths_re is not None:
+        raw_sections = os.environ.get("SYG_HANDOFF_SECTIONS")
+        if raw_sections is None:
+            sections_re = DEFAULT_HANDOFF_SECTIONS
+        elif raw_sections == "":
+            sections_re = None
+        else:
+            try:
+                sections_re = re.compile(raw_sections, re.MULTILINE)
+            except (re.error, TypeError, ValueError, RecursionError, OverflowError):
+                paths_re = None
+                sections_re = None
+                if paths_re is None and cmds_re is None:
+                    print("ok"); sys.exit()
+    else:
+        sections_re = None
 else:
     paths_re = DEFAULT_HANDOFF_PATHS
     cmds_re = None
+    sections_re = None
 
 path = os.environ["TRANSCRIPT"]
 # Read only the tail: a long session's transcript can be hundreds of MB, and this
@@ -162,6 +194,17 @@ if turn_start is None:
 turn = records[turn_start:]
 
 
+def iter_strings(obj):
+    if isinstance(obj, str):
+        yield obj
+    elif isinstance(obj, dict):
+        for v in obj.values():
+            yield from iter_strings(v)
+    elif isinstance(obj, list):
+        for item in obj:
+            yield from iter_strings(item)
+
+
 def is_handoff_write(block):
     if not isinstance(block, dict) or block.get("type") != "tool_use":
         return False
@@ -171,7 +214,11 @@ def is_handoff_write(block):
         return False
     if name in ("Edit", "Write", "MultiEdit", "NotebookEdit") and paths_re is not None:
         fp = inp.get("file_path") or inp.get("notebook_path")
-        return isinstance(fp, str) and bool(paths_re.search(fp))
+        if not (isinstance(fp, str) and paths_re.search(fp)):
+            return False
+        if sections_re is None or DEFAULT_HANDOFF_PATHS.search(fp):
+            return True
+        return any(sections_re.search(s) for s in iter_strings(inp))
     if name == "Bash" and cmds_re is not None:
         cmd = inp.get("command")
         return isinstance(cmd, str) and bool(cmds_re.search(cmd))
