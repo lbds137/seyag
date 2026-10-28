@@ -23,7 +23,20 @@ Commands are found with the shared splitter (lib/shell_quotes.py): top-level
 pipelines, wrapper strings such as `bash -c '…'`, and command substitutions
 (two levels deep). A command whose own prefix holds `bypass_assignment` (e.g.
 `SYG_ALLOW_SESSION_URL=1 git commit …`, `env SYG_ALLOW_SESSION_URL=1 gh …`)
-yields nothing; a mention elsewhere in the text does not count.
+yields nothing; a mention elsewhere in the text does not count. When
+`SYG_GH_WRAPPERS` (a whitespace-separated token list; opt-in, empty by default;
+falls back to `SYG_LOSSY_PIPE_GH_WRAPPERS` when unset or empty) is set and a
+command's argv begins with that token sequence (the first token compared
+against the basename of `argv[0]`, the rest verbatim), the walker matches a
+`gh` operation in either the plain two-word form (`<subcommand> <word>` where
+`<subcommand>` is `pr`, `issue`, `repo`, `gist`, `release`, `run` or `api`,
+anchored immediately after the wrapper tokens or immediately after a literal
+`gh` word there) or, scanning forward, the colon form (`gh:<rest>`, e.g.
+`gh:pr-edit`, `gh:repo-set-default`, `gh:api`, split on the first `-`), and
+feeds the synthetic `gh` argv through the same `gh_text_exempt`,
+`file_values_gh` and `repo_create_push_dir` path as a literal `gh` command
+(when intervening words sit between the wrapper tokens and a colon-form match,
+`gh_text_exempt` is skipped and the command text is always scanned).
 
 THE ADDED LAYER: git-hooks/pre-push scans what a push sends from a public
 repo (message, identities, paths, added lines, tags, notes), however bash
@@ -374,6 +387,42 @@ def file_values_gh(argv):
                 out.append(w[2:])
         i += 1
     return out
+
+
+GH_WRAPPER_SUBCOMMANDS = frozenset(GH_READ_SUBCOMMANDS) | {"api"}
+
+
+def _gh_wrapper_argv(argv):
+    """`(gh_argv, skipped)` when `SYG_GH_WRAPPERS` (falling back to
+    `SYG_LOSSY_PIPE_GH_WRAPPERS` when unset or empty) is set, `argv` begins
+    with that whitespace-separated token sequence (`wrappers[0]` compared
+    against the basename of `argv[0]` and the remaining tokens verbatim), and
+    either the plain two-word form (`<subcommand> <word>` with `<subcommand>`
+    in `GH_WRAPPER_SUBCOMMANDS`) sits immediately after the wrapper tokens (or
+    immediately after a literal `gh` word there) or a word after the wrapper
+    tokens matches the colon form (`gh:<rest>`, split on the first `-`);
+    `skipped` is True when intervening words sit between the wrapper-token
+    prefix and the matched `gh` operation; else `(None, False)`."""
+    try:
+        wrappers = (os.environ.get("SYG_GH_WRAPPERS", "").split()
+                    or os.environ.get("SYG_LOSSY_PIPE_GH_WRAPPERS", "").split())
+        n = len(wrappers)
+        if not wrappers or len(argv) <= n:
+            return None, False
+        if argv[0].rsplit("/", 1)[-1] != wrappers[0] or argv[1:n] != wrappers[1:]:
+            return None, False
+        plain = n + 1 if argv[n] == "gh" else n
+        if plain + 1 < len(argv) and argv[plain] in GH_WRAPPER_SUBCOMMANDS:
+            return ["gh"] + argv[plain:], False
+        for i in range(n, len(argv)):
+            w = argv[i]
+            if w.startswith("gh:"):
+                rest = w[3:]
+                if rest:
+                    return ["gh"] + rest.split("-", 1) + argv[i + 1:], i > n
+    except Exception:
+        return None, False
+    return None, False
 
 
 def read_file(path, directory):
@@ -897,14 +946,15 @@ def outbound_items(cmd, cwd, bypass_assignment, dir_filter=None,
             if prog in ("cd", "pushd"):
                 directory, oldpwd = _cd_move(prog, argv, directory, oldpwd)
                 continue
-            if prog == "gh":
+            gh_argv, gh_skipped = (argv, False) if prog == "gh" else _gh_wrapper_argv(argv)
+            if gh_argv is not None:
                 if bypassed:
                     continue
                 if wanted(directory):
-                    if not gh_text_exempt(argv, prefix):
+                    if gh_skipped or not gh_text_exempt(gh_argv, prefix):
                         command_text(directory)
-                    files(file_values_gh(argv), directory)
-                push_dir = repo_create_push_dir(argv, directory)
+                    files(file_values_gh(gh_argv), directory)
+                push_dir = repo_create_push_dir(gh_argv, directory)
                 if push_dir is not None and wanted(push_dir):
                     items.extend(_push_items(push_sources([]), push_dir))
                 continue

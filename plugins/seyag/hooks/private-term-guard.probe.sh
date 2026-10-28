@@ -688,6 +688,54 @@ run 2 "closed-text: a swallowed second gh command keeps the text" "$PUB" "${T[@]
 run 2 "closed-text: a push in the compound still scans what it sends" "$PMSG" "${T[@]}" -- \
   "gh pr list && git push origin main"
 
+# =============================================================================
+# Wrapper-invoked gh commands (SYG_GH_WRAPPERS)
+# =============================================================================
+run 2 "gh wrapper colon write: myops gh:pr-edit --body-file with the term" "$PUB" "${T[@]}" SYG_GH_WRAPPERS=myops -- \
+  "myops gh:pr-edit --body-file $TMP/files/body.txt"
+assert_out "wrapper write names term #2 in header" present "(#2 in \$SYG_PRIVATE_TERMS_FILE)"
+assert_out "wrapper write masks the term as #2" present "[private term #2]"
+assert_out "wrapper write names a body file, not its path" present "matched in: a body file."
+run 2 "gh wrapper plain write: myops gh pr edit --body-file with the term" "$PUB" "${T[@]}" SYG_GH_WRAPPERS=myops -- \
+  "myops gh pr edit --body-file $TMP/files/body.txt"
+assert_out "wrapper plain write names term #2 in header" present "(#2 in \$SYG_PRIVATE_TERMS_FILE)"
+assert_out "wrapper plain write masks the term as #2" present "[private term #2]"
+assert_out "wrapper plain write names a body file, not its path" present "matched in: a body file."
+run 0 "gh wrapper colon read: myops gh:pr-view stays silent" "$PUB" "${T[@]}" SYG_GH_WRAPPERS=myops -- \
+  "myops gh:pr-view 1 # zorbleflux"
+run 0 "gh wrapper opt-in boundary: unset SYG_GH_WRAPPERS leaves myops gh:pr-edit silent" "$PUB" -u SYG_GH_WRAPPERS "${T[@]}" -- \
+  "myops gh:pr-edit --body-file $TMP/files/body.txt"
+run 2 "gh wrapper plain two-token form without literal gh: myops ci pr edit --body-file" "$PUB" "${T[@]}" SYG_GH_WRAPPERS="myops ci" -- \
+  "myops ci pr edit --body-file $TMP/files/body.txt"
+assert_out "two-token plain wrapper names a body file" present "matched in: a body file."
+run 0 "gh wrapper plain two-token read without literal gh stays silent" "$PUB" "${T[@]}" SYG_GH_WRAPPERS="myops ci" -- \
+  "myops ci pr view 1 # zorbleflux"
+run 2 "gh wrapper gh:api -F x=@file with the term" "$PUB" "${T[@]}" SYG_GH_WRAPPERS="myops ci" -- \
+  "myops ci gh:api repos/x/y -F x=@$TMP/files/body.txt"
+assert_out "wrapper gh:api -F names a body file" present "matched in: a body file."
+run 2 "gh wrapper gh:api --input file with the term" "$PUB" "${T[@]}" SYG_GH_WRAPPERS="myops ci" -- \
+  "myops ci gh:api repos/x/y --input $TMP/files/body.txt"
+assert_out "wrapper gh:api --input names a body file" present "matched in: a body file."
+run 0 "gh wrapper bypass: own-prefix SYG_ALLOW_PRIVATE_TERM=1 passes" "$PUB" "${T[@]}" SYG_GH_WRAPPERS="myops ci" -- \
+  "SYG_ALLOW_PRIVATE_TERM=1 myops ci pr edit --body-file $TMP/files/body.txt"
+run 2 "gh wrapper closed-text: plain VAR= prefix on a read keeps the text" "$PUB" "${T[@]}" SYG_GH_WRAPPERS="myops ci" -- \
+  "FOO=1 myops ci pr list # zorbleflux"
+assert_out "wrapper VAR= prefix scans the command text" present "matched in: the command text"
+run 2 "gh wrapper repo create --source <repo> --push captures the directory" "$PLAIN" "${T[@]}" SYG_GH_WRAPPERS="myops ci" -- \
+  "myops ci repo create me/x --private --source $PMSG --push"
+assert_out "wrapper repo create names the commit message by sha only" present "matched in: commit $PMSG_SHA message."
+run 2 "gh wrapper intervening word before gh:pr-view forces text scan" "$PUB" "${T[@]}" SYG_GH_WRAPPERS="myops ci" -- \
+  "myops ci --quiet gh:pr-view 1 # zorbleflux"
+assert_out "wrapper intervening word scans the command text" present "matched in: the command text"
+run 0 "gh wrapper anchored plain form: later subcommand-looking word is not a gh command" "$PUB" "${T[@]}" SYG_GH_WRAPPERS="myops ci" -- \
+  "myops ci task run unit --body-file $TMP/files/body.txt"
+run 2 "gh wrapper colon single-split: gh:repo-set-default scans text" "$PUB" "${T[@]}" SYG_GH_WRAPPERS="myops ci" -- \
+  "myops ci gh:repo-set-default o/r # zorbleflux"
+run 2 "gh wrapper basename match on argv[0]" "$PUB" "${T[@]}" SYG_GH_WRAPPERS="myops ci" -- \
+  "/usr/local/bin/myops ci pr edit --body-file $TMP/files/body.txt"
+run 2 "gh wrapper fallback to SYG_LOSSY_PIPE_GH_WRAPPERS when SYG_GH_WRAPPERS is unset" "$PUB" -u SYG_GH_WRAPPERS SYG_LOSSY_PIPE_GH_WRAPPERS="myops ci" "${T[@]}" -- \
+  "myops ci pr edit --body-file $TMP/files/body.txt"
+
 if [ "$FAILURES" -ne 0 ]; then
   printf '\n%d probe case(s) FAILED\n' "$FAILURES"
   exit 1
