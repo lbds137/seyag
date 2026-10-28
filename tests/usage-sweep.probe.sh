@@ -11,7 +11,7 @@ bad() { echo "FAIL: $1"; fail=1; }
 
 line() { # id ts in out cache_read [block] [model]
   printf '{"type":"assistant","timestamp":"%s","requestId":"r-%s","message":{"id":"%s","model":"%s","content":[{"type":"%s"}],"usage":{"input_tokens":%s,"output_tokens":%s,"cache_read_input_tokens":%s,"cache_creation_input_tokens":0}}}\n' \
-    "$2" "$1" "$1" "${7:-m}" "${6:-text}" "$3" "$4" "$5"
+    "$2" "$1" "$1" "${7:-claude-sonnet-4-6}" "${6:-text}" "$3" "$4" "$5"
 }
 P="$T/projects"; mkdir -p "$P/slugA/s1/subagents" "$P/slugA/mined-corpus" "$P/slugB"
 { line m0 2026-01-01T00:00:00Z 999 0 0     # before the window
@@ -538,5 +538,20 @@ j_ctl=$(env -i HOME="$T" PATH=/usr/bin:/bin CLAUDE_PROJECTS_DIR="$T/advisor-ctl-
 [ "$(jq -r '[([.by_model | keys[]] | sort | join(",")), .messages_counted, .by_model["claude-sonnet-5-5"].output] | join(" ")' <<<"$j_ctl")" = "claude-opus-5-5,claude-sonnet-5-5 2 200" ] \
   && ok "real-shape control: executor sonnet 200 from top-level only; null-model iterations uncounted; odd usage keys ignored" \
   || bad "real-shape executor/null-iterations: $(jq -c '{messages_counted, by_model}' <<<"$j_ctl")"
+
+# --- --points excludes unbilled-family weight from meter split ---
+mkdir -p "$T/unbilled-pts-state/claude-usage" "$T/unbilled-pts-projects/slugBilled" "$T/unbilled-pts-projects/slugUnbilled"
+{ rd 10.0 1790208000 10.0
+  rd 30.0 1790229600 30.0
+} > "$T/unbilled-pts-state/claude-usage/readings.jsonl"
+line ub_opus 2026-09-24T02:00:00Z 1000 0 0 text claude-opus-4-6 > "$T/unbilled-pts-projects/slugBilled/s1.jsonl"
+line ub_glm  2026-09-24T02:05:00Z 1000 0 0 text glm-5 > "$T/unbilled-pts-projects/slugUnbilled/s1.jsonl"
+j_ub=$(env -i HOME="$T" PATH=/usr/bin:/bin CLAUDE_PROJECTS_DIR="$T/unbilled-pts-projects" \
+            XDG_STATE_HOME="$T/unbilled-pts-state" "$US" \
+            --since 2026-09-24T01:15Z --until 2026-09-24T05:30Z --points --json 2>"$T/ub.err")
+[ "$(jq -r '.points.by_slug.slugBilled == 20 and .points.by_slug.slugUnbilled == 0 and .points.by_model["claude-opus-4-6"] == 20 and .points.by_model["glm-5"] == 0' <<<"$j_ub")" = true ] \
+  && grep -q "unbilled-family tokens, excluded" "$T/ub.err" \
+  && ok "--points excludes unbilled-family weight from meter split (billed slug 20, unbilled slug 0, warns on stderr)" \
+  || bad "--points unbilled exclusion: $(jq -c .points <<<"$j_ub") err=$(cat "$T/ub.err")"
 
 exit $fail

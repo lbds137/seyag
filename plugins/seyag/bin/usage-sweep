@@ -528,7 +528,7 @@ def main():
     ap.add_argument("--until", help="ISO timestamp (UTC if no offset); default: now")
     ap.add_argument("--slug", action="append", default=[], help="project folder name under ~/.claude/projects")
     ap.add_argument("--points", action="store_true",
-                    help="convert each folder's share of the window into meter points from claude-usage's readings log")
+                    help="convert each folder's share of the window into meter points from claude-usage's readings log; unbilled-family (non-Anthropic) weight is excluded from the split")
     ap.add_argument("--by-session", action="store_true",
                     help="attribute usage per session (slug/session) instead of per folder")
     ap.add_argument("--fit", action="store_true",
@@ -655,6 +655,8 @@ def main():
     by_slug = defaultdict(float)
     by_scope = defaultdict(float)
     by_session = defaultdict(float)
+    by_slug_unbilled = defaultdict(float)
+    by_session_unbilled = defaultdict(float)
     for slug, scope, session, model, u, epoch in report_replies.values():
         w = weigh(u)
         d = by_model[model]
@@ -666,8 +668,15 @@ def main():
         by_scope[scope] += w
         if a.by_session:
             by_session[f"{folder_label(slug)}/{session}"] += w
+        if family(model) == "unbilled":
+            by_slug_unbilled[folder_label(slug)] += w
+            if a.by_session:
+                by_session_unbilled[f"{folder_label(slug)}/{session}"] += w
 
     total = sum(d["weighted"] for d in by_model.values())
+    # Unbilled-family tokens (non-Anthropic lanes) do not move the Anthropic
+    # meter, so they must not dilute the meter-point split.
+    billed_total = sum(d["weighted"] for m, d in by_model.items() if family(m) != "unbilled")
 
     points = None
     readings = None
@@ -681,13 +690,19 @@ def main():
     if a.points:
         points = meter_points(readings, int(since.timestamp()), int(until.timestamp()))
         points["readings_skipped"] = readings_skipped
-        points["by_slug"] = {k: round(w / total * points["weekly_delta"], 2) if total else 0.0
+        points["by_slug"] = {k: round((w - by_slug_unbilled.get(k, 0.0)) / billed_total * points["weekly_delta"], 2)
+                             if billed_total and w > by_slug_unbilled.get(k, 0.0) else 0.0
                              for k, w in by_slug.items()}
         if a.by_session:
-            points["by_session"] = {k: round(w / total * points["weekly_delta"], 2) if total else 0.0
+            points["by_session"] = {k: round((w - by_session_unbilled.get(k, 0.0)) / billed_total * points["weekly_delta"], 2)
+                                    if billed_total and w > by_session_unbilled.get(k, 0.0) else 0.0
                                     for k, w in by_session.items()}
-        points["by_model"] = {k: round(v["weighted"] / total * points["weekly_delta"], 2) if total else 0.0
+        points["by_model"] = {k: round(v["weighted"] / billed_total * points["weekly_delta"], 2)
+                              if billed_total and family(k) != "unbilled" else 0.0
                               for k, v in by_model.items()}
+        if total > billed_total:
+            pct = round((total - billed_total) / total * 100, 1) if total else 0.0
+            print(f"usage-sweep: {pct}% of window weight is unbilled-family tokens, excluded from meter points", file=sys.stderr)
 
     fit_obj = None
     probe_obj = None
