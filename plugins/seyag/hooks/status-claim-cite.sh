@@ -65,22 +65,22 @@ else
   MARKERS="$DEFAULT_RE"
 fi
 
-# Each printf writer below is wrapped in a subshell that exits 0: its reader
-# (grep -q on a match, or grep bailing immediately on an invalid regex) can
-# close the pipe before the writer drains. Left unwrapped under pipefail, the
-# writer's EPIPE would override the reader's exit status and its stderr would
-# leak into the hook output.
-( printf '%s\n' "$TEXT" 2>/dev/null; true ) | grep -iqE "$MARKERS" 2>/dev/null
+# Every reader below either drains its input to EOF (no -q) or exits nonzero
+# before reading anything (an invalid regex from SYG_STATUS_CLAIM_MARKERS, a
+# jq parse error). Pipefail reports the rightmost nonzero status, so the
+# writer's fate never decides the branch; the subshell wrapper keeps a dying
+# writer's stderr out of the hook output.
+( printf '%s\n' "$TEXT" 2>/dev/null; true ) | grep -iE "$MARKERS" >/dev/null 2>/dev/null
 rc=$?
 if [ "$rc" -eq 2 ]; then
-  ( printf '%s\n' "$TEXT" 2>/dev/null; true ) | grep -iqE "$DEFAULT_RE" 2>/dev/null || exit 0
+  ( printf '%s\n' "$TEXT" 2>/dev/null; true ) | grep -iE "$DEFAULT_RE" >/dev/null 2>/dev/null || exit 0
 elif [ "$rc" -ne 0 ]; then
   exit 0
 fi
 
 # shellcheck disable=SC2016
 CITE_RE='(`[^`]+`|\b([A-Za-z0-9_./~-]+[./][A-Za-z0-9_./~-]*):[0-9]+)'
-if ( printf '%s\n' "$TEXT" 2>/dev/null; true ) | grep -qE "$CITE_RE" 2>/dev/null; then
+if ( printf '%s\n' "$TEXT" 2>/dev/null; true ) | grep -E "$CITE_RE" >/dev/null 2>/dev/null; then
   exit 0
 fi
 
