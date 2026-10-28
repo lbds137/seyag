@@ -33,7 +33,9 @@ Weights: input 1x, output 5x, cache read 0.1x, cache write 1.25x. They track
 the trend and the delegation ratio; the plan meter is the instrument for pace.
 
 Meter-point shares are of the swept set: with --slug the per-slug points sum
-to less than the window's total weekly delta.
+to less than the window's total weekly delta; shares and points cover billed
+(Anthropic-family) weight only — unbilled-family and unknown-model tokens are
+excluded.
 
 The tick method fits per-model meter rates (points per M weighted tokens) from
 precise meter ticks. claude-usage records prev_epoch to bracket each tick in
@@ -655,8 +657,8 @@ def main():
     by_slug = defaultdict(float)
     by_scope = defaultdict(float)
     by_session = defaultdict(float)
-    by_slug_unbilled = defaultdict(float)
-    by_session_unbilled = defaultdict(float)
+    by_slug_billed = defaultdict(float)
+    by_session_billed = defaultdict(float)
     for slug, scope, session, model, u, epoch in report_replies.values():
         w = weigh(u)
         d = by_model[model]
@@ -668,10 +670,10 @@ def main():
         by_scope[scope] += w
         if a.by_session:
             by_session[f"{folder_label(slug)}/{session}"] += w
-        if family(model) == "unbilled":
-            by_slug_unbilled[folder_label(slug)] += w
+        if family(model) != "unbilled":
+            by_slug_billed[folder_label(slug)] += w
             if a.by_session:
-                by_session_unbilled[f"{folder_label(slug)}/{session}"] += w
+                by_session_billed[f"{folder_label(slug)}/{session}"] += w
 
     total = sum(d["weighted"] for d in by_model.values())
     # Unbilled-family tokens (non-Anthropic lanes) do not move the Anthropic
@@ -690,19 +692,19 @@ def main():
     if a.points:
         points = meter_points(readings, int(since.timestamp()), int(until.timestamp()))
         points["readings_skipped"] = readings_skipped
-        points["by_slug"] = {k: round((w - by_slug_unbilled.get(k, 0.0)) / billed_total * points["weekly_delta"], 2)
-                             if billed_total and w > by_slug_unbilled.get(k, 0.0) else 0.0
+        points["by_slug"] = {k: round(by_slug_billed.get(k, 0.0) / billed_total * points["weekly_delta"], 2)
+                             if billed_total else 0.0
                              for k, w in by_slug.items()}
         if a.by_session:
-            points["by_session"] = {k: round((w - by_session_unbilled.get(k, 0.0)) / billed_total * points["weekly_delta"], 2)
-                                    if billed_total and w > by_session_unbilled.get(k, 0.0) else 0.0
+            points["by_session"] = {k: round(by_session_billed.get(k, 0.0) / billed_total * points["weekly_delta"], 2)
+                                    if billed_total else 0.0
                                     for k, w in by_session.items()}
         points["by_model"] = {k: round(v["weighted"] / billed_total * points["weekly_delta"], 2)
                               if billed_total and family(k) != "unbilled" else 0.0
                               for k, v in by_model.items()}
         if total > billed_total:
             pct = round((total - billed_total) / total * 100, 1) if total else 0.0
-            print(f"usage-sweep: {pct}% of window weight is unbilled-family tokens, excluded from meter points", file=sys.stderr)
+            print(f"usage-sweep: {pct}% of window weight is unbilled-family or unknown-model tokens, excluded from meter points", file=sys.stderr)
 
     fit_obj = None
     probe_obj = None
@@ -810,14 +812,14 @@ def main():
         print(f"\nmeter points: weekly {points['weekly_delta']:+.1f} pts"
               f" ({points['readings_used']} readings, {points['readings_skipped']} skipped)")
         for k, v in sorted(points["by_slug"].items(), key=lambda kv: -kv[1]):
-            share = 100 * by_slug[k] / total if total else 0
+            share = 100 * by_slug_billed.get(k, 0.0) / billed_total if billed_total else 0
             print(f"  {k:<48} {share:5.1f}% / {v:6.2f} pts")
         if a.by_session:
             for k, v in sorted(points["by_session"].items(), key=lambda kv: -kv[1]):
                 print(f"  {k:<48} {v:6.2f} pts")
         print("  by model: (equal-rate shares; --fit gives per-model rates)")
         for k, v in sorted(points["by_model"].items(), key=lambda kv: -kv[1]):
-            share = 100 * by_model[k]["weighted"] / total if total else 0
+            share = 100 * by_model[k]["weighted"] / billed_total if billed_total and family(k) != "unbilled" else 0
             print(f"    {k:<46} {share:5.1f}% / {v:6.2f} pts")
         el, er = points["edge_left"], points["edge_right"]
         if el["extrapolated"]:
