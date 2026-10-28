@@ -522,6 +522,55 @@ run 0 "gh read-only command with a session link in the text: gh pr view" "$WORK"
 run 2 "gh write command with a session link in the text: gh pr create" "$WORK" "${NOENV[@]}" -- \
   "gh pr create --title t --body \"${LINK}\""
 
+# =============================================================================
+# Group 12: wrapper-invoked gh commands (SYG_GH_WRAPPERS)
+# =============================================================================
+run 2 "gh wrapper colon-form write with --body-file blocks" "$WORK" SYG_GH_WRAPPERS=myops -- \
+  "myops gh:pr-edit --body-file $TMP/files/leaky.txt"
+assert_out "wrapper colon write names the body file" present "file $TMP/files/leaky.txt"
+assert_out "wrapper colon write masks the session id" absent "$ID"
+run 2 "gh wrapper plain two-word form with --body-file blocks" "$WORK" SYG_GH_WRAPPERS=myops -- \
+  "myops gh pr edit --body-file $TMP/files/leaky.txt"
+assert_out "wrapper plain write names the body file" present "file $TMP/files/leaky.txt"
+assert_out "wrapper plain write masks the session id" absent "$ID"
+run 0 "gh wrapper colon-form read stays silent" "$WORK" SYG_GH_WRAPPERS=myops -- \
+  "myops gh:pr-view 1 --json body # ${LINK}"
+run 0 "gh wrapper plain read stays silent" "$WORK" SYG_GH_WRAPPERS=myops -- \
+  "myops gh pr view 1 --json body # ${LINK}"
+run 0 "gh wrapper opt-in boundary: unset SYG_GH_WRAPPERS stays silent" "$WORK" -u SYG_GH_WRAPPERS -- \
+  "myops gh:pr-edit --body-file $TMP/files/leaky.txt"
+run 2 "gh wrapper plain two-token form without literal gh: myops ci pr edit --body-file blocks" "$WORK" SYG_GH_WRAPPERS="myops ci" -- \
+  "myops ci pr edit --body-file $TMP/files/leaky.txt"
+assert_out "wrapper plain two-token write names the body file" present "file $TMP/files/leaky.txt"
+assert_out "wrapper plain two-token write masks the session id" absent "$ID"
+run 0 "gh wrapper plain two-token read without literal gh stays silent" "$WORK" SYG_GH_WRAPPERS="myops ci" -- \
+  "myops ci pr view 1 --json body # ${LINK}"
+run 2 "gh wrapper gh:api -F x=@file blocks" "$WORK" SYG_GH_WRAPPERS="myops ci" -- \
+  "myops ci gh:api repos/example/one/issues -F x=@$TMP/files/leaky.txt"
+assert_out "wrapper gh:api -F names the file" present "file $TMP/files/leaky.txt"
+run 2 "gh wrapper gh:api --input file blocks" "$WORK" SYG_GH_WRAPPERS="myops ci" -- \
+  "myops ci gh:api repos/example/one/issues --input $TMP/files/leaky.txt"
+assert_out "wrapper gh:api --input names the file" present "file $TMP/files/leaky.txt"
+run 0 "gh wrapper bypass: own-prefix SYG_ALLOW_SESSION_URL=1 passes" "$WORK" SYG_GH_WRAPPERS="myops ci" -- \
+  "SYG_ALLOW_SESSION_URL=1 myops ci pr edit --body-file $TMP/files/leaky.txt"
+run 2 "gh wrapper closed-text: plain VAR= prefix on a read keeps the text" "$WORK" SYG_GH_WRAPPERS="myops ci" -- \
+  "FOO=1 myops ci pr list # ${LINK}"
+assert_out "wrapper VAR= prefix names the command text" present "the command text"
+run 2 "gh wrapper repo create --source <repo> --push captures the directory" "$TMP/plain" SYG_GH_WRAPPERS="myops ci" -- \
+  "myops ci repo create me/x --private --source $WORK --push"
+assert_out "wrapper repo create message names the short sha" present "commit $LEAKY_SHA subject line"
+run 2 "gh wrapper intervening word before gh:pr-view forces text scan" "$WORK" SYG_GH_WRAPPERS="myops ci" -- \
+  "myops ci --quiet gh:pr-view 1 --json body # ${LINK}"
+assert_out "wrapper intervening word names the command text" present "the command text"
+run 0 "gh wrapper anchored plain form: later subcommand-looking word is not a gh command" "$WORK" SYG_GH_WRAPPERS="myops ci" -- \
+  "myops ci task run unit --body-file $TMP/files/leaky.txt"
+run 2 "gh wrapper colon single-split: gh:repo-set-default scans text" "$WORK" SYG_GH_WRAPPERS="myops ci" -- \
+  "myops ci gh:repo-set-default o/r # ${LINK}"
+run 2 "gh wrapper basename match on argv[0]" "$WORK" SYG_GH_WRAPPERS="myops ci" -- \
+  "/usr/local/bin/myops ci pr edit --body-file $TMP/files/leaky.txt"
+run 2 "gh wrapper fallback to SYG_LOSSY_PIPE_GH_WRAPPERS when SYG_GH_WRAPPERS is unset" "$WORK" -u SYG_GH_WRAPPERS SYG_LOSSY_PIPE_GH_WRAPPERS="myops ci" -- \
+  "myops ci pr edit --body-file $TMP/files/leaky.txt"
+
 if [ "$FAILURES" -ne 0 ]; then
   printf '\n%d probe case(s) FAILED\n' "$FAILURES"
   exit 1
