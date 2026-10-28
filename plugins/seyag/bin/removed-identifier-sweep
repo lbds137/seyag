@@ -153,8 +153,8 @@ fi
 # a clean pass. Each fragment is compiled once by a throwaway awk; a bad one
 # is dropped with a stderr warning and the valid fragments still apply.
 VALID_FRAGMENTS=""
-read -r -a frag_list <<<"${SYG_SWEEP_EXCLUDE_PATHS:-}"
-for frag in "${frag_list[@]}"; do
+read -r -d '' -a frag_list <<<"${SYG_SWEEP_EXCLUDE_PATHS:-}" || true
+for frag in ${frag_list[@]+"${frag_list[@]}"}; do
     # Split via read -a (word splitting, NO pathname expansion: an unquoted
     # for-in expansion would glob a fragment like tracker/.* into the files
     # it matches, silently shrinking the exclusion). Compile each fragment
