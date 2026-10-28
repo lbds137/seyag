@@ -79,6 +79,9 @@ expect_warn "Multi-word marker all tests pass" \
 expect_warn "Case-insensitive marker FIXED" \
   '{"tool_name":"PushNotification","tool_input":{"message":"Issue FIXED in latest run."}}'
 
+expect_warn "Large payload early marker fires" \
+  "$(jq -nc --arg m "$(printf 'fixed x%.0s' {1..12000})" '{tool_name:"PushNotification",tool_input:{message:$m}}')"
+
 # --- Marker + citation stays silent (backtick, hex sha, path:line) ---
 expect_silent "SendMessage marker + backtick cite" \
   '{"tool_name":"SendMessage","tool_input":{"message":"All tests pass after running `pytest -q`.","summary":"status"}}'
