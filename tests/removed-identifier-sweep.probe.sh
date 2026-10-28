@@ -320,6 +320,30 @@ empty_and_stage src/inc2e.ts
 check 0 fire "mention under xclaude/hooks/ fires (leading dot in .claude/hooks/ is escaped)" \
     "LINE:xclaude/hooks/note.md:1: xclaudeFn"
 
+printf 'export function globFn(x: number): number {\n  return x;\n}\n' >"$REPO/src/inc2g.ts"
+mkdir -p "$REPO/tracker"
+printf '.keep\n' >"$REPO/tracker/.keep"
+printf 'globFn notes live in the tracker.\n' >"$REPO/tracker/notes.md"
+commit_all
+empty_and_stage src/inc2g.ts
+export SYG_SWEEP_EXCLUDE_PATHS='tracker/.*'
+check 0 silent "fragment tracker/.* survives globbing: tracker/ mention stays silent"
+unset SYG_SWEEP_EXCLUDE_PATHS
+
+printf 'export function chanParFn(x: number): number {\n  return x;\n}\n' >"$REPO/src/inc2h.ts"
+printf 'chanParFn notes sit in a root doc.\n' >"$REPO/CHANPAR.md"
+commit_all
+empty_and_stage src/inc2h.ts
+export SYG_SWEEP_EXCLUDE_PATHS='foo\\('
+check 0 fire "raw foo\\( fragment is dropped by the ENVIRON-channel validator and the sweep fires" \
+    "LINE:CHANPAR.md:1: chanParFn"
+chan_stderr=$(cd "$REPO" && bash "$HOOK" 2>&1 >/dev/null)
+if ! grep -q 'dropping invalid SYG_SWEEP_EXCLUDE_PATHS fragment' <<<"$chan_stderr"; then
+    echo "FAIL [stderr missing dropping-warning for raw foo\\( fragment]: validator and classifier see the same string"
+    fail=1
+fi
+unset SYG_SWEEP_EXCLUDE_PATHS
+
 # Fragments travel raw (ENVIRON, not awk -v): a backslash in a fragment stays
 # a backslash, so `^docs\.local/` matches only the literal path and a hit
 # under `docsXlocal/` (which an unescaped `.` would swallow) still fires.
