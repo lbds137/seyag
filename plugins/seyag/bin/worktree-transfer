@@ -19,6 +19,8 @@
 #   1 main-tree-identity    `git rev-parse --show-toplevel` in the invoking cwd
 #                           equals the first `worktree ` line of
 #                           `git worktree list --porcelain` (the main working tree)
+#                           and HEAD is on a branch (`symbolic-ref` resolves —
+#                           a detached main refuses)
 #   2 main-tree-clean       `git status --porcelain` in the main root prints nothing
 #   3 worktree-registered   resolved <worktree-path> appears in the porcelain
 #                           listing with a `branch refs/heads/<name>` line (detached
@@ -38,8 +40,11 @@
 #  10 byte-identical        `git diff --cached --binary` in the main root matches
 #                           `<patchfile>` via `cmp`; `--binary` must appear on BOTH
 #                           sides because a plain diff renders a binary change as a
-#                           notice `git apply` fails to consume (a mismatch leaves
-#                           the main tree staged for inspection)
+#                           notice `git apply` fails to consume — as must --no-color
+#                           --no-ext-diff and the a/ b/ prefixes, so user diff config
+#                           (diff.noprefix, diff.external, color.ui) cannot change
+#                           what either side produces (a mismatch leaves the main
+#                           tree staged for inspection)
 #  11 removal               `git worktree unlock <wt>`, `git worktree remove --force <wt>`,
 #                           then — re-checking SYG_WORKTREE_BRANCH_RE at the removal
 #                           site — `git branch -D <branch>`, then `git worktree prune`
@@ -162,6 +167,8 @@ done <<<"$PORCELAIN"
 if [ -z "$FIRST_WT" ] || [ "$FIRST_WT" != "$MAIN_ROOT" ]; then
   refuse main-tree-identity "must run from the main working tree ($FIRST_WT), not a linked worktree ($MAIN_ROOT)"
 fi
+[ -n "$(git -C "$MAIN_ROOT" symbolic-ref -q --short HEAD)" ] \
+  || refuse main-tree-identity "main working tree is detached (the staged unit would sit on no branch)"
 PASSED_CHECKS+=("main-tree-identity")
 
 # 2. main-tree-clean
@@ -244,7 +251,7 @@ add_err=$(git -C "$WT_PATH" add -A 2>&1) \
   || refuse empty-patch "git add -A failed in worktree: $add_err"
 # stderr goes to its own file, never into the patch: a warn-but-succeed diff
 # must not mix notice text into what `git apply` will consume.
-if ! git -C "$WT_PATH" diff --cached --binary >"$PATCH_FILE" 2>"$TMP_DIR/diff.err"; then
+if ! git -C "$WT_PATH" diff --cached --binary --no-color --no-ext-diff --src-prefix=a/ --dst-prefix=b/ >"$PATCH_FILE" 2>"$TMP_DIR/diff.err"; then
   refuse empty-patch "git diff --cached --binary failed in worktree: $(cat "$TMP_DIR/diff.err")"
 fi
 if [ ! -s "$PATCH_FILE" ]; then
@@ -297,7 +304,7 @@ APPLY_ERR=$(git -C "$MAIN_ROOT" apply --index "$PATCH_FILE" 2>&1) \
 PASSED_CHECKS+=("apply")
 
 # 10. byte-identical
-if ! git -C "$MAIN_ROOT" diff --cached --binary | cmp - "$PATCH_FILE" >/dev/null 2>&1; then
+if ! git -C "$MAIN_ROOT" diff --cached --binary --no-color --no-ext-diff --src-prefix=a/ --dst-prefix=b/ | cmp - "$PATCH_FILE" >/dev/null 2>&1; then
   refuse byte-identical "main tree staged diff differs from worktree patch; main tree left staged for inspection"
 fi
 PASSED_CHECKS+=("byte-identical")
@@ -315,6 +322,12 @@ if ! br_err=$(git -C "$MAIN_ROOT" branch -D -- "$WT_BRANCH" 2>&1); then
 fi
 git -C "$MAIN_ROOT" worktree prune >/dev/null 2>&1 || true
 PASSED_CHECKS+=("removal")
+
+# Non-gating notice for the ad-hoc path: printed only on success, after the
+# patch is verified, so it can never precede a STOP line on stderr.
+if ! $BASE_GIVEN; then
+  printf 'warning: no --base given; the patch was applied onto the main tree HEAD (%s) unpinned\n' "$MAIN_HEAD" >&2
+fi
 
 git -C "$MAIN_ROOT" diff --cached --stat
 checks_joined=""
