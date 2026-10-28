@@ -550,8 +550,21 @@ j_ub=$(env -i HOME="$T" PATH=/usr/bin:/bin CLAUDE_PROJECTS_DIR="$T/unbilled-pts-
             XDG_STATE_HOME="$T/unbilled-pts-state" "$US" \
             --since 2026-09-24T01:15Z --until 2026-09-24T05:30Z --points --json 2>"$T/ub.err")
 [ "$(jq -r '.points.by_slug.slugBilled == 20 and .points.by_slug.slugUnbilled == 0 and .points.by_model["claude-opus-4-6"] == 20 and .points.by_model["glm-5"] == 0' <<<"$j_ub")" = true ] \
-  && grep -q "unbilled-family tokens, excluded" "$T/ub.err" \
+  && grep -q "unbilled-family or unknown-model tokens, excluded" "$T/ub.err" \
   && ok "--points excludes unbilled-family weight from meter split (billed slug 20, unbilled slug 0, warns on stderr)" \
   || bad "--points unbilled exclusion: $(jq -c .points <<<"$j_ub") err=$(cat "$T/ub.err")"
+j_ub_sess=$(env -i HOME="$T" PATH=/usr/bin:/bin CLAUDE_PROJECTS_DIR="$T/unbilled-pts-projects" \
+                 XDG_STATE_HOME="$T/unbilled-pts-state" "$US" \
+                 --since 2026-09-24T01:15Z --until 2026-09-24T05:30Z --points --by-session --json 2>/dev/null)
+[ "$(jq -r '.points.by_session["slugBilled/s1"] == 20 and .points.by_session["slugUnbilled/s1"] == 0 and ([.points.by_session | to_entries[] | select(.value > 0) | .key] == ["slugBilled/s1"])' <<<"$j_ub_sess")" = true ] \
+  && ok "--points --by-session: billed session bucket carries the share (20), no unbilled/unknown bucket has points" \
+  || bad "--points --by-session unbilled exclusion: $(jq -c .points.by_session <<<"$j_ub_sess")"
+ub_txt_line=$(env -i HOME="$T" PATH=/usr/bin:/bin CLAUDE_PROJECTS_DIR="$T/unbilled-pts-projects" \
+                   XDG_STATE_HOME="$T/unbilled-pts-state" "$US" \
+                   --since 2026-09-24T01:15Z --until 2026-09-24T05:30Z --points 2>/dev/null \
+              | grep -E '^  slugBilled .* pts$')
+grep -q '100\.0% /  20\.00 pts' <<<"$ub_txt_line" \
+  && ok "--points text mode: billed slug share is 100.0% of billed_total" \
+  || bad "--points text-mode share: $ub_txt_line"
 
 exit $fail
