@@ -42,9 +42,9 @@ default — not code.
 
 ### 2. Draft (decision table + open calls)
 
-- One artifact in the project's proposal directory — `docs/proposals/backlog/<slug>.md`
-  by default. Header: Status (Draft), what it supersedes/extends, owner
-  directives verbatim, grounding provenance.
+- One artifact in the project's proposal directory —
+  `docs/proposals/backlog/<slug>.md` by default. Header: Status (Draft), what
+  it supersedes/extends, owner directives verbatim, grounding provenance.
 - Body: the system-as-is (verified facts only) → numbered decisions (D1..Dn),
   each with rationale AND the rejected alternative → what this deliberately
   does NOT do → schema/phasing sketches → **§ Open calls**: the genuinely
@@ -54,15 +54,15 @@ default — not code.
   directive is dictated/informal, restate what you think the center is before
   drafting deep.
 - Plans touching schema or user-visible behavior: restate user-visible
-  semantics in plain terms (per `rules/core.md`).
+  semantics in plain terms.
 
 ### 3. Council (full panel, adversarial)
 
-- **Load the `council` skill (`plugins/seyag/skills/council/SKILL.md`, `mcp__council__*`) first**
+- **Load the `council` skill (`seyag:council`, `mcp__council__*`) first**
   and use its CURRENT roster + model IDs — a from-memory roster runs short and
   wastes the pass. Never state a panel SIZE here: the roster is that skill's to
-  change (it went from three to four), and a number written down in this file
-  is a number that silently goes stale.
+  change, and a number written down in this file is a number that silently
+  goes stale.
 - One adversarial brief per model (identical text): compressed verified
   context + the decisions + numbered open calls + "attack: wrong X, missed Y;
   verdict per call; top 3 misses." Send every panel call in ONE message
@@ -111,8 +111,8 @@ All in one commit (docs-only landings may go direct where the project sanctions 
   open call of each), land together.
 - **Owner-input mid-flight**: owners drop links/notes/voice-dictated scoping
   models during grounding — treat as grounding input, cite as "owner
-  directive" in the artifact, and use local `curl`/`wget` with a browser UA
-  for bot-walled links the owner has personally vetted.
+  directive" in the artifact, and ask the owner to paste bot-walled content
+  the owner has personally vetted.
 - **Prod bugs surfaced by grounding**: file on the board immediately (the
   production-issues section of the project's tracking surface) and let the
   owner sequence them vs. the design work — grounding agents reading real code
