@@ -41,6 +41,11 @@
 #   as `path:line:content` on the first two colons, so a path containing a
 #   colon would mis-attribute — declined (a -z re-parse is complexity out
 #   of proportion): space-free and colon-free path naming is assumed.
+# - A leading `*` line counts as prose in EVERY file type (JSDoc/DocBlock
+#   continuations), and a leading `#` counts as prose outside JS/TS — so a
+#   C-family `*ptr = …` line or `#include`/`#define FOO` would surface as a
+#   prose hit. Scoping both by extension is a stated future refinement, not
+#   done here; the probe pins the current behavior.
 # - No diff-file exclusion: a name re-declared on a + side is already
 #   cancelled by the -/+ subtraction before any grep, and `git grep` reads
 #   the worktree, where the removed lines no longer exist — so excluding
@@ -71,6 +76,13 @@
 # Fixture check: run tests/removed-identifier-sweep.probe.sh after ANY edit.
 
 set -uo pipefail
+
+# Per-session off switch: SYG_SWEEP=0 silences the sweep without editing the
+# repo's pre-commit wiring (the wired hook itself is the primary toggle; this
+# is the session- or machine-level one).
+if [ "${SYG_SWEEP:-1}" = "0" ]; then
+    exit 0
+fi
 
 # Follow the repo the script actually runs in: `git rev-parse --show-toplevel`
 # resolves to the root of the worktree the commit is made in — including a
@@ -134,7 +146,26 @@ if [ "$COUNT" -gt 40 ]; then
     exit 0
 fi
 
-export SYG_SWEEP_EXCLUDE_PATHS="${SYG_SWEEP_EXCLUDE_PATHS:-}"
+# Validate SYG_SWEEP_EXCLUDE_PATHS fragments BEFORE the sweep: a malformed
+# awk regex (an unbalanced `(` or `[`) would otherwise exit fatally inside
+# every grep-awk stage, and the `|| found=""` fallback would silence the
+# whole sweep with no message — a configuration error must not masquerade as
+# a clean pass. Each fragment is compiled once by a throwaway awk; a bad one
+# is dropped with a stderr warning and the valid fragments still apply.
+VALID_FRAGMENTS=""
+for frag in ${SYG_SWEEP_EXCLUDE_PATHS:-}; do
+    if awk -v re="$frag" 'BEGIN { if ("" ~ re) ; }' 2>/dev/null; then
+        VALID_FRAGMENTS="$VALID_FRAGMENTS $frag"
+    else
+        printf 'removed-identifier-sweep: dropping invalid SYG_SWEEP_EXCLUDE_PATHS fragment: %s\n' "$frag" >&2
+    fi
+done
+# Fragments travel to the classifier through the ENVIRONMENT, not an awk -v
+# assignment: gawk processes escape sequences in -v values (a `\\` arrives as
+# `\`, `\n` as a newline, and unknown escapes warn once per invocation), while
+# ENVIRON is raw — a fragment like `^docs\.local/` must reach the regex with
+# its backslash intact.
+export SYG_SWEEP_VALID_FRAGMENTS="$VALID_FRAGMENTS"
 
 HITS=""
 while IFS= read -r ident; do
@@ -144,8 +175,8 @@ while IFS= read -r ident; do
 BEGIN {
     nhits = 0
     seen_code = 0
-    exclude_re = "(.claude/hooks/|\\.husky/|(^|/)CHANGELOG|^docs/incidents/.*\\.md$|^backlog/)"
-    n_extra = split(ENVIRON["SYG_SWEEP_EXCLUDE_PATHS"], extra, /[[:space:]]+/)
+    exclude_re = "(\\.claude/hooks/|\\.husky/|(^|/)CHANGELOG|^docs/incidents/.*\\.md$|^backlog/)"
+    n_extra = split(ENVIRON["SYG_SWEEP_VALID_FRAGMENTS"], extra, /[[:space:]]+/)
     for (i = 1; i <= n_extra; i++) {
         if (extra[i] != "") exclude_re = exclude_re "|" extra[i]
     }
