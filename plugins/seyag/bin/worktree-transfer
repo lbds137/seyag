@@ -1,0 +1,332 @@
+#!/bin/bash
+# worktree-transfer - transfer a delegation worker's uncommitted worktree changes into the main tree, verify byte-identity, and remove the worktree and branch
+#
+# Usage:
+#   worktree-transfer [--base SHA] <worktree-path>
+#
+# Run from the MAIN working tree, never from inside the transferred worktree.
+# Stages everything the worker left uncommitted in <worktree-path> into one
+# binary-capable patch file, verifies the no-commit contract and worktree state,
+# applies the patch to the main tree's index and working tree, verifies
+# byte-identity against the main tree's staged diff, and removes the worktree
+# and its agent branch. Local git only; no network calls.
+#
+# Checks run in a FIXED order; the first failure refuses with one line
+# `STOP: <check-name>: <reason>` on stderr and exits 1, and nothing after the
+# failed check runs. Every check before `apply` is read-only or touches only
+# the worktree; `apply` is the first write to the main tree; `removal` runs
+# only after every prior check has passed:
+#   1 main-tree-identity    `git rev-parse --show-toplevel` in the invoking cwd
+#                           equals the first `worktree ` line of
+#                           `git worktree list --porcelain` (the main working tree)
+#   2 main-tree-clean       `git status --porcelain` in the main root prints nothing
+#   3 worktree-registered   resolved <worktree-path> appears in the porcelain
+#                           listing with a `branch refs/heads/<name>` line (detached
+#                           trees refuse) matching SYG_WORKTREE_BRANCH_RE
+#   4 base-unchanged        when --base SHA is given, `<sha>^{commit}` resolves and
+#                           equals the main tree's HEAD (skipped when omitted)
+#   5 empty-patch           `git -C <wt> add -A` then `git -C <wt> diff --cached --binary`
+#                           written to a temp file is non-empty
+#   6 nothing-outside-patch every non-empty `git -C <wt> status --porcelain` line
+#                           after staging matches `^[MADRCT] `
+#   7 no-unpushed-remotes   `git -C <wt> log --oneline HEAD --not --remotes` is empty
+#                           (skipped with `no-unpushed-remotes (skipped: no
+#                           remote-tracking refs)` when the repo has none, where
+#                           the log would list every commit including the base's)
+#   8 no-unpushed-base      `git -C <wt> log --oneline <main-head>..HEAD` is empty
+#   9 apply                 `git apply --index <patchfile>` in the main root succeeds
+#  10 byte-identical        `git diff --cached --binary` in the main root matches
+#                           `<patchfile>` via `cmp`; `--binary` must appear on BOTH
+#                           sides because a plain diff renders a binary change as a
+#                           notice `git apply` fails to consume (a mismatch leaves
+#                           the main tree staged for inspection)
+#  11 removal               `git worktree unlock <wt>`, `git worktree remove --force <wt>`,
+#                           then — re-checking SYG_WORKTREE_BRANCH_RE at the removal
+#                           site — `git branch -D <branch>`, then `git worktree prune`
+#
+# Branch regex: SYG_WORKTREE_BRANCH_RE (extended regex applied with `[[ $b =~ $re ]]`),
+# shared with safe-worktree-clean check 6. Unset or set-but-empty both fall back to
+# `^worktree-agent-`. An invalid regex refuses (`not a valid extended regex`) without
+# deleting anything.
+#
+# Stated non-goal: the two removal-failure wordings (`git worktree remove --force` vs
+# `git branch -D`) are best-effort operator messages; a refusal at check 11 never
+# loses the patch because it is already applied and verified in the main tree.
+#
+# Exit codes: 0 success; 1 refusal (`STOP: <check-name>: <reason>`); 2 usage error.
+#
+# Fixture check: run tests/worktree-transfer.probe.sh after ANY edit.
+
+set -uo pipefail
+
+usage() { sed -n '2,/^$/s/^# \{0,1\}//p' "$0"; }
+
+refuse() {
+  local check=$1 reason=$2
+  reason=${reason//$'\n'/ }
+  printf 'STOP: %s: %s\n' "$check" "$reason" >&2
+  exit 1
+}
+
+BASE_ARG=""
+BASE_GIVEN=false
+POSITIONALS=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h | --help)
+      usage
+      exit 0
+      ;;
+    --base)
+      [ $# -ge 2 ] || { usage >&2; exit 2; }
+      [ -n "$2" ] || { usage >&2; exit 2; }
+      BASE_ARG=$2
+      BASE_GIVEN=true
+      shift
+      ;;
+    --base=*)
+      BASE_ARG=${1#--base=}
+      [ -n "$BASE_ARG" ] || { usage >&2; exit 2; }
+      BASE_GIVEN=true
+      ;;
+    --)
+      shift
+      while [ $# -gt 0 ]; do
+        POSITIONALS+=("$1")
+        shift
+      done
+      break
+      ;;
+    -*)
+      usage >&2
+      exit 2
+      ;;
+    *)
+      POSITIONALS+=("$1")
+      ;;
+  esac
+  shift
+done
+
+if [ ${#POSITIONALS[@]} -ne 1 ] || [ -z "${POSITIONALS[0]}" ]; then
+  usage >&2
+  exit 2
+fi
+
+WT_PATH=$(realpath -m -- "${POSITIONALS[0]}" 2>/dev/null) || {
+  usage >&2
+  exit 2
+}
+
+BRANCH_RE=${SYG_WORKTREE_BRANCH_RE:-}
+[ -n "$BRANCH_RE" ] || BRANCH_RE='^worktree-agent-'
+
+# Match branch $1 against BRANCH_RE. Returns 0 on match, 1 on mismatch, 2 on invalid regex.
+match_branch_re() {
+  local b=$1 re_rc
+  [[ "" =~ $BRANCH_RE ]] 2>/dev/null
+  # shellcheck disable=SC2319 # exit status 2 from [[ =~ ]] indicates an invalid extended regex
+  re_rc=$?
+  if [ "$re_rc" -gt 1 ]; then
+    return 2
+  fi
+  [[ $b =~ $BRANCH_RE ]] 2>/dev/null
+}
+
+TMP_DIR=""
+trap '[ -z "$TMP_DIR" ] || rm -rf -- "$TMP_DIR"' EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+PASSED_CHECKS=()
+
+# 1. main-tree-identity
+MAIN_ROOT=$(git rev-parse --show-toplevel 2>/dev/null) \
+  || refuse main-tree-identity "not inside a git working tree"
+[ -n "$MAIN_ROOT" ] || refuse main-tree-identity "not inside a git working tree"
+MAIN_ROOT=$(realpath -m -- "$MAIN_ROOT")
+PORCELAIN=$(git -C "$MAIN_ROOT" worktree list --porcelain 2>/dev/null) \
+  || refuse main-tree-identity "git worktree list --porcelain failed in $MAIN_ROOT"
+
+FIRST_WT=""
+while IFS= read -r line; do
+  case "$line" in
+    "worktree "*)
+      FIRST_WT=$(realpath -m -- "${line#worktree }")
+      break
+      ;;
+  esac
+done <<<"$PORCELAIN"
+
+if [ -z "$FIRST_WT" ] || [ "$FIRST_WT" != "$MAIN_ROOT" ]; then
+  refuse main-tree-identity "must run from the main working tree ($FIRST_WT), not a linked worktree ($MAIN_ROOT)"
+fi
+PASSED_CHECKS+=("main-tree-identity")
+
+# 2. main-tree-clean
+MAIN_STATUS=$(git -C "$MAIN_ROOT" status --porcelain 2>&1) \
+  || refuse main-tree-clean "git status --porcelain failed: $MAIN_STATUS"
+if [ -n "$MAIN_STATUS" ]; then
+  refuse main-tree-clean "main working tree is not clean"
+fi
+PASSED_CHECKS+=("main-tree-clean")
+
+# 3. worktree-registered
+WT_FOUND=false
+WT_BRANCH=""
+WT_DETACHED=false
+cur_wt=""
+while IFS= read -r line; do
+  case "$line" in
+    "worktree "*)
+      cur_wt=$(realpath -m -- "${line#worktree }")
+      if [ "$cur_wt" = "$WT_PATH" ]; then
+        WT_FOUND=true
+      fi
+      ;;
+    "branch refs/heads/"*)
+      if [ "$cur_wt" = "$WT_PATH" ]; then
+        WT_BRANCH=${line#branch refs/heads/}
+      fi
+      ;;
+    detached)
+      if [ "$cur_wt" = "$WT_PATH" ]; then
+        WT_DETACHED=true
+      fi
+      ;;
+    "")
+      cur_wt=""
+      ;;
+  esac
+done <<<"$PORCELAIN"
+
+if ! $WT_FOUND; then
+  refuse worktree-registered "path is not a registered linked worktree: $WT_PATH"
+elif [ "$WT_PATH" = "$MAIN_ROOT" ]; then
+  refuse worktree-registered "$WT_PATH is the main working tree itself; pass the worker worktree's path"
+elif [ ! -d "$WT_PATH" ]; then
+  refuse worktree-registered "registered worktree's directory is missing: $WT_PATH"
+fi
+if $WT_DETACHED || [ -z "$WT_BRANCH" ]; then
+  refuse worktree-registered "worktree at $WT_PATH is detached (there is no branch to delete)"
+fi
+
+match_branch_re "$WT_BRANCH"
+case $? in
+  0) ;;
+  1) refuse worktree-registered "branch '$WT_BRANCH' does not match $BRANCH_RE (removal/deletion is sanctioned only for agent worktree branches)" ;;
+  *) refuse worktree-registered "SYG_WORKTREE_BRANCH_RE is not a valid extended regex (unusable): $BRANCH_RE" ;;
+esac
+PASSED_CHECKS+=("worktree-registered")
+
+# 4. base-unchanged
+MAIN_HEAD=$(git -C "$MAIN_ROOT" rev-parse --verify "HEAD^{commit}" 2>/dev/null) \
+  || refuse base-unchanged "cannot resolve main working tree HEAD"
+if $BASE_GIVEN; then
+  case "$BASE_ARG" in
+    -*) refuse base-unchanged "cannot resolve --base '$BASE_ARG' to a commit" ;;
+  esac
+  RESOLVED_BASE=$(git -C "$MAIN_ROOT" rev-parse --verify "$BASE_ARG^{commit}" 2>/dev/null) \
+    || refuse base-unchanged "cannot resolve --base '$BASE_ARG' to a commit"
+  if [ "$RESOLVED_BASE" != "$MAIN_HEAD" ]; then
+    refuse base-unchanged "main HEAD ($MAIN_HEAD) moved from --base ($RESOLVED_BASE)"
+  fi
+  PASSED_CHECKS+=("base-unchanged")
+else
+  PASSED_CHECKS+=("base-unchanged (skipped: no --base)")
+fi
+
+# 5. empty-patch
+TMP_DIR=$(mktemp -d) || refuse empty-patch "mktemp -d failed"
+PATCH_FILE="$TMP_DIR/unit.patch"
+add_err=$(git -C "$WT_PATH" add -A 2>&1) \
+  || refuse empty-patch "git add -A failed in worktree: $add_err"
+# stderr goes to its own file, never into the patch: a warn-but-succeed diff
+# must not mix notice text into what `git apply` will consume.
+if ! git -C "$WT_PATH" diff --cached --binary >"$PATCH_FILE" 2>"$TMP_DIR/diff.err"; then
+  refuse empty-patch "git diff --cached --binary failed in worktree: $(cat "$TMP_DIR/diff.err")"
+fi
+if [ ! -s "$PATCH_FILE" ]; then
+  refuse empty-patch "patch is empty; nothing to transfer from $WT_PATH"
+fi
+PASSED_CHECKS+=("empty-patch")
+
+# 6. nothing-outside-patch
+WT_STATUS=$(git -C "$WT_PATH" status --porcelain 2>&1) \
+  || refuse nothing-outside-patch "git status --porcelain failed in worktree: $WT_STATUS"
+PATCH_STATUS_RE='^[MADRCT] '
+while IFS= read -r sline; do
+  [ -n "$sline" ] || continue
+  if [[ ! $sline =~ $PATCH_STATUS_RE ]]; then
+    refuse nothing-outside-patch "worktree has unstageable state outside patch: '$sline'"
+  fi
+done <<<"$WT_STATUS"
+PASSED_CHECKS+=("nothing-outside-patch")
+
+# 7. no-unpushed-remotes
+# Skipped when the repo has no remote-tracking refs: with an empty exclusion
+# list `HEAD --not --remotes` would list every commit including the base's and
+# refuse every transfer in a repo git has never fetched from. Check 8 still
+# refuses worker commits ahead of main. A for-each-ref failure refuses rather
+# than silently taking the skip branch.
+REMOTE_REFS=$(git -C "$WT_PATH" for-each-ref --count=1 refs/remotes/ 2>&1) \
+  || refuse no-unpushed-remotes "git for-each-ref refs/remotes/ failed: $REMOTE_REFS"
+if [ -n "$REMOTE_REFS" ]; then
+  UNPUSHED_REMOTES=$(git -C "$WT_PATH" log --oneline HEAD --not --remotes 2>&1) \
+    || refuse no-unpushed-remotes "git log --not --remotes failed in worktree: $UNPUSHED_REMOTES"
+  if [ -n "$UNPUSHED_REMOTES" ]; then
+    refuse no-unpushed-remotes "worktree has commit(s) not reached by any remote: $UNPUSHED_REMOTES"
+  fi
+  PASSED_CHECKS+=("no-unpushed-remotes")
+else
+  PASSED_CHECKS+=("no-unpushed-remotes (skipped: no remote-tracking refs)")
+fi
+
+# 8. no-unpushed-base
+UNPUSHED_BASE=$(git -C "$WT_PATH" log --oneline "$MAIN_HEAD..HEAD" 2>&1) \
+  || refuse no-unpushed-base "git log $MAIN_HEAD..HEAD failed in worktree: $UNPUSHED_BASE"
+if [ -n "$UNPUSHED_BASE" ]; then
+  refuse no-unpushed-base "worktree has commit(s) ahead of main HEAD ($MAIN_HEAD): $UNPUSHED_BASE"
+fi
+PASSED_CHECKS+=("no-unpushed-base")
+
+# 9. apply
+APPLY_ERR=$(git -C "$MAIN_ROOT" apply --index "$PATCH_FILE" 2>&1) \
+  || refuse apply "git apply --index failed: $APPLY_ERR"
+PASSED_CHECKS+=("apply")
+
+# 10. byte-identical
+if ! git -C "$MAIN_ROOT" diff --cached --binary | cmp - "$PATCH_FILE" >/dev/null 2>&1; then
+  refuse byte-identical "main tree staged diff differs from worktree patch; main tree left staged for inspection"
+fi
+PASSED_CHECKS+=("byte-identical")
+
+# 11. removal
+git -C "$MAIN_ROOT" worktree unlock "$WT_PATH" >/dev/null 2>&1 || true
+if ! rm_err=$(git -C "$MAIN_ROOT" worktree remove --force "$WT_PATH" 2>&1); then
+  refuse removal "patch is applied and verified in main tree, but worktree removal failed ($rm_err); remove manually: git worktree remove --force '$WT_PATH' && git branch -D '$WT_BRANCH'"
+fi
+if ! match_branch_re "$WT_BRANCH"; then
+  refuse removal "patch is applied and verified and worktree is removed, but branch '$WT_BRANCH' failed regex re-check ($BRANCH_RE); refusing to delete branch"
+fi
+if ! br_err=$(git -C "$MAIN_ROOT" branch -D -- "$WT_BRANCH" 2>&1); then
+  refuse removal "patch is applied and verified and worktree is removed, but branch deletion failed ($br_err); run manually: git branch -D '$WT_BRANCH'"
+fi
+git -C "$MAIN_ROOT" worktree prune >/dev/null 2>&1 || true
+PASSED_CHECKS+=("removal")
+
+git -C "$MAIN_ROOT" diff --cached --stat
+checks_joined=""
+for c in "${PASSED_CHECKS[@]}"; do
+  if [ -n "$checks_joined" ]; then
+    checks_joined="$checks_joined, $c"
+  else
+    checks_joined="$c"
+  fi
+done
+printf 'checks passed: %s\n' "$checks_joined"
+printf 'worktree removed\n'
+printf 'branch %s deleted\n' "$WT_BRANCH"
+printf 'next step: run the gates, then commit\n'
+exit 0
