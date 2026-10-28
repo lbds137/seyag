@@ -1,6 +1,6 @@
 ---
 name: pr-monitoring
-description: 'Automatic PR CI and review monitoring: arm pr-ci-wait on every PR create and push, verify the SHA-pinned workflow run list and three review endpoints when it fires, report CI and review state together, hand feedback to seyag:review-response, and merge only through a green, un-checked-out head branch. Use when opening a PR, pushing to an open PR, handling a pr-ci-wait sentinel, or merging a PR.'
+description: 'Automatic PR CI and review monitoring: arm pr-ci-wait on every PR create and push, verify the SHA-pinned workflow run list and the review endpoints when it fires, report CI and review state together, hand feedback to seyag:review-response, and merge only through a green, un-checked-out head branch. Use when opening a PR, pushing to an open PR, handling a pr-ci-wait sentinel, or merging a PR.'
 ---
 
 # PR Monitoring
@@ -31,11 +31,12 @@ findings).
   hand-extend a SHA:
 
 ```bash
-pr-ci-wait <N> --sha $(git rev-parse 'refs/heads/<branch>')
+cd '<toplevel>' && pr-ci-wait <N> --sha $(git rev-parse 'refs/heads/<branch>')
 ```
 
   Outside the push-triggered template, omit `--sha` so `pr-ci-wait` resolves
   and watches the PR's current head rather than pasting a SHA by hand.
+  The cd anchor matches the hook template: pr-ci-wait has no -C, so its gh and git calls resolve against the Monitor's working directory.
 - **Pass `description: "CI + reviews for PR #<N>"`, `timeout_ms: 1800000`
   (30 min), and `persistent: false`.** The `false` is a deliberate departure
   from the `Monitor` tool's own guidance — do not "correct" it back:
@@ -55,14 +56,28 @@ sentinel and final check list.
 When the watcher fires, **all four** steps below must run in order — do not
 stop after step 1 even if every check is green:
 
-1. **Confirm CI state and the SHA-pinned workflow run list.** Note the final
+1. **Handle the gate sentinel.** `pr-ci-wait` waits for the anchor CI
+   workflow (or the quiet-window run set) to finish with nothing else on that
+   SHA in flight and for the review workflow run to exist and complete, hands
+   off to `gh pr checks --watch`, prints **one** sentinel, and prints the
+   final `gh pr checks <N>` list. Read **which** sentinel printed:
+
+| Sentinel | Meaning | Action |
+|---|---|---|
+| `CI_COMPLETE` | CI settled with nothing in flight and the review run completed. | Proceed to the steps below. |
+| `CI_GATE_TIMEOUT` | `pr-ci-wait` hit its give-up ceiling (25 min default). | Re-arm; do **not** assume CI passed. |
+| `CI_GATE_STARTUP_FAILURE` | A workflow died before dispatch (`startup_failure`, invisible in `gh pr checks`). | Run `gh run rerun <run-id>`, then re-arm. |
+| `CI_GATE_REVIEW_MISSING` | CI settled, but no review workflow run appeared within the 5-min grace window. | Re-query the run list; if still absent, the workflow never dispatched (`gh run rerun` has nothing to rerun and re-pushing is not a reliable lever) — check its `on:` filter against the PR event. |
+| _(none printed)_ | The Monitor's own 30-min `timeout_ms` killed the process first. | Re-arm. |
+
+2. **Confirm CI state and the SHA-pinned workflow run list.** Note the final
    CI state from `gh pr checks <N>`, **and** run the SHA-pinned run-list
    query. **A green `gh pr checks` list is not proof CI ran**: a workflow run
    that dies before dispatch (`startup_failure`) creates zero check-runs, so
    it is absent from `gh pr checks` while surviving workflows print green:
 
 ```bash
-gh api "repos/{owner}/{repo}/actions/runs?head_sha=$(git rev-parse HEAD)" \
+gh api "repos/{owner}/{repo}/actions/runs?head_sha=$(gh pr view <N> --json headRefOid -q .headRefOid)" \
   --jq '.workflow_runs[] | "\(.status) \(.conclusion // "-") \(.name)"'
 ```
 
@@ -72,11 +87,14 @@ gh api "repos/{owner}/{repo}/actions/runs?head_sha=$(git rev-parse HEAD)" \
    anything. Anything not `completed success` (or `skipped`) is a finding;
    **pin on the SHA, never a timestamp window**. Re-derive numbers and
    enumerations in the PR body and commit body against the head REF
-   (`git grep <pat> HEAD`, `git show HEAD:<path>`), never the working tree.
+   (`git grep <pat> $(git rev-parse 'refs/heads/<branch>')`, `git show
+   HEAD:<path>`), never the working tree — and when the shell may sit
+   outside the branch's checkout, resolve the ref explicitly (`git rev-parse
+   'refs/heads/<branch>'`) instead of bare `HEAD`.
 
-2. **Fetch new reviewer feedback from all three endpoint groups**
-   (`issues/<N>/comments` alone does not cover inline review comments or
-   review summaries):
+3. **Fetch new reviewer feedback from these endpoint groups** (the same
+   set the `pr-monitor-reminder` banner prints; `issues/<N>/comments` alone
+   does not cover inline review comments or review summaries):
    - Conversation + inline line-level review comments (where human reviewers
      leave blocking feedback):
      `gh api repos/{owner}/{repo}/issues/<N>/comments` and
@@ -89,12 +107,12 @@ gh api "repos/{owner}/{repo}/actions/runs?head_sha=$(git rev-parse HEAD)" \
    Track the last-reported comment's timestamp so a later push does not
    re-report it (after a session restart, a re-fetch may re-surface
    already-reported comments once — expected, not a dedup bug), and
-   **include human reviewers** alongside bots. **claude-review health**: a
-   green check means the workflow _completed_, not that a review body was
-   posted — if no new `claude[bot]` comment followed a green run, run
+   **include human reviewers** alongside bots. **Review-bot health**: a green check means the project's review
+   workflow (the one `SYG_CI_REVIEW` names) _completed_, not that a review
+   body was posted — if no new review-bot comment followed a green run, run
    `gh run rerun <run-id>` before proceeding.
 
-3. **Report in one consolidated message, then invoke `seyag:review-response`.**
+4. **Report in one consolidated message, then invoke `seyag:review-response`.**
    In one concise message, report CI pass/fail **and** any new review
    findings (blocking vs. non-blocking); if there are no new reviews, say so.
    **Read every `###` section of each review body — do not rely on the
@@ -104,24 +122,10 @@ gh api "repos/{owner}/{repo}/actions/runs?head_sha=$(git rev-parse HEAD)" \
    **invoke `/review-response` (`seyag:review-response`) first, before
    touching anything**.
 
-4. **Handle the gate sentinel.** `pr-ci-wait` waits for the anchor CI
-   workflow (or the quiet-window run set) to finish with nothing else on that
-   SHA in flight and for the review workflow run to exist and complete, hands
-   off to `gh pr checks --watch`, prints **one** sentinel, and prints the
-   final `gh pr checks <N>` list. Read **which** sentinel printed:
-
-| Sentinel | Meaning | Action |
-|---|---|---|
-| `CI_COMPLETE` | CI settled with nothing in flight and the review run completed. | Proceed to steps 1–3 above. |
-| `CI_GATE_TIMEOUT` | `pr-ci-wait` hit its give-up ceiling (25 min default). | Re-arm; do **not** assume CI passed. |
-| `CI_GATE_STARTUP_FAILURE` | A workflow died before dispatch (`startup_failure`, invisible in `gh pr checks`). | Run `gh run rerun <run-id>`, then re-arm. |
-| `CI_GATE_REVIEW_MISSING` | CI settled, but no review workflow run appeared within the 5-min grace window. | Re-query the run list; if still absent, the workflow never dispatched (`gh run rerun` has nothing to rerun and re-pushing is not a reliable lever) — check its `on:` filter against the PR event. |
-| _(none printed)_ | The Monitor's own 30-min `timeout_ms` killed the process first. | Re-arm. |
-
 ## Infrastructure-shaped failures
 
 **A red check with zero steps never ran — that is infrastructure, not your
-diff**, and is rerun-eligible per the project's failure-shape policy.
+diff**, and is rerun-eligible: rerun, re-arm, and only then read the result.
 `gh pr checks` renders it like a real failure, so inspect the job step counts
 whenever a job fails without an obvious cause:
 
