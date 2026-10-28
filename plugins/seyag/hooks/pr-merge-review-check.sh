@@ -719,6 +719,17 @@ def scan_invocations(text):
         sub_pos = n
         return False, 0
 
+    def record_split_sub_prefix(idx, assignment_word, split_sub_interior):
+        nonlocal pending_prefix_repo, pending_prefix_target_idx
+        m = GH_REPO_ASSIGN.match(assignment_word)
+        if m and "\n" not in m.group(1):
+            val = bt_strip(normalize_sub_val(idx, m.group(1)))
+            if val != m.group(1):
+                pending_prefix_repo = val
+                pending_prefix_target_idx = idx + 1 + split_sub_interior
+                return True
+        return False
+
     for idx, (raw, in_child) in enumerate(commands):
         argv, runinfo = unwrap_runners(raw)
         # A backtick-span interior keeps its delimiters glued to the first and
@@ -790,33 +801,34 @@ def scan_invocations(text):
         #   and `coproc { … }` (whose body always runs in a subshell).
         if not in_child:
             if not argv and not runinfo.get("runners") and len(raw) == 1:
-                m = GH_REPO_ASSIGN.match(raw[0])
-                if m and "\n" not in m.group(1):
-                    val = bt_strip(normalize_sub_val(idx, m.group(1)))
-                    if val != m.group(1) and split_sub_prefix:
-                        pending_prefix_repo = val
-                        pending_prefix_target_idx = (
-                            idx + 1 + split_sub_interior
-                        )
-                    elif gh_repo_exported:
-                        gh_repo_env = val
-                        gh_repo_unresolvable = False
-                    else:
-                        gh_repo_bare = val
-            elif split_sub_prefix:
+                if not (
+                    split_sub_prefix
+                    and record_split_sub_prefix(
+                        idx, raw[0], split_sub_interior
+                    )
+                ):
+                    m = GH_REPO_ASSIGN.match(raw[0])
+                    if m and "\n" not in m.group(1):
+                        val = bt_strip(normalize_sub_val(idx, m.group(1)))
+                        if gh_repo_exported:
+                            gh_repo_env = val
+                            gh_repo_unresolvable = False
+                        else:
+                            gh_repo_bare = val
+            elif split_sub_prefix and base0 not in (
+                "export",
+                "declare",
+                "typeset",
+                "readonly",
+            ):
                 # Split-sub prefix preceded by earlier assignments or runner
                 # words (`FOO=1 GH_REPO=$(...) gh ...`, `env GH_REPO=$(...)
                 # gh ...`): the command after the substitution interior still
                 # inherits the non-literal GH_REPO (directly or via the runner
-                # invoking the merge).
-                m = GH_REPO_ASSIGN.match(raw[-1])
-                if m and "\n" not in m.group(1):
-                    val = bt_strip(normalize_sub_val(idx, m.group(1)))
-                    if val != m.group(1):
-                        pending_prefix_repo = val
-                        pending_prefix_target_idx = (
-                            idx + 1 + split_sub_interior
-                        )
+                # invoking the merge). Export-family builtins (`export
+                # GH_REPO=$(...) FOO=1`) are excluded so they fall through to
+                # the export arm below.
+                record_split_sub_prefix(idx, raw[-1], split_sub_interior)
             elif argv:
                 cmd_base = base0
                 if cmd_base == "unset" and "-f" not in argv[1:]:
@@ -889,21 +901,20 @@ def scan_invocations(text):
                             gh_repo_exported = False
                             gh_repo_unresolvable = False
         elif not argv and not runinfo.get("runners") and len(raw) == 1:
-            m = GH_REPO_ASSIGN.match(raw[0])
-            if m and "\n" not in m.group(1):
-                val = bt_strip(normalize_sub_val(idx, m.group(1)))
-                if val != m.group(1) and split_sub_prefix:
-                    pending_prefix_repo = val
-                    pending_prefix_target_idx = idx + 1 + split_sub_interior
-                elif gh_repo_exported:
+            if not (
+                split_sub_prefix
+                and record_split_sub_prefix(idx, raw[0], split_sub_interior)
+            ):
+                m = GH_REPO_ASSIGN.match(raw[0])
+                if m and "\n" not in m.group(1) and gh_repo_exported:
                     child_gh_repo_exported = True
-        elif split_sub_prefix:
-            m = GH_REPO_ASSIGN.match(raw[-1])
-            if m and "\n" not in m.group(1):
-                val = bt_strip(normalize_sub_val(idx, m.group(1)))
-                if val != m.group(1):
-                    pending_prefix_repo = val
-                    pending_prefix_target_idx = idx + 1 + split_sub_interior
+        elif split_sub_prefix and base0 not in (
+            "export",
+            "declare",
+            "typeset",
+            "readonly",
+        ):
+            record_split_sub_prefix(idx, raw[-1], split_sub_interior)
         elif argv:
             cmd_base = base0
             if cmd_base in ("export", "declare", "typeset", "readonly") \

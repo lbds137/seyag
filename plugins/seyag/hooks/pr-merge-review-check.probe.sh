@@ -1927,6 +1927,45 @@ assert_no_fetch "…no fetch ran"
 assert_api_lacks "…no repos/ lookup in the api log" 'repos/'
 assert_ack_lacks "…and no ack line written" '2002:777:2026-08-08T12:00:00Z'
 
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'GH_FORCE_TTY=1 GH_REPO=$(calc) gh pr merge 2002 --rebase | tail -5'
+assert_exit "piped split-sub GH_REPO=\$(calc) prefix preceded by another assignment (child branch): refused" 2
+assert_stderr_has "…with the unresolvable-scope banner" 'MERGE SCOPE UNRESOLVABLE'
+assert_no_fetch "…no fetch ran"
+assert_api_lacks "…no repos/ lookup in the api log" 'repos/'
+assert_ack_lacks "…and no ack line written" '2002:777:2026-08-08T12:00:00Z'
+
+# Export-family exclusion from the split-sub prefix arm (measured, bash 5.3,
+# `env -i`): `export GH_REPO=$(calc) FOO=1` has trailing words after `)` so
+# `consume_split_sub_is_prefix` returns True, but `export` (and `declare`/
+# `typeset`/`readonly` `-x`) exports `GH_REPO` for the rest of the shell or
+# child subshell rather than prefixing `FOO=1` — it must fall through to the
+# export arm so both same-shell and child merges refuse as `MERGE SCOPE
+# UNRESOLVABLE` before any network call.
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'export GH_REPO=$(calc) FOO=1 && gh pr merge 2002 --rebase'
+assert_exit "same-shell export GH_REPO=\$(calc) with trailing assignment word before merge: refused" 2
+assert_stderr_has "…with the unresolvable-scope banner" 'MERGE SCOPE UNRESOLVABLE'
+assert_no_fetch "…no fetch ran"
+assert_api_lacks "…no repos/ lookup in the api log" 'repos/'
+assert_ack_lacks "…and no ack line written" '2002:777:2026-08-08T12:00:00Z'
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke '(export GH_REPO=$(calc) FOO=1; gh pr merge 2002)'
+assert_exit "child-subshell export GH_REPO=\$(calc) with trailing assignment word before merge: refused" 2
+assert_stderr_has "…with the unresolvable-scope banner" 'MERGE SCOPE UNRESOLVABLE'
+assert_no_fetch "…no fetch ran"
+assert_api_lacks "…no repos/ lookup in the api log" 'repos/'
+assert_ack_lacks "…and no ack line written" '2002:777:2026-08-08T12:00:00Z'
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'export GH_REPO=$(calc) && gh pr merge 2002 --rebase'
+assert_exit "plain non-literal export GH_REPO=\$(calc) before merge: refused" 2
+assert_stderr_has "…with the unresolvable-scope banner" 'MERGE SCOPE UNRESOLVABLE'
+assert_no_fetch "…no fetch ran"
+assert_api_lacks "…no repos/ lookup in the api log" 'repos/'
+assert_ack_lacks "…and no ack line written" '2002:777:2026-08-08T12:00:00Z'
+
 # ===========================================================================
 # 3. The review gate — block once per (PR, review-id), allow on retry
 # ===========================================================================
