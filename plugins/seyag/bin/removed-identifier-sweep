@@ -153,8 +153,15 @@ fi
 # a clean pass. Each fragment is compiled once by a throwaway awk; a bad one
 # is dropped with a stderr warning and the valid fragments still apply.
 VALID_FRAGMENTS=""
-for frag in ${SYG_SWEEP_EXCLUDE_PATHS:-}; do
-    if awk -v re="$frag" 'BEGIN { if ("" ~ re) ; }' 2>/dev/null; then
+read -r -a frag_list <<<"${SYG_SWEEP_EXCLUDE_PATHS:-}"
+for frag in "${frag_list[@]}"; do
+    # Split via read -a (word splitting, NO pathname expansion: an unquoted
+    # for-in expansion would glob a fragment like tracker/.* into the files
+    # it matches, silently shrinking the exclusion). Compile each fragment
+    # through the SAME channel the classifier reads — the raw environment,
+    # not an awk -v value, whose escape processing would validate a
+    # different string than the one used at sweep time.
+    if SYG_SWEEP_FRAG="$frag" awk 'BEGIN { re = ENVIRON["SYG_SWEEP_FRAG"]; if ("" ~ re) ; }' 2>/dev/null; then
         VALID_FRAGMENTS="$VALID_FRAGMENTS $frag"
     else
         printf 'removed-identifier-sweep: dropping invalid SYG_SWEEP_EXCLUDE_PATHS fragment: %s\n' "$frag" >&2
