@@ -1,6 +1,6 @@
 #!/bin/bash
 # Fixture check for plugins/seyag/bin/worktree-transfer — run after ANY
-# edit to the script. 21 cases assert the fixed check order, refusal shapes,
+# edit to the script. 23 cases assert the fixed check order, refusal shapes,
 # branch-regex gating, and byte-identical staged transfer over hermetic
 # throwaway git repos under $(mktemp -d):
 #   1. cwd inside the linked worktree -> STOP: main-tree-identity
@@ -11,8 +11,8 @@
 #   5. detached worktree (git worktree add --detach) -> STOP: worktree-registered
 #   6. --base <old-sha> after main moved, and --base does-not-exist -> STOP: base-unchanged
 #   7. clean worktree with no edits -> STOP: empty-patch
-#   8. commit made inside the worker worktree -> STOP: no-unpushed-remotes
-#   9. commit in worker worktree pushed to origin (remotes check passes) -> STOP: no-unpushed-base
+#   8. commit made inside the worker worktree -> STOP: no-unpushed-base (HEAD differs)
+#   9. pushed worker commit -> STOP: no-unpushed-base
 #  10. first-failure-wins: dirty main tree + empty worktree -> STOP: main-tree-clean
 #  11. SYG_WORKTREE_BRANCH_RE='^agent/' with branch agent/t2 -> full transfer and branch deletion
 #  12. SYG_WORKTREE_BRANCH_RE='^agent/' with branch worktree-agent-x -> refusal, branch kept
@@ -23,18 +23,18 @@
 #  16. happy path: exit 0, expected stdout lines, changes staged in main tree, modified/new/deleted
 #      files verified, binary file byte-identical via cmp, gitignored dist/out.bin not transferred,
 #      worktree directory and branch removed
-#  17. no remote-tracking refs (origin removed) -> transfer succeeds with
-#      `no-unpushed-remotes (skipped: no remote-tracking refs)`: with an empty
-#      exclusion list `HEAD --not --remotes` would list every commit including
-#      the base's and refuse every transfer
+#  17. no remote-tracking refs (origin removed) -> transfer succeeds with no remote-tracking refs
 #  18. detached main working tree -> STOP: main-tree-identity naming detached
 #  19. --base=OLD via the = form after main moved -> STOP: base-unchanged
 #  20. usage errors: no positional, two positionals, unknown flag -> exit 2 + usage text
 #  21. diff.noprefix=true in the fixture repo -> transfer still succeeds with the new
 #      file at its real nested path (a/-b/ prefixes pinned on both diff calls)
+#  22. worktree cut from an older commit than main HEAD -> STOP: no-unpushed-base
+#      naming the differing HEADs (behind is as wrong as ahead)
+#  23. a locked worktree -> transfer still succeeds (unlock then remove --force)
 #
 # Stated non-goal: the two removal-failure wordings (`git worktree remove --force`
-# vs `git branch -D` in check 11) are not constructible without root tricks; the
+# vs `git branch -D` in check 10) are not constructible without root tricks; the
 # safety-critical piece — `branch -D` gated on the regex re-check — is pinned by
 # cases 4, 11 and 12.
 #
@@ -204,7 +204,7 @@ else
   record_case 1 "case 7: clean worktree with no edits" "rc=$rc err=$err"
 fi
 
-# Case 8: A commit made inside the worker worktree -> STOP: no-unpushed-remotes.
+# Case 8: A commit made inside the worker worktree -> STOP: no-unpushed-base (HEAD differs).
 (cd "$R1" && git worktree add -q -b worktree-agent-committed .wt-committed >/dev/null 2>&1)
 printf 'committed change\n' >"$R1/.wt-committed/committed.txt"
 git -C "$R1/.wt-committed" add committed.txt >/dev/null 2>&1
@@ -212,18 +212,17 @@ git -C "$R1/.wt-committed" commit -q --no-verify -m 'worker commit' >/dev/null 2
 populate_wt "$R1/.wt-committed"
 err=$(cd "$R1" && bash "$TOOL" .wt-committed 2>&1 >/dev/null)
 rc=$?
-if [ "$rc" -eq 1 ] && [[ $err == "STOP: no-unpushed-remotes:"* ]] \
+if [ "$rc" -eq 1 ] && [[ $err == "STOP: no-unpushed-base:"* ]] \
   && [ -d "$R1/.wt-committed" ] \
   && git -C "$R1" rev-parse --verify -q refs/heads/worktree-agent-committed >/dev/null \
   && [ -z "$(git -C "$R1" status --porcelain)" ]; then
-  record_case 0 "case 8: commit inside worker worktree refuses STOP: no-unpushed-remotes"
+  record_case 0 "case 8: commit inside worker worktree refuses STOP: no-unpushed-base (HEAD differs)"
 else
   record_case 1 "case 8: commit inside worker worktree" "rc=$rc err=$err"
 fi
 
-# Case 9: no-unpushed-base specifically: a bare remote; push the base commit to it;
-# then a worktree whose branch carries one commit, pushed to the same remote ->
-# the remotes check passes, STOP: no-unpushed-base fires.
+# Case 9: Pushed worker commit: a worktree whose branch carries one commit
+# pushed to origin -> STOP: no-unpushed-base fires.
 (cd "$R1" && git worktree add -q -b worktree-agent-pushed .wt-pushed >/dev/null 2>&1)
 printf 'pushed worker commit\n' >"$R1/.wt-pushed/pushed.txt"
 git -C "$R1/.wt-pushed" add pushed.txt >/dev/null 2>&1
@@ -233,11 +232,10 @@ populate_wt "$R1/.wt-pushed"
 err=$(cd "$R1" && bash "$TOOL" .wt-pushed 2>&1 >/dev/null)
 rc=$?
 if [ "$rc" -eq 1 ] && [[ $err == "STOP: no-unpushed-base:"* ]] \
-  && [ -z "$(git -C "$R1/.wt-pushed" log --oneline HEAD --not --remotes)" ] \
   && [ -d "$R1/.wt-pushed" ] \
   && git -C "$R1" rev-parse --verify -q refs/heads/worktree-agent-pushed >/dev/null \
   && [ -z "$(git -C "$R1" status --porcelain)" ]; then
-  record_case 0 "case 9: pushed worker commit passes remotes check and refuses STOP: no-unpushed-base"
+  record_case 0 "case 9: pushed worker commit refuses STOP: no-unpushed-base"
 else
   record_case 1 "case 9: no-unpushed-base" "rc=$rc err=$err"
 fi
@@ -377,7 +375,7 @@ c16_fail=0
 c16_reason=""
 if [ "$rc" -ne 0 ]; then
   c16_fail=1; c16_reason="rc=$rc out=$out"
-elif ! grep -qF 'checks passed: main-tree-identity, main-tree-clean, worktree-registered, base-unchanged (skipped: no --base), empty-patch, nothing-outside-patch, no-unpushed-remotes, no-unpushed-base, apply, byte-identical, removal' <<<"$out"; then
+elif ! grep -qF 'checks passed: main-tree-identity, main-tree-clean, worktree-registered, base-unchanged (skipped: no --base), empty-patch, nothing-outside-patch, no-unpushed-base, apply, byte-identical, removal' <<<"$out"; then
   c16_fail=1; c16_reason="missing checks passed line in: $out"
 elif ! grep -qxF 'worktree removed' <<<"$out"; then
   c16_fail=1; c16_reason="missing 'worktree removed' in: $out"
@@ -406,21 +404,18 @@ elif grep -qxF "worktree $R1/.wt" <<<"$wt_list"; then
 fi
 record_case "$c16_fail" "case 16: happy path transfers staged patch (text + binary, no ignored), removes worktree and branch" "$c16_reason"
 
-# Case 17: No remote-tracking refs (origin removed) -> transfer succeeds with
-# `no-unpushed-remotes (skipped: no remote-tracking refs)`: with an empty
-# exclusion list `HEAD --not --remotes` would list every commit including the
-# base's and refuse every transfer in a never-fetched repo.
+# Case 17: No remote-tracking refs (origin removed) -> transfer succeeds in a
+# never-fetched repo.
 mk_fixture r17
 R17="$T/r17"
 git -C "$R17" remote remove origin >/dev/null 2>&1
 out=$(cd "$R17" && bash "$TOOL" .wt 2>&1)
 rc=$?
 if [ "$rc" -eq 0 ] \
-  && grep -qF 'no-unpushed-remotes (skipped: no remote-tracking refs)' <<<"$out" \
   && grep -q '^branch worktree-agent-t1 deleted$' <<<"$out" \
   && [ ! -e "$R17/.wt" ] \
   && [ -f "$R17/src/new.js" ]; then
-  record_case 0 "case 17: no remote-tracking refs skips no-unpushed-remotes and the transfer succeeds"
+  record_case 0 "case 17: transfer succeeds with no remote-tracking refs"
 else
   record_case 1 "case 17: no remote-tracking refs" "rc=$rc out=$out"
 fi
@@ -483,6 +478,42 @@ if [ "$rc" -eq 0 ] \
   record_case 0 "case 21: diff.noprefix=true still transfers with the file at its nested path"
 else
   record_case 1 "case 21: diff.noprefix=true" "rc=$rc out=$out"
+fi
+
+# Case 22: Worktree cut from an OLDER commit than main HEAD -> STOP:
+# no-unpushed-base naming the differing HEADs.
+mk_fixture r22
+R22="$T/r22"
+MAIN_HEAD22=$(git -C "$R22" rev-parse HEAD)
+printf 'Later docs.\n' >>"$R22/README.md"
+git -C "$R22" add README.md >/dev/null 2>&1
+git -C "$R22" commit -q --no-verify -m 'advance main' >/dev/null 2>&1
+(cd "$R22" && git worktree add -q -b worktree-agent-old .wt-old "$MAIN_HEAD22" >/dev/null 2>&1)
+populate_wt "$R22/.wt-old"
+err=$(cd "$R22" && bash "$TOOL" .wt-old 2>&1 >/dev/null)
+rc=$?
+if [ "$rc" -eq 1 ] && [[ $err == "STOP: no-unpushed-base:"* ]] \
+  && grep -q 'differs from the main tree HEAD' <<<"$err" \
+  && [ -d "$R22/.wt-old" ] \
+  && git -C "$R22" rev-parse --verify -q refs/heads/worktree-agent-old >/dev/null; then
+  record_case 0 "case 22: worktree behind main HEAD refuses STOP: no-unpushed-base (differing HEADs named)"
+else
+  record_case 1 "case 22: worktree behind main" "rc=$rc err=$err"
+fi
+
+# Case 23: A LOCKED worktree -> transfer still succeeds (unlock then remove --force).
+mk_fixture r23
+R23="$T/r23"
+git -C "$R23" worktree lock --reason 'probe lock' "$R23/.wt" >/dev/null 2>&1
+out=$(cd "$R23" && bash "$TOOL" .wt 2>&1)
+rc=$?
+if [ "$rc" -eq 0 ] \
+  && grep -q '^worktree removed$' <<<"$out" \
+  && grep -q '^branch worktree-agent-t1 deleted$' <<<"$out" \
+  && [ ! -e "$R23/.wt" ]; then
+  record_case 0 "case 23: locked worktree unlocks and transfers"
+else
+  record_case 1 "case 23: locked worktree" "rc=$rc out=$out"
 fi
 
 [ "$fail" -eq 0 ] || exit 1

@@ -31,13 +31,10 @@
 #                           written to a temp file is non-empty
 #   6 nothing-outside-patch every non-empty `git -C <wt> status --porcelain` line
 #                           after staging matches `^[MADRCT] `
-#   7 no-unpushed-remotes   `git -C <wt> log --oneline HEAD --not --remotes` is empty
-#                           (skipped with `no-unpushed-remotes (skipped: no
-#                           remote-tracking refs)` when the repo has none, where
-#                           the log would list every commit including the base's)
-#   8 no-unpushed-base      `git -C <wt> log --oneline <main-head>..HEAD` is empty
-#   9 apply                 `git apply --index <patchfile>` in the main root succeeds
-#  10 byte-identical        `git diff --cached --binary` in the main root matches
+#   7 no-unpushed-base      worktree HEAD equals the main tree's HEAD, and
+#                           `git -C <wt> log --oneline <main-head>..HEAD` is empty
+#   8 apply                 `git apply --index <patchfile>` in the main root succeeds
+#   9 byte-identical        `git diff --cached --binary` in the main root matches
 #                           `<patchfile>` via `cmp`; `--binary` must appear on BOTH
 #                           sides because a plain diff renders a binary change as a
 #                           notice `git apply` fails to consume — as must --no-color
@@ -45,7 +42,7 @@
 #                           (diff.noprefix, diff.external, color.ui) cannot change
 #                           what either side produces (a mismatch leaves the main
 #                           tree staged for inspection)
-#  11 removal               `git worktree unlock <wt>`, `git worktree remove --force <wt>`,
+#  10 removal               `git worktree unlock <wt>`, `git worktree remove --force <wt>`,
 #                           then — re-checking SYG_WORKTREE_BRANCH_RE at the removal
 #                           site — `git branch -D <branch>`, then `git worktree prune`
 #
@@ -55,7 +52,7 @@
 # deleting anything.
 #
 # Stated non-goal: the two removal-failure wordings (`git worktree remove --force` vs
-# `git branch -D`) are best-effort operator messages; a refusal at check 11 never
+# `git branch -D`) are best-effort operator messages; a refusal at check 10 never
 # loses the patch because it is already applied and verified in the main tree.
 #
 # Exit codes: 0 success; 1 refusal (`STOP: <check-name>: <reason>`); 2 usage error.
@@ -271,26 +268,13 @@ while IFS= read -r sline; do
 done <<<"$WT_STATUS"
 PASSED_CHECKS+=("nothing-outside-patch")
 
-# 7. no-unpushed-remotes
-# Skipped when the repo has no remote-tracking refs: with an empty exclusion
-# list `HEAD --not --remotes` would list every commit including the base's and
-# refuse every transfer in a repo git has never fetched from. Check 8 still
-# refuses worker commits ahead of main. A for-each-ref failure refuses rather
-# than silently taking the skip branch.
-REMOTE_REFS=$(git -C "$WT_PATH" for-each-ref --count=1 refs/remotes/ 2>&1) \
-  || refuse no-unpushed-remotes "git for-each-ref refs/remotes/ failed: $REMOTE_REFS"
-if [ -n "$REMOTE_REFS" ]; then
-  UNPUSHED_REMOTES=$(git -C "$WT_PATH" log --oneline HEAD --not --remotes 2>&1) \
-    || refuse no-unpushed-remotes "git log --not --remotes failed in worktree: $UNPUSHED_REMOTES"
-  if [ -n "$UNPUSHED_REMOTES" ]; then
-    refuse no-unpushed-remotes "worktree has commit(s) not reached by any remote: $UNPUSHED_REMOTES"
-  fi
-  PASSED_CHECKS+=("no-unpushed-remotes")
-else
-  PASSED_CHECKS+=("no-unpushed-remotes (skipped: no remote-tracking refs)")
+# 7. no-unpushed-base
+# The worktree must sit exactly on the main tree's HEAD: behind is as wrong as ahead.
+WT_HEAD=$(git -C "$WT_PATH" rev-parse HEAD 2>&1) \
+  || refuse no-unpushed-base "git rev-parse HEAD failed in worktree: $WT_HEAD"
+if [ "$WT_HEAD" != "$MAIN_HEAD" ]; then
+  refuse no-unpushed-base "worktree HEAD ($WT_HEAD) differs from the main tree HEAD ($MAIN_HEAD); the patch was built on a base the main tree no longer matches"
 fi
-
-# 8. no-unpushed-base
 UNPUSHED_BASE=$(git -C "$WT_PATH" log --oneline "$MAIN_HEAD..HEAD" 2>&1) \
   || refuse no-unpushed-base "git log $MAIN_HEAD..HEAD failed in worktree: $UNPUSHED_BASE"
 if [ -n "$UNPUSHED_BASE" ]; then
@@ -298,18 +282,18 @@ if [ -n "$UNPUSHED_BASE" ]; then
 fi
 PASSED_CHECKS+=("no-unpushed-base")
 
-# 9. apply
+# 8. apply
 APPLY_ERR=$(git -C "$MAIN_ROOT" apply --index "$PATCH_FILE" 2>&1) \
   || refuse apply "git apply --index failed: $APPLY_ERR"
 PASSED_CHECKS+=("apply")
 
-# 10. byte-identical
+# 9. byte-identical
 if ! git -C "$MAIN_ROOT" diff --cached --binary --no-color --no-ext-diff --src-prefix=a/ --dst-prefix=b/ | cmp - "$PATCH_FILE" >/dev/null 2>&1; then
   refuse byte-identical "main tree staged diff differs from worktree patch; main tree left staged for inspection"
 fi
 PASSED_CHECKS+=("byte-identical")
 
-# 11. removal
+# 10. removal
 git -C "$MAIN_ROOT" worktree unlock "$WT_PATH" >/dev/null 2>&1 || true
 if ! rm_err=$(git -C "$MAIN_ROOT" worktree remove --force "$WT_PATH" 2>&1); then
   refuse removal "patch is applied and verified in main tree, but worktree removal failed ($rm_err); remove manually: git worktree remove --force '$WT_PATH' && git branch -D '$WT_BRANCH'"
