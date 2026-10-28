@@ -147,6 +147,10 @@ expect_warn "Invalid SYG_STATUS_CLAIM_MARKERS falls back to default markers" \
   '{"tool_name":"PushNotification","tool_input":{"message":"Everything works now."}}' \
   'foo|['
 
+expect_warn "Invalid marker extension with large payload still fires" \
+  "$(jq -nc --arg m "$(printf 'fixed x%.0s' {1..12000})" '{tool_name:"PushNotification",tool_input:{message:$m}}')" \
+  'foo|['
+
 expect_warn "Empty-only SYG_STATUS_CLAIM_MARKERS='|' fires on default marker" \
   '{"tool_name":"PushNotification","tool_input":{"message":"Everything works now."}}' \
   '|'
