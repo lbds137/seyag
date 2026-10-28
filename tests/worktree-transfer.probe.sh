@@ -1,6 +1,6 @@
 #!/bin/bash
 # Fixture check for plugins/seyag/bin/worktree-transfer — run after ANY
-# edit to the script. 17 cases assert the fixed check order, refusal shapes,
+# edit to the script. 21 cases assert the fixed check order, refusal shapes,
 # branch-regex gating, and byte-identical staged transfer over hermetic
 # throwaway git repos under $(mktemp -d):
 #   1. cwd inside the linked worktree -> STOP: main-tree-identity
@@ -27,6 +27,11 @@
 #      `no-unpushed-remotes (skipped: no remote-tracking refs)`: with an empty
 #      exclusion list `HEAD --not --remotes` would list every commit including
 #      the base's and refuse every transfer
+#  18. detached main working tree -> STOP: main-tree-identity naming detached
+#  19. --base=OLD via the = form after main moved -> STOP: base-unchanged
+#  20. usage errors: no positional, two positionals, unknown flag -> exit 2 + usage text
+#  21. diff.noprefix=true in the fixture repo -> transfer still succeeds with the new
+#      file at its real nested path (a/-b/ prefixes pinned on both diff calls)
 #
 # Stated non-goal: the two removal-failure wordings (`git worktree remove --force`
 # vs `git branch -D` in check 11) are not constructible without root tricks; the
@@ -418,6 +423,66 @@ if [ "$rc" -eq 0 ] \
   record_case 0 "case 17: no remote-tracking refs skips no-unpushed-remotes and the transfer succeeds"
 else
   record_case 1 "case 17: no remote-tracking refs" "rc=$rc out=$out"
+fi
+
+# Case 18: Detached main working tree -> STOP: main-tree-identity naming detached.
+mk_fixture r18
+R18="$T/r18"
+git -C "$R18" checkout -q --detach HEAD >/dev/null 2>&1
+err=$(cd "$R18" && bash "$TOOL" .wt 2>&1 >/dev/null)
+rc=$?
+if [ "$rc" -eq 1 ] && [[ $err == "STOP: main-tree-identity:"* ]] \
+  && grep -q 'detached' <<<"$err" \
+  && [ -d "$R18/.wt" ] \
+  && git -C "$R18" rev-parse --verify -q refs/heads/worktree-agent-t1 >/dev/null; then
+  record_case 0 "case 18: detached main refuses STOP: main-tree-identity naming detached"
+else
+  record_case 1 "case 18: detached main" "rc=$rc err=$err"
+fi
+
+# Case 19: --base=OLD via the = form after main moved -> STOP: base-unchanged.
+mk_fixture r19
+R19="$T/r19"
+OLD_SHA19=$(git -C "$R19" rev-parse HEAD)
+printf 'More docs.\n' >>"$R19/README.md"
+git -C "$R19" add README.md >/dev/null 2>&1
+git -C "$R19" commit -q --no-verify -m 'advance main' >/dev/null 2>&1
+err=$(cd "$R19" && bash "$TOOL" "--base=$OLD_SHA19" .wt 2>&1 >/dev/null)
+rc=$?
+if [ "$rc" -eq 1 ] && [[ $err == "STOP: base-unchanged:"* ]]; then
+  record_case 0 "case 19: --base=OLD (the = form) after main moved refuses STOP: base-unchanged"
+else
+  record_case 1 "case 19: --base= form" "rc=$rc err=$err"
+fi
+
+# Case 20: Usage errors -> exit 2 with usage text on stderr.
+err_nopos=$(bash "$TOOL" 2>&1 >/dev/null); rc_nopos=$?
+err_twopos=$(bash "$TOOL" a b 2>&1 >/dev/null); rc_twopos=$?
+err_badflag=$(bash "$TOOL" --nope x 2>&1 >/dev/null); rc_badflag=$?
+if [ "$rc_nopos" -eq 2 ] && [ -n "$err_nopos" ] \
+  && [ "$rc_twopos" -eq 2 ] && [ -n "$err_twopos" ] \
+  && [ "$rc_badflag" -eq 2 ] && [ -n "$err_badflag" ]; then
+  record_case 0 "case 20: no positional, two positionals, unknown flag all exit 2 with usage"
+else
+  record_case 1 "case 20: usage errors" \
+    "rc_nopos=$rc_nopos rc_twopos=$rc_twopos rc_badflag=$rc_badflag"
+fi
+
+# Case 21: diff.noprefix=true in the fixture repo -> transfer still succeeds
+# with the new file at its real nested path (the flag set pins the prefixes).
+mk_fixture r21
+R21="$T/r21"
+git -C "$R21" config diff.noprefix true >/dev/null 2>&1
+out=$(cd "$R21" && bash "$TOOL" .wt 2>&1)
+rc=$?
+if [ "$rc" -eq 0 ] \
+  && [ -f "$R21/src/new.js" ] \
+  && [ ! -e "$R21/new.js" ] \
+  && [ ! -e "$R21/.wt" ] \
+  && ! git -C "$R21" rev-parse --verify -q refs/heads/worktree-agent-t1 >/dev/null; then
+  record_case 0 "case 21: diff.noprefix=true still transfers with the file at its nested path"
+else
+  record_case 1 "case 21: diff.noprefix=true" "rc=$rc out=$out"
 fi
 
 [ "$fail" -eq 0 ] || exit 1

@@ -141,7 +141,7 @@ Read the FULL diff yourself, in the worktree, never through a verifier subagent:
 
 ```bash
 WT=<worktree path>; BASE=<base sha>; PATCH=<scratch dir>/unit.patch
-git -C "$WT" add -A && git -C "$WT" diff --cached --binary > "$PATCH"
+git -C "$WT" add -A && git -C "$WT" diff --cached --binary --no-color --no-ext-diff --src-prefix=a/ --dst-prefix=b/ > "$PATCH"
 [ -s "$PATCH" ] || { echo 'STOP: empty patch, nothing to transfer'; exit 1; }
 [ -z "$(git -C "$WT" log --oneline "$BASE..HEAD")" ] || { echo 'STOP: worker committed'; exit 1; }
 [ "$(git rev-parse HEAD)" = "$(git rev-parse "$BASE")" ] || { echo 'STOP: main moved off base'; exit 1; }
@@ -156,7 +156,7 @@ The tool ends printing the staged `--stat`, `worktree removed`, `branch deleted`
 BR=$(git -C "$WT" branch --show-current); case "$BR" in worktree-agent-*) ;; *) echo "STOP: $BR is not an agent branch"; exit 1;; esac; git worktree remove --force "$WT" && git branch -D "$BR"
 ```
 
-Tested: it stops on a non-agent branch and otherwise removes the tree and deletes its branch. That `--force` removal is sanctioned here, resting on both the byte-identical check and the no-commits check, and post-session under § Stale worktrees and branches. Then rebuild every edited package's build output (stale output lets gates pass on source they never compiled), run the main-tree gates one at a time, commit, push, and open the PR per the project's git workflow.
+Tested: it stops on a non-agent branch and otherwise removes the tree and deletes its branch. The fallback's branch gate is the same gate as the tool's: `SYG_WORKTREE_BRANCH_RE` (default `^worktree-agent-`) — the block's literal `worktree-agent-*` case is that default spelled out. That `--force` removal is sanctioned here, resting on both the byte-identical check and the no-commits check, and post-session under § Stale worktrees and branches. Then rebuild every edited package's build output (stale output lets gates pass on source they never compiled), run the main-tree gates one at a time, commit, push, and open the PR per the project's git workflow.
 
 Remove the tree right after the FINAL transfer, while the transfer pair is still its gate; a tree kept through later review rounds goes through `safe-worktree-clean` after the merge.
 
