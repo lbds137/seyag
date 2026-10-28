@@ -1,6 +1,6 @@
 #!/bin/bash
 # Fixture check for plugins/seyag/bin/removed-identifier-sweep — run after ANY
-# edit to the script. 35 checks assert the fire/silent/summary table over the
+# edit to the script. 44 checks assert the fire/silent/summary table over the
 # shapes that matter:
 #   - a removed `export function` named in a comment in another file FIRES
 #     with that file:line (the spec's headline case);
@@ -290,6 +290,10 @@ export SYG_SWEEP_EXCLUDE_PATHS="tracker/ ^docs/local/"
 check 0 silent "SYG_SWEEP_EXCLUDE_PATHS fragment ^docs/local/ silences a matching hit"
 unset SYG_SWEEP_EXCLUDE_PATHS
 
+export SYG_SWEEP_EXCLUDE_PATHS=$'tracker/\n^docs/local/'
+check 0 silent "newline-separated fragments all apply (multiline transport)"
+unset SYG_SWEEP_EXCLUDE_PATHS
+
 printf 'export function badFragFn(x: number): number {\n  return x;\n}\n' >"$REPO/src/inc2c.ts"
 printf 'badFragFn notes sit in a root doc.\n' >"$REPO/BADFRAG.md"
 commit_all
@@ -308,9 +312,19 @@ printf 'export function toggledFn(x: number): number {\n  return x;\n}\n' >"$REP
 printf '// toggledFn would fire without SYG_SWEEP=0.\n' >"$REPO/src/inc2d-notes.ts"
 commit_all
 empty_and_stage src/inc2d.ts
+check 0 fire "positive control: toggledFn mention fires without the toggle" \
+    "LINE:src/inc2d-notes.ts:1: toggledFn"
 export SYG_SWEEP=0
-check 0 silent "SYG_SWEEP=0 silences the sweep for the session"
+check 0 silent "SYG_SWEEP=0 silences the sweep for processes inheriting the variable"
 unset SYG_SWEEP
+
+printf 'export function fooBarFn(x: number): number {\n  return x;\n}\n' >"$REPO/src/inc2x.ts"
+printf '#define fooBarFn 1\n' >"$REPO/src/inc2x-defs.c"
+printf 'fooBarFn notes live in a root doc.\n' >"$REPO/FOOBAR.md"
+commit_all
+empty_and_stage src/inc2x.ts
+check 0 fire "a leading-# line in a .c file counts as prose (#define mention pins the stated trade)" \
+    "LINE:src/inc2x-defs.c:1: fooBarFn"
 
 printf 'export function xclaudeFn(x: number): number {\n  return x;\n}\n' >"$REPO/src/inc2e.ts"
 mkdir -p "$REPO/xclaude/hooks"
