@@ -77,9 +77,9 @@
 
 set -uo pipefail
 
-# Per-session off switch: SYG_SWEEP=0 silences the sweep without editing the
-# repo's pre-commit wiring (the wired hook itself is the primary toggle; this
-# is the session- or machine-level one).
+# Off switch: SYG_SWEEP=0 silences the sweep for any process inheriting the
+# variable, without editing the repo's pre-commit wiring (the wired hook
+# itself is the primary toggle; this is the session- or machine-level one).
 if [ "${SYG_SWEEP:-1}" = "0" ]; then
     exit 0
 fi
