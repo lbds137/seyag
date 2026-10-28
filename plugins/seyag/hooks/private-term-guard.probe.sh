@@ -688,6 +688,24 @@ run 2 "closed-text: a swallowed second gh command keeps the text" "$PUB" "${T[@]
 run 2 "closed-text: a push in the compound still scans what it sends" "$PMSG" "${T[@]}" -- \
   "gh pr list && git push origin main"
 
+# =============================================================================
+# Wrapper-invoked gh commands (SYG_GH_WRAPPERS)
+# =============================================================================
+run 2 "gh wrapper colon write: myops gh:pr-edit --body-file with the term" "$PUB" "${T[@]}" SYG_GH_WRAPPERS=myops -- \
+  "myops gh:pr-edit --body-file $TMP/files/body.txt"
+assert_out "wrapper write names term #2 in header" present "(#2 in \$SYG_PRIVATE_TERMS_FILE)"
+assert_out "wrapper write masks the term as #2" present "[private term #2]"
+assert_out "wrapper write names a body file, not its path" present "matched in: a body file."
+run 2 "gh wrapper plain write: myops gh pr edit --body-file with the term" "$PUB" "${T[@]}" SYG_GH_WRAPPERS=myops -- \
+  "myops gh pr edit --body-file $TMP/files/body.txt"
+assert_out "wrapper plain write names term #2 in header" present "(#2 in \$SYG_PRIVATE_TERMS_FILE)"
+assert_out "wrapper plain write masks the term as #2" present "[private term #2]"
+assert_out "wrapper plain write names a body file, not its path" present "matched in: a body file."
+run 0 "gh wrapper colon read: myops gh:pr-view stays silent" "$PUB" "${T[@]}" SYG_GH_WRAPPERS=myops -- \
+  "myops gh:pr-view 1 # zorbleflux"
+run 0 "gh wrapper opt-in boundary: unset SYG_GH_WRAPPERS leaves myops gh:pr-edit silent" "$PUB" -u SYG_GH_WRAPPERS "${T[@]}" -- \
+  "myops gh:pr-edit --body-file $TMP/files/body.txt"
+
 if [ "$FAILURES" -ne 0 ]; then
   printf '\n%d probe case(s) FAILED\n' "$FAILURES"
   exit 1

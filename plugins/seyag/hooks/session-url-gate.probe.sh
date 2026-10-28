@@ -522,6 +522,24 @@ run 0 "gh read-only command with a session link in the text: gh pr view" "$WORK"
 run 2 "gh write command with a session link in the text: gh pr create" "$WORK" "${NOENV[@]}" -- \
   "gh pr create --title t --body \"${LINK}\""
 
+# =============================================================================
+# Group 12: wrapper-invoked gh commands (SYG_GH_WRAPPERS)
+# =============================================================================
+run 2 "gh wrapper colon-form write with --body-file blocks" "$WORK" SYG_GH_WRAPPERS=myops -- \
+  "myops gh:pr-edit --body-file $TMP/files/leaky.txt"
+assert_out "wrapper colon write names the body file" present "file $TMP/files/leaky.txt"
+assert_out "wrapper colon write masks the session id" absent "$ID"
+run 2 "gh wrapper plain two-word form with --body-file blocks" "$WORK" SYG_GH_WRAPPERS=myops -- \
+  "myops gh pr edit --body-file $TMP/files/leaky.txt"
+assert_out "wrapper plain write names the body file" present "file $TMP/files/leaky.txt"
+assert_out "wrapper plain write masks the session id" absent "$ID"
+run 0 "gh wrapper colon-form read stays silent" "$WORK" SYG_GH_WRAPPERS=myops -- \
+  "myops gh:pr-view 1 --json body # ${LINK}"
+run 0 "gh wrapper plain read stays silent" "$WORK" SYG_GH_WRAPPERS=myops -- \
+  "myops gh pr view 1 --json body # ${LINK}"
+run 0 "gh wrapper opt-in boundary: unset SYG_GH_WRAPPERS stays silent" "$WORK" -u SYG_GH_WRAPPERS -- \
+  "myops gh:pr-edit --body-file $TMP/files/leaky.txt"
+
 if [ "$FAILURES" -ne 0 ]; then
   printf '\n%d probe case(s) FAILED\n' "$FAILURES"
   exit 1
