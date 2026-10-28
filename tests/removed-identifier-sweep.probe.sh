@@ -290,6 +290,49 @@ export SYG_SWEEP_EXCLUDE_PATHS="tracker/ ^docs/local/"
 check 0 silent "SYG_SWEEP_EXCLUDE_PATHS fragment ^docs/local/ silences a matching hit"
 unset SYG_SWEEP_EXCLUDE_PATHS
 
+printf 'export function badFragFn(x: number): number {\n  return x;\n}\n' >"$REPO/src/inc2c.ts"
+printf 'badFragFn notes sit in a root doc.\n' >"$REPO/BADFRAG.md"
+commit_all
+empty_and_stage src/inc2c.ts
+export SYG_SWEEP_EXCLUDE_PATHS='foo|['
+check 0 fire "invalid SYG_SWEEP_EXCLUDE_PATHS fragment warns on stderr and still fires" \
+    "LINE:BADFRAG.md:1: badFragFn"
+bad_frag_stderr=$(cd "$REPO" && bash "$HOOK" 2>&1 >/dev/null)
+if ! grep -q 'dropping invalid SYG_SWEEP_EXCLUDE_PATHS fragment' <<<"$bad_frag_stderr"; then
+    echo "FAIL [stderr missing 'dropping invalid SYG_SWEEP_EXCLUDE_PATHS fragment']: invalid SYG_SWEEP_EXCLUDE_PATHS fragment warns on stderr and still fires"
+    fail=1
+fi
+unset SYG_SWEEP_EXCLUDE_PATHS
+
+printf 'export function toggledFn(x: number): number {\n  return x;\n}\n' >"$REPO/src/inc2d.ts"
+printf '// toggledFn would fire without SYG_SWEEP=0.\n' >"$REPO/src/inc2d-notes.ts"
+commit_all
+empty_and_stage src/inc2d.ts
+export SYG_SWEEP=0
+check 0 silent "SYG_SWEEP=0 silences the sweep for the session"
+unset SYG_SWEEP
+
+printf 'export function xclaudeFn(x: number): number {\n  return x;\n}\n' >"$REPO/src/inc2e.ts"
+mkdir -p "$REPO/xclaude/hooks"
+printf 'xclaudeFn notes live under xclaude/hooks.\n' >"$REPO/xclaude/hooks/note.md"
+commit_all
+empty_and_stage src/inc2e.ts
+check 0 fire "mention under xclaude/hooks/ fires (leading dot in .claude/hooks/ is escaped)" \
+    "LINE:xclaude/hooks/note.md:1: xclaudeFn"
+
+# Fragments travel raw (ENVIRON, not awk -v): a backslash in a fragment stays
+# a backslash, so `^docs\.local/` matches only the literal path and a hit
+# under `docsXlocal/` (which an unescaped `.` would swallow) still fires.
+printf 'export function backslashFn(x: number): number {\n  return x;\n}\n' >"$REPO/src/inc2f.ts"
+mkdir -p "$REPO/docsXlocal"
+printf 'backslashFn notes live under docsXlocal.\n' >"$REPO/docsXlocal/note.md"
+commit_all
+empty_and_stage src/inc2f.ts
+export SYG_SWEEP_EXCLUDE_PATHS='^docs\.local/'
+check 0 fire "backslash in SYG_SWEEP_EXCLUDE_PATHS fragment stays literal (raw transport)" \
+    "LINE:docsXlocal/note.md:1: backslashFn"
+unset SYG_SWEEP_EXCLUDE_PATHS
+
 printf 'export function backlogFn(x: number): number {\n  return x;\n}\n' >"$REPO/src/inc3.ts"
 printf 'backlogFn notes live in the backlog.\n' >"$REPO/backlog/idea.md"
 commit_all
