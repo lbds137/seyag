@@ -85,6 +85,7 @@ FAIL  b (exit 3)
       bad
 PASS  c
 FAIL  d (exit 137)
+      (SIGTERM/SIGKILL after the 600s per-probe ceiling — usually the timeout, but an external cancel looks the same; the probe'\''s own output follows)
 PASS  e
 ---
 3 passed, 2 failed (of 5)'

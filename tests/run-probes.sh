@@ -57,6 +57,25 @@ if [ ${#PROBES[@]} -eq 0 ]; then
   exit 1
 fi
 
+# Default ceiling: generous multiple (>=5x) of the slowest probe re-measured under parallel CI conditions, floor honored.
+DEFAULT_PROBE_TIMEOUT=600
+if [ -z "${SYG_PROBE_TIMEOUT+x}" ]; then
+  PT=$DEFAULT_PROBE_TIMEOUT
+elif [[ "$SYG_PROBE_TIMEOUT" =~ ^[0-9]+$ ]] && [ "$((10#$SYG_PROBE_TIMEOUT))" -gt 0 ]; then
+  PT=$((10#$SYG_PROBE_TIMEOUT))
+else
+  echo "run-probes: invalid SYG_PROBE_TIMEOUT='${SYG_PROBE_TIMEOUT}' (must be a positive integer); falling back to default ${DEFAULT_PROBE_TIMEOUT}s" >&2
+  PT=$DEFAULT_PROBE_TIMEOUT
+fi
+
+TO=()
+if command -v timeout >/dev/null 2>&1; then
+  TO=(timeout -k 5 "$PT")
+  echo "run-probes: probe timeout: ${PT}s per probe (SYG_PROBE_TIMEOUT or default)" >&2
+else
+  echo "run-probes: no timeout binary on PATH; probes run without a per-probe limit" >&2
+fi
+
 TMP=$(mktemp -d) || exit 1
 # PID -> probe index of jobs still running; a finished job leaves this set at
 # once, so the trap never signals a PID the system may already have reused.
@@ -89,6 +108,9 @@ flush_ready() {
     else
       out=$(<"$TMP/$next.out")
       echo "FAIL  $name (exit $rc)"
+      if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
+        echo "      (SIGTERM/SIGKILL after the ${PT}s per-probe ceiling — usually the timeout, but an external cancel looks the same; the probe's own output follows)"
+      fi
       printf '%s\n' "$out" | sed 's/^/      /'
       failed+=("$name")
     fi
@@ -123,7 +145,7 @@ for i in "${!PROBES[@]}"; do
     set -m
     got_sig=""
     trap 'got_sig=1' TERM INT
-    bash "$p" </dev/null >"$TMP/$i.out" 2>&1 &
+    "${TO[@]+"${TO[@]}"}" bash "$p" </dev/null >"$TMP/$i.out" 2>&1 &
     child=$!
     trap 'kill -TERM -- "-$child" 2>/dev/null || true; wait "$child" 2>/dev/null || true; exit 143' TERM INT
     if [ -n "$got_sig" ]; then
