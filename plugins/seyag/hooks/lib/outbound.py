@@ -37,10 +37,10 @@ feeds the synthetic `gh` argv through the same `gh_text_exempt`,
 `file_values_gh` and `repo_create_push_dir` path as a literal `gh` command
 (when intervening words sit between the wrapper tokens and a colon-form match,
 `gh_text_exempt` is skipped and the command text is always scanned). A
-single-token wrapper that names a common script runner (e.g. `pnpm`) makes
+single-token wrapper that names a common script runner (e.g. `myops`) makes
 plain `run`/`release` invocations scan as gh writes — configure the full prefix
-(e.g. `pnpm ops`). Wrapper flags sitting before an anchored plain-form
-operation are not scanned.
+(e.g. `myops ci`). Wrapper flags sitting before an anchored plain-form
+operation leave the whole command unscanned (the colon form does scan past them, fail closed).
 
 THE ADDED LAYER: git-hooks/pre-push scans what a push sends from a public
 repo (message, identities, paths, added lines, tags, notes), however bash

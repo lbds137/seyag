@@ -568,6 +568,12 @@ run 2 "gh wrapper colon single-split: gh:repo-set-default scans text" "$WORK" SY
   "myops ci gh:repo-set-default o/r # ${LINK}"
 run 2 "gh wrapper basename match on argv[0]" "$WORK" SYG_GH_WRAPPERS="myops ci" -- \
   "/usr/local/bin/myops ci pr edit --body-file $TMP/files/leaky.txt"
+run 2 "gh wrapper basename match on configured token" "$WORK" SYG_GH_WRAPPERS="./bin/myops ci" -- \
+  "myops ci pr edit --body-file $TMP/files/leaky.txt"
+assert_out "path-qualified wrapper write names the body file" present "file $TMP/files/leaky.txt"
+assert_out "path-qualified wrapper write masks the session id" absent "$ID"
+run 0 "gh wrapper flag before anchored plain-form operation leaves command unscanned" "$WORK" SYG_GH_WRAPPERS=myops -- \
+  "myops --verbose pr edit --body-file $TMP/files/leaky.txt"
 
 if [ "$FAILURES" -ne 0 ]; then
   printf '\n%d probe case(s) FAILED\n' "$FAILURES"

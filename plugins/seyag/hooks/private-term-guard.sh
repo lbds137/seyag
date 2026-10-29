@@ -138,6 +138,7 @@ CMD=$(jq -r '.tool_input.command // empty' <<<"$INPUT" 2>/dev/null || echo "")
 [ -n "$CMD" ] || exit 0
 
 read -r GH_WRAPPER_FIRST _ <<<"${SYG_GH_WRAPPERS:-}"
+GH_WRAPPER_FIRST=${GH_WRAPPER_FIRST##*/}
 if [[ "$CMD" =~ (^|[^[:alnum:]_.-])gh([^[:alnum:]_-]|$) ]]; then
   :
 elif [ -n "$GH_WRAPPER_FIRST" ] \
