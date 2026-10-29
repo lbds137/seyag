@@ -4,8 +4,10 @@
 text, 4 answered (glm-5.3, kimi-k3, deepseek-v4-pro before the owner pass;
 qwen3.8-max-0902 after it — incremental fold below). Owner: skill-eval ruled
 OBSOLETE and the design CONFIRMED ALL (ask answered directly, and relayed
-independently through the owner's management session) — sign-off on both rulings,
-no open calls remaining.
+independently through the owner's management session) — sign-off on both rulings.
+Scope of that sign-off: the design as presented through the pre-qwen fold; the
+post-pass qwen refinements below (including one declined dissent, recorded in
+§ Council record) are engineering-level folds that did not go back to the owner.
 Extends the measure-first item of the Tzurot port queue (owner-approved audit,
 2026-10-18); dispositions for two sibling items (hook-probes parity, skill-eval)
 land here. Implementation follows § Phasing; this PR carries the artifact only.
@@ -43,7 +45,7 @@ artifact carries what the design needs.
   bytes (one file in the glob); repo `CLAUDE.md` 23 / 4,666, with no `@`-imports;
   18 `SKILL.md` files, 2,011 lines / 190,372 bytes total, every one with a
   single-line `description:` frontmatter — plain unquoted scalars (backlog-md,
-  going-public) and single-quoted scalars across the other fifteen; bodies
+  going-public) and single-quoted scalars across the other sixteen; bodies
   lazy-loaded. One agent (`agents/implementer.md`, also a plain scalar) whose
   frontmatter description is likewise natively listed.
 
@@ -56,8 +58,11 @@ skip it. Registry parity (every hook probed and wired, every bin probed) is alre
 enforced by `tests/hook-wiring.probe.sh`, which leaves Tzurot's `guard:hook-probes`
 with one residue: no per-probe timeout — a hung probe stalls the whole suite, and
 `probes.yml` sets no explicit `timeout-minutes` (the GitHub default job ceiling is
-the only backstop). No size or baseline tooling exists. The always-loaded context is
-paid on every session (plugin rules + skill/agent descriptions machine-wide; repo
+the only backstop). Baseline tooling does not exist. Size measurement does: `plugins/seyag/bin/context-audit`
+(Python, 291L) — `weigh` is the doc-audit skill's advisory, machine-wide audit (its
+skill-description figure counts whole frontmatter blocks); its fence-aware `@`-import
+scan (`IMPORT_RE`) and frontmatter parsing are the prior art this design reuses (D1).
+The always-loaded context is paid on every session (plugin rules + skill/agent descriptions machine-wide; repo
 CLAUDE.md per-repo) and grows through the cheapest commit path (prose edits), with
 nothing structural pushing back.
 
@@ -104,23 +109,40 @@ release note touching rules loading or skill listing.
 `plugins/seyag/bin/lines-check` (bash; `jq` required, fail-loud if absent — the
 house pattern `run.sh` uses): `--check` (default; exit non-zero on any failure),
 `update-baseline [--surface S] [--dry-run]`, `--breakdown`, `--baseline PATH`,
-`--root DIR` (canaries/tests). Exit-code contract: 0 pass, 1 check failed,
-2 usage/environment, 3 baseline/schema/config error — prose never carries the
-verdict alone. `tests/lines-check.probe.sh`: the live repo passes `--check`; a
+`--root DIR` (canaries/tests). Exit-code contract: 0 pass, 1 check failed (over
+budget, hollow, measurement-refused, import found, nested dir, fixture leak),
+2 usage/environment, 3 baseline/schema/config error (missing, invalid, or
+canonical-set-inconsistent baseline) — prose never carries the verdict alone, and
+each canary below pins its code. `tests/lines-check.probe.sh`: the live repo passes `--check`; a
 canary fixture tree (fake repo root with its own baseline) asserts exact failure
 shapes via stable tokens and exit codes; positive-control mutants built in fixture
 copies only (the hook-wiring pattern — never the live tree). README row per house
 convention; hook-wiring's bin-probe rule satisfied by the probe (components.tsv is
 hooks-only — bins are covered by the bin-probe rule, no registration needed).
 
+**Measurement core (reused, per review round 2)**: measurement lives in
+`context-audit`, which gains a repo-scoped `measure` verb emitting JSON — the three
+surface numbers with D2's decoded-description byte model, per-file breakdown rows,
+and the instructions total (D8's tripwire sum). `lines-check` is the bash policy
+gate over that JSON (`jq` required; fail-loud if `python3`/`context-audit` are
+absent — both already shipped, `context-audit` itself being a Python bin). One
+extractor, no YAML scalar decoding re-implemented in bash (the riskiest part of D2
+per the round-2 review); the advisory `weigh` and the repo gate keep separate
+outputs, and the description byte model canonical for the GATE is the decoded
+value, while weigh's whole-frontmatter figure remains the audit's own advisory
+view — each README row states which it reports. The baseline meta's impl version
+bumps when the `measure` output contract changes.
+
 **Canary/mutant set (each pins one failure mode):**
 
-1. over-budget surface → fail naming surface + dimension (both breach shapes:
-   lines-only-over and bytes-only-over);
-2. hollow measurement (glob matches zero files) → fail, never pass at 0;
-3. missing baseline file → fail with the refresh instruction (hard, never ungated);
-4. baseline missing a canonical surface → fail (union iteration); a baseline-only
-   stray entry fails too (the evaluator's "not measured by this tool" class);
+1. over-budget surface → fail (exit 1) naming surface + dimension (both breach
+   shapes: lines-only-over and bytes-only-over);
+2. hollow measurement (glob matches zero files) → fail (exit 1), never pass at 0;
+3. missing baseline file → fail (exit 3) with the refresh instruction (hard,
+   never ungated);
+4. baseline missing a canonical surface → fail (exit 3, union iteration); a
+   baseline-only stray entry fails too (exit 3, the evaluator's "not measured by
+   this tool" class);
 5. **grace inflation** (baseline diff raising grace without content growth) →
    passes `--check` BY DESIGN, and the test pins that the delta is what the
    reviewer sees — the threat model in the README row says it plainly: the
@@ -128,17 +150,20 @@ hooks-only — bins are covered by the bin-probe rule, no registration needed).
    diff in review, and the reviewer is that gate;
 6. description extraction totality (D2): a folded multi-line description, a
    missing `description:` key, and malformed frontmatter each fail as
-   measurement-refused, never partial-measure — with positive cases for every
-   accepted form, so plain unquoted and single-quoted single-line scalars both
-   measure correctly (three live files are plain scalars; a quoted-only extractor
-   would refuse the live repo);
-7. an `@`-import inside a measured file → fail (bytes must not migrate off the
-   measured set; no `@`-imports exist in measured files today [V]);
-8. a subdirectory under a measured glob → fail loud (forces the recursion-premise
-   re-check instead of silently ignoring nested files);
+   measurement-refused (exit 1), never partial-measure — with positive cases for
+   every accepted form, so plain unquoted and single-quoted single-line scalars
+   both measure correctly (three live files are plain scalars; a quoted-only
+   extractor would refuse the live repo);
+7. an `@`-import inside a measured file → fail (exit 1; bytes must not migrate
+   off the measured set). Detection is the shared import scan — fence- and
+   backtick-aware, `context-audit`'s `IMPORT_RE` semantics — so an inline
+   backtick token like `` `pkg@somehost` `` does not match; no imports exist in
+   measured files today [V];
+8. a subdirectory under a measured glob → fail loud (exit 1; forces the
+   recursion-premise re-check instead of silently ignoring nested files);
 9. fixture isolation: no path under `tests/` (fixtures, canaries) ever enters a
-   live measurement — the live globs are scoped to production plugin paths by
-   construction, and this canary proves it;
+   live measurement (exit 1 if one does) — the live globs are scoped to
+   production plugin paths by construction, and this canary proves it;
 10. invalid baseline → schema error (exit 3), with atomic writes on the refresh
     path (temp file → validate → rename; a failed refresh never leaves a partial
     baseline).
@@ -171,7 +196,7 @@ Tzurot-continuity naming wins.
   and single-line double-quoted scalars — each measured to its decoded value;
   anything else (folded or block scalars, missing keys, malformed frontmatter) is
   measurement-refused. The live set today: plain scalars (backlog-md, going-public,
-  the agent) and single-quoted scalars (the other fifteen skills). The description
+  the agent) and single-quoted scalars (the other sixteen skills). The description
   is the dominant *variable* part of what the harness natively lists per
   skill/agent — a proxy for that listing, not a claim of completeness.
 
@@ -211,10 +236,13 @@ adds/verifies a `.gitattributes` eol pin for measured paths so EOL churn cannot
 move the number. README limitation line (council): *bytes is a proxy for tokens;
 divergence (e.g. CJK-heavy prose) is a known limitation, not a bug* — the two
 dimensions are chosen to diverge on each other's blind spots (line-joining
-inflates bytes, line-splitting inflates lines). Lines are wc-compatible (a final
-unterminated line counts as one); both dimensions gate, and if line semantics
-ever prove unstable across contributors, lines demote to display-only — bytes
-carries the gate alone.
+inflates bytes, line-splitting inflates lines). Lines count newline-terminated
+lines, plus a final unterminated line — Tzurot's countLines arithmetic, chosen so
+a file missing its trailing newline does not silently drop its last line from the
+count; it is not strict `wc -l`, which counts newlines only, and the design
+drops that label). Both
+dimensions gate, and if line semantics ever prove unstable across contributors,
+lines demote to display-only — bytes carries the gate alone.
 
 ### D4 — Baseline mechanics from Tzurot, plus the panel's closes
 
@@ -364,13 +392,21 @@ mechanism.
 
 Tzurot adds a fixed 147k-char (UTF-16) ceiling over CLAUDE.md + rules because
 per-surface baselines can each be fine while the sum blows past the harness's own
-warning total. Seyag's tracked instructions measure ~26 KB — 17% of that mirror —
-and the sum is already ratcheted per-surface; the ceiling would be inert for
+warning total. Seyag's rules + repo CLAUDE.md measure ~26 KB — 17% of that
+mirror (the full always-paid sum the tripwire watches, descriptions included, is
+larger) — and the sum is already ratcheted per-surface; the ceiling would be
+inert for
 years at current sizes, and its hedge (it mirrors observed harness behavior, not
 a documented contract) would need re-verification at the only time it could bind.
 
-**Tripwire (council):** `--check` always prints the tracked-instructions total
-and emits a non-gating WARN at ≥60 KB — the promote trigger observes itself.
+**Tripwire (council; scope and unit pinned per review round 2):** `--check`
+always prints the tracked-instructions total — the FULL always-paid set (rules +
+claude-md + descriptions), the same quantity the promoted ceiling would gate,
+not the rules+claude-md subset — and emits a non-gating WARN at ≥60,000 UTF-16
+code units. The v1 figure is computed by the Python measurement core as decoded
+code points (astral characters count one where UTF-16 counts two — labeled an
+approximation in the output); at promotion the ceiling switches to exact UTF-16
+code units, matching what the harness sums.
 *Promote-when*: the WARN fires in practice, or an adopter reports harness
 memory-file warnings. At promotion (council, qwen's scope correction adopted):
 the ceiling sums ALL always-paid surfaces (rules + claude-md + descriptions),
