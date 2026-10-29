@@ -1,6 +1,6 @@
 #!/bin/bash
 # Fixture check for plugins/seyag/bin/worktree-transfer — run after ANY
-# edit to the script. 23 cases assert the fixed check order, refusal shapes,
+# edit to the script. 26 cases assert the fixed check order, refusal shapes,
 # branch-regex gating, and byte-identical staged transfer over hermetic
 # throwaway git repos under $(mktemp -d):
 #   1. cwd inside the linked worktree -> STOP: main-tree-identity
@@ -32,6 +32,12 @@
 #  22. worktree cut from an older commit than main HEAD -> STOP: no-unpushed-base
 #      naming the differing HEADs (behind is as wrong as ahead)
 #  23. a locked worktree -> transfer still succeeds (unlock then remove --force)
+#  24. status.showUntrackedFiles=no in the fixture repo -> an untracked file in
+#      the main tree still refuses STOP: main-tree-clean
+#  25. a worker that committed everything and left a clean tree -> STOP:
+#      no-unpushed-base (the HEAD diagnosis fires before the empty-patch check)
+#  26. a gitignored non-build file in the worktree -> transfer succeeds and the
+#      output lists the file as deleted-with-the-tree
 #
 # Stated non-goal: the two removal-failure wordings (`git worktree remove --force`
 # vs `git branch -D` in check 10) are not constructible without root tricks; the
@@ -375,7 +381,7 @@ c16_fail=0
 c16_reason=""
 if [ "$rc" -ne 0 ]; then
   c16_fail=1; c16_reason="rc=$rc out=$out"
-elif ! grep -qF 'checks passed: main-tree-identity, main-tree-clean, worktree-registered, base-unchanged (skipped: no --base), empty-patch, nothing-outside-patch, no-unpushed-base, apply, byte-identical, removal' <<<"$out"; then
+elif ! grep -qF 'checks passed: main-tree-identity, main-tree-clean, worktree-registered, base-unchanged (skipped: no --base), no-unpushed-base, empty-patch, nothing-outside-patch, apply, byte-identical, removal' <<<"$out"; then
   c16_fail=1; c16_reason="missing checks passed line in: $out"
 elif ! grep -qxF 'worktree removed' <<<"$out"; then
   c16_fail=1; c16_reason="missing 'worktree removed' in: $out"
@@ -514,6 +520,55 @@ if [ "$rc" -eq 0 ] \
   record_case 0 "case 23: locked worktree unlocks and transfers"
 else
   record_case 1 "case 23: locked worktree" "rc=$rc out=$out"
+fi
+
+# Case 24: status.showUntrackedFiles=no in the fixture repo -> an untracked
+# file in the main tree STILL refuses STOP: main-tree-clean.
+mk_fixture r24
+R24="$T/r24"
+git -C "$R24" config status.showUntrackedFiles no >/dev/null 2>&1
+printf 'hidden untracked content\n' >"$R24/stray-hidden.txt"
+err=$(cd "$R24" && bash "$TOOL" .wt 2>&1 >/dev/null)
+rc=$?
+if [ "$rc" -eq 1 ] && [[ $err == "STOP: main-tree-clean:"* ]]; then
+  record_case 0 "case 24: status.showUntrackedFiles=no does not hide an untracked main-tree file"
+else
+  record_case 1 "case 24: untracked-hidden config" "rc=$rc err=$err"
+fi
+
+# Case 25: A worker that committed everything and left a clean tree -> STOP:
+# no-unpushed-base (the HEAD diagnosis fires BEFORE the empty-patch check).
+mk_fixture r25
+R25="$T/r25"
+printf 'committed change\n' >"$R25/.wt/committed.txt"
+git -C "$R25/.wt" add committed.txt >/dev/null 2>&1
+git -C "$R25/.wt" commit -q --no-verify -m 'worker commit' >/dev/null 2>&1
+err=$(cd "$R25" && bash "$TOOL" .wt 2>&1 >/dev/null)
+rc=$?
+if [ "$rc" -eq 1 ] && [[ $err == "STOP: no-unpushed-base:"* ]] \
+  && [[ $err != *"empty-patch"* ]]; then
+  record_case 0 "case 25: committed-everything worker is diagnosed by HEAD, not by an empty patch"
+else
+  record_case 1 "case 25: committed-everything worker" "rc=$rc err=$err"
+fi
+
+# Case 26: A gitignored NON-build file in the worktree -> transfer succeeds
+# and the output lists the file as deleted with the tree.
+mk_fixture r26
+R26="$T/r26"
+printf 'notes/\n' >>"$R26/.wt/.gitignore"
+mkdir -p "$R26/.wt/notes"
+printf 'worker wanted this\n' >"$R26/.wt/notes/local.md"
+out=$(cd "$R26" && bash "$TOOL" .wt 2>&1)
+rc=$?
+if [ "$rc" -eq 0 ] \
+  && grep -q 'ignored file(s) in the worktree will be deleted' <<<"$out" \
+  && grep -qF 'notes/local.md' <<<"$out" \
+  && grep -q '^branch worktree-agent-t1 deleted$' <<<"$out" \
+  && [ ! -e "$R26/.wt" ]; then
+  record_case 0 "case 26: ignored files are listed on the output before the tree is removed"
+else
+  record_case 1 "case 26: ignored-file listing" "rc=$rc out=$out"
 fi
 
 [ "$fail" -eq 0 ] || exit 1
