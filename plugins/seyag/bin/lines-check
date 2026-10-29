@@ -429,6 +429,11 @@ run_update() {
       echo "lines-check: scoped update-baseline requires an existing baseline at $BASELINE" >&2
       finish 3
     fi
+    base_hash=$(jq -r '.meta.config_hash' "$BASELINE")
+    if [ "$old_impl" != "$IMPL_VERSION" ] || [ "$base_hash" != "$CONFIG_HASH" ]; then
+      echo "lines-check: baseline is drifted (impl_version $old_impl, config $base_hash); a scoped refresh would stamp the new measurement over entries it did not re-measure — run unscoped 'lines-check update-baseline'" >&2
+      finish 3
+    fi
     strays=$(jq -r --argjson c "$(jq '.config.surfaces' <<<"$MEASURE_JSON")" '((.surfaces | keys) - $c) | join(", ")' "$BASELINE")
     if [ -n "$strays" ]; then
       echo "lines-check: stray surface(s) in baseline ($strays); run unscoped 'lines-check update-baseline' to prune" >&2

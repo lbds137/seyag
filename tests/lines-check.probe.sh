@@ -455,6 +455,23 @@ else
   bad "drift check (rc=$rc_dr)" "$out_dr"
 fi
 
+# 16b. Scoped refresh refuses a drifted baseline: stamping the new measurement
+# hash over entries it did not re-measure would bless stale numbers as current.
+make_fixture drift-scoped
+jq '.meta.config_hash = "0000000000000000"' "$TMP/drift-scoped/.github/baselines/lines-baseline.json" \
+  >"$TMP/drift-scoped/b.tmp" && mv "$TMP/drift-scoped/b.tmp" "$TMP/drift-scoped/.github/baselines/lines-baseline.json"
+before_drift=$(cat "$TMP/drift-scoped/.github/baselines/lines-baseline.json")
+out_dsc=$(lc update-baseline --surface rules --root "$TMP/drift-scoped")
+rc_dsc=$?
+after_drift=$(cat "$TMP/drift-scoped/.github/baselines/lines-baseline.json")
+if [ "$rc_dsc" -eq 3 ] \
+  && grep -qF "scoped refresh would stamp the new measurement" <<<"$out_dsc" \
+  && [ "$before_drift" = "$after_drift" ]; then
+  ok "scoped refresh refuses a drifted baseline (exit 3, baseline untouched)"
+else
+  bad "scoped refresh drift refusal (rc=$rc_dsc)" "$out_dsc"
+fi
+
 make_fixture tripwire
 printf '%060500d\n' 0 >"$TMP/tripwire/plugins/seyag/rules/core.md"
 lc update-baseline --root "$TMP/tripwire" >/dev/null
