@@ -74,6 +74,23 @@ else
   bad "hung probe (rc=$rc, elapsed=${elapsed}s): out=[$out] err=[$err]"
 fi
 
+# The point of the group kill: the hung probe's whole tree is dead once the
+# runner returns — pin it, so a regression that left the sleeper running fails.
+spid="$(<"$HUNG_PIDFILE")"
+sleeper_dead=0
+for _ in $(seq 1 40); do
+  if ! kill -0 "$spid" 2>/dev/null || grep -q '^State:[[:space:]]*Z' "/proc/$spid/status" 2>/dev/null; then
+    sleeper_dead=1
+    break
+  fi
+  sleep 0.05
+done
+if [ "$sleeper_dead" -eq 1 ]; then
+  ok "hung probe: the sleeper's process tree (sleep $spid) is dead after the runner returns"
+else
+  bad "hung probe: sleep $spid still alive after the runner returned"
+fi
+
 # Remove the sleeper probe so healthy-suite cases run over the two trivial probes.
 rm -f "$COPY/tests/acme-sleeper.probe.sh"
 
@@ -106,8 +123,8 @@ out_def=$(env -u SYG_PROBE_TIMEOUT bash "$RUNNER" 2>"$TMP/banner-def.err")
 rc_def=$?
 err_def=$(<"$TMP/banner-def.err")
 if [ "$rc_def" -eq 0 ] \
-  && [ "$(grep -cF 'run-probes: probe timeout: 600s per probe (SYG_PROBE_TIMEOUT or default)' <<<"$err_def")" -eq 1 ]; then
-  ok "banner (unset): prints default 600s per probe"
+  && [ "$(grep -cF 'run-probes: probe timeout: 600s per probe (default)' <<<"$err_def")" -eq 1 ]; then
+  ok "banner (unset): prints default 600s per probe, attributed to the default"
 else
   bad "banner (unset, rc=$rc_def): out=[$out_def] err=[$err_def]"
 fi
@@ -116,8 +133,8 @@ out_ovr=$(SYG_PROBE_TIMEOUT=45 bash "$RUNNER" 2>"$TMP/banner-ovr.err")
 rc_ovr=$?
 err_ovr=$(<"$TMP/banner-ovr.err")
 if [ "$rc_ovr" -eq 0 ] \
-  && [ "$(grep -cF 'run-probes: probe timeout: 45s per probe (SYG_PROBE_TIMEOUT or default)' <<<"$err_ovr")" -eq 1 ]; then
-  ok "banner (override): prints SYG_PROBE_TIMEOUT=45s per probe"
+  && [ "$(grep -cF 'run-probes: probe timeout: 45s per probe (SYG_PROBE_TIMEOUT)' <<<"$err_ovr")" -eq 1 ]; then
+  ok "banner (override): prints SYG_PROBE_TIMEOUT=45s per probe, attributed to the override"
 else
   bad "banner (override, rc=$rc_ovr): out=[$out_ovr] err=[$err_ovr]"
 fi
@@ -129,7 +146,7 @@ for bad_val in abc 0 -5; do
   err_v=$(<"$TMP/val-$bad_val.err")
   if [ "$rc_v" -eq 0 ] \
     && grep -qF "run-probes: invalid SYG_PROBE_TIMEOUT='$bad_val' (must be a positive integer); falling back to default 600s" <<<"$err_v" \
-    && grep -qF 'run-probes: probe timeout: 600s per probe (SYG_PROBE_TIMEOUT or default)' <<<"$err_v" \
+    && grep -qF 'run-probes: probe timeout: 600s per probe (default)' <<<"$err_v" \
     && grep -q '^PASS  acme-alpha$' <<<"$out_v" \
     && grep -q '^PASS  acme-beta$' <<<"$out_v" \
     && grep -q '^2 passed, 0 failed (of 2)$' <<<"$out_v"; then
@@ -144,7 +161,7 @@ out_gen=$(SYG_PROBE_TIMEOUT=300 bash "$RUNNER" 2>"$TMP/gen.err")
 rc_gen=$?
 err_gen=$(<"$TMP/gen.err")
 if [ "$rc_gen" -eq 0 ] \
-  && grep -qF 'run-probes: probe timeout: 300s per probe (SYG_PROBE_TIMEOUT or default)' <<<"$err_gen" \
+  && grep -qF 'run-probes: probe timeout: 300s per probe (SYG_PROBE_TIMEOUT)' <<<"$err_gen" \
   && grep -q '^PASS  acme-alpha$' <<<"$out_gen" \
   && grep -q '^PASS  acme-beta$' <<<"$out_gen" \
   && grep -q '^2 passed, 0 failed (of 2)$' <<<"$out_gen"; then
