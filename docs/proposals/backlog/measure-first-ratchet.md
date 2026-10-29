@@ -4,17 +4,18 @@
 text, 4 answered (glm-5.3, kimi-k3, deepseek-v4-pro before the owner pass;
 qwen3.8-max-0902 after it — incremental fold below). Owner: skill-eval ruled
 OBSOLETE and the design CONFIRMED ALL (ask answered directly, and relayed
-independently via Deck) — sign-off on both rulings, no open calls remaining.
-Extends the Tzurot port queue (`tzurot-port-sources.md` item 5, measure-first);
-dispositions for two sibling items (hook-probes parity, skill-eval) land here.
-Implementation follows § Phasing; this PR carries the artifact only.
+independently through the owner's management session) — sign-off on both rulings,
+no open calls remaining.
+Extends the measure-first item of the Tzurot port queue (owner-approved audit,
+2026-10-18); dispositions for two sibling items (hook-probes parity, skill-eval)
+land here. Implementation follows § Phasing; this PR carries the artifact only.
 
 ## Owner directives (verbatim)
 
-- Port picks (Lila, 2026-10-18): "Tzurot port picks … after audit-2: merge-review,
+- Port picks (owner, 2026-10-18): "Tzurot port picks … after audit-2: merge-review,
   branch-commit, design-boulder, PR-monitoring prose, bin worktree-transfer" —
-  measure-first named in the same audit's queue (`tzurot-port-sources.md` §PORT QUEUE
-  item 5: "Seyag equivalents need design (suite probes, not tooling package)").
+  measure-first named in the same audit's queue (item 5: "Seyag equivalents need
+  design (suite probes, not tooling package)").
 - Repo CLAUDE.md, standing: "`plugins/seyag/rules/core.md` is always-loaded in every
   session on the machine … every added line is paid on every turn everywhere. Cut
   before adding."
@@ -24,12 +25,12 @@ Implementation follows § Phasing; this PR carries the artifact only.
 ## Grounding provenance
 
 All facts [V] verified this session (2026-10-28, checkout 4f41a76 / 0.3.108) unless
-noted; full detail with citations: `.claude/dispatch/measure-first-grounding.md`
-(gitignored working material — this artifact carries what the design needs).
+noted; full citations live in session working material outside this repo — this
+artifact carries what the design needs.
 
 - Tzurot sources read whole: `lines-check.WHY.md` (126L), `lines-surfaces.ts` (235L),
   `lines-check.ts` (593L), `lines-ceiling.ts` (108L), `check-hook-probes-registry.ts`
-  (236L), `check-hook-probes.ts` (327L), `~/.claude/hooks/skill-eval.sh` (259L).
+  (236L), `check-hook-probes.ts` (327L), and Tzurot's `skill-eval.sh` hook (259L).
 - Seyag side verified: `tests/hook-wiring.probe.sh` already ships bidirectional
   hooks↔probes↔hooks.json↔components.tsv↔bins parity with written exemptions;
   `.github/workflows/probes.yml` gates every PR event with no path filters and no
@@ -40,10 +41,11 @@ noted; full detail with citations: `.claude/dispatch/measure-first-grounding.md`
 - Measured surfaces (this checkout, moves with every edit — the baseline file is the
   live record going forward): rules `plugins/seyag/rules/core.md` 165 lines / 21,159
   bytes (one file in the glob); repo `CLAUDE.md` 23 / 4,666, with no `@`-imports;
-  18 `SKILL.md` files, 2,011 lines / 190,372 bytes total, all with single-line
-  single-quoted YAML `description:` frontmatter; bodies lazy-loaded. One agent
-  (`agents/implementer.md`) whose frontmatter description is likewise natively
-  listed.
+  18 `SKILL.md` files, 2,011 lines / 190,372 bytes total, every one with a
+  single-line `description:` frontmatter — plain unquoted scalars (backlog-md,
+  going-public) and single-quoted scalars across the other fifteen; bodies
+  lazy-loaded. One agent (`agents/implementer.md`, also a plain scalar) whose
+  frontmatter description is likewise natively listed.
 
 ## System as-is
 
@@ -126,7 +128,10 @@ hooks-only — bins are covered by the bin-probe rule, no registration needed).
    diff in review, and the reviewer is that gate;
 6. description extraction totality (D2): a folded multi-line description, a
    missing `description:` key, and malformed frontmatter each fail as
-   measurement-refused, never partial-measure;
+   measurement-refused, never partial-measure — with positive cases for every
+   accepted form, so plain unquoted and single-quoted single-line scalars both
+   measure correctly (three live files are plain scalars; a quoted-only extractor
+   would refuse the live repo);
 7. an `@`-import inside a measured file → fail (bytes must not migrate off the
    measured set; no `@`-imports exist in measured files today [V]);
 8. a subdirectory under a measured glob → fail loud (forces the recursion-premise
@@ -161,7 +166,14 @@ Tzurot-continuity naming wins.
   file yields exactly one complete single-line description or the surface FAILS
   as measurement-refused — under-extraction must never read as a low number
   (a folded YAML value under a naive extractor is the exact PR this ratchet
-  exists to catch). The extraction handles the `''`→`'` YAML escape.
+  exists to catch). **Accepted forms, named explicitly**: single-line plain
+  unquoted scalars, single-line single-quoted scalars (with the `''`→`'` escape),
+  and single-line double-quoted scalars — each measured to its decoded value;
+  anything else (folded or block scalars, missing keys, malformed frontmatter) is
+  measurement-refused. The live set today: plain scalars (backlog-md, going-public,
+  the agent) and single-quoted scalars (the other fifteen skills). The description
+  is the dominant *variable* part of what the harness natively lists per
+  skill/agent — a proxy for that listing, not a claim of completeness.
 
 **Descriptions byte model** (council addendum, qwen): the measured value is the
 EXTRACTED description string — the decoded YAML scalar's UTF-8 byte length — not
@@ -190,18 +202,19 @@ the migration cost D4 names.
 Tzurot's why transfers verbatim: density varies across the corpus, so a
 line-only ratchet rates dense files "comfortable" while they carry the payload;
 bytes are exact, deterministic, tokenizer-free; a derived token figure is display
-only and never gates. For whole-file surfaces bytes are on-disk size (`wc -c`,
-whitespace-trimmed) of the working-tree file — the artifact the harness actually
-loads; the `descriptions` surface measures its extracted values (D2's byte
-model). The fleet and CI are LF-only; implementation adds/verifies a
-`.gitattributes` eol pin for measured paths so EOL churn cannot move the number.
-README limitation line (council): *bytes is a proxy for tokens; divergence
-(e.g. CJK-heavy prose) is a known limitation, not a bug* — the two dimensions are
-chosen to diverge on each other's blind spots (line-joining inflates bytes,
-line-splitting inflates lines). Lines are wc-compatible (a final unterminated
-line counts as one); both dimensions gate, and if line semantics ever prove
-unstable across contributors, lines demote to display-only — bytes carries the
-gate alone.
+only and never gates. For whole-file surfaces bytes are on-disk size of the
+working-tree file — the artifact the harness actually loads — taken as `wc -c`'s
+byte count with its padded numeric output trimmed; the file content is never
+trimmed or normalized (the `descriptions` surface measures its extracted values
+instead, per D2's byte model). The fleet and CI are LF-only; implementation
+adds/verifies a `.gitattributes` eol pin for measured paths so EOL churn cannot
+move the number. README limitation line (council): *bytes is a proxy for tokens;
+divergence (e.g. CJK-heavy prose) is a known limitation, not a bug* — the two
+dimensions are chosen to diverge on each other's blind spots (line-joining
+inflates bytes, line-splitting inflates lines). Lines are wc-compatible (a final
+unterminated line counts as one); both dimensions gate, and if line semantics
+ever prove unstable across contributors, lines demote to display-only — bytes
+carries the gate alone.
 
 ### D4 — Baseline mechanics from Tzurot, plus the panel's closes
 
@@ -271,7 +284,8 @@ owner ruled OBSOLETE 2026-10-28/29 on both channels):
 
 Re-check triggers (folded from council): the harness stops natively listing
 plugin skills, skill activation measurably regresses, or skills land that the
-harness will not auto-surface. The disposition lands in `tzurot-port-sources.md`.
+harness will not auto-surface. The disposition lands in the machine-side port
+ledger.
 
 ### D6 — Per-probe timeout in `run-probes.sh`: port, with a correct kill model
 
@@ -285,6 +299,17 @@ to temp files (no surviving grandchild can hold a pipe the runner reads). The
 probe contract stays synchronous — a probe that forks background survivors and
 exits 0 is a probe bug, and the process-group kill is the backstop, not a
 license.
+
+**Composition with the existing runner**: `tests/run-probes.sh` already runs
+each probe inside a `set -m` subshell — the probe is its own process-group
+leader — and after exit sweeps the group with TERM, then KILL for survivors,
+with a 143 exit path when the runner itself is signalled. D6's `timeout` wraps
+`bash "$p"` INSIDE that subshell, so its group signaling covers the probe tree;
+the existing post-exit sweep stays in place as the second net (it also reaps
+anything the timeout killed); and a timeout death (124/137) is recorded through
+the runner's existing `.rc` file machinery in `reap_one` exactly like any other
+non-zero exit — never as a silent pass, and distinguishable from the runner's
+own 143 path.
 
 - Default ceiling: a generous multiple (≥5×) of the slowest probe measured under
   parallel conditions, with an absolute floor; the effective value prints in the
@@ -371,7 +396,7 @@ without a tokenizer; the README proxy line (D3) covers the concern.
 | --- | --- | --- |
 | A | `bin/lines-check` + `tests/lines-check.probe.sh` + canary/mutant set (D1) + baseline capture + README row | delegation unit; driver gates; the probe auto-joins CI |
 | B | per-probe timeout in `run-probes.sh` + `probes.yml` `timeout-minutes` + canary (D6) | small, independent; after A |
-| — | skill-eval disposition | `tzurot-port-sources.md` update only; no repo change (done with this landing) |
+| — | skill-eval disposition | machine-side port-ledger update only; no repo change (done with this landing) |
 
 ## § Council record
 
