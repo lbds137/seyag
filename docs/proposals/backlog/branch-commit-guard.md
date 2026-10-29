@@ -380,7 +380,7 @@ strands).
 
 | Slice | Content | Notes |
 | --- | --- | --- |
-| A | `branch_switch.py` + `commit_location.sh` + `branch_switch_test.py` port onto seyag's lib; 205 rows adjudicated per-axis; the scanner parity suite (heredoc-to-shell, `$()`, backticks, here-strings, eval-join) | delegation unit; the tables are the acceptance gate |
+| A | `branch_switch.py` + `commit_location.sh` + `branch_switch_test.py` port onto seyag's lib; 205 rows adjudicated per-axis; the scanner parity suite (heredoc-to-shell, `$()`, backticks, here-strings, eval-join) | delegation unit; the tables are the acceptance gate. SHIPPED 2026-10-29: the ported 205-row table grew to 247 through the review rounds (28 D4 isolation rows replacing the five empty-reading rows; 14 R1 rows for keyword-prefixed movers and redirect-suffixed cds); D4's connector truth is implemented (the walker reads `\|`/`&`/`( )` as isolating, `{ }` as persisting); review F3's predicted gap disproved at runtime (the scanner resolves a command word's quoted content), its marker came off; the test modules moved to `tests/` and the resolver gained its own probe |
 | B | the `commit-branch-guard` hook over the D1 grammar + D10 canary probe + components.tsv/hooks.json wiring + README row + the replay gate (`tests/replay-hook.sh commit-branch-guard --since 7`, the D9 row exported) | delegation unit; joins guards-commit; CLAUDE.md requires the replay before a new hook ships |
 | C | seyag-repo policy row in settings (D9, with the JSON-escaped spelling pinned) + docs | small; driver-side + docs PR |
 
