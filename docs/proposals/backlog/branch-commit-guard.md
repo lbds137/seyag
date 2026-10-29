@@ -44,17 +44,17 @@ session working material; this artifact carries what the design needs.
   marker appears TWICE mid-file, interleaved with the gate; the true partition
   is header half (python 228-414 + bash 724-805) vs gate half (python 416-716
   + bash 807-1201), seamed by the two-line verdict protocol.
-- **TASK-1048 confirmed live** at the scanner layer: the quote-stripper erases
+- **The wrapper/heredoc bypass confirmed live** at the scanner layer: the quote-stripper erases
   `bash -c`-wrapped invocations; unquoted-delimiter heredoc bodies are stripped
   as inert data though bash executes them (and `bash <<'EOF'` executes even
   quoted bodies); `watch`/`su -c`/`ssh` unprobed and mostly evaded.
-- **TASK-1219 confirmed live**: pipe/background/subshell shapes return no dir
+- **The pipe/subshell cwd ambiguity confirmed live**: pipe/background/subshell shapes return no dir
   read → judged on the live checkout even when the commit runs elsewhere.
 - **The seyag shell_quotes port is a diverged superset**: of branch_switch's
   six imports, three behave differently (multi-opener heredoc stripping,
   per-span substitution stripping, five-shell wrapper recognition) — the
   205-row table is the acceptance gate, and the scanner divergence itself
-  needs a parity suite (TASK-1048 lives at that layer, one above
+  needs a parity suite (the wrapper bypass lives at that layer, one above
   branch_switch).
 - **commit_diff.py owns the content half** (staged + same-command adds + `-a` +
   pathspecs, untracked contents, 1 MiB cap, config-pinned diff headers); the
@@ -132,8 +132,9 @@ record separator). Each row:
 
 - `quantifier` — `any` (default spelled out; the row fires when ANY
   would-be-committed file matches) or `all` (fires only when EVERY file in the
-  set matches — the doc-only semantics hook B needs; the empty set matches an
-  `all` row, which is how `--allow-empty` stays judgeable).
+  set matches — the doc-only semantics hook B needs). An `all` row over an
+  EMPTY set does not fire — empty-set judgment belongs to the `-` files-ERE
+  (the `--allow-empty` mechanism; vacuous truth is excluded).
 - `files-ERE` — ERE over the would-be-committed paths, relative to the
   candidate checkout root. A literal `:` inside the ERE is written `[:]`
   (the documented spelling rule; the field parser splits on `:` outside
@@ -184,7 +185,7 @@ compensating-walker-entry requirement, never an accepted "conservative" —
 stripping is the evasion direction for invocation detection. Separately, the
 scanner divergence gets its own **parity suite**: heredoc-to-shell execution
 in both delimiter forms, `$()`/backtick runtime construction, here-strings,
-eval-join — the layer TASK-1048 actually lives at, one above branch_switch.
+eval-join — the layer the wrapper bypass actually lives at, one above branch_switch.
 The three-line script contract, the 32-location cap (over-cap → ambiguous),
 and the single canonical trusted-config statement are preserved. Genericized
 on arrival: no Tzurot tracker IDs in the test table.
@@ -201,9 +202,12 @@ growth, decided**: `watch`, `su` (non-login forms are cwd/env-preserving;
 `su -`/`-l`/`--login` reset cwd and scrub env → the location resolves to
 ambiguous), `sudo`, `doas`, `timeout`, `flock` join as local
 cwd-preserving runners; the INTERIORS of any wrapped command are always
-scanned (the TASK-1048 closure is the interiors machinery, not the table —
-the table governs cwd/env context for the WHERE walk). Unknown runners
-default to cwd-preserving-and-interiors-scanned, stated in the guard.
+scanned (the wrapper-bypass closure is the interiors machinery, not the table —
+the table governs cwd/env context for the WHERE walk). The operational rule
+is content-based, not runner-based: any argv whose token stream contains a
+`git … commit` sequence is scanned whatever argv[0] is — an unrecognized
+runner cannot hide a commit (it can at most mis-resolve WHERE, which is the
+ambiguity path); the table only decides cwd/env context.
 **ssh**: `localhost`/`127.0.0.1` targets are local and judged normally; any
 other target carrying an inner commit is AMBIGUOUS (block rows block, warn
 rows advise) — a 5-second local bypass via `ssh localhost` does not exist.
@@ -214,7 +218,7 @@ aliases are a documented hole with a canary.
 ReDoS-shaped regex, and a pattern-string slice contract; seyag's argv walk is
 already probe-pinned by three guards.
 
-### D4 — TASK-1219: the walk knows each connector's truth; ambiguity is per-policy
+### D4 — Pipe/subshell cwd ambiguity: the walk knows each connector's truth; ambiguity is per-policy
 
 The two-set walk implements the connector semantics bash actually has:
 cwd/branch state persists across `&&`, `||`, `;` and inside `{ }`; `|`,
@@ -228,7 +232,7 @@ the walker) → the location set is AMBIGUOUS: `block` rows block with the
 remedy (`git -C <abs> commit`, or the cd as its own call; compound commands
 are told to split); `warn` rows advise. A commit word inside a substitution
 argument (`out=$(git commit …)`) is a runtime-executed command and is judged,
-not stripped past (canary-pinned — the TASK-1219 family's substitution rows).
+not stripped past (canary-pinned — the pipe/subshell family's substitution rows).
 
 *Rejected — naive location spreading across all connectors*: over-spread
 locations produce false ambiguity, and ambiguity-fatigue trains users into
@@ -243,7 +247,11 @@ TRACKED files only (an untracked file must not enter the set under `-a`);
 paths, the rest of the index excluded) while `--include` is additive; and
 `--pathspec-from-file`/`--amend` resolve explicitly (`--amend` judges the
 amended commit's own branch — same destination rule). Empty set: only rows
-whose files-ERE is `-` match (so `--allow-empty` is policy data). Paths are
+whose files-ERE is `-` match (so `--allow-empty` is policy data). An
+AMBIGUOUS file set (an unresolvable add source — the content-side of D4's
+relocation ambiguity) evaluates as the wide fallback: `any` rows fire on it,
+`all` rows are satisfied, and the row action follows — the conservative
+direction. Paths are
 relative to the candidate checkout root — content is computed AT the candidate
 location when the walk resolves one (a gated file that exists only in the
 sibling reached via `-C` must block). The >1 MiB untracked cap falls back WIDE
@@ -258,10 +266,11 @@ Tzurot's stack frozen into seyag; rows are data.
 Per-command bypass `SYG_ALLOW_COMMIT_BRANCH=1` as an assignment in the
 commit's own prefix (walker `bypass_assignment` semantics; `=0`/empty do not
 waive; a token in prose/quotes/heredoc bodies is not a bypass; POLICY and
-SYG_DISABLE are never honored from command text). Every bypass use prints one
-durable stderr audit line (the session transcript carries it) — the bypass is
-self-authorizing by design and is honest as visible friction + audit, not as
-a security boundary. Component toggle `guards-commit`; `SYG_DISABLE`; the
+SYG_DISABLE are never honored from command text). Every bypass use appends a
+line to an audit file under the state dir (`SYG_STATE_DIR` convention,
+append-only) in addition to stderr — the durable trail is the FILE, not
+exit-0 stderr, whose session persistence is not assumed; a canary asserts the
+append. Component toggle `guards-commit`; `SYG_DISABLE`; the
 project-local hook override. Chained commands are judged per commit
 invocation by the argv walk.
 
@@ -291,12 +300,16 @@ matcher — the clarified sentence).
 
 ### D9 — The seyag-repo policy: one row, honestly labeled (owner call — O1)
 
-`main-gate:any:\.(sh|py|md|json|yml)$|^\.claude/|^\.github/:^main$:block` —
-"no seyag-stack commits while on main." It mechanizes the commit-act half of
+`main-gate:any:\.(sh|py|md|json|yml|tsv|txt|yaml)$|^\.claude/|^\.github/:^main$:block` —
+"no seyag-stack commits while on main." (The set includes `.tsv`/`.txt`/`.yaml`
+— components.tsv and the coupling allowlist are seyag-stack by any definition.)
+It mechanizes the commit-act half of
 the standing rule; the push half stays with the ruleset ref restriction, the
 bypass is friction + audit, and non-stack content (Dockerfile, LICENSE,
 no-extension files, `--allow-empty`) is out of the row's scope by data. Ships
-in this repo's settings, not as a plugin default. No docs-on-unit-branch row
+in this repo's settings, not as a plugin default; in the settings JSON each
+backslash doubles (`\\.sh` decodes to the `\.sh` D1 validates) — Slice C pins
+the literal JSON value. No docs-on-unit-branch row
 without an observed failure mode (unit branches are pushed and PR'd; nothing
 strands).
 
@@ -310,12 +323,12 @@ strands).
    create/switch flags), bare commit on the live branch, `git -C elsewhere
    commit`, `cd elsewhere && git commit`; branch-nomatch (`!`) rows firing
    outside the allowed set.
-3. Ambiguity + TASK-1219: `cd -`/`popd`/`~user` → exit 2 with remedy;
+3. Ambiguity + pipe/subshell cwd: `cd -`/`popd`/`~user` → exit 2 with remedy;
    multi-checkout → same; pipeline/background/subshell/group cwd truths each
    pinned (`cd /x | git commit` judges the LIVE dir; `{ cd /x; git commit; }`
    judges /x); `out=$(git commit …)` judged; branch-mutating unknown
    (`symbolic-ref`, `--orphan`) → ambiguous, never unchanged.
-4. TASK-1048: `bash -c 'git commit …'` → blocked; `watch -n1 '…'` → blocked;
+4. Wrapper/heredoc bypass: `bash -c 'git commit …'` → blocked; `watch -n1 '…'` → blocked;
    `su -c '…'` → blocked; `su -l '…'` → ambiguous; unquoted-heredoc body
    carrying a commit → row action, never silent pass; quoted-heredoc-to-shell
    (`bash <<'EOF'`) → judged; other-host ssh with an inner commit → ambiguous;
@@ -327,8 +340,11 @@ strands).
    → the un-bypassed commit still judged; every bypass prints the audit line.
 7. Content sources: `git add` + pathspec; `commit -a` tracked-only (untracked
    `.sh` + `-am` → no untracked in set); `<paths>` = `--only`; `--include`
-   additive; `--pathspec-from-file` → ambiguous; `--amend` same-branch;
-   wide-fallback blocks for block rows.
+   additive; `--pathspec-from-file` → ambiguous file set (evaluated as the
+   wide fallback: `any` rows fire, `all` rows satisfied — the conservative
+   direction); `--amend` same-branch; wide-fallback blocks for block rows;
+   an `all` row over `--allow-empty` does not fire and a `-` row does (the
+   empty-set rule, pinned once).
 8. Config: empty policy inert; INVALID rows → exit 2 with the row named
    (refuse-secure); `[:]` spelling accepted; name collision and control-char
    names refused; `warn` rows deliver `additionalContext` (asserted, not
@@ -353,8 +369,8 @@ strands).
 | Slice | Content | Notes |
 | --- | --- | --- |
 | A | `branch_switch.py` + `commit_location.sh` + `branch_switch_test.py` port onto seyag's lib; 205 rows adjudicated per-axis; the scanner parity suite (heredoc-to-shell, `$()`, backticks, here-strings, eval-join) | delegation unit; the tables are the acceptance gate |
-| B | the `commit-branch-guard` hook over the D1 grammar + D10 canary probe + components.tsv/hooks.json wiring + README row | delegation unit; joins guards-commit |
-| C | seyag-repo policy row in settings (D9) + replay gate (`tests/replay-hook.sh commit-branch-guard --since 7`) + docs | small; driver-side + docs PR |
+| B | the `commit-branch-guard` hook over the D1 grammar + D10 canary probe + components.tsv/hooks.json wiring + README row + the replay gate (`tests/replay-hook.sh commit-branch-guard --since 7`, the D9 row exported) | delegation unit; joins guards-commit; CLAUDE.md requires the replay before a new hook ships |
+| C | seyag-repo policy row in settings (D9, with the JSON-escaped spelling pinned) + docs | small; driver-side + docs PR |
 
 ## § Council record
 
@@ -377,7 +393,7 @@ gate.
   the draft's ∃ semantics hook B was an approximation marketed as a port.
 - **Stripping adjudication split (glm + kimi)**: FP-axis flips accept;
   FN-axis flips (executing spans erased) require compensating entries; the
-  scanner-layer parity suite added — TASK-1048 lives one layer above
+  scanner-layer parity suite added — the wrapper bypass lives one layer above
   branch_switch (kimi: "the 851L→2932L scanner divergence gets no parity
   suite" was the draft's gap).
 - **Relocation axis (glm + kimi + deepseek)**: GIT_DIR/GIT_WORK_TREE/
