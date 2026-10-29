@@ -1,0 +1,614 @@
+#!/bin/bash
+# Policy gate over `context-audit measure` JSON: gates always-loaded context
+# surfaces (rules, claude-md, descriptions) on both lines and bytes against a
+# checked-in JSON baseline (.github/baselines/lines-baseline.json by default).
+#
+# Usage:
+#   lines-check [--check] [--breakdown] [--baseline PATH] [--root DIR]
+#   lines-check update-baseline [--surface S] [--dry-run] [--breakdown] [--baseline PATH] [--root DIR]
+#
+# Exit codes:
+#   0  pass / baseline updated
+#   1  check failed (over budget, hollow, measurement-refused, @-import, nested dir, fixture leak, irregular file)
+#   2  usage or environment error (missing jq/python3, invalid flags)
+#   3  baseline/schema/config error (missing, invalid, drifted, or canonical-set-inconsistent baseline)
+
+set -uo pipefail
+
+IMPL_VERSION="${LINES_CHECK_IMPL_VERSION:-1}"
+WARN_INSTRUCTIONS_TOTAL=60000
+DEFAULT_NOTES="Absolute grace margins: rules absorbs one new rule section, claude-md a process paragraph, descriptions one new skill or a rewording pass. Tightening is free; loosening is review-gated."
+
+usage() {
+  cat <<'EOF'
+Usage:
+  lines-check [--check] [--breakdown] [--baseline PATH] [--root DIR]
+  lines-check update-baseline [--surface S] [--dry-run] [--breakdown] [--baseline PATH] [--root DIR]
+EOF
+}
+
+MODE=""
+TARGET_SURFACE=""
+DRY_RUN=0
+BREAKDOWN=0
+BASELINE=""
+ROOT=""
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h | --help)
+      usage
+      exit 0
+      ;;
+    --check)
+      if [ "$MODE" = "update" ]; then
+        echo "lines-check: cannot combine --check and update-baseline" >&2
+        exit 2
+      fi
+      MODE="check"
+      shift
+      ;;
+    update-baseline | --update-baseline)
+      if [ "$MODE" = "check" ]; then
+        echo "lines-check: cannot combine --check and update-baseline" >&2
+        exit 2
+      fi
+      MODE="update"
+      shift
+      ;;
+    --surface)
+      if [ $# -lt 2 ] || [ -z "$2" ]; then
+        echo "lines-check: --surface requires a surface name" >&2
+        exit 2
+      fi
+      TARGET_SURFACE="$2"
+      shift 2
+      ;;
+    --surface=*)
+      TARGET_SURFACE="${1#--surface=}"
+      if [ -z "$TARGET_SURFACE" ]; then
+        echo "lines-check: --surface requires a surface name" >&2
+        exit 2
+      fi
+      shift
+      ;;
+    --dry-run)
+      DRY_RUN=1
+      shift
+      ;;
+    --breakdown)
+      BREAKDOWN=1
+      shift
+      ;;
+    --baseline)
+      if [ $# -lt 2 ] || [ -z "$2" ]; then
+        echo "lines-check: --baseline requires a file path" >&2
+        exit 2
+      fi
+      BASELINE="$2"
+      shift 2
+      ;;
+    --baseline=*)
+      BASELINE="${1#--baseline=}"
+      if [ -z "$BASELINE" ]; then
+        echo "lines-check: --baseline requires a file path" >&2
+        exit 2
+      fi
+      shift
+      ;;
+    --root)
+      if [ $# -lt 2 ] || [ -z "$2" ]; then
+        echo "lines-check: --root requires a directory path" >&2
+        exit 2
+      fi
+      ROOT="$2"
+      shift 2
+      ;;
+    --root=*)
+      ROOT="${1#--root=}"
+      if [ -z "$ROOT" ]; then
+        echo "lines-check: --root requires a directory path" >&2
+        exit 2
+      fi
+      shift
+      ;;
+    *)
+      echo "lines-check: unknown argument: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+[ -n "$MODE" ] || MODE="check"
+
+if [ "$MODE" != "update" ]; then
+  if [ -n "$TARGET_SURFACE" ] || [ "$DRY_RUN" -eq 1 ]; then
+    echo "lines-check: --surface and --dry-run require update-baseline" >&2
+    exit 2
+  fi
+fi
+
+if ! command -v jq >/dev/null 2>&1; then
+  echo "lines-check: jq is required on PATH" >&2
+  exit 2
+fi
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "lines-check: python3 is required on PATH" >&2
+  exit 2
+fi
+
+if ! [[ "$IMPL_VERSION" =~ ^[1-9][0-9]*$ ]]; then
+  echo "lines-check: invalid IMPL_VERSION: $IMPL_VERSION" >&2
+  exit 2
+fi
+
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+if [ -z "$ROOT" ]; then
+  ROOT=$(cd "$SCRIPT_DIR/../../.." && pwd)
+fi
+if [ ! -d "$ROOT" ]; then
+  echo "lines-check: --root directory does not exist: $ROOT" >&2
+  exit 2
+fi
+ROOT=$(cd "$ROOT" && pwd)
+
+if [ -z "$BASELINE" ]; then
+  BASELINE="$ROOT/.github/baselines/lines-baseline.json"
+fi
+
+CA="${LINES_CHECK_CONTEXT_AUDIT:-$SCRIPT_DIR/context-audit}"
+if [ ! -f "$CA" ]; then
+  echo "lines-check: context-audit not found at $CA" >&2
+  exit 2
+fi
+
+if ! MEASURE_JSON=$(python3 "$CA" measure --root "$ROOT"); then
+  echo "lines-check: context-audit measure failed" >&2
+  exit 2
+fi
+if [ -z "$MEASURE_JSON" ]; then
+  echo "lines-check: empty output from context-audit measure" >&2
+  exit 2
+fi
+
+if ! CONFIG_JSON=$(jq -cS '.config' <<<"$MEASURE_JSON" 2>/dev/null); then
+  echo "lines-check: malformed JSON from context-audit measure" >&2
+  exit 2
+fi
+CONFIG_HASH=$(python3 -c 'import hashlib,sys; print(hashlib.sha256(sys.argv[1].encode("utf-8")).hexdigest())' "$CONFIG_JSON")
+
+print_breakdown() {
+  [ "$BREAKDOWN" -eq 1 ] || return 0
+  echo "Breakdown (worst-first by bytes):"
+  jq -r '
+    [ .surfaces | to_entries[] | .key as $s | (.value.files // [])[] |
+      . + {surface: $s}
+    ]
+    | sort_by(-.bytes, .path)
+    | .[]
+    | "  \(.bytes) B  \(.lines) L  [\(.surface)]  \(.path)\(if .refused then " (REFUSED: " + (.reason // "invalid") + ")" else "" end)"
+  ' <<<"$MEASURE_JSON"
+}
+
+finish() {
+  local code=$1
+  print_breakdown
+  exit "$code"
+}
+
+print_instructions_total() {
+  local total note
+  total=$(jq -r '.instructions_total' <<<"$MEASURE_JSON")
+  note=$(jq -r '.instructions_total_note' <<<"$MEASURE_JSON")
+  echo "instructions_total: $total code points ($note; warn threshold: $WARN_INSTRUCTIONS_TOTAL)"
+  if [ "$total" -ge "$WARN_INSTRUCTIONS_TOTAL" ]; then
+    echo "WARN: instructions_total $total >= $WARN_INSTRUCTIONS_TOTAL (~UTF-16 code units tripwire)"
+  fi
+}
+
+validate_baseline_schema() {
+  local file=$1 out
+  if [ ! -f "$file" ]; then
+    echo "missing file"
+    return 1
+  fi
+  if ! out=$(jq -r '
+    if type != "object" then "top-level value must be an object"
+    elif ((keys - ["surfaces", "meta"]) | length) > 0 then "unknown top-level keys: \((keys - ["surfaces", "meta"]) | join(", "))"
+    elif (has("surfaces") | not) or (has("meta") | not) then "missing required top-level keys (surfaces, meta)"
+    elif (.meta | type) != "object" then "meta must be an object"
+    elif ((.meta | keys - ["impl_version", "config_hash", "notes"]) | length) > 0 then "unknown meta keys: \((.meta | keys - ["impl_version", "config_hash", "notes"]) | join(", "))"
+    elif ((["impl_version", "config_hash", "notes"] - (.meta | keys)) | length) > 0 then "missing required meta keys"
+    elif (.meta.impl_version | (type == "number" and (. % 1 == 0) and . >= 1) | not) then "meta.impl_version must be a positive integer"
+    elif (.meta.config_hash | (type == "string" and length > 0) | not) then "meta.config_hash must be a non-empty string"
+    elif (.meta.notes | type) != "string" then "meta.notes must be a string"
+    elif (.surfaces | type) != "object" then "surfaces must be an object"
+    else
+      [ .surfaces | to_entries[] |
+        .key as $k | .value as $v |
+        if ($v | type) != "object" then "surface \($k): must be an object"
+        elif (($v | keys - ["lines", "grace_lines", "bytes", "grace_bytes"]) | length) > 0 then "surface \($k): unknown keys \((($v | keys) - ["lines", "grace_lines", "bytes", "grace_bytes"]) | join(", "))"
+        elif ((["lines", "grace_lines", "bytes", "grace_bytes"] - ($v | keys)) | length) > 0 then "surface \($k): missing required keys"
+        elif ($v.lines | (type == "number" and (. % 1 == 0) and . >= 0) | not) then "surface \($k): lines must be a non-negative integer"
+        elif ($v.bytes | (type == "number" and (. % 1 == 0) and . >= 0) | not) then "surface \($k): bytes must be a non-negative integer"
+        elif ($v.grace_lines | (type == "number" and (. % 1 == 0) and . >= 0) | not) then "surface \($k): grace_lines must be a non-negative integer"
+        elif ($v.grace_bytes | (type == "number" and (. % 1 == 0) and . >= 0) | not) then "surface \($k): grace_bytes must be a non-negative integer"
+        else empty end
+      ] | if length > 0 then join("; ") else "OK" end
+    end
+  ' "$file" 2>/dev/null); then
+    echo "malformed JSON"
+    return 1
+  fi
+  if [ "$out" != "OK" ]; then
+    echo "$out"
+    return 1
+  fi
+  return 0
+}
+
+check_surface_guards() {
+  local s=$1 failed=0 items
+  items=$(jq -r --arg s "$s" '(.surfaces[$s].fixture_files // []) | join(", ")' <<<"$MEASURE_JSON")
+  if [ -n "$items" ]; then
+    echo "lines-check: FAIL: surface '$s' fixture isolation violated (tests/ path entered measurement): $items" >&2
+    failed=1
+  fi
+  items=$(jq -r --arg s "$s" '(.surfaces[$s].irregular_files // []) | join(", ")' <<<"$MEASURE_JSON")
+  if [ -n "$items" ]; then
+    echo "lines-check: FAIL: surface '$s' irregular or unsafe file (symlink/FIFO/device or outside root): $items" >&2
+    failed=1
+  fi
+  items=$(jq -r --arg s "$s" '(.surfaces[$s].subdirs // []) | join(", ")' <<<"$MEASURE_JSON")
+  if [ -n "$items" ]; then
+    echo "lines-check: FAIL: surface '$s' nested directory under measured glob: $items" >&2
+    failed=1
+  fi
+  items=$(jq -r --arg s "$s" '(.surfaces[$s].imports // []) | join(", ")' <<<"$MEASURE_JSON")
+  if [ -n "$items" ]; then
+    echo "lines-check: FAIL: surface '$s' @-import found in measured file: $items" >&2
+    failed=1
+  fi
+  items=$(jq -r --arg s "$s" '(.surfaces[$s].malformed_skills // []) | join(", ")' <<<"$MEASURE_JSON")
+  if [ -n "$items" ]; then
+    echo "lines-check: FAIL: surface '$s' malformed skill directory (no SKILL.md): $items" >&2
+    failed=1
+  fi
+  items=$(jq -r --arg s "$s" '(.surfaces[$s].refused_files // []) | join(", ")' <<<"$MEASURE_JSON")
+  if [ -n "$items" ]; then
+    echo "lines-check: FAIL: surface '$s' measurement-refused (description extraction failed): $items" >&2
+    failed=1
+  fi
+  if [ "$(jq -r --arg s "$s" '.surfaces[$s].hollow' <<<"$MEASURE_JSON")" = "true" ]; then
+    echo "lines-check: FAIL: surface '$s' hollow measurement (0 files or 0 lines/bytes)" >&2
+    failed=1
+  fi
+  return "$failed"
+}
+
+# One grace-defaults policy, one copy: the accessors and both refresh builds read
+# this map; the fallbacks cover a canonical surface added without a map entry.
+GRACE_DEFAULTS='{"rules":{"gl":15,"gb":1500},"claude-md":{"gl":8,"gb":800},"descriptions":{"gl":2,"gb":600}}'
+
+default_grace_lines() {
+  jq -r --arg s "$1" '.[$s].gl // 10' <<<"$GRACE_DEFAULTS"
+}
+
+default_grace_bytes() {
+  jq -r --arg s "$1" '.[$s].gb // 500' <<<"$GRACE_DEFAULTS"
+}
+
+fmt_signed() {
+  if [ "$1" -ge 0 ]; then
+    printf '+%d' "$1"
+  else
+    printf '%d' "$1"
+  fi
+}
+
+run_check() {
+  local s schema_err base_impl base_hash union_surfaces in_canon in_base
+  local guard_failed=0 union_failed=0 budget_failed=0
+  local cur_lines cur_bytes base_lines grace_lines base_bytes grace_bytes
+  local limit_lines limit_bytes dl db gap_lines gap_bytes dl_str db_str
+
+  print_instructions_total
+
+  while IFS= read -r s; do
+    [ -n "$s" ] || continue
+    if ! check_surface_guards "$s"; then
+      guard_failed=1
+    fi
+  done < <(jq -r '.config.surfaces[]' <<<"$MEASURE_JSON")
+
+  if [ ! -f "$BASELINE" ]; then
+    echo "lines-check: missing baseline at $BASELINE; run 'lines-check update-baseline' to initialize it" >&2
+    finish 3
+  fi
+
+  if ! schema_err=$(validate_baseline_schema "$BASELINE"); then
+    echo "lines-check: invalid baseline schema in $BASELINE: $schema_err" >&2
+    finish 3
+  fi
+
+  base_impl=$(jq -r '.meta.impl_version' "$BASELINE")
+  base_hash=$(jq -r '.meta.config_hash' "$BASELINE")
+  if [ "$base_impl" != "$IMPL_VERSION" ]; then
+    echo "lines-check: impl_version drift (baseline=$base_impl, current=$IMPL_VERSION): the measurement changed; refresh the baseline with 'lines-check update-baseline'" >&2
+    finish 3
+  fi
+  if [ "$base_hash" != "$CONFIG_HASH" ]; then
+    echo "lines-check: config_hash drift (baseline=$base_hash, current=$CONFIG_HASH): the measurement changed; refresh the baseline with 'lines-check update-baseline'" >&2
+    finish 3
+  fi
+
+  # Union iteration: canonical surface set U baseline keys
+  union_surfaces=$(jq -rn --argjson m "$MEASURE_JSON" --slurpfile b "$BASELINE" '
+    ($m.config.surfaces + ($b[0].surfaces | keys)) as $all
+    | ($m.config.surfaces + (($all | unique) - $m.config.surfaces))[]
+  ')
+
+  while IFS= read -r s; do
+    [ -n "$s" ] || continue
+    in_canon=$(jq -r --arg s "$s" '.config.surfaces | index($s) != null' <<<"$MEASURE_JSON")
+    in_base=$(jq -r --arg s "$s" '.surfaces | has($s)' "$BASELINE")
+    if [ "$in_canon" != "true" ]; then
+      echo "lines-check: surface '$s' in baseline is not measured by this tool (stray baseline entry); refresh the baseline with 'lines-check update-baseline'" >&2
+      union_failed=1
+    elif [ "$in_base" != "true" ]; then
+      echo "lines-check: canonical surface '$s' is missing from baseline; rebase and refresh the baseline with 'lines-check update-baseline'" >&2
+      union_failed=1
+    fi
+  done <<<"$union_surfaces"
+
+  if [ "$union_failed" -eq 1 ]; then
+    finish 3
+  fi
+
+  if [ "$guard_failed" -eq 1 ]; then
+    finish 1
+  fi
+
+  while IFS= read -r s; do
+    [ -n "$s" ] || continue
+    cur_lines=$(jq -r --arg s "$s" '.surfaces[$s].lines' <<<"$MEASURE_JSON")
+    cur_bytes=$(jq -r --arg s "$s" '.surfaces[$s].bytes' <<<"$MEASURE_JSON")
+    base_lines=$(jq -r --arg s "$s" '.surfaces[$s].lines' "$BASELINE")
+    grace_lines=$(jq -r --arg s "$s" '.surfaces[$s].grace_lines' "$BASELINE")
+    base_bytes=$(jq -r --arg s "$s" '.surfaces[$s].bytes' "$BASELINE")
+    grace_bytes=$(jq -r --arg s "$s" '.surfaces[$s].grace_bytes' "$BASELINE")
+
+    limit_lines=$((base_lines + grace_lines))
+    limit_bytes=$((base_bytes + grace_bytes))
+    dl=$((cur_lines - base_lines))
+    db=$((cur_bytes - base_bytes))
+    gap_lines=$((limit_lines - cur_lines))
+    gap_bytes=$((limit_bytes - cur_bytes))
+    dl_str=$(fmt_signed "$dl")
+    db_str=$(fmt_signed "$db")
+
+    echo "surface $s: lines $cur_lines/$limit_lines (baseline $base_lines, delta $dl_str, grace +$grace_lines, gap $gap_lines), bytes $cur_bytes/$limit_bytes (baseline $base_bytes, delta $db_str, grace +$grace_bytes, gap $gap_bytes)"
+
+    if [ "$cur_lines" -gt "$limit_lines" ]; then
+      echo "lines-check: FAIL: surface '$s' over budget on lines ($cur_lines > $limit_lines: baseline $base_lines + grace $grace_lines, +$((cur_lines - limit_lines)) over limit); run 'lines-check update-baseline --surface $s'" >&2
+      budget_failed=1
+    fi
+    if [ "$cur_bytes" -gt "$limit_bytes" ]; then
+      echo "lines-check: FAIL: surface '$s' over budget on bytes ($cur_bytes > $limit_bytes: baseline $base_bytes + grace $grace_bytes, +$((cur_bytes - limit_bytes)) over limit); run 'lines-check update-baseline --surface $s'" >&2
+      budget_failed=1
+    fi
+  done <<<"$union_surfaces"
+
+  if [ "$budget_failed" -eq 1 ]; then
+    finish 1
+  fi
+
+  finish 0
+}
+
+run_update() {
+  local s schema_err strays ms old_impl="" has_existing=0
+  local new_lines new_bytes old_lines old_bytes gl gb dl db dl_str db_str
+  local new_json tmp_dir tmp_file
+
+  if [ -f "$BASELINE" ]; then
+    if ! schema_err=$(validate_baseline_schema "$BASELINE"); then
+      echo "lines-check: invalid baseline schema in $BASELINE: $schema_err" >&2
+      finish 3
+    fi
+    has_existing=1
+    old_impl=$(jq -r '.meta.impl_version' "$BASELINE")
+  fi
+
+  if [ -n "$TARGET_SURFACE" ]; then
+    if [ "$(jq -r --arg s "$TARGET_SURFACE" '.config.surfaces | index($s) != null' <<<"$MEASURE_JSON")" != "true" ]; then
+      echo "lines-check: unknown canonical surface '$TARGET_SURFACE'" >&2
+      finish 3
+    fi
+    if [ "$has_existing" -eq 0 ]; then
+      echo "lines-check: scoped update-baseline requires an existing baseline at $BASELINE" >&2
+      finish 3
+    fi
+    strays=$(jq -r --argjson c "$(jq '.config.surfaces' <<<"$MEASURE_JSON")" '((.surfaces | keys) - $c) | join(", ")' "$BASELINE")
+    if [ -n "$strays" ]; then
+      echo "lines-check: stray surface(s) in baseline ($strays); run unscoped 'lines-check update-baseline' to prune" >&2
+      finish 3
+    fi
+    while IFS= read -r ms; do
+      [ -n "$ms" ] || continue
+      echo "WARN: canonical surface '$ms' is missing from baseline and remains untracked after scoped refresh" >&2
+    done < <(jq -r --argjson c "$(jq '.config.surfaces' <<<"$MEASURE_JSON")" --arg t "$TARGET_SURFACE" '(($c - [$t]) - (.surfaces | keys))[]' "$BASELINE")
+
+    if ! check_surface_guards "$TARGET_SURFACE"; then
+      echo "lines-check: refusing to refresh surface '$TARGET_SURFACE' from a failed or hollow measurement" >&2
+      finish 3
+    fi
+
+    new_lines=$(jq -r --arg s "$TARGET_SURFACE" '.surfaces[$s].lines' <<<"$MEASURE_JSON")
+    new_bytes=$(jq -r --arg s "$TARGET_SURFACE" '.surfaces[$s].bytes' <<<"$MEASURE_JSON")
+    if [ "$(jq -r --arg s "$TARGET_SURFACE" '.surfaces | has($s)' "$BASELINE")" = "true" ]; then
+      old_lines=$(jq -r --arg s "$TARGET_SURFACE" '.surfaces[$s].lines' "$BASELINE")
+      old_bytes=$(jq -r --arg s "$TARGET_SURFACE" '.surfaces[$s].bytes' "$BASELINE")
+      gl=$(jq -r --arg s "$TARGET_SURFACE" '.surfaces[$s].grace_lines' "$BASELINE")
+      gb=$(jq -r --arg s "$TARGET_SURFACE" '.surfaces[$s].grace_bytes' "$BASELINE")
+      dl=$((new_lines - old_lines))
+      db=$((new_bytes - old_bytes))
+      dl_str=$(fmt_signed "$dl")
+      db_str=$(fmt_signed "$db")
+      echo "delta $TARGET_SURFACE: lines $old_lines -> $new_lines ($dl_str, grace +$gl, limit $((new_lines + gl))), bytes $old_bytes -> $new_bytes ($db_str, grace +$gb, limit $((new_bytes + gb)))"
+      if [ "$old_impl" = "$IMPL_VERSION" ]; then
+        if [ $((new_lines * 2)) -lt "$old_lines" ] || [ $((new_bytes * 2)) -lt "$old_bytes" ]; then
+          echo "WARN: shrink guard: surface '$TARGET_SURFACE' dropped by more than half (lines $old_lines -> $new_lines, bytes $old_bytes -> $new_bytes) without an impl_version bump"
+        fi
+      fi
+    else
+      gl=$(default_grace_lines "$TARGET_SURFACE")
+      gb=$(default_grace_bytes "$TARGET_SURFACE")
+      echo "delta $TARGET_SURFACE: lines (new) -> $new_lines (+$new_lines, grace +$gl, limit $((new_lines + gl))), bytes (new) -> $new_bytes (+$new_bytes, grace +$gb, limit $((new_bytes + gb)))"
+    fi
+
+    new_json=$(jq --arg s "$TARGET_SURFACE" \
+      --argjson nl "$new_lines" \
+      --argjson gl "$gl" \
+      --argjson nb "$new_bytes" \
+      --argjson gb "$gb" \
+      --argjson iv "$IMPL_VERSION" \
+      --arg ch "$CONFIG_HASH" \
+      '.surfaces[$s] = {lines: $nl, grace_lines: $gl, bytes: $nb, grace_bytes: $gb}
+       | .meta.impl_version = $iv
+       | .meta.config_hash = $ch' "$BASELINE")
+  else
+    while IFS= read -r s; do
+      [ -n "$s" ] || continue
+      if ! check_surface_guards "$s"; then
+        echo "lines-check: refusing to refresh baseline from a failed or hollow measurement on surface '$s'" >&2
+        finish 3
+      fi
+    done < <(jq -r '.config.surfaces[]' <<<"$MEASURE_JSON")
+
+    if [ "$has_existing" -eq 1 ]; then
+      while IFS= read -r s; do
+        [ -n "$s" ] || continue
+        echo "delta $s: pruned stray surface from baseline"
+      done < <(jq -r --argjson c "$(jq '.config.surfaces' <<<"$MEASURE_JSON")" '((.surfaces | keys) - $c)[]' "$BASELINE")
+    fi
+
+    while IFS= read -r s; do
+      [ -n "$s" ] || continue
+      new_lines=$(jq -r --arg s "$s" '.surfaces[$s].lines' <<<"$MEASURE_JSON")
+      new_bytes=$(jq -r --arg s "$s" '.surfaces[$s].bytes' <<<"$MEASURE_JSON")
+      if [ "$has_existing" -eq 1 ] && [ "$(jq -r --arg s "$s" '.surfaces | has($s)' "$BASELINE")" = "true" ]; then
+        old_lines=$(jq -r --arg s "$s" '.surfaces[$s].lines' "$BASELINE")
+        old_bytes=$(jq -r --arg s "$s" '.surfaces[$s].bytes' "$BASELINE")
+        gl=$(jq -r --arg s "$s" '.surfaces[$s].grace_lines' "$BASELINE")
+        gb=$(jq -r --arg s "$s" '.surfaces[$s].grace_bytes' "$BASELINE")
+        dl=$((new_lines - old_lines))
+        db=$((new_bytes - old_bytes))
+        dl_str=$(fmt_signed "$dl")
+        db_str=$(fmt_signed "$db")
+        echo "delta $s: lines $old_lines -> $new_lines ($dl_str, grace +$gl, limit $((new_lines + gl))), bytes $old_bytes -> $new_bytes ($db_str, grace +$gb, limit $((new_bytes + gb)))"
+        if [ "$old_impl" = "$IMPL_VERSION" ]; then
+          if [ $((new_lines * 2)) -lt "$old_lines" ] || [ $((new_bytes * 2)) -lt "$old_bytes" ]; then
+            echo "WARN: shrink guard: surface '$s' dropped by more than half (lines $old_lines -> $new_lines, bytes $old_bytes -> $new_bytes) without an impl_version bump"
+          fi
+        fi
+      else
+        gl=$(default_grace_lines "$s")
+        gb=$(default_grace_bytes "$s")
+        echo "delta $s: lines (new) -> $new_lines (+$new_lines, grace +$gl, limit $((new_lines + gl))), bytes (new) -> $new_bytes (+$new_bytes, grace +$gb, limit $((new_bytes + gb)))"
+      fi
+    done < <(jq -r '.config.surfaces[]' <<<"$MEASURE_JSON")
+
+    if [ "$has_existing" -eq 1 ]; then
+      new_json=$(jq -n --argjson m "$MEASURE_JSON" --slurpfile b "$BASELINE" \
+        --argjson iv "$IMPL_VERSION" --arg ch "$CONFIG_HASH" --arg dn "$DEFAULT_NOTES" \
+        --argjson d "$GRACE_DEFAULTS" '
+        {
+          surfaces: (
+            reduce $m.config.surfaces[] as $s ({};
+              . + {
+                ($s): {
+                  lines: $m.surfaces[$s].lines,
+                  grace_lines: ($b[0].surfaces[$s].grace_lines // ($d[$s].gl // 10)),
+                  bytes: $m.surfaces[$s].bytes,
+                  grace_bytes: ($b[0].surfaces[$s].grace_bytes // ($d[$s].gb // 500))
+                }
+              }
+            )
+          ),
+          meta: {
+            impl_version: $iv,
+            config_hash: $ch,
+            notes: ($b[0].meta.notes // $dn)
+          }
+        }
+      ')
+    else
+      new_json=$(jq -n --argjson m "$MEASURE_JSON" \
+        --argjson iv "$IMPL_VERSION" --arg ch "$CONFIG_HASH" --arg dn "$DEFAULT_NOTES" \
+        --argjson d "$GRACE_DEFAULTS" '
+        {
+          surfaces: (
+            reduce $m.config.surfaces[] as $s ({};
+              . + {
+                ($s): {
+                  lines: $m.surfaces[$s].lines,
+                  grace_lines: ($d[$s].gl // 10),
+                  bytes: $m.surfaces[$s].bytes,
+                  grace_bytes: ($d[$s].gb // 500)
+                }
+              }
+            )
+          ),
+          meta: {
+            impl_version: $iv,
+            config_hash: $ch,
+            notes: $dn
+          }
+        }
+      ')
+    fi
+  fi
+
+  if [ "$DRY_RUN" -eq 1 ]; then
+    tmp_file=$(mktemp) || finish 3
+    printf '%s\n' "$new_json" >"$tmp_file"
+    if ! schema_err=$(validate_baseline_schema "$tmp_file"); then
+      rm -f "$tmp_file"
+      echo "lines-check: generated baseline failed schema validation: $schema_err" >&2
+      finish 3
+    fi
+    rm -f "$tmp_file"
+    echo "lines-check: dry-run (baseline not written)"
+    finish 0
+  fi
+
+  tmp_dir=$(dirname "$BASELINE")
+  mkdir -p "$tmp_dir" || {
+    echo "lines-check: failed to create baseline directory: $tmp_dir" >&2
+    finish 3
+  }
+  tmp_file=$(mktemp "$BASELINE.tmp.XXXXXX") || {
+    echo "lines-check: failed to create temporary baseline file" >&2
+    finish 3
+  }
+  printf '%s\n' "$new_json" >"$tmp_file"
+  if ! schema_err=$(validate_baseline_schema "$tmp_file"); then
+    rm -f "$tmp_file"
+    echo "lines-check: generated baseline failed schema validation: $schema_err" >&2
+    finish 3
+  fi
+  if ! mv -f "$tmp_file" "$BASELINE"; then
+    rm -f "$tmp_file"
+    echo "lines-check: failed to rename temporary baseline into place" >&2
+    finish 3
+  fi
+  echo "lines-check: wrote baseline to $BASELINE"
+  finish 0
+}
+
+if [ "$MODE" = "update" ]; then
+  run_update
+else
+  run_check
+fi

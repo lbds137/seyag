@@ -13,7 +13,8 @@
 # prose trains the reader to skim past it.
 #
 # Patterns are plain POSIX ERE (no PCRE-only constructs) because some dev
-# machines have ugrep standing in for grep — see the note at skill-eval.sh:81-90.
+# machines have ugrep standing in for grep, and engines disagree on
+# word-boundary edge cases — probe any pattern here against both.
 
 set -uo pipefail
 

@@ -160,7 +160,11 @@ bumps when the `measure` output contract changes.
    backtick token like `` `pkg@somehost` `` does not match; no imports exist in
    measured files today [V];
 8. a subdirectory under a measured glob → fail loud (exit 1; forces the
-   recursion-premise re-check instead of silently ignoring nested files);
+   recursion-premise re-check instead of silently ignoring nested files) —
+   scoped to the flat rules glob: the fixed-depth `*/SKILL.md` descriptions glob
+   cannot hide files, so skill-internal directories (references/, scripts/) sit
+   outside the guard, and a skill directory without SKILL.md fails under its
+   own malformed-skill reason instead;
 9. fixture isolation: no path under `tests/` (fixtures, canaries) ever enters a
    live measurement (exit 1 if one does) — the live globs are scoped to
    production plugin paths by construction, and this canary proves it;

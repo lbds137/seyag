@@ -273,6 +273,398 @@ def refs(mem):
           "Paths with spaces are cut at the space, and ~/gdrive is never checked.")
 
 
+# --- measure -------------------------------------------------------------------------------------
+
+MEASURE_SURFACES = ["rules", "claude-md", "descriptions"]
+MEASURE_GLOBS = {
+    "rules": ["plugins/seyag/rules/*.md"],
+    "claude-md": ["CLAUDE.md"],
+    "descriptions": [
+        "plugins/seyag/skills/*/SKILL.md",
+        "plugins/seyag/agents/*.md",
+    ],
+}
+MEASURE_EXTRACTOR_VERSION = 1
+
+_DOUBLE_ESCAPES = {
+    '"': '"',
+    "\\": "\\",
+    "/": "/",
+    "b": "\b",
+    "f": "\f",
+    "n": "\n",
+    "r": "\r",
+    "t": "\t",
+    "0": "\0",
+    "a": "\a",
+    "v": "\v",
+    "e": "\x1b",
+    " ": " ",
+}
+
+
+def count_lines(data):
+    """Newline-terminated lines plus a final unterminated line (not strict wc -l)."""
+    if not data:
+        return 0
+    return data.count(b"\n") + (0 if data.endswith(b"\n") else 1)
+
+
+def measure_imports(text):
+    """Fence- and inline-backtick-aware @-import scan using IMPORT_RE."""
+    stripped = re.sub(r"```.*?```", "", text, flags=re.S)
+    stripped = re.sub(r"`[^`\n]*`", "", stripped)
+    return IMPORT_RE.findall(stripped)
+
+
+def _decode_double_quoted(raw):
+    if len(raw) < 2 or not raw.startswith('"') or not raw.endswith('"'):
+        return None, "unclosed double-quoted scalar"
+    out = []
+    i = 1
+    n = len(raw)
+    while i < n - 1:
+        ch = raw[i]
+        if ch == '"':
+            return None, "unescaped quote inside double-quoted scalar"
+        if ch == "\\":
+            if i + 1 >= n - 1:
+                return None, "dangling backslash in double-quoted scalar"
+            esc = raw[i + 1]
+            if esc in _DOUBLE_ESCAPES:
+                out.append(_DOUBLE_ESCAPES[esc])
+                i += 2
+            elif esc == "x":
+                hx = raw[i + 2 : i + 4]
+                if len(hx) != 2 or not re.fullmatch(r"[0-9a-fA-F]{2}", hx):
+                    return None, "invalid \\x escape in double-quoted scalar"
+                out.append(chr(int(hx, 16)))
+                i += 4
+            elif esc == "u":
+                hx = raw[i + 2 : i + 6]
+                if len(hx) != 4 or not re.fullmatch(r"[0-9a-fA-F]{4}", hx):
+                    return None, "invalid \\u escape in double-quoted scalar"
+                cp = int(hx, 16)
+                if 0xD800 <= cp <= 0xDFFF:
+                    return None, "surrogate code point in double-quoted scalar"
+                out.append(chr(cp))
+                i += 6
+            elif esc == "U":
+                hx = raw[i + 2 : i + 10]
+                if len(hx) != 8 or not re.fullmatch(r"[0-9a-fA-F]{8}", hx):
+                    return None, "invalid \\U escape in double-quoted scalar"
+                cp = int(hx, 16)
+                if cp > 0x10FFFF or (0xD800 <= cp <= 0xDFFF):
+                    return None, "invalid code point in double-quoted scalar"
+                out.append(chr(cp))
+                i += 10
+            else:
+                return None, f"unsupported escape \\{esc} in double-quoted scalar"
+        else:
+            out.append(ch)
+            i += 1
+    return "".join(out), None
+
+
+def extract_description(text):
+    """Extract single-line description scalar from YAML frontmatter.
+    Returns (decoded_str, None) on success, or (None, reason) when refused.
+    """
+    m = re.match(r"^---\n(.*?)\n---(?:\n|$)", text, re.S)
+    if not m:
+        return None, "missing or malformed frontmatter delimiter"
+    fm = m.group(1)
+    lines = fm.split("\n")
+    desc_indices = []
+    for idx, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if not line[0].isspace():
+            if not re.match(r"^[A-Za-z0-9_-]+\s*:(?:\s.*|$)", line):
+                return None, f"malformed frontmatter line: {line!r}"
+            if re.match(r"^description\s*:(?:\s.*|$)", line):
+                desc_indices.append(idx)
+        else:
+            if not re.match(r"^\s+(?:-\s+|[A-Za-z0-9_-]+\s*:|\S)", line):
+                return None, f"malformed indented frontmatter line: {line!r}"
+    if len(desc_indices) == 0:
+        return None, "missing description key"
+    if len(desc_indices) > 1:
+        return None, "duplicate description key"
+    d_idx = desc_indices[0]
+    for follow in lines[d_idx + 1 :]:
+        s_follow = follow.strip()
+        if not s_follow or s_follow.startswith("#"):
+            continue
+        if follow[0].isspace():
+            return None, "multi-line or block description is not allowed"
+        break
+    raw_val = re.sub(r"^description\s*:", "", lines[d_idx], count=1).strip()
+    if not raw_val:
+        return None, "empty description value"
+    if raw_val.startswith("'"):
+        if len(raw_val) < 2 or not raw_val.endswith("'"):
+            return None, "unclosed single-quoted description"
+        inner = raw_val[1:-1]
+        if "'" in inner.replace("''", ""):
+            return None, "unescaped single quote in single-quoted description"
+        decoded = inner.replace("''", "'")
+    elif raw_val.startswith('"'):
+        decoded, err = _decode_double_quoted(raw_val)
+        if err:
+            return None, err
+    else:
+        if raw_val[0] in "|>[]{}&*!%@`":
+            return None, f"non-plain YAML scalar indicator {raw_val[0]!r}"
+        if raw_val in ("|", ">", "|-", ">-", "|+", ">+"):
+            return None, "block or folded scalar indicator"
+        decoded = raw_val
+    if not decoded or "\n" in decoded or "\r" in decoded:
+        return None, "decoded description must be a non-empty single line"
+    return decoded, None
+
+
+def _is_under_root(path, root_resolved):
+    try:
+        rp = path.resolve()
+    except OSError:
+        return False
+    return rp == root_resolved or str(rp).startswith(str(root_resolved).rstrip("/") + "/")
+
+
+def _check_ancestors(root, root_resolved, rel_parts, irregular):
+    cur = root
+    for idx, part in enumerate(rel_parts):
+        cur = cur / part
+        rel = "/".join(rel_parts[: idx + 1])
+        try:
+            st = os.lstat(cur)
+        except OSError:
+            irregular.append(rel)
+            return False
+        if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode) or not _is_under_root(cur, root_resolved):
+            irregular.append(rel)
+            return False
+    return True
+
+
+def _empty_surface():
+    return {
+        "lines": 0,
+        "bytes": 0,
+        "code_points": 0,
+        "file_count": 0,
+        "hollow": True,
+        "files": [],
+        "refused_files": [],
+        "imports": [],
+        "subdirs": [],
+        "malformed_skills": [],
+        "irregular_files": [],
+        "fixture_files": [],
+    }
+
+
+def _finalize_surface(surf):
+    surf["hollow"] = (
+        surf["file_count"] == 0
+        or surf["lines"] == 0
+        or surf["bytes"] == 0
+        or len(surf["refused_files"]) > 0
+    )
+    surf["fixture_files"] = [
+        f["path"]
+        for f in surf["files"]
+        if f["path"].startswith("tests/") or "/tests/" in f["path"]
+    ]
+    return surf
+
+
+def measure(root):
+    try:
+        st_root = os.lstat(root)
+        if stat.S_ISLNK(st_root.st_mode) or not stat.S_ISDIR(st_root.st_mode):
+            sys.exit(f"context-audit: --root must be a real directory: {root}")
+        root_resolved = root.resolve()
+    except OSError as exc:
+        sys.exit(f"context-audit: invalid --root {root}: {exc}")
+
+    surfaces = {}
+
+    # 1. rules: plugins/seyag/rules/*.md
+    s_rules = _empty_surface()
+    if _check_ancestors(root, root_resolved, ["plugins", "seyag", "rules"], s_rules["irregular_files"]):
+        rules_dir = root / "plugins" / "seyag" / "rules"
+        for name in sorted(os.listdir(rules_dir)):
+            p = rules_dir / name
+            rel = f"plugins/seyag/rules/{name}"
+            try:
+                st = os.lstat(p)
+            except OSError:
+                s_rules["irregular_files"].append(rel)
+                continue
+            if stat.S_ISDIR(st.st_mode):
+                s_rules["subdirs"].append(rel)
+            elif stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode) or not _is_under_root(p, root_resolved):
+                s_rules["irregular_files"].append(rel)
+            elif name.endswith(".md"):
+                data = p.read_bytes()
+                text = data.decode("utf-8", errors="replace")
+                flines = count_lines(data)
+                fbytes = len(data)
+                fcp = len(text)
+                for imp in measure_imports(text):
+                    s_rules["imports"].append(f"{rel}: @{imp}")
+                s_rules["files"].append({"path": rel, "lines": flines, "bytes": fbytes})
+                s_rules["lines"] += flines
+                s_rules["bytes"] += fbytes
+                s_rules["code_points"] += fcp
+                s_rules["file_count"] += 1
+    surfaces["rules"] = _finalize_surface(s_rules)
+
+    # 2. claude-md: CLAUDE.md
+    s_claude = _empty_surface()
+    p_claude = root / "CLAUDE.md"
+    rel_claude = "CLAUDE.md"
+    try:
+        st_c = os.lstat(p_claude)
+    except OSError:
+        st_c = None
+    if st_c is not None:
+        if stat.S_ISDIR(st_c.st_mode):
+            s_claude["subdirs"].append(rel_claude)
+        elif stat.S_ISLNK(st_c.st_mode) or not stat.S_ISREG(st_c.st_mode) or not _is_under_root(p_claude, root_resolved):
+            s_claude["irregular_files"].append(rel_claude)
+        else:
+            data = p_claude.read_bytes()
+            text = data.decode("utf-8", errors="replace")
+            flines = count_lines(data)
+            fbytes = len(data)
+            fcp = len(text)
+            for imp in measure_imports(text):
+                s_claude["imports"].append(f"{rel_claude}: @{imp}")
+            s_claude["files"].append({"path": rel_claude, "lines": flines, "bytes": fbytes})
+            s_claude["lines"] += flines
+            s_claude["bytes"] += fbytes
+            s_claude["code_points"] += fcp
+            s_claude["file_count"] += 1
+    surfaces["claude-md"] = _finalize_surface(s_claude)
+
+    # 3. descriptions: plugins/seyag/skills/*/SKILL.md and plugins/seyag/agents/*.md
+    s_desc = _empty_surface()
+
+    def _measure_desc_file(p, rel):
+        data = p.read_bytes()
+        text = data.decode("utf-8", errors="replace")
+        for imp in measure_imports(text):
+            s_desc["imports"].append(f"{rel}: @{imp}")
+        decoded, err = extract_description(text)
+        s_desc["file_count"] += 1
+        if err is not None:
+            s_desc["refused_files"].append(f"{rel} ({err})")
+            s_desc["files"].append({"path": rel, "lines": 0, "bytes": 0, "refused": True, "reason": err})
+        else:
+            d_bytes = decoded.encode("utf-8")
+            flines = count_lines(d_bytes)
+            fbytes = len(d_bytes)
+            fcp = len(decoded)
+            s_desc["files"].append({"path": rel, "lines": flines, "bytes": fbytes})
+            s_desc["lines"] += flines
+            s_desc["bytes"] += fbytes
+            s_desc["code_points"] += fcp
+
+    if _check_ancestors(root, root_resolved, ["plugins", "seyag", "skills"], s_desc["irregular_files"]):
+        skills_dir = root / "plugins" / "seyag" / "skills"
+        for skill_name in sorted(os.listdir(skills_dir)):
+            sp = skills_dir / skill_name
+            srel = f"plugins/seyag/skills/{skill_name}"
+            try:
+                st_s = os.lstat(sp)
+            except OSError:
+                s_desc["irregular_files"].append(srel)
+                continue
+            if stat.S_ISLNK(st_s.st_mode) or not stat.S_ISDIR(st_s.st_mode) or not _is_under_root(sp, root_resolved):
+                s_desc["irregular_files"].append(srel)
+                continue
+            children = sorted(os.listdir(sp))
+            if "SKILL.md" not in children:
+                s_desc["malformed_skills"].append(srel + " (directory without SKILL.md)")
+            for child_name in children:
+                cp_path = sp / child_name
+                crel = f"{srel}/{child_name}"
+                try:
+                    cst = os.lstat(cp_path)
+                except OSError:
+                    s_desc["irregular_files"].append(crel)
+                    continue
+                if stat.S_ISDIR(cst.st_mode):
+                    continue  # skill-internal content: lazy, unmeasured, outside the perimeter
+                if stat.S_ISLNK(cst.st_mode) or not stat.S_ISREG(cst.st_mode) or not _is_under_root(cp_path, root_resolved):
+                    s_desc["irregular_files"].append(crel)
+                elif child_name == "SKILL.md":
+                    _measure_desc_file(cp_path, crel)
+
+    agents_dir = root / "plugins" / "seyag" / "agents"
+    if _check_ancestors(root, root_resolved, ["plugins", "seyag", "agents"], s_desc["irregular_files"]):
+        for name in sorted(os.listdir(agents_dir)):
+            p = agents_dir / name
+            rel = f"plugins/seyag/agents/{name}"
+            try:
+                st_a = os.lstat(p)
+            except OSError:
+                s_desc["irregular_files"].append(rel)
+                continue
+            if stat.S_ISLNK(st_a.st_mode) or not stat.S_ISREG(st_a.st_mode) or not _is_under_root(p, root_resolved):
+                s_desc["irregular_files"].append(rel)
+            elif name.endswith(".md"):
+                _measure_desc_file(p, rel)
+
+    surfaces["descriptions"] = _finalize_surface(s_desc)
+
+    instructions_total = sum(surfaces[s]["code_points"] for s in MEASURE_SURFACES)
+    result = {
+        "surfaces": surfaces,
+        "instructions_total": instructions_total,
+        "instructions_total_note": "decoded code points across rules + claude-md + descriptions; approximates UTF-16 code units",
+        "config": {
+            "surfaces": MEASURE_SURFACES,
+            "globs": MEASURE_GLOBS,
+            "extractor": MEASURE_EXTRACTOR_VERSION,
+        },
+    }
+    print(json.dumps(result, indent=2))
+
+
+def _parse_measure_root(rest):
+    root = None
+    i = 0
+    while i < len(rest):
+        arg = rest[i]
+        if arg == "--root":
+            if i + 1 >= len(rest):
+                sys.exit("context-audit: --root requires a directory argument")
+            root = Path(rest[i + 1])
+            i += 2
+        elif arg.startswith("--root="):
+            val = arg.split("=", 1)[1]
+            if not val:
+                sys.exit("context-audit: --root requires a directory argument")
+            root = Path(val)
+            i += 1
+        elif arg.startswith("-"):
+            sys.exit(f"context-audit: unknown measure option {arg!r}")
+        elif root is None:
+            root = Path(arg)
+            i += 1
+        else:
+            sys.exit(f"context-audit: unexpected measure argument {arg!r}")
+    if root is None:
+        default_root = Path(__file__).resolve().parents[3]
+        root = default_root if (default_root / "plugins" / "seyag").exists() else Path.cwd()
+    return root
+
+
 def main():
     args = sys.argv[1:]
     if not args or args[0] in ("-h", "--help"):
@@ -283,8 +675,10 @@ def main():
         weigh(Path(rest[0]) if rest else Path.cwd())
     elif cmd == "refs":
         refs(Path(rest[0]) if rest else memory_dir(Path.cwd()))
+    elif cmd == "measure":
+        measure(_parse_measure_root(rest))
     else:
-        sys.exit(f"context-audit: unknown command {cmd!r} (weigh, refs)")
+        sys.exit(f"context-audit: unknown command {cmd!r} (weigh, refs, measure)")
 
 
 if __name__ == "__main__":
