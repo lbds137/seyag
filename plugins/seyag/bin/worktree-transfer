@@ -21,18 +21,20 @@
 #                           `git worktree list --porcelain` (the main working tree)
 #                           and HEAD is on a branch (`symbolic-ref` resolves —
 #                           a detached main refuses)
-#   2 main-tree-clean       `git status --porcelain` in the main root prints nothing
+#   2 main-tree-clean       `git status --porcelain --untracked-files=all` in the main
+#                           root prints nothing (the flag pins it against
+#                           status.showUntrackedFiles=no)
 #   3 worktree-registered   resolved <worktree-path> appears in the porcelain
 #                           listing with a `branch refs/heads/<name>` line (detached
 #                           trees refuse) matching SYG_WORKTREE_BRANCH_RE
 #   4 base-unchanged        when --base SHA is given, `<sha>^{commit}` resolves and
 #                           equals the main tree's HEAD (skipped when omitted)
-#   5 empty-patch           `git -C <wt> add -A` then `git -C <wt> diff --cached --binary`
+#   5 no-unpushed-base      worktree HEAD equals the main tree's HEAD (ahead is as
+#                           wrong as behind; runs before the patch is built)
+#   6 empty-patch           `git -C <wt> add -A` then `git -C <wt> diff --cached --binary`
 #                           written to a temp file is non-empty
-#   6 nothing-outside-patch every non-empty `git -C <wt> status --porcelain` line
+#   7 nothing-outside-patch every non-empty `git -C <wt> status --porcelain` line
 #                           after staging matches `^[MADRCT] `
-#   7 no-unpushed-base      worktree HEAD equals the main tree's HEAD, and
-#                           `git -C <wt> log --oneline <main-head>..HEAD` is empty
 #   8 apply                 `git apply --index <patchfile>` in the main root succeeds
 #   9 byte-identical        `git diff --cached --binary` in the main root matches
 #                           `<patchfile>` via `cmp`; `--binary` must appear on BOTH
@@ -169,7 +171,7 @@ fi
 PASSED_CHECKS+=("main-tree-identity")
 
 # 2. main-tree-clean
-MAIN_STATUS=$(git -C "$MAIN_ROOT" status --porcelain 2>&1) \
+MAIN_STATUS=$(git -C "$MAIN_ROOT" status --porcelain --untracked-files=all 2>&1) \
   || refuse main-tree-clean "git status --porcelain failed: $MAIN_STATUS"
 if [ -n "$MAIN_STATUS" ]; then
   refuse main-tree-clean "main working tree is not clean"
@@ -241,7 +243,18 @@ else
   PASSED_CHECKS+=("base-unchanged (skipped: no --base)")
 fi
 
-# 5. empty-patch
+# 5. no-unpushed-base
+# The worktree must sit exactly on the main tree's HEAD: ahead is as wrong as
+# behind, and this check runs BEFORE the patch is built so a worker that
+# committed its work is diagnosed by its HEAD, not by an empty patch.
+WT_HEAD=$(git -C "$WT_PATH" rev-parse HEAD 2>&1) \
+  || refuse no-unpushed-base "git rev-parse HEAD failed in worktree: $WT_HEAD"
+if [ "$WT_HEAD" != "$MAIN_HEAD" ]; then
+  refuse no-unpushed-base "worktree HEAD ($WT_HEAD) differs from the main tree HEAD ($MAIN_HEAD); the patch was built on a base the main tree no longer matches"
+fi
+PASSED_CHECKS+=("no-unpushed-base")
+
+# 6. empty-patch
 TMP_DIR=$(mktemp -d) || refuse empty-patch "mktemp -d failed"
 PATCH_FILE="$TMP_DIR/unit.patch"
 add_err=$(git -C "$WT_PATH" add -A 2>&1) \
@@ -256,7 +269,7 @@ if [ ! -s "$PATCH_FILE" ]; then
 fi
 PASSED_CHECKS+=("empty-patch")
 
-# 6. nothing-outside-patch
+# 7. nothing-outside-patch
 WT_STATUS=$(git -C "$WT_PATH" status --porcelain 2>&1) \
   || refuse nothing-outside-patch "git status --porcelain failed in worktree: $WT_STATUS"
 PATCH_STATUS_RE='^[MADRCT] '
@@ -268,20 +281,6 @@ while IFS= read -r sline; do
 done <<<"$WT_STATUS"
 PASSED_CHECKS+=("nothing-outside-patch")
 
-# 7. no-unpushed-base
-# The worktree must sit exactly on the main tree's HEAD: behind is as wrong as ahead.
-WT_HEAD=$(git -C "$WT_PATH" rev-parse HEAD 2>&1) \
-  || refuse no-unpushed-base "git rev-parse HEAD failed in worktree: $WT_HEAD"
-if [ "$WT_HEAD" != "$MAIN_HEAD" ]; then
-  refuse no-unpushed-base "worktree HEAD ($WT_HEAD) differs from the main tree HEAD ($MAIN_HEAD); the patch was built on a base the main tree no longer matches"
-fi
-UNPUSHED_BASE=$(git -C "$WT_PATH" log --oneline "$MAIN_HEAD..HEAD" 2>&1) \
-  || refuse no-unpushed-base "git log $MAIN_HEAD..HEAD failed in worktree: $UNPUSHED_BASE"
-if [ -n "$UNPUSHED_BASE" ]; then
-  refuse no-unpushed-base "worktree has commit(s) ahead of main HEAD ($MAIN_HEAD): $UNPUSHED_BASE"
-fi
-PASSED_CHECKS+=("no-unpushed-base")
-
 # 8. apply
 APPLY_ERR=$(git -C "$MAIN_ROOT" apply --index "$PATCH_FILE" 2>&1) \
   || refuse apply "git apply --index failed: $APPLY_ERR"
@@ -289,11 +288,21 @@ PASSED_CHECKS+=("apply")
 
 # 9. byte-identical
 if ! git -C "$MAIN_ROOT" diff --cached --binary --no-color --no-ext-diff --src-prefix=a/ --dst-prefix=b/ | cmp - "$PATCH_FILE" >/dev/null 2>&1; then
-  refuse byte-identical "main tree staged diff differs from worktree patch; main tree left staged for inspection"
+  KEPT_PATCH=$PATCH_FILE
+  TMP_DIR=""
+  refuse byte-identical "main tree staged diff differs from worktree patch; main tree left staged for inspection; the patch is kept at $KEPT_PATCH for comparison"
 fi
 PASSED_CHECKS+=("byte-identical")
 
 # 10. removal
+# Ignored files in the worktree are deleted with the tree by
+# `git worktree remove --force` and are NOT part of the patch. List them on
+# stderr so nothing vanishes silently; this is a notice, not a gate — build
+# output and cache droppings are normal here.
+IGN=$(git -C "$WT_PATH" status --porcelain --ignored --untracked-files=all 2>&1 | grep '^!! ' || true)
+if [ -n "$IGN" ]; then
+  printf 'note: ignored file(s) in the worktree will be deleted with the tree; transfer any you want by hand first:\n%s\n' "$IGN" >&2
+fi
 git -C "$MAIN_ROOT" worktree unlock "$WT_PATH" >/dev/null 2>&1 || true
 if ! rm_err=$(git -C "$MAIN_ROOT" worktree remove --force "$WT_PATH" 2>&1); then
   refuse removal "patch is applied and verified in main tree, but worktree removal failed ($rm_err); remove manually: git worktree remove --force '$WT_PATH' && git branch -D '$WT_BRANCH'"
