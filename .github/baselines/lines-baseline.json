@@ -1,0 +1,27 @@
+{
+  "surfaces": {
+    "rules": {
+      "lines": 165,
+      "grace_lines": 15,
+      "bytes": 21159,
+      "grace_bytes": 1500
+    },
+    "claude-md": {
+      "lines": 23,
+      "grace_lines": 8,
+      "bytes": 4666,
+      "grace_bytes": 800
+    },
+    "descriptions": {
+      "lines": 19,
+      "grace_lines": 2,
+      "bytes": 7665,
+      "grace_bytes": 600
+    }
+  },
+  "meta": {
+    "impl_version": 1,
+    "config_hash": "e36c8e1f27cecbf04af8e57ce0a48ec117a1c9dea405e0a64fdc2aaecfb52b91",
+    "notes": "Absolute grace margins: rules absorbs one new rule section, claude-md a process paragraph, descriptions one new skill or a rewording pass. Tightening is free; loosening is review-gated."
+  }
+}
