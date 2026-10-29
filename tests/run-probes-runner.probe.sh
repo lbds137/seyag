@@ -91,7 +91,7 @@ PASS  e
 3 passed, 2 failed (of 5)'
 
 rm -f "$PIDFILE"
-out1=$(bash "$RUNNER" -j 1)
+out1=$(env -u SYG_PROBE_TIMEOUT bash "$RUNNER" -j 1)
 rc1=$?
 [ -s "$PIDFILE" ] && leaked_pids+=("$(<"$PIDFILE")")
 if [ "$rc1" -eq 1 ] && [ "$(grep -v '^ *$' <<<"$out1")" = "$want_lines" ]; then
@@ -106,7 +106,7 @@ else
 fi
 
 rm -f "$PIDFILE"
-out3=$(bash "$RUNNER" -j 3)
+out3=$(env -u SYG_PROBE_TIMEOUT bash "$RUNNER" -j 3)
 rc3=$?
 [ -s "$PIDFILE" ] && leaked_pids+=("$(<"$PIDFILE")")
 if [ "$rc3" -eq 1 ] && [ "$(grep -v '^ *$' <<<"$out3")" = "$want_lines" ]; then

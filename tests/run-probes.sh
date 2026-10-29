@@ -59,10 +59,12 @@ fi
 
 # Default ceiling: generous multiple (>=5x) of the slowest probe re-measured under parallel CI conditions, floor honored.
 DEFAULT_PROBE_TIMEOUT=600
+PT_SOURCE=default
 if [ -z "${SYG_PROBE_TIMEOUT+x}" ]; then
   PT=$DEFAULT_PROBE_TIMEOUT
 elif [[ "$SYG_PROBE_TIMEOUT" =~ ^[0-9]+$ ]] && [ "$((10#$SYG_PROBE_TIMEOUT))" -gt 0 ]; then
   PT=$((10#$SYG_PROBE_TIMEOUT))
+  PT_SOURCE=SYG_PROBE_TIMEOUT
 else
   echo "run-probes: invalid SYG_PROBE_TIMEOUT='${SYG_PROBE_TIMEOUT}' (must be a positive integer); falling back to default ${DEFAULT_PROBE_TIMEOUT}s" >&2
   PT=$DEFAULT_PROBE_TIMEOUT
@@ -71,7 +73,7 @@ fi
 TO=()
 if command -v timeout >/dev/null 2>&1; then
   TO=(timeout -k 5 "$PT")
-  echo "run-probes: probe timeout: ${PT}s per probe (SYG_PROBE_TIMEOUT or default)" >&2
+  echo "run-probes: probe timeout: ${PT}s per probe (${PT_SOURCE})" >&2
 else
   echo "run-probes: no timeout binary on PATH; probes run without a per-probe limit" >&2
 fi
@@ -108,7 +110,7 @@ flush_ready() {
     else
       out=$(<"$TMP/$next.out")
       echo "FAIL  $name (exit $rc)"
-      if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
+      if { [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; } && [ "${#TO[@]}" -gt 0 ]; then
         echo "      (SIGTERM/SIGKILL after the ${PT}s per-probe ceiling — usually the timeout, but an external cancel looks the same; the probe's own output follows)"
       fi
       printf '%s\n' "$out" | sed 's/^/      /'
