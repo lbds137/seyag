@@ -148,7 +148,9 @@ record separator). Each row:
 - `action` — `block` (exit 2 with the banner) or `warn` (exit 0 with the
   advisory delivered through `hookSpecificOutput.additionalContext` — plain
   stderr never reaches the model, per the claim-shape-guard's channel note; a
-  canary asserts delivery). Default `block`.
+  canary asserts delivery). ALL FIVE FIELDS ARE REQUIRED — the defaults are
+  the recommended spellings, not omittable fields (a four-field row is
+  ambiguous under the raw-`:` split and refuses).
 
 Evaluation: ALL rows whose files-ERE matches (per quantifier) and whose
 branch test hits are collected; any `block` hit → exit 2 naming every hitting
@@ -194,20 +196,24 @@ on arrival: no Tzurot tracker IDs in the test table.
 test table are the assets. *Rejected — vendoring tzurot's shell_quotes*: two
 scanners in one tree is the drift the divergence report warns about.
 
-### D3 — Detection: the structural argv convention; the runner table grows by named decision
+### D3 — Detection: the structural argv convention; the runner table: `su` and `flock` join, the rest reused
 
 Commit detection = `command_pipelines` + `unwrap_runners` + `parse_git`
 subcommand check (the temporal-marker-guard skeleton). **Runner-table
-growth, decided**: `watch`, `su` (non-login forms are cwd/env-preserving;
+changes, decided**: `su` and `flock` join; the existing `watch`/`sudo`/
+`doas`/`timeout` entries are reused as-is (`shell_quotes.py:2318-2337` —
+Slice A/B must not re-add them). `su` non-login forms are cwd/env-preserving;
 `su -`/`-l`/`--login` reset cwd and scrub env → the location resolves to
-ambiguous), `sudo`, `doas`, `timeout`, `flock` join as local
-cwd-preserving runners; the INTERIORS of any wrapped command are always
-scanned (the wrapper-bypass closure is the interiors machinery, not the table —
-the table governs cwd/env context for the WHERE walk). The operational rule
-is content-based, not runner-based: any argv whose token stream contains a
-`git … commit` sequence is scanned whatever argv[0] is — an unrecognized
-runner cannot hide a commit (it can at most mis-resolve WHERE, which is the
-ambiguity path); the table only decides cwd/env context.
+ambiguous; `sudo -i`/`--login` are LOGIN forms in the same class (sudo's
+`env_reset` also scrubs the `GIT_DIR` family) → ambiguous; plain `sudo` is
+cwd-preserving but its env_reset means the relocation env family will not
+survive it (noted next to the su env clause). The INTERIORS of any wrapped
+command are always scanned at EXECUTING positions — wrapper `-c` strings,
+heredocs fed to a shell, `$()`/backtick interiors — plus unknown-runner argv
+where `git` sits at a command position and `commit` is its parsed subcommand
+(the `parse_git` check). Read-only shapes are NOT commits: `git log --grep
+commit`, `echo git commit -m x`, `git show HEAD -- commit` exit 0 (canary
+group 2 pins the false-positive controls).
 **ssh**: `localhost`/`127.0.0.1` targets are local and judged normally; any
 other target carrying an inner commit is AMBIGUOUS (block rows block, warn
 rows advise) — a 5-second local bypass via `ssh localhost` does not exist.
@@ -267,8 +273,10 @@ Per-command bypass `SYG_ALLOW_COMMIT_BRANCH=1` as an assignment in the
 commit's own prefix (walker `bypass_assignment` semantics; `=0`/empty do not
 waive; a token in prose/quotes/heredoc bodies is not a bypass; POLICY and
 SYG_DISABLE are never honored from command text). Every bypass use appends a
-line to an audit file under the state dir (`SYG_STATE_DIR` convention,
-append-only) in addition to stderr — the durable trail is the FILE, not
+line to an audit file under the XDG state dir
+(`${XDG_STATE_HOME:-$HOME/.local/state}/seyag/` — the cwd-drift-guard
+convention; reboot-durable, unlike the /tmp default of `SYG_STATE_DIR`),
+append-only, in addition to stderr — the durable trail is the FILE, not
 exit-0 stderr, whose session persistence is not assumed; a canary asserts the
 append. Component toggle `guards-commit`; `SYG_DISABLE`; the
 project-local hook override. Chained commands are judged per commit
@@ -300,9 +308,11 @@ matcher — the clarified sentence).
 
 ### D9 — The seyag-repo policy: one row, honestly labeled (owner call — O1)
 
-`main-gate:any:\.(sh|py|md|json|yml|tsv|txt|yaml)$|^\.claude/|^\.github/:^main$:block` —
+`main-gate:any:\.(sh|py|md|json|yml|tsv|txt|yaml)$|^\.claude/|^\.github/|^plugins/seyag/bin/:^main$:block` —
 "no seyag-stack commits while on main." (The set includes `.tsv`/`.txt`/`.yaml`
-— components.tsv and the coupling allowlist are seyag-stack by any definition.)
+— components.tsv and the coupling allowlist are seyag-stack by any definition —
+and `^plugins/seyag/bin/`, because the stack's 24 extensionless bin tools carry
+no extension for the suffix ERE to catch.)
 It mechanizes the commit-act half of
 the standing rule; the push half stays with the ruleset ref restriction, the
 bypass is friction + audit, and non-stack content (Dockerfile, LICENSE,
@@ -329,7 +339,8 @@ strands).
    judges /x); `out=$(git commit …)` judged; branch-mutating unknown
    (`symbolic-ref`, `--orphan`) → ambiguous, never unchanged.
 4. Wrapper/heredoc bypass: `bash -c 'git commit …'` → blocked; `watch -n1 '…'` → blocked;
-   `su -c '…'` → blocked; `su -l '…'` → ambiguous; unquoted-heredoc body
+   `su -c '…'` → blocked; `su -l '…'` → ambiguous; `sudo -i sh -c 'cd <repo>
+   && git commit'` → ambiguous (the login-form class); unquoted-heredoc body
    carrying a commit → row action, never silent pass; quoted-heredoc-to-shell
    (`bash <<'EOF'`) → judged; other-host ssh with an inner commit → ambiguous;
    ssh localhost → judged normally.
@@ -337,7 +348,8 @@ strands).
    --work-tree=… commit` → ambiguous → block-row block; content computed at
    the candidate location (gated file only in the `-C` sibling → blocks).
 6. Bypass: prefix waives; `=0`/empty don't; prose/quotes don't; chained mixed
-   → the un-bypassed commit still judged; every bypass prints the audit line.
+   → the un-bypassed commit still judged; every bypass APPENDS the audit-file
+   line (the file asserted, not stderr).
 7. Content sources: `git add` + pathspec; `commit -a` tracked-only (untracked
    `.sh` + `-am` → no untracked in set); `<paths>` = `--only`; `--include`
    additive; `--pathspec-from-file` → ambiguous file set (evaluated as the
@@ -414,8 +426,10 @@ gate.
 - **D2 two-axis adjudication + D5 git-semantics pins (kimi + deepseek)**:
   `-a` tracked-only, `<paths>`=`--only`, `--include` additive,
   `--pathspec-from-file`/`--amend` explicit, wide-fallback blocks.
-- **su login forms → ambiguous (kimi)**; runner table grows
-  watch/su/sudo/doas/timeout/flock with a stated unknown-runner default
+- **su login forms → ambiguous (kimi)**; runner table: `su` and `flock` join,
+  the existing `watch`/`sudo`/`doas`/`timeout` entries reused (deepseek's
+  stale-claim catch against `_RUNNERS`), interiors-always-scanned as the
+  content-based rule
   (deepseek); `switch -c`/`checkout -b` flag correction (deepseek caught the
   draft's non-existent `switch -b` example); branch-mutating unknown →
   ambiguous never unchanged (kimi); symbolic-ref evasion named (kimi); alias
