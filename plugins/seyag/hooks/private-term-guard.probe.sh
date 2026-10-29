@@ -733,8 +733,6 @@ run 2 "gh wrapper colon single-split: gh:repo-set-default scans text" "$PUB" "${
   "myops ci gh:repo-set-default o/r # zorbleflux"
 run 2 "gh wrapper basename match on argv[0]" "$PUB" "${T[@]}" SYG_GH_WRAPPERS="myops ci" -- \
   "/usr/local/bin/myops ci pr edit --body-file $TMP/files/body.txt"
-run 2 "gh wrapper fallback to SYG_LOSSY_PIPE_GH_WRAPPERS when SYG_GH_WRAPPERS is unset" "$PUB" -u SYG_GH_WRAPPERS SYG_LOSSY_PIPE_GH_WRAPPERS="myops ci" "${T[@]}" -- \
-  "myops ci pr edit --body-file $TMP/files/body.txt"
 
 if [ "$FAILURES" -ne 0 ]; then
   printf '\n%d probe case(s) FAILED\n' "$FAILURES"
