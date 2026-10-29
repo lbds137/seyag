@@ -124,7 +124,7 @@ TOOL_NAME=$(jq -r '.tool_name // empty' <<<"$INPUT" 2>/dev/null || echo "")
 CMD=$(jq -r '.tool_input.command // empty' <<<"$INPUT" 2>/dev/null || echo "")
 [ -z "$CMD" ] && exit 0
 
-read -r GH_WRAPPER_FIRST _ <<<"${SYG_GH_WRAPPERS:-${SYG_LOSSY_PIPE_GH_WRAPPERS:-}}"
+read -r GH_WRAPPER_FIRST _ <<<"${SYG_GH_WRAPPERS:-}"
 if [[ "$CMD" =~ (^|[^[:alnum:]_.-])gh([^[:alnum:]_-]|$) ]]; then
   :
 elif [ -n "$GH_WRAPPER_FIRST" ] \

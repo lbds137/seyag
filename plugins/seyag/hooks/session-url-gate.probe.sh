@@ -568,8 +568,6 @@ run 2 "gh wrapper colon single-split: gh:repo-set-default scans text" "$WORK" SY
   "myops ci gh:repo-set-default o/r # ${LINK}"
 run 2 "gh wrapper basename match on argv[0]" "$WORK" SYG_GH_WRAPPERS="myops ci" -- \
   "/usr/local/bin/myops ci pr edit --body-file $TMP/files/leaky.txt"
-run 2 "gh wrapper fallback to SYG_LOSSY_PIPE_GH_WRAPPERS when SYG_GH_WRAPPERS is unset" "$WORK" -u SYG_GH_WRAPPERS SYG_LOSSY_PIPE_GH_WRAPPERS="myops ci" -- \
-  "myops ci pr edit --body-file $TMP/files/leaky.txt"
 
 if [ "$FAILURES" -ne 0 ]; then
   printf '\n%d probe case(s) FAILED\n' "$FAILURES"

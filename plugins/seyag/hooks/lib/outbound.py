@@ -25,10 +25,10 @@ pipelines, wrapper strings such as `bash -c '…'`, and command substitutions
 `SYG_ALLOW_SESSION_URL=1 git commit …`, `env SYG_ALLOW_SESSION_URL=1 gh …`)
 yields nothing; a mention elsewhere in the text does not count. When
 `SYG_GH_WRAPPERS` (a whitespace-separated token list; opt-in, empty by default;
-falls back to `SYG_LOSSY_PIPE_GH_WRAPPERS` when unset or empty) is set and a
-command's argv begins with that token sequence (the first token compared
-against the basename of `argv[0]`, the rest verbatim), the walker matches a
-`gh` operation in either the plain two-word form (`<subcommand> <word>` where
+the only input — no fallback to any other variable) is set and a command's argv
+begins with that token sequence (the first token compared by basename against
+the basename of `argv[0]`, the rest verbatim), the walker matches a `gh`
+operation in either the plain two-word form (`<subcommand> <word>` where
 `<subcommand>` is `pr`, `issue`, `repo`, `gist`, `release`, `run` or `api`,
 anchored immediately after the wrapper tokens or immediately after a literal
 `gh` word there) or, scanning forward, the colon form (`gh:<rest>`, e.g.
@@ -36,7 +36,11 @@ anchored immediately after the wrapper tokens or immediately after a literal
 feeds the synthetic `gh` argv through the same `gh_text_exempt`,
 `file_values_gh` and `repo_create_push_dir` path as a literal `gh` command
 (when intervening words sit between the wrapper tokens and a colon-form match,
-`gh_text_exempt` is skipped and the command text is always scanned).
+`gh_text_exempt` is skipped and the command text is always scanned). A
+single-token wrapper that names a common script runner (e.g. `pnpm`) makes
+plain `run`/`release` invocations scan as gh writes — configure the full prefix
+(e.g. `pnpm ops`). Wrapper flags sitting before an anchored plain-form
+operation are not scanned.
 
 THE ADDED LAYER: git-hooks/pre-push scans what a push sends from a public
 repo (message, identities, paths, added lines, tags, notes), however bash
@@ -393,23 +397,21 @@ GH_WRAPPER_SUBCOMMANDS = frozenset(GH_READ_SUBCOMMANDS) | {"api"}
 
 
 def _gh_wrapper_argv(argv):
-    """`(gh_argv, skipped)` when `SYG_GH_WRAPPERS` (falling back to
-    `SYG_LOSSY_PIPE_GH_WRAPPERS` when unset or empty) is set, `argv` begins
-    with that whitespace-separated token sequence (`wrappers[0]` compared
-    against the basename of `argv[0]` and the remaining tokens verbatim), and
-    either the plain two-word form (`<subcommand> <word>` with `<subcommand>`
-    in `GH_WRAPPER_SUBCOMMANDS`) sits immediately after the wrapper tokens (or
-    immediately after a literal `gh` word there) or a word after the wrapper
-    tokens matches the colon form (`gh:<rest>`, split on the first `-`);
-    `skipped` is True when intervening words sit between the wrapper-token
-    prefix and the matched `gh` operation; else `(None, False)`."""
+    """`(gh_argv, skipped)` when `SYG_GH_WRAPPERS` is set, `argv` begins with
+    that whitespace-separated token sequence (`wrappers[0]` compared by
+    basename against the basename of `argv[0]` and the remaining tokens
+    verbatim), and either the plain two-word form (`<subcommand> <word>` with
+    `<subcommand>` in `GH_WRAPPER_SUBCOMMANDS`) sits immediately after the
+    wrapper tokens (or immediately after a literal `gh` word there) or a word
+    after the wrapper tokens matches the colon form (`gh:<rest>`, split on the
+    first `-`); `skipped` is True when intervening words sit between the
+    wrapper-token prefix and the matched `gh` operation; else `(None, False)`."""
     try:
-        wrappers = (os.environ.get("SYG_GH_WRAPPERS", "").split()
-                    or os.environ.get("SYG_LOSSY_PIPE_GH_WRAPPERS", "").split())
+        wrappers = os.environ.get("SYG_GH_WRAPPERS", "").split()
         n = len(wrappers)
         if not wrappers or len(argv) <= n:
             return None, False
-        if argv[0].rsplit("/", 1)[-1] != wrappers[0] or argv[1:n] != wrappers[1:]:
+        if argv[0].rsplit("/", 1)[-1] != wrappers[0].rsplit("/", 1)[-1] or argv[1:n] != wrappers[1:]:
             return None, False
         plain = n + 1 if argv[n] == "gh" else n
         if plain + 1 < len(argv) and argv[plain] in GH_WRAPPER_SUBCOMMANDS:
