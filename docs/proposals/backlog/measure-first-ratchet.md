@@ -27,8 +27,7 @@ land here. Implementation follows § Phasing; this PR carries the artifact only.
 ## Grounding provenance
 
 All facts [V] verified this session (2026-10-28, checkout 4f41a76 / 0.3.108) unless
-noted; full citations live in session working material outside this repo — this
-artifact carries what the design needs.
+noted; this artifact carries everything the design needs.
 
 - Tzurot sources read whole: `lines-check.WHY.md` (126L), `lines-surfaces.ts` (235L),
   `lines-check.ts` (593L), `lines-ceiling.ts` (108L), `check-hook-probes-registry.ts`
@@ -151,9 +150,10 @@ bumps when the `measure` output contract changes.
 6. description extraction totality (D2): a folded multi-line description, a
    missing `description:` key, and malformed frontmatter each fail as
    measurement-refused (exit 1), never partial-measure — with positive cases for
-   every accepted form, so plain unquoted and single-quoted single-line scalars
-   both measure correctly (three live files are plain scalars; a quoted-only
-   extractor would refuse the live repo);
+   every accepted form — plain unquoted, single-quoted, and double-quoted with an
+   escape sequence (e.g. `\"`) — each decoding to its true value; three live
+   files are plain scalars, so a quoted-only extractor would refuse the live
+   repo;
 7. an `@`-import inside a measured file → fail (exit 1; bytes must not migrate
    off the measured set). Detection is the shared import scan — fence- and
    backtick-aware, `context-audit`'s `IMPORT_RE` semantics — so an inline
@@ -227,11 +227,11 @@ the migration cost D4 names.
 Tzurot's why transfers verbatim: density varies across the corpus, so a
 line-only ratchet rates dense files "comfortable" while they carry the payload;
 bytes are exact, deterministic, tokenizer-free; a derived token figure is display
-only and never gates. For whole-file surfaces bytes are on-disk size of the
-working-tree file — the artifact the harness actually loads — taken as `wc -c`'s
-byte count with its padded numeric output trimmed; the file content is never
-trimmed or normalized (the `descriptions` surface measures its extracted values
-instead, per D2's byte model). The fleet and CI are LF-only; implementation
+only and never gates. For whole-file surfaces bytes are the on-disk byte length
+of the working-tree file — the artifact the harness actually loads — measured by
+the Python core (`len(read_bytes())`, equivalent to `wc -c`); the file content is
+never trimmed or normalized. The `descriptions` surface measures its extracted
+values instead, per D2's byte model. The fleet and CI are LF-only; implementation
 adds/verifies a `.gitattributes` eol pin for measured paths so EOL churn cannot
 move the number. README limitation line (council): *bytes is a proxy for tokens;
 divergence (e.g. CJK-heavy prose) is a known limitation, not a bug* — the two
@@ -239,10 +239,10 @@ dimensions are chosen to diverge on each other's blind spots (line-joining
 inflates bytes, line-splitting inflates lines). Lines count newline-terminated
 lines, plus a final unterminated line — Tzurot's countLines arithmetic, chosen so
 a file missing its trailing newline does not silently drop its last line from the
-count; it is not strict `wc -l`, which counts newlines only, and the design
-drops that label). Both
-dimensions gate, and if line semantics ever prove unstable across contributors,
-lines demote to display-only — bytes carries the gate alone.
+count. That is not strict `wc -l`, which counts newlines only; the design drops
+the wc-compatible label. Both dimensions gate, and if line semantics ever prove
+unstable across contributors, lines demote to display-only — bytes carries the
+gate alone.
 
 ### D4 — Baseline mechanics from Tzurot, plus the panel's closes
 
@@ -263,7 +263,8 @@ JSON baseline at `.github/baselines/lines-baseline.json`:
   other entries verbatim (so a trim's tightening lands without loosening an
   unrelated grown surface — the failure that happened in Tzurot), warning when a
   scoped refresh would leave canonical surfaces untracked. Refreshing from a
-  hollow measurement throws. A scoped refresh validates the whole baseline, not
+  hollow measurement fails with exit 3 — it would bless a broken surface path. A
+  scoped refresh validates the whole baseline, not
   just its target — strays and schema errors fail the refresh, they are not
   silently preserved.
 - **Shrink guard** (council, qwen): refreshes print old→new deltas per surface
@@ -312,8 +313,7 @@ owner ruled OBSOLETE 2026-10-28/29 on both channels):
 
 Re-check triggers (folded from council): the harness stops natively listing
 plugin skills, skill activation measurably regresses, or skills land that the
-harness will not auto-surface. The disposition lands in the machine-side port
-ledger.
+harness will not auto-surface.
 
 ### D6 — Per-probe timeout in `run-probes.sh`: port, with a correct kill model
 
@@ -432,7 +432,7 @@ without a tokenizer; the README proxy line (D3) covers the concern.
 | --- | --- | --- |
 | A | `bin/lines-check` + `tests/lines-check.probe.sh` + canary/mutant set (D1) + baseline capture + README row | delegation unit; driver gates; the probe auto-joins CI |
 | B | per-probe timeout in `run-probes.sh` + `probes.yml` `timeout-minutes` + canary (D6) | small, independent; after A |
-| — | skill-eval disposition | machine-side port-ledger update only; no repo change (done with this landing) |
+| — | skill-eval disposition | recorded in this artifact (D5); no repo change |
 
 ## § Council record
 
