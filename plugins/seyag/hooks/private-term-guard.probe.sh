@@ -733,6 +733,12 @@ run 2 "gh wrapper colon single-split: gh:repo-set-default scans text" "$PUB" "${
   "myops ci gh:repo-set-default o/r # zorbleflux"
 run 2 "gh wrapper basename match on argv[0]" "$PUB" "${T[@]}" SYG_GH_WRAPPERS="myops ci" -- \
   "/usr/local/bin/myops ci pr edit --body-file $TMP/files/body.txt"
+run 2 "gh wrapper basename match on configured token" "$PUB" "${T[@]}" SYG_GH_WRAPPERS="./bin/myops ci" -- \
+  "myops ci pr edit --body-file $TMP/files/body.txt"
+assert_out "path-qualified wrapper masks the term as #2" present "[private term #2]"
+assert_out "path-qualified wrapper names a body file, not its path" present "matched in: a body file."
+run 0 "gh wrapper flag before anchored plain-form operation leaves command unscanned" "$PUB" "${T[@]}" SYG_GH_WRAPPERS=myops -- \
+  "myops --verbose pr edit --body-file $TMP/files/body.txt"
 
 if [ "$FAILURES" -ne 0 ]; then
   printf '\n%d probe case(s) FAILED\n' "$FAILURES"
