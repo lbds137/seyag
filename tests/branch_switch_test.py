@@ -652,6 +652,25 @@ ROWS = [
         (None, branch_switch.UNREADABLE_DIR, False),
     ),
     (
+        # R2: a commit behind a keyword is unplaceable; it must void the read,
+        # not vanish from the results beside a located commit.
+        "R2: a commit behind then voids the read",
+        "git -C /other commit -m a; if true; then git commit -m b; fi",
+        (None, branch_switch.UNREADABLE_DIR, False),
+    ),
+    (
+        "R2: a commit behind do voids the read",
+        "git -C /other commit -m a; for x in 1; do git commit -m b; done",
+        (None, branch_switch.UNREADABLE_DIR, False),
+    ),
+    (
+        # R2: the conditional path clears inert like any other re-pointing
+        # command, so no different-repository silence follows.
+        "R2: a re-pointing command behind a keyword clears inert",
+        "if ln -sfn /path/to/project /tmp/link; then :; fi; git -C /tmp/link commit -m x",
+        (None, "/tmp/link", False),
+    ),
+    (
         # R1: bash strips redirections before the command runs; the cd argument
         # is /x whatever the redirect.
         "R1: a redirect on the cd argument reads the cd",
@@ -1084,7 +1103,7 @@ BAD_REF_NAMES = [
 class RuleTable(unittest.TestCase):
     def test_row_count(self):
         # The table is the acceptance gate: a rule is never dropped.
-        self.assertEqual(len(ROWS), 247)
+        self.assertEqual(len(ROWS), 250)
         labels = [label for label, _, _ in ROWS]
         self.assertEqual(len(set(labels)), len(labels))
 

@@ -706,7 +706,8 @@ def _changed_dir(words, here, cdpath=False, tilde_quoted=False, home_mentioned=F
 
 def _commit_dir(words, base):
     """The directory a `[env -C <dir> …] git [globals] commit …` segment runs
-    in, starting from `base` (`_START`, an absolute path or `UNREADABLE_DIR`),
+    in, starting from `base` (`_START`, an absolute or relative location, or
+    `UNREADABLE_DIR`),
     or None when it cannot be read (void). A bare commit returns `base`
     unchanged, `_START` included.
 
@@ -1105,9 +1106,16 @@ class _SegmentWalk:
                 # what bash runs and skips inside the compound is unknowable,
                 # with or without a changer behind it; the walk refuses the
                 # confident wrong answer ("no change") and reads the same
-                # value an unresolvable cd produces, with `inert` left as the
-                # mover path leaves it.
+                # value an unresolvable cd produces. `inert` is cleared (a
+                # re-pointing command behind a keyword must not earn the
+                # different-repository silence), and a commit word behind the
+                # keyword voids the whole read: that commit's directory is as
+                # unplaceable as the segment, so it is recorded unreadable
+                # instead of being dropped from the results.
                 seg_ok = {UNREADABLE_DIR for _ in run}
+                self.inert = False
+                if any(w.lower() == "commit" for w in words):
+                    self.results.update(UNREADABLE_DIR for _ in run)
             elif _is_source(words):
                 seg_ok = seg_fail = {UNREADABLE_DIR}
                 self.inert = False
