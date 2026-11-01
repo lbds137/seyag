@@ -33,8 +33,12 @@
 #                           wrong as behind; runs before the patch is built)
 #   6 empty-patch           `git -C <wt> add -A` then `git -C <wt> diff --cached --binary`
 #                           written to a temp file is non-empty
-#   7 nothing-outside-patch every non-empty `git -C <wt> status --porcelain` line
-#                           after staging matches `^[MADRCT] `
+#   7 nothing-outside-patch no `git -C <wt> ls-files -v` entry is assume-unchanged
+#                           (lowercase tag) or skip-worktree (`S`) on disk, every
+#                           staged gitlink (`160000`) commit resolves in the main
+#                           repo or its submodule, and every non-empty
+#                           `git -C <wt> status --porcelain` line after staging
+#                           matches `^[MADRCT] `
 #   8 apply                 `git apply --index <patchfile>` in the main root succeeds
 #   9 byte-identical        `git diff --cached --binary` in the main root matches
 #                           `<patchfile>` via `cmp`; `--binary` must appear on BOTH
@@ -135,6 +139,15 @@ match_branch_re() {
     return 2
   fi
   [[ $b =~ $BRANCH_RE ]] 2>/dev/null
+}
+
+z_list() {
+  local -n z_arr=$1
+  shift
+  mapfile -d '' z_arr < <("$@"; printf '\001rc=%s\0' "$?")
+  local last=${z_arr[-1]:-}
+  unset 'z_arr[-1]'
+  [ "$last" = $'\001rc=0' ]
 }
 
 TMP_DIR=""
@@ -257,8 +270,41 @@ PASSED_CHECKS+=("no-unpushed-base")
 # 6. empty-patch
 TMP_DIR=$(mktemp -d) || refuse empty-patch "mktemp -d failed"
 PATCH_FILE="$TMP_DIR/unit.patch"
+is_hidden_entry() {
+  local LC_ALL=C tag=${1:0:1} p=${1:2}
+  case "$tag" in
+    [a-z]) return 0 ;;
+    S) [ -e "$WT_PATH/$p" ] || [ -L "$WT_PATH/$p" ] ;;
+    *) return 1 ;;
+  esac
+}
+
+FLAGGED=()
+if ! z_list FLAGGED git -C "$WT_PATH" ls-files -v -z; then
+  refuse nothing-outside-patch "git ls-files -v failed in worktree"
+fi
+for entry in "${FLAGGED[@]}"; do
+  if is_hidden_entry "$entry"; then
+    refuse nothing-outside-patch "${entry:2}: assume-unchanged or skip-worktree edits would be lost"
+  fi
+done
 add_err=$(git -C "$WT_PATH" add -A 2>&1) \
   || refuse empty-patch "git add -A failed in worktree: $add_err"
+RAW_DIFF=()
+if ! z_list RAW_DIFF git -C "$WT_PATH" diff --cached --raw --no-renames --no-abbrev --ignore-submodules=none -z 2>/dev/null; then
+  refuse nothing-outside-patch "git diff --cached --raw failed in worktree"
+fi
+for ((i = 0; i + 1 < ${#RAW_DIFF[@]}; i += 2)); do
+  meta=${RAW_DIFF[i]}
+  rpath=${RAW_DIFF[i + 1]}
+  read -r _ new_mode _ new_sha _ <<<"$meta"
+  [ "$new_mode" = "160000" ] || continue
+  if ! git -C "$MAIN_ROOT" cat-file -e "$new_sha^{commit}" 2>/dev/null \
+    && { [ ! -e "$MAIN_ROOT/$rpath/.git" ] \
+      || ! git -C "$MAIN_ROOT/$rpath" cat-file -e "$new_sha^{commit}" 2>/dev/null; }; then
+    refuse nothing-outside-patch "gitlink '$rpath' commit $new_sha does not resolve in main repo"
+  fi
+done
 # stderr goes to its own file, never into the patch: a warn-but-succeed diff
 # must not mix notice text into what `git apply` will consume.
 if ! git -C "$WT_PATH" diff --cached --binary --no-color --no-ext-diff --src-prefix=a/ --dst-prefix=b/ >"$PATCH_FILE" 2>"$TMP_DIR/diff.err"; then

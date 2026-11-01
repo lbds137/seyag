@@ -287,6 +287,35 @@ D="$T/home/.local/share/keys/keys.cred"
 grep -qF '[--with-key=host]' "$CLOG" && grep -qF '[--name=fixture-cred]' "$CLOG" \
   && ok "SYG_KEYS_WITH_KEY and SYG_KEYS_NAME reach systemd-creds" || bad "config argv: $(cat "$CLOG")"
 
+# --- fullmatch NAME, line-separator rejection, and CRLF store ---
+sum=$(md5sum "$S")
+e=$(printf 'fixture-key-value-baz\n' | run "$K" set $'BAZ\n' 2>&1); rc=$?
+[ $rc = 2 ] && grep -qF 'NAME must match ^[A-Z][A-Z0-9_]*$' <<<"$e" && [ "$(md5sum "$S")" = "$sum" ] \
+  && ! run "$K" names | grep -qxF BAZ \
+  && ok "set \$'BAZ\\n' is a usage error and stores nothing" || bad "set BAZ\\n rc $rc: $e"
+sum=$(md5sum "$S")
+e=$(printf 'abc\xe2\x80\xa8QUX=x\n' | run "$K" set SEP_KEY 2>&1); rc=$?
+[ $rc = 1 ] && [ "$e" = "keys: the value for SEP_KEY holds a line-separator character; nothing stored" ] \
+  && [ "$(md5sum "$S")" = "$sum" ] && ! run "$K" names | grep -qxF QUX \
+  && ok "a value with U+2028 refuses, stores nothing, and injects no QUX in names" || bad "U+2028 value rc $rc: $e"
+sum=$(md5sum "$S")
+e=$(printf 'abc\x0bdef\n' | run "$K" set SEP_KEY 2>&1); rc=$?
+[ $rc = 1 ] && [ "$e" = "keys: the value for SEP_KEY holds a line-separator character; nothing stored" ] \
+  && [ "$(md5sum "$S")" = "$sum" ] && ! run "$K" names | grep -qxF SEP_KEY \
+  && ok "a value with VT (0x0b) refuses and stores nothing" || bad "VT value rc $rc: $e"
+CRLF_S="$T/crlf/keys.cred"; mkdir -m 700 "$T/crlf"
+printf 'mock-cred:keys\nALPHA_KEY=fixture-crlf-alpha\r\nBETA_KEY=fixture-crlf-beta\r\n' > "$CRLF_S"
+[ "$(run SYG_KEYS_STORE="$CRLF_S" "$K" names)" = "$(printf 'ALPHA_KEY\nBETA_KEY')" ] \
+  && [ "$(run SYG_KEYS_STORE="$CRLF_S" "$K" get ALPHA_KEY)" = fixture-crlf-alpha ] \
+  && [ "$(run SYG_KEYS_STORE="$CRLF_S" "$K" get BETA_KEY)" = fixture-crlf-beta ] \
+  && ok "a CRLF store parses names and values cleanly" || bad "CRLF store parse"
+U2028_S="$T/u2028/keys.cred"; mkdir -m 700 "$T/u2028"
+printf 'mock-cred:keys\nU=abc\xe2\x80\xa8QUX=x\n' > "$U2028_S"
+[ "$(run SYG_KEYS_STORE="$U2028_S" "$K" names)" = "U" ] \
+  && [ "$(run SYG_KEYS_STORE="$U2028_S" "$K" get U)" = $'abc\xe2\x80\xa8QUX=x' ] \
+  && ok "a hand-built store holding U=abc<U+2028>QUX=x reads back whole, with no QUX in names" \
+  || bad "U+2028 store read"
+
 # --- over every call above: set, get, names and delete alike ---
 grep -qE '[A-Z]+_KEY|fixture-(key|legacy|race|victim)' "$LOG" "$CLOG" && bad "a key NAME or value reached systemd-creds argv: $(grep -hE '[A-Z]+_KEY|fixture-(key|legacy|race|victim)' "$LOG" "$CLOG" | head -n 3)" \
   || ok "no key NAME or value in any systemd-creds argv, over the whole run"

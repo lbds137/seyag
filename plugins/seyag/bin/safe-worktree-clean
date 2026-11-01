@@ -24,17 +24,24 @@
 #               <base>'s bytes unchanged. Untracked: <base>'s file keeps every line of the tree's
 #               file, in order (additions only). An untracked path that <base> lacks is HOLD,
 #               and so is any assume-unchanged or skip-worktree entry (its edits are hidden)
-#   5 ignored   ignored files are only safe-clean cache names (read from safe-clean itself) or
-#               repo-declared regenerable paths: .claude/worktree-regenerable as committed on
-#               <base> (never a tree's copy) plus SYG_WORKTREE_REGENERABLE (whitespace-separated
-#               globs). One entry per line, # comments: `<glob>` (bash pattern, * crosses /,
-#               a trailing / dropped) or `<path> = <template>`, where the ignored file must
-#               equal <base>'s <template> byte for byte. A malformed line, or a glob that
-#               matches every path (*, **, .*), is skipped with a warning on stderr.
+#   5 ignored   ignored files are only safe-clean cache names (the entry's own last component,
+#               or ignored by a rule file in a directory whose last component is a cache name;
+#               read from safe-clean itself) or repo-declared regenerable paths:
+#               .claude/worktree-regenerable as committed on <base> (never a tree's copy) plus
+#               SYG_WORKTREE_REGENERABLE (whitespace-separated globs). One entry per line, #
+#               comments: `<glob>` (bash pattern, * crosses /, a trailing / dropped) or
+#               `<path> = <template>`, where the ignored file must equal <base>'s <template>
+#               byte for byte. A malformed line, or a glob that matches every path (*, **, .*),
+#               is skipped with a warning on stderr.
 #   6 branch    the branch matches SYG_WORKTREE_BRANCH_RE (extended regex; unset or empty:
 #               ^worktree-agent-); a detached HEAD instead needs check 7
 #   7 detached  the tree is under <repo>/.claude/worktrees/ (outside is HOLD:detached-outside)
 #               and HEAD's commit is reachable from <base> or a local branch
+#   8 state     no in-progress git operation (rebase-merge, rebase-apply, MERGE_HEAD,
+#               CHERRY_PICK_HEAD, REVERT_HEAD, BISECT_LOG, sequencer -> HOLD:in-progress), and
+#               no submodule with uncommitted, untracked or ignored content, commits not on any
+#               remote (including stashes, custom refs and reflogs), or a populated gitlink
+#               directory without .git (HOLD:submodule)
 # <base> is --base REF, else SYG_WORKTREE_BASE, else origin/<default branch> (origin/HEAD,
 # else origin/main), compared as the local ref stands (fetch first for a fresh verdict);
 # a configured ref that does not resolve, or no default ref, makes every tree HOLD:no-base;
@@ -316,13 +323,18 @@ regen_verdict() {
   return 1
 }
 
-is_cache_path() { # any component of the path is a safe-clean cache name
-  local comp n
-  local -a comps
-  IFS=/ read -ra comps <<<"${1%/}"
-  for comp in "${comps[@]}"; do
-    for n in "${CACHE_NAMES[@]}"; do [ "$comp" = "$n" ] && return 0; done
-  done
+is_cache_path() { # the entry's own last path component, or its ignore rule's containing dir's, is a cache name
+  local t=$1 q=${2%/} leaf n out meta src dir
+  leaf=${q##*/}
+  for n in "${CACHE_NAMES[@]}"; do [ "$leaf" = "$n" ] && return 0; done
+  out=$(git -C "$t" check-ignore -v -- "$q" 2>/dev/null) || return 1
+  meta=${out%%$'\t'*}
+  [[ $meta =~ ^(.+):[0-9]+: ]] || return 1
+  src=${BASH_REMATCH[1]}
+  [[ $src == */* ]] || return 1
+  dir=${src%/*}
+  leaf=${dir##*/}
+  for n in "${CACHE_NAMES[@]}"; do [ "$leaf" = "$n" ] && return 0; done
   return 1
 }
 
@@ -490,9 +502,59 @@ judge_git() {
       hold ignored "ignored ${p%/} differs from its declared template ${REGEN_TEMPLATE[${p%/}]}"
     elif [ ${#CACHE_NAMES[@]} -eq 0 ]; then
       hold ignored "$p is ignored, and safe-clean's cache list could not be read"
-    elif ! is_cache_path "$p"; then
+    elif ! is_cache_path "$t" "$p"; then
       hold ignored "$p is ignored and not a safe-clean cache name or a declared regenerable path"
     fi
+  done
+  local op gp
+  local -a ops_found=()
+  for op in rebase-merge rebase-apply MERGE_HEAD CHERRY_PICK_HEAD REVERT_HEAD BISECT_LOG sequencer; do
+    if ! gp=$(git -C "$t" rev-parse --git-path "$op" 2>&1) || [ -z "$gp" ]; then
+      hold git-error "git rev-parse --git-path $op failed: ${gp//$'\n'/ }"
+      break
+    fi
+    case "$gp" in
+      /*) ;;
+      *) gp="$t/$gp" ;;
+    esac
+    if [ -e "$gp" ] || [ -L "$gp" ]; then
+      ops_found+=("$op")
+    fi
+  done
+  if [ ${#ops_found[@]} -gt 0 ]; then
+    hold in-progress "in-progress git operation in the tree: ${ops_found[*]}"
+  fi
+  judge_submodules "$t" ""
+}
+
+judge_submodules() {
+  local root=$1 prefix=$2 entry sub rel full sub_status sub_unpushed
+  local -a sub_entries=()
+  if ! z_list sub_entries git -C "$root" ls-files -s -z; then
+    hold git-error "git ls-files -s in ${prefix:-the tree} failed"
+    return
+  fi
+  for entry in "${sub_entries[@]}"; do
+    case "$entry" in "160000 "*) ;; *) continue ;; esac
+    sub=${entry#*$'\t'}
+    rel=${prefix:+$prefix/}$sub
+    full="$root/$sub"
+    if [ ! -e "$full/.git" ] && [ ! -L "$full/.git" ]; then
+      if [ -d "$full" ] && [ -n "$(ls -A -- "$full" 2>/dev/null)" ]; then
+        hold submodule "submodule $rel is not initialised but its directory is not empty"
+      fi
+      continue
+    fi
+    if ! sub_status=$(git -C "$full" status --porcelain --ignored --untracked-files=all 2>&1); then
+      hold git-error "git status in submodule $rel failed: ${sub_status//$'\n'/ }"
+    elif ! sub_unpushed=$(git -C "$full" rev-list --max-count=1 --all --reflog HEAD --not --remotes 2>&1); then
+      hold git-error "git rev-list in submodule $rel failed: ${sub_unpushed//$'\n'/ }"
+    elif [ -n "$sub_status" ]; then
+      hold submodule "submodule $rel has uncommitted, untracked, or ignored content"
+    elif [ -n "$sub_unpushed" ]; then
+      hold submodule "submodule $rel has commit(s) not on any remote (${sub_unpushed:0:12})"
+    fi
+    judge_submodules "$full" "$rel"
   done
 }
 
@@ -526,8 +588,8 @@ for i in "${TREES[@]}"; do
   else
     # 1: the lock.
     if ${WT_LOCKED[$i]}; then
-      if [[ ${WT_LOCK_REASON[$i]} =~ [Pp][Ii][Dd][\ :=]*([0-9]+) ]]; then
-        pid=${BASH_REMATCH[1]}
+      if [[ ${WT_LOCK_REASON[$i]} =~ (^|[^[:alnum:]_])[Pp][Ii][Dd][\ :=]+([0-9]+) ]]; then
+        pid=${BASH_REMATCH[2]}
         [ -d "/proc/$pid" ] && hold locked-live "lock pid $pid is alive"
       else
         hold lock-unparsable "lock reason names no pid: '${WT_LOCK_REASON[$i]}'"
