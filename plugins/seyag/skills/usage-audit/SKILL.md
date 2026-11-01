@@ -73,7 +73,7 @@ It ranks where the calls are rather than partitioning the total: a reply's outpu
 ## Step 4: append the ledger row
 
 ```
-| date | window | weighted total (deduped) | meter (all · scoped · 5h) | implied capacity | delegation | per-folder top 3 | notes |
+| date | window | weighted total (deduped) | meter (all · scoped · 5h when present) | implied capacity | delegation | per-folder top 3 | notes |
 ```
 
 Create the file with a header line (machine-local, never committed, weights, dedupe) if it doesn't exist. Notes carry the caveats: cloud units in the window, an applied reset, a model mix far from usual.
@@ -95,4 +95,4 @@ If a project stamps its audit cadence somewhere (Tzurot: `pnpm ops cadence:mark 
 ## Related
 
 - `session-mining`: the qualitative sibling. This skill counts tokens; that one counts friction and keepers.
-- `claude-usage`: the live meter and the 5-hour gate (`--ok`, `--wait`).
+- `claude-usage`: the live meter and the usage gate (`--ok`, `--wait`).

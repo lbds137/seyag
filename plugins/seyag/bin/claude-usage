@@ -1,14 +1,14 @@
 #!/bin/bash
 # claude-usage: the Claude plan's usage windows, shared by every session on this machine.
 #
-#   claude-usage              one line: 5h window % and reset, weekly % and reset, per-model weekly caps,
+#   claude-usage              one line: 5h window % and reset (when the plan has that window), weekly % and reset, per-model weekly caps,
 #                             plus ' · extra $X.XX left of $B.BB' / '$X.XX used' / '$X.XX over $B.BB'
 #                             while the plan's paid extra usage is on, under its spend limit, and anything
 #                             was spent or the week is maxed; ' · extra off (limit reached)' or
 #                             ' · extra off (<reason>)' at a maxed week when it is limit-reached, or carries
 #                             a disabled_reason while not enabled (enabled + reason + under the limit
 #                             passes the gate, so it shows the balance)
-#   claude-usage --ok [PCT]   exit 0 if the 5h window is below PCT% (default 90), the week is under 75% and
+#   claude-usage --ok [PCT]   exit 0 if the 5h window (when the plan has one) is below PCT% (default 90), the week is under 75% and
 #                             the calling session's model (Fable) has its own weekly cap left, else 1;
 #                             CLAUDE_USAGE_EXTRA_OK=1 passes past the weekly reserve while extra usage is on
 #                             and under its spend limit (cache at most 2 TTLs or 10 min old);
@@ -16,12 +16,12 @@
 #                             guests get the band above it) and the week reserve overridable via CLAUDE_USAGE_ZAI_WEEK_RESERVE_CMD (integer 1-99, must return promptly) or CLAUDE_USAGE_ZAI_WEEK_RESERVE;
 #                             other routed lanes (OpenRouter, a Console API key) pass at once (see below);
 #                             prints one verdict line to stderr (lane, meter, value, threshold,
-#                             source=api|estimate|none; says FAIL-OPEN when it passed on an estimate)
-#   claude-usage --wait [PCT] block until --ok PCT (default 50, i.e. the 5h window reset) passes, checking
+#                             source=api|estimate|none; a plan with no 5h window names meter=week and has no 5h= token; says FAIL-OPEN when it passed on an estimate)
+#   claude-usage --wait [PCT] block until --ok PCT (default 50, i.e. the 5h window reset where the plan has that window) passes, checking
 #                             every 2 minutes, then print the line; run it in the background to pause a session
 #   claude-usage --json       {five_hour_pct, five_hour_resets_at, seconds_to_reset, weekly_pct, weekly_resets_at, scoped, routed,
 #                             lane (anthropic|zai|or|console|unknown)} plus the calling lane's numbers, null when unreadable:
-#                             zai_five_hour_pct, zai_week_pct (z.ai) | or_remaining_usd (OpenRouter, 2 dp as displayed) | api_credit_remaining_usd (Console); extra_usage {enabled, spend_limit_reached, disabled_reason, used_usd} when in cache
+#                             zai_five_hour_pct, zai_week_pct (z.ai) | or_remaining_usd (OpenRouter, 2 dp as displayed) | api_credit_remaining_usd (Console); five_hour_absent: true when the plan cache has no 5h window (on every lane, routed ones included); extra_usage {enabled, spend_limit_reached, disabled_reason, used_usd} when in cache
 #   claude-usage --all        one line per lane on this machine (Anthropic plan, z.ai quota, API credit), whatever the
 #                             calling session's lane; always exits 0
 #
@@ -73,7 +73,7 @@ refresh() {
     if printf 'Authorization: Bearer %s\n' "$tok" |
         curl -sf -m 10 -H @- -H "anthropic-beta: oauth-2025-04-20" \
             https://api.anthropic.com/api/oauth/usage -o "$tmp" &&
-        jq -e '.five_hour' "$tmp" >/dev/null 2>&1; then
+        jq -e 'type == "object" and ((.five_hour.utilization | type) == "number" or (.seven_day.utilization | type) == "number")' "$tmp" >/dev/null 2>&1; then
         mv "$tmp" "$cache"
     else
         rm -f "$tmp"
@@ -225,11 +225,12 @@ if [ ! -s "$cache" ] && [ "${1:-}" != --all ]; then
 fi
 
 # resets_at looks like 2026-09-25T06:09:59.682848+00:00; fromdateiso8601 wants ...:59Z
-read -r five five_reset week week_reset < <(jq -r '
+read -r five five_reset week week_reset no_five < <(jq -r '
     def epoch: (. // "") | sub("\\.[0-9]+"; "") | sub("\\+00:00$"; "Z")
         | if . == "" then 0 else (fromdateiso8601? // 0) end;
-    [ (.five_hour.utilization // 0 | round), (.five_hour.resets_at | epoch),
-      (.seven_day.utilization // 0 | round), (.seven_day.resets_at | epoch) ] | @tsv' "$cache" 2>/dev/null)
+    [ (.five_hour.utilization // 0 | round), (if .five_hour.utilization == null then 0 else (.five_hour.resets_at | epoch) end),
+      (.seven_day.utilization // 0 | round), (.seven_day.resets_at | epoch),
+      (if .five_hour.utilization == null then 1 else 0 end) ] | @tsv' "$cache" 2>/dev/null)
 # Per-model weekly caps ("Fable 8%"), read on their own: @tsv would double a backslash in a name.
 scoped=$(jq -r '[ .limits[]? | select(.kind == "weekly_scoped" and .scope.model.display_name != null) | "\(.scope.model.display_name) \(.percent)%" ] | join(", ")' "$cache" 2>/dev/null)
 
@@ -292,7 +293,11 @@ plan_line() {
         week_line="$week_line (resets $(date -d "@$week_reset" '+%a %b %-d %H:%M'), in $((to_week / 86400))d $(( (to_week % 86400) / 3600 ))h)"
     fi
     [ -n "$scoped" ] && week_line="$week_line · $scoped of its own weekly cap"
-    echo "$five_line · $week_line"
+    if [ "$no_five" = 1 ]; then
+        echo "$week_line"
+    else
+        echo "$five_line · $week_line"
+    fi
 }
 
 # --all: one line per lane on this machine, whatever lane the caller is on (a plan session's fleet
@@ -410,12 +415,17 @@ case "${1:-}" in
         stale_note=""
         [ "$cache_age" -gt "$ttl" ] && stale_note=" (cache $((cache_age / 60))m old)"
         thr=${2:-90}
+        if [ "$no_five" = 1 ] && ! [ "$thr" -eq "$thr" ] 2>/dev/null; then
+            echo "claude-usage: --ok FAIL lane=anthropic meter=pct PCT is not an integer" >&2
+            exit 1
+        fi
         pass_meter="5h"
+        [ "$no_five" = 1 ] && pass_meter="week"
         week_op="<"
-        if ! { [ "$five" -lt "$thr" ] && [ "$week" -lt "$week_reserve" ]; } 2>/dev/null; then
+        if ! { { [ "$no_five" = 1 ] || [ "$five" -lt "$thr" ]; } && [ "$week" -lt "$week_reserve" ]; } 2>/dev/null; then
             five_op=">="; [ "$five" -lt "$thr" ] 2>/dev/null && five_op="<"
             week_op=">="; [ "$week" -lt "$week_reserve" ] 2>/dev/null && week_op="<"
-            meter="5h"; [ "$five" -lt "$thr" ] 2>/dev/null && meter="week"
+            meter="5h"; { [ "$no_five" = 1 ] || [ "$five" -lt "$thr" ]; } 2>/dev/null && meter="week"
             extra_note=""
             if [ "$meter" = week ] && [ "${CLAUDE_USAGE_EXTRA_OK:-}" = 1 ]; then
                 # The reason is the API's own token, reduced to [A-Za-z0-9_.-] so it can't break the verdict line.
@@ -439,7 +449,9 @@ case "${1:-}" in
                 fi
             fi
             if [ "$pass_meter" != extra-usage ]; then
-                echo "claude-usage: --ok FAIL lane=anthropic meter=$meter 5h=${five}%${five_op}${thr}% week=${week}%${week_op}${week_reserve}%${extra_note} source=api${stale_note}" >&2
+                five_tok=" 5h=${five}%${five_op}${thr}%"
+                [ "$no_five" = 1 ] && five_tok=""
+                echo "claude-usage: --ok FAIL lane=anthropic meter=$meter${five_tok} week=${week}%${week_op}${week_reserve}%${extra_note} source=api${stale_note}" >&2
                 exit 1
             fi
         fi
@@ -467,13 +479,16 @@ case "${1:-}" in
                 extra_bal=" extra=$(extra_figure "$ex_used")"
             fi
         fi
-        echo "claude-usage: --ok pass lane=anthropic meter=$pass_meter 5h=${five}%<${thr}% week=${week}%${week_op}${week_reserve}%${extra_bal} source=api${stale_note}" >&2
+        five_tok=" 5h=${five}%<${thr}%"
+        [ "$no_five" = 1 ] && five_tok=""
+        echo "claude-usage: --ok pass lane=anthropic meter=$pass_meter${five_tok} week=${week}%${week_op}${week_reserve}%${extra_bal} source=api${stale_note}" >&2
         exit 0
         ;;
     --json)
         # The lane fields ride after the original ones, which stay byte-for-byte as they were.
         ext=$(lane_fields); ext=${ext#\{}; ext=${ext%\}}
         [ -n "$ext" ] || ext="\"lane\":\"$vendor_lane\""
+        [ "$no_five" = 1 ] && ext="$ext,\"five_hour_absent\":true"
         if extra=$(extra_usage_field) && [ -n "$extra" ] && [[ $extra != *$'\n'* ]]; then
             extra=${extra#\{}; extra=${extra%\}}
             ext="$ext,$extra"

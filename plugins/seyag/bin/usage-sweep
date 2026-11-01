@@ -16,7 +16,7 @@ Usage:
   usage-sweep --by-session         attribute per session (slug/session) instead of per folder
   usage-sweep --fit                fit per-model meter rates (pts/M) via NNLS over tick intervals
   usage-sweep --probe START END    compare observed meter ticks vs fitted spend estimate in [START, END]
-  usage-sweep --meter 5h|week      meter to fit (default: 5h)
+  usage-sweep --meter 5h|week      meter to fit (default: 5h, or week when the newest reading in the window has no five_hour_pct)
   usage-sweep --max-gap SEC        max tick bracket width in seconds (default: 180)
   usage-sweep --max-span SEC       max interval span in seconds (default: 18000)
   usage-sweep --boot N             bootstrap resamples for CI (default: 1000)
@@ -485,6 +485,7 @@ def meter_points(readings, x, y):
     window = readings[li:ri + 1]
     weekly_delta = five_hour_delta = 0.0
     resets = {"weekly": 0, "five_hour": 0}
+    five_hour_absent = all(r["five_hour_pct"] is None for r in window)
     five_hour_ok = True
     for a, b in zip(window, window[1:]):
         d = b["weekly_pct"] - a["weekly_pct"]
@@ -507,6 +508,7 @@ def meter_points(readings, x, y):
         "five_hour_delta": five_hour_delta,
         "resets_inside": resets,
         "five_hour_usable": five_hour_ok and resets["five_hour"] == 0,
+        "five_hour_absent": five_hour_absent,
         "edge_left": {"epoch": left["epoch"], "distance_s": abs(left["epoch"] - x),
                       "extrapolated": left["epoch"] > x},
         "edge_right": {"epoch": right["epoch"], "distance_s": abs(right["epoch"] - y),
@@ -537,8 +539,8 @@ def main():
                     help="fit per-model meter rates (pts/M) via NNLS over tick intervals")
     ap.add_argument("--probe", nargs=2, metavar=("START", "END"),
                     help="compare observed meter ticks vs fitted spend estimate in [START, END] (implies --fit)")
-    ap.add_argument("--meter", choices=["5h", "week"], default="5h",
-                    help="meter to fit (5h or week; default: 5h)")
+    ap.add_argument("--meter", choices=["5h", "week"], default=None,
+                    help="meter to fit (5h or week; default: 5h, or week when the newest reading in the window has no five_hour_pct)")
     ap.add_argument("--max-gap", type=int, default=180,
                     help="max tick bracket width in seconds for a precise tick (default: 180)")
     ap.add_argument("--max-span", type=int, default=18000,
@@ -710,7 +712,18 @@ def main():
     probe_obj = None
     fit_k = None
     if a.fit:
-        meter_field = "five_hour_pct" if a.meter == "5h" else "weekly_pct"
+        win_readings = [r for r in readings if since_ts <= r["epoch"] <= until_ts]
+        newest_no_five = bool(win_readings) and win_readings[-1]["five_hour_pct"] is None
+        if a.meter is None:
+            fit_meter = "week" if newest_no_five else "5h"
+        else:
+            fit_meter = a.meter
+            if a.meter == "5h" and newest_no_five:
+                sys.stderr.write(
+                    "usage-sweep: the newest reading has no 5h window;"
+                    " only older readings can fit this meter (--meter week fits the weekly meter)\n"
+                )
+        meter_field = "five_hour_pct" if fit_meter == "5h" else "weekly_pct"
         intervals, ticks_total, ticks_precise = extract_ticks_and_intervals(
             readings, replies, meter_field, a.max_gap, a.max_span, since_ts, until_ts
         )
@@ -741,7 +754,7 @@ def main():
             }
 
         fit_obj = {
-            "meter": a.meter,
+            "meter": fit_meter,
             "intervals": len(intervals),
             "ticks_total": ticks_total,
             "ticks_precise": ticks_precise,
@@ -799,8 +812,8 @@ def main():
           f" (delegation {sub:.0f}%)")
     print(f"TOTAL weighted {total / M:.1f}M")
     if m:
-        print(f"meter: weekly {m.get('weekly_pct')}% · {m.get('scoped') or 'no per-model cap'}"
-              f" · 5h {m.get('five_hour_pct')}%")
+        five_part = "" if m.get("five_hour_absent") else f" · 5h {m.get('five_hour_pct')}%"
+        print(f"meter: weekly {m.get('weekly_pct')}% · {m.get('scoped') or 'no per-model cap'}{five_part}")
         if m.get("weekly_pct"):
             print(f"implied weekly capacity (our weights): {total / (m['weekly_pct'] / 100) / M:.0f}M"
                   " (valid only when --since is the window start)")
@@ -826,9 +839,14 @@ def main():
             print("note: no reading at/before the window start; the first reading stands in for it")
         if er["extrapolated"]:
             print("note: no reading at/after the window end; the last reading stands in for it")
-        if not points["five_hour_usable"]:
-            print(f"note: five-hour delta {points['five_hour_delta']:+.1f} pts not usable"
-                  f" ({points['resets_inside']['five_hour']} reset(s) inside the window)")
+        if points.get("five_hour_absent"):
+            print("note: no 5h readings in the window")
+        elif not points["five_hour_usable"]:
+            if points["resets_inside"]["five_hour"] == 0:
+                print("note: five-hour delta not usable (some readings in the window have no 5h figure)")
+            else:
+                print(f"note: five-hour delta {points['five_hour_delta']:+.1f} pts not usable"
+                      f" ({points['resets_inside']['five_hour']} reset(s) inside the window)")
         dist = max(el["distance_s"], er["distance_s"])
         if dist > 7200:
             print(f"note: nearest reading is {dist // 60} min from the window edge; points are approximate")

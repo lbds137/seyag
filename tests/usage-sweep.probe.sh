@@ -567,4 +567,102 @@ grep -q '100\.0% /  20\.00 pts' <<<"$ub_txt_line" \
   && ok "--points text mode: billed slug share is 100.0% of billed_total" \
   || bad "--points text-mode share: $ub_txt_line"
 
+# --- All-null five_hour_pct readings: auto-meter falls back to week, explicit --meter 5h warns, --points notes no 5h readings ---
+mkdir -p "$T/no5h-state/claude-usage"
+{ rd_fit null  700  9.0 ""   "" 100000
+  rd_fit null 1000 10.0  940 "" 100000
+  rd_fit null 1300 11.0 1240 "" 100000
+  rd_fit null 1600 12.0 1540 "" 100000
+  rd_fit null 1900 13.0 1840 "" 200000
+  rd_fit null 2200 14.0 2140 "" 200000
+  rd_fit null 2500 15.0 2440 "" 200000
+} > "$T/no5h-state/claude-usage/readings.jsonl"
+
+j_no5h=$(env -i HOME="$T" PATH=/usr/bin:/bin CLAUDE_PROJECTS_DIR="$T/week-projects" \
+              XDG_STATE_HOME="$T/no5h-state" "$US" --since "$(iso 600)" --until "$(iso 2700)" --fit --json)
+opus_no5h=$(jq -r '.fit.by_family.opus.pts_per_M' <<<"$j_no5h")
+iv_no5h=$(jq -r '.fit.intervals' <<<"$j_no5h")
+m_no5h=$(jq -r '.fit.meter' <<<"$j_no5h")
+awk -v o="$opus_no5h" -v iv="$iv_no5h" -v m="$m_no5h" \
+  'BEGIN { exit !(m == "week" && o >= 0.45 && o <= 0.55 && iv == 3) }' \
+  && ok "all-null five_hour readings: bare --fit auto-selects meter week (3 intervals, opus ~0.5)" \
+  || bad "all-null five_hour bare --fit failed (meter $m_no5h, opus $opus_no5h, intervals $iv_no5h)"
+
+err_no5h_5h=$(env -i HOME="$T" PATH=/usr/bin:/bin CLAUDE_PROJECTS_DIR="$T/week-projects" \
+                   XDG_STATE_HOME="$T/no5h-state" "$US" --since "$(iso 600)" --until "$(iso 2700)" --meter 5h --fit 2>&1); rc=$?
+[ $rc = 1 ] \
+  && grep -qF "usage-sweep: the newest reading has no 5h window; only older readings can fit this meter (--meter week fits the weekly meter)" <<<"$err_no5h_5h" \
+  && grep -qF "usage-sweep: --fit needs at least 3 tick intervals, found 0" <<<"$err_no5h_5h" \
+  && ok "all-null five_hour readings: explicit --meter 5h prints stderr note and exits 1" \
+  || bad "all-null five_hour explicit --meter 5h failed (rc $rc): $err_no5h_5h"
+
+err_has5h=$(run_fit --since "$START_WIN" --until "$END_WIN" --meter 5h --fit --json 2>&1 >/dev/null); rc=$?
+[ $rc = 0 ] && [ -z "$err_has5h" ] \
+  && ok "explicit --meter 5h when newest reading has 5h figure: no stderr note" \
+  || bad "explicit --meter 5h with 5h figure stderr (rc $rc): $err_has5h"
+
+err_no5h_wk=$(env -i HOME="$T" PATH=/usr/bin:/bin CLAUDE_PROJECTS_DIR="$T/week-projects" \
+                   XDG_STATE_HOME="$T/no5h-state" "$US" --since "$(iso 600)" --until "$(iso 2700)" --meter week --fit --json 2>&1 >/dev/null); rc=$?
+[ $rc = 0 ] && [ -z "$err_no5h_wk" ] \
+  && ok "all-null five_hour readings with --meter week: no stderr note" \
+  || bad "all-null five_hour --meter week stderr (rc $rc): $err_no5h_wk"
+
+out_pts_no5h=$(env -i HOME="$T" PATH=/usr/bin:/bin CLAUDE_PROJECTS_DIR="$T/week-projects" \
+                    XDG_STATE_HOME="$T/no5h-state" "$US" --since "$(iso 600)" --until "$(iso 2700)" --points)
+grep -qF "note: no 5h readings in the window" <<<"$out_pts_no5h" \
+  && ! grep -q "0 reset(s) inside the window" <<<"$out_pts_no5h" \
+  && ok "all-null five_hour readings: --points prints 'note: no 5h readings in the window' and not the 0 reset(s) note" \
+  || bad "all-null five_hour --points note failed: $out_pts_no5h"
+
+# --- Report meter line with stub claude-usage first on PATH ---
+mkdir -p "$T/cu-bin"
+cat > "$T/cu-bin/claude-usage" <<'EOF'
+#!/bin/sh
+[ "$1" = --json ] && printf '%s\n' "$STUB_CU_JSON"
+EOF
+chmod +x "$T/cu-bin/claude-usage"
+meter_absent=$(env -i HOME="$T" PATH="$T/cu-bin:/usr/bin:/bin" CLAUDE_PROJECTS_DIR="$P" \
+  STUB_CU_JSON='{"five_hour_pct":0,"five_hour_resets_at":0,"seconds_to_reset":0,"weekly_pct":20,"weekly_resets_at":1790800000,"scoped":"","routed":0,"lane":"anthropic","five_hour_absent":true}' \
+  "$US" --since 2026-09-24T01:15Z | grep '^meter:')
+[ "$meter_absent" = "meter: weekly 20% · no per-model cap" ] && [[ $meter_absent != *5h* ]] \
+  && ok "report meter line: five_hour_absent:true has no 5h" \
+  || bad "report meter line (five_hour_absent): [$meter_absent]"
+
+meter_present=$(env -i HOME="$T" PATH="$T/cu-bin:/usr/bin:/bin" CLAUDE_PROJECTS_DIR="$P" \
+  STUB_CU_JSON='{"five_hour_pct":3,"five_hour_resets_at":1790300000,"seconds_to_reset":3600,"weekly_pct":20,"weekly_resets_at":1790800000,"scoped":"","routed":0,"lane":"anthropic"}' \
+  "$US" --since 2026-09-24T01:15Z | grep '^meter:')
+[ "$meter_present" = "meter: weekly 20% · no per-model cap · 5h 3%" ] \
+  && ok "report meter line: normal meter has ' · 5h 3%'" \
+  || bad "report meter line (5h present): [$meter_present]"
+
+# --- Mixed window (older 5h readings, newest null) and one-reading null window ---
+mkdir -p "$T/mixed-state/claude-usage"
+{ rd_fit  9.0  700  9.0 ""   18000 100000
+  rd_fit 10.0 1000 10.0  940 18000 100000
+  rd_fit 11.0 1300 11.0 1240 18000 100000
+  rd_fit 12.0 1600 12.0 1540 18000 100000
+  rd_fit 13.0 1900 13.0 1840 18000 200000
+  rd_fit 14.0 2200 14.0 2140 18000 200000
+  rd_fit null 2500 15.0 2440 ""    200000
+} > "$T/mixed-state/claude-usage/readings.jsonl"
+
+j_mixed=$(env -i HOME="$T" PATH=/usr/bin:/bin CLAUDE_PROJECTS_DIR="$T/week-projects" \
+               XDG_STATE_HOME="$T/mixed-state" "$US" --since "$(iso 600)" --until "$(iso 2700)" --fit --json)
+[ "$(jq -r '.fit.meter' <<<"$j_mixed")" = "week" ] \
+  && ok "mixed window (older 5h readings, newest null): bare --fit reports meter week" \
+  || bad "mixed window bare --fit meter: $(jq -r '.fit.meter' <<<"$j_mixed")"
+
+out_pts_mixed=$(env -i HOME="$T" PATH=/usr/bin:/bin CLAUDE_PROJECTS_DIR="$T/week-projects" \
+                     XDG_STATE_HOME="$T/mixed-state" "$US" --since "$(iso 600)" --until "$(iso 2700)" --points)
+grep -qF "note: five-hour delta not usable (some readings in the window have no 5h figure)" <<<"$out_pts_mixed" \
+  && ! grep -q "0 reset(s)" <<<"$out_pts_mixed" \
+  && ok "mixed window: --points prints 'some readings in the window have no 5h figure' and not '0 reset(s)'" \
+  || bad "mixed window --points note failed: $out_pts_mixed"
+
+j_one_null=$(env -i HOME="$T" PATH=/usr/bin:/bin CLAUDE_PROJECTS_DIR="$T/week-projects" \
+                  XDG_STATE_HOME="$T/mixed-state" "$US" --since "$(iso 2500)" --until "$(iso 2700)" --points --json)
+[ "$(jq -r '.points.readings_used == 1 and .points.five_hour_usable == true and .points.five_hour_absent == true' <<<"$j_one_null")" = true ] \
+  && ok "one-reading null window: --points --json has five_hour_usable true" \
+  || bad "one-reading null window failed: $(jq -c '.points | {readings_used, five_hour_usable, five_hour_absent}' <<<"$j_one_null")"
+
 exit $fail
