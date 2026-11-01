@@ -509,6 +509,132 @@ else
   bad "--all --apply (rc $rc)"; printf '%s\n' "$out"
 fi
 
+# --- Lock word boundary, cache leaf-only match, in-progress operations, and submodules. ---
+mk_repo batch1
+B1="$T/batch1"
+B1W="$B1/.claude/worktrees"
+add_tree batch1 lockrapid
+git -C "$B1" worktree lock --reason "rapid 99999" "$B1W/lockrapid"
+add_tree batch1 cachenotes
+mkdir -p "$B1W/cachenotes/node_modules/mine"
+echo x > "$B1W/cachenotes/node_modules/mine/notes.log"
+add_tree batch1 cachehand
+mkdir -p "$B1W/cachehand/data/node_modules"
+echo x > "$B1W/cachehand/data/node_modules/hand-written.log"
+git -C "$B1" checkout -q -b side "$C1"
+echo side > "$B1/a.txt"
+git -C "$B1" commit -qam "side change"
+C_SIDE=$(git -C "$B1" rev-parse HEAD)
+git -C "$B1" checkout -q main
+git -C "$B1" branch -q -D side
+add_tree batch1 midrebase
+git -C "$B1W/midrebase" rebase --exec false HEAD~1 >/dev/null 2>&1
+add_tree batch1 midmerge
+git -C "$B1W/midmerge" merge "$C_SIDE" >/dev/null 2>&1
+git -C "$B1W/midmerge" checkout HEAD -- a.txt
+add_tree batch1 midcherry
+git -C "$B1W/midcherry" cherry-pick "$C_SIDE" >/dev/null 2>&1
+git -C "$B1W/midcherry" checkout HEAD -- a.txt
+add_tree batch1 midseq
+seq_dir=$(git -C "$B1W/midseq" rev-parse --git-path sequencer)
+mkdir -p "$seq_dir"
+echo "pick $C1" > "$seq_dir/todo"
+add_tree batch1 pytestcache
+mkdir -p "$B1W/pytestcache/.pytest_cache/v"
+printf '*\n' > "$B1W/pytestcache/.pytest_cache/.gitignore"
+printf 'pytest cache dir\n' > "$B1W/pytestcache/.pytest_cache/README.md"
+printf '{}\n' > "$B1W/pytestcache/.pytest_cache/v/cache"
+git -C "$B1W/pytestcache" status --porcelain=v1 --ignored=matching --untracked-files=all \
+  | grep -qx '!! \.pytest_cache/README\.md' \
+  && ok "pytestcache: git status --ignored=matching lists .pytest_cache/README.md individually" \
+  || bad "pytestcache: .pytest_cache/README.md not listed individually"
+add_tree batch1 cleanlinked
+git -C "$B1" rebase --exec false HEAD~1 >/dev/null 2>&1
+J=$("$TOOL" --repo "$B1" --json)
+git -C "$B1" rebase --abort >/dev/null 2>&1
+expect "$J" lockrapid HOLD:lock-unparsable "lock reason 'rapid 99999' does not parse as a dead pid"
+expect "$J" cachenotes HOLD:ignored "node_modules/mine/notes.log holds (leaf is not cache name)"
+expect "$J" cachehand HOLD:ignored "data/node_modules/hand-written.log holds (leaf is not cache name)"
+expect "$J" midrebase HOLD:in-progress "mid-rebase worktree holds"
+expect "$J" midmerge HOLD:in-progress "mid-merge worktree holds"
+expect "$J" midcherry HOLD:in-progress "mid-cherry-pick worktree holds"
+expect "$J" midseq HOLD:in-progress "sequencer with no CHERRY_PICK_HEAD holds"
+expect "$J" pytestcache SAFE ".pytest_cache self-ignored stays SAFE"
+expect "$J" cleanlinked SAFE "main-tree rebase does not hold a linked tree"
+
+mk_repo submod
+SM="$T/submod"
+SMW="$SM/.claude/worktrees"
+git init -q --bare -b main "$T/nested-origin.git"
+git clone -q "$T/nested-origin.git" "$T/nested-seed" 2>/dev/null
+echo "nested-initial-content" > "$T/nested-seed/n.txt"
+git -C "$T/nested-seed" add n.txt && git -C "$T/nested-seed" commit -qm "nested init"
+git -C "$T/nested-seed" push -q origin main 2>/dev/null
+git init -q --bare -b main "$T/sub-origin.git"
+git clone -q "$T/sub-origin.git" "$T/sub-seed" 2>/dev/null
+echo "sub-initial-content" > "$T/sub-seed/s.txt"
+git -C "$T/sub-seed" add s.txt && git -C "$T/sub-seed" commit -qm "sub init"
+git -C "$T/sub-seed" -c protocol.file.allow=always submodule add -q "$T/nested-origin.git" nested 2>/dev/null
+git -C "$T/sub-seed" commit -qm "add nested submodule"
+git -C "$T/sub-seed" push -q origin main 2>/dev/null
+git -C "$SM" -c protocol.file.allow=always submodule add -q "$T/sub-origin.git" sub 2>/dev/null
+git -C "$SM" commit -qm "add submodule"
+git -C "$SM" push -q origin main 2>/dev/null
+add_tree submod subclean
+git -C "$SMW/subclean" -c protocol.file.allow=always submodule update --init -q 2>/dev/null
+add_tree submod subuntracked
+git -C "$SMW/subuntracked" -c protocol.file.allow=always submodule update --init -q 2>/dev/null
+echo "untracked-in-sub" > "$SMW/subuntracked/sub/untracked.txt"
+add_tree submod subbranch
+git -C "$SMW/subbranch" -c protocol.file.allow=always submodule update --init -q 2>/dev/null
+sub_rec=$(git -C "$SMW/subbranch/sub" rev-parse HEAD)
+git -C "$SMW/subbranch/sub" switch -q -c sub-wip
+echo "sub-branch-only-content" > "$SMW/subbranch/sub/s.txt"
+git -C "$SMW/subbranch/sub" commit -qam "sub branch commit"
+git -C "$SMW/subbranch/sub" checkout -q --detach "$sub_rec"
+add_tree submod substash
+git -C "$SMW/substash" -c protocol.file.allow=always submodule update --init -q 2>/dev/null
+echo "sub-stash-content" > "$SMW/substash/sub/s.txt"
+git -C "$SMW/substash/sub" stash push -q -m "sub stash"
+add_tree submod subcustomref
+git -C "$SMW/subcustomref" -c protocol.file.allow=always submodule update --init -q 2>/dev/null
+custom_tree=$(git -C "$SMW/subcustomref/sub" rev-parse "HEAD^{tree}")
+custom_sha=$(echo "custom ref commit" | git -C "$SMW/subcustomref/sub" commit-tree "$custom_tree" -p HEAD)
+git -C "$SMW/subcustomref/sub" update-ref refs/custom/saved "$custom_sha"
+add_tree submod subreflog
+git -C "$SMW/subreflog" -c protocol.file.allow=always submodule update --init -q 2>/dev/null
+sub_rec_rl=$(git -C "$SMW/subreflog/sub" rev-parse HEAD)
+git -C "$SMW/subreflog/sub" checkout -q --detach "$sub_rec_rl"
+echo "sub-reflog-only-content" > "$SMW/subreflog/sub/s.txt"
+git -C "$SMW/subreflog/sub" commit -qam "sub reflog commit"
+git -C "$SMW/subreflog/sub" checkout -q --detach "$sub_rec_rl"
+add_tree submod subnogit
+echo "populated-without-git" > "$SMW/subnogit/sub/local.txt"
+add_tree submod subnested
+git -C "$SMW/subnested" -c protocol.file.allow=always submodule update --init --recursive -q 2>/dev/null
+echo "nested-stash-content" > "$SMW/subnested/sub/nested/n.txt"
+git -C "$SMW/subnested/sub/nested" stash push -q -m "nested stash"
+J=$("$TOOL" --repo "$SM" --json)
+expect "$J" subclean SAFE "clean initialised submodule at recorded commit with remote stays SAFE"
+expect "$J" subuntracked HOLD:submodule "untracked file in initialised submodule holds"
+expect "$J" subbranch HOLD:submodule "submodule branch commit with gitlink unchanged holds"
+expect "$J" substash HOLD:submodule "stash in submodule holds"
+expect "$J" subcustomref HOLD:submodule "custom ref commit in submodule holds"
+expect "$J" subreflog HOLD:submodule "reflog-only commit in submodule holds"
+expect "$J" subnogit HOLD:submodule "populated gitlink directory with no .git holds"
+expect "$J" subnested HOLD:submodule "nested submodule stash holds"
+GCFG="$T/global-untracked-no.gitconfig"
+git config --file "$GCFG" status.showUntrackedFiles no
+J_GCFG=$(GIT_CONFIG_GLOBAL="$GCFG" "$TOOL" --repo "$SM" --json)
+expect "$J_GCFG" subuntracked HOLD:submodule "status.showUntrackedFiles=no in global config with untracked file in submodule still holds"
+out=$("$TOOL" --repo "$SM" --apply); rc=$?
+if [ "$rc" -eq 0 ] && [ ! -e "$SMW/subclean" ] && [ -d "$SMW/subbranch/sub" ] \
+  && git -C "$SMW/subbranch/sub" rev-parse --verify -q refs/heads/sub-wip >/dev/null; then
+  ok "subbranch: --apply keeps tree with submodule branch commit while removing clean sibling"
+else
+  bad "subbranch --apply (rc $rc)"; printf '%s\n' "$out"
+fi
+
 # --- The rm guards pass the tool's own invocation untouched (exit 0, no output). ---
 for cmd in 'safe-worktree-clean --repo /srv/team/myrepo --apply' \
   'safe-worktree-clean --repo ~/src/node_modules-demo --apply' \

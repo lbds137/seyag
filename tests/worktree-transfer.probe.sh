@@ -571,5 +571,223 @@ else
   record_case 1 "case 26: ignored-file listing" "rc=$rc out=$out"
 fi
 
+# Case 27: skip-worktree edit refuses with the tree kept and main untouched.
+mk_fixture r27
+R27="$T/r27"
+printf 'skip-worktree edit\n' >>"$R27/.wt/README.md"
+git -C "$R27/.wt" update-index --skip-worktree README.md
+err=$(cd "$R27" && bash "$TOOL" .wt 2>&1 >/dev/null)
+rc=$?
+if [ "$rc" -eq 1 ] && [[ $err == "STOP: nothing-outside-patch:"* ]] \
+  && grep -qF 'README.md' <<<"$err" \
+  && grep -qF 'assume-unchanged or skip-worktree edits would be lost' <<<"$err" \
+  && [ -d "$R27/.wt" ] \
+  && grep -qF 'skip-worktree edit' "$R27/.wt/README.md" \
+  && [ -z "$(git -C "$R27" status --porcelain)" ]; then
+  record_case 0 "case 27: skip-worktree edit refuses STOP: nothing-outside-patch with tree kept and main untouched"
+else
+  record_case 1 "case 27: skip-worktree edit" "rc=$rc err=$err"
+fi
+
+# Case 28: assume-unchanged edit refuses with the tree kept and main untouched.
+mk_fixture r28
+R28="$T/r28"
+printf 'assume-unchanged edit\n' >>"$R28/.wt/README.md"
+git -C "$R28/.wt" update-index --assume-unchanged README.md
+err=$(cd "$R28" && bash "$TOOL" .wt 2>&1 >/dev/null)
+rc=$?
+if [ "$rc" -eq 1 ] && [[ $err == "STOP: nothing-outside-patch:"* ]] \
+  && grep -qF 'README.md' <<<"$err" \
+  && grep -qF 'assume-unchanged or skip-worktree edits would be lost' <<<"$err" \
+  && [ -d "$R28/.wt" ] \
+  && grep -qF 'assume-unchanged edit' "$R28/.wt/README.md" \
+  && [ -z "$(git -C "$R28" status --porcelain)" ]; then
+  record_case 0 "case 28: assume-unchanged edit refuses STOP: nothing-outside-patch with tree kept and main untouched"
+else
+  record_case 1 "case 28: assume-unchanged edit" "rc=$rc err=$err"
+fi
+
+# Case 29: untracked nested repo refuses with the tree kept.
+mk_fixture r29
+R29="$T/r29"
+git init -q -b main "$R29/.wt/nested-repo" >/dev/null 2>&1
+git -C "$R29/.wt/nested-repo" config user.email probe@example.invalid
+git -C "$R29/.wt/nested-repo" config user.name 'Probe Harness'
+git -C "$R29/.wt/nested-repo" config commit.gpgsign false
+printf 'unique nested repo payload\n' >"$R29/.wt/nested-repo/nested.txt"
+git -C "$R29/.wt/nested-repo" add nested.txt >/dev/null 2>&1
+git -C "$R29/.wt/nested-repo" commit -q --no-verify -m 'nested repo commit' >/dev/null 2>&1
+err=$(cd "$R29" && bash "$TOOL" .wt 2>&1 >/dev/null)
+rc=$?
+if [ "$rc" -eq 1 ] && [[ $err == "STOP: nothing-outside-patch:"* ]] \
+  && grep -qF 'nested-repo' <<<"$err" \
+  && [ -d "$R29/.wt/nested-repo/.git" ] \
+  && [ -f "$R29/.wt/nested-repo/nested.txt" ] \
+  && [ -z "$(git -C "$R29" status --porcelain)" ]; then
+  record_case 0 "case 29: untracked nested repo refuses STOP: nothing-outside-patch with tree kept"
+else
+  record_case 1 "case 29: untracked nested repo" "rc=$rc err=$err"
+fi
+
+# Case 30: STOP: byte-identical via apply.whitespace=fix reached with the tree kept.
+mk_fixture r30
+R30="$T/r30"
+git -C "$R30" config apply.whitespace fix
+printf 'export const value = 2;   \n' >"$R30/.wt/src/app.js"
+err=$(cd "$R30" && bash "$TOOL" .wt 2>&1 >/dev/null)
+rc=$?
+kept_patch=${err#*kept at }
+kept_patch=${kept_patch%% *}
+[ -n "$kept_patch" ] && [ -f "$kept_patch" ] && rm -rf -- "$(dirname "$kept_patch")"
+if [ "$rc" -eq 1 ] && [[ $err == "STOP: byte-identical:"* ]] \
+  && [ -d "$R30/.wt" ] \
+  && git -C "$R30" rev-parse --verify -q refs/heads/worktree-agent-t1 >/dev/null; then
+  record_case 0 "case 30: apply.whitespace=fix reaches STOP: byte-identical with the tree kept"
+else
+  record_case 1 "case 30: STOP: byte-identical via apply.whitespace=fix" "rc=$rc err=$err"
+fi
+
+# Case 31: STOP: apply reached with the tree kept.
+mk_fixture r31
+R31="$T/r31"
+git -C "$R31" config apply.whitespace error
+printf 'export const value = 2;   \n' >"$R31/.wt/src/app.js"
+err=$(cd "$R31" && bash "$TOOL" .wt 2>&1 >/dev/null)
+rc=$?
+if [ "$rc" -eq 1 ] && [[ $err == "STOP: apply:"* ]] \
+  && [ -d "$R31/.wt" ] \
+  && git -C "$R31" rev-parse --verify -q refs/heads/worktree-agent-t1 >/dev/null \
+  && [ -z "$(git -C "$R31" status --porcelain)" ]; then
+  record_case 0 "case 31: apply failure reaches STOP: apply with the tree kept"
+else
+  record_case 1 "case 31: STOP: apply" "rc=$rc err=$err"
+fi
+
+# Case 32: A sparse worker tree with an in-cone edit transfers (out-of-cone S
+# entries absent from disk do not refuse).
+mk_fixture r32
+R32="$T/r32"
+mkdir -p "$R32/docs"
+printf 'guide v1\n' >"$R32/docs/guide.md"
+git -C "$R32" add docs/guide.md >/dev/null 2>&1
+git -C "$R32" commit -q --no-verify -m 'add docs/guide.md' >/dev/null 2>&1
+git -C "$R32" push -q origin main >/dev/null 2>&1
+(cd "$R32" && git worktree add -q -b worktree-agent-sparse .wt-sparse >/dev/null 2>&1)
+git -C "$R32/.wt-sparse" sparse-checkout set src >/dev/null 2>&1
+sparse_tag=$(git -C "$R32/.wt-sparse" ls-files -v -- docs/guide.md)
+printf 'export const value = 3;\n' >"$R32/.wt-sparse/src/app.js"
+out=$(cd "$R32" && bash "$TOOL" .wt-sparse 2>&1)
+rc=$?
+if [ "$rc" -eq 0 ] \
+  && [ "$sparse_tag" = "S docs/guide.md" ] \
+  && [ "$(cat "$R32/src/app.js" 2>/dev/null)" = "export const value = 3;" ] \
+  && [ -f "$R32/docs/guide.md" ] \
+  && [ ! -e "$R32/.wt-sparse" ] \
+  && ! git -C "$R32" rev-parse --verify -q refs/heads/worktree-agent-sparse >/dev/null; then
+  record_case 0 "case 32: sparse worker tree with an in-cone edit transfers"
+else
+  record_case 1 "case 32: sparse worker tree with in-cone edit" "rc=$rc sparse_tag='$sparse_tag' out=$out"
+fi
+
+# Case 33: In a sparse worker tree, a skip-worktree (S) file present on disk
+# with an edit still refuses.
+mk_fixture r33
+R33="$T/r33"
+mkdir -p "$R33/docs"
+printf 'guide v1\n' >"$R33/docs/guide.md"
+git -C "$R33" add docs/guide.md >/dev/null 2>&1
+git -C "$R33" commit -q --no-verify -m 'add docs/guide.md' >/dev/null 2>&1
+git -C "$R33" push -q origin main >/dev/null 2>&1
+(cd "$R33" && git worktree add -q -b worktree-agent-sparse-disk .wt-sparse-disk >/dev/null 2>&1)
+git -C "$R33/.wt-sparse-disk" sparse-checkout set src >/dev/null 2>&1
+printf 'export const value = 4;\n' >"$R33/.wt-sparse-disk/src/app.js"
+mkdir -p "$R33/.wt-sparse-disk/docs"
+printf 'on-disk skip-worktree edit\n' >"$R33/.wt-sparse-disk/docs/guide.md"
+err=$(cd "$R33" && bash "$TOOL" .wt-sparse-disk 2>&1 >/dev/null)
+rc=$?
+if [ "$rc" -eq 1 ] && [[ $err == "STOP: nothing-outside-patch:"* ]] \
+  && grep -qF 'docs/guide.md' <<<"$err" \
+  && [ -d "$R33/.wt-sparse-disk" ] \
+  && [ -z "$(git -C "$R33" status --porcelain)" ]; then
+  record_case 0 "case 33: skip-worktree file present on disk with an edit still refuses"
+else
+  record_case 1 "case 33: skip-worktree file on disk in sparse tree" "rc=$rc err=$err"
+fi
+
+# Case 34: A gitlink at a path containing a space, with its commit in main's
+# module store, transfers.
+SUB_SPACE="$T/sub-space-origin"
+git init -q -b main "$SUB_SPACE" >/dev/null 2>&1
+git -C "$SUB_SPACE" config user.email probe@example.invalid
+git -C "$SUB_SPACE" config user.name 'Probe Harness'
+git -C "$SUB_SPACE" config commit.gpgsign false
+printf 'sub space v1\n' >"$SUB_SPACE/s.txt"
+git -C "$SUB_SPACE" add s.txt >/dev/null 2>&1
+git -C "$SUB_SPACE" commit -q --no-verify -m 'sub space v1' >/dev/null 2>&1
+mk_fixture r34
+R34="$T/r34"
+(
+  cd "$R34" \
+    && git -c protocol.file.allow=always submodule add -q "$SUB_SPACE" "sub space" >/dev/null 2>&1 \
+    && git commit -q --no-verify -m 'add sub space' >/dev/null 2>&1 \
+    && git push -q origin main >/dev/null 2>&1 \
+    && git worktree add -q -b worktree-agent-space .wt-space >/dev/null 2>&1
+)
+printf 'sub space v2\n' >"$SUB_SPACE/s.txt"
+git -C "$SUB_SPACE" commit -qam 'sub space v2' >/dev/null 2>&1
+SUB_SPACE_V2=$(git -C "$SUB_SPACE" rev-parse HEAD)
+git -C "$R34/sub space" -c protocol.file.allow=always fetch -q origin main >/dev/null 2>&1
+(cd "$R34/.wt-space" && git -c protocol.file.allow=always submodule update --init -q >/dev/null 2>&1)
+git -C "$R34/.wt-space/sub space" checkout -q "$SUB_SPACE_V2"
+out=$(cd "$R34" && bash "$TOOL" .wt-space 2>&1)
+rc=$?
+if [ "$rc" -eq 0 ] \
+  && [ "$(git -C "$R34" ls-files -s -- "sub space" | awk '{print $2}')" = "$SUB_SPACE_V2" ] \
+  && [ ! -e "$R34/.wt-space" ] \
+  && ! git -C "$R34" rev-parse --verify -q refs/heads/worktree-agent-space >/dev/null; then
+  record_case 0 "case 34: gitlink at path with a space, commit in main's module store, transfers"
+else
+  record_case 1 "case 34: gitlink at path with a space" "rc=$rc out=$out"
+fi
+
+# Case 35: A gitlink at a path with a quote, with its commit in main's module
+# store, does not false-refuse.
+SUB_QUOTE="$T/sub-quote-origin"
+git init -q -b main "$SUB_QUOTE" >/dev/null 2>&1
+git -C "$SUB_QUOTE" config user.email probe@example.invalid
+git -C "$SUB_QUOTE" config user.name 'Probe Harness'
+git -C "$SUB_QUOTE" config commit.gpgsign false
+printf 'sub quote v1\n' >"$SUB_QUOTE/q.txt"
+git -C "$SUB_QUOTE" add q.txt >/dev/null 2>&1
+git -C "$SUB_QUOTE" commit -q --no-verify -m 'sub quote v1' >/dev/null 2>&1
+mk_fixture r35
+R35="$T/r35"
+qpath='sub "quote"'
+(
+  cd "$R35" \
+    && git -c protocol.file.allow=always submodule add -q "$SUB_QUOTE" "$qpath" >/dev/null 2>&1 \
+    && git commit -q --no-verify -m 'add sub quote' >/dev/null 2>&1 \
+    && git push -q origin main >/dev/null 2>&1 \
+    && git worktree add -q -b worktree-agent-quote .wt-quote >/dev/null 2>&1
+)
+printf 'sub quote v2\n' >"$SUB_QUOTE/q.txt"
+git -C "$SUB_QUOTE" commit -qam 'sub quote v2' >/dev/null 2>&1
+SUB_QUOTE_V2=$(git -C "$SUB_QUOTE" rev-parse HEAD)
+git -C "$R35/$qpath" -c protocol.file.allow=always fetch -q origin main >/dev/null 2>&1
+(cd "$R35/.wt-quote" && git -c protocol.file.allow=always submodule update --init -q >/dev/null 2>&1)
+git -C "$R35/.wt-quote/$qpath" checkout -q "$SUB_QUOTE_V2"
+raw_z_sample=$(git -C "$R35/.wt-quote" diff --raw --no-renames --no-abbrev --ignore-submodules=none -z | tr '\0' '|')
+out=$(cd "$R35" && bash "$TOOL" .wt-quote 2>&1)
+rc=$?
+if [ "$rc" -eq 0 ] \
+  && [[ $raw_z_sample == :160000\ 160000\ *\ M\|"$qpath"\| ]] \
+  && [ "$(git -C "$R35" ls-files -s -- "$qpath" | awk '{print $2}')" = "$SUB_QUOTE_V2" ] \
+  && [ ! -e "$R35/.wt-quote" ] \
+  && ! git -C "$R35" rev-parse --verify -q refs/heads/worktree-agent-quote >/dev/null; then
+  record_case 0 "case 35: gitlink at path with a quote does not false-refuse and transfers"
+else
+  record_case 1 "case 35: gitlink at path with a quote" "rc=$rc raw_z=$raw_z_sample out=$out"
+fi
+
 [ "$fail" -eq 0 ] || exit 1
 echo "PASS: worktree-transfer ($pass cases)"
