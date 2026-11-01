@@ -41,9 +41,7 @@
 # provably-narrow shapes; aggregation filters (`to_entries`, `{env}`, `..`,
 # `del(...)`, comma lists) deny even when their intent looks narrow; a keyed
 # reread after a selector (`env | cut -s -d= -f1 | xargs printenv`) prints
-# every value and is unseen (`bash -c 'env'` / `sh -c printenv` wrapper strings
-# are descended into by `lib/shell_quotes.py`'s `command_pipelines` and
-# blocked); `grep -o` patterns cannot be analyzed
+# every value and is unseen; `grep -o` patterns cannot be analyzed
 # safely for names-only output, so none are allowlisted (the fleet's
 # `env $(env | grep -oE '^[A-Z_]*' | …)` launcher pattern needs the bypass
 # prefix or a `cut -s -d= -f1` rewrite); `jq '.x|keys' file` prints a
@@ -52,7 +50,9 @@
 # over-blocks because the cluster is not value-parsed; `wc -` over-blocks,
 # since the wc allowlist has no bare `-`; safe, and left that way; a jq
 # dump's downstream refuses `cut` and `jq` even for `jq -r` output,
-# deliberately, so no later edit should turn it into an allow.
+# deliberately, so no later edit should turn it into an allow. `bash -c 'env'`
+# / `sh -c printenv` wrapper strings are descended into by
+# `lib/shell_quotes.py`'s `command_pipelines` and blocked.
 #
 # File sinks (allowed by design because the guard's scope is transcript output):
 #   - File targets: a dump segment whose stdout ends at a file (`env > f`,
@@ -198,12 +198,6 @@ _JQ_1ARG_FLAGS = frozenset({
 })
 _JQ_2ARG_FLAGS = frozenset({
     "--arg", "--argjson", "--slurpfile", "--rawfile",
-})
-_GREP_1ARG_FLAGS = frozenset({
-    "-m", "--max-count", "-A", "--after-context", "-B", "--before-context",
-    "-C", "--context", "-D", "--devices", "-d", "--directories",
-    "--binary-files", "--color", "--colour", "--label",
-    "--exclude", "--exclude-from", "--exclude-dir", "--include",
 })
 _GREP_LONG_NOARG = frozenset({
     "--count", "--ignore-case", "--no-ignore-case", "--invert-match",
@@ -777,18 +771,10 @@ def is_grep_names_only(args: list[str]) -> bool:
             else:
                 i += 1
             continue
-        if a in _GREP_1ARG_FLAGS:
-            if i + 1 >= len(args):
-                return False
-            i += 2
-            continue
         if a.startswith("--"):
-            if "=" in a:
-                if a.split("=", 1)[0] not in _GREP_1ARG_FLAGS:
-                    return False
-            elif a not in _GREP_LONG_NOARG:
+            if a not in _GREP_LONG_NOARG:
                 return False
-            elif a == "--count":
+            if a == "--count":
                 has_c = True
             i += 1
             continue
