@@ -29,6 +29,14 @@ run 2 'sudo rm -rf ./node_modules'
 run 2 $'cd /tmp\nrm -rf x/__pycache__'           # a newline ends the cd
 run 2 $'cd /tmp && rm -rf \\\nx/__pycache__'     # backslash-newline continues the rm
 run 2 "bash -c 'rm -rf node_modules'"
+run 2 'echo "$(rm -rf node_modules)"'
+run 2 'x="$(rm -rf node_modules)"'
+run 2 'echo `rm -rf node_modules`'
+run 2 'x=`rm -rf node_modules`'
+run 2 'echo "`rm -rf node_modules`"'
+run 2 '`rm -rf node_modules`'
+run 2 '2>/dev/null rm -rf node_modules'
+run 2 '> f rm -rf node_modules'
 run 2 $'cat <<\'EOF\' | bash\nrm -rf node_modules\nEOF'
 run 0 $'echo "cd /tmp\nrm -rf x/__pycache__"'   # a quoted newline is text, not a boundary
 run 0 $'cat > notes.md <<\'EOF\'\nrm -rf node_modules\nEOF'  # heredoc data, not a command

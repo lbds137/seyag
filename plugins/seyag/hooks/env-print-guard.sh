@@ -30,28 +30,32 @@
 #      `.env?` deny; `.env.VAR`, `.model`, `.name` allow), unless its stdout
 #      ends at a file (see file sinks below).
 #
-# Accepted gaps: bare `export`, `export -p`, bare `declare`, `declare -x`,
-# `declare -p`, `alias`, `typeset -p`, absolute-path `printenv` under a renamed
-# binary, and selectors expressed in languages other
-# than the allowlist are unseen; the guard models the `jq`/`env`/`set`/`printenv`
-# command words only — `cat .env`, `/proc/self/environ`, `/proc/$$/environ`
-# (and `/proc/*/environ` siblings), `jq . < settings.json`, and
-# `cat settings.json | jq .` are unseen (file-argument analysis is
-# cat/grep-shaped and out of scope here); the jq check is an allowlist of
-# provably-narrow shapes; aggregation filters (`to_entries`, `{env}`, `..`,
-# `del(...)`, comma lists) deny even when their intent looks narrow; a keyed
-# reread after a selector (`env | cut -s -d= -f1 | xargs printenv`) prints
-# every value and is unseen; `grep -o` patterns cannot be analyzed
-# safely for names-only output, so none are allowlisted (the fleet's
-# `env $(env | grep -oE '^[A-Z_]*' | …)` launcher pattern needs the bypass
-# prefix or a `cut -s -d= -f1` rewrite); `jq '.x|keys' file` prints a
-# bare-string value inside jq's error, accepted because `.env` is an object by
-# the settings schema and this is the guard's recommended form; `sort -tc`
-# over-blocks because the cluster is not value-parsed; `wc -` over-blocks,
-# since the wc allowlist has no bare `-`; safe, and left that way; a jq
-# dump's downstream refuses `cut` and `jq` even for `jq -r` output,
-# deliberately, so no later edit should turn it into an allow. `bash -c 'env'`
-# / `sh -c printenv` wrapper strings are descended into by
+# Accepted gaps:
+#   - bare `export`, `export -p`, bare `declare`, `declare -x`, `declare -p`,
+#     `alias`, `typeset -p`, absolute-path `printenv` under a renamed binary,
+#     and selectors expressed in languages other than the allowlist are unseen;
+#   - the guard models the `jq`/`env`/`set`/`printenv` command words only —
+#     `cat .env`, `/proc/self/environ`, `/proc/$$/environ` (and
+#     `/proc/*/environ` siblings), `jq . < settings.json`, and
+#     `cat settings.json | jq .` are unseen (file-argument analysis is
+#     cat/grep-shaped and out of scope here);
+#   - the jq check is an allowlist of provably-narrow shapes; aggregation
+#     filters (`to_entries`, `{env}`, `..`, `del(...)`, comma lists) deny even
+#     when their intent looks narrow;
+#   - a keyed reread after a selector (`env | cut -s -d= -f1 | xargs printenv`)
+#     prints every value and is unseen;
+#   - `grep -o` patterns cannot be analyzed safely for names-only output, so
+#     none are allowlisted (the fleet's `env $(env | grep -oE '^[A-Z_]*' | …)`
+#     launcher pattern needs the bypass prefix or a `cut -s -d= -f1` rewrite);
+#   - `jq '.x|keys' file` prints a bare-string value inside jq's error,
+#     accepted because `.env` is an object by the settings schema and this is
+#     the guard's recommended form;
+#   - `sort -tc` over-blocks because the cluster is not value-parsed;
+#   - `wc -` over-blocks, since the wc allowlist has no bare `-`; safe, and
+#     left that way;
+#   - a jq dump's downstream refuses `cut` and `jq` even for `jq -r` output,
+#     deliberately, so no later edit should turn it into an allow.
+# `bash -c 'env'` / `sh -c printenv` wrapper strings are descended into by
 # `lib/shell_quotes.py`'s `command_pipelines` and blocked.
 #
 # File sinks (allowed by design because the guard's scope is transcript output):
@@ -129,9 +133,9 @@
 #     and a later `cat f` of that file in a separate segment is unseen;
 #     `env -i` / `env -i CMD` and `printenv NAME` keyed reads are allowed by
 #     design.
-# Double-quoted command substitutions are not split by
-# `lib/shell_quotes.py` (`command_pipelines`) and fail open. Heredoc bodies
-# written to a file (`cat > f <<EOF`) are stripped as data by
+# Double-quoted command substitutions and backtick spans are surfaced as
+# commands by `lib/shell_quotes.py` (`command_pipelines`) and blocked. Heredoc
+# bodies written to a file (`cat > f <<EOF`) are stripped as data by
 # `command_pipelines` (unless fed to a stdin-script shell or inside an executed
 # substitution span), so guard-shaped text inside a written file passes, and an
 # unquoted heredoc body's `$(env)` also passes, as a gap in the shared parser.
@@ -176,6 +180,7 @@ import sys
 sys.path.insert(0, os.environ["SYG_LIB_DIR"])
 from shell_quotes import (  # noqa: E402
     command_pipelines,
+    strip_backtick_glue,
     strip_redirections as _lib_strip_redirections,
     unwrap_runners,
 )
@@ -258,7 +263,10 @@ try:
 except Exception:
     _CWD = ""
 try:
-    pipelines = command_pipelines(cmd)
+    pipelines = [
+        [strip_backtick_glue(seg) for seg in pipeline]
+        for pipeline in command_pipelines(cmd)
+    ]
 except Exception:
     sys.exit(0)
 _HAS_PROCSUB = ">(" in cmd or "<(" in cmd

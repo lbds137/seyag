@@ -180,6 +180,14 @@ class RuntimeConstruction(ParityCase):
         with self.subTest("cd then commit order inside the span"):
             self.assertTrue(runs_before("out=$(cd /other && git commit -m x)", CD, COMMIT))
 
+    def test_quoted_and_backtick_substitutions_surface_as_commands(self):
+        self.check_runs("double-quoted argument", 'echo "$(git commit -m x)"')
+        self.check_runs("double-quoted assignment", 'out="$(git commit -m x)"')
+        self.check_runs("backtick argument", "echo `git commit -m x`")
+        self.check_runs("backtick assignment", "out=`git commit -m x`")
+        self.check_runs("double-quoted backtick", 'echo "`git commit -m x`"')
+        self.check_runs("double-quoted backtick at command position", '"`git commit -m x`"')
+
     def test_quoted_substitution_is_visible_to_the_walk_predicate(self):
         for label, command in (
             ("double-quoted", 'echo "$(git commit -m x)"'),
@@ -262,14 +270,7 @@ class RuntimeConstruction(ParityCase):
             or any("git commit" in inner for inner in wrapped_command_strings(command))
         )
 
-    @unittest.expectedFailure
-    def test_known_gap_quoted_substitution_nested_in_an_unquoted_span(self):
-        # KNOWN GAP, recorded rather than hidden: `substitution_spans_matching`
-        # cleans each outermost span with `strip_quoted`, which erases a quoted
-        # argument of the span, so a `$(...)` nested in quotes inside a span is
-        # surfaced by none of the readers. Expected failure, same contract as
-        # above; branch_switch compensates for the walk with
-        # `_substitution_hides_execution` (pinned in branch_switch_test.py).
+    def test_quoted_substitution_nested_in_an_unquoted_span(self):
         self.assertTrue(self._nested_span_surfaced('echo $(echo "$(git commit -m x)")'))
 
     def test_quoted_substitution_nested_in_a_quoted_span_surfaces(self):
@@ -282,10 +283,7 @@ class RuntimeConstruction(ParityCase):
         with self.subTest("the walk predicate misses it", command=command):
             self.assertFalse(span_mentions(command, "git commit"))
 
-    @unittest.expectedFailure
-    def test_known_gap_wrapper_inside_a_quoted_span(self):
-        # Same gap for a wrapper: the enclosing quotes hide `bash -c` from the
-        # top-level wrapper reader, and the span clean then erases its string.
+    def test_wrapper_inside_a_quoted_span(self):
         self.assertTrue(self._nested_span_surfaced("echo \"$(bash -c 'git commit -m x')\""))
 
 

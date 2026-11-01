@@ -47,6 +47,39 @@ run 2 'rm -rf "$TMPDIR/scratch"'
 # Blocked: command boundaries from the shared splitter.
 run 2 $'cd /tmp\nrm -rf x'                      # a newline ends the cd
 run 2 $'x=$(cd b\nrm -rf n)'                    # a newline inside $() separates the interior's rm
+run 2 'echo "$(rm -rf X)"'
+run 2 $'echo "$(cat <<EOF | bash\nrm -rf X\nEOF\n)"'  # a body fed to a shell inside a quoted span runs
+run 2 $'echo `bash <<EOF\nrm -rf X\nEOF\n`'
+run 2 'x="$(rm -rf X)"'
+run 2 'echo `rm -rf X`'
+run 2 'x=`rm -rf X`'
+run 2 'echo "`rm -rf X`"'
+run 2 'echo $(echo "$(rm -rf X)")'
+run 2 '`rm -rf X`'
+run 2 '(`rm -rf X`)'
+run 2 'echo "$(`rm -rf X`)"'
+run 2 'if `rm -rf X`; then :; fi'
+run 2 'true; `rm -rf X`'
+run 2 '`true; rm -rf X`'
+run 2 '2>/dev/null rm -rf X'
+run 2 '> f rm -rf X'
+run 2 'function f { rm -rf X; }; f'
+run 2 'time -p rm -rf X'
+run 2 'echo "a # b `rm -rf X`"'
+run 2 'echo a#`rm -rf X`'
+run 2 $'bash -c \'echo `rm -rf X`\''
+run 2 $'eval \'echo `rm -rf X`\''
+run 2 $'bash <<\'EOF\'\necho "$(rm -rf X)"\nEOF'
+run 2 $'cat <<\'EOF\' | bash\necho "`rm -rf X`"\nEOF'
+run 2 'time -p `rm -rf X`'
+run 2 'function f { `rm -rf X`; }'
+run 2 'case a in a) `rm -rf X`;; esac'
+run 2 'ls\) `rm -rf X`'
+run 2 'prog\(1\) `rm -rf X`'
+run 2 $'echo a\\\n# `rm -rf X`'
+run 2 'echo `echo \`rm -rf X\``'
+run 2 'echo "`echo \`rm -rf X\``"'
+run 2 '$(a) `rm -rf X`'
 run 2 $'cd /tmp && rm -rf \\\nx'                # backslash-newline continues the rm
 run 2 'cd /tmp; rm -rf x'
 run 2 'true && (cd /tmp && rm -rf x)'
@@ -131,8 +164,18 @@ run 0 'rm -f -- -rf notes'
 run 0 'find . -name "*.log"'
 run 0 'git rm -r --cached dir'                   # argv[0] is git
 run 0 '# rm -rf /home/example/x'                    # a comment is not a command
+run 0 'echo hi # `rm -rf X`'
+run 0 $'# `rm -rf X`\necho hi'
+run 0 $'echo a \\\n# `rm -rf X`\necho b'
+run 0 $'echo a\\\\\n# `rm -rf X`\necho b'
+run 0 $'cat > f <<\'EOF\'\necho "$(rm -rf X)"\nEOF'
 run 0 'echo a#b; echo $#'                        # mid-word # and $# are not comments
 run 0 'echo "rm -rf x"'                          # quoted text, not a command
+run 0 $'echo \'$(rm -rf X)\''
+run 0 $'echo \'`rm -rf X`\''
+run 0 'echo "\$(rm -rf X)"'
+run 0 'echo "\`rm -rf X\`"'
+run 0 $'git commit -m "$(cat <<\'EOF\'\nrm -rf X\nEOF\n)"'
 run 0 $'echo "cd /tmp\nrm -rf x"'                # a quoted newline is text
 run 0 $'cat > notes.md <<\'EOF\'\nrm -rf x\nEOF'  # heredoc data, not a command
 run 0 $'cat > README.md <<\'EOF\'\nClean with:\n```\nrm -rf build\n```\nEOF\n'  # fenced heredoc data is data too

@@ -196,6 +196,8 @@ check(
     [("cd", BASE), ("true", BASE + "/a"), ("echo", BASE), ("true", BASE)],
 )
 check("the substitution's cd does not leak out", st.cwd, BASE)
+_, _, st = run('x="$(cd /a && pwd)"')
+check('x="$(cd /a && pwd)" does not move the tracked directory', st.cwd, BASE)
 recs, _, st = run("bash -c 'cd a; true'; true")
 check(
     "a bash -c wrapper's commands run right after its pipeline, on a copy",

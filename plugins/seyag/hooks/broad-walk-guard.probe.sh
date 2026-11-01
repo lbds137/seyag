@@ -48,6 +48,14 @@ run 2 'du -sh .' "$HOME/gdrive"
 run 2 $'cd /tmp\nfind / -name x'               # a newline ends the cd
 run 2 $'cd /tmp && find \\\n/ -name x'         # backslash-newline continues the find
 run 2 "bash -c 'find / -name x'"
+run 2 'echo "$(find / -name x)"'
+run 2 'x="$(find / -name x)"'
+run 2 'echo `find / -name x`'
+run 2 'x=`find / -name x`'
+run 2 'echo "`find / -name x`"'
+run 2 '`find / -name x`'
+run 2 '2>/dev/null find / -name x'
+run 2 '> f find / -name x'
 run 0 $'echo "cd /tmp\nfind / -name x"'       # a quoted newline is text, not a boundary
 run 2 $'# it\'s here\nfind / -name x'           # an apostrophe in a comment opens no quote
 run 2 $'echo hi # don\'t worry\nfind / -name x'

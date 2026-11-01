@@ -856,6 +856,32 @@ LIB_DIR_OVERRIDE=''
 new_case; invoke 'out=$(gh pr merge 2002)'
 assert_pr "command substitution around the invocation still arms the gate" 2002
 
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'echo "$(gh pr merge 7)"'
+assert_pr 'double-quoted command substitution arms the gate' 7
+assert_exit '…and blocks under a review fixture' 2
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'result="$(gh pr merge 7 2>&1)"'
+assert_pr 'double-quoted assignment substitution with redirect arms the gate' 7
+assert_exit '…and blocks under a review fixture' 2
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'out=`gh pr merge 7`'
+assert_pr 'backtick assignment substitution arms the gate' 7
+assert_exit '…and blocks under a review fixture' 2
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'if `gh pr merge 7`; then :; fi'
+assert_pr 'backtick merge after `if` arms the gate' 7
+assert_exit '…and blocks under a review fixture' 2
+assert_stderr_lacks '…without the compound one-merge refusal' 'ONE MERGE PER COMMAND'
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke '2>/dev/null gh pr merge 7'
+assert_pr 'leading redirection before gh pr merge arms the gate' 7
+assert_exit '…and blocks under a review fixture' 2
+
 # A shell with flags before its own `-c`. Scoping the check to the token
 # immediately preceding `-c` missed this; the owner is the command word.
 new_case; invoke 'bash -x -c "gh pr merge 2002"'
@@ -1965,6 +1991,53 @@ assert_stderr_has "…with the unresolvable-scope banner" 'MERGE SCOPE UNRESOLVA
 assert_no_fetch "…no fetch ran"
 assert_api_lacks "…no repos/ lookup in the api log" 'repos/'
 assert_ack_lacks "…and no ack line written" '2002:777:2026-08-08T12:00:00Z'
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'GH_REPO=$(echo `cat r`) gh pr merge 7 --rebase'
+assert_exit 'split-sub GH_REPO=$(echo `cat r`) with surfaced backtick span: refused' 2
+assert_stderr_has '…with the unresolvable-scope banner' 'MERGE SCOPE UNRESOLVABLE'
+assert_no_fetch '…no fetch ran'
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'GH_REPO=$(echo hi; echo `cat r`) gh pr merge 7'
+assert_exit 'split-sub GH_REPO=$(echo hi; echo `cat r`) with two inline commands and surfaced span: refused' 2
+assert_stderr_has '…with the unresolvable-scope banner' 'MERGE SCOPE UNRESOLVABLE'
+assert_no_fetch '…no fetch ran'
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke "GH_REPO=\$(bash -c 'cat r') gh pr merge 7"
+assert_exit "split-sub GH_REPO=\$(bash -c 'cat r') with unwrapped wrapper inside sub: refused" 2
+assert_stderr_has '…with the unresolvable-scope banner' 'MERGE SCOPE UNRESOLVABLE'
+assert_no_fetch '…no fetch ran'
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'gh pr view 7 # `gh pr merge 8`'
+assert_exit 'backtick merge inside a comment does not arm: allowed' 0
+assert_no_fetch '…no fetch ran'
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'gh pr merge 7 --rebase # was `gh pr merge 8`'
+assert_pr 'merge followed by commented-out backtick merge arms on PR 7' 7
+assert_exit '…and blocks under a review fixture' 2
+assert_stderr_lacks '…without the compound one-merge refusal' 'ONE MERGE PER COMMAND'
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'time -p `gh pr merge 7`'
+assert_pr 'backtick merge after `time -p` arms on PR 7' 7
+assert_exit '…and blocks under a review fixture' 2
+assert_stderr_lacks '…without the compound one-merge refusal' 'ONE MERGE PER COMMAND'
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'function f { `gh pr merge 7`; }'
+assert_pr 'backtick merge inside `function f { …; }` arms on PR 7' 7
+assert_exit '…and blocks under a review fixture' 2
+assert_stderr_lacks '…without the compound one-merge refusal' 'ONE MERGE PER COMMAND'
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'case a in a) `gh pr merge 7`;; esac'
+assert_pr 'backtick merge in a `case` arm arms on PR 7' 7
+assert_exit '…and blocks under a review fixture' 2
+assert_stderr_lacks '…without the compound one-merge refusal' 'ONE MERGE PER COMMAND'
 
 # ===========================================================================
 # 3. The review gate — block once per (PR, review-id), allow on retry
