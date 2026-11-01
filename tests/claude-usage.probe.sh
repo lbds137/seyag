@@ -885,17 +885,26 @@ parity_case "enabled+lim-missing, week 101" 10 101 0 true omit null '{"currency"
 route_anthropic
 mkdir -p "$tmp/curl-bin"
 curl_marker="$tmp/curl-ran"
+fail_stamp="$tmp/claude-statusline/usage.json.fail"
 cat > "$tmp/curl-bin/curl" <<'EOF'
 #!/bin/sh
 cat >/dev/null
 [ -n "${CURL_MARKER:-}" ] && : > "$CURL_MARKER"
+out="" hdr=""
 while [ $# -gt 0 ]; do
-    if [ "$1" = -o ]; then
-        cat "$CURL_BODY" > "$2"
-        exit 0
-    fi
-    shift
+    case "$1" in
+        -D) hdr=$2; shift 2 ;;
+        -o) out=$2; shift 2 ;;
+        *) shift ;;
+    esac
 done
+[ -n "${CURL_HEADERS:-}" ] && [ -n "$hdr" ] && cp "$CURL_HEADERS" "$hdr"
+[ "${CURL_FAIL:-0}" = 1 ] && exit 22
+[ -n "${CURL_RC:-}" ] && exit "$CURL_RC"
+if [ -n "$out" ]; then
+    cat "$CURL_BODY" > "$out"
+    exit 0
+fi
 exit 1
 EOF
 chmod +x "$tmp/curl-bin/curl"
@@ -903,6 +912,7 @@ echo '{"claudeAiOauth":{"accessToken":"fake-oauth-token"}}' > "$tmp/.claude/.cre
 
 fixture 10 90 0
 touch -d "@$(($(date +%s) - 600))" "$tmp/claude-statusline/usage.json"
+rm -f "$curl_marker" "$fail_stamp"
 jq -n '{five_hour: null, seven_day: {utilization: 20, resets_at: "2099-01-07T00:00:00.000000+00:00"}, limits: []}' > "$tmp/curl-body.json"
 out=$(PATH="$tmp/curl-bin:$PATH" CURL_BODY="$tmp/curl-body.json" run --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
 [ $rc = 0 ] && [ -z "$out" ] \
@@ -913,32 +923,37 @@ out=$(PATH="$tmp/curl-bin:$PATH" CURL_BODY="$tmp/curl-body.json" run --ok 90 2>"
 
 fixture 10 90 0
 touch -d "@$(($(date +%s) - 600))" "$tmp/claude-statusline/usage.json"
+rm -f "$curl_marker" "$fail_stamp"
 jq -n '{five_hour: {utilization: 15, resets_at: "2099-01-01T00:00:00.000000+00:00"}, seven_day: {utilization: 20, resets_at: "2099-01-07T00:00:00.000000+00:00"}, limits: []}' > "$tmp/curl-body.json"
 PATH="$tmp/curl-bin:$PATH" CURL_BODY="$tmp/curl-body.json" run --ok 90 >/dev/null 2>&1
 jq -e '.five_hour.utilization == 15 and .seven_day.utilization == 20' "$tmp/claude-statusline/usage.json" >/dev/null \
     && ok "refresh: normal both-windows reply replaces stale cache" \
     || bad "refresh normal both-windows: $(cat "$tmp/claude-statusline/usage.json")"
 
-fixture 10 90 0
+fixture 10 25 0
 touch -d "@$(($(date +%s) - 600))" "$tmp/claude-statusline/usage.json"
+rm -f "$curl_marker" "$fail_stamp"
 jq -n '{five_hour: {utilization: 18, resets_at: "2099-01-01T00:00:00.000000+00:00"}}' > "$tmp/curl-body.json"
-PATH="$tmp/curl-bin:$PATH" CURL_BODY="$tmp/curl-body.json" run --ok 90 >/dev/null 2>&1
-jq -e '.five_hour.utilization == 18 and (.seven_day == null)' "$tmp/claude-statusline/usage.json" >/dev/null \
-    && ok "refresh: five_hour-only reply replaces stale cache" \
-    || bad "refresh five_hour-only: $(cat "$tmp/claude-statusline/usage.json")"
+PATH="$tmp/curl-bin:$PATH" CURL_BODY="$tmp/curl-body.json" CURL_MARKER="$curl_marker" run --ok 90 >/dev/null 2>&1
+[ -e "$curl_marker" ] && jq -e '.five_hour.utilization == 10 and .seven_day.utilization == 25' "$tmp/claude-statusline/usage.json" >/dev/null \
+    && ok "refresh: five_hour-only reply is discarded and old cache kept" \
+    || bad "refresh five_hour-only kept: marker=$([ -e "$curl_marker" ] && echo 1 || echo 0) $(cat "$tmp/claude-statusline/usage.json")"
 
 fixture 10 25 0
 touch -d "@$(($(date +%s) - 600))" "$tmp/claude-statusline/usage.json"
-rm -f "$curl_marker"
+rm -f "$curl_marker" "$fail_stamp"
 echo '{"error":"x"}' > "$tmp/curl-body.json"
 PATH="$tmp/curl-bin:$PATH" CURL_BODY="$tmp/curl-body.json" CURL_MARKER="$curl_marker" run --ok 90 >/dev/null 2>&1
 [ -e "$curl_marker" ] && jq -e '.five_hour.utilization == 10 and .seven_day.utilization == 25' "$tmp/claude-statusline/usage.json" >/dev/null \
     && ok "refresh: {\"error\":\"x\"} reply is discarded and old cache kept" \
     || bad "refresh error reply kept: marker=$([ -e "$curl_marker" ] && echo 1 || echo 0) $(cat "$tmp/claude-statusline/usage.json")"
+[ -e "$fail_stamp" ] \
+    && ok "refresh: discarded {\"error\":\"x\"} reply writes .fail backoff stamp" \
+    || bad "refresh error reply stamp: .fail missing"
 
 fixture 10 25 0
 touch -d "@$(($(date +%s) - 600))" "$tmp/claude-statusline/usage.json"
-rm -f "$curl_marker"
+rm -f "$curl_marker" "$fail_stamp"
 jq -n '{five_hour: null, seven_day: null, limits: []}' > "$tmp/curl-body.json"
 PATH="$tmp/curl-bin:$PATH" CURL_BODY="$tmp/curl-body.json" CURL_MARKER="$curl_marker" run --ok 90 >/dev/null 2>&1
 [ -e "$curl_marker" ] && jq -e '.five_hour.utilization == 10 and .seven_day.utilization == 25' "$tmp/claude-statusline/usage.json" >/dev/null \
@@ -948,14 +963,241 @@ PATH="$tmp/curl-bin:$PATH" CURL_BODY="$tmp/curl-body.json" CURL_MARKER="$curl_ma
 for bad_body in '{"seven_day":{}}' '{"seven_day":{"utilization":null}}' '{"five_hour":{}}'; do
     fixture 10 25 0
     touch -d "@$(($(date +%s) - 600))" "$tmp/claude-statusline/usage.json"
-    rm -f "$curl_marker"
+    rm -f "$curl_marker" "$fail_stamp"
     printf '%s\n' "$bad_body" > "$tmp/curl-body.json"
     PATH="$tmp/curl-bin:$PATH" CURL_BODY="$tmp/curl-body.json" CURL_MARKER="$curl_marker" run --ok 90 >/dev/null 2>&1
     [ -e "$curl_marker" ] && jq -e '.five_hour.utilization == 10 and .seven_day.utilization == 25' "$tmp/claude-statusline/usage.json" >/dev/null \
         && ok "refresh: $bad_body reply is discarded and old cache kept" \
         || bad "refresh $bad_body kept: marker=$([ -e "$curl_marker" ] && echo 1 || echo 0) $(cat "$tmp/claude-statusline/usage.json")"
 done
-rm -f "$tmp/.claude/.credentials.json"
+
+fixture 10 25 0
+touch -d "@$(($(date +%s) - 600))" "$tmp/claude-statusline/usage.json"
+rm -f "$curl_marker" "$fail_stamp"
+PATH="$tmp/curl-bin:$PATH" CURL_FAIL=1 CURL_MARKER="$curl_marker" run --ok 90 >/dev/null 2>&1
+[ -e "$curl_marker" ] && [ -e "$fail_stamp" ] \
+    && ok "refresh backoff: failed curl invokes curl and writes .fail stamp" \
+    || bad "refresh backoff first run: marker=$([ -e "$curl_marker" ] && echo 1 || echo 0) stamp=$([ -e "$fail_stamp" ] && echo 1 || echo 0)"
+
+rm -f "$curl_marker"
+out=$(PATH="$tmp/curl-bin:$PATH" CURL_FAIL=1 CURL_MARKER="$curl_marker" run --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ ! -e "$curl_marker" ] && [ $rc = 0 ] && [ -z "$out" ] \
+    && [ "$err" = "claude-usage: --ok pass lane=anthropic meter=5h 5h=10%<90% week=25%<75% source=api (cache 10m old)" ] \
+    && ok "refresh backoff: second run within TTL skips curl and exits by cache" \
+    || bad "refresh backoff second run: marker=$([ -e "$curl_marker" ] && echo 1 || echo 0) rc=$rc out=[$out] err=[$err]"
+
+rm -f "$curl_marker"
+touch -d "@$(($(date +%s) - 10))" "$fail_stamp"
+PATH="$tmp/curl-bin:$PATH" CURL_FAIL=1 CURL_MARKER="$curl_marker" run --ok 90 >/dev/null 2>&1
+delta=$(( $(stat -c %Y "$fail_stamp" 2>/dev/null || echo -9999) - $(date +%s) ))
+[ -e "$curl_marker" ] && [ "$delta" -ge 90 ] && [ "$delta" -le 150 ] \
+    && ok "refresh backoff: past .fail stamp is expired and runs curl again" \
+    || bad "refresh backoff expired stamp: marker=$([ -e "$curl_marker" ] && echo 1 || echo 0) delta=$delta"
+
+rm -f "$curl_marker"
+touch -d "@$(($(date +%s) - 600))" "$fail_stamp"
+jq -n '{five_hour: {utilization: 12, resets_at: "2099-01-01T00:00:00.000000+00:00"}, seven_day: {utilization: 22, resets_at: "2099-01-07T00:00:00.000000+00:00"}, limits: []}' > "$tmp/curl-body.json"
+PATH="$tmp/curl-bin:$PATH" CURL_BODY="$tmp/curl-body.json" CURL_MARKER="$curl_marker" run --ok 90 >/dev/null 2>&1
+[ -e "$curl_marker" ] && [ ! -e "$fail_stamp" ] && jq -e '.seven_day.utilization == 22' "$tmp/claude-statusline/usage.json" >/dev/null \
+    && ok "refresh backoff: successful fetch removes .fail stamp" \
+    || bad "refresh backoff success removes stamp: marker=$([ -e "$curl_marker" ] && echo 1 || echo 0) stamp=$([ -e "$fail_stamp" ] && echo 1 || echo 0)"
+
+hdr_left=0
+fixture 10 25 0
+touch -d "@$(($(date +%s) - 600))" "$tmp/claude-statusline/usage.json"
+rm -f "$curl_marker" "$fail_stamp"
+printf 'HTTP/1.1 429 Too Many Requests\nRetry-After: 600\n\n' > "$tmp/curl-hdr"
+PATH="$tmp/curl-bin:$PATH" CURL_RC=22 CURL_HEADERS="$tmp/curl-hdr" CURL_MARKER="$curl_marker" run --ok 90 >/dev/null 2>&1
+compgen -G "$tmp/claude-statusline/*.hdr" >/dev/null && hdr_left=1
+first_ran=$([ -e "$curl_marker" ] && echo 1 || echo 0)
+delta=$(( $(stat -c %Y "$fail_stamp" 2>/dev/null || echo -9999) - $(date +%s) ))
+rm -f "$curl_marker"
+PATH="$tmp/curl-bin:$PATH" CURL_RC=22 CURL_HEADERS="$tmp/curl-hdr" CURL_MARKER="$curl_marker" run --ok 90 >/dev/null 2>&1
+compgen -G "$tmp/claude-statusline/*.hdr" >/dev/null && hdr_left=1
+[ "$first_ran" = 1 ] && [ "$delta" -ge 570 ] && [ "$delta" -le 630 ] && [ ! -e "$curl_marker" ] \
+    && ok "refresh Retry-After: 600 sets .fail stamp ~600s ahead and second run skips curl" \
+    || bad "refresh Retry-After 600: first_ran=$first_ran delta=$delta second_ran=$([ -e "$curl_marker" ] && echo 1 || echo 0)"
+
+fixture 10 25 0
+touch -d "@$(($(date +%s) - 600))" "$tmp/claude-statusline/usage.json"
+rm -f "$curl_marker" "$fail_stamp"
+printf 'HTTP/1.1 429 Too Many Requests\nRetry-After: 0\n\n' > "$tmp/curl-hdr"
+PATH="$tmp/curl-bin:$PATH" CURL_RC=22 CURL_HEADERS="$tmp/curl-hdr" CURL_MARKER="$curl_marker" run --ok 90 >/dev/null 2>&1
+compgen -G "$tmp/claude-statusline/*.hdr" >/dev/null && hdr_left=1
+delta=$(( $(stat -c %Y "$fail_stamp" 2>/dev/null || echo -9999) - $(date +%s) ))
+[ -e "$curl_marker" ] && [ "$delta" -ge 90 ] && [ "$delta" -le 150 ] \
+    && ok "refresh Retry-After: 0 sets .fail stamp ~120s ahead (TTL floor)" \
+    || bad "refresh Retry-After 0: marker=$([ -e "$curl_marker" ] && echo 1 || echo 0) delta=$delta"
+
+fixture 10 25 0
+touch -d "@$(($(date +%s) - 600))" "$tmp/claude-statusline/usage.json"
+rm -f "$curl_marker" "$fail_stamp"
+printf 'HTTP/1.1 429 Too Many Requests\r\nretry-after: 600\r\n\r\n' > "$tmp/curl-hdr"
+PATH="$tmp/curl-bin:$PATH" CURL_RC=22 CURL_HEADERS="$tmp/curl-hdr" CURL_MARKER="$curl_marker" run --ok 90 >/dev/null 2>&1
+compgen -G "$tmp/claude-statusline/*.hdr" >/dev/null && hdr_left=1
+delta=$(( $(stat -c %Y "$fail_stamp" 2>/dev/null || echo -9999) - $(date +%s) ))
+[ -e "$curl_marker" ] && [ "$delta" -ge 570 ] && [ "$delta" -le 630 ] \
+    && ok "refresh retry-after: 600 lowercase with CRLF sets .fail stamp ~600s ahead" \
+    || bad "refresh retry-after 600 CRLF: marker=$([ -e "$curl_marker" ] && echo 1 || echo 0) delta=$delta"
+
+fixture 10 25 0
+touch -d "@$(($(date +%s) - 600))" "$tmp/claude-statusline/usage.json"
+rm -f "$curl_marker" "$fail_stamp"
+printf 'HTTP/1.1 429 Too Many Requests\r\nRetry-After: Wed, 01 Jan 2098 07:28:00 GMT\r\n\r\n' > "$tmp/curl-hdr"
+PATH="$tmp/curl-bin:$PATH" CURL_RC=22 CURL_HEADERS="$tmp/curl-hdr" CURL_MARKER="$curl_marker" run --ok 90 >/dev/null 2>&1
+compgen -G "$tmp/claude-statusline/*.hdr" >/dev/null && hdr_left=1
+delta=$(( $(stat -c %Y "$fail_stamp" 2>/dev/null || echo -9999) - $(date +%s) ))
+[ -e "$curl_marker" ] && [ "$delta" -ge 90 ] && [ "$delta" -le 150 ] \
+    && ok "refresh Retry-After future HTTP-date sets .fail stamp ~120s ahead (TTL fallback)" \
+    || bad "refresh Retry-After HTTP-date: marker=$([ -e "$curl_marker" ] && echo 1 || echo 0) delta=$delta"
+
+fixture 10 25 0
+touch -d "@$(($(date +%s) - 600))" "$tmp/claude-statusline/usage.json"
+rm -f "$curl_marker" "$fail_stamp"
+printf 'HTTP/1.1 429 Too Many Requests\r\nRetry-After: 99999\r\n\r\n' > "$tmp/curl-hdr"
+PATH="$tmp/curl-bin:$PATH" CURL_RC=22 CURL_HEADERS="$tmp/curl-hdr" CURL_MARKER="$curl_marker" run --ok 90 >/dev/null 2>&1
+compgen -G "$tmp/claude-statusline/*.hdr" >/dev/null && hdr_left=1
+delta=$(( $(stat -c %Y "$fail_stamp" 2>/dev/null || echo -9999) - $(date +%s) ))
+[ -e "$curl_marker" ] && [ "$delta" -ge 870 ] && [ "$delta" -le 930 ] \
+    && ok "refresh Retry-After: 99999 caps backoff at 900s (.fail stamp ~900s ahead)" \
+    || bad "refresh Retry-After 99999: marker=$([ -e "$curl_marker" ] && echo 1 || echo 0) delta=$delta"
+
+fixture 10 25 0
+touch -d "@$(($(date +%s) - 600))" "$tmp/claude-statusline/usage.json"
+touch -d "@$(($(date +%s) + 7200))" "$fail_stamp"
+rm -f "$curl_marker"
+PATH="$tmp/curl-bin:$PATH" CURL_FAIL=1 CURL_MARKER="$curl_marker" run --ok 90 >/dev/null 2>&1
+delta=$(( $(stat -c %Y "$fail_stamp" 2>/dev/null || echo -9999) - $(date +%s) ))
+[ -e "$curl_marker" ] && [ "$delta" -ge 90 ] && [ "$delta" -le 150 ] \
+    && ok "refresh backoff: stamp 2 hours ahead is ignored and curl runs" \
+    || bad "refresh backoff 2h wedge: marker=$([ -e "$curl_marker" ] && echo 1 || echo 0) delta=$delta"
+
+fixture 10 25 0
+touch -d "@$(($(date +%s) - 600))" "$tmp/claude-statusline/usage.json"
+touch -d "@$(($(date +%s) + 60))" "$fail_stamp"
+rm -f "$curl_marker"
+PATH="$tmp/curl-bin:$PATH" CURL_FAIL=1 CURL_MARKER="$curl_marker" CLAUDE_USAGE_TTL=55 run --ok 90 >/dev/null 2>&1
+[ ! -e "$curl_marker" ] \
+    && ok "refresh backoff: stamp 60s ahead skips curl for CLAUDE_USAGE_TTL=55 caller" \
+    || bad "refresh backoff 60s ahead TTL=55: curl ran"
+
+fixture 10 25 0
+touch -d "@$(($(date +%s) - 600))" "$tmp/claude-statusline/usage.json"
+rm -f "$curl_marker" "$fail_stamp"
+printf 'HTTP/1.1 429 Too Many Requests\r\nRetry-After: 600\r\n\r\n' > "$tmp/curl-hdr"
+PATH="$tmp/curl-bin:$PATH" CURL_RC=22 CURL_HEADERS="$tmp/curl-hdr" CURL_MARKER="$curl_marker" CLAUDE_USAGE_TTL=55 run --ok 90 >/dev/null 2>&1
+compgen -G "$tmp/claude-statusline/*.hdr" >/dev/null && hdr_left=1
+first_ran=$([ -e "$curl_marker" ] && echo 1 || echo 0)
+delta=$(( $(stat -c %Y "$fail_stamp" 2>/dev/null || echo -9999) - $(date +%s) ))
+rm -f "$curl_marker"
+PATH="$tmp/curl-bin:$PATH" CURL_RC=22 CURL_HEADERS="$tmp/curl-hdr" CURL_MARKER="$curl_marker" run --ok 90 >/dev/null 2>&1
+compgen -G "$tmp/claude-statusline/*.hdr" >/dev/null && hdr_left=1
+[ "$first_ran" = 1 ] && [ "$delta" -ge 570 ] && [ "$delta" -le 630 ] && [ ! -e "$curl_marker" ] \
+    && ok "refresh backoff: stamp written by CLAUDE_USAGE_TTL=55 after Retry-After: 600 skips default-TTL reader" \
+    || bad "refresh backoff TTL=55 writer -> default reader: first_ran=$first_ran delta=$delta second_ran=$([ -e "$curl_marker" ] && echo 1 || echo 0)"
+
+fixture 10 25 0
+touch -d "@$(($(date +%s) - 4000))" "$tmp/claude-statusline/usage.json"
+rm -f "$curl_marker" "$fail_stamp"
+PATH="$tmp/curl-bin:$PATH" CURL_FAIL=1 CURL_MARKER="$curl_marker" CLAUDE_USAGE_TTL=3600 run --ok 90 >/dev/null 2>&1
+first_ran=$([ -e "$curl_marker" ] && echo 1 || echo 0)
+delta=$(( $(stat -c %Y "$fail_stamp" 2>/dev/null || echo -9999) - $(date +%s) ))
+rm -f "$curl_marker"
+PATH="$tmp/curl-bin:$PATH" CURL_FAIL=1 CURL_MARKER="$curl_marker" CLAUDE_USAGE_TTL=3600 run --ok 90 >/dev/null 2>&1
+[ "$first_ran" = 1 ] && [ "$delta" -ge 3570 ] && [ "$delta" -le 3630 ] && [ ! -e "$curl_marker" ] \
+    && ok "refresh backoff: CLAUDE_USAGE_TTL=3600 failure sets stamp ~3600s ahead and second call skips" \
+    || bad "refresh backoff TTL=3600: first_ran=$first_ran delta=$delta second_ran=$([ -e "$curl_marker" ] && echo 1 || echo 0)"
+
+rm -f "$tmp/claude-statusline/usage.json" "$curl_marker"
+touch -d "@$(($(date +%s) + 600))" "$fail_stamp"
+jq -n '{five_hour: {utilization: 12, resets_at: "2099-01-01T00:00:00.000000+00:00"}, seven_day: {utilization: 22, resets_at: "2099-01-07T00:00:00.000000+00:00"}, limits: []}' > "$tmp/curl-body.json"
+PATH="$tmp/curl-bin:$PATH" CURL_BODY="$tmp/curl-body.json" CURL_MARKER="$curl_marker" run --ok 90 >/dev/null 2>&1; rc=$?
+[ -e "$curl_marker" ] && [ $rc = 0 ] && [ ! -e "$fail_stamp" ] \
+    && ok "refresh backoff: cold cache with active .fail stamp still invokes curl" \
+    || bad "refresh backoff cold cache: marker=$([ -e "$curl_marker" ] && echo 1 || echo 0) rc=$rc stamp=$([ -e "$fail_stamp" ] && echo 1 || echo 0)"
+
+fixture 10 25 0
+touch -d "@$(($(date +%s) - 600))" "$tmp/claude-statusline/usage.json"
+rm -f "$curl_marker" "$fail_stamp" "$tmp/.claude/.credentials.json"
+PATH="$tmp/curl-bin:$PATH" CURL_FAIL=1 CURL_MARKER="$curl_marker" run --ok 90 >/dev/null 2>&1
+[ ! -e "$curl_marker" ] && [ ! -e "$fail_stamp" ] \
+    && ok "refresh backoff: no token writes no .fail stamp" \
+    || bad "refresh backoff no token: marker=$([ -e "$curl_marker" ] && echo 1 || echo 0) stamp=$([ -e "$fail_stamp" ] && echo 1 || echo 0)"
+echo '{"claudeAiOauth":{"accessToken":"fake-oauth-token"}}' > "$tmp/.claude/.credentials.json"
+
+fixture 10 25 0
+touch -d "@$(($(date +%s) - 600))" "$tmp/claude-statusline/usage.json"
+rm -f "$curl_marker" "$fail_stamp"
+printf 'HTTP/1.1 302 Found\r\nRetry-After: 600\r\n\r\nHTTP/1.1 503 Service Unavailable\r\nServer: test\r\n\r\n' > "$tmp/curl-hdr"
+PATH="$tmp/curl-bin:$PATH" CURL_RC=22 CURL_HEADERS="$tmp/curl-hdr" CURL_MARKER="$curl_marker" run --ok 90 >/dev/null 2>&1
+compgen -G "$tmp/claude-statusline/*.hdr" >/dev/null && hdr_left=1
+delta=$(( $(stat -c %Y "$fail_stamp" 2>/dev/null || echo -9999) - $(date +%s) ))
+[ -e "$curl_marker" ] && [ "$delta" -ge 90 ] && [ "$delta" -le 150 ] \
+    && ok "refresh Retry-After: two header blocks with Retry-After only in first gives ~120s (one TTL)" \
+    || bad "refresh Retry-After two header blocks: marker=$([ -e "$curl_marker" ] && echo 1 || echo 0) delta=$delta"
+
+fixture 10 25 0
+touch -d "@$(($(date +%s) - 600))" "$tmp/claude-statusline/usage.json"
+rm -f "$curl_marker" "$fail_stamp"
+printf 'HTTP/1.1 429 Too Many Requests\r\nRetry-After: 600\r\nRetry-After: 300\r\n\r\n' > "$tmp/curl-hdr"
+PATH="$tmp/curl-bin:$PATH" CURL_RC=22 CURL_HEADERS="$tmp/curl-hdr" CURL_MARKER="$curl_marker" run --ok 90 >/dev/null 2>&1
+compgen -G "$tmp/claude-statusline/*.hdr" >/dev/null && hdr_left=1
+delta=$(( $(stat -c %Y "$fail_stamp" 2>/dev/null || echo -9999) - $(date +%s) ))
+[ -e "$curl_marker" ] && [ "$delta" -ge 270 ] && [ "$delta" -le 330 ] \
+    && ok "refresh Retry-After: duplicate headers in final block use last (~300s)" \
+    || bad "refresh Retry-After duplicate headers: marker=$([ -e "$curl_marker" ] && echo 1 || echo 0) delta=$delta"
+
+for bad_ra in "" "+5"; do
+    fixture 10 25 0
+    touch -d "@$(($(date +%s) - 600))" "$tmp/claude-statusline/usage.json"
+    rm -f "$curl_marker" "$fail_stamp"
+    printf 'HTTP/1.1 429 Too Many Requests\r\nRetry-After: %s\r\n\r\n' "$bad_ra" > "$tmp/curl-hdr"
+    PATH="$tmp/curl-bin:$PATH" CURL_RC=22 CURL_HEADERS="$tmp/curl-hdr" CURL_MARKER="$curl_marker" run --ok 90 >/dev/null 2>&1
+    compgen -G "$tmp/claude-statusline/*.hdr" >/dev/null && hdr_left=1
+    delta=$(( $(stat -c %Y "$fail_stamp" 2>/dev/null || echo -9999) - $(date +%s) ))
+    [ -e "$curl_marker" ] && [ "$delta" -ge 90 ] && [ "$delta" -le 150 ] \
+        && ok "refresh Retry-After '$bad_ra' gives ~120s (one TTL)" \
+        || bad "refresh Retry-After '$bad_ra': marker=$([ -e "$curl_marker" ] && echo 1 || echo 0) delta=$delta"
+done
+
+fixture 10 25 0
+touch -d "@$(($(date +%s) - 600))" "$tmp/claude-statusline/usage.json"
+rm -f "$curl_marker" "$fail_stamp"
+printf 'HTTP/1.1 429 Too Many Requests\r\nRetry-After: 9999999999999999999\r\n\r\n' > "$tmp/curl-hdr"
+PATH="$tmp/curl-bin:$PATH" CURL_RC=22 CURL_HEADERS="$tmp/curl-hdr" CURL_MARKER="$curl_marker" run --ok 90 >/dev/null 2>&1
+compgen -G "$tmp/claude-statusline/*.hdr" >/dev/null && hdr_left=1
+delta=$(( $(stat -c %Y "$fail_stamp" 2>/dev/null || echo -9999) - $(date +%s) ))
+[ -e "$curl_marker" ] && [ "$delta" -ge 90 ] && [ "$delta" -le 930 ] \
+    && ok "refresh Retry-After huge integer stays within floor and cap" \
+    || bad "refresh Retry-After huge integer: marker=$([ -e "$curl_marker" ] && echo 1 || echo 0) delta=$delta"
+
+fixture 10 25 0
+touch -d "@$(($(date +%s) - 600))" "$tmp/claude-statusline/usage.json"
+rm -f "$curl_marker" "$fail_stamp"
+printf 'HTTP/1.1 429 Too Many Requests\r\nRetry-After: 900\r\n\r\n' > "$tmp/curl-hdr"
+PATH="$tmp/curl-bin:$PATH" CURL_RC=22 CURL_HEADERS="$tmp/curl-hdr" CURL_MARKER="$curl_marker" run --ok 90 >/dev/null 2>&1
+compgen -G "$tmp/claude-statusline/*.hdr" >/dev/null && hdr_left=1
+delta=$(( $(stat -c %Y "$fail_stamp" 2>/dev/null || echo -9999) - $(date +%s) ))
+[ -e "$curl_marker" ] && [ "$delta" -ge 870 ] && [ "$delta" -le 930 ] \
+    && ok "refresh Retry-After: 900 gives ~900s ahead" \
+    || bad "refresh Retry-After 900: marker=$([ -e "$curl_marker" ] && echo 1 || echo 0) delta=$delta"
+
+fixture 10 25 0
+touch -d "@$(($(date +%s) - 600))" "$tmp/claude-statusline/usage.json"
+rm -f "$curl_marker" "$fail_stamp"
+printf 'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n' > "$tmp/curl-hdr"
+jq -n '{five_hour: {utilization: 12, resets_at: "2099-01-01T00:00:00.000000+00:00"}, seven_day: {utilization: 22, resets_at: "2099-01-07T00:00:00.000000+00:00"}, limits: []}' > "$tmp/curl-body.json"
+PATH="$tmp/curl-bin:$PATH" CURL_BODY="$tmp/curl-body.json" CURL_HEADERS="$tmp/curl-hdr" CURL_MARKER="$curl_marker" run --ok 90 >/dev/null 2>&1
+compgen -G "$tmp/claude-statusline/*.hdr" >/dev/null && hdr_left=1
+[ -e "$curl_marker" ] && ! compgen -G "$tmp/claude-statusline/*.hdr" >/dev/null \
+    && ok "refresh success with CURL_HEADERS set leaves no .hdr file" \
+    || bad "refresh success .hdr cleanup: marker=$([ -e "$curl_marker" ] && echo 1 || echo 0) hdr=$(compgen -G "$tmp/claude-statusline/*.hdr")"
+
+[ "$hdr_left" = 0 ] && ! compgen -G "$tmp/claude-statusline/*.hdr" >/dev/null \
+    && ok "refresh Retry-After: no leftover .hdr file in cache directory after any case" \
+    || bad "refresh Retry-After: leftover .hdr file in cache directory"
+
+rm -f "$tmp/.claude/.credentials.json" "$fail_stamp"
 
 fixture_no5h() {
     jq -n --argjson w "$1" --argjson m "$2" '{
