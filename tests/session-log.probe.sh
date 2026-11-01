@@ -71,7 +71,8 @@ EOF
 
 # 1. list
 run list && ok "list exits 0" || bad "list exit $rc: $(cat "$T/err")"
-head -1 "$T/out" | grep -q '^# times local (EDT)$' && ok "list header names the local zone" || bad "list header: $(head -1 "$T/out")"
+# The header names the zone in force NOW, so the expected abbreviation follows today's DST state.
+head -1 "$T/out" | grep -qxF "# times local ($(date +%Z))" && ok "list header names the local zone" || bad "list header: $(head -1 "$T/out")"
 [ "$(tail -1 "$T/out")" = "3 transcripts (1 app sessions, 1 local-only); archive: none ($T/archive)" ] && ok "list summary groups A+B by bridge id; archive dir absent is never silent" || bad "list summary: $(tail -1 "$T/out")"
 grep -q "aaaaaaaa  cse_01AAAAAAAA .*Custom Title A *early bird$" "$T/out" \
   && ok "A: later custom-title beats ai-title; first prompt" || bad "A row: $(grep aaaaaaaa "$T/out" | head -1)"
