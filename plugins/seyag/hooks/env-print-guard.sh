@@ -49,7 +49,10 @@
 # prefix or a `cut -s -d= -f1` rewrite); `jq '.x|keys' file` prints a
 # bare-string value inside jq's error, accepted because `.env` is an object by
 # the settings schema and this is the guard's recommended form; `sort -tc`
-# over-blocks because the cluster is not value-parsed.
+# over-blocks because the cluster is not value-parsed; `wc -` over-blocks,
+# since the wc allowlist has no bare `-`; safe, and left that way; a jq
+# dump's downstream refuses `cut` and `jq` even for `jq -r` output,
+# deliberately, so no later edit should turn it into an allow.
 #
 # File sinks (allowed by design because the guard's scope is transcript output):
 #   - File targets: a dump segment whose stdout ends at a file (`env > f`,
@@ -201,6 +204,12 @@ _GREP_1ARG_FLAGS = frozenset({
     "-C", "--context", "-D", "--devices", "-d", "--directories",
     "--binary-files", "--color", "--colour", "--label",
     "--exclude", "--exclude-from", "--exclude-dir", "--include",
+})
+_GREP_LONG_NOARG = frozenset({
+    "--count", "--ignore-case", "--no-ignore-case", "--invert-match",
+    "--extended-regexp", "--fixed-strings", "--perl-regexp", "--basic-regexp",
+    "--word-regexp", "--line-regexp", "--no-messages", "--quiet", "--silent",
+    "--text", "--null-data", "--with-filename", "--no-filename",
 })
 _REDIRECT_PARSE_RE = re.compile(
     r"^([0-9]{0,9})(&>>|&>|>>|>\||>&|>|<>|<&|<<<|<<|<)(.*)$"
@@ -774,7 +783,12 @@ def is_grep_names_only(args: list[str]) -> bool:
             i += 2
             continue
         if a.startswith("--"):
-            if a == "--count":
+            if "=" in a:
+                if a.split("=", 1)[0] not in _GREP_1ARG_FLAGS:
+                    return False
+            elif a not in _GREP_LONG_NOARG:
+                return False
+            elif a == "--count":
                 has_c = True
             i += 1
             continue
