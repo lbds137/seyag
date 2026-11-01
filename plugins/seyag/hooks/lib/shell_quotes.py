@@ -2231,8 +2231,19 @@ def _pipelines_context(tokens, force_child=False):
             inside_piped_compound = bool(
                 compound_stack and compound_stack[-1][3]
             )
-            while current and current[0][0] in _LEADING_KEYWORDS:
-                current = current[1:]
+            while current:
+                kw = current[0][0]
+                if kw in _LEADING_KEYWORDS:
+                    current = current[1:]
+                    if kw == "time":
+                        if current and current[0][0] == "-p":
+                            current = current[1:]
+                        if current and current[0][0] == "--":
+                            current = current[1:]
+                elif kw == "function" and len(current) >= 2:
+                    current = current[2:]
+                else:
+                    break
             if current:
                 in_child = (
                     force_child or inside_piped_compound or current[0][1]
@@ -2352,6 +2363,33 @@ _XARGS_NO_VALUE_LONG = {
 }
 
 
+def strip_backtick_glue(argv):
+    """Return a new list with backticks stripped from `argv`'s command word and
+    last word: it reads delimiters `_tokens` leaves glued, and bash's own argv
+    has none."""
+    argv = list(argv)
+    if argv and argv[-1].endswith("`") and argv[-1].count("`") % 2 == 1:
+        argv[-1] = argv[-1][:-1]
+        if not argv[-1]:
+            argv.pop()
+    i = 0
+    while i < len(argv):
+        if _REDIRECT_OPERATOR.match(argv[i]):
+            i += 2
+            continue
+        if _REDIRECT_WORD.match(argv[i]) or _ASSIGNMENT.match(argv[i]):
+            i += 1
+            continue
+        if argv[i].startswith("`"):
+            argv[i] = argv[i][1:]
+            if argv[i].endswith("`"):
+                argv[i] = argv[i][:-1]
+        if not argv[i]:
+            argv.pop(i)
+        break
+    return argv
+
+
 def unwrap_runners(argv):
     """Strip leading `VAR=val` assignments and runner prefixes from one simple
     command; return `(argv, info)` with argv[0] the program that really runs.
@@ -2367,12 +2405,20 @@ def unwrap_runners(argv):
     Option values are consumed per runner (`_RUNNERS`), so `xargs -n 1 rm` runs
     rm, not `1`. An xargs long option not known to take no value consumes the
     next word too (conservative: an unknown value would otherwise become the
-    program). `env -S 'cmd args'` splits its string into the command.
+    program). `env -S 'cmd args'` splits its string into the command. Leading
+    and trailing backticks on the outer words are stripped: this reads
+    delimiters `_tokens` leaves glued, and bash's own argv has none.
     """
     info = {"runners": [], "stdin": False, "arg_file": False, "chdir": False, "fanout": False,
             "watch_exec": False}
-    argv = list(argv)
+    argv = strip_backtick_glue(argv)
     while argv:
+        if _REDIRECT_OPERATOR.match(argv[0]):
+            argv = argv[2:]
+            continue
+        if _REDIRECT_WORD.match(argv[0]):
+            argv.pop(0)
+            continue
         if _ASSIGNMENT.match(argv[0]):
             argv.pop(0)
             continue
@@ -2517,8 +2563,20 @@ def _span_is_executed(prefix, glued):
         j -= 1
     if all(not isinstance(t, _Op) for t in tokens[j:]):
         argv, _ = unwrap_runners(tokens[j:])
-        while argv and argv[0] in _LEADING_KEYWORDS:
-            argv, _ = unwrap_runners(argv[1:])
+        while argv:
+            kw = argv[0]
+            if kw in _LEADING_KEYWORDS:
+                argv = argv[1:]
+                if kw == "time":
+                    if argv and argv[0] == "-p":
+                        argv = argv[1:]
+                    if argv and argv[0] == "--":
+                        argv = argv[1:]
+            elif kw == "function" and len(argv) >= 2:
+                argv = argv[2:]
+            else:
+                break
+            argv, _ = unwrap_runners(argv)
         if not argv:
             return True
     if last == "eval":
@@ -2533,11 +2591,11 @@ def _span_is_executed(prefix, glued):
     return False
 
 
-def _dq_regions(text, offsets, heredoc_regions):
-    """`(open, close)` offsets of `text`'s double-quoted regions, in order:
-    what decides whether a substitution span's opener sits INSIDE a quoted
-    word. Pairs the same characters the module's other readers
-    pair: escape pairs, single-quoted and `$'…'` regions, word-start `#`
+def _lexer_regions(text, offsets, heredoc_regions):
+    """`(dq_regions, comment_regions)` of `text`: `(open, close)` offsets of
+    double-quoted regions and `(start, end)` offsets of word-start `#`
+    comments, both in text order. Pairs the same characters the module's other
+    readers pair: escape pairs, single-quoted and `$'…'` regions, word-start `#`
     comments, consumed heredoc bodies (`heredoc_regions`) and the OUTERMOST
     substitution spans (`offsets`, from `substitution_span_offsets`) are
     opaque to the outer lexer and jumped whole, as bash hands each to a
@@ -2546,9 +2604,12 @@ def _dq_regions(text, offsets, heredoc_regions):
     text: bash reports unexpected EOF, so nothing after runs either way and
     reading its contents as inside-quotes takes the over-arm-removal with
     it. `$"…"` opens a region at its `"` (the `$` stays before it, so a span
-    after `$"` still OPENS the word for the caller's check), and a `#`
+    after `$"` still OPENS the word for the caller's check), a `#`
     glued directly after a span's closing delimiter is a literal, not a
-    comment (`_tokens`' `$(…)#` rule).
+    comment (`_tokens`' `$(…)#` rule), and a `#` right after a `\\`-newline
+    continuation pair (or consecutive pairs) takes the character before the
+    continuation as its preceding character, so `echo a\\\n#` is mid-word,
+    not a comment.
 
     Deliberately approximate, and toward NOT-in-quotes whenever unsure —
     a misread span then cuts its window at a raw separator, the over-arm
@@ -2561,9 +2622,10 @@ def _dq_regions(text, offsets, heredoc_regions):
     nested-build shape no habitual command reaches — the boundary
     `_span_is_executed` already states.
     """
-    if '"' not in text:
-        return []
+    if '"' not in text and "#" not in text:
+        return [], []
     regions = []
+    comments = []
     n = len(text)
     spans = []
     for start, end, _in_single in offsets:
@@ -2578,6 +2640,8 @@ def _dq_regions(text, offsets, heredoc_regions):
     i = 0
     q = None
     literal_hash = False  # a `#` glued to a span's closing delimiter
+    cont_at = -1
+    cont_prev = ""
     while i < n:
         if literal_hash:
             literal_hash = False
@@ -2599,6 +2663,10 @@ def _dq_regions(text, offsets, heredoc_regions):
             continue
         ch = text[i]
         if ch == "\\" and i + 1 < n:
+            if text[i + 1] == "\n":
+                if i != cont_at:
+                    cont_prev = text[i - 1] if i else ""
+                cont_at = i + 2
             i += 2
             continue
         if q is None:
@@ -2616,9 +2684,10 @@ def _dq_regions(text, offsets, heredoc_regions):
                 i = end + 1
                 continue
             if ch == "#":
-                prev = text[i - 1] if i else ""
+                prev = cont_prev if i == cont_at else (text[i - 1] if i else "")
                 if not prev or prev in " \t\f\v;&|()\n":
                     newline = text.find("\n", i + 1)
+                    comments.append((i, n if newline == -1 else newline))
                     i = n if newline == -1 else newline + 1
                     continue
             if ch == '"':
@@ -2629,7 +2698,12 @@ def _dq_regions(text, offsets, heredoc_regions):
         i += 1
     if q is not None:
         regions.append((q, n))
-    return regions
+    return regions, comments
+
+
+def _dq_regions(text, offsets, heredoc_regions):
+    """`(open, close)` offsets of `text`'s double-quoted regions, in order."""
+    return _lexer_regions(text, offsets, heredoc_regions)[0]
 
 
 def _last_command_boundary(text, lo, boundary, dq_regions):
@@ -2772,9 +2846,10 @@ def _backtick_line_interiors(text, depth=0, regions=None, offsets=None):
     hides every command after the first. Bash runs each interior line in the
     substitution subshell regardless (`echo `cmd NEWLINE env`` dumps env), so
     this surfaces those later lines. Gated on a word-bearing line after the
-    first: a span whose later lines held only heredoc body and terminator
-    (already stripped) hides nothing, and leaving it alone keeps the S3
-    shape's pipelines byte-stable. `$()`-family spans are not collected —
+    first: a single-line command-position backtick span already has its
+    command in `_tokens` (and non-command-position or quoted backtick spans
+    are surfaced whole by `_unsplit_span_interiors`, which skips any interior
+    already scanned here). `$()`-family spans are not collected —
     their interior newlines are separators in `_tokens`, so their lines are
     already visible inline — but at depth 0 each one's interior is recursed
     into ONCE, because a backtick span nested there has its newlines glued
@@ -2814,6 +2889,122 @@ def _backtick_line_interiors(text, depth=0, regions=None, offsets=None):
     return found
 
 
+_BT_UNESCAPE = re.compile(r"\\([`$\\])")
+_BT_UNESCAPE_DQ = re.compile(r'\\([`$\\"])')
+
+
+def _backtick_unescape(interior, in_dq):
+    return (_BT_UNESCAPE_DQ if in_dq else _BT_UNESCAPE).sub(r"\1", interior)
+
+
+def _ends_unescaped_paren(w):
+    return w.endswith(")") and (len(w) - 1 - len(w[:-1].rstrip("\\"))) % 2 == 0
+
+
+def _is_command_prefix(words):
+    """True when `words` (between the last command boundary and an unquoted
+    backtick opener) leave the span at command position in `_tokens`. A
+    word ending in `)` counts as a boundary word only when the `)` is
+    preceded by an even number of backslashes (zero counts)."""
+    if len(words) >= 4 and words[0] == "case" and words[2] == "in":
+        words = words[3:]
+    prev = ""
+    for w in words:
+        if (
+            w in _LEADING_KEYWORDS
+            or _ASSIGNMENT.match(w)
+            or (prev == "time" and w in ("-p", "--"))
+            or w == "function"
+            or prev == "function"
+            or _ends_unescaped_paren(w)
+        ):
+            prev = "time" if (prev == "time" and w == "-p") else w
+        else:
+            return False
+    return True
+
+
+def _unsplit_span_interiors(text, depth=0, regions=None, offsets=None):
+    """The interiors of spans bash runs that `_tokens` does not split into
+    commands, bodies kept so the caller's scan decides them (data, unless fed
+    to a shell): every closed,
+    non-single-quoted backtick span (quoted or unquoted, first line included)
+    except an unquoted one at command position, plus every `$(` span whose
+    opener sits inside a double-quoted region (`_dq_regions`). A span whose
+    opener sits inside a stripped heredoc body or a `#` comment
+    (`_lexer_regions`) is skipped. Each returned backtick interior has one
+    level of backslash removed before `` ` ``, `$` and `\\` (and before `"`
+    when inside double quotes, `_backtick_unescape`), as bash does before
+    parsing the span.
+
+    An unquoted backtick span at command position (nothing but spaces, tabs,
+    `(` or whitespace-separated `_LEADING_KEYWORDS` / `_ASSIGNMENT` / `time`
+    flag / `function NAME` / `case` pattern words ending in `)` preceded by
+    an even number of backslashes between the last unquoted
+    command boundary and the opener) is excluded:
+    `_tokens` already yields its interior as commands with the backtick
+    delimiters glued, and surfacing it again would count each command twice.
+    Double-quoted spans and non-command-position backtick spans are not
+    excluded.
+
+    An unquoted `$(` span is not returned (`_tokens` already splits it at its
+    parens), but because `substitution_span_offsets` lists only top-level
+    spans, its interior is recursed into to find spans nested there. That
+    recursion stops at `MAX_WRAPPER_DEPTH` levels: `'$(' * 40000` does not
+    raise `RecursionError`, and a span nested deeper is not seen, the same cap
+    wrappers have."""
+    if regions is None:
+        regions = _strip_heredoc(text)[1] if "<<" in text else []
+    if offsets is None:
+        offsets = substitution_span_offsets(text, regions)
+    if not offsets:
+        return []
+    dq_regions, comment_regions = _lexer_regions(text, offsets, regions)
+    found = []
+    ri = 0
+    dr = 0
+    cr = 0
+    for start, end, in_single in offsets:
+        if in_single or end is None:
+            continue
+        while ri < len(regions) and regions[ri][1] <= start:
+            ri += 1
+        if ri < len(regions) and regions[ri][0] <= start:
+            continue  # the opener sits in heredoc DATA
+        if text[start - 1] == "`":
+            opener = start - 1
+            is_backtick = True
+        elif text[start - 2 : start] == "$(":
+            opener = start - 2
+            is_backtick = False
+        else:
+            continue
+        while cr < len(comment_regions) and comment_regions[cr][1] <= opener:
+            cr += 1
+        if cr < len(comment_regions) and comment_regions[cr][0] <= opener:
+            continue  # the opener sits in a comment
+        while dr < len(dq_regions) and dq_regions[dr][1] <= opener:
+            dr += 1
+        in_dq = dr < len(dq_regions) and dq_regions[dr][0] < opener
+        if is_backtick:
+            if not in_dq:
+                lo = max(0, opener - 512)
+                cut = _last_command_boundary(text, lo, opener, dq_regions)
+                prefix = text[cut + 1 : opener] if cut != -1 else text[lo:opener]
+                stripped = prefix.strip(" \t(")
+                if not stripped or (
+                    prefix[-1] in " \t("
+                    and _is_command_prefix(stripped.split())
+                ):
+                    continue
+            found.append(_backtick_unescape(text[start:end], in_dq))
+        elif in_dq:
+            found.append(text[start:end])
+        elif depth < MAX_WRAPPER_DEPTH:
+            found.extend(_unsplit_span_interiors(text[start:end], depth + 1))
+    return found
+
+
 def simple_commands(text):
     """Return every simple command bash would EXECUTE from `text`, as argv
     lists of word VALUES (quotes removed, escapes resolved).
@@ -2830,8 +3021,8 @@ def simple_commands(text):
       command; a newline inside quotes does not, and neither does the `&` of a
       redirection (`2>&1`, `&>file`);
     - a backslash-newline continues the same command (bash deletes the pair);
-    - leading reserved words (`if`, `then`, `do`, `{`, `!`, `time`, …) are
-      dropped, so argv[0] is the program;
+    - leading reserved words (`if`, `then`, `do`, `{`, `!`, `time [-p] [--]`,
+      `function NAME`, …) are dropped, so argv[0] is the program;
     - heredoc BODIES are data and are not split into commands
       (`strip_heredoc_bodies`), EXCEPT when a command in the text is a shell
       reading its script from stdin (`cat <<'EOF' | bash`, `bash <<'EOF'`,
@@ -2850,16 +3041,34 @@ def simple_commands(text):
     bash, so nothing in a comment is a command and an apostrophe in it opens
     no quote.
 
-    NOT SEEN: a command inside a QUOTED substitution whose span does not open
-    a code word (`echo "$(rm -rf x)"` stays data; a quoted span whose output
-    is executed — `eval "$(…)"`, a shell `-c` script, a span at command
-    position — is seen, `_executed_span_interiors`); a command a script FILE
-    runs. (An unquoted `$(…)` is split at its parens and seen; a backtick
-    span's later lines — top-level, or nested one `$(` level — are surfaced
-    as their own commands; a span whose output bash EXECUTES contributes its
-    heredoc bodies as commands too.)
+    NOT SEEN: a command inside an UNQUOTED-delimiter heredoc body's
+    substitution (`cat <<EOF\n$(…)\nEOF`, stripped as data by
+    `strip_heredoc_bodies`), a substitution or wrapper nested deeper than
+    `MAX_WRAPPER_DEPTH`, or a command a script FILE runs; a span's end is read
+    at the first `)` even inside single quotes or a `case` arm inside it
+    (`substitution_span_offsets`), so commands after that point in a quoted
+    span are not seen. (An unquoted `$(…)`
+    is split at its parens and seen; double-quoted `$(…)` spans and backtick
+    spans — quoted or not, first line included, except an unquoted backtick
+    span at command position which `_tokens` already yields with its delimiters
+    glued — are surfaced as child commands, heredoc bodies still data unless
+    fed to a shell, `_unsplit_span_interiors` and `_backtick_line_interiors`; a span whose
+    output bash EXECUTES contributes its heredoc bodies as commands too,
+    `_executed_span_interiors`.)
     """
     return [argv for argv, _ in simple_commands_context(text)]
+
+
+def inline_command_count(text):
+    """The number of simple commands in `text` from `_pipelines_context` over
+    `_tokens(strip_heredoc_bodies(text), with_context=True)` alone, without
+    surfacing span interiors or unwrapping wrapper strings."""
+    return sum(
+        len(pipeline)
+        for pipeline in _pipelines_context(
+            _tokens(strip_heredoc_bodies(text), with_context=True)
+        )
+    )
 
 
 def simple_commands_context(text):
@@ -2895,6 +3104,8 @@ def _command_pipelines_context(text, depth):
         _reads_script_from_stdin(c) for pipeline in pipelines for c, _ in pipeline
     ):
         pipelines = _pipelines_context(_tokens(text, with_context=True))
+        heredoc_regions = []
+        offsets = substitution_span_offsets(text, [])
     # A span whose output is EXECUTED (eval, command position, a shell -c
     # script argument) turns its heredoc body from data into code: the body is
     # what runs. Tokenize those interiors with the bodies kept, as commands of
@@ -2909,10 +3120,20 @@ def _command_pipelines_context(text, depth):
     # A backtick span's interior lines are commands of their own;
     # the glue reading keeps the enclosing pipeline whole (S3) but hides
     # every interior line after the first, so they are appended here.
-    for interior in _backtick_line_interiors(text, 0, heredoc_regions, offsets):
+    backtick_interiors = _backtick_line_interiors(text, 0, heredoc_regions, offsets)
+    for interior in backtick_interiors:
         pipelines.extend(
             _pipelines_context(_tokens(interior, with_context=True), force_child=True)
         )
+    if depth < MAX_WRAPPER_DEPTH:
+        backtick_seen = set(backtick_interiors)
+        for interior in _unsplit_span_interiors(
+            text, depth, heredoc_regions, offsets
+        ):
+            if interior in backtick_seen:
+                continue
+            for pipeline in _command_pipelines_context(interior, depth + 1):
+                pipelines.append([(c, True) for c, _ in pipeline])
     # `plain_pipelines` is built AFTER the interior extensions above, so the
     # wrapper walk descends into `bash -c`/`eval` strings that live inside
     # executed-span and backtick-line interiors. Building it earlier dropped

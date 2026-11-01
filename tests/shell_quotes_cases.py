@@ -25,7 +25,9 @@ from shell_quotes import (  # noqa: E402
     HEREDOC_OPENER,
     executed_segments,
     heredoc_openers,
+    inline_command_count,
     resolve_placeholders,
+    strip_backtick_glue,
     strip_heredoc_bodies,
     strip_quoted,
     strip_quoted_indexed,
@@ -746,7 +748,7 @@ SIMPLE_COMMAND_CASES += [
      [['echo', '${#var}'], ['echo', 'B']]),
     ('a comment inside backticks ends at the closing backtick',
      'echo `echo A #`; echo B',
-     [['echo', '`echo', 'A', '`'], ['echo', 'B']]),
+     [['echo', '`echo', 'A', '`'], ['echo', 'B'], ['echo', 'A']]),
     ('a comment inside $(…) ends at the newline',
      'echo $(echo A # c\n); echo B',
      [['echo', '$'], ['echo', 'A'], ['echo', 'B']]),
@@ -767,7 +769,7 @@ SIMPLE_COMMAND_CASES += [
      [['env'], ['x']]),
     ('H1: stray quote inside "$(cat <<EOF …)" body does not hide following command',
      "git commit -m \"$(cat <<'EOF'\nSupport 27\" monitors\nEOF\n)\"\nenv",
-     [['git', 'commit', '-m', "$(cat <<'EOF'\n\n)"], ['env']]),
+     [['git', 'commit', '-m', "$(cat <<'EOF'\n\n)"], ['env'], ['cat', '<<EOF']]),
     ('H2a: after ((…)), # starts a comment so an apostrophe cannot hide the next command',
      "((1))# it's\nenv",
      [['1'], ['env']]),
@@ -782,7 +784,7 @@ SIMPLE_COMMAND_CASES += [
      [['echo', '${x:-$'], ['cat', '<<A'], ['$(…)', '}'], ['env']]),
     ('M2: heredoc opener inside backticks does not consume lines after the outer heredoc',
      'cat <<A `: <<B`\na\nA\nenv\nB',
-     [['cat', '<<A', '`:', '<<B`'], ['env'], ['B']]),
+     [['cat', '<<A', '`:', '<<B`'], ['env'], ['B'], [':', '<<B']]),
     ('M3: closing ) inside <(…) does not insert a placeholder before the command word',
      'cat <(case x in *)rm -rf x;; esac)',
      [['cat', '<'], ['case', 'x', 'in', '*'], ['rm', '-rf', 'x'], ['esac']]),
@@ -1019,10 +1021,13 @@ check_equal(
     strip_heredoc_bodies('cat <<A; echo $(x)\nm2\nA'),
     'cat <<A; echo $(x)\n',
 )
-check_equal(
+_s3_got = command_pipelines('find . -name x `: <<EOF\nx\nEOF\n` | xargs echo')
+report(
     'S3: a newline inside a backtick span does not cut the pipeline pairing',
-    command_pipelines('find . -name x `: <<EOF\nx\nEOF\n` | xargs echo'),
-    [[['find', '.', '-name', 'x', '`:', '<<EOF', '`'], ['xargs', 'echo']]],
+    [['find', '.', '-name', 'x', '`:', '<<EOF', '`'], ['xargs', 'echo']] in _s3_got
+    and [[':', '<<EOF']] in _s3_got,
+    _s3_got,
+    "pipelines containing [['find', '.', '-name', 'x', '`:', '<<EOF', '`'], ['xargs', 'echo']] and [[':', '<<EOF']]",
 )
 check_equal(
     'S6: a ) inside a $() comment never ends the span',
@@ -1088,15 +1093,19 @@ report(
 
 # The value form is the glue the S3 pin already uses for a span's interior
 # text inside an enclosing word: prefix, interior, suffix concatenated.
-check_equal(
+_dq_bt_got = simple_commands('git commit -m "fix `foo` bug"')
+report(
     'a double-quoted word keeps the text before a backtick span',
-    simple_commands('git commit -m "fix `foo` bug"'),
-    [['git', 'commit', '-m', 'fix foo bug']],
+    ['git', 'commit', '-m', 'fix foo bug'] in _dq_bt_got and ['foo'] in _dq_bt_got,
+    _dq_bt_got,
+    "a list containing ['git', 'commit', '-m', 'fix foo bug'] and ['foo']",
 )
-check_equal(
+_dq_path_got = simple_commands('rm -rf "build/__pycache__/`x`"')
+report(
     '...so a path guard sees the whole target, not the span alone',
-    simple_commands('rm -rf "build/__pycache__/`x`"'),
-    [['rm', '-rf', 'build/__pycache__/x']],
+    ['rm', '-rf', 'build/__pycache__/x'] in _dq_path_got and ['x'] in _dq_path_got,
+    _dq_path_got,
+    "a list containing ['rm', '-rf', 'build/__pycache__/x'] and ['x']",
 )
 check_equal(
     'fenced code inside a heredoc body is not commands',
@@ -1316,7 +1325,13 @@ for _label, _inp, _want in [
      [(['<'], False), (['a'], True)]),
     ('double-quoted command substitution "$(a)" -> child True',
      '"$(a)"',
-     [(['$(a)'], True)]),
+     [(['$(a)'], True), (['a'], True)]),
+    ('surfaced double-quoted substitution interior has child True',
+     'echo "$(a)"',
+     [(['echo', '$(a)'], False), (['a'], True)]),
+    ('surfaced non-command-position backtick interior has child True',
+     'echo `a`',
+     [(['echo', '`a`'], False), (['a'], True)]),
     ('arithmetic expansion $((1)) -> child False',
      '$((1))',
      [(['$'], False), (['1'], False)]),
@@ -1380,6 +1395,76 @@ for _label, _inp, _want in [
 ]:
     _got = simple_commands_context(_inp)
     report('simple_commands_context: ' + _label, _got == _want, _got, _want)
+
+report(
+    'a heredoc body inside a surfaced double-quoted span is not a command',
+    ['rm', '-rf', 'x'] not in (_surf_hd_dq := simple_commands('git commit -m "$(cat <<\'EOF\'\nrm -rf x\nEOF\n)"'))
+    and ['cat', '<<EOF'] in _surf_hd_dq,
+    _surf_hd_dq,
+    "['cat', '<<EOF'] surfaced without ['rm', '-rf', 'x']",
+)
+report(
+    'a heredoc body inside a surfaced backtick span is not a command',
+    ['rm', '-rf', 'x'] not in (_surf_hd_bt := simple_commands('git commit -m "`cat <<\'EOF\'\nrm -rf x\nEOF\n`"'))
+    and ['cat', '<<EOF'] in _surf_hd_bt,
+    _surf_hd_bt,
+    "['cat', '<<EOF'] surfaced without ['rm', '-rf', 'x']",
+)
+for _label, _t in [
+    ('command_pipelines matches strip_heredoc_bodies on double-quoted commit heredoc',
+     'git commit -m "$(cat <<EOF\nmsg\nEOF\n)"'),
+    ('command_pipelines matches strip_heredoc_bodies on backtick commit heredoc',
+     'git commit -m "`cat <<EOF\nmsg\nEOF\n`"'),
+]:
+    check_equal(_label, command_pipelines(_t), command_pipelines(strip_heredoc_bodies(_t)))
+
+for _label, _argv, _want in [
+    ("glued single-word backtick", ["`ls`"], ["ls"]),
+    ("glued multi-word backtick", ["`rm", "-rf", "X`"], ["rm", "-rf", "X"]),
+    ("lone backtick delimiter", ["`"], []),
+    ("assignment before glued backtick", ["X=1", "`ls`"], ["ls"]),
+]:
+    check_equal("unwrap_runners: " + _label, unwrap_runners(_argv)[0], _want)
+
+for _label, _argv, _want in [
+    ("glued single-word backtick", ["`env`"], ["env"]),
+    ("assignment before glued backtick", ["X=1", "`env`"], ["X=1", "env"]),
+    ("plain argv unchanged", ["echo", "x"], ["echo", "x"]),
+    ("trailing backtick on last word", ["cut", "-f1`"], ["cut", "-f1"]),
+    ("lone backtick delimiter", ["`"], []),
+    ("closed backtick span in wrapper string unchanged", ["bash", "-c", "echo `env`"], ["bash", "-c", "echo `env`"]),
+    ("lone trailing backtick word dropped", ["rm", "`"], ["rm"]),
+    ("trailing backtick on last arg stripped", ["rm", "-rf", "X`"], ["rm", "-rf", "X"]),
+]:
+    check_equal("strip_backtick_glue: " + _label, strip_backtick_glue(_argv), _want)
+
+for _label, _inp, _want in [
+    ("surfaced backtick span not counted inline", "echo `cat r`", 1),
+    ("semicolon-separated inline commands counted", "echo hi; echo x", 2),
+    ("wrapper string not unwrapped inline", "bash -c 'cat r'", 1),
+]:
+    check_equal("inline_command_count: " + _label, inline_command_count(_inp), _want)
+
+check_equal(
+    "simple_commands: a backtick span inside a comment is not surfaced",
+    simple_commands("# `a`\nb"),
+    [["b"]],
+)
+for _label, _inp, _want in [
+    ("time -p before a backtick span does not double-count", "time -p `x`", [["`x`"]]),
+    ("function header before a backtick span does not double-count", "function f { `x`; }", [["`x`"]]),
+    ("case arm before a backtick span does not double-count", "case a in a) `x`;; esac", [["case", "a", "in", "a"], ["`x`"], ["esac"]]),
+    ("escaped backslash before ) before a backtick span does not double-count", 'a\\\\) `x`', [["a\\"], ["`x`"]]),
+    ("heredoc fed to bash surfaces quoted span inside body", "bash <<'EOF'\necho \"$(rm -rf X)\"\nEOF", [["bash", "<<EOF"], ["echo", "$(rm -rf X)"], ["EOF"], ["rm", "-rf", "X"]]),
+]:
+    check_equal("simple_commands: " + _label, simple_commands(_inp), _want)
+
+for _label, _inp, _want in [
+    ('backtick inside double quotes unescapes \\"', 'echo "`echo \\"y\\"`"', ['echo', 'y']),
+    ('backtick unescapes \\$', 'x=`echo \\$HOME`', ['echo', '$HOME']),
+]:
+    _got = simple_commands(_inp)
+    report("simple_commands: " + _label, _want in _got, _got, "a list containing %r" % (_want,))
 
 print("%d passed, %d failed" % (passed, failed))
 sys.exit(1 if failed else 0)

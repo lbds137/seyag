@@ -710,7 +710,7 @@ def scan_invocations(text):
                         k += 1
                     is_prefix = k < n and sub_view[k] not in ";&|\n)'\""
                     n_interior = (
-                        max(1, len(simple_commands_context(interior)))
+                        max(1, inline_command_count(interior))
                         if is_prefix
                         else 0
                     )
@@ -1160,6 +1160,7 @@ try:
     from shell_quotes import (  # noqa: E402
         MAX_WRAPPER_DEPTH,
         QUOTED_SPAN,
+        inline_command_count,
         resolve_placeholders,
         simple_commands_context,
         strip_heredoc_bodies,

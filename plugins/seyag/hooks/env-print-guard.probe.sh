@@ -255,15 +255,20 @@ expect_allow "env | busybox sort | cut" "env | busybox sort | cut -s -d= -f1"
 # (lines) stay in the set.
 expect_deny "env | tail +10c | cut" "env | tail +10c | cut -s -d= -f1" "bulk environment dump via"
 expect_allow "env | tail +5 | cut" "env | tail +5 | cut -s -d= -f1"
-# Audit C1, C2: names-only selector option allowlists (jq, wc), sort -c/-C
+# Names-only selector option allowlists (jq, wc), sort -c/-C
 # check mode, and jq-dump downstream disallowing cut.
 expect_deny "env | jq -R keys" "env | jq -R keys" "bulk environment dump via"
 expect_deny "env | jq -Rs keys" "env | jq -Rs keys" "bulk environment dump via"
 expect_deny "env | jq --raw-input 'keys[]'" "env | jq --raw-input 'keys[]'" "bulk environment dump via"
 expect_deny "env | jq -n keys" "env | jq -n keys" "bulk environment dump via"
+expect_deny "env | jq --slurp keys" "env | jq --slurp keys" "bulk environment dump via"
+expect_deny "env | jq --null-input keys" "env | jq --null-input keys" "bulk environment dump via"
+expect_deny "env | jq --arg x y keys" "env | jq --arg x y keys" "bulk environment dump via"
 expect_deny "env | wc --files0=-" "env | wc --files0=-" "bulk environment dump via"
 expect_deny "env | wc --files0 -" "env | wc --files0 -" "bulk environment dump via"
 expect_deny "env | wc --f=-" "env | wc --f=-" "bulk environment dump via"
+expect_deny "env | wc --total=never" "env | wc --total=never" "bulk environment dump via"
+expect_deny "env | wc --" "env | wc --" "bulk environment dump via"
 expect_deny "env | wc somefile" "env | wc somefile" "bulk environment dump via"
 expect_deny "env | sort -c | cut -s -d= -f1" "env | sort -c | cut -s -d= -f1" "bulk environment dump via"
 expect_deny "env | sort -C | cut -s -d= -f1" "env | sort -C | cut -s -d= -f1" "bulk environment dump via"
@@ -313,6 +318,11 @@ expect_allow "env | grep -c -A 1 X" "env | grep -c -A 1 X"
 expect_allow "env | grep -c --file=p" "env | grep -c --file=p"
 expect_allow "env | grep --regexp X -c" "env | grep --regexp X -c"
 expect_allow "env | jq keys" "env | jq keys"
+expect_allow "env | jq -c keys" "env | jq -c keys"
+expect_allow "env | jq -S keys" "env | jq -S keys"
+expect_allow "env | jq -e keys" "env | jq -e keys"
+expect_allow "env | jq -j keys" "env | jq -j keys"
+expect_allow "env | jq --compact-output keys" "env | jq --compact-output keys"
 expect_allow "env | jq -r 'keys[]'" "env | jq -r 'keys[]'"
 expect_allow "jq . settings.json | wc -l" "jq . settings.json | wc -l"
 expect_allow "jq . settings.json | grep -c x" "jq . settings.json | grep -c x"
@@ -494,10 +504,44 @@ expect_allow "SYG_ALLOW_ENV_PRINT=1 env" "SYG_ALLOW_ENV_PRINT=1 env"
 expect_allow "(SYG_ALLOW_ENV_PRINT=1 env)" "(SYG_ALLOW_ENV_PRINT=1 env)"
 expect_allow "SYG_ALLOW_ENV_PRINT=1 jq . .env" "SYG_ALLOW_ENV_PRINT=1 jq . .env"
 
-# --- Pinned fail-open: double-quoted command substitution is not split by
-# lib/shell_quotes.py command_pipelines, so the hook stays silent. ---
+# --- Double-quoted command substitutions and backtick spans are surfaced by
+# lib/shell_quotes.py command_pipelines; single-quoted and selector/sink forms pass. ---
 # shellcheck disable=SC2016
-expect_allow "double-quoted command substitution (unsplit by command_pipelines)" 'echo "$(env)"'
+expect_deny "double-quoted command substitution" 'echo "$(env)"' "bulk environment dump via"
+# shellcheck disable=SC2016
+expect_deny 'x="$(env)"' 'x="$(env)"' "bulk environment dump via"
+# shellcheck disable=SC2016
+expect_deny 'echo `env`' 'echo `env`' "bulk environment dump via"
+# shellcheck disable=SC2016
+expect_deny 'x=`env`' 'x=`env`' "bulk environment dump via"
+# shellcheck disable=SC2016
+expect_deny '`env`' '`env`' "bulk environment dump via"
+# shellcheck disable=SC2016
+expect_deny '(`env`)' '(`env`)' "bulk environment dump via"
+# shellcheck disable=SC2016
+expect_deny '`true; env`' '`true; env`' "bulk environment dump via"
+# shellcheck disable=SC2016
+expect_deny 'echo "$(`env`)"' 'echo "$(`env`)"' "bulk environment dump via"
+# shellcheck disable=SC2016
+expect_deny 'X=1 `env`' 'X=1 `env`' "bulk environment dump via"
+# shellcheck disable=SC2016
+expect_allow 'echo hi # `env`' 'echo hi # `env`'
+# shellcheck disable=SC2016
+expect_deny 'echo `echo \`env\``' 'echo `echo \`env\``' "bulk environment dump via"
+expect_deny "echo a\\ NEWLINE # \`env\`" $'echo a\\\n# `env`' "bulk environment dump via"
+# shellcheck disable=SC2016
+expect_deny "bash -c 'echo \`env\`'" $'bash -c \'echo `env`\'' "bulk environment dump via"
+# shellcheck disable=SC2016
+expect_deny "sh -c 'x=\`env\`'" $'sh -c \'x=`env`\'' "bulk environment dump via"
+# shellcheck disable=SC2016
+expect_deny "eval 'echo \`env\`'" $'eval \'echo `env`\'' "bulk environment dump via"
+# shellcheck disable=SC2016
+expect_allow '`env | cut -s -d= -f1`' '`env | cut -s -d= -f1`'
+# shellcheck disable=SC2016
+expect_allow 'x="$(env | cut -s -d= -f1)"' 'x="$(env | cut -s -d= -f1)"'
+expect_allow '> f env' '> f env'
+# shellcheck disable=SC2016
+expect_allow "echo '\$(env)'" "echo '\$(env)'"
 
 # Round 7 §10: under a substitution the legacy `/dev/null` walk still governs,
 # but jq sinks now demand an explicit fd-2 sink there too — the plain
