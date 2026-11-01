@@ -507,7 +507,7 @@ def meter_points(readings, x, y):
         "weekly_delta": weekly_delta,
         "five_hour_delta": five_hour_delta,
         "resets_inside": resets,
-        "five_hour_usable": five_hour_ok and resets["five_hour"] == 0,
+        "five_hour_usable": five_hour_ok and not five_hour_absent and resets["five_hour"] == 0,
         "five_hour_absent": five_hour_absent,
         "edge_left": {"epoch": left["epoch"], "distance_s": abs(left["epoch"] - x),
                       "extrapolated": left["epoch"] > x},
@@ -715,7 +715,14 @@ def main():
         win_readings = [r for r in readings if since_ts <= r["epoch"] <= until_ts]
         newest_no_five = bool(win_readings) and win_readings[-1]["five_hour_pct"] is None
         if a.meter is None:
-            fit_meter = "week" if newest_no_five else "5h"
+            if newest_no_five:
+                fit_meter = "week"
+                sys.stderr.write(
+                    "usage-sweep: the newest reading has no 5h window;"
+                    " fitting the weekly meter (--meter 5h overrides)\n"
+                )
+            else:
+                fit_meter = "5h"
         else:
             fit_meter = a.meter
             if a.meter == "5h" and newest_no_five:
