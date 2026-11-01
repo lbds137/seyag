@@ -881,4 +881,156 @@ parity_case "disabled+reason, week 101" 10 101 0 false false admin_disabled '{"c
 parity_case "disabled+no-spend, week 50" 10 50 0 false false null
 parity_case "enabled+lim-missing, week 101" 10 101 0 true omit null '{"currency":"USD","amount_minor":1234,"exponent":2}'
 
+# --- Plans with no 5h window (five_hour: null) ---
+route_anthropic
+mkdir -p "$tmp/curl-bin"
+curl_marker="$tmp/curl-ran"
+cat > "$tmp/curl-bin/curl" <<'EOF'
+#!/bin/sh
+cat >/dev/null
+[ -n "${CURL_MARKER:-}" ] && : > "$CURL_MARKER"
+while [ $# -gt 0 ]; do
+    if [ "$1" = -o ]; then
+        cat "$CURL_BODY" > "$2"
+        exit 0
+    fi
+    shift
+done
+exit 1
+EOF
+chmod +x "$tmp/curl-bin/curl"
+echo '{"claudeAiOauth":{"accessToken":"fake-oauth-token"}}' > "$tmp/.claude/.credentials.json"
+
+fixture 10 90 0
+touch -d "@$(($(date +%s) - 600))" "$tmp/claude-statusline/usage.json"
+jq -n '{five_hour: null, seven_day: {utilization: 20, resets_at: "2099-01-07T00:00:00.000000+00:00"}, limits: []}' > "$tmp/curl-body.json"
+out=$(PATH="$tmp/curl-bin:$PATH" CURL_BODY="$tmp/curl-body.json" run --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 0 ] && [ -z "$out" ] \
+    && [ "$err" = "claude-usage: --ok pass lane=anthropic meter=week week=20%<75% source=api" ] \
+    && jq -e '.five_hour == null and .seven_day.utilization == 20' "$tmp/claude-statusline/usage.json" >/dev/null \
+    && ok "refresh: null five_hour + object seven_day replaces stale cache and gate reads new week" \
+    || bad "refresh null five_hour: rc=$rc out=[$out] err=[$err] cache=$(cat "$tmp/claude-statusline/usage.json")"
+
+fixture 10 90 0
+touch -d "@$(($(date +%s) - 600))" "$tmp/claude-statusline/usage.json"
+jq -n '{five_hour: {utilization: 15, resets_at: "2099-01-01T00:00:00.000000+00:00"}, seven_day: {utilization: 20, resets_at: "2099-01-07T00:00:00.000000+00:00"}, limits: []}' > "$tmp/curl-body.json"
+PATH="$tmp/curl-bin:$PATH" CURL_BODY="$tmp/curl-body.json" run --ok 90 >/dev/null 2>&1
+jq -e '.five_hour.utilization == 15 and .seven_day.utilization == 20' "$tmp/claude-statusline/usage.json" >/dev/null \
+    && ok "refresh: normal both-windows reply replaces stale cache" \
+    || bad "refresh normal both-windows: $(cat "$tmp/claude-statusline/usage.json")"
+
+fixture 10 90 0
+touch -d "@$(($(date +%s) - 600))" "$tmp/claude-statusline/usage.json"
+jq -n '{five_hour: {utilization: 18, resets_at: "2099-01-01T00:00:00.000000+00:00"}}' > "$tmp/curl-body.json"
+PATH="$tmp/curl-bin:$PATH" CURL_BODY="$tmp/curl-body.json" run --ok 90 >/dev/null 2>&1
+jq -e '.five_hour.utilization == 18 and (.seven_day == null)' "$tmp/claude-statusline/usage.json" >/dev/null \
+    && ok "refresh: five_hour-only reply replaces stale cache" \
+    || bad "refresh five_hour-only: $(cat "$tmp/claude-statusline/usage.json")"
+
+fixture 10 25 0
+touch -d "@$(($(date +%s) - 600))" "$tmp/claude-statusline/usage.json"
+rm -f "$curl_marker"
+echo '{"error":"x"}' > "$tmp/curl-body.json"
+PATH="$tmp/curl-bin:$PATH" CURL_BODY="$tmp/curl-body.json" CURL_MARKER="$curl_marker" run --ok 90 >/dev/null 2>&1
+[ -e "$curl_marker" ] && jq -e '.five_hour.utilization == 10 and .seven_day.utilization == 25' "$tmp/claude-statusline/usage.json" >/dev/null \
+    && ok "refresh: {\"error\":\"x\"} reply is discarded and old cache kept" \
+    || bad "refresh error reply kept: marker=$([ -e "$curl_marker" ] && echo 1 || echo 0) $(cat "$tmp/claude-statusline/usage.json")"
+
+fixture 10 25 0
+touch -d "@$(($(date +%s) - 600))" "$tmp/claude-statusline/usage.json"
+rm -f "$curl_marker"
+jq -n '{five_hour: null, seven_day: null, limits: []}' > "$tmp/curl-body.json"
+PATH="$tmp/curl-bin:$PATH" CURL_BODY="$tmp/curl-body.json" CURL_MARKER="$curl_marker" run --ok 90 >/dev/null 2>&1
+[ -e "$curl_marker" ] && jq -e '.five_hour.utilization == 10 and .seven_day.utilization == 25' "$tmp/claude-statusline/usage.json" >/dev/null \
+    && ok "refresh: reply with both windows null is discarded and old cache kept" \
+    || bad "refresh both null kept: marker=$([ -e "$curl_marker" ] && echo 1 || echo 0) $(cat "$tmp/claude-statusline/usage.json")"
+
+for bad_body in '{"seven_day":{}}' '{"seven_day":{"utilization":null}}' '{"five_hour":{}}'; do
+    fixture 10 25 0
+    touch -d "@$(($(date +%s) - 600))" "$tmp/claude-statusline/usage.json"
+    rm -f "$curl_marker"
+    printf '%s\n' "$bad_body" > "$tmp/curl-body.json"
+    PATH="$tmp/curl-bin:$PATH" CURL_BODY="$tmp/curl-body.json" CURL_MARKER="$curl_marker" run --ok 90 >/dev/null 2>&1
+    [ -e "$curl_marker" ] && jq -e '.five_hour.utilization == 10 and .seven_day.utilization == 25' "$tmp/claude-statusline/usage.json" >/dev/null \
+        && ok "refresh: $bad_body reply is discarded and old cache kept" \
+        || bad "refresh $bad_body kept: marker=$([ -e "$curl_marker" ] && echo 1 || echo 0) $(cat "$tmp/claude-statusline/usage.json")"
+done
+rm -f "$tmp/.claude/.credentials.json"
+
+fixture_no5h() {
+    jq -n --argjson w "$1" --argjson m "$2" '{
+        five_hour: null,
+        seven_day: {utilization: $w, resets_at: "2099-01-07T00:00:00.000000+00:00"},
+        limits: [{kind: "weekly_scoped", percent: $m, scope: {model: {display_name: "Fable"}}}]}' \
+        > "$tmp/claude-statusline/usage.json"
+}
+
+fixture_no5h 50 7
+printf '#!/bin/sh\nexit 0\n' > "$tmp/.local/bin/zai-usage"
+out=$(run)
+[[ $out == "week 50% (resets "*" · Fable 7% of its own weekly cap" ]] && [[ $out != *5h* ]] \
+    && ok "no 5h window: plain line has no 5h part" || bad "no 5h plain line: $out"
+out_all=$(run --all)
+[[ $(sed -n 1p <<< "$out_all") == "Anthropic plan: week 50% (resets "*" · Fable 7% of its own weekly cap" ]] && [[ $out_all != *5h* ]] \
+    && ok "no 5h window: --all plan line has no 5h part" || bad "no 5h --all: $out_all"
+
+fixture_no5h 2 0
+out=$(run --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 0 ] && [ -z "$out" ] && [ "$err" = "claude-usage: --ok pass lane=anthropic meter=week week=2%<75% source=api" ] \
+    && ok "no 5h window: --ok pass line names meter=week with no 5h=" || bad "no 5h --ok pass: rc=$rc out=[$out] err=[$err]"
+out=$(run --ok 0 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 0 ] && [ -z "$out" ] && [ "$err" = "claude-usage: --ok pass lane=anthropic meter=week week=2%<75% source=api" ] \
+    && ok "no 5h window: --ok 0 passes under the weekly reserve" || bad "no 5h --ok 0: rc=$rc out=[$out] err=[$err]"
+
+fixture_no5h 80 0
+out=$(run --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 1 ] && [ -z "$out" ] && [ "$err" = "claude-usage: --ok FAIL lane=anthropic meter=week week=80%>=75% source=api" ] \
+    && ok "no 5h window: --ok FAIL line names meter=week with no 5h=" || bad "no 5h --ok FAIL: rc=$rc out=[$out] err=[$err]"
+
+fixture_no5h 98 0
+jq '. + {extra_usage: {is_enabled: true, spend_limit_reached: false, disabled_reason: null},
+         spend: {used: {currency: "USD", amount_minor: 1234, exponent: 2}}}' \
+    "$tmp/claude-statusline/usage.json" > "$tmp/claude-statusline/usage.json.tmp"
+mv "$tmp/claude-statusline/usage.json.tmp" "$tmp/claude-statusline/usage.json"
+out=$(CLAUDE_USAGE_EXTRA_OK=1 run --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 0 ] && [ -z "$out" ] \
+    && [ "$err" = "claude-usage: --ok pass lane=anthropic meter=extra-usage week=98%>=75% extra=\$12.34 used source=api" ] \
+    && ok "no 5h window: extra-usage pass keeps meter=extra-usage without 5h=" \
+    || bad "no 5h extra-usage pass: rc=$rc out=[$out] err=[$err]"
+
+fixture_no5h 50 0
+j=$(run --json)
+[ "$j" = '{"five_hour_pct":0,"five_hour_resets_at":0,"seconds_to_reset":0,"weekly_pct":50,"weekly_resets_at":4071427200,"scoped":"Fable 0%","routed":0,"lane":"anthropic","five_hour_absent":true}' ] \
+    && jq -e '(.five_hour_pct | type) == "number" and .five_hour_pct == 0 and .five_hour_absent == true' <<< "$j" >/dev/null \
+    && ok "no 5h window: --json has numeric five_hour_pct 0 and five_hour_absent:true" \
+    || bad "no 5h --json: $j"
+
+rm -f "$log" "$log.last"
+jq -n '{
+    five_hour: {utilization: null, resets_at: "2099-01-01T00:00:00.000000+00:00"},
+    seven_day: {utilization: 50, resets_at: "2099-01-07T00:00:00.000000+00:00"},
+    limits: []
+}' > "$tmp/claude-statusline/usage.json"
+j=$(run --json)
+jq -e '.five_hour_resets_at == 0 and .seconds_to_reset == 0 and .five_hour_absent == true' <<< "$j" >/dev/null \
+    && jq -e '.five_hour_resets_at == null' "$log" >/dev/null \
+    && ok "no 5h window (null utilization with resets_at): --json shows 0 for both reset fields and log writes null" \
+    || bad "null utilization with resets_at: json=$j log=$(cat "$log" 2>/dev/null)"
+
+fixture_no5h 2 0
+out=$(run --ok abc 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 1 ] && [ -z "$out" ] && [ "$err" = "claude-usage: --ok FAIL lane=anthropic meter=pct PCT is not an integer" ] \
+    && ok "no 5h window: --ok abc exits 1 with meter=pct" || bad "no 5h --ok abc: rc=$rc out=[$out] err=[$err]"
+
+fixture_no5h 20 100
+out=$(CLAUDE_USAGE_MODEL=claude-fable-5-1 HOME="$tmp" XDG_CACHE_HOME="$tmp" "$CU" --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 1 ] && [ -z "$out" ] && [ "$err" = "claude-usage: --ok FAIL lane=anthropic meter=model-cap model=Fable cap=100%>=100% source=api" ] \
+    && ok "no 5h window: Fable cap 100% blocks Fable session with meter=model-cap" || bad "no 5h Fable cap: rc=$rc out=[$out] err=[$err]"
+
+fixture 10 50 0
+j=$(run --json)
+jq -e 'has("five_hour_absent") == false' <<< "$j" >/dev/null \
+    && ok "normal fixture: --json has no five_hour_absent key" \
+    || bad "normal fixture five_hour_absent: $j"
+
 exit $fail
