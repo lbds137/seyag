@@ -14,7 +14,8 @@
 #          `=`—are dropped instead of passed whole; `sed 's/=.*//'` and
 #          `awk -F= '{print $1}'` are not allowlisted for the same reason)
 #        - `jq` with `keys` / `keys_unsorted` (stdin mode)
-#        - `wc` (flags only, excluding `--files0-from`)
+#        - `wc` (only `-l`/`-w`/`-c`/`-m`/`-L` and `--lines`/`--words`/
+#          `--bytes`/`--chars`/`--max-line-length`, with no file operands)
 #        - `grep -c` (count-only)
 #      Value-preserving filters (`grep`, `head`, `tail`, `sort`, or name-keyed
 #      redactions like `sed 's/TOKEN=.*/TOKEN=…/'` or `jq del(...)`) do not
@@ -40,13 +41,15 @@
 # provably-narrow shapes; aggregation filters (`to_entries`, `{env}`, `..`,
 # `del(...)`, comma lists) deny even when their intent looks narrow; a keyed
 # reread after a selector (`env | cut -s -d= -f1 | xargs printenv`) prints
-# every value and is unseen; `bash -c 'env'` / `sh -c printenv` wrapper strings
-# are not descended into by this guard's walker (the lib's shell-quote scanner
-# serves the delete-analysis guards; wiring it here is a possible follow-up,
-# not done in this PR); `grep -o` patterns cannot be analyzed
+# every value and is unseen (`bash -c 'env'` / `sh -c printenv` wrapper strings
+# are descended into by `lib/shell_quotes.py`'s `command_pipelines` and
+# blocked); `grep -o` patterns cannot be analyzed
 # safely for names-only output, so none are allowlisted (the fleet's
 # `env $(env | grep -oE '^[A-Z_]*' | …)` launcher pattern needs the bypass
-# prefix or a `cut -s -d= -f1` rewrite).
+# prefix or a `cut -s -d= -f1` rewrite); `jq '.x|keys' file` prints a
+# bare-string value inside jq's error, accepted because `.env` is an object by
+# the settings schema and this is the guard's recommended form; `sort -tc`
+# over-blocks because the cluster is not value-parsed.
 #
 # File sinks (allowed by design because the guard's scope is transcript output):
 #   - File targets: a dump segment whose stdout ends at a file (`env > f`,
@@ -125,9 +128,11 @@
 #     design.
 # Double-quoted command substitutions are not split by
 # `lib/shell_quotes.py` (`command_pipelines`) and fail open. Heredoc bodies
-# written to a file (`cat > f <<EOF`) are scanned as commands, so guard-shaped
-# text inside a written script blocks the writer (observed in replay; lib-level,
-# follow-up filed). A bash array initialization like `scrub=(env …)` is parsed
+# written to a file (`cat > f <<EOF`) are stripped as data by
+# `command_pipelines` (unless fed to a stdin-script shell or inside an executed
+# substitution span), so guard-shaped text inside a written file passes, and an
+# unquoted heredoc body's `$(env)` also passes, as a gap in the shared parser.
+# A bash array initialization like `scrub=(env …)` is parsed
 # as a parenthesized subshell, so an array whose literal elements start with
 # `env`/`printenv` blocks the assignment (observed on real fleet tooling in
 # replay; lib/shell_quotes-level classification, follow-up filed).
@@ -698,8 +703,39 @@ def is_jq_keys_filter(expr: str) -> bool:
     return True
 
 
+_JQ_SELECTOR_SHORT = frozenset("crSejaMC")
+_JQ_SELECTOR_LONG = frozenset({
+    "--compact-output", "--raw-output", "--sort-keys", "--exit-status",
+    "--join-output", "--ascii-output", "--monochrome-output", "--color-output",
+})
+_WC_SHORT_FLAGS = frozenset("lwcmL")
+_WC_LONG_FLAGS = frozenset({
+    "--lines", "--words", "--bytes", "--chars", "--max-line-length",
+})
+
+
+def _jq_selector_opts_ok(args: list[str]) -> bool:
+    for a in args:
+        if a == "--":
+            break
+        if not a.startswith("-"):
+            continue
+        if a.startswith("--"):
+            if a not in _JQ_SELECTOR_LONG:
+                return False
+        elif len(a) <= 1 or not set(a[1:]).issubset(_JQ_SELECTOR_SHORT):
+            return False
+    return True
+
+
 def is_wc_names_only(args: list[str]) -> bool:
-    return all(a.startswith("-") and not a.startswith("--files0-from") for a in args)
+    for a in args:
+        if a.startswith("--"):
+            if a not in _WC_LONG_FLAGS:
+                return False
+        elif not a.startswith("-") or len(a) <= 1 or not set(a[1:]).issubset(_WC_SHORT_FLAGS):
+            return False
+    return True
 
 
 def is_grep_names_only(args: list[str]) -> bool:
@@ -744,28 +780,26 @@ def is_grep_names_only(args: list[str]) -> bool:
             continue
         if a.startswith("-") and len(a) > 1:
             flags = a[1:]
-            if "e" in flags:
-                idx = flags.index("e")
-                before_e = flags[:idx]
-                after_e = flags[idx + 1:]
-                if "c" in before_e:
+            for idx, ch in enumerate(flags):
+                if ch == "c":
                     has_c = True
-                if "f" in before_e:
-                    has_f = True
-                if after_e:
-                    patterns.append(after_e)
-                    i += 1
-                else:
-                    if i + 1 >= len(args):
-                        return False
-                    patterns.append(args[i + 1])
-                    i += 2
-                continue
-            if "c" in flags:
-                has_c = True
-            if "f" in flags:
-                has_f = True
-            i += 1
+                elif ch in "efABCDdm":
+                    rest = flags[idx + 1:]
+                    if ch == "f":
+                        has_f = True
+                    if rest:
+                        if ch == "e":
+                            patterns.append(rest)
+                        i += 1
+                    else:
+                        if i + 1 >= len(args):
+                            return False
+                        if ch == "e":
+                            patterns.append(args[i + 1])
+                        i += 2
+                    break
+            else:
+                i += 1
             continue
         pos.append(a)
         i += 1
@@ -778,15 +812,19 @@ def is_grep_names_only(args: list[str]) -> bool:
     return False
 
 
-def is_names_only_selector(seg: list[str]) -> bool:
-    words, _ = unwrap_runners(strip_redirections(seg))
+def is_names_only_selector(seg: list[str], *, json_stream: bool = False) -> bool:
+    words, info = unwrap_runners(strip_redirections(seg))
     if not words:
+        return False
+    if {"xargs", "parallel"} & set(info["runners"]):
         return False
     base = os.path.basename(words[0])
     args = words[1:]
     if base == "cut":
-        return is_cut_names_only(args)
+        return not json_stream and is_cut_names_only(args)
     if base == "jq":
+        if json_stream or not _jq_selector_opts_ok(args):
+            return False
         parsed = parse_jq_invocation(args)
         if parsed is None:
             return False
@@ -885,9 +923,9 @@ _SORT_LONG_VALUED = frozenset({
 
 
 def _sort_is_pure(args: list[str]) -> bool:
-    # Short flags without `o` plus an exact long-option allowlist; the four
-    # valued knobs pass in `=` or spaced form (a spaced value lands as an
-    # inert operand word). Every other `--…` denies: `--output`'s unambiguous
+    # Short flags without `o`, `c` and `C` plus an exact long-option allowlist;
+    # the four valued knobs pass in `=` or spaced form (a spaced value lands as
+    # an inert operand word). Every other `--…` denies: `--output`'s unambiguous
     # abbreviations (`--o`, `--out`, `--outp`) write files, `--compress-program`
     # runs a program, and `--random-source` denies with them.
     for a in args:
@@ -897,7 +935,7 @@ def _sort_is_pure(args: list[str]) -> bool:
             name = a.split("=", 1)[0]
             if name not in _SORT_LONG_FREE and name not in _SORT_LONG_VALUED:
                 return False
-        elif a.startswith("-") and len(a) > 1 and "o" in a[1:]:
+        elif a.startswith("-") and len(a) > 1 and any(c in a[1:] for c in ("o", "c", "C")):
             return False
     return True
 
@@ -968,8 +1006,8 @@ def _is_pure_transform(seg: list[str]) -> bool:
     - `head`/`tail` without `-c`/`--bytes` in any prefix form
       (`_no_bytes_flag`); `tail` also without the obsolete `+N[bcl]`
       byte-offset operand (`_no_tail_byte_operand`; `+5`/`+5l` are lines)
-    - `sort` on short flags without `o` plus an exact long-option allowlist
-      (`_sort_is_pure`)
+    - `sort` on short flags without `o`, `c` and `C` plus an exact long-option
+      allowlist (`_sort_is_pure`)
     - `uniq` with at most one operand (`uniq IN OUT` writes OUT), with the
       values of its value-taking flags consumed (`uniq -f 1 -` is one
       operand, not two)
@@ -1018,13 +1056,15 @@ def _is_pure_transform(seg: list[str]) -> bool:
     return False
 
 
-def has_downstream_names_only_selector(downstream: list[list[str]]) -> bool:
+def has_downstream_names_only_selector(
+    downstream: list[list[str]], *, json_stream: bool = False
+) -> bool:
     if _HAS_PROCSUB:
         return False
     for s in downstream:
         if is_transcript_tee(s):
             return False
-        if is_names_only_selector(s):
+        if is_names_only_selector(s, json_stream=json_stream):
             return True
         if not _is_pure_transform(s):
             return False
@@ -1092,7 +1132,7 @@ for pipeline in pipelines:
         jq_hit = detect_jq_bulk_file_dump(seg)
         if jq_hit is not None:
             downstream = pipeline[idx + 1:]
-            if not has_downstream_names_only_selector(downstream):
+            if not has_downstream_names_only_selector(downstream, json_stream=True):
                 filt, fpath = jq_hit
                 shown_filt = filt if filt else "<empty>"
                 # The "sink both fds" remedy is wrong advice for stderr-builtin
