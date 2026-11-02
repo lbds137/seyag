@@ -40,7 +40,7 @@
 #      output lists the file as deleted-with-the-tree
 #
 # Stated non-goal: the two removal-failure wordings (`git worktree remove --force`
-# vs `git branch -D` in check 10) are not constructible without root tricks; the
+# vs `git branch -D` in check 11) are not constructible without root tricks; the
 # safety-critical piece — `branch -D` gated on the regex re-check — is pinned by
 # cases 4, 11 and 12.
 #
@@ -381,7 +381,7 @@ c16_fail=0
 c16_reason=""
 if [ "$rc" -ne 0 ]; then
   c16_fail=1; c16_reason="rc=$rc out=$out"
-elif ! grep -qF 'checks passed: main-tree-identity, main-tree-clean, worktree-registered, base-unchanged (skipped: no --base), no-unpushed-base, empty-patch, nothing-outside-patch, apply, byte-identical, removal' <<<"$out"; then
+elif ! grep -qF 'checks passed: main-tree-identity, main-tree-clean, worktree-registered, worktree-gitfile, base-unchanged (skipped: no --base), no-unpushed-base, empty-patch, nothing-outside-patch, apply, byte-identical, removal' <<<"$out"; then
   c16_fail=1; c16_reason="missing checks passed line in: $out"
 elif ! grep -qxF 'worktree removed' <<<"$out"; then
   c16_fail=1; c16_reason="missing 'worktree removed' in: $out"
@@ -619,12 +619,12 @@ git -C "$R29/.wt/nested-repo" add nested.txt >/dev/null 2>&1
 git -C "$R29/.wt/nested-repo" commit -q --no-verify -m 'nested repo commit' >/dev/null 2>&1
 err=$(cd "$R29" && bash "$TOOL" .wt 2>&1 >/dev/null)
 rc=$?
-if [ "$rc" -eq 1 ] && [[ $err == "STOP: nothing-outside-patch:"* ]] \
+if [ "$rc" -eq 1 ] && [[ $err == "STOP: worktree-gitfile:"* ]] \
   && grep -qF 'nested-repo' <<<"$err" \
   && [ -d "$R29/.wt/nested-repo/.git" ] \
   && [ -f "$R29/.wt/nested-repo/nested.txt" ] \
   && [ -z "$(git -C "$R29" status --porcelain)" ]; then
-  record_case 0 "case 29: untracked nested repo refuses STOP: nothing-outside-patch with tree kept"
+  record_case 0 "case 29: untracked nested repo refuses STOP: worktree-gitfile with tree kept"
 else
   record_case 1 "case 29: untracked nested repo" "rc=$rc err=$err"
 fi
@@ -787,6 +787,106 @@ if [ "$rc" -eq 0 ] \
   record_case 0 "case 35: gitlink at path with a quote does not false-refuse and transfers"
 else
   record_case 1 "case 35: gitlink at path with a quote" "rc=$rc raw_z=$raw_z_sample out=$out"
+fi
+
+# Case 36: A worktree whose .git is repointed at a crafted gitdir with
+# core.fsmonitor set to a script that touches a marker file refuses
+# STOP: worktree-gitfile without firing the marker; direct git -C status fires it.
+mk_fixture r36
+R36="$T/r36"
+FSM36_CRAFTED="$T/r36-crafted.git"
+FSM36_MARKER="$T/r36-fsmonitor.marker"
+FSM36_HOOK="$T/r36-fsmonitor-hook.sh"
+printf '#!/bin/sh\n: > "%s"\n' "$FSM36_MARKER" >"$FSM36_HOOK"
+chmod +x "$FSM36_HOOK"
+cp -R "$R36/.git" "$FSM36_CRAFTED"
+git --git-dir="$FSM36_CRAFTED" config core.fsmonitor "$FSM36_HOOK"
+printf 'gitdir: %s\n' "$FSM36_CRAFTED" >"$R36/.wt/.git"
+rm -f "$FSM36_MARKER"
+err=$(cd "$R36" && bash "$TOOL" .wt 2>&1 >/dev/null)
+rc=$?
+marker_before=absent
+[ -e "$FSM36_MARKER" ] && marker_before=present
+git -C "$R36/.wt" status >/dev/null 2>&1
+marker_after=absent
+[ -e "$FSM36_MARKER" ] && marker_after=present
+if [ "$rc" -eq 1 ] && [[ $err == "STOP: worktree-gitfile:"* ]] \
+  && [ "$marker_before" = absent ] && [ "$marker_after" = present ] \
+  && [ -d "$R36/.wt" ] && [ -z "$(git -C "$R36" status --porcelain)" ]; then
+  record_case 0 "case 36: repointed .git with core.fsmonitor refuses STOP: worktree-gitfile without firing marker (direct git -C status fires it)"
+else
+  record_case 1 "case 36: repointed .git with core.fsmonitor" \
+    "rc=$rc marker_before=$marker_before marker_after=$marker_after err=$err"
+fi
+
+# Case 37: An untracked nested repo whose .git directory has core.fsmonitor set
+# to a marker-touching script refuses STOP: worktree-gitfile with the tree kept,
+# main tree clean, and marker absent; git add sub + git status fires the marker.
+mk_fixture r37
+R37="$T/r37"
+FSM37_WT="$R37/.wt"
+FSM37_MARKER="$T/r37-fsmonitor.marker"
+FSM37_HOOK="$T/r37-fsmonitor-hook.sh"
+printf '#!/bin/sh\n: > "%s"\n' "$FSM37_MARKER" >"$FSM37_HOOK"
+chmod +x "$FSM37_HOOK"
+mkdir "$FSM37_WT/sub"
+cp -R "$R37/.git" "$FSM37_WT/sub/.git"
+rm -rf "$FSM37_WT/sub/.git/worktrees"
+git -C "$FSM37_WT/sub" reset -q --hard main
+git -C "$FSM37_WT/sub" config core.fsmonitor "$FSM37_HOOK"
+rm -f "$FSM37_MARKER"
+err=$(cd "$R37" && bash "$TOOL" .wt 2>&1 >/dev/null)
+rc=$?
+marker37_before=absent
+[ -e "$FSM37_MARKER" ] && marker37_before=present
+git -C "$FSM37_WT" add sub 2>/dev/null
+git -C "$FSM37_WT" status >/dev/null 2>&1
+marker37_after=absent
+[ -e "$FSM37_MARKER" ] && marker37_after=present
+if [ "$rc" -eq 1 ] && [[ $err == "STOP: worktree-gitfile:"* ]] \
+  && [ "$marker37_before" = absent ] && [ "$marker37_after" = present ] \
+  && [ -d "$FSM37_WT" ] && [ -z "$(git -C "$R37" status --porcelain)" ]; then
+  record_case 0 "case 37: untracked nested repo with core.fsmonitor refuses STOP: worktree-gitfile without firing marker (add + status fires it)"
+else
+  record_case 1 "case 37: untracked nested repo with core.fsmonitor" \
+    "rc=$rc marker_before=$marker37_before marker_after=$marker37_after err=$err"
+fi
+
+# Case 38: A planted repo (no .git name) at sub/ beside a normal edit refuses
+# STOP: worktree-gitfile: with the tree kept, main tree clean, sub absent from
+# the main tree, and marker absent; git -C "$WT/sub" status then fires the marker.
+plant_repo() { # $1=dir $2=hook
+  mkdir -p "$1/objects" "$1/refs/heads"
+  printf 'ref: refs/heads/main\n' >"$1/HEAD"
+  : >"$1/objects/.keep"
+  : >"$1/refs/heads/.keep"
+  printf '[core]\n\trepositoryformatversion = 0\n\tbare = false\n\tworktree = ..\n\tfsmonitor = %s\n' "$2" >"$1/config"
+}
+mk_fixture r38
+R38="$T/r38"
+FSM38_WT="$R38/.wt"
+FSM38_MARKER="$T/r38-fsmonitor.marker"
+FSM38_HOOK="$T/r38-fsmonitor-hook.sh"
+printf '#!/bin/sh\n: > "%s"\n' "$FSM38_MARKER" >"$FSM38_HOOK"
+chmod +x "$FSM38_HOOK"
+plant_repo "$FSM38_WT/sub" "$FSM38_HOOK"
+rm -f "$FSM38_MARKER"
+err=$(cd "$R38" && bash "$TOOL" .wt 2>&1 >/dev/null)
+rc=$?
+marker38_before=absent
+[ -e "$FSM38_MARKER" ] && marker38_before=present
+git -C "$FSM38_WT/sub" status >/dev/null 2>&1
+marker38_after=absent
+[ -e "$FSM38_MARKER" ] && marker38_after=present
+if [ "$rc" -eq 1 ] && [[ $err == "STOP: worktree-gitfile:"* ]] \
+  && grep -qF 'sub' <<<"$err" \
+  && [ "$marker38_before" = absent ] && [ "$marker38_after" = present ] \
+  && [ -d "$FSM38_WT" ] && [ ! -e "$R38/sub" ] \
+  && [ -z "$(git -C "$R38" status --porcelain)" ]; then
+  record_case 0 "case 38: planted repo at sub/ (no .git) refuses STOP: worktree-gitfile with tree kept, main clean, sub absent from main, marker absent (git -C sub status fires it)"
+else
+  record_case 1 "case 38: planted repo at sub/ (no .git)" \
+    "rc=$rc marker_before=$marker38_before marker_after=$marker38_after sub_in_main=$([ -e "$R38/sub" ] && echo present || echo absent) err=$err"
 fi
 
 [ "$fail" -eq 0 ] || exit 1
