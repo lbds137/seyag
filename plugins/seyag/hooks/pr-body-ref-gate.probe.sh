@@ -885,4 +885,190 @@ printf 'Closes TASK-100.\n\n## Acceptance\n- done\n' >"$CHECK_ACCEPT"
 run_check "$REPO" --check "$CHECK_ACCEPT"
 assert_pass "--check with resolving ref and Acceptance heading exits 0"
 
+# ============================================================================
+# Audit D10 cases: closing verb family, short flags, stdin/substitution, gh api
+# ============================================================================
+
+# ---- Section 1: closing keyword family (rule 1 + rule 2) -------------------
+for closing_verb in Closes Closed Close Fixes Fixed Fix Resolves Resolved Resolve; do
+  run_hook "$REPO" "gh pr create --body \"$closing_verb TASK-99\""
+  assert_blocks "$closing_verb TASK-99 blocks with unresolved tracker reference" "unresolved tracker reference"
+done
+
+run_hook "$REPO" 'gh pr create --body "Fixes TASK-100 (see `tracker/tasks/task-100 - Real Task.md`)."'
+assert_pass "Fixes TASK-100 (resolves) passes rule 1"
+
+run_hook "$REPO" 'gh pr create --body "Prefixes TASK-99 in the output."'
+assert_pass "Prefixes TASK-99 does not match rule 1"
+
+run_hook "$REPO" 'gh pr create --body "Leaves an unfixed TASK-99 note."'
+assert_pass "unfixed TASK-99 does not match rule 1"
+
+run_hook "$REPO" 'gh pr create --body "fix the flaky near TASK-5"'
+assert_pass "fix the flaky near TASK-5 passes rule 1"
+
+run_hook "$REPO" 'gh pr create --body "resolve conflicts, see TASK-5"'
+assert_pass "resolve conflicts, see TASK-5 passes rule 1"
+
+run_hook "$REPO" 'gh pr create --body "we fix a bug in TASK-5 code"'
+assert_pass "we fix a bug in TASK-5 code passes rule 1"
+
+run_hook "$REPO" 'gh pr create --body "closes the item TASK-99"'
+assert_blocks "closes the item TASK-99 blocks under rule 1" "unresolved tracker reference"
+
+run_hook "$REPO" 'gh pr create --body "Fixes TASK-100"'
+assert_blocks "Fixes TASK-100 on its own line with no Acceptance heading blocks (rule 2)" "Fixes TASK-100"
+
+run_hook "$REPO" $'gh pr create --body "Fixes TASK-100\n\n## Acceptance\n- done"'
+assert_pass "Fixes TASK-100 on its own line is exempt under an Acceptance heading"
+
+# ---- Section 2: short flags -b and -F on gh pr create|edit -----------------
+CLAIM_FILE_D10="$TMPDIR_PROBE/d10-claim.md"
+echo "This fixes all 4 call sites." >"$CLAIM_FILE_D10"
+CLEAN_FILE_D10="$TMPDIR_PROBE/d10-clean.md"
+echo "Adds a thing. No refs or claims here." >"$CLEAN_FILE_D10"
+UNRES_FILE_D10="$TMPDIR_PROBE/d10-unresolved.md"
+echo "Fixes TASK-99" >"$UNRES_FILE_D10"
+
+run_hook "$REPO" 'gh pr create -b "This fixes all 4 call sites."'
+assert_blocks 'gh pr create -b "<claim>" blocks' "all 4 call sites"
+
+run_hook "$REPO" 'gh pr create -b"This fixes all 4 call sites."'
+assert_blocks 'gh pr create -b"<claim>" blocks' "all 4 call sites"
+
+run_hook "$REPO" "gh pr create -b 'This fixes all 4 call sites.'"
+assert_blocks "gh pr create -b '<claim>' blocks" "all 4 call sites"
+
+run_hook "$REPO" "gh pr edit 7 -F $CLAIM_FILE_D10"
+assert_blocks "gh pr edit 7 -F <claim file> blocks" "all 4 call sites"
+
+run_hook "$REPO" "gh pr edit 7 -F$CLAIM_FILE_D10"
+assert_blocks "gh pr edit 7 -F<claim file> blocks" "all 4 call sites"
+
+# shellcheck disable=SC2016
+run_hook "$REPO" 'gh pr create -b "$(cat <<'\''E'\''
+Hedges the "retry" path.
+This fixes all 4 call sites.
+E
+)"'
+assert_blocks 'gh pr create -b "$(cat <<'\''E'\'' heredoc form blocks' "all 4 call sites"
+
+run_hook "$REPO" "git commit -F $CLAIM_FILE_D10 && gh pr create --fill"
+assert_pass "git commit -F <claim file> && gh pr create --fill passes"
+
+run_hook "$REPO" 'gh pr view 7 -b x'
+assert_pass "gh pr view 7 -b x passes"
+
+run_hook "$REPO" 'gh pr create -b "Fixes TASK-99"'
+assert_blocks 'gh pr create -b "Fixes TASK-99" blocks under rule 1' "unresolved tracker reference"
+
+run_hook "$REPO" $'gh pr create \\\n--title t \\\n-b "This fixes all 4 call sites."'
+assert_blocks 'line-continued gh pr create -b "<claim>" blocks' "all 4 call sites"
+
+run_hook "$REPO" $'gh pr create \\\n--title t \\\n-F '"$CLAIM_FILE_D10"
+assert_blocks 'line-continued gh pr create -F <claim file> blocks' "all 4 call sites"
+
+run_hook "$REPO" $'cat > x.txt <<\'E\'\ngh pr create -b "This fixes all 4 call sites."\nE'
+assert_blocks 'prose in a heredoc mentioning gh pr create -b "<claim>" blocks (documented over-block)' "all 4 call sites"
+
+# ---- Section 3: bodies read from stdin or a substitution -------------------
+run_hook "$REPO" $'gh pr create --body-file - <<\'E\'\nThis fixes all 4 call sites.\nE'
+assert_blocks "gh pr create --body-file - <<'E' blocks" "all 4 call sites"
+
+run_hook "$REPO" $'cat > x.txt <<\'Q\'\nAdds a thing. No refs or claims here.\nQ\ngh pr create --body-file - <<\'E\'\nThis fixes all 4 call sites.\nE'
+assert_blocks "earlier clean heredoc before gh pr create --body-file - <<'E' with claim blocks" "all 4 call sites"
+
+run_hook "$REPO" $'cat > x.txt <<\'Q\'\nThis fixes all 4 call sites.\nQ\ngh pr create --body-file - < '"$CLEAN_FILE_D10"
+assert_pass "claim in earlier heredoc with gh pr create --body-file - < <clean file> on later line passes"
+
+run_hook "$REPO" $'cat > x.txt <<\'Q\'\nThis fixes all 4 call sites.\nQ\ngh pr create --body-file - <<\'E\'\nAdds a thing. No refs or claims here.\nE'
+assert_pass "claim in earlier heredoc and clean text in gh's own heredoc passes"
+
+run_hook "$REPO" $'cat <<\'E\' | gh pr create --body-file -\nThis fixes all 4 call sites.\nE'
+assert_blocks "cat <<'E' | gh pr create --body-file - blocks" "all 4 call sites"
+
+run_hook "$REPO" "cat $CLAIM_FILE_D10 | gh pr create --body-file -"
+assert_blocks "cat <claim file> | gh pr create --body-file - blocks" "all 4 call sites"
+
+run_hook "$REPO" "cat $CLAIM_FILE_D10 | wc -l; echo hi | gh pr create --body-file -"
+assert_pass "cat <claim file> | wc -l; echo hi | gh pr create --body-file - passes"
+
+run_hook "$REPO" "gh pr create --body-file - < $CLAIM_FILE_D10"
+assert_blocks "gh pr create --body-file - < <claim file> blocks" "all 4 call sites"
+
+run_hook "$REPO" "gh pr create -F - < $CLAIM_FILE_D10"
+assert_blocks "gh pr create -F - < <claim file> blocks" "all 4 call sites"
+
+run_hook "$REPO" "gh pr create --body \"\$(cat $CLAIM_FILE_D10)\""
+assert_blocks 'gh pr create --body "$(cat <claim file>)" blocks' "all 4 call sites"
+
+run_hook "$REPO" "gh pr create --body \"\$(< $CLAIM_FILE_D10)\""
+assert_blocks 'gh pr create --body "$(< <claim file>)" blocks' "all 4 call sites"
+
+run_hook "$REPO" $'gh pr create --body-file - <<\'E\'\nAdds a thing. No refs or claims here.\nE'
+assert_pass "gh pr create --body-file - <<'E' with clean body passes"
+
+run_hook "$REPO" $'cat <<\'E\' | gh pr create --body-file -\nAdds a thing. No refs or claims here.\nE'
+assert_pass "cat <<'E' | gh pr create --body-file - with clean body passes"
+
+run_hook "$REPO" "cat $CLEAN_FILE_D10 | gh pr create --body-file -"
+assert_pass "cat <clean file> | gh pr create --body-file - passes"
+
+run_hook "$REPO" "gh pr create --body-file - < $CLEAN_FILE_D10"
+assert_pass "gh pr create --body-file - < <clean file> passes"
+
+run_hook "$REPO" "gh pr create -F - < $CLEAN_FILE_D10"
+assert_pass "gh pr create -F - < <clean file> passes"
+
+run_hook "$REPO" "gh pr create --body \"\$(cat $CLEAN_FILE_D10)\""
+assert_pass 'gh pr create --body "$(cat <clean file>)" passes'
+
+run_hook "$REPO" "gh pr create --body \"\$(< $CLEAN_FILE_D10)\""
+assert_pass 'gh pr create --body "$(< <clean file>)" passes'
+
+# shellcheck disable=SC2016
+run_hook "$REPO" 'gh pr create --body "$(cat "$F")"'
+assert_pass '--body "$(cat "$F")" passes as a documented miss'
+
+run_hook "$REPO" "gh pr create --body \"\$(cat $UNRES_FILE_D10)\""
+assert_blocks 'file holding Fixes TASK-99 read through $(cat f) blocks under rule 1' "unresolved tracker reference"
+
+# ---- Section 4: gh api create form and --raw-field -------------------------
+run_hook "$REPO" 'gh api repos/o/r/pulls -f body="This fixes all 4 call sites."'
+assert_blocks 'gh api repos/o/r/pulls -f body="<claim>" blocks' "all 4 call sites"
+
+run_hook "$REPO" 'gh api -X POST repos/o/r/pulls -f body="This fixes all 4 call sites."'
+assert_blocks 'gh api -X POST repos/o/r/pulls -f body="<claim>" blocks' "all 4 call sites"
+
+run_hook "$REPO" 'gh api -X PATCH repos/o/r/pulls/12 --raw-field body="This fixes all 4 call sites."'
+assert_blocks 'gh api -X PATCH repos/o/r/pulls/12 --raw-field body="<claim>" blocks' "all 4 call sites"
+
+run_hook "$REPO" 'gh api repos/o/r/pulls/7/comments -f body="This fixes all 4 call sites."'
+assert_pass 'gh api repos/o/r/pulls/7/comments -f body="<claim>" passes'
+
+run_hook "$REPO" 'gh api repos/o/r/issues/7/comments -f body="This fixes all 4 call sites."'
+assert_pass 'gh api repos/o/r/issues/7/comments -f body="<claim>" passes'
+
+run_hook "$REPO" 'gh api -X GET repos/o/r/pulls -f body=x'
+assert_pass 'gh api -X GET repos/o/r/pulls -f body=x passes'
+
+run_hook "$REPO" 'gh api repos/o/r/pulls --jq . ; gh issue create --body "This fixes all 4 call sites."'
+assert_pass 'gh api repos/o/r/pulls --jq . ; gh issue create --body "<claim>" passes'
+
+run_hook "$REPO" 'gh api repos/o/r/pulls --jq . && gh api repos/o/r/issues/1/comments -f body="This fixes all 4 call sites."'
+assert_pass 'gh api repos/o/r/pulls --jq . && gh api repos/o/r/issues/1/comments -f body="<claim>" passes'
+
+# ---- Time bound: 16 KB gh pr create -b command finishes under 5 s ----------
+PAD_16K=$(printf 'word %.0s' {1..3300})
+SECONDS=0
+run_hook "$REPO" "gh pr create --title \"feat: x\" -b \"$PAD_16K This fixes all 4 call sites.\""
+ELAPSED_16K=$SECONDS
+assert_blocks "16 KB gh pr create -b command blocks" "all 4 call sites"
+if [ "$ELAPSED_16K" -ge 5 ]; then
+  echo "FAIL [elapsed=${ELAPSED_16K}s want=<5s]: 16 KB gh pr create -b command finishes under 5 s"
+  fail=1
+else
+  echo "ok: 16 KB gh pr create -b command finishes under 5 s (${ELAPSED_16K}s)"
+fi
+
 exit $fail

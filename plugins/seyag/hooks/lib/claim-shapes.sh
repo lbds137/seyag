@@ -11,6 +11,10 @@
 # -E honours `\b` in an ERE; awk and several other ERE engines do not, so
 # keep the anchors if this ever moves to another engine).
 #
+# CLAIM_CLOSING_REF_REGEX: GitHub's closing-keyword family followed by a
+# tracker id (`TASK-N` or `doc-N`), shared by CLAIM_SHAPE_PR_BODY_EXTRA_REGEX
+# and the Acceptance-heading narrowing in pr-body-ref-gate.sh.
+#
 # CLAIM_SHAPE_PR_BODY_EXTRA_REGEX: additions that only make sense in a PR
 # body — a closing reference ("closes TASK-N") and vocabulary
 # ("every caller", "verified") that reads as a claim in a body's prose even
@@ -21,6 +25,8 @@
 # or command) or its own hedge (an explicit unverified/hypothesis marker).
 CLAIM_SHAPE_CORE_REGEX='\balways\b|\bnever\b|\bcannot\b|\bguaranteed\b|\bonly (place|path|caller|writer|reader)\b|\bcomes? from\b|\bderived from\b|\bpopulated (by|from)\b|\bread from\b|\bwritten (only )?by\b|\b(both|all|the) [0-9]+ |\b[0-9]+ (call sites?|tests?|files?|instances?|copies|callers?|places)\b'
 
-CLAIM_SHAPE_PR_BODY_EXTRA_REGEX='\bevery (call ?sites?|callers?|files?|modules?|tests?|consumers?|paths?)\b|\bcloses?:? (TASK|doc)-[0-9]+|\b(verified|confirmed|measured)\b'
+CLAIM_CLOSING_REF_REGEX='\b(close[sd]?|fix(es|ed)?|resolve[sd]?):? (TASK|doc)-[0-9]+'
+
+CLAIM_SHAPE_PR_BODY_EXTRA_REGEX='\bevery (call ?sites?|callers?|files?|modules?|tests?|consumers?|paths?)\b|'"$CLAIM_CLOSING_REF_REGEX"'|\b(verified|confirmed|measured)\b'
 
 CLAIM_CITE_EXEMPT_REGEX='`[^`]*[/:][^`]*`|`(pnpm|git|grep|npx|gh|rg|node|npm|yarn|curl|docker|bash|sh|make|python[0-9.]*) [^`]*`|unverified|not verified|not runtime-confirmed|code-read|hypothesis'

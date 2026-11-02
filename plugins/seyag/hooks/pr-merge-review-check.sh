@@ -2174,7 +2174,7 @@ fi
 if [ "$REVIEW_FETCH_FAILED" = 1 ]; then
     {
         printf '%s\n' "$RULE"
-        printf 'MERGE REVIEW UNREADABLE — the review fetch failed\n'
+        printf 'MERGE REVIEW UNREADABLE — the review could not be read\n'
         printf '%s\n\n' "$RULE"
         printf 'The repository lookup or the `gh api` review fetch for PR #%s failed, timed out or returned unreadable output.\n' "$PR_NUM"
         printf 'Nothing was read, so this merge cannot be judged reviewed.\n\n'
