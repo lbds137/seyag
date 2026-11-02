@@ -373,6 +373,28 @@ run 2 "r2: export GH_REPO then unset falls back to remotes" "$FIX" -- \
 assert_out "r2: unset GH_REPO restored example/one" first-line \
   "blocked: gh repo edit would make example/one public. Run the going-public checklist (seyag:going-public) for it first; on pass set SYG_PUBLISH_CHECKED=example/one (colon-list ok; any non-empty value for a gist) (it is read from the session's environment at start: the owner restarts the session with it exported, or runs the command herself with \`!\`)."
 
+CHK="$TMP/chk"
+mk_repo "$CHK"
+git -C "$CHK" remote add origin https://github.com/other/two.git
+run 2 "r2: false && cd ../chk; gh repo edit --visibility public" "$FIX" \
+  SYG_PUBLISH_CHECKED=other/two -- \
+  "false && cd ../chk; gh repo edit --visibility public"
+run 2 "r2: cd ../chk & gh repo edit --visibility public" "$FIX" \
+  SYG_PUBLISH_CHECKED=other/two -- \
+  "cd ../chk & gh repo edit --visibility public"
+run 2 "r2: if false; then cd ../chk; fi; gh repo edit --visibility public" "$FIX" \
+  SYG_PUBLISH_CHECKED=other/two -- \
+  "if false; then cd ../chk; fi; gh repo edit --visibility public"
+run 0 "r2: cd ../chk && gh repo edit --visibility public (regression canary)" "$FIX" \
+  SYG_PUBLISH_CHECKED=other/two -- \
+  "cd ../chk && gh repo edit --visibility public"
+run 0 "r2: cd ../chk; gh repo edit --visibility public when ../chk exists" "$FIX" \
+  SYG_PUBLISH_CHECKED=other/two -- \
+  "cd ../chk; gh repo edit --visibility public"
+run 0 "r2: cd ../chk || exit 1; gh repo edit --visibility public" "$FIX" \
+  SYG_PUBLISH_CHECKED=other/two -- \
+  "cd ../chk || exit 1; gh repo edit --visibility public"
+
 # --- r5: cheap pins for code-read behavior -----------------------------------
 run 2 "r5: api.github.com-prefixed endpoint blocks" "$FIX" -- \
   "gh api https://api.github.com/repos/example/one -X PATCH -f private=false"

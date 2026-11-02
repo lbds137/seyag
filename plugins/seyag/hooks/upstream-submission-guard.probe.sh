@@ -469,6 +469,35 @@ run 2 "r3: cd fork newline" "$OWN" -- "cd ../fork${NL}gh pr create --fill"
 run 0 "r3: gh then cd fork" "$OWN" -- "gh pr create --fill; cd ../fork"
 run 2 "r3: GIT_DIR prefix" "$OWN" -- "GIT_DIR=../fork/.git gh pr create --fill"
 run 2 "r3: exported GIT_DIR" "$OWN" -- "export GIT_DIR=../fork/.git; gh pr create --fill"
+run 2 "r3: false && cd ../own; gh pr create --fill" "$FORK" -- \
+  "false && cd ../own; gh pr create --fill"
+run 2 "r3: cd ../own & gh pr create --fill" "$FORK" -- \
+  "cd ../own & gh pr create --fill"
+run 2 "r3: if false; then cd ../own; fi; gh pr create --fill" "$FORK" -- \
+  "if false; then cd ../own; fi; gh pr create --fill"
+run 2 "r3: cd /nonexistent-dir; gh pr create --fill" "$FORK" -- \
+  "cd /nonexistent-dir; gh pr create --fill"
+run 0 "r3: cd ../own && gh pr create --fill" "$FORK" -- \
+  "cd ../own && gh pr create --fill"
+run 0 "r3: cd ../own; gh pr create --fill" "$FORK" -- \
+  "cd ../own; gh pr create --fill"
+run 0 "r3: cd ../own || exit 1; gh pr create --fill" "$FORK" -- \
+  "cd ../own || exit 1; gh pr create --fill"
+run 0 "r3: cd ../own && if true; then echo; fi; gh pr create --fill" "$FORK" -- \
+  "cd ../own && if true; then echo; fi; gh pr create --fill"
+run 0 "r3: cd ../own && for i in 1; do echo; done; gh pr create --fill" "$FORK" -- \
+  "cd ../own && for i in 1; do echo; done; gh pr create --fill"
+run 0 "r3: cd ../own && case x in x) echo;; esac; gh pr create --fill" "$FORK" -- \
+  "cd ../own && case x in x) echo;; esac; gh pr create --fill"
+run 0 "r3: cd ../own && while false; do :; done; gh pr create --fill" "$FORK" -- \
+  "cd ../own && while false; do :; done; gh pr create --fill"
+run 0 "r3: cd ../own && { echo; } | cat; gh pr create --fill" "$FORK" -- \
+  "cd ../own && { echo; } | cat; gh pr create --fill"
+run 0 "r3: export D=../own; cd \"\$D\" && gh pr create --fill" "$FORK" -- \
+  'export D=../own; cd "$D" && gh pr create --fill'
+mkdir -p "$OWN/sub"
+run 2 'r3: cd "$(git rev-parse --show-toplevel)" from own/sub then cd ../fork' "$OWN/sub" -- \
+  'cd "$(git rev-parse --show-toplevel)" && cd ../fork && gh pr create --fill'
 
 # --- env / GH_REPO ---------------------------------------------------------------
 run 2 "r3: declare -x GH_REPO" "$OWN" -- "declare -x GH_REPO=other/x; gh pr create --fill"

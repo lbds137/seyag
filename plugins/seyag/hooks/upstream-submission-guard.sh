@@ -81,19 +81,30 @@
 # ignored (the directory's own repo is read).
 #
 # EFFECTIVE DIRECTORY for git-remote resolution: starts at the payload cwd;
-# each `cd` earlier in the command text updates it, COMPOUNDING (a relative
-# target resolves against the CURRENT effective directory, so `cd a && cd b`
-# lands in `a/b`). Read the way bash does: options `-P`/`-L`/`-e`/`-@` and
-# `--` before the target, `builtin cd`/`command cd`, bare `cd` → `$HOME`,
-# `cd -` → the previous directory, `~+`/`~-` → PWD/OLDPWD, `pushd DIR` (cd,
-# pushing the old one), bare `pushd` (swap), `popd` (pop back); an invalid
+# `lib/shell_state.py`'s `walk` carries a list of possible states ("worlds",
+# capped at `MAX_WORLDS = 64`), updating each on `cd`/`pushd`/`popd`,
+# COMPOUNDING (a relative target resolves against the world's current
+# directory, so `cd a && cd b` lands in `a/b`). Read the way bash does:
+# options `-P`/`-L`/`-e`/`-@` and `--` before the target, `builtin cd`/
+# `command cd`, bare `cd` → `$HOME`, `cd -` → the previous directory,
+# `~+`/`~-` → PWD/OLDPWD, `$(pwd)`/`` `pwd` `` (staying at PWD, or joining a
+# `/…` suffix) and `$(git rev-parse --show-toplevel)` (and its backtick/unquoted
+# forms, resolved via `git rev-parse --show-toplevel` when the cwd exists),
+# `$NAME`/`${NAME}` expanded from `PWD`, `OLDPWD`, tracked variables (`VAR=val`
+# and `export`/`declare`/`typeset`/`local`/`readonly` update them; `unset`,
+# `read`, `mapfile`/`readarray`, `printf -v`, `getopts`, `+=` and
+# `$`/backtick/glob values mask the environment) and `os.environ`, `pushd DIR`
+# (cd, pushing the old one), bare `pushd` (swap), `popd` (pop back); an invalid
 # option, two operands, bare `cd` with HOME unset or `~-` with no OLDPWD is
-# bash's own error and changes nothing (a failed `pushd` pushes nothing). An
-# unresolvable form resets the effective directory to the payload cwd: a
-# target holding `$`, a backtick or a glob char, `~user` (unless a literal
-# directory of that name exists in the cwd), `~N`, `cd -` with no earlier
-# directory, `popd`/bare `pushd` on a stack this text didn't build,
-# and `pushd`/`popd` `-n`/`+N`/`-N`.
+# bash's own error and changes nothing (a failed `pushd` pushes nothing). Conditional
+# (`&&`/`||`), background (`&`), pipeline and compound (`if`/`while`/`until`/
+# `for`/`case`, `(…)`, `{ … }`) branches, as well as a move whose target is
+# uncertain (unresolvable or not an existing directory), keep both paths. An
+# unresolvable form resets that world's effective directory to the payload
+# cwd: a `$` form that doesn't expand, a backtick or a glob char, `~user`
+# (unless a literal directory of that name exists in the cwd), `~N`, `cd -`
+# with no earlier directory, `popd`/bare `pushd` on a stack this text didn't
+# build, and `pushd`/`popd` `-n`/`+N`/`-N`.
 #
 # REMOTES: for each remote of the effective directory, `git remote get-url`
 # (so a `url.<base>.insteadOf` rewrite is honored) is parsed for its host and
@@ -140,10 +151,10 @@
 #   - a `GH_REPO` exported by an EARLIER Bash tool call, in a persistent
 #     shell, is invisible — only an export within the SAME command text is
 #     tracked.
-#   - a subshell's cd leaks forward: `(cd fork); gh …`, an UNQUOTED
-#     `x=$(cd fork)` and a pipeline stage `cd fork | cat` are read as though
-#     the `cd` ran in the current shell, because the underlying command
-#     splitter does not model subshell scope (a quoted `"$(…)"` is scoped).
+#   - a subshell's cd is kept alongside the outer directory: `(cd fork); gh …`
+#     and a pipeline stage `cd fork | cat` keep both the moved state and the
+#     entry state as conservative over-blocks (`"$(…)"` and `$(…)` are scoped);
+#     forking stops after `MAX_WORLDS = 64` states.
 #   - state the same command text changes outside the shell: `git remote
 #     add`/`set-url`, `gh repo set-default`, a `cd` into a clone the text
 #     creates (`gh repo fork --clone && cd x`) — remotes are read as they are
@@ -154,10 +165,13 @@
 #     COMMANDS ARE FOUND).
 #   - `env -C DIR` and `sudo -D DIR` change the directory a wrapped command
 #     runs in; this hook does not read either.
-#   - a `cd` target that isn't a single literal word (a variable, `$(...)`,
-#     a backtick, a glob, `~user` unless a literal directory of that name
-#     exists in the cwd, `~N`) is unresolvable; see EFFECTIVE DIRECTORY
-#     above.
+#   - a `cd` target that isn't a single literal word after `$NAME`/`${NAME}`
+#     expansion (`$(...)`, a backtick, `${x:-y}`, `$1`, an unset or dynamic
+#     variable, a glob, `~user` unless a literal directory of that name
+#     exists in the cwd, `~N`, other than the `$(pwd)` and top-level forms)
+#     is unresolvable; see EFFECTIVE DIRECTORY above.
+#   - an unquoted empty expansion that vanishes from `cd`'s words (`cd $UNSET ../x`)
+#     is read as two arguments, so nothing moves.
 #   - operands fed on stdin or by `xargs` (`echo URL | xargs gh pr comment
 #     -b hi`) aren't seen: with no visible URL or `-R`, the local remotes
 #     decide the target.

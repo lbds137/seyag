@@ -283,6 +283,43 @@ run 2 "fail closed: unresolvable directory judged by the public cwd" "$PUB" "${T
   "git -C $TMP/missing commit -m 'add zorbleflux'"
 run 0 "near-miss: unresolvable directory with a private cwd" "$PRIV" "${T[@]}" -- \
   "git -C $TMP/missing commit -m 'add zorbleflux'"
+run 2 "tracking: pushd ../priv >/dev/null; popd; git commit -m <term>" "$PUB" "${T[@]}" -- \
+  "pushd ../priv >/dev/null; popd; git commit -m 'add zorbleflux'"
+run 2 "tracking: false && cd \$PRIV; git commit -m <term>" "$PUB" "${T[@]}" -- \
+  "false && cd $PRIV; git commit -m 'add zorbleflux'"
+run 2 "tracking: cd \$PRIV & git commit -m <term>" "$PUB" "${T[@]}" -- \
+  "cd $PRIV & git commit -m 'add zorbleflux'"
+run 2 "tracking: cd \$UNSETVAR; git commit -m <term> (unknown is scanned)" "$PRIV" -u UNSETVAR "${T[@]}" -- \
+  'cd $UNSETVAR; git commit -m "add zorbleflux"'
+run 2 "tracking: cd \$PUB; cd \$PRIV; cd \"\$OLDPWD\"; git commit -m <term>" "$PRIV" "${T[@]}" -- \
+  "cd $PUB; cd $PRIV; cd \"\$OLDPWD\"; git commit -m 'add zorbleflux'"
+mkrepo "$TMP/pub-under-home" true
+run 2 "tracking: cd \$HOME/pub-under-home; git commit -m <term>" "$PRIV" "${T[@]}" HOME="$TMP" -- \
+  'cd $HOME/pub-under-home; git commit -m "add zorbleflux"'
+run 0 "near-miss: cd \$PRIV && git commit -m <term> from public stays out" "$PUB" "${T[@]}" -- \
+  "cd $PRIV && git commit -m 'add zorbleflux'"
+cp "$TMP/files/body.txt" "$PUB/body.txt"
+run 2 "body file: gh pr create --body-file \"\$PWD/body.txt\"" "$PUB" "${T[@]}" -- \
+  'gh pr create --title t --body-file "$PWD/body.txt"'
+run 2 "body file: gh pr create --body-file with env var" "$PUB" "${T[@]}" JOB_DIR="$TMP/files" -- \
+  'gh pr create --title t --body-file "$JOB_DIR/body.txt"'
+run 2 "body file: B=body.txt; gh pr create --body-file \"\$B\"" "$PUB" "${T[@]}" -- \
+  'B=body.txt; gh pr create --title t --body-file "$B"'
+run 2 "unknown dir: staged file holding a term in public cwd" "$STG" -u UNSETVAR "${T[@]}" -- \
+  'cd $UNSETVAR && git commit -m ok'
+run 2 "unknown dir: unpushed commit message holding a term in public cwd" "$PMSG" -u UNSETVAR "${T[@]}" -- \
+  'cd $UNSETVAR && git push origin main'
+run 2 "unknown dir: relative body file holding a term in public cwd" "$PUB" -u UNSETVAR "${T[@]}" -- \
+  'cd $UNSETVAR && gh pr create --body-file body.txt'
+run 0 'tracking: cd "$(git rev-parse --show-toplevel)" in a private repo stays private' "$PRIV" "${T[@]}" -- \
+  'cd "$(git rev-parse --show-toplevel)" && git commit -m "add zorbleflux"'
+run 2 'tracking: cd "$(git rev-parse --show-toplevel)" in a public repo stays public' "$PUB" "${T[@]}" -- \
+  'cd "$(git rev-parse --show-toplevel)" && git commit -m "add zorbleflux"'
+mkdir -p "$PUB/sub"
+run 2 'tracking: cd "$(git rev-parse --show-toplevel)" from a public subdir resolves top-level body.txt' "$PUB/sub" "${T[@]}" -- \
+  'cd "$(git rev-parse --show-toplevel)" && gh pr create --body-file body.txt'
+run 2 'tracking: cd "$(dirname x)" in a private repo is unknown and scans text' "$PRIV" "${T[@]}" -- \
+  'cd "$(dirname x)" && git commit -m "add zorbleflux"'
 
 # =============================================================================
 # Latency: a repo not marked public gets no diff work
@@ -313,6 +350,17 @@ rm -f "$TMP/gitlog"
 run 2 "latency positive control: staged term in a public repo" "$STG" "${T[@]}" PATH="$GITSHIM:$PATH" -- \
   "git commit -m clean"
 diff_check ran "public repo: git diff ran (the shim sees diffs)"
+CHAIN60=$(printf 'cd m%d && x; ' $(seq 1 60))"git commit -m ok"
+rm -f "$TMP/gitlog"
+run 2 "latency: 60 missing-directory cds before git commit in public repo with staged term" "$STG" "${T[@]}" PATH="$GITSHIM:$PATH" -- \
+  "$CHAIN60"
+if grep -qE '(^| )-C [^ ]*/m[0-9]+( |$)' "$TMP/gitlog"; then
+  printf 'FAIL  (git shim)  a missing directory spawned git\n'; FAILURES=$((FAILURES + 1))
+else
+  printf 'PASS  (git shim)  a missing directory spawned no git\n'
+fi
+run 2 "a repeated commit sees the git add between the two" "$UNT" "${T[@]}" -- \
+  "git commit -m ok; git add loose.md; git commit -m ok"
 
 # =============================================================================
 # Output ceiling: many hits stay under 2 KB
@@ -455,6 +503,18 @@ run 0 "husky repo with the install: git push --no-verify passes" "$HUSKY" "${T[@
 T=(SYG_PRIVATE_TERMS_FILE="$TERMS" GIT_CONFIG_GLOBAL="$ACTIVE")
 run 2 "block: git push --no-verify" "$PUB" "${T[@]}" -- "git push --no-verify origin main"
 assert_out "names the token" present "blocked: --no-verify would get a push past the seyag pre-push"
+run 2 "block: pushd ../priv; popd; git push --no-verify returns to public repo" "$PUB" "${T[@]}" -- \
+  "pushd ../priv >/dev/null; popd; git push --no-verify origin main"
+run 2 "block: cd \$PUB; pushd ../priv; popd; git push --no-verify returns to public repo" "$PRIV" "${T[@]}" -- \
+  "cd $PUB && pushd ../priv >/dev/null; popd >/dev/null; git push --no-verify origin main"
+run 2 "block: false && cd ../priv; git push --no-verify keeps public repo" "$PUB" "${T[@]}" -- \
+  "false && cd ../priv; git push --no-verify origin main"
+run 2 "block: false && cd ../pub; git push --no-verify reaches public repo" "$PRIV" "${T[@]}" -- \
+  "false && cd ../pub; git push --no-verify origin main"
+run 0 "twin: cd ../priv && git push --no-verify leaves public repo" "$PUB" "${T[@]}" -- \
+  "cd ../priv && git push --no-verify origin main"
+run 2 "block: cd \$UNSETVAR; git push --no-verify from a private repo counts (unknown)" "$PRIV" -u UNSETVAR "${T[@]}" -- \
+  'cd $UNSETVAR && git push --no-verify origin main'
 run 2 "block: git push --no-verif (a prefix git accepts)" "$PUB" "${T[@]}" -- "git push --no-verif origin main"
 run 2 "block: git push --no-v (shortest prefix)" "$PUB" "${T[@]}" -- "git push --no-v origin main"
 run 0 "twin: git push -n (push's -n is --dry-run)" "$PUB" "${T[@]}" -- "git push -n origin main"

@@ -63,10 +63,11 @@
 #      <f>`, `-F <f>` (not on `gh api`), and on `gh api` a `-F`/`--field`
 #      value `key=@<f>` or `--input <f>`; `gh gist create|edit`: every
 #      positional file and `edit --add <f>`. `-` means stdin, i.e. the command
-#      text, already covered by 1. A relative path resolves against the
-#      event's cwd, moved by `cd`/`pushd` words earlier in the command
-#      (redirections and `-P`/`-L` allowed; `~` expands HOME) and by git's
-#      `-C` (`~` expanded too). An unreadable file is not a block.
+#      text, already covered by 1. A path expands `$NAME`/`${NAME}` (`PWD`,
+#      `OLDPWD`, simple assignments and the environment) and `~`, and a
+#      relative path resolves against each tracked cwd (`cd`/`pushd`/`popd`
+#      across branches, as lib/outbound.py tracks it) and git's `-C`. An
+#      unreadable file is not a block.
 #   3. `git push`: the messages of the commits being pushed. Sources are the
 #      source side of each refspec given (`foo`, `+foo:bar`, `HEAD:refs/…`;
 #      a delete `:dst` has none), else HEAD; `--all`/`--mirror` scan every
@@ -89,17 +90,19 @@
 # own prefix (`VAR=… git commit …`, `env VAR=… gh …`); a mention elsewhere in
 # the text does not count. Only on the owner's word.
 #
-# KNOWN GAPS (accepted): a body read through a variable or a substitution
-# (`-F "$f"`, `--body "$(cat f)"`), a file written earlier by another tool call
-# and read by a wrapper script, a `cd` inside a subshell leaking into the
-# tracked directory, and `git push` of refs that git log cannot resolve
-# (skipped). Stdin redirects: `-F - < f`, `--body-file - < f`, `cat f | gh …
-# --body-file -`. Annotated tag messages on push (only commit messages are
-# scanned). File CONTENTS inside a commit are read only as lib/commit_diff.py
-# approximates them: content written earlier in the same command does not
-# exist yet when this PreToolUse hook runs, a merge commit's own changes are
-# not read on push (no `-m`), and pushed diffs past 4 MiB of log output are
-# not read.
+# KNOWN GAPS (accepted): a body read through a command substitution or a
+# dynamic/unset variable (`-F "$1"`, `--body "$(cat f)"`), a file written
+# earlier by another tool call and read by a wrapper script, a `cd` inside a
+# subshell kept alongside the outer directory (and state forks past
+# `MAX_WORLDS = 64` dropped), a function body's `cd` walked as though the
+# function ran at its definition, and
+# `git push` of refs that git log cannot resolve (skipped). Stdin redirects:
+# `-F - < f`, `--body-file - < f`, `cat f | gh … --body-file -`. Annotated tag
+# messages on push (only commit messages are scanned). File CONTENTS inside a
+# commit are read only as lib/commit_diff.py approximates them: content written
+# earlier in the same command does not exist yet when this PreToolUse hook
+# runs, a merge commit's own changes are not read on push (no `-m`), and pushed
+# diffs past 4 MiB of log output are not read.
 #
 # FAIL-OPEN: no jq/python3, unparsable JSON or command, or an internal python
 # error → exit 0. Prefilter, in bash, before python spawns: a `gh` word always

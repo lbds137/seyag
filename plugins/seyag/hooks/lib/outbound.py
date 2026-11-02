@@ -7,17 +7,17 @@ records; each hook matches its own pattern over `text`. `label` names the
 source and can hold user text (a commit subject, a path); `kind` (`text`,
 `file`, `staged`, `commit-message`, `commit-diff`) and `sha` name it without
 user text. `directory` is the
-directory the command producing the item runs in (the event cwd moved by
-`cd`/`pushd` words and git's `-C`, `~` expanded), for a hook that judges the
-target repo. `cd`/`pushd` are followed with redirection words dropped and
-`-P`/`-L`/`--` before the one target; a bare `cd` moves to `$HOME` (with
-HOME unset or empty bash's cd fails and nothing moves), `cd -` to the
-directory the last move, followed or not, left (kept when none was), and a
-target holding `$` or a backtick is not followed. A `~user` word that
-doesn't expand is followed into the literal directory of that name when one
-exists. When
-`dir_filter(directory)` returns False, the items of that directory are not
-built (no file read, diff or log run).
+directory the command producing the item runs in (the event cwd tracked
+across possible states by `lib/shell_state.py`'s `walk` — `cd`/`pushd`/`popd`,
+`~` and `$NAME`/`${NAME}` from `PWD`, `OLDPWD`, tracked assignments and the
+environment, plus git's `-C`), for a hook that judges the target repo.
+Conditional/uncertain moves, `&`, pipelines and compound commands keep both
+paths (up to `MAX_WORLDS = 64`). When a `cd` target is unresolvable, the state
+resets to the event cwd and is marked `unknown`: it is judged at its `cwd` by
+`dir_filter` as usual for files, staged lines and `git log`, and in addition
+its command text is scanned regardless of `dir_filter` or `commit_text_owner`.
+When `dir_filter(directory)` returns False, the remaining items of that
+directory are not built (no file read, diff or log run).
 
 Commands are found with the shared splitter (lib/shell_quotes.py): top-level
 pipelines, wrapper strings such as `bash -c '…'`, and command substitutions
@@ -67,9 +67,12 @@ ITEMS, for every unbypassed command:
     `-aF f`); for `gh`: `--body-file <f>`, `--notes-file <f>`, `-F <f>` (not
     on `gh api`), and on `gh api` a `-F`/`--field` value `key=@<f>` or
     `--input <f>`; `gh gist create|edit`: every positional file and
-    `edit --add <f>`. `-` means stdin, i.e. the command text. A relative path
-    resolves against the tracked directory (`cd ~` and `cd ~/x` expand HOME).
-    At most 4 MiB is read; an unreadable file yields nothing.
+    `edit --add <f>`. `-` means stdin, i.e. the command text. `$NAME` and
+    `${NAME}` in `<f>` (and in git `-C` and `gh repo create --source`) expand
+    from `PWD`, `OLDPWD`, simple assignments in the command text and the
+    environment before `~`, and a relative path resolves against the tracked
+    directory (`cd ~` and `cd ~/x` expand HOME). At most 4 MiB is read; an
+    unreadable file or a path still holding `$` yields nothing.
   - ("commit <sha> <subject>", subject + "\\n" + body): the messages of the
     commits a `git push` sends. Sources are the source side of each refspec
     (`foo`, `+foo:bar`, `HEAD:refs/…`; a delete `:dst` has none), else HEAD;
@@ -86,16 +89,21 @@ ITEMS, for every unbypassed command:
     (same sources as the message scan), from commit_diff's
     `pushed_added_lines`.
 
-KNOWN GAPS (accepted): a body read through a variable or a substitution
-(`-F "$f"`, `--body "$(cat f)"`), a file written earlier by another tool call
-and read by a wrapper script, a `cd` inside a subshell leaking into the
-tracked directory, and `git push` of refs that git log cannot resolve
-(skipped). Stdin redirects: `-F - < f`, `--body-file - < f`, `cat f | gh …
---body-file -`. Annotated tag messages on push. commit_diff's own gaps for
-the staged lines (content written earlier in the same command does not exist
-yet when a PreToolUse hook runs) and pushed lines (a merge commit's own
-changes are not shown without `-m`; log output past 4 MiB is not read).
-`--git-dir`/`--work-tree` and `GIT_DIR` are not followed.
+KNOWN GAPS (accepted): a body read through a substitution or non-plain
+parameter expansion (`--body "$(cat f)"`, `-F "${f:-x}"`, or an unset/masked
+variable), a file written earlier by another tool call and read by a wrapper
+script, a subshell's `cd` keeping the moved directory alongside the entry
+directory (and state forks past `MAX_WORLDS = 64` dropped), a function body's
+`cd` walked as though the function ran at its definition, an unquoted empty
+expansion that vanishes from `cd`'s words (`cd $UNSET ../x`) read as two
+arguments so nothing moves, and `git push` of
+refs that git log cannot resolve (skipped). Stdin redirects: `-F - < f`,
+`--body-file - < f`, `cat f | gh … --body-file -`. Annotated tag messages on
+push. commit_diff's own gaps for the staged lines (content written earlier in
+the same command does not exist yet when a PreToolUse hook runs) and pushed
+lines (a merge commit's own changes are not shown without `-m`; log output
+past 4 MiB is not read). `--git-dir`/`--work-tree` and `GIT_DIR` are not
+followed.
 
 `prepush_bypasses(cmd, cwd, bypass_assignment, dir_filter)` lists the tokens
 that would get a push past the pre-push hook (its docstring has the list);
@@ -115,26 +123,81 @@ from collections import namedtuple
 
 from shell_quotes import (command_pipelines, strip_redirections, substitution_spans,
                           unwrap_runners)
+from shell_state import State, do_cd, do_popd, do_pushd, expand_vars, walk
 import commit_diff
 
 Item = namedtuple("Item", "label text directory kind sha")
 
 MAX_FILE = 4 * 1024 * 1024
 FILE_SUBCOMMANDS = ("commit", "tag", "notes")
+_BUILTIN_RUNNERS = {"builtin", "command"}
+_STATES_CACHE = []
 
 # git global options that take a separate value word: commit_diff's set, so
 # both parsers find the same subcommand.
 GIT_VALUE_OPTS = {"-C"} | commit_diff.GIT_VAL_GLOBAL
 
 
-def join_dir(base, rel):
+class _WalkCtx:
+    def __init__(self):
+        self.visited = set()
+        self.leftovers = []
+
+
+def _states_by_command(cmd, cwd):
+    start = cwd or "."
+    if _STATES_CACHE and _STATES_CACHE[0][0] == (cmd, start):
+        return _STATES_CACHE[0][1]
+    by_command = {}
+    by_seen = {}
+    all_states = []
+    all_seen = set()
+
+    def _record_all(st):
+        k = st._key()
+        if k not in all_seen:
+            all_seen.add(k)
+            all_states.append(st.copy())
+
+    def _run(argv, state, _ctx):
+        _record_all(state)
+        key = tuple(argv)
+        bucket = by_command.setdefault(key, [])
+        seen = by_seen.setdefault(key, set())
+        k = state._key()
+        if k not in seen:
+            seen.add(k)
+            bucket.append(state.copy())
+        unwrapped, info = unwrap_runners(argv)
+        if unwrapped and set(info["runners"]) <= _BUILTIN_RUNNERS:
+            name = unwrapped[0]
+            args = strip_redirections(unwrapped[1:])
+            if name == "cd":
+                do_cd(state, args)
+            elif name == "pushd":
+                do_pushd(state, args)
+            elif name == "popd":
+                do_popd(state, args)
+        _record_all(state)
+
+    init = State(start, payload_cwd=start)
+    _record_all(init)
+    walk(cmd, 0, init, _WalkCtx(), _run)
+    res = (by_command, all_states)
+    _STATES_CACHE[:] = [((cmd, start), res)]
+    return res
+
+
+def join_dir(base, rel, state=None):
     if not rel:
         return base
+    if state is not None:
+        rel = expand_vars(rel, state)
     rel = os.path.expanduser(rel)
     return rel if os.path.isabs(rel) else os.path.join(base, rel)
 
 
-def git_parts(argv, base):
+def git_parts(argv, base, state=None):
     """(subcommand, args after it, directory after -C options) for a git
     argv, or None when there is no subcommand."""
     directory = base
@@ -142,7 +205,7 @@ def git_parts(argv, base):
     while i < len(argv):
         w = argv[i]
         if w == "-C" and i + 1 < len(argv):
-            directory = join_dir(directory, argv[i + 1])
+            directory = join_dir(directory, argv[i + 1], state=state)
             i += 2
         elif w in GIT_VALUE_OPTS:
             i += 2
@@ -219,7 +282,7 @@ def file_values_gist(argv):
     return out
 
 
-def repo_create_push_dir(argv, base):
+def repo_create_push_dir(argv, base, state=None):
     """Directory to scan for `gh repo create … --push`, else None."""
     if len(argv) < 3 or argv[1] != "repo" or argv[2] != "create":
         return None
@@ -235,7 +298,7 @@ def repo_create_push_dir(argv, base):
         elif w.startswith("--source="):
             source = w[len("--source="):]
         i += 1
-    return join_dir(base, os.path.expanduser(source))
+    return join_dir(base, source, state=state)
 
 
 GH_GLOBAL_VALUE_OPTS = {
@@ -427,12 +490,15 @@ def _gh_wrapper_argv(argv):
     return None, False
 
 
-def read_file(path, directory):
+def read_file(path, directory, state=None):
     """Decoded contents (at most MAX_FILE bytes), or None."""
     if not path or path == "-":
         return None
+    expanded = expand_vars(path, state) if state is not None else path
+    if "$" in expanded:
+        return None
     try:
-        with open(join_dir(directory, path), "rb") as fh:
+        with open(join_dir(directory, path, state=state), "rb") as fh:
             data = fh.read(MAX_FILE)
     except OSError:
         return None
@@ -502,34 +568,6 @@ def all_pipelines(text, depth=0):
         for span in substitution_spans(text):
             result.extend(all_pipelines(span, depth + 1))
     return result
-
-
-
-
-def cd_target(prog, args, base=None):
-    """The directory a `cd`/`pushd` moves to (HOME expanded), or None when it
-    is not followed. `args` are its words after the program, redirection
-    words already dropped; `-P`/`-L` (cd only) and `--` may precede the one
-    target; `cd -`, a second operand, any other option and a target holding
-    `$` or a backtick are not followed. A `~user` word that doesn't expand
-    is followed into the literal directory of that name under `base` (bash
-    leaves the word literal and enters it) when one exists, else not
-    followed. `~+`/`~-` are not followed: this walker keeps no PWD/OLDPWD
-    for them (lib/shell_state.py, which does, resolves both)."""
-    opts = ("-P", "-L") if prog == "cd" else ()
-    while args and args[0] in opts:
-        args = args[1:]
-    if args and args[0] == "--":
-        args = args[1:]
-    if len(args) != 1 or re.search(r"[$`]|^-", args[0]):
-        return None
-    target = os.path.expanduser(args[0])
-    if not target.startswith("~"):
-        return target
-    if target in ("~+", "~-") or base is None:
-        return None
-    literal = os.path.join(base, target)
-    return literal if os.path.isdir(literal) else None
 
 
 def _push_items(sources, directory):
@@ -795,22 +833,39 @@ def prepush_bypasses(cmd, cwd, bypass_assignment=None, dir_filter=None, global_f
     that owns f (`dir_filter(owner)`; no owning repo: not counted); the
     GIT_CONFIG_* matches by `dir_filter(cwd)`, asked only after a match."""
     tokens = []
+    base_dir = cwd or "."
+    dir_exists = {}
+    verdicts = {}
 
-    def counts(scope, gdir):
+    def exists(d):
+        if d not in dir_exists:
+            dir_exists[d] = os.path.isdir(d)
+        return dir_exists[d]
+
+    def dir_wanted(d):
+        if dir_filter is None:
+            return False
+        key = d if exists(d) else base_dir
+        if key not in verdicts:
+            verdicts[key] = bool(dir_filter(key))
+        return verdicts[key]
+
+    def counts(scope, gdir, state=None):
         if dir_filter is None and global_filter is None:
             return True
         if scope == "global":
             return bool(global_filter and global_filter())
         if isinstance(scope, tuple):
-            path = join_dir(gdir, scope[1])
+            path = join_dir(gdir, scope[1], state=state)
             if os.path.realpath(path) in _global_config_paths():
                 return bool(global_filter and global_filter())
             owner = _config_file_owner(path)
-            return bool(owner and dir_filter and dir_filter(owner))
-        return bool(dir_filter and dir_filter(gdir))
+            return bool(owner and dir_wanted(owner))
+        if state is not None and state.unknown:
+            return True
+        return dir_wanted(gdir)
 
-    directory = cwd or "."
-    oldpwd = None
+    by_command, all_states = _states_by_command(cmd, cwd)
     bypass_raws = []  # the commands that carry the bypass in their own prefix
     for pipeline in all_pipelines(cmd):
         for raw in pipeline:
@@ -821,19 +876,17 @@ def prepush_bypasses(cmd, cwd, bypass_assignment=None, dir_filter=None, global_f
             prefix = raw[: len(raw) - len(argv)]
             bypassed = bypass_assignment is not None and bypass_assignment in prefix
             prog = argv[0].rsplit("/", 1)[-1]
-            if prog in ("cd", "pushd"):
-                directory, oldpwd = _cd_move(prog, argv, directory, oldpwd)
-                continue
             if bypassed:
                 if _carries_bypass(raw, unwrapped, argv, bypass_assignment):
                     bypass_raws.append(raw)
                 continue
             if prog == "git":
-                parts = git_parts(argv, directory)
-                gdir = parts[2] if parts else directory
-                for token, scope in _git_bypass_tokens(argv, prefix):
-                    if counts(scope, gdir):
-                        tokens.append(token)
+                for st in by_command.get(tuple(raw), all_states):
+                    parts = git_parts(argv, st.cwd, state=st)
+                    gdir = parts[2] if parts else st.cwd
+                    for token, scope in _git_bypass_tokens(argv, prefix):
+                        if counts(scope, gdir, st):
+                            tokens.append(token)
     env_hits = [m.group(m.lastindex) for m in _ENV_ASSIGN.finditer(cmd)
                 if not _in_bypassed_prefix(cmd, m, bypass_assignment, bypass_raws)]
     env_hits += [m.group(m.lastindex) for m in _ENV_DECLARE.finditer(cmd)]
@@ -894,46 +947,65 @@ def _carries_bypass(raw, unwrapped, argv, bypass_assignment):
             and bool(strip_redirections(argv)))
 
 
-def _cd_move(prog, argv, directory, oldpwd):
-    """`(directory, oldpwd)` after one `cd`/`pushd` (outbound_items' rules)."""
-    args = strip_redirections(argv[1:])
-    if prog == "cd" and not args:
-        target = os.environ.get("HOME")  # bare cd: $HOME
-        if not target:
-            return directory, oldpwd  # no HOME: bash's cd fails, nothing moves
-    elif prog == "cd" and args == ["-"]:
-        target = oldpwd  # cd -: None (no move yet) keeps
-    else:
-        target = cd_target(prog, args, directory)
-    if target is not None:
-        return join_dir(directory, target), directory
-    return directory, directory  # unfollowed: it left the believed dir
-
-
 def outbound_items(cmd, cwd, bypass_assignment, dir_filter=None,
                    commit_text_owner=None):
     items = []
     text_dirs = set()
     adds = []
-    directory = cwd or "."
-    oldpwd = None  # the directory the last cd/pushd left, followed or not
+    by_command, all_states = _states_by_command(cmd, cwd)
+    base_dir = cwd or "."
+    dir_exists = {}
     verdicts = {}
+    owners = {}
+    staged_cache = {}
+    push_cache = {}
+
+    def exists(d):
+        if d not in dir_exists:
+            dir_exists[d] = os.path.isdir(d)
+        return dir_exists[d]
 
     def wanted(d):
         if dir_filter is None:
             return True
-        if d not in verdicts:
-            verdicts[d] = bool(dir_filter(d))
-        return verdicts[d]
+        key = d if exists(d) else base_dir
+        if key not in verdicts:
+            verdicts[key] = bool(dir_filter(key))
+        return verdicts[key]
+
+    def text_owned(d):
+        if commit_text_owner is None:
+            return False
+        key = d if exists(d) else base_dir
+        if key not in owners:
+            owners[key] = bool(commit_text_owner(key))
+        return owners[key]
+
+    def cached_push_items(sources, d):
+        if not exists(d):
+            return ()
+        key = (d, tuple(sources))
+        if key not in push_cache:
+            push_cache[key] = _push_items(sources, d)
+        return push_cache[key]
+
+    def cached_commit_lines(d, args):
+        if not exists(d):
+            return ()
+        key = (d, tuple(args), len(adds))  # an earlier `git add` changes the answer
+        if key not in staged_cache:
+            staged_cache[key] = commit_diff.commit_lines(
+                d, commit_diff.parse_commit(args), adds)
+        return staged_cache[key]
 
     def command_text(d):
         if d not in text_dirs:
             text_dirs.add(d)
             items.append(Item("the command text", cmd, d, "text", None))
 
-    def files(names, d):
+    def files(names, d, state):
         for f in names:
-            text = read_file(f, d)
+            text = read_file(f, d, state=state)
             if text is not None:
                 items.append(Item(f"file {f}", text, d, "file", None))
 
@@ -945,42 +1017,53 @@ def outbound_items(cmd, cwd, bypass_assignment, dir_filter=None,
             prefix = raw[: len(raw) - len(argv)]
             bypassed = bypass_assignment in prefix
             prog = argv[0].rsplit("/", 1)[-1]
-            if prog in ("cd", "pushd"):
-                directory, oldpwd = _cd_move(prog, argv, directory, oldpwd)
-                continue
+            states = by_command.get(tuple(raw), all_states)
             gh_argv, gh_skipped = (argv, False) if prog == "gh" else _gh_wrapper_argv(argv)
             if gh_argv is not None:
                 if bypassed:
                     continue
-                if wanted(directory):
-                    if gh_skipped or not gh_text_exempt(gh_argv, prefix):
+                for st in states:
+                    directory = st.cwd
+                    if (st.unknown or wanted(directory)) and (
+                            gh_skipped or not gh_text_exempt(gh_argv, prefix)):
                         command_text(directory)
-                    files(file_values_gh(gh_argv), directory)
-                push_dir = repo_create_push_dir(gh_argv, directory)
-                if push_dir is not None and wanted(push_dir):
-                    items.extend(_push_items(push_sources([]), push_dir))
+                    if wanted(directory):
+                        files(file_values_gh(gh_argv), directory, st)
+                    push_dir = repo_create_push_dir(gh_argv, directory, state=st)
+                    if push_dir is not None and exists(push_dir) and wanted(push_dir):
+                        items.extend(cached_push_items(push_sources([]), push_dir))
                 continue
             if prog != "git":
                 continue
-            parts = git_parts(argv, directory)
-            if parts is None:
-                continue
-            sub, args, gdir = parts
-            if sub in ("add", "stage"):
-                spec = commit_diff.parse_add(args)
-                spec["dir"] = gdir
-                adds.append(spec)
-                continue
-            if bypassed or not wanted(gdir):
-                continue
-            if sub in FILE_SUBCOMMANDS:
-                if commit_text_owner is None or not commit_text_owner(gdir):
+            for st in states:
+                parts = git_parts(argv, st.cwd, state=st)
+                if parts is None:
+                    continue
+                sub, args, gdir = parts
+                if sub in ("add", "stage"):
+                    spec = commit_diff.parse_add(args)
+                    spec["dir"] = gdir
+                    adds.append(spec)
+                    continue
+                if bypassed:
+                    continue
+                if sub in FILE_SUBCOMMANDS and (
+                        st.unknown or (wanted(gdir) and not text_owned(gdir))):
                     command_text(gdir)
-                files(file_values_git(args), gdir)
-                if sub == "commit":
-                    for path, line in commit_diff.commit_lines(
-                            gdir, commit_diff.parse_commit(args), adds):
-                        items.append(Item(f"staged {path}", line, gdir, "staged", None))
-            elif sub == "push":
-                items.extend(_push_items(push_sources(args), gdir))
-    return items
+                if not wanted(gdir):
+                    continue
+                if sub in FILE_SUBCOMMANDS:
+                    files(file_values_git(args), gdir, st)
+                    if sub == "commit" and exists(gdir):
+                        for path, line in cached_commit_lines(gdir, args):
+                            items.append(Item(f"staged {path}", line, gdir, "staged", None))
+                elif sub == "push" and exists(gdir):
+                    items.extend(cached_push_items(push_sources(args), gdir))
+    out = []
+    seen = set()
+    for it in items:
+        k = (it.kind, it.label, it.text, it.directory)
+        if k not in seen:
+            seen.add(k)
+            out.append(it)
+    return out
