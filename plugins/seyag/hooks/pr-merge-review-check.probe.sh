@@ -76,22 +76,12 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Leak guard: the live ack state must be byte-identical afterwards. Captured
-# before the first invocation so a HOME that silently failed to take effect
-# is caught, rather than quietly acking real PRs. "absent" is a real state,
-# not a failure: the live state may simply not exist yet.
+# Leak guard: capture the live ack lines before the first invocation so a
+# HOME that silently failed to take effect is caught at the end by checking
+# whether any new live line matches a fixture ack, without reddening when
+# another session merges an unrelated PR concurrently.
 REAL_STATE="${XDG_STATE_HOME:-$HOME/.local/state}/seyag/pr-merge-review-check/ack"
-# `md5sum` missing would make BOTH checksums fall through to the same
-# sentinel, so the guard would compare "absent" to "absent" and report PASS
-# having verified nothing — the vacuous pass this file refuses everywhere
-# else. Checked once, up front, and fatal: a leak guard that cannot run is
-# worse than none, because it reads as proof.
-if ! command -v md5sum >/dev/null 2>&1; then
-  printf 'FATAL: md5sum not found — the leak guard could not verify that the live\n' >&2
-  printf 'ack state is untouched, and a guard that cannot run must not report a pass.\n' >&2
-  exit 1
-fi
-REAL_STATE_BEFORE=$(md5sum "$REAL_STATE" 2>/dev/null | cut -d' ' -f1 || echo "absent")
+cp "$REAL_STATE" "$WORK/live-before" 2>/dev/null || : >"$WORK/live-before"
 
 mkdir -p "$WORK/bin"
 
@@ -149,13 +139,24 @@ case "$*" in
     ;;
   *"/issues/"*"/comments"*)
     printf '%s\n' "$*" >>"${SHIM_API_LOG:-/dev/null}"
+    [ "${SHIM_API_EXIT:-0}" = "0" ] || exit "${SHIM_API_EXIT}"
     # The hook pipes gh's output to a REAL jq, so the fixture must be the
     # RAW shape --slurp produces: an outer array of PAGES, each page an
     # array of comments. The fixture is one comment object, so the shim
     # wraps it twice (one page holding that comment). Pagination itself
     # (many pages) is a live-API property, pinned only as the flags'
-    # presence in the logged argv.
-    printf '[[%s]]' "${SHIM_REVIEW_JSON:-}"
+    # presence in the logged argv. SHIM_API_EMPTY=1 prints nothing (empty
+    # gh stdout); non-comment payloads (no "user" field and not empty/"[]")
+    # print raw so filter failures on {"message":"x"} or [1] are reachable.
+    if [ "${SHIM_API_EMPTY:-0}" = "1" ]; then
+      :
+    elif [ -z "${SHIM_REVIEW_JSON:-}" ] || [ "${SHIM_REVIEW_JSON:-}" = "[]" ]; then
+      printf '[[]]'
+    elif [[ "${SHIM_REVIEW_JSON}" == *'"user"'* ]]; then
+      printf '[[%s]]' "${SHIM_REVIEW_JSON}"
+    else
+      printf '%s' "${SHIM_REVIEW_JSON}"
+    fi
     ;;
   "pr diff "*)
     # The added-comment claim scan's input. SHIM_DIFF_EXIT non-zero with no
@@ -232,6 +233,8 @@ SHIM_PR_NUMBER=''
 SHIM_REPO='acme-widgets/cli'
 SHIM_DEFAULT_BRANCH='main'
 SHIM_REPO_EXIT=0
+SHIM_API_EXIT=0
+SHIM_API_EMPTY=0
 SHIM_REVIEW_JSON=''
 SHIM_CURRENT_TREE='/repo'
 SHIM_WORKTREES=''
@@ -289,6 +292,8 @@ invoke() {
     SHIM_REPO="$SHIM_REPO" \
     SHIM_DEFAULT_BRANCH="$SHIM_DEFAULT_BRANCH" \
     SHIM_REPO_EXIT="$SHIM_REPO_EXIT" \
+    SHIM_API_EXIT="$SHIM_API_EXIT" \
+    SHIM_API_EMPTY="$SHIM_API_EMPTY" \
     SHIM_REVIEW_JSON="$SHIM_REVIEW_JSON" \
     SHIM_CURRENT_TREE="$SHIM_CURRENT_TREE" \
     SHIM_WORKTREES="$SHIM_WORKTREES" \
@@ -327,6 +332,8 @@ invoke_via_runner() {
     SHIM_REPO="$SHIM_REPO" \
     SHIM_DEFAULT_BRANCH="$SHIM_DEFAULT_BRANCH" \
     SHIM_REPO_EXIT="$SHIM_REPO_EXIT" \
+    SHIM_API_EXIT="$SHIM_API_EXIT" \
+    SHIM_API_EMPTY="$SHIM_API_EMPTY" \
     SHIM_REVIEW_JSON="$SHIM_REVIEW_JSON" \
     SHIM_CURRENT_TREE="$SHIM_CURRENT_TREE" \
     SHIM_WORKTREES="$SHIM_WORKTREES" \
@@ -366,6 +373,8 @@ invoke_in() {
       SHIM_REPO="$SHIM_REPO" \
       SHIM_DEFAULT_BRANCH="$SHIM_DEFAULT_BRANCH" \
       SHIM_REPO_EXIT="$SHIM_REPO_EXIT" \
+      SHIM_API_EXIT="$SHIM_API_EXIT" \
+      SHIM_API_EMPTY="$SHIM_API_EMPTY" \
       SHIM_REVIEW_JSON="$SHIM_REVIEW_JSON" \
       SHIM_CURRENT_TREE="$SHIM_CURRENT_TREE" \
       SHIM_WORKTREES="$SHIM_WORKTREES" \
@@ -454,6 +463,11 @@ assert_ack_lacks() {
   if grep -qxF "$2" "$ACK_FILE" 2>/dev/null; then
     bad "$1 (ack should not hold '$2')"
   else ok "$1"; fi
+}
+assert_no_ack() { # <label>
+  if [ ! -s "$ACK_FILE" ]; then ok "$1"; else
+    bad "$1 (expected no ack, got: $(tr '\n' ';' <"$ACK_FILE" 2>/dev/null))"
+  fi
 }
 # assert_api_has <label> <fixed-string> — pin the REVIEW FETCH URL itself
 # (the api log line), beyond just the PR number assert_pr extracts from it.
@@ -1743,7 +1757,7 @@ assert_exit "child bare GH_REPO= reassignment over exported GH_REPO with in-chil
 assert_stderr_has "…with the unresolvable-scope banner" 'MERGE SCOPE UNRESOLVABLE'
 assert_no_fetch "…no fetch ran"
 assert_api_lacks "…neither parent nor child repo reaches a fetch" 'repos/'
-assert_lacks_ack "…no ack written"
+assert_no_ack "…no ack written"
 
 new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
 # Fix 4: `unset GH_REPO` and `export -n GH_REPO` clear `gh_repo_unresolvable`
@@ -3243,15 +3257,535 @@ assert_no_fetch "skipped hook fetches nothing"
 assert_silent "…and is silent"
 
 # ===========================================================================
-# 11. Leak guard — the live ack state must be untouched
+# 10b. Audit holes D2, D3, D5, D6, D13
 # ===========================================================================
-printf '\n--- leak guard ---\n'
+printf '\n--- audit holes (D2, D3, D5, D6, D13) ---\n'
 
-REAL_STATE_AFTER=$(md5sum "$REAL_STATE" 2>/dev/null | cut -d' ' -f1 || echo "absent")
-if [ "$REAL_STATE_BEFORE" = "$REAL_STATE_AFTER" ]; then
-  ok "the live ack state is unchanged ($REAL_STATE_BEFORE)"
+# D2: gh accepts -R/--repo before `pr` and between `pr` and `merge`.
+new_case; SHIM_REPO_EXIT=1; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'gh -R o/r pr merge 7'
+assert_api_has "D2: gh -R o/r pr merge 7 arms and fetches o/r#7" 'repos/o/r/issues/7/comments'
+assert_exit "…and blocks on review" 2
+
+new_case; SHIM_REPO_EXIT=1; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'gh --repo o/r pr merge 7'
+assert_api_has "D2: gh --repo o/r pr merge 7 arms and fetches o/r#7" 'repos/o/r/issues/7/comments'
+assert_exit "…and blocks on review" 2
+
+new_case; SHIM_REPO_EXIT=1; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'gh --repo=o/r pr merge 7'
+assert_api_has "D2: gh --repo=o/r pr merge 7 arms and fetches o/r#7" 'repos/o/r/issues/7/comments'
+assert_exit "…and blocks on review" 2
+
+new_case; SHIM_REPO_EXIT=1; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'gh -Ro/r pr merge 7'
+assert_api_has "D2: gh -Ro/r pr merge 7 arms and fetches o/r#7" 'repos/o/r/issues/7/comments'
+assert_exit "…and blocks on review" 2
+
+new_case; SHIM_REPO_EXIT=1; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'gh pr -R o/r merge 7'
+assert_api_has "D2: gh pr -R o/r merge 7 arms and fetches o/r#7" 'repos/o/r/issues/7/comments'
+assert_exit "…and blocks on review" 2
+
+new_case; SHIM_REPO_EXIT=1; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'gh -R first/r pr merge 7 -R o/r'
+assert_api_has "D2: later -R on merge wins over root -R" 'repos/o/r/issues/7/comments'
+assert_exit "…and blocks on review" 2
+
+new_case; SHIM_REPO_EXIT=1; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'gh -R=o/r pr merge 7'
+assert_api_has "D2: gh -R=o/r pr merge 7 strips = and fetches o/r#7" 'repos/o/r/issues/7/comments'
+assert_exit "…and blocks on review" 2
+
+new_case; SHIM_REPO_EXIT=1; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'gh pr merge 7 -R=o/r'
+assert_api_has "D2: gh pr merge 7 -R=o/r strips = and fetches o/r#7" 'repos/o/r/issues/7/comments'
+assert_exit "…and blocks on review" 2
+SHIM_REPO_EXIT=0
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'gh --foo pr merge 7'
+assert_exit "D2: unknown root flag gh --foo pr merge 7 stays silent" 0
+assert_no_fetch "…no fetch"
+assert_silent "…and silent"
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'gh -R o/r pr view 7'
+assert_exit "D2: gh -R o/r pr view 7 stays silent" 0
+assert_no_fetch "…no fetch"
+assert_silent "…and silent"
+
+# D3: quote-split and backslash-split `merge` words pass the cheap reject.
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'gh pr m""erge 7'
+assert_pr 'D3: gh pr m""erge 7 arms and fetches PR 7' 7
+assert_exit "…and blocks on review" 2
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'gh pr mer\ge 7'
+assert_pr 'D3: gh pr mer\ge 7 arms and fetches PR 7' 7
+assert_exit "…and blocks on review" 2
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke "$(printf 'gh pr m\\\nerge 7')"
+assert_pr 'D3: line-continuation-split gh pr m\NEWLINEerge 7 arms and fetches PR 7' 7
+assert_exit "…and blocks on review" 2
+
+# D5: numberless merge after a branch switch in the same command refuses.
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'git switch other && gh pr merge'
+assert_exit "D5: git switch other && gh pr merge refused" 2
+assert_stderr_has "…with MERGE BRANCH MOVED banner" 'MERGE BRANCH MOVED — numberless merge after a branch switch refused'
+assert_no_fetch "…no fetch"
+assert_no_ack "…no ack"
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'git -C . checkout other; gh pr merge'
+assert_exit "D5: git -C . checkout other; gh pr merge refused" 2
+assert_stderr_has "…with MERGE BRANCH MOVED banner" 'MERGE BRANCH MOVED — numberless merge after a branch switch refused'
+assert_no_fetch "…no fetch"
+assert_no_ack "…no ack"
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'gh pr checkout 9 && gh pr merge'
+assert_exit "D5: gh pr checkout 9 && gh pr merge refused" 2
+assert_stderr_has "…with MERGE BRANCH MOVED banner" 'MERGE BRANCH MOVED — numberless merge after a branch switch refused'
+assert_no_fetch "…no fetch"
+assert_no_ack "…no ack"
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'git switch other && gh pr merge 7'
+assert_stderr_lacks "D5: numbered merge after git switch does not get MERGE BRANCH MOVED" 'MERGE BRANCH MOVED'
+assert_pr "…and fetches PR 7" 7
+
+new_case; SHIM_NUMBER_EXIT=0; SHIM_PR_NUMBER=4242; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'gh pr merge; git switch main'
+assert_stderr_lacks "D5: switch after gh pr merge does not get MERGE BRANCH MOVED" 'MERGE BRANCH MOVED'
+assert_pr "…and resolves branch PR" 4242
+
+new_case; SHIM_NUMBER_EXIT=0; SHIM_PR_NUMBER=4242; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'git checkout -- f; gh pr merge'
+assert_stderr_lacks "D5: path checkout (git checkout -- f) before merge does not get MERGE BRANCH MOVED" 'MERGE BRANCH MOVED'
+assert_pr "…and resolves branch PR" 4242
+
+new_case; SHIM_NUMBER_EXIT=0; SHIM_PR_NUMBER=4242; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'git checkout HEAD -- f; gh pr merge'
+assert_stderr_lacks "D5: path checkout with tree-ish (git checkout HEAD -- f) before merge does not get MERGE BRANCH MOVED" 'MERGE BRANCH MOVED'
+assert_pr "…and resolves branch PR" 4242
+SHIM_NUMBER_EXIT=1; SHIM_PR_NUMBER=''
+
+# D6: a failed review fetch refuses instead of reading as no review.
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"; SHIM_API_EXIT=1
+invoke 'gh pr merge 2002 --rebase'
+assert_exit "D6: SHIM_API_EXIT=1 refuses" 2
+assert_stderr_has "…with MERGE REVIEW UNREADABLE banner" 'MERGE REVIEW UNREADABLE — the review fetch failed'
+assert_no_ack "…no ack"
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"; SHIM_API_EXIT=124
+invoke 'gh pr merge 2002 --rebase'
+assert_exit "D6: SHIM_API_EXIT=124 (timeout) refuses" 2
+assert_stderr_has "…with MERGE REVIEW UNREADABLE banner" 'MERGE REVIEW UNREADABLE — the review fetch failed'
+assert_no_ack "…no ack"
+SHIM_API_EXIT=0
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON='not-json{'
+invoke 'gh pr merge 2002 --rebase'
+assert_exit "D6: malformed non-JSON review fixture refuses" 2
+assert_stderr_has "…with MERGE REVIEW UNREADABLE banner" 'MERGE REVIEW UNREADABLE — the review fetch failed'
+assert_no_ack "…no ack"
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON='{"message":"x"}'
+invoke 'gh pr merge 2002 --rebase'
+assert_exit "D6: object payload {\"message\":\"x\"} (filter failure) refuses" 2
+assert_stderr_has "…with MERGE REVIEW UNREADABLE banner" 'MERGE REVIEW UNREADABLE — the review fetch failed'
+assert_no_ack "…no ack"
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON='[1]'
+invoke 'gh pr merge 2002 --rebase'
+assert_exit "D6: non-page array payload [1] (filter failure) refuses" 2
+assert_stderr_has "…with MERGE REVIEW UNREADABLE banner" 'MERGE REVIEW UNREADABLE — the review fetch failed'
+assert_no_ack "…no ack"
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON=''; SHIM_API_EMPTY=1
+invoke 'gh pr merge 2002 --rebase'
+assert_exit "D6: empty gh output (shim prints nothing) refuses" 2
+assert_stderr_has "…with MERGE REVIEW UNREADABLE banner" 'MERGE REVIEW UNREADABLE — the review fetch failed'
+assert_no_ack "…no ack"
+SHIM_API_EMPTY=0
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON=$(review_json 777 'other bot' '2026-08-08T12:00:00Z' 'other[bot]')
+invoke 'gh pr merge 2002 --rebase'
+assert_exit "D6: exit 0 with no matching comment still takes the no-review path" 0
+assert_stderr_lacks "…not MERGE REVIEW UNREADABLE" 'MERGE REVIEW UNREADABLE'
+assert_silent "…and stays silent on a feature PR"
+
+# D13: heredoc-fed split substitution prefix sets unresolvable.
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke "$(printf "GH_REPO=\$(bash <<'E'\ncat r\nE\n) gh pr merge 7")"
+assert_exit "D13: heredoc-fed split sub prefix refuses" 2
+assert_stderr_has "…with MERGE SCOPE UNRESOLVABLE" 'MERGE SCOPE UNRESOLVABLE'
+assert_no_fetch "…no fetch"
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke "$(printf "GH_REPO=\$(cat <<'E'\no/r\nE\n) gh pr merge 7")"
+assert_exit "D13: data heredoc split sub prefix refuses" 2
+assert_stderr_has "…with MERGE SCOPE UNRESOLVABLE" 'MERGE SCOPE UNRESOLVABLE'
+assert_no_fetch "…no fetch"
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke "GH_REPO=\$(bash <<<'cat r') gh pr merge 7"
+assert_exit "D13: here-string split sub prefix refuses" 2
+assert_stderr_has "…with MERGE SCOPE UNRESOLVABLE" 'MERGE SCOPE UNRESOLVABLE'
+assert_no_fetch "…no fetch"
+
+new_case; SHIM_REPO_EXIT=1; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke "$(printf "GH_REPO=\$(cat <<'E'\nx/y\nE\n) gh pr merge 7 -R o/r")"
+assert_stderr_lacks "D13: shadowed heredoc sub prefix with -R o/r does not get MERGE SCOPE UNRESOLVABLE" 'MERGE SCOPE UNRESOLVABLE'
+assert_api_has "…and fetches repos/o/r/issues/7/comments" 'repos/o/r/issues/7/comments'
+assert_exit "…and blocks on review" 2
+SHIM_REPO_EXIT=0
+
+# R4: unquoted substitution in root repo flag position refuses before any fetch.
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'gh -R $(cat r) pr merge 7'
+assert_exit "R4: gh -R \$(cat r) pr merge 7 refuses" 2
+assert_stderr_has "…with MERGE SCOPE UNRESOLVABLE" 'MERGE SCOPE UNRESOLVABLE'
+assert_no_fetch "…no fetch"
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'gh --repo=$(cat r) pr merge 7'
+assert_exit "R4: gh --repo=\$(cat r) pr merge 7 refuses" 2
+assert_stderr_has "…with MERGE SCOPE UNRESOLVABLE" 'MERGE SCOPE UNRESOLVABLE'
+assert_no_fetch "…no fetch"
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'gh -R `cat r` pr merge 7'
+assert_exit "R4: gh -R \`cat r\` pr merge 7 refuses" 2
+assert_stderr_has "…with MERGE SCOPE UNRESOLVABLE" 'MERGE SCOPE UNRESOLVABLE'
+assert_no_fetch "…no fetch"
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'gh -R o/r -R $(cat r) pr merge 7'
+assert_exit "R4: double-root gh -R o/r -R \$(cat r) pr merge 7 refuses" 2
+assert_stderr_has "…with MERGE SCOPE UNRESOLVABLE" 'MERGE SCOPE UNRESOLVABLE'
+assert_no_fetch "…no fetch"
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'FOO=1 gh -R $(cat r) pr merge 7'
+assert_exit "R4: FOO=1 gh -R \$(cat r) pr merge 7 refuses" 2
+assert_stderr_has "…with MERGE SCOPE UNRESOLVABLE" 'MERGE SCOPE UNRESOLVABLE'
+assert_no_fetch "…no fetch"
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'env gh -R $(cat r) pr merge 7'
+assert_exit "R4: env gh -R \$(cat r) pr merge 7 refuses" 2
+assert_stderr_has "…with MERGE SCOPE UNRESOLVABLE" 'MERGE SCOPE UNRESOLVABLE'
+assert_no_fetch "…no fetch"
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'command gh -R $(cat r) pr merge 7'
+assert_exit "R4: command gh -R \$(cat r) pr merge 7 refuses" 2
+assert_stderr_has "…with MERGE SCOPE UNRESOLVABLE" 'MERGE SCOPE UNRESOLVABLE'
+assert_no_fetch "…no fetch"
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'gh pr -R $(cat r) merge 7'
+assert_exit "R4: gh pr -R \$(cat r) merge 7 refuses" 2
+assert_stderr_has "…with MERGE SCOPE UNRESOLVABLE" 'MERGE SCOPE UNRESOLVABLE'
+assert_no_fetch "…no fetch"
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'gh -R $(echo $(cat r)) pr merge 7'
+assert_exit "R4: gh -R \$(echo \$(cat r)) pr merge 7 refuses" 2
+assert_stderr_has "…with MERGE SCOPE UNRESOLVABLE" 'MERGE SCOPE UNRESOLVABLE'
+assert_no_fetch "…no fetch"
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'gh pr merge 3; gh -R $(cat r) pr merge 7'
+assert_exit "R4: gh pr merge 3; gh -R \$(cat r) pr merge 7 refuses" 2
+assert_stderr_has "…with MERGE SCOPE UNRESOLVABLE" 'MERGE SCOPE UNRESOLVABLE'
+assert_no_fetch "…no fetch"
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke "$(printf "cat <<'E'\ngh -R \$(cat r) pr merge 7\nE")"
+assert_exit "R4: heredoc body gh -R \$(cat r) pr merge 7 stays silent" 0
+assert_no_fetch "…no fetch"
+assert_silent "…and silent"
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'echo "gh -R $(cat r) pr merge 7"'
+assert_exit 'R4: echo "gh -R $(cat r) pr merge 7" stays silent' 0
+assert_no_fetch "…no fetch"
+assert_silent "…and silent"
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'gh -R $(cat r) pr view 7'
+assert_exit "R4: gh -R \$(cat r) pr view 7 stays silent" 0
+assert_no_fetch "…no fetch"
+assert_silent "…and silent"
+
+new_case; SHIM_REPO_EXIT=1; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'gh -R o/r pr merge 7'
+assert_stderr_lacks "R4: gh -R o/r pr merge 7 does not get MERGE SCOPE UNRESOLVABLE" 'MERGE SCOPE UNRESOLVABLE'
+assert_api_has "…and fetches o/r#7" 'repos/o/r/issues/7/comments'
+assert_exit "…and blocks on review" 2
+SHIM_REPO_EXIT=0
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke "$(printf '# gh -R $(cat r) pr merge 7\nls')"
+assert_exit "R4: commented # gh -R \$(cat r) pr merge 7 before ls stays silent" 0
+assert_no_fetch "…no fetch"
+assert_silent "…and silent"
+
+new_case; SHIM_REPO_EXIT=1; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke "gh -R '\$(cat r)' -R o/r pr merge 7 # shadowed single-quoted sub"
+assert_stderr_lacks "R4: single-quoted -R '\$(cat r)' shadowed by -R o/r does not get MERGE SCOPE UNRESOLVABLE" 'MERGE SCOPE UNRESOLVABLE'
+assert_api_has "…and fetches o/r#7" 'repos/o/r/issues/7/comments'
+assert_exit "…and blocks on review" 2
+SHIM_REPO_EXIT=0
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+LONG_SUB_CMD="gh $(printf -- '-R $(a) %.0s' {1..2000})x merge"
+t0=$SECONDS
+invoke "$LONG_SUB_CMD"
+elapsed=$((SECONDS - t0))
+assert_exit "R4: 2000x -R \$(a) x merge is not killed (exits 0)" 0
+assert_no_fetch "…no fetch"
+if [ "$elapsed" -lt 20 ]; then
+  ok "R4: 2000x -R \$(a) x merge finishes under 20s (${elapsed}s) and is not killed"
 else
-  bad "the live ack state CHANGED ($REAL_STATE_BEFORE -> $REAL_STATE_AFTER) — the HOME redirect did not hold"
+  bad "R4: 2000x -R \$(a) x merge took ${elapsed}s (>= 20s)"
+fi
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke "$(printf 'echo `echo a\ngh pr merge 5` `gh pr merge 5`')"
+assert_exit "R4: two backtick spans with gh pr merge 5 refuses ONE MERGE PER COMMAND" 2
+assert_stderr_has "…with ONE MERGE PER COMMAND" 'ONE MERGE PER COMMAND'
+assert_no_fetch "…no fetch"
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'bash -c '\''gh -R $(x) pr merge 5'\'''
+assert_exit "R4: bash -c 'gh -R \$(x) pr merge 5' refuses" 2
+assert_stderr_has "…with MERGE SCOPE UNRESOLVABLE" 'MERGE SCOPE UNRESOLVABLE'
+assert_no_fetch "…no fetch"
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'eval '\''gh -R $(x) pr merge 5'\'''
+assert_exit "R4: eval 'gh -R \$(x) pr merge 5' refuses" 2
+assert_stderr_has "…with MERGE SCOPE UNRESOLVABLE" 'MERGE SCOPE UNRESOLVABLE'
+assert_no_fetch "…no fetch"
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'bash -c "gh -R \$(x) pr merge 5"'
+assert_exit 'R4: bash -c "gh -R \$(x) pr merge 5" refuses' 2
+assert_stderr_has "…with MERGE SCOPE UNRESOLVABLE" 'MERGE SCOPE UNRESOLVABLE'
+assert_no_fetch "…no fetch"
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'bash -c "gh -R $(x) pr merge 5"'
+assert_exit 'R4: bash -c "gh -R $(x) pr merge 5" refuses' 2
+assert_stderr_has "…with MERGE SCOPE UNRESOLVABLE" 'MERGE SCOPE UNRESOLVABLE'
+assert_no_fetch "…no fetch"
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'x=$(gh -R $(y) pr merge 5)'
+assert_exit "R4: x=\$(gh -R \$(y) pr merge 5) refuses" 2
+assert_stderr_has "…with MERGE SCOPE UNRESOLVABLE" 'MERGE SCOPE UNRESOLVABLE'
+assert_no_fetch "…no fetch"
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke '$(gh -R $(x) pr merge 5)'
+assert_exit "R4: \$(gh -R \$(x) pr merge 5) refuses" 2
+assert_stderr_has "…with MERGE SCOPE UNRESOLVABLE" 'MERGE SCOPE UNRESOLVABLE'
+assert_no_fetch "…no fetch"
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke '`gh -R $(x) pr merge 5`'
+assert_exit "R4: \`gh -R \$(x) pr merge 5\` refuses" 2
+assert_stderr_has "…with MERGE SCOPE UNRESOLVABLE" 'MERGE SCOPE UNRESOLVABLE'
+assert_no_fetch "…no fetch"
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'echo "$(gh -R $(y) pr merge 5)"'
+assert_exit 'R4: echo "$(gh -R $(y) pr merge 5)" refuses' 2
+assert_stderr_has "…with MERGE SCOPE UNRESOLVABLE" 'MERGE SCOPE UNRESOLVABLE'
+assert_no_fetch "…no fetch"
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke "$(printf 'cat <<'\''E'\''\n$(y\nE\ngh -R $(x) pr merge 5')"
+assert_exit "R4: cat heredoc with unterminated \$(y before gh -R \$(x) pr merge 5 refuses" 2
+assert_stderr_has "…with MERGE SCOPE UNRESOLVABLE" 'MERGE SCOPE UNRESOLVABLE'
+assert_no_fetch "…no fetch"
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke "$(printf 'bash <<'\''E'\''\ngh -R $(x) pr merge 5\nE')"
+assert_exit "R4: bash heredoc with gh -R \$(x) pr merge 5 refuses" 2
+assert_stderr_has "…with MERGE SCOPE UNRESOLVABLE" 'MERGE SCOPE UNRESOLVABLE'
+assert_no_fetch "…no fetch"
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke "$(printf 'git commit -m "$(cat <<'\''E'\''\ngh -R $(cat r) pr merge 7\nE\n)"')"
+assert_exit "R4: git commit -m heredoc mentioning gh -R \$(cat r) pr merge 7 stays silent" 0
+assert_no_fetch "…no fetch"
+assert_silent "…and silent"
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke "$(printf 'gh pr create --body "$(cat <<'\''E'\''\ngh -R $(cat r) pr merge 7\nE\n)"')"
+assert_exit "R4: gh pr create --body heredoc mentioning gh -R \$(cat r) pr merge 7 stays silent" 0
+assert_no_fetch "…no fetch"
+assert_silent "…and silent"
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'x=$(echo gh -R $(y) pr merge 5)'
+assert_exit "R4: x=\$(echo gh -R \$(y) pr merge 5) stays silent" 0
+assert_no_fetch "…no fetch"
+assert_silent "…and silent"
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'echo '\''$(gh -R $(x) pr merge 5)'\'''
+assert_exit "R4: echo '\$(gh -R \$(x) pr merge 5)' stays silent" 0
+assert_no_fetch "…no fetch"
+assert_silent "…and silent"
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke "$(printf '# $(gh -R $(x) pr merge 5)\nls')"
+assert_exit "R4: a merge span in a comment stays silent" 0
+assert_no_fetch "…no fetch"
+assert_silent "…and silent"
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke "$(printf 'cat <<'\''E'\''\n$(gh -R $(x) pr merge 5)\nE')"
+assert_exit "R4: a merge span in heredoc data stays silent" 0
+assert_no_fetch "…no fetch"
+assert_silent "…and silent"
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke "$(printf '# x $(y)\nls')"
+assert_exit "R4: # x \$(y) before ls stays silent" 0
+assert_no_fetch "…no fetch"
+assert_silent "…and silent"
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+DEEP_SUB_CMD="$(printf '$(%.0s' {1..2000})gh -R \$(a) pr merge 5"
+t0=$SECONDS
+invoke "$DEEP_SUB_CMD"
+elapsed=$((SECONDS - t0))
+assert_exit "R4: 2000x \$( then gh -R \$(a) pr merge 5 is not killed (exits 0)" 0
+assert_no_fetch "…no fetch"
+if [ "$elapsed" -lt 20 ]; then
+  ok "R4: 2000x \$( then gh -R \$(a) pr merge 5 finishes under 20s (${elapsed}s) and is not killed"
+else
+  bad "R4: 2000x \$( then gh -R \$(a) pr merge 5 took ${elapsed}s (>= 20s)"
+fi
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'echo $'\''a\'\''$(y)'\''; gh -R $(x) pr merge 5'
+assert_exit "R4: echo \$'a\\'\$(y)'; gh -R \$(x) pr merge 5 refuses" 2
+assert_stderr_has "…with MERGE SCOPE UNRESOLVABLE" 'MERGE SCOPE UNRESOLVABLE'
+assert_no_fetch "…no fetch"
+
+# ===========================================================================
+# 11. Self-check and leak guard
+# ===========================================================================
+printf '\n--- self-check & leak guard ---\n'
+
+# A1: every assert_[A-Za-z0-9_]+ word at command position in $0 must be a
+# defined function.
+assert_helper_check_fails() {
+  local label="$1" target="$2" out rc=0
+  out=$(check_assert_helpers "$target") || rc=$?
+  if [ "$rc" -ne 0 ] && [[ "$out" == *"FAIL  "* ]]; then
+    ok "$label"
+  else
+    bad "$label (rc=$rc, out=$out)"
+  fi
+}
+check_assert_helpers() {
+  local src="${1:-$0}" fn missing=0 count=0
+  if [ ! -r "$src" ]; then
+    bad "unreadable assertion source: $src"
+    return 1
+  fi
+  for fn in $(sed -E '/^[[:space:]]*#/d; s/[;|&({]+/\n/g' "$src" \
+    | sed -nE ':a; s/^[[:space:]]+//; s/^(if|while|until|then|elif|else|do|!)[[:space:]]+//; ta; s/^(assert_[A-Za-z0-9_]+)([[:space:])};|&].*|$)/\1/p' | sort -u); do
+    count=$((count + 1))
+    if ! declare -F "$fn" >/dev/null; then
+      bad "undefined assertion helper in $(basename "$src"): $fn"
+      missing=1
+    fi
+  done
+  # Non-empty check: a broken sed pipeline yielding fewer than 10 helpers fails
+  # rather than vacuously passing with missing=0.
+  if [ "$count" -lt 10 ]; then
+    bad "fewer than 10 assertion helpers found in $(basename "$src"): $count"
+    return 1
+  fi
+  if [ "$missing" -ne 0 ]; then
+    return 1
+  fi
+  ok "all assert_* helpers in $(basename "$src") are defined"
+}
+check_assert_helpers "$0"
+cp "$0" "$WORK/scratch-if.sh"
+printf '\nif assert_undef_after_if "x"; then :; fi\n' >>"$WORK/scratch-if.sh"
+assert_helper_check_fails "A1: undefined helper after if is caught" "$WORK/scratch-if.sh"
+rm -f "$WORK/scratch-if.sh"
+
+cp "$0" "$WORK/scratch-bang.sh"
+printf '\n! assert_undef_after_bang "x"\n' >>"$WORK/scratch-bang.sh"
+assert_helper_check_fails "A1: undefined helper after ! is caught" "$WORK/scratch-bang.sh"
+rm -f "$WORK/scratch-bang.sh"
+
+assert_helper_check_fails "A1: missing source path is caught" "$WORK/no-such-probe.sh"
+
+printf 'assert_exit "x" 0\n' >"$WORK/scratch-few.sh"
+assert_helper_check_fails "A1: helper count < 10 is caught" "$WORK/scratch-few.sh"
+rm -f "$WORK/scratch-few.sh"
+
+# A2: new live lines are those in the live file and not in live-before;
+# leak_check catches a new live line equal to a fixture ack line. A leaking
+# case writes nothing to its own fixture file, so the rows asserting an ack in
+# the fixture HOME are what prove the redirect held.
+leak_check() {
+  local before="$1" after="$2"
+  shift 2
+  [ -s "$after" ] || return 0
+  local new_lines f
+  if [ -s "$before" ]; then
+    new_lines=$(grep -vxFf "$before" "$after" 2>/dev/null || true)
+  else
+    new_lines=$(cat "$after")
+  fi
+  [ -n "$new_lines" ] || return 0
+  for f in "$@"; do
+    [ -s "$f" ] || continue
+    if printf '%s\n' "$new_lines" | grep -qxFf "$f" 2>/dev/null; then
+      return 1
+    fi
+  done
+  return 0
+}
+
+printf 'alpha/one#1\t10\n' >"$WORK/leak-before"
+printf 'alpha/one#1\t10\nbeta/two#2\t20\n' >"$WORK/leak-after-hit"
+printf 'beta/two#2\t20\n' >"$WORK/leak-fixture"
+if ! leak_check "$WORK/leak-before" "$WORK/leak-after-hit" "$WORK/leak-fixture"; then
+  ok "leak_check: reports a leak when a fixture ack line appears in live state"
+else
+  bad "leak_check: missed a fixture ack line in live state"
+fi
+
+printf 'alpha/one#1\t10\ngamma/three#3\t30\n' >"$WORK/leak-after-other"
+if leak_check "$WORK/leak-before" "$WORK/leak-after-other" "$WORK/leak-fixture"; then
+  ok "leak_check: ignores an unrelated new live line from another session"
+else
+  bad "leak_check: false-positived on an unrelated new live line"
+fi
+
+if leak_check "$WORK/live-before" "$REAL_STATE" "$WORK"/home.*/.local/state/seyag/pr-merge-review-check/ack; then
+  ok "the live ack state holds no leaked fixture lines"
+else
+  bad "the live ack state gained a fixture line — the HOME redirect did not hold"
 fi
 
 if [ "$FAILURES" -gt 0 ]; then

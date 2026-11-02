@@ -1466,5 +1466,48 @@ for _label, _inp, _want in [
     _got = simple_commands(_inp)
     report("simple_commands: " + _label, _want in _got, _got, "a list containing %r" % (_want,))
 
+for _label, _inp in [
+    ('multi-line backtick span with \\$ holds later-line merge once', 'x=`echo \\$HOME\ngh pr merge 7`'),
+    ('multi-line backtick span with heredoc and \\$ holds later-line merge once', 'x=`cat <<EOF\n\\$HOME\nEOF\ngh pr merge 7`'),
+    ('multi-line backtick span with shell heredoc holds merge once', 'x=`bash <<E\ngh pr merge 7\nE\necho hi`'),
+    ('multi-line backtick span with nested escaped backtick holds merge once', 'x=`echo \\`gh pr merge 7\\`\nfoo`'),
+    ('multi-line backtick span with eval heredoc holds merge once', 'x=`eval "$(cat <<E\ngh pr merge 7\nE\n)"\nfoo`'),
+]:
+    _got = simple_commands(_inp)
+    report(
+        "simple_commands: " + _label,
+        _got.count(['gh', 'pr', 'merge', '7']) == 1,
+        _got,
+        "['gh', 'pr', 'merge', '7'] appearing once",
+    )
+
+_esc_bt_nl_got = simple_commands("echo `\\`\n\\`bash -c 'gh pr merge 7'`")
+report(
+    "simple_commands: escaped-backtick pair across newline in backtick span holds merge at least once",
+    _esc_bt_nl_got.count(['gh', 'pr', 'merge', '7']) >= 1,
+    _esc_bt_nl_got,
+    "['gh', 'pr', 'merge', '7'] appearing at least once",
+)
+
+_dup_bt_lines_got = simple_commands('x=`a\na`')
+report(
+    "simple_commands: x=`a\\na` holds ['a'] twice",
+    _dup_bt_lines_got.count(['a']) == 2,
+    _dup_bt_lines_got,
+    "['a'] appearing twice",
+)
+
+for _label, _inp in [
+    ('two backtick spans keep second span merge when first is in backtick_seen', 'echo `echo a\ngh pr merge 5` `gh pr merge 5`'),
+    ('two backtick spans keep second span merge when first has \\$a', 'echo `echo \\$a\ngh pr merge 5` `gh pr merge 5`'),
+]:
+    _got = simple_commands(_inp)
+    report(
+        "simple_commands: " + _label,
+        _got.count(['gh', 'pr', 'merge', '5']) == 2,
+        _got,
+        "['gh', 'pr', 'merge', '5'] appearing twice",
+    )
+
 print("%d passed, %d failed" % (passed, failed))
 sys.exit(1 if failed else 0)
