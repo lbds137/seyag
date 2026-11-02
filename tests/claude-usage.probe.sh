@@ -1210,10 +1210,11 @@ fixture_no5h() {
 fixture_no5h 50 7
 printf '#!/bin/sh\nexit 0\n' > "$tmp/.local/bin/zai-usage"
 out=$(run)
-[[ $out == "week 50% (resets "*" · Fable 7% of its own weekly cap" ]] && [[ $out != *5h* ]] \
+# Outside the reset text: "resets ... in 3d 15h" holds a 5h on some hours.
+[[ $out == "week 50% (resets "*" · Fable 7% of its own weekly cap" ]] && [[ ${out//(*)/} != *5h* ]] \
     && ok "no 5h window: plain line has no 5h part" || bad "no 5h plain line: $out"
 out_all=$(run --all)
-[[ $(sed -n 1p <<< "$out_all") == "Anthropic plan: week 50% (resets "*" · Fable 7% of its own weekly cap" ]] && [[ $out_all != *5h* ]] \
+[[ $(sed -n 1p <<< "$out_all") == "Anthropic plan: week 50% (resets "*" · Fable 7% of its own weekly cap" ]] && [[ ${out_all//(*)/} != *5h* ]] \
     && ok "no 5h window: --all plan line has no 5h part" || bad "no 5h --all: $out_all"
 
 fixture_no5h 2 0

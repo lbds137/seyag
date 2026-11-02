@@ -157,8 +157,16 @@
 #   - A substitution on `--body`/`-b`/`body=` that is not a plain `cat PATH`
 #     or `< PATH` with a literal unquoted path (e.g. `--body "$(cat "$F")"`)
 #     is not read as a file by rule 2 and stays as literal text.
-#   - A `&` or `|` in a quoted URL or an earlier field value ends the simple
-#     command for the `IS_POST_PR_API` check.
+#   - A `;`, `&`, or `|` in a quoted URL, an earlier field value, or an
+#     earlier argument (e.g. `--title "a | b"`) ends the simple command for
+#     the `IS_POST_PR_API` check and the `-b`/`-F` short-flag paths.
+#   - A backslash-newline line continuation before `-b` on the
+#     `-b "$(cat <<'EOF' … EOF)"` heredoc form is not matched by the
+#     TAG-aware heredoc capture (which reads `CMD` rather than `CMD_JOINED`
+#     so a trailing backslash on a quoted-heredoc line cannot hide the
+#     terminator, and keeps `GH_PR_CMD_PREFIX` free of nested
+#     quantifiers); a heredoc body there that also carries an inner `"` falls
+#     through to the `[^"]*` arm and truncates at that quote.
 #
 #   The bullets above are misses. The bullets BELOW are deliberate
 #   under-blocking — choices not to over-block. Append a new miss above this
@@ -257,18 +265,24 @@ extract_pr_body() {
   # body (inline, BODY_FROM_FILE stays 0), then `< PATH` after `-`, then
   # `cat PATH |` before `gh`.
   if [ "$body_file" = "-" ]; then
-    body=$(printf '%s' "$CMD_JOINED" | grep -zoP -- '(?m)^(?=[^\n]*(?:--body-file[= ]+|-F(?:=|[ \t]*))-(?:[ \t]|$))[^\n]*?(?<!<)<<(?!<)-?[ \t]*[\x27"]?(\w+)[\x27"]?[^\n]*\n\K(?s:.*?)(?=\n\1(?:\n|$))' | head -zn1 | tr -d '\0')
+    # Raw text first: a joined body could hide its terminator. The joined text
+    # then finds an opener on a continuation line of the gh command.
+    body=""
+    for stdin_text in "$CMD" "$CMD_JOINED"; do
+      [ -z "$body" ] || break
+      body=$(printf '%s' "$stdin_text" | grep -zoP -- '(?m)^(?=[^\n]*\bgh\b[^\n;&|]*\b(?:pr[ \t]+(?:create|edit)|api)\b[^\n;&|]*?(?:--body-file[= ]+|-F(?:=|[ \t]*))-(?:[ \t]|$))[^\n]*?(?<!<)<<(?!<)-?[ \t]*[\x27"]?(\w+)[\x27"]?[^\n]*\n\K(?s:.*?)(?=\n\t*\1(?:\n|$))' | head -zn1 | tr -d '\0')
+    done
     if [ -n "$body" ]; then
       BODY_TEXT="$body"
       return 0
     fi
-    body_file=$(printf '%s' "$CMD" | grep -oP -- '(?:--body-file[= ]+|-F(?:=|[[:space:]]*))-[^\n;&|<>]*?(?<!<)<(?!<)[[:space:]]*\K[^\s'"'"'"<>|$()]+')
+    body_file=$(printf '%s' "$CMD_JOINED" | grep -oP -- '\bgh\b[^\n;&|]*\b(?:pr[[:space:]]+(?:create|edit)|api)\b[^\n;&|]*?(?:--body-file[= ]+|-F(?:=|[[:space:]]*))-[^\n;&|<>]*?(?<!<)<(?!<)[[:space:]]*\K[^\s'"'"'"<>|$()]+')
     rc=$?
     if [ "$rc" -gt 1 ]; then
       return 3
     fi
     if [ -z "$body_file" ]; then
-      body_file=$(printf '%s' "$CMD" | grep -oP -- '\bcat[[:space:]]+\K[^\s'"'"'"<>|$()]+(?=[ \t]*\|[^\n;&|]*\bgh\b)')
+      body_file=$(printf '%s' "$CMD_JOINED" | grep -oP -- '\bcat[[:space:]]+\K[^\s'"'"'"<>|$()]+(?=[ \t]*\|[^\n;&|]*\bgh\b[^\n;&|]*\b(?:pr[[:space:]]+(?:create|edit)|api)\b[^\n;&|]*?(?:--body-file[= ]+|-F(?:=|[[:space:]]*))-(?:[[:space:];&|<>]|$))')
       rc=$?
       if [ "$rc" -gt 1 ]; then
         return 3
@@ -326,7 +340,7 @@ extract_pr_body() {
   # `\K` after the opener's newline and a lookahead on the `\1` terminator line
   # capture only the body lines themselves; non-matching commands fall through.
   # shellcheck disable=SC2016
-  body=$(printf '%s' "$CMD_JOINED" | grep -zoP -- '(?:--body(?:=|[[:space:]]+)|(?:-f|-F|--field|--raw-field)[[:space:]]+body=|'"${GH_PR_CMD_PREFIX}"'-b(?:=|[[:space:]]*))"\$\(cat[[:space:]]*<<-?[ \t]*[\x27"]?(\w+)[\x27"]?[ \t]*\n\K(?s:.*?)(?=\n\1(?:\n|\)|$))' | head -zn1 | tr -d '\0')
+  body=$(printf '%s' "$CMD" | grep -zoP -- '(?:--body(?:=|[[:space:]]+)|(?:-f|-F|--field|--raw-field)[[:space:]]+body=|'"${GH_PR_CMD_PREFIX}"'-b(?:=|[[:space:]]*))"\$\(cat[[:space:]]*<<-?[ \t]*[\x27"]?(\w+)[\x27"]?[ \t]*\n\K(?s:.*?)(?=\n\1(?:\n|\)|$))' | head -zn1 | tr -d '\0')
   if [ -n "$body" ]; then BODY_TEXT="$body"; return 0; fi
   body=$(printf '%s' "$CMD" | grep -zoP -- '--body="\K[^"]*' | head -zn1 | tr -d '\0')
   if [ -n "$body" ]; then BODY_TEXT="$body"; return 0; fi
@@ -486,14 +500,14 @@ run_ref_check() {
 # span a newline, which keeps this conservative (a claim verb on one line and
 # an unrelated id on a later line never matches).
 #
-# Both alternations carry a negative lookbehind so a longer word ending in a
-# verb or an id does not match: `(?<![A-Za-z])` keeps `discloses`/`encloses`
-# from matching the `closes` verb, and `(?<![A-Za-z-])` keeps `SUBTASK-100`
-# and `asciidoc-12` from matching an id. The `-` in the id class is what
-# rejects a hyphenated prefix token (`SUB-TASK-100`). The id lookbehind sits
-# AFTER the `[\x60*_(\[]*` wrapper class, so a backticked or bracketed id
-# still matches — the wrapper char, not a letter, is what precedes the id.
-# grep runs this with -i; probed, the lookbehinds are not widened by it.
+# Both alternations carry a negative lookbehind so a longer or hyphenated word
+# ending in a verb or an id does not match: `(?<![A-Za-z-])` keeps
+# `discloses`/`encloses`/`pre-fix` from matching a closing verb, and keeps
+# `SUBTASK-100` and `asciidoc-12` from matching an id. The `-` in the class is
+# what rejects a hyphenated prefix token (`pre-fix`, `SUB-TASK-100`). The id
+# lookbehind sits AFTER the `[\x60*_(\[]*` wrapper class, so a backticked or
+# bracketed id still matches — the wrapper char, not a letter, is what precedes
+# the id. grep runs this with -i; probed, the lookbehinds are not widened by it.
 #
 # The trailing `(…)*` chain picks up a comma/`and`-separated RUN of ids after
 # one verb. Without it the `{0,3}` window capped a span at ~4 ids and the
@@ -503,7 +517,7 @@ run_ref_check() {
 # convention — probed unmatched without it.
 # Probes: "discloses", "SUBTASK", backticked-id, five-chained-ids, and
 # colon-after-verb cases.
-REF_PATTERN='(?<![A-Za-z])(?:(?:filed as|tracked in|closes|completes|finishes):?(?:[ \t]+[^ \t]+){0,3}|(?:close[d]?|fix(?:es|ed)?|resolve[sd]?):?)[ \t]+[\x60*_(\[]*(?<![A-Za-z-])(TASK-[0-9]+|doc-[0-9]+)([\x60*_)\]]*[ \t]*[,;]?[ \t]*(and[ \t]+)?[\x60*_(\[]*(?<![A-Za-z-])(TASK-[0-9]+|doc-[0-9]+))*'
+REF_PATTERN='(?<![A-Za-z-])(?:(?:filed as|tracked in|closes|completes|finishes):?(?:[ \t]+[^ \t]+){0,3}|(?:close[d]?|fix(?:es|ed)?|resolve[sd]?):?)[ \t]+[\x60*_(\[]*(?<![A-Za-z-])(TASK-[0-9]+|doc-[0-9]+)([\x60*_)\]]*[ \t]*[,;]?[ \t]*(and[ \t]+)?[\x60*_(\[]*(?<![A-Za-z-])(TASK-[0-9]+|doc-[0-9]+))*'
 REF_SPANS=$(printf '%s' "$SCAN_TEXT" | grep -oPi "$REF_PATTERN")
 RC=$?
 if [ "$RC" -gt 1 ]; then
