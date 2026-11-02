@@ -9,11 +9,11 @@
 #                             a disabled_reason while not enabled (enabled + reason + under the limit
 #                             passes the gate, so it shows the balance)
 #   claude-usage --ok [PCT]   exit 0 if the 5h window (when the plan has one) is below PCT% (default 90), the week is under 75% and
-#                             the calling session's model (Fable) has its own weekly cap left, else 1;
-#                             CLAUDE_USAGE_EXTRA_OK=1 passes past the weekly reserve while extra usage is on
-#                             and under its spend limit (cache at most 2 TTLs or 10 min old);
+#                             the calling session's model (Fable) has its own weekly cap left, else 1 (a cache older than CLAUDE_USAGE_GATE_MAX_AGE seconds, default 21600, or with no weekly figure fails with meter=cache; a reading from before its own reset counts as 0 for the gate);
+#                             CLAUDE_USAGE_EXTRA_OK=1 passes past the weekly reserve while extra usage is on, under its spend limit,
+#                             and spend.used is under the budget from SYG_EXTRA_USAGE_BUDGET_CMD (timeout SYG_EXTRA_USAGE_BUDGET_CMD_TIMEOUT, default 10 s) or SYG_EXTRA_USAGE_BUDGET_USD (cache at most 2 TTLs or 10 min old);
 #                             on the z.ai lane the same thresholds apply to z.ai's own quota, with the 5h one capped at 80% (Tzurot's
-#                             guests get the band above it) and the week reserve overridable via CLAUDE_USAGE_ZAI_WEEK_RESERVE_CMD (integer 1-99, must return promptly) or CLAUDE_USAGE_ZAI_WEEK_RESERVE;
+#                             guests get the band above it), the week reserve overridable via CLAUDE_USAGE_ZAI_WEEK_RESERVE_CMD (integer 1-99, must return promptly) or CLAUDE_USAGE_ZAI_WEEK_RESERVE, and a quota cache over 30 minutes old treated as unavailable;
 #                             other routed lanes (OpenRouter, a Console API key) pass at once (see below);
 #                             prints one verdict line to stderr (lane, meter, value, threshold,
 #                             source=api|estimate|none; a plan with no 5h window names meter=week and has no 5h= token; says FAIL-OPEN when it passed on an estimate)
@@ -227,6 +227,16 @@ if [ "${1:-}" = --ok ] && [ "$routed" = 1 ]; then
         echo "claude-usage: --ok pass lane=zai meter=zai-5h source=estimate FAIL-OPEN: z.ai quota API unavailable, local estimate never blocks; gate passes" >&2
         exit 0
     fi
+    zas_of=$(jq -r 'if (.as_of | type) == "number" then (.as_of | floor) else empty end' <<< "$zai" 2>/dev/null)
+    zstale_note=""
+    if [[ $zas_of =~ ^[0-9]+$ ]]; then
+        zai_age=$(( $(date +%s) - zas_of ))
+        if [ "$zai_age" -gt 1800 ]; then
+            echo "claude-usage: --ok pass lane=zai meter=zai-5h source=estimate FAIL-OPEN: z.ai quota cache $((zai_age / 60))m old, local estimate never blocks; gate passes" >&2
+            exit 0
+        fi
+        [ "$zai_age" -gt "$ttl" ] && zstale_note=" (cache $((zai_age / 60))m old)"
+    fi
     zfive=$(jq -r '.five_hour_pct // 0' <<< "$zai"); zweek=$(jq -r '.week_pct // 0' <<< "$zai")
     zai_week_reserve=$week_reserve
     if [ -n "${CLAUDE_USAGE_ZAI_WEEK_RESERVE_CMD:-}" ]; then
@@ -245,10 +255,10 @@ if [ "${1:-}" = --ok ] && [ "$routed" = 1 ]; then
         zfive_op=">="; [ "$zfive" -lt "$zlimit" ] 2>/dev/null && zfive_op="<"
         zweek_op=">="; [ "$zweek" -lt "$zai_week_reserve" ] 2>/dev/null && zweek_op="<"
         zmeter="zai-5h"; [ "$zfive" -lt "$zlimit" ] 2>/dev/null && zmeter="week"
-        echo "claude-usage: --ok FAIL lane=zai meter=$zmeter 5h=${zfive}%${zfive_op}${zlimit}% week=${zweek}%${zweek_op}${zai_week_reserve}% source=api" >&2
+        echo "claude-usage: --ok FAIL lane=zai meter=$zmeter 5h=${zfive}%${zfive_op}${zlimit}% week=${zweek}%${zweek_op}${zai_week_reserve}% source=api${zstale_note}" >&2
         exit 1
     fi
-    echo "claude-usage: --ok pass lane=zai meter=zai-5h 5h=${zfive}%<${zlimit}% week=${zweek}%<${zai_week_reserve}% source=api" >&2
+    echo "claude-usage: --ok pass lane=zai meter=zai-5h 5h=${zfive}%<${zlimit}% week=${zweek}%<${zai_week_reserve}% source=api${zstale_note}" >&2
     exit 0
 fi
 
@@ -419,15 +429,44 @@ extra_usage_field() {
         else empty end' "$cache" 2>/dev/null
 }
 
+# Read the extra-usage budget into global extra_budget at most once per process (run in the
+# parent shell, never inside $(...)): SYG_EXTRA_USAGE_BUDGET_CMD (timeout SYG_EXTRA_USAGE_BUDGET_CMD_TIMEOUT,
+# default 10 s; wins the slot in success and failure, with no fallback to the env value) else
+# SYG_EXTRA_USAGE_BUDGET_USD, matched against ^[0-9]+([.][0-9]+)?$ under LC_ALL=C.
+extra_budget=""
+extra_budget_read=0
+read_extra_budget() {
+    [ "$extra_budget_read" = 1 ] && return 0
+    extra_budget_read=1
+    extra_budget=""
+    local t=10 tmp out rc
+    if [ -n "${SYG_EXTRA_USAGE_BUDGET_CMD:-}" ]; then
+        if [[ ${SYG_EXTRA_USAGE_BUDGET_CMD_TIMEOUT:-} =~ ^[0-9]+$ ]] && [ "$((10#$SYG_EXTRA_USAGE_BUDGET_CMD_TIMEOUT))" -gt 0 ]; then
+            t=$((10#$SYG_EXTRA_USAGE_BUDGET_CMD_TIMEOUT))
+        fi
+        tmp=$(mktemp 2>/dev/null) || return 0
+        timeout -k 1 "$t" bash -c "$SYG_EXTRA_USAGE_BUDGET_CMD" </dev/null >"$tmp" 2>/dev/null
+        rc=$?
+        out=$(<"$tmp")
+        rm -f "$tmp"
+        out=${out#"${out%%[![:space:]]*}"}
+        out=${out%"${out##*[![:space:]]}"}
+        if [ "$rc" -eq 0 ] && [[ $out != *$'\n'* ]] && LC_ALL=C awk -v b="$out" 'BEGIN{exit !(b ~ /^[0-9]+([.][0-9]+)?$/)}'; then
+            extra_budget=$out
+        fi
+    elif [ -n "${SYG_EXTRA_USAGE_BUDGET_USD:-}" ] \
+        && [[ $SYG_EXTRA_USAGE_BUDGET_USD != *$'\n'* ]] \
+        && LC_ALL=C awk -v b="$SYG_EXTRA_USAGE_BUDGET_USD" 'BEGIN{exit !(b ~ /^[0-9]+([.][0-9]+)?$/)}'; then
+        extra_budget=$SYG_EXTRA_USAGE_BUDGET_USD
+    fi
+}
+
 # The extra-usage figure the plain line's ` · extra …` and an extra-usage --ok pass's
-# ` extra=…` both end in: under a valid SYG_EXTRA_USAGE_BUDGET_USD (anything else counts
-# as unset) "$X.XX over $B.BB" past it or "$X.XX left of $B.BB" under it, "$X.XX used"
-# without one. $1 is used_usd; a missing spend counts as 0.
+# ` extra=…` both end in, from global extra_budget (set by read_extra_budget in the parent
+# shell): "$X.XX over $B.BB" past it or "$X.XX left of $B.BB" under it, "$X.XX used"
+# without one. $1 is used_usd; a missing spend counts as 0 on the plain line.
 extra_figure() {
-    local used=${1:-0} budget=""
-    [ -n "${SYG_EXTRA_USAGE_BUDGET_USD:-}" ] \
-        && LC_ALL=C awk -v b="$SYG_EXTRA_USAGE_BUDGET_USD" 'BEGIN{exit !(b ~ /^[0-9]+([.][0-9]+)?$/)}' \
-        && budget=$SYG_EXTRA_USAGE_BUDGET_USD
+    local used=${1:-0} budget=$extra_budget
     if [ -n "$budget" ]; then
         if LC_ALL=C awk -v u="$used" -v b="$budget" 'BEGIN{exit !(u > b)}'; then
             LC_ALL=C awk -v u="$used" -v b="$budget" 'BEGIN{printf "$%.2f over $%.2f", u, b}'
@@ -444,12 +483,36 @@ case "${1:-}" in
         # A week at the reserve blocks everything, whatever the 5h window says, unless the extra-usage
         # opt-in below applies: the last 25% is reserved for the owner and GitHub claude-review.
         # --wait then keeps polling until the weekly reset instead of waking on each fresh 5h window.
-        # CLAUDE_USAGE_EXTRA_OK=1 lifts the weekly reserve while the plan's extra usage is on and under its spend limit.
-        # That pass spends money, so it fails closed: strict booleans only, and never on a cache older
-        # than two TTLs or 10 minutes, whichever is less.
-        cache_age=$(( $(date +%s) - $(stat -c %Y "$cache" 2>/dev/null || echo 0) ))
+        # CLAUDE_USAGE_EXTRA_OK=1 lifts the weekly reserve while the plan's extra usage is on, under its
+        # spend limit, and has a spend reading strictly under the budget from SYG_EXTRA_USAGE_BUDGET_CMD
+        # (wins in success and failure, no fallback) or SYG_EXTRA_USAGE_BUDGET_USD. That pass spends
+        # money, so it fails closed: strict booleans, a readable spend and budget, and never on a cache
+        # older than two TTLs or 10 minutes, whichever is less.
+        cache_mtime=$(stat -c %Y "$cache" 2>/dev/null || echo 0)
+        now=$(date +%s)
+        cache_age=$(( now - cache_mtime ))
+        gate_max_age=21600
+        if [[ ${CLAUDE_USAGE_GATE_MAX_AGE:-} =~ ^[0-9]+$ ]] && [ "$((10#$CLAUDE_USAGE_GATE_MAX_AGE))" -ge "$ttl" ]; then
+            gate_max_age=$((10#$CLAUDE_USAGE_GATE_MAX_AGE))
+        fi
+        if [ "$cache_age" -gt "$gate_max_age" ]; then
+            echo "claude-usage: --ok FAIL lane=anthropic meter=cache cache=$((cache_age / 60))m>$((gate_max_age / 60))m source=none: the usage refresh keeps failing" >&2
+            exit 1
+        fi
+        if ! jq -e '(.seven_day.utilization | type) == "number"' "$cache" >/dev/null 2>&1; then
+            echo "claude-usage: --ok FAIL lane=anthropic meter=cache source=none: the usage cache holds no weekly figure" >&2
+            exit 1
+        fi
         stale_note=""
         [ "$cache_age" -gt "$ttl" ] && stale_note=" (cache $((cache_age / 60))m old)"
+        if [ "${week_reset:-0}" -gt 0 ] && [ "$cache_mtime" -lt "$week_reset" ] && [ "$week_reset" -le "$now" ]; then
+            week=0
+            stale_note="$stale_note (week reset since cache)"
+        fi
+        if [ "${five_reset:-0}" -gt 0 ] && [ "$cache_mtime" -lt "$five_reset" ] && [ "$five_reset" -le "$now" ]; then
+            five=0
+            stale_note="$stale_note (5h reset since cache)"
+        fi
         thr=${2:-90}
         if [ "$no_five" = 1 ] && ! [ "$thr" -eq "$thr" ] 2>/dev/null; then
             echo "claude-usage: --ok FAIL lane=anthropic meter=pct PCT is not an integer" >&2
@@ -458,11 +521,13 @@ case "${1:-}" in
         pass_meter="5h"
         [ "$no_five" = 1 ] && pass_meter="week"
         week_op="<"
+        extra_used=""
         if ! { { [ "$no_five" = 1 ] || [ "$five" -lt "$thr" ]; } && [ "$week" -lt "$week_reserve" ]; } 2>/dev/null; then
             five_op=">="; [ "$five" -lt "$thr" ] 2>/dev/null && five_op="<"
             week_op=">="; [ "$week" -lt "$week_reserve" ] 2>/dev/null && week_op="<"
             meter="5h"; { [ "$no_five" = 1 ] || [ "$five" -lt "$thr" ]; } 2>/dev/null && meter="week"
             extra_note=""
+            extra_hint=""
             if [ "$meter" = week ] && [ "${CLAUDE_USAGE_EXTRA_OK:-}" = 1 ]; then
                 # The reason is the API's own token, reduced to [A-Za-z0-9_.-] so it can't break the verdict line.
                 extra_state=$(jq -r '
@@ -477,6 +542,24 @@ case "${1:-}" in
                     extra_state="off:stale"
                 fi
                 if [ "$extra_state" = ok ]; then
+                    ex_json=$(extra_usage_field)
+                    if [ -n "$ex_json" ] && [[ $ex_json != *$'\n'* ]]; then
+                        extra_used=$(jq -r '.extra_usage.used_usd // empty' <<< "$ex_json" 2>/dev/null)
+                    fi
+                    if [ -z "$extra_used" ]; then
+                        extra_state="off:no spend reading"
+                    else
+                        read_extra_budget
+                        if [ -z "$extra_budget" ]; then
+                            extra_state="off:no budget"
+                            extra_hint=": no readable budget; set SYG_EXTRA_USAGE_BUDGET_CMD or SYG_EXTRA_USAGE_BUDGET_USD, or re-anchor what the command reads"
+                        elif LC_ALL=C awk -v u="$extra_used" -v b="$extra_budget" 'BEGIN{exit !(u >= b)}'; then
+                            extra_state="off:over budget"
+                            extra_hint=$(LC_ALL=C awk -v u="$extra_used" -v b="$extra_budget" 'BEGIN{printf ": $%.2f used of $%.2f; re-anchor the budget source after a purchase", u, b}')
+                        fi
+                    fi
+                fi
+                if [ "$extra_state" = ok ]; then
                     pass_meter="extra-usage"
                 else
                     extra_reason=${extra_state#off:}
@@ -487,7 +570,7 @@ case "${1:-}" in
             if [ "$pass_meter" != extra-usage ]; then
                 five_tok=" 5h=${five}%${five_op}${thr}%"
                 [ "$no_five" = 1 ] && five_tok=""
-                echo "claude-usage: --ok FAIL lane=anthropic meter=$meter${five_tok} week=${week}%${week_op}${week_reserve}%${extra_note} source=api${stale_note}" >&2
+                echo "claude-usage: --ok FAIL lane=anthropic meter=$meter${five_tok} week=${week}%${week_op}${week_reserve}%${extra_note} source=api${stale_note}${extra_hint}" >&2
                 exit 1
             fi
         fi
@@ -505,15 +588,10 @@ case "${1:-}" in
             done < <(sed 's/, /\n/g; s/%//g' <<< "$scoped" | grep .)
         fi
         # An extra-usage pass names its balance: extra_figure() under the same budget
-        # var the plain line uses. Every other pass line stays as it was.
+        # read_extra_budget loaded above. Every other pass line stays as it was.
         extra_bal=""
         if [ "$pass_meter" = extra-usage ]; then
-            ex_json=$(extra_usage_field)
-            if [ -n "$ex_json" ] && [[ $ex_json != *$'\n'* ]]; then
-                ex_used=0
-                eval "$(jq -r '.extra_usage as $x | @sh "ex_used=\($x.used_usd // 0)"' <<< "$ex_json" 2>/dev/null)"
-                extra_bal=" extra=$(extra_figure "$ex_used")"
-            fi
+            extra_bal=" extra=$(extra_figure "$extra_used")"
         fi
         five_tok=" 5h=${five}%<${thr}%"
         [ "$no_five" = 1 ] && five_tok=""
@@ -581,7 +659,10 @@ case "${1:-}" in
                 ex_show=0
                 [ "$week" -ge 100 ] 2>/dev/null && ex_show=1
                 LC_ALL=C awk -v u="$ex_used" 'BEGIN{exit !(u > 0)}' && ex_show=1
-                [ "$ex_show" = 1 ] && extra_tail=" · extra $(extra_figure "$ex_used")"
+                if [ "$ex_show" = 1 ]; then
+                    read_extra_budget
+                    extra_tail=" · extra $(extra_figure "$ex_used")"
+                fi
             fi
         fi
         echo "$note$(plan_line)$extra_tail$tail"

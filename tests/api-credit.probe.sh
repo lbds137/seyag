@@ -456,6 +456,8 @@ echo '{"data":[{"starting_at":"2026-10-08T00:00:00Z","ending_at":"2026-10-09T00:
 echo '{"data":[{"starting_at":"2026-10-05T00:00:00Z","ending_at":"2026-10-06T00:00:00Z","results":[{"currency":"USD","amount":"370.289"}]}],"has_more":true,"next_page":"p2"}' > "$T/cr/paged1.json"
 echo '{"data":[{"starting_at":"2026-10-08T00:00:00Z","ending_at":"2026-10-09T00:00:00Z","results":[{"currency":"USD","amount":"1000"}]}],"has_more":false}' > "$T/cr/paged2.json"
 echo '{"data":[{"starting_at":"2026-10-05T00:00:00Z","ending_at":"2026-10-06T00:00:00Z","results":[{"currency":"USD","amount":"1"}]}],"has_more":true,"next_page":"same"}' > "$T/cr/loop.json"
+echo '{"data":[{"starting_at":"2026-10-05T00:00:00Z","ending_at":"2026-10-06T00:00:00Z","results":[{"currency":"USD","amount":"370.289"}]}],"has_more":true,"next_page":null}' > "$T/cr/truncnull.json"
+echo '{"data":[{"starting_at":"2026-10-05T00:00:00Z","ending_at":"2026-10-06T00:00:00Z","results":[{"currency":"USD","amount":"370.289"}]}],"has_more":true,"next_page":""}' > "$T/cr/truncempty.json"
 echo '{"data":[{"starting_at":"2026-10-07T00:00:00Z","ending_at":"2026-10-08T00:00:00Z","results":[{"currency":"USD","amount":"1000"}]}],"has_more":false}' > "$T/cr/lag.json"
 echo '{"data":[],"has_more":false}' > "$T/cr/nobucket.json"
 echo '{"data":[{"starting_at":"2026-10-08T00:00:00Z","results":[{"currency":"USD","amount":"100"}]},{"starting_at":"later","results":[{"currency":"USD","amount":"500"}]}],"has_more":false}' > "$T/cr/nostart.json"
@@ -1641,5 +1643,17 @@ if jq -e '.source=="provider" and .estimate==true and .provider_subday==true and
   && near "$(jq .remaining_usd <<< "$b39")" 145; then
   ok "anchored sub-day grant: a 10-13T12:00 grant on the 10-13 bucket day -> estimate true, provider_subday true (the anchor's own mid-day instant exempt)"
 else bad "anchored sub-day: $b39"; fi
+
+# 40. Truncated cost_report page (has_more true without a non-empty next_page string) -> labeled ledger fallback.
+echo truncnull > "$T/cr/mode"
+b=$(lv truncnull balance --json)
+jq -e '.source=="ledger" and .estimate==true and .spent_usd==7.5 and .remaining_usd==92.5 and .provider_as_of==null' <<< "$b" > /dev/null \
+  && ok "provider pages: has_more true with next_page null -> labeled ledger fallback" \
+  || bad "provider pages truncnull: $b"
+echo truncempty > "$T/cr/mode"
+b=$(lv truncempty balance --json)
+jq -e '.source=="ledger" and .estimate==true and .spent_usd==7.5 and .remaining_usd==92.5 and .provider_as_of==null' <<< "$b" > /dev/null \
+  && ok "provider pages: has_more true with empty next_page -> labeled ledger fallback" \
+  || bad "provider pages truncempty: $b"
 
 exit $fail

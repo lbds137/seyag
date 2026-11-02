@@ -913,7 +913,9 @@ def parse_cost_page(doc):
         # An unknown amount makes the sum unknown: fall back rather than undercount.
         raise ValueError("%d unparsable USD amount(s)" % bad)
     nxt = doc.get("next_page")
-    more = doc.get("has_more") is True and isinstance(nxt, str) and bool(nxt)
+    more = doc.get("has_more") is True
+    if more and (not isinstance(nxt, str) or not nxt):
+        raise ValueError("cost_report has_more without next_page")
     return total, last, more, nxt, days
 
 

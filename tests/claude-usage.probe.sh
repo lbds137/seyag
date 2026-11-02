@@ -8,7 +8,9 @@
 # usage-sweep --points consumes the readings log it writes. Also: the caller's model read from its
 # session transcript, and --json's scoped string escaping. Also: --all's three lane lines and their
 # degrades, --json's lane fields, OpenRouter dollars read-only from the statusline's credits cache,
-# and per-deployment z.ai week reserve overrides (CLAUDE_USAGE_ZAI_WEEK_RESERVE_CMD / _WEEK_RESERVE).
+# per-deployment z.ai week reserve overrides (CLAUDE_USAGE_ZAI_WEEK_RESERVE_CMD / _WEEK_RESERVE),
+# the extra-usage budget stop (SYG_EXTRA_USAGE_BUDGET_CMD / SYG_EXTRA_USAGE_BUDGET_USD), and the
+# gate's cache-age / missing-weekly-figure stop (meter=cache) and passed-reset rows.
 # Usage: tests/claude-usage.probe.sh   (from anywhere; never touches the real cache, settings or API)
 
 set -uo pipefail
@@ -99,10 +101,11 @@ out=$(run --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
 [ $rc = 0 ] && [ -z "$out" ] && [ "$err" = "claude-usage: --ok pass lane=anthropic meter=5h 5h=10%<90% week=50%<75% source=api (cache 10m old)" ] \
     && ok "stale cache (10m old, refresh fails): --ok appends (cache 10m old) to verdict" || bad "stale cache verdict: rc=$rc out=[$out] err=[$err]"
 
-# Paid extra usage opt-in (CLAUDE_USAGE_EXTRA_OK=1): lifts only the weekly reserve while extra_usage is enabled and under spend limit.
-fixture_extra 10 98 0 true false null
-out=$(CLAUDE_USAGE_EXTRA_OK=1 run --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
-[ $rc = 0 ] && [ -z "$out" ] && [ "$err" = "claude-usage: --ok pass lane=anthropic meter=extra-usage 5h=10%<90% week=98%>=75% extra=\$0.00 used source=api" ] \
+# Paid extra usage opt-in (CLAUDE_USAGE_EXTRA_OK=1): lifts only the weekly reserve while extra_usage is enabled, under spend limit, and under budget.
+usd0='{"currency":"USD","amount_minor":0,"exponent":2}'
+fixture_extra 10 98 0 true false null "$usd0"
+out=$(CLAUDE_USAGE_EXTRA_OK=1 SYG_EXTRA_USAGE_BUDGET_USD=100 run --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 0 ] && [ -z "$out" ] && [ "$err" = "claude-usage: --ok pass lane=anthropic meter=extra-usage 5h=10%<90% week=98%>=75% extra=\$100.00 left of \$100.00 source=api" ] \
     && ok "extra-usage opted in + on at week 98%: passes with meter=extra-usage" || bad "extra-usage pass: rc=$rc out=[$out] err=[$err]"
 fixture_extra 10 98 0 false false out_of_credits
 out=$(CLAUDE_USAGE_EXTRA_OK=1 run --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
@@ -127,18 +130,18 @@ fixture_extra 95 98 0 true false null
 out=$(CLAUDE_USAGE_EXTRA_OK=1 run --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
 [ $rc = 1 ] && [ -z "$out" ] && [ "$err" = "claude-usage: --ok FAIL lane=anthropic meter=5h 5h=95%>=90% week=98%>=75% source=api" ] \
     && ok "extra-usage opted in + 5h 95%: fails with meter=5h, no suffix" || bad "extra-usage 5h 95%: rc=$rc out=[$out] err=[$err]"
-fixture_extra 10 98 100 true false null
-out=$(CLAUDE_USAGE_EXTRA_OK=1 CLAUDE_USAGE_MODEL=claude-fable-5-1 HOME="$tmp" XDG_CACHE_HOME="$tmp" "$CU" --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+fixture_extra 10 98 100 true false null "$usd0"
+out=$(CLAUDE_USAGE_EXTRA_OK=1 SYG_EXTRA_USAGE_BUDGET_USD=100 CLAUDE_USAGE_MODEL=claude-fable-5-1 HOME="$tmp" XDG_CACHE_HOME="$tmp" "$CU" --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
 [ $rc = 1 ] && [ -z "$out" ] && [ "$err" = "claude-usage: --ok FAIL lane=anthropic meter=model-cap model=Fable cap=100%>=100% source=api" ] \
     && ok "extra-usage opted in + Fable cap 100% on Fable: fails with model-cap line" || bad "extra-usage Fable cap: rc=$rc out=[$out] err=[$err]"
 fixture_extra 10 50 0 true false null
 out=$(CLAUDE_USAGE_EXTRA_OK=1 run --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
 [ $rc = 0 ] && [ -z "$out" ] && [ "$err" = "claude-usage: --ok pass lane=anthropic meter=5h 5h=10%<90% week=50%<75% source=api" ] \
     && ok "extra-usage opted in at week 50%: unchanged normal meter=5h pass line" || bad "extra-usage week 50%: rc=$rc out=[$out] err=[$err]"
-# The pass spends money, so it fails closed. extra_raw <5h> <week> <extra_usage JSON>: any shape.
+# The pass spends money, so it fails closed. extra_raw <5h> <week> <extra_usage JSON> [<spend.used json>]: any shape.
 extra_raw() {
     fixture "$1" "$2" 0
-    jq --argjson x "$3" '. + {extra_usage: $x}' "$tmp/claude-statusline/usage.json" > "$tmp/claude-statusline/usage.json.tmp"
+    jq --argjson x "$3" --argjson su "${4:-null}" '. + {extra_usage: $x} + (if $su == null then {} else {spend: {used: $su}} end)' "$tmp/claude-statusline/usage.json" > "$tmp/claude-statusline/usage.json.tmp"
     mv "$tmp/claude-statusline/usage.json.tmp" "$tmp/claude-statusline/usage.json"
 }
 # expect_opt <rc> <stderr line> <label> [extra env ...]: one opted-in --ok 90 run.
@@ -162,15 +165,15 @@ extra_raw 10 98 '[true]'
 expect_opt 1 "$wk98 extra=off (disabled) source=api" "extra-usage: extra_usage an array fails closed"
 extra_raw 10 98 '{"is_enabled": true, "spend_limit_reached": true, "disabled_reason": "x"}'
 expect_opt 1 "$wk98 extra=off (spend_limit_reached) source=api" "extra-usage: spend_limit_reached wins over disabled_reason"
-extra_raw 10 98 '{"is_enabled": true, "spend_limit_reached": false, "disabled_reason": "x"}'
-expect_opt 0 "claude-usage: --ok pass lane=anthropic meter=extra-usage 5h=10%<90% week=98%>=75% extra=\$0.00 used source=api" "extra-usage: on and under the limit passes whatever disabled_reason says"
+extra_raw 10 98 '{"is_enabled": true, "spend_limit_reached": false, "disabled_reason": "x"}' "$usd0"
+expect_opt 0 "claude-usage: --ok pass lane=anthropic meter=extra-usage 5h=10%<90% week=98%>=75% extra=\$100.00 left of \$100.00 source=api" "extra-usage: on and under the limit passes whatever disabled_reason says" SYG_EXTRA_USAGE_BUDGET_USD=100
 extra_raw 10 98 '{"is_enabled": false, "spend_limit_reached": false, "disabled_reason": "a b\nFAKE ok"}'
 expect_opt 1 "$wk98 extra=off (a_b_FAKE_ok) source=api" "extra-usage: disabled_reason reduced to [A-Za-z0-9_.-]"
 # Boundaries: 5h exactly at the threshold stays a 5h fail; the week exactly at the reserve takes the extra pass.
 extra_raw 90 98 '{"is_enabled": true, "spend_limit_reached": false}'
 expect_opt 1 "claude-usage: --ok FAIL lane=anthropic meter=5h 5h=90%>=90% week=98%>=75% source=api" "extra-usage: 5h at the threshold still fails on 5h"
-extra_raw 10 75 '{"is_enabled": true, "spend_limit_reached": false}'
-expect_opt 0 "claude-usage: --ok pass lane=anthropic meter=extra-usage 5h=10%<90% week=75%>=75% extra=\$0.00 used source=api" "extra-usage: week at the reserve passes on extra usage"
+extra_raw 10 75 '{"is_enabled": true, "spend_limit_reached": false}' "$usd0"
+expect_opt 0 "claude-usage: --ok pass lane=anthropic meter=extra-usage 5h=10%<90% week=75%>=75% extra=\$100.00 left of \$100.00 source=api" "extra-usage: week at the reserve passes on extra usage" SYG_EXTRA_USAGE_BUDGET_USD=100
 # Only exactly 1 opts in.
 for v in 0 "" 10 true; do
     extra_raw 10 98 '{"is_enabled": true, "spend_limit_reached": false}'
@@ -181,34 +184,92 @@ done
 extra_raw 10 98 '{"is_enabled": true, "spend_limit_reached": false}'; touch -d "@$(($(date +%s) - 600))" "$tmp/claude-statusline/usage.json"
 expect_opt 1 "$wk98 extra=off (stale) source=api (cache 10m old)" "extra-usage: a cache older than two TTLs fails closed"
 # Within two TTLs it still passes, with the age disclosed: 3m old with CLAUDE_USAGE_TTL=120 (> 1 TTL, < 2).
-extra_raw 10 98 '{"is_enabled": true, "spend_limit_reached": false}'; touch -d "@$(($(date +%s) - 180))" "$tmp/claude-statusline/usage.json"
-expect_opt 0 "claude-usage: --ok pass lane=anthropic meter=extra-usage 5h=10%<90% week=98%>=75% extra=\$0.00 used source=api (cache 3m old)" "extra-usage: a cache within two TTLs passes and discloses its age"
+extra_raw 10 98 '{"is_enabled": true, "spend_limit_reached": false}' "$usd0"; touch -d "@$(($(date +%s) - 180))" "$tmp/claude-statusline/usage.json"
+expect_opt 0 "claude-usage: --ok pass lane=anthropic meter=extra-usage 5h=10%<90% week=98%>=75% extra=\$100.00 left of \$100.00 source=api (cache 3m old)" "extra-usage: a cache within two TTLs passes and discloses its age" SYG_EXTRA_USAGE_BUDGET_USD=100
 # A long TTL doesn't stretch it: with CLAUDE_USAGE_TTL=3600 the ceiling is 10 minutes (11m fails, 9m passes).
 extra_raw 10 98 '{"is_enabled": true, "spend_limit_reached": false}'; touch -d "@$(($(date +%s) - 660))" "$tmp/claude-statusline/usage.json"
 expect_opt 1 "$wk98 extra=off (stale) source=api" "extra-usage: TTL 3600, an 11m cache fails closed (10-minute ceiling)" CLAUDE_USAGE_TTL=3600
-extra_raw 10 98 '{"is_enabled": true, "spend_limit_reached": false}'; touch -d "@$(($(date +%s) - 540))" "$tmp/claude-statusline/usage.json"
-expect_opt 0 "claude-usage: --ok pass lane=anthropic meter=extra-usage 5h=10%<90% week=98%>=75% extra=\$0.00 used source=api" "extra-usage: TTL 3600, a 9m cache passes" CLAUDE_USAGE_TTL=3600
+extra_raw 10 98 '{"is_enabled": true, "spend_limit_reached": false}' "$usd0"; touch -d "@$(($(date +%s) - 540))" "$tmp/claude-statusline/usage.json"
+expect_opt 0 "claude-usage: --ok pass lane=anthropic meter=extra-usage 5h=10%<90% week=98%>=75% extra=\$100.00 left of \$100.00 source=api" "extra-usage: TTL 3600, a 9m cache passes" CLAUDE_USAGE_TTL=3600 SYG_EXTRA_USAGE_BUDGET_USD=100
 # --wait inherits the opt-in: at week 98% with extra usage on it returns at once.
-extra_raw 10 98 '{"is_enabled": true, "spend_limit_reached": false}'
-out=$(timeout 5 env CLAUDE_USAGE_EXTRA_OK=1 HOME="$tmp" XDG_CACHE_HOME="$tmp" CLAUDE_USAGE_MODEL=claude-opus-5-5 "$CU" --wait 2>/dev/null); rc=$?
+extra_raw 10 98 '{"is_enabled": true, "spend_limit_reached": false}' "$usd0"
+out=$(timeout 5 env CLAUDE_USAGE_EXTRA_OK=1 SYG_EXTRA_USAGE_BUDGET_USD=100 HOME="$tmp" XDG_CACHE_HOME="$tmp" CLAUDE_USAGE_MODEL=claude-opus-5-5 "$CU" --wait 2>/dev/null); rc=$?
 [ $rc = 0 ] && grep -q "week 98%" <<< "$out" && ok "extra-usage: --wait returns at once when opted in" || bad "extra-usage --wait: rc=$rc out=[$out]"
 
-# The balance suffix (SYG_EXTRA_USAGE_BUDGET_USD, invalid = unset): an extra-usage --ok
-# pass gains ` extra=…` after week=, and the plain line gains ` · extra …` after the plan
-# windows — "$X.XX over $B.BB" past a budget, "$X.XX left of $B.BB" under it, "$X.XX
-# used" without one; a missing spend counts as $0.00. FAIL lines and non-extra pass
-# lines are pinned byte-identical above.
+# The balance suffix and budget gate (SYG_EXTRA_USAGE_BUDGET_CMD / SYG_EXTRA_USAGE_BUDGET_USD):
+# an extra-usage --ok pass requires a readable spend strictly under the budget and gains ` extra=…`
+# after week=; the plain line gains ` · extra …` after the plan windows.
+no_budget_hint="no readable budget; set SYG_EXTRA_USAGE_BUDGET_CMD or SYG_EXTRA_USAGE_BUDGET_USD, or re-anchor what the command reads"
 fixture_extra 10 98 0 true false null '{"currency":"USD","amount_minor":1234,"exponent":2}'
 expect_opt 0 "claude-usage: --ok pass lane=anthropic meter=extra-usage 5h=10%<90% week=98%>=75% extra=\$87.66 left of \$100.00 source=api" \
     "extra-usage pass with a \$100 budget: gains 'extra=\$87.66 left of \$100.00'" SYG_EXTRA_USAGE_BUDGET_USD=100
-expect_opt 0 "claude-usage: --ok pass lane=anthropic meter=extra-usage 5h=10%<90% week=98%>=75% extra=\$12.34 used source=api" \
-    "extra-usage pass without a budget: gains 'extra=\$12.34 used'"
+expect_opt 1 "$wk98 extra=off (no budget) source=api: $no_budget_hint" \
+    "extra-usage without a budget: FAILs with extra=off (no budget) and hint"
 fixture_extra 10 98 0 true false null '{"currency":"USD","amount_minor":6000,"exponent":2}'
-expect_opt 0 "claude-usage: --ok pass lane=anthropic meter=extra-usage 5h=10%<90% week=98%>=75% extra=\$60.00 over \$50.00 source=api" \
-    "extra-usage pass over budget: gains 'extra=\$60.00 over \$50.00'" SYG_EXTRA_USAGE_BUDGET_USD=50
+expect_opt 1 "$wk98 extra=off (over budget) source=api: \$60.00 used of \$50.00; re-anchor the budget source after a purchase" \
+    "extra-usage over budget: FAILs with extra=off (over budget) and hint" SYG_EXTRA_USAGE_BUDGET_USD=50
 fixture_extra 10 98 0 true false null '{"currency":"USD","amount_minor":1234,"exponent":2}'
-expect_opt 0 "claude-usage: --ok pass lane=anthropic meter=extra-usage 5h=10%<90% week=98%>=75% extra=\$12.34 over \$0.00 source=api" \
-    "extra-usage pass with budget 0: gains 'extra=\$12.34 over \$0.00'" SYG_EXTRA_USAGE_BUDGET_USD=0
+expect_opt 1 "$wk98 extra=off (over budget) source=api: \$12.34 used of \$0.00; re-anchor the budget source after a purchase" \
+    "extra-usage with budget 0: FAILs with extra=off (over budget) and hint" SYG_EXTRA_USAGE_BUDGET_USD=0
+# I5 new rows: command vs env, command failure shapes, timeout, boundaries, missing spend, single-run counter, plain line, --wait block.
+fixture_extra 10 98 0 true false null '{"currency":"USD","amount_minor":1234,"exponent":2}'
+expect_opt 0 "claude-usage: --ok pass lane=anthropic meter=extra-usage 5h=10%<90% week=98%>=75% extra=\$87.66 left of \$100.00 source=api" \
+    "extra-usage budget: SYG_EXTRA_USAGE_BUDGET_CMD beats SYG_EXTRA_USAGE_BUDGET_USD" SYG_EXTRA_USAGE_BUDGET_USD=50 SYG_EXTRA_USAGE_BUDGET_CMD='printf " \t100\n "'
+expect_opt 1 "$wk98 extra=off (no budget) source=api: $no_budget_hint" \
+    "extra-usage budget: empty CMD stdout (exit 0) with env set FAILs no budget (no fallback)" SYG_EXTRA_USAGE_BUDGET_USD=100 SYG_EXTRA_USAGE_BUDGET_CMD='true'
+expect_opt 1 "$wk98 extra=off (no budget) source=api: $no_budget_hint" \
+    "extra-usage budget: non-zero CMD exit with valid stdout FAILs no budget" SYG_EXTRA_USAGE_BUDGET_USD=100 SYG_EXTRA_USAGE_BUDGET_CMD='echo 100; exit 1'
+expect_opt 1 "$wk98 extra=off (no budget) source=api: $no_budget_hint" \
+    "extra-usage budget: text CMD stdout FAILs no budget" SYG_EXTRA_USAGE_BUDGET_USD=100 SYG_EXTRA_USAGE_BUDGET_CMD='echo nope'
+expect_opt 1 "$wk98 extra=off (no budget) source=api: $no_budget_hint" \
+    "extra-usage budget: two-line CMD stdout FAILs no budget" SYG_EXTRA_USAGE_BUDGET_USD=100 SYG_EXTRA_USAGE_BUDGET_CMD=$'printf "100\\n200\\n"'
+t0_bcmd=$(date +%s)
+expect_opt 1 "$wk98 extra=off (no budget) source=api: $no_budget_hint" \
+    "extra-usage budget: hanging CMD with TIMEOUT=1 FAILs no budget" SYG_EXTRA_USAGE_BUDGET_USD=100 SYG_EXTRA_USAGE_BUDGET_CMD='sleep 30' SYG_EXTRA_USAGE_BUDGET_CMD_TIMEOUT=1
+[ "$(( $(date +%s) - t0_bcmd ))" -lt 5 ] && ok "extra-usage budget: hanging CMD timed out within 5 s" || bad "extra-usage budget timeout took >= 5 s"
+t0_bcmd=$(date +%s)
+expect_opt 0 "claude-usage: --ok pass lane=anthropic meter=extra-usage 5h=10%<90% week=98%>=75% extra=\$87.66 left of \$100.00 source=api" \
+    "extra-usage budget: CMD with background child ('sleep 30 & echo 100') passes" SYG_EXTRA_USAGE_BUDGET_CMD='sleep 30 & echo 100' SYG_EXTRA_USAGE_BUDGET_CMD_TIMEOUT=1
+[ "$(( $(date +%s) - t0_bcmd ))" -lt 5 ] && ok "extra-usage budget: background child ('sleep 30 & echo 100') finished under 5 s" || bad "extra-usage budget background child took >= 5 s"
+t0_bcmd=$(date +%s)
+out=$( (sleep 30 2>/dev/null &) | env CLAUDE_USAGE_EXTRA_OK=1 SYG_EXTRA_USAGE_BUDGET_CMD='cat; echo 100' SYG_EXTRA_USAGE_BUDGET_CMD_TIMEOUT=1 HOME="$tmp" XDG_CACHE_HOME="$tmp" CLAUDE_USAGE_MODEL=claude-opus-5-5 "$CU" --ok 90 2>"$tmp/err" ); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 0 ] && [ -z "$out" ] && [ "$err" = "claude-usage: --ok pass lane=anthropic meter=extra-usage 5h=10%<90% week=98%>=75% extra=\$87.66 left of \$100.00 source=api" ] && [ "$(( $(date +%s) - t0_bcmd ))" -lt 5 ] \
+    && ok "extra-usage budget: CMD reading stdin ('cat; echo 100') under held-open stdin passes at once" \
+    || bad "extra-usage budget stdin CMD: rc=$rc out=[$out] err=[$err]"
+fixture_extra 10 98 0 true false null '{"currency":"USD","amount_minor":9999,"exponent":2}'
+expect_opt 0 "claude-usage: --ok pass lane=anthropic meter=extra-usage 5h=10%<90% week=98%>=75% extra=\$0.01 left of \$100.00 source=api" \
+    "extra-usage budget: one cent under (\$99.99 of \$100.00) passes" SYG_EXTRA_USAGE_BUDGET_USD=100
+fixture_extra 10 98 0 true false null '{"currency":"USD","amount_minor":10000,"exponent":2}'
+expect_opt 1 "$wk98 extra=off (over budget) source=api: \$100.00 used of \$100.00; re-anchor the budget source after a purchase" \
+    "extra-usage budget: exactly at budget (\$100.00 of \$100.00) FAILs over budget" SYG_EXTRA_USAGE_BUDGET_USD=100
+fixture_extra 10 98 0 true false null '{"currency":"USD","amount_minor":50000,"exponent":2}'
+expect_opt 1 "$wk98 extra=off (over budget) source=api: \$500.00 used of \$100.00; re-anchor the budget source after a purchase" \
+    "extra-usage budget: \$500.00 used of \$100.00 FAILs over budget (audit case)" SYG_EXTRA_USAGE_BUDGET_USD=100
+fixture_extra 10 98 0 true false null
+expect_opt 1 "$wk98 extra=off (no spend reading) source=api" \
+    "extra-usage budget: no spend object FAILs no spend reading with budget set" SYG_EXTRA_USAGE_BUDGET_USD=100
+rm -f "$tmp/bcmd-count"
+fixture_extra 10 98 0 true false null '{"currency":"USD","amount_minor":1234,"exponent":2}'
+expect_opt 0 "claude-usage: --ok pass lane=anthropic meter=extra-usage 5h=10%<90% week=98%>=75% extra=\$87.66 left of \$100.00 source=api" \
+    "extra-usage budget: pass with counter CMD" SYG_EXTRA_USAGE_BUDGET_CMD="echo x >> '$tmp/bcmd-count'; echo 100"
+[ -f "$tmp/bcmd-count" ] && [ "$(wc -l < "$tmp/bcmd-count" | tr -d ' ')" = 1 ] \
+    && ok "extra-usage budget: CMD runs exactly once on an extra-usage pass" \
+    || bad "extra-usage budget counter on pass: $(wc -l < "$tmp/bcmd-count" 2>&1)"
+rm -f "$tmp/bcmd-count"
+fixture_extra 10 50 0 true false null '{"currency":"USD","amount_minor":1234,"exponent":2}'
+CLAUDE_USAGE_EXTRA_OK=1 SYG_EXTRA_USAGE_BUDGET_CMD="echo x >> '$tmp/bcmd-count'; echo 100" run --ok 90 2>/dev/null
+SYG_EXTRA_USAGE_BUDGET_CMD="echo x >> '$tmp/bcmd-count'; echo 100" run --json >/dev/null
+[ ! -e "$tmp/bcmd-count" ] && ok "extra-usage budget: CMD does not run when week is under reserve or on --json" \
+    || bad "extra-usage budget CMD ran when week under reserve or --json"
+fixture_extra 10 99 0 true false null '{"currency":"USD","amount_minor":1234,"exponent":2}'
+out=$(SYG_EXTRA_USAGE_BUDGET_CMD='echo 100' run)
+[[ $out == *' · extra $87.66 left of $100.00' ]] \
+    && ok "plain line with SYG_EXTRA_USAGE_BUDGET_CMD: uses the command's figure" || bad "plain line CMD figure: $out"
+fixture_extra 10 98 0 true false null '{"currency":"USD","amount_minor":6000,"exponent":2}'
+timeout 3 env CLAUDE_USAGE_EXTRA_OK=1 SYG_EXTRA_USAGE_BUDGET_USD=50 HOME="$tmp" XDG_CACHE_HOME="$tmp" CLAUDE_USAGE_MODEL=claude-opus-5-5 "$CU" --wait >/dev/null 2>"$tmp/wait-over.err"; rc=$?
+[ $rc = 124 ] && [ ! -s "$tmp/wait-over.err" ] \
+    && ok "extra-usage: --wait at over-budget keeps blocking (timeout rc 124)" \
+    || bad "extra-usage --wait over-budget: rc=$rc err=[$(cat "$tmp/wait-over.err")]"
 fixture_extra 10 99 0 true false null '{"currency":"USD","amount_minor":1234,"exponent":2}'
 out=$(SYG_EXTRA_USAGE_BUDGET_USD=100 run)
 [[ $out == *' · extra $87.66 left of $100.00' ]] \
@@ -1235,9 +1296,9 @@ jq '. + {extra_usage: {is_enabled: true, spend_limit_reached: false, disabled_re
          spend: {used: {currency: "USD", amount_minor: 1234, exponent: 2}}}' \
     "$tmp/claude-statusline/usage.json" > "$tmp/claude-statusline/usage.json.tmp"
 mv "$tmp/claude-statusline/usage.json.tmp" "$tmp/claude-statusline/usage.json"
-out=$(CLAUDE_USAGE_EXTRA_OK=1 run --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+out=$(CLAUDE_USAGE_EXTRA_OK=1 SYG_EXTRA_USAGE_BUDGET_USD=100 run --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
 [ $rc = 0 ] && [ -z "$out" ] \
-    && [ "$err" = "claude-usage: --ok pass lane=anthropic meter=extra-usage week=98%>=75% extra=\$12.34 used source=api" ] \
+    && [ "$err" = "claude-usage: --ok pass lane=anthropic meter=extra-usage week=98%>=75% extra=\$87.66 left of \$100.00 source=api" ] \
     && ok "no 5h window: extra-usage pass keeps meter=extra-usage without 5h=" \
     || bad "no 5h extra-usage pass: rc=$rc out=[$out] err=[$err]"
 
@@ -1275,5 +1336,91 @@ j=$(run --json)
 jq -e 'has("five_hour_absent") == false' <<< "$j" >/dev/null \
     && ok "normal fixture: --json has no five_hour_absent key" \
     || bad "normal fixture five_hour_absent: $j"
+
+# --- I4: gate cache age, passed resets, and z.ai as_of age ---
+route_anthropic
+fixture 10 10 0; touch -d "@$(($(date +%s) - 3 * 86400))" "$tmp/claude-statusline/usage.json"
+out=$(run --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 1 ] && [ -z "$out" ] && [ "$err" = "claude-usage: --ok FAIL lane=anthropic meter=cache cache=4320m>360m source=none: the usage refresh keeps failing" ] \
+    && ok "gate max age: 3-day cache at week 10 FAILs meter=cache" || bad "gate max age 3d: rc=$rc out=[$out] err=[$err]"
+
+fixture 10 10 0; touch -d "@$(($(date +%s) - 21540))" "$tmp/claude-statusline/usage.json"
+out=$(run --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 0 ] && [ -z "$out" ] && [ "$err" = "claude-usage: --ok pass lane=anthropic meter=5h 5h=10%<90% week=10%<75% source=api (cache 359m old)" ] \
+    && ok "gate max age: 5h 59m cache passes with (cache 359m old)" || bad "gate max age 5h59m: rc=$rc out=[$out] err=[$err]"
+
+fixture 10 10 0; touch -d "@$(($(date +%s) - 600))" "$tmp/claude-statusline/usage.json"
+out=$(CLAUDE_USAGE_GATE_MAX_AGE=300 run --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 1 ] && [ -z "$out" ] && [ "$err" = "claude-usage: --ok FAIL lane=anthropic meter=cache cache=10m>5m source=none: the usage refresh keeps failing" ] \
+    && ok "gate max age: CLAUDE_USAGE_GATE_MAX_AGE=300 override honoured" || bad "gate max age override: rc=$rc out=[$out] err=[$err]"
+
+no_week_line="claude-usage: --ok FAIL lane=anthropic meter=cache source=none: the usage cache holds no weekly figure"
+for nw_pair in 'limits-only:{"limits":[]}' \
+    'null-util:{"five_hour":{"utilization":10},"seven_day":{"utilization":null},"limits":[]}' \
+    'str-util:{"five_hour":{"utilization":10},"seven_day":{"utilization":"50"},"limits":[]}'; do
+    nw_label=${nw_pair%%:*}; nw_body=${nw_pair#*:}
+    printf '%s\n' "$nw_body" > "$tmp/claude-statusline/usage.json"
+    out=$(run --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+    [ $rc = 1 ] && [ -z "$out" ] && [ "$err" = "$no_week_line" ] \
+        && ok "gate cache no weekly figure ($nw_label): FAILs meter=cache" \
+        || bad "gate cache no weekly figure ($nw_label): rc=$rc out=[$out] err=[$err]"
+done
+
+now_r=$(date +%s)
+jq -n --arg wr "$(iso $((now_r - 30)))" '{
+    five_hour: {utilization: 10, resets_at: "2099-01-01T00:00:00.000000+00:00"},
+    seven_day: {utilization: 90, resets_at: $wr},
+    limits: []}' > "$tmp/claude-statusline/usage.json"
+touch -d "@$((now_r - 60))" "$tmp/claude-statusline/usage.json"
+out=$(run --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 0 ] && [ -z "$out" ] && [ "$err" = "claude-usage: --ok pass lane=anthropic meter=5h 5h=10%<90% week=0%<75% source=api (week reset since cache)" ] \
+    && [ "$(run --json | jq -r '.weekly_pct')" = 90 ] && [[ $(run) == *"week 90%"* ]] \
+    && ok "passed reset: week 90 with resets_at past and older cache passes with (week reset since cache); plain/--json keep 90" \
+    || bad "passed week reset: rc=$rc out=[$out] err=[$err]"
+
+jq -n --arg wr "$(iso $((now_r - 60)))" '{
+    five_hour: {utilization: 10, resets_at: "2099-01-01T00:00:00.000000+00:00"},
+    seven_day: {utilization: 90, resets_at: $wr},
+    limits: []}' > "$tmp/claude-statusline/usage.json"
+touch -d "@$((now_r - 30))" "$tmp/claude-statusline/usage.json"
+out=$(run --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 1 ] && [ -z "$out" ] && [ "$err" = "claude-usage: --ok FAIL lane=anthropic meter=week 5h=10%<90% week=90%>=75% source=api" ] \
+    && ok "passed reset: week 90 with resets_at past and mtime AFTER it still FAILs" \
+    || bad "passed week reset mtime after: rc=$rc out=[$out] err=[$err]"
+
+jq -n --arg fr "$(iso $((now_r - 30)))" '{
+    five_hour: {utilization: 95, resets_at: $fr},
+    seven_day: {utilization: 10, resets_at: "2099-01-07T00:00:00.000000+00:00"},
+    limits: []}' > "$tmp/claude-statusline/usage.json"
+touch -d "@$((now_r - 60))" "$tmp/claude-statusline/usage.json"
+out=$(run --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 0 ] && [ -z "$out" ] && [ "$err" = "claude-usage: --ok pass lane=anthropic meter=5h 5h=0%<90% week=10%<75% source=api (5h reset since cache)" ] \
+    && ok "passed reset: 5h 95 with its reset past passes with (5h reset since cache)" \
+    || bad "passed 5h reset: rc=$rc out=[$out] err=[$err]"
+
+fixture 10 90 0; touch -d "@$(($(date +%s) - 600))" "$tmp/claude-statusline/usage.json"
+out=$(run --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 1 ] && [ -z "$out" ] && [ "$err" = "claude-usage: --ok FAIL lane=anthropic meter=week 5h=10%<90% week=90%>=75% source=api (cache 10m old)" ] \
+    && ok "passed reset: week 90 with future reset and old cache still FAILs" \
+    || bad "future reset old cache: rc=$rc out=[$out] err=[$err]"
+
+route_zai
+printf '#!/bin/sh\necho '\''{"source":"api","as_of":%s,"five_hour_pct":95,"week_pct":96}'\''\n' "$(( $(date +%s) - 1860 ))" > "$tmp/.local/bin/zai-usage"
+chmod +x "$tmp/.local/bin/zai-usage"
+out=$(run --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 0 ] && [ -z "$out" ] && [ "$err" = "claude-usage: --ok pass lane=zai meter=zai-5h source=estimate FAIL-OPEN: z.ai quota cache 31m old, local estimate never blocks; gate passes" ] \
+    && ok "z.ai as_of 31m old at 95/96: FAIL-OPENs rc 0" || bad "z.ai as_of 31m: rc=$rc out=[$out] err=[$err]"
+
+printf '#!/bin/sh\necho '\''{"source":"api","as_of":%s,"five_hour_pct":95,"week_pct":96}'\''\n' "$(( $(date +%s) - 600 ))" > "$tmp/.local/bin/zai-usage"
+chmod +x "$tmp/.local/bin/zai-usage"
+out=$(run --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 1 ] && [ -z "$out" ] && [ "$err" = "claude-usage: --ok FAIL lane=zai meter=zai-5h 5h=95%>=80% week=96%>=75% source=api (cache 10m old)" ] \
+    && ok "z.ai as_of 10m old at 95/96: FAILs rc 1 with (cache 10m old)" || bad "z.ai as_of 10m: rc=$rc out=[$out] err=[$err]"
+
+zai_stub api 95 96
+out=$(run --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 1 ] && [ -z "$out" ] && [ "$err" = "claude-usage: --ok FAIL lane=zai meter=zai-5h 5h=95%>=80% week=96%>=75% source=api" ] \
+    && ok "z.ai with no as_of: unchanged" || bad "z.ai no as_of: rc=$rc out=[$out] err=[$err]"
+route_anthropic
 
 exit $fail
