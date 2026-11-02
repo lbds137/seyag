@@ -5,10 +5,12 @@ The quota API is GET https://api.z.ai/api/monitor/usage/quota/limit with a beare
 z.ai key, see zai_token): TOKENS_LIMIT entries give the 5h (number==5) and
 weekly (unit==6) utilization percentages plus rolling nextResetTime. This is account truth —
 the meter polls it (120s TTL, lock, background refresh for the statusline) and prints
-Anthropic-style percentages. When the API is unreachable it falls back to the local transcript
-scan (weighted-invocation model: GLM-5.3 1x/3x off/peak, flash 0.4x/1.2x, peak Mon-Fri
-14:00-18:00 UTC+8; optional console anchors via --calibrate) and tags the line "local est" —
-a floor, never confused with account truth.
+Anthropic-style percentages. When the API is unreachable or its reply unreadable, a reading
+under 30 minutes old is kept; after that it falls back to the local transcript scan
+(weighted-invocation model: GLM-5.3 1x/3x off/peak, flash 0.4x/1.2x, peak Mon-Fri
+14:00-18:00 UTC+8; optional console anchors via --calibrate, which anchors the local estimate
+and refuses while the API answers) and tags the line "local est" — a floor, never confused with
+account truth.
 
   zai-usage                refresh if stale (API first), then print the one-line summary
   zai-usage --line         same line, refresh in the background when stale (statusline mode)
@@ -18,7 +20,7 @@ a floor, never confused with account truth.
   zai-usage --sweep        force a refresh; silent
   zai-usage --models       per-model token totals for the last 7 days (monitor API)
   zai-usage --calibrate W [F] [--reset "YYYY-MM-DD HH:MM"]
-                           offline mode: anchor the LOCAL scan to console readings
+                           offline mode: anchor the LOCAL scan to console readings (refuses while the API answers)
 
 Scope: machine-local by design — usage figures stay off every repo. The token comes from the
 lane key file, the encrypted `keys` store, or a z.ai-routed env or settings.json (zai_token has
@@ -28,6 +30,7 @@ the order), and is sent by stdin, never argv, never printed.
 import calendar
 import glob
 import json
+import math
 import os
 import sys
 import tempfile
@@ -44,6 +47,7 @@ PROJECTS = os.environ.get("ZAI_SPEND_PROJECTS") or os.path.expanduser("~/.claude
 QUOTA_URL = os.environ.get("ZAI_SPEND_QUOTA_URL", "https://api.z.ai/api/monitor/usage/quota/limit")
 MODELS_URL = os.environ.get("ZAI_SPEND_MODELS_URL", "https://api.z.ai/api/monitor/usage/model-usage")
 TTL = 120
+API_KEEP_S = 1800  # matches the z.ai cache-age bound in claude-usage --ok
 SWEEP_LOCK = os.path.join(os.path.dirname(STATE), ".sweep.lock")
 STATE_VERSION = 4
 ROUTING_EPOCH = 1789900000  # the z.ai routing flip: readings before this stay local-est
@@ -188,7 +192,7 @@ def sweep(state):
     # Percentages: the console anchor converts weighted invocations into an implied cap.
     for cal_key, win_key, out_key in (("calW", "week", "week_pct"), ("cal5", "five_hour", "five_hour_pct")):
         cal = state.get(cal_key)
-        if cal and cal.get("winv"):
+        if cal and cal.get("winv") and cal.get("pct"):
             out[out_key] = round(win[win_key]["w"] * 100 / (cal["winv"] * 100.0 / cal["pct"]))
     out["anchors"] = {k: {"pct": state[k]["pct"], "at": state[k]["at"]}
                       for k in ("calW", "cal5") if state.get(k)}
@@ -326,26 +330,49 @@ def models():
     return 0
 
 
+def finite_num(v):
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return False
+    try:
+        return math.isfinite(v)
+    except OverflowError:
+        return False
+
+
 def poll_api():
     """Fetch the quota API and write the cache from it. Returns True on success."""
     d = api_get(QUOTA_URL)
-    if not d or not d.get("success"):
+    if not isinstance(d, dict) or not d.get("success"):
         return False
     try:
-        limits = [L for L in d["data"]["limits"] if L.get("type") == "TOKENS_LIMIT"]
+        raw_limits = d["data"]["limits"]
+        if not isinstance(raw_limits, list) or not all(isinstance(L, dict) for L in raw_limits):
+            return False
+        limits = [L for L in raw_limits if L.get("type") == "TOKENS_LIMIT"]
         five = next(L for L in limits if L.get("number") == 5)
         week = next(L for L in limits if L.get("unit") == 6)
-    except (KeyError, StopIteration, TypeError):
+    except (KeyError, StopIteration, TypeError, AttributeError):
         return False
+    for L in (five, week):
+        p = L.get("percentage")
+        if not finite_num(p) or not (0 <= p <= 1000):
+            return False
+
+    def reset_sec(L):
+        r = L.get("nextResetTime")
+        if not finite_num(r) or not (0 <= r <= 10**14):
+            return 0
+        return int(r // 1000)
+
     out = {"as_of": int(time.time()), "source": "api",
            "five_hour_pct": round(five["percentage"]), "week_pct": round(week["percentage"]),
-           "five_hour_reset_at": int(five.get("nextResetTime", 0) // 1000),
-           "week_reset_at": int(week.get("nextResetTime", 0) // 1000)}
+           "five_hour_reset_at": reset_sec(five),
+           "week_reset_at": reset_sec(week)}
     write_json(CACHE, out)
     return True
 
 
-def sweep_locked():
+def sweep_locked(keep_api=True):
     """One refresher at a time: API first, transcript-scan fallback. A caller that loses the
     lock race keeps the old numbers."""
     os.makedirs(os.path.dirname(STATE), exist_ok=True)
@@ -357,6 +384,16 @@ def sweep_locked():
     try:
         if poll_api():
             return load(CACHE, {})
+        # Keep a recent live reading across a brief API outage (matches the 1800s bound in claude-usage --ok).
+        prev = load(CACHE, {})
+        as_of = prev.get("as_of") if isinstance(prev, dict) else None
+        if (keep_api and isinstance(prev, dict) and prev.get("source") == "api"
+                and finite_num(as_of) and time.time() - as_of < API_KEEP_S):
+            try:
+                os.utime(CACHE)
+            except OSError:
+                pass
+            return prev
         out = sweep(load(STATE, {}))
         out["source"] = "local"
         write_json(CACHE, out)
@@ -374,10 +411,13 @@ def calibrate(args):
             reset = time.mktime(time.strptime(next(it), "%Y-%m-%d %H:%M"))
         elif a.replace(".", "", 1).isdigit():
             nums.append(float(a))
-    if not nums:
+    if not nums or any(n == 0 for n in nums):
         print('usage: zai-usage --calibrate WEEK_PCT [5H_PCT] [--reset "YYYY-MM-DD HH:MM"]')
         return 2
-    sweep_locked()  # fresh numbers before anchoring
+    cache = sweep_locked(keep_api=False)  # fresh numbers before anchoring
+    if isinstance(cache, dict) and cache.get("source") == "api":
+        print("zai-usage: the live quota API is answering; --calibrate only anchors the local estimate")
+        return 2
     # The sweep's own lock, waited for: a concurrent detached --sweep must not lose its offsets.
     with open(SWEEP_LOCK, "w") as lock:
         flock(lock, LOCK_EX)
@@ -390,12 +430,12 @@ def calibrate(args):
         if reset:
             state["reset_at"] = int(reset)
         write_json(STATE, state)
-    sweep_locked()  # bake the percentages into the cache
+    sweep_locked(keep_api=False)  # bake the percentages into the cache
     cache = load(CACHE, {})
     caps = []
-    if "week_pct" in cache:
+    if "week_pct" in cache and "week_winv" in cache:
         caps.append(f"wk cap ~{cache['week_winv'] * 100.0 / nums[0]:.0f} winv")
-    if "five_hour_pct" in cache:
+    if len(nums) > 1 and "five_hour_pct" in cache and "five_hour_winv" in cache:
         caps.append(f"5h cap ~{cache['five_hour_winv'] * 100.0 / nums[1]:.0f} winv")
     print(f"anchored: weekly {nums[0]:g}%"
           + (f", 5h {nums[1]:g}%" if len(nums) > 1 else "")

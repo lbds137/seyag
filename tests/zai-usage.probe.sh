@@ -347,4 +347,130 @@ wait "$CAL_PID"; rc=$?
 [ $rc = 0 ] && jq -e '.calW.pct == 40' <<< "$(state c7)" >/dev/null \
     && ok "calibrate: lock released -> calibrate completes, calW lands" || bad "calibrate after release (rc $rc): $(state c7)"
 
+# 8. Bad API shapes and keeping the last good reading under 1800 s (I2).
+jq -n '{success: true, data: {limits: [
+    {type: "TOKENS_LIMIT", number: 5, unit: 3},
+    {type: "TOKENS_LIMIT", number: 1, unit: 6, percentage: 17}]}}' > "$tmp/q-nomiss.json"
+jq -n '{success: true, data: {limits: [
+    {type: "TOKENS_LIMIT", number: 5, unit: 3, percentage: null},
+    {type: "TOKENS_LIMIT", number: 1, unit: 6, percentage: 17}]}}' > "$tmp/q-nullpct.json"
+jq -n '{success: true, data: {limits: [
+    {type: "TOKENS_LIMIT", number: 5, unit: 3, percentage: "42"},
+    {type: "TOKENS_LIMIT", number: 1, unit: 6, percentage: 17}]}}' > "$tmp/q-strpct.json"
+jq -n '{success: true, data: {limits: [
+    {type: "TOKENS_LIMIT", number: 5, unit: 3, percentage: 42, nextResetTime: null},
+    {type: "TOKENS_LIMIT", number: 1, unit: 6, percentage: 17, nextResetTime: null}]}}' > "$tmp/q-nullreset.json"
+echo '[{"unexpected": true}]' > "$tmp/q-list.json"
+
+for pair in "nomiss:percentage missing" "nullpct:percentage null" "strpct:percentage string" "list:JSON list reply"; do
+    tag=${pair%%:*}; label=${pair#*:}
+    err=$(zs "bad-$tag" ZAI_SPEND_QUOTA_URL="file://$tmp/q-$tag.json" CC_ROUTE_KEYS="$tmp/keys.env" -- --sweep 2>&1); rc=$?
+    [ $rc = 0 ] && [ -z "$err" ] && [ "$(cache "bad-$tag" | jq -r '.source // empty')" = local ] \
+        && ok "bad shape ($label): exits 0 with no traceback, no earlier cache falls to local" \
+        || bad "bad shape ($label): rc=$rc err=[$err] cache=$(cache "bad-$tag")"
+done
+
+err=$(zs bad-nullreset ZAI_SPEND_QUOTA_URL="file://$tmp/q-nullreset.json" CC_ROUTE_KEYS="$tmp/keys.env" -- --sweep 2>&1); rc=$?
+[ $rc = 0 ] && [ -z "$err" ] \
+    && jq -e '.source == "api" and .five_hour_pct == 42 and .week_pct == 17 and .five_hour_reset_at == 0 and .week_reset_at == 0' <<< "$(cache bad-nullreset)" >/dev/null \
+    && ok "bad shape (nextResetTime null): succeeds with source=api and reset 0, no traceback" \
+    || bad "bad shape (nextResetTime null): rc=$rc err=[$err] cache=$(cache bad-nullreset)"
+
+jq -n --argjson r5 "$(( (now + 3600) * 1000 ))" --argjson rw "$(( (now + 86400) * 1000 ))" '{success: true, data: {limits: [
+    {type: "TOKENS_LIMIT", number: 5, unit: 3, percentage: 95, nextResetTime: $r5},
+    {type: "TOKENS_LIMIT", number: 1, unit: 6, percentage: 96, nextResetTime: $rw}]}}' > "$tmp/quota95.json"
+zs ckeep ZAI_SPEND_QUOTA_URL="file://$tmp/quota95.json" CC_ROUTE_KEYS="$tmp/keys.env" -- --sweep
+old_as=$(( $(date +%s) - 300 ))
+jq --argjson a "$old_as" '.as_of = $a' "$tmp/ckeep/cache/claude-statusline/zai-usage.json" > "$tmp/ckeep.tmp" \
+    && mv "$tmp/ckeep.tmp" "$tmp/ckeep/cache/claude-statusline/zai-usage.json"
+touch -d "@$old_as" "$tmp/ckeep/cache/claude-statusline/zai-usage.json"
+zs ckeep ZAI_SPEND_QUOTA_URL="file://$tmp/q-nullpct.json" CC_ROUTE_KEYS="$tmp/keys.env" -- --sweep; rc=$?
+new_mtime=$(stat -c %Y "$tmp/ckeep/cache/claude-statusline/zai-usage.json" 2>/dev/null || echo 0)
+[ $rc = 0 ] && [ "$new_mtime" -gt "$old_as" ] \
+    && jq -e --argjson a "$old_as" '.source == "api" and .five_hour_pct == 95 and .week_pct == 96 and .as_of == $a' <<< "$(cache ckeep)" >/dev/null \
+    && ok "bad poll after 95/96: keeps source=api, 95/96 and old as_of, and cache mtime moves" \
+    || bad "bad poll keep (rc $rc, mtime $new_mtime vs $old_as): $(cache ckeep)"
+
+old_expired=$(( $(date +%s) - 1805 ))
+jq --argjson a "$old_expired" '.as_of = $a' "$tmp/ckeep/cache/claude-statusline/zai-usage.json" > "$tmp/ckeep.tmp" \
+    && mv "$tmp/ckeep.tmp" "$tmp/ckeep/cache/claude-statusline/zai-usage.json"
+touch -d "@$old_expired" "$tmp/ckeep/cache/claude-statusline/zai-usage.json"
+zs ckeep ZAI_SPEND_QUOTA_URL="file://$tmp/q-nullpct.json" CC_ROUTE_KEYS="$tmp/keys.env" -- --sweep; rc=$?
+[ $rc = 0 ] && [ "$(cache ckeep | jq -r '.source // empty')" = local ] \
+    && ok "bad poll with API cache > 1800s old: falls to local" \
+    || bad "bad poll > 1800s (rc $rc): $(cache ckeep)"
+
+# Odd numbers from z.ai (R3): 400-digit ints (built with printf '%0400d' so the fixture holds them
+# literally) and negative percentages must not raise OverflowError or pass the gate.
+big=$(printf '%0400d' 0 | tr 0 9)
+printf '{"success":true,"data":{"limits":[{"type":"TOKENS_LIMIT","number":5,"unit":3,"percentage":%s},{"type":"TOKENS_LIMIT","number":1,"unit":6,"percentage":17}]}}\n' "$big" > "$tmp/q-hugepct.json"
+err=$(zs bad-hugepct ZAI_SPEND_QUOTA_URL="file://$tmp/q-hugepct.json" CC_ROUTE_KEYS="$tmp/keys.env" -- --sweep 2>&1); rc=$?
+[ $rc = 0 ] && [ -z "$err" ] && [ "$(cache bad-hugepct | jq -r '.source // empty')" = local ] \
+    && ok "bad shape (400-digit percentage): exits 0 with no traceback, falls to local" \
+    || bad "bad shape (400-digit percentage): rc=$rc err=[$err] cache=$(cache bad-hugepct)"
+
+printf '{"success":true,"data":{"limits":[{"type":"TOKENS_LIMIT","number":5,"unit":3,"percentage":42,"nextResetTime":%s},{"type":"TOKENS_LIMIT","number":1,"unit":6,"percentage":17,"nextResetTime":%s}]}}\n' "$big" "$big" > "$tmp/q-hugereset.json"
+err=$(zs bad-hugereset ZAI_SPEND_QUOTA_URL="file://$tmp/q-hugereset.json" CC_ROUTE_KEYS="$tmp/keys.env" -- --sweep 2>&1); rc=$?
+line_out=$(zs bad-hugereset ZAI_SPEND_QUOTA_URL="file://$tmp/q-hugereset.json" CC_ROUTE_KEYS="$tmp/keys.env" -- --line 2>&1); line_rc=$?
+[ $rc = 0 ] && [ -z "$err" ] && [ $line_rc = 0 ] && ! grep -qi 'traceback' <<< "$line_out" \
+    && jq -e '.source == "api" and .five_hour_pct == 42 and .week_pct == 17 and .five_hour_reset_at == 0 and .week_reset_at == 0' <<< "$(cache bad-hugereset)" >/dev/null \
+    && ok "bad shape (400-digit nextResetTime): source=api, reset 0, and --line exits 0 with no traceback" \
+    || bad "bad shape (400-digit nextResetTime): rc=$rc err=[$err] line_rc=$line_rc line=[$line_out] cache=$(cache bad-hugereset)"
+
+printf '{"success":true,"data":{"limits":[{"type":"TOKENS_LIMIT","number":5,"unit":3,"percentage":-5},{"type":"TOKENS_LIMIT","number":1,"unit":6,"percentage":17}]}}\n' > "$tmp/q-negpct.json"
+err=$(zs bad-negpct ZAI_SPEND_QUOTA_URL="file://$tmp/q-negpct.json" CC_ROUTE_KEYS="$tmp/keys.env" -- --sweep 2>&1); rc=$?
+[ $rc = 0 ] && [ -z "$err" ] && [ "$(cache bad-negpct | jq -r '.source // empty')" = local ] \
+    && ok "bad shape (percentage -5): exits 0 with no traceback, falls to local" \
+    || bad "bad shape (percentage -5): rc=$rc err=[$err] cache=$(cache bad-negpct)"
+
+mkdir -p "$tmp/bad-hugeasof/cache/claude-statusline"
+printf '{"as_of":%s,"source":"api","five_hour_pct":42,"week_pct":17,"five_hour_reset_at":0,"week_reset_at":0}\n' "$big" \
+    > "$tmp/bad-hugeasof/cache/claude-statusline/zai-usage.json"
+touch -d '10 minutes ago' "$tmp/bad-hugeasof/cache/claude-statusline/zai-usage.json"
+err=$(zs bad-hugeasof ZAI_SPEND_QUOTA_URL="$QDOWN" CC_ROUTE_KEYS="$tmp/keys.env" -- --sweep 2>&1); rc=$?
+[ $rc = 0 ] && [ -z "$err" ] && [ "$(cache bad-hugeasof | jq -r '.source // empty')" = local ] \
+    && ok "bad shape (400-digit as_of in API cache with failing poll): exits 0 with no traceback, falls to local" \
+    || bad "bad shape (400-digit as_of): rc=$rc err=[$err] cache=$(cache bad-hugeasof)"
+
+# 9. --calibrate guards (I3).
+out=$(zs cal0 "${TR[@]}" -- --calibrate 0 2>&1); rc=$?
+[ $rc = 2 ] && grep -q '^usage: zai-usage --calibrate' <<< "$out" && [ -z "$(state cal0)" ] \
+    && ok "--calibrate 0: rc 2, usage line, state unwritten" || bad "--calibrate 0 (rc $rc): out=[$out] state=[$(state cal0)]"
+
+cp "$tmp/c5/state/zai-spend/state.json" "$tmp/c5-state.before"
+out=$(zs c5 "${TR[@]}" -- --calibrate 40 0 2>&1); rc=$?
+[ $rc = 2 ] && grep -q '^usage: zai-usage --calibrate' <<< "$out" \
+    && cmp -s "$tmp/c5/state/zai-spend/state.json" "$tmp/c5-state.before" \
+    && ok "--calibrate 40 0: rc 2, usage line, existing state unchanged" || bad "--calibrate 40 0 (rc $rc): out=[$out] state=[$(state c5)]"
+
+mkdir -p "$tmp/cal-zero/state/zai-spend"
+jq -n '{v: 4, files: {}, calW: {pct: 0, at: 123, winv: 2.4}}' > "$tmp/cal-zero/state/zai-spend/state.json"
+err1=$(zs cal-zero "${TR[@]}" -- --sweep 2>&1); rc1=$?
+out2=$(zs cal-zero "${TR[@]}" -- --json 2>"$tmp/cal-zero.err"); rc2=$?; err2=$(cat "$tmp/cal-zero.err")
+[ $rc1 = 0 ] && [ $rc2 = 0 ] && [ -z "$err1$err2" ] && jq -e '.source == "local" and (has("week_pct") | not)' <<< "$out2" >/dev/null \
+    && ok "state with calW.pct 0: --sweep and --json exit 0 without ZeroDivisionError" \
+    || bad "state with calW.pct 0: rc1=$rc1 rc2=$rc2 err=[$err1$err2] out=[$out2]"
+
+out=$(zs c5 "${TR[@]}" ZAI_SPEND_PEAK_UTC=0-0 -- --calibrate 40 2>&1); rc=$?
+[ $rc = 0 ] && grep -q '^anchored: weekly 40%' <<< "$out" \
+    && ok "--calibrate 40 with a prior cal5 in state: exits 0" \
+    || bad "--calibrate 40 with prior cal5 (rc $rc): $out"
+
+out=$(zs cal-live ZAI_SPEND_QUOTA_URL="$QOK" CC_ROUTE_KEYS="$tmp/keys.env" -- --calibrate 40 2>&1); rc=$?
+[ $rc = 2 ] && [ "$out" = "zai-usage: the live quota API is answering; --calibrate only anchors the local estimate" ] \
+    && [ -z "$(state cal-live)" ] \
+    && ok "--calibrate 40 with live API answering: rc 2, message printed, state unwritten" \
+    || bad "--calibrate 40 live API (rc $rc): out=[$out] state=[$(state cal-live)]"
+
+mkdir -p "$tmp/cal-outage/cache/claude-statusline"
+old_cal_as=$(( $(date +%s) - 600 ))
+jq -n --argjson a "$old_cal_as" '{as_of: $a, source: "api", five_hour_pct: 43, week_pct: 17, five_hour_reset_at: 1, week_reset_at: 1}' \
+    > "$tmp/cal-outage/cache/claude-statusline/zai-usage.json"
+touch -d "@$old_cal_as" "$tmp/cal-outage/cache/claude-statusline/zai-usage.json"
+out=$(zs cal-outage "${TR[@]}" ZAI_SPEND_PEAK_UTC=0-0 -- --calibrate 40 2>&1); rc=$?
+[ $rc = 0 ] && jq -e '(.calW.winv | type) == "number" and .calW.winv == 2.4 and .calW.pct == 40' <<< "$(state cal-outage)" >/dev/null \
+    && jq -e '.source == "local" and .week_pct == 40' <<< "$(cache cal-outage)" >/dev/null \
+    && ok "--calibrate 40 with 10m-old API cache and failing API: exits 0, calW lands with numeric winv, cache source is local" \
+    || bad "--calibrate 40 outage (rc $rc): out=[$out] state=[$(state cal-outage)] cache=[$(cache cal-outage)]"
+
 exit $fail

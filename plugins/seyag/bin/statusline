@@ -636,7 +636,9 @@ else
             # invalidates the source; the first VALID value of each key wins.
             # Anything invalid, or a set-but-missing file,
             # falls through to SYG_EXTRA_USAGE_BUDGET_USD exactly as before. One
-            # awk pass, no network: this runs on every prompt tick.
+            # awk pass, no network: this runs on every prompt tick. The gate in
+            # claude-usage also honours SYG_EXTRA_USAGE_BUDGET_CMD, which this render
+            # does not run because it fires on every prompt tick.
             ex_budget="" ex_anchor=0 ex_tb="" ex_ta=""
             if [ -n "${SYG_EXTRA_USAGE_TOML:-}" ] && [ -f "$SYG_EXTRA_USAGE_TOML" ]; then
                 eval "$(LC_ALL=C awk '
