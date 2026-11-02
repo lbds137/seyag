@@ -3390,38 +3390,38 @@ assert_no_ack "…no ack"
 new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"; SHIM_API_EXIT=1
 invoke 'gh pr merge 2002 --rebase'
 assert_exit "D6: SHIM_API_EXIT=1 refuses" 2
-assert_stderr_has "…with MERGE REVIEW UNREADABLE banner" 'MERGE REVIEW UNREADABLE — the review fetch failed'
+assert_stderr_has "…with MERGE REVIEW UNREADABLE banner" 'MERGE REVIEW UNREADABLE — the review could not be read'
 assert_no_ack "…no ack"
 
 new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"; SHIM_API_EXIT=124
 invoke 'gh pr merge 2002 --rebase'
 assert_exit "D6: SHIM_API_EXIT=124 (timeout) refuses" 2
-assert_stderr_has "…with MERGE REVIEW UNREADABLE banner" 'MERGE REVIEW UNREADABLE — the review fetch failed'
+assert_stderr_has "…with MERGE REVIEW UNREADABLE banner" 'MERGE REVIEW UNREADABLE — the review could not be read'
 assert_no_ack "…no ack"
 SHIM_API_EXIT=0
 
 new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON='not-json{'
 invoke 'gh pr merge 2002 --rebase'
 assert_exit "D6: malformed non-JSON review fixture refuses" 2
-assert_stderr_has "…with MERGE REVIEW UNREADABLE banner" 'MERGE REVIEW UNREADABLE — the review fetch failed'
+assert_stderr_has "…with MERGE REVIEW UNREADABLE banner" 'MERGE REVIEW UNREADABLE — the review could not be read'
 assert_no_ack "…no ack"
 
 new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON='{"message":"x"}'
 invoke 'gh pr merge 2002 --rebase'
 assert_exit "D6: object payload {\"message\":\"x\"} (filter failure) refuses" 2
-assert_stderr_has "…with MERGE REVIEW UNREADABLE banner" 'MERGE REVIEW UNREADABLE — the review fetch failed'
+assert_stderr_has "…with MERGE REVIEW UNREADABLE banner" 'MERGE REVIEW UNREADABLE — the review could not be read'
 assert_no_ack "…no ack"
 
 new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON='[1]'
 invoke 'gh pr merge 2002 --rebase'
 assert_exit "D6: non-page array payload [1] (filter failure) refuses" 2
-assert_stderr_has "…with MERGE REVIEW UNREADABLE banner" 'MERGE REVIEW UNREADABLE — the review fetch failed'
+assert_stderr_has "…with MERGE REVIEW UNREADABLE banner" 'MERGE REVIEW UNREADABLE — the review could not be read'
 assert_no_ack "…no ack"
 
 new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON=''; SHIM_API_EMPTY=1
 invoke 'gh pr merge 2002 --rebase'
 assert_exit "D6: empty gh output (shim prints nothing) refuses" 2
-assert_stderr_has "…with MERGE REVIEW UNREADABLE banner" 'MERGE REVIEW UNREADABLE — the review fetch failed'
+assert_stderr_has "…with MERGE REVIEW UNREADABLE banner" 'MERGE REVIEW UNREADABLE — the review could not be read'
 assert_no_ack "…no ack"
 SHIM_API_EMPTY=0
 

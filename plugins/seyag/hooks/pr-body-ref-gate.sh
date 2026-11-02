@@ -34,17 +34,22 @@
 # therefore fires rule 1 too — deliberate, not widened. Rule 2 scans only
 # the parsed PR body text (see extract_pr_body), never the command string,
 # so a claim-shaped word sitting in --title or elsewhere in the command does
-# not reach it.
+# not reach it, though heredoc prose that writes out `gh pr create -b "…"`
+# (like `--body "…"` prose today) still matches extract_pr_body and blocks.
 #
 # Scope: `gh pr create`, `gh pr edit`, a command family registered via
 # `SYG_PR_BODY_EXTRA_COMMANDS`, and a
-# `gh api -X PATCH .../pulls/N -F body=@file` (or `-f body=<text>`)
-# invocation, each when carrying `--body`, `--body-file`, or a
-# `-f/-F/--field body=` argument; plus direct `--check <body-file>` preflight.
+# `gh api -X PATCH .../pulls/N -F body=@file` (or `-f body=<text>`) or
+# `gh api .../pulls` POST invocation, each when carrying `--body`,
+# `--body-file`, `-b`/`-F` (on `gh pr create|edit`), or a
+# `-f/-F/--field/--raw-field body=` argument; plus direct `--check <body-file>`
+# preflight.
 # Rule 1's claim-verb spans ("filed as", "tracked in", "closes", "completes",
-# "finishes") followed by a TASK-N or doc-N id are checked — a bare mention
-# ("see TASK-99999 for background") makes no claim and is deliberately left
-# alone.
+# and "finishes" allow up to 3 intervening tokens before the id; "close",
+# "closed", "fix", "fixes", "fixed", "resolve", "resolves", and "resolved"
+# require the id directly after the verb or optional colon) followed by a
+# TASK-N or doc-N id are checked — a bare mention ("see TASK-99999 for
+# background") makes no claim and is deliberately left alone.
 #
 # Fail-open throughout: a missing ${SYG_PR_BODY_BASE_REF} ref, a git error, an
 # empty tracker/ listing, or an unsupported grep dialect all pass the command
@@ -56,11 +61,10 @@
 # still found even when a --body-file elsewhere is unreadable).
 #
 # KNOWN GAPS:
-#   - gh's SHORT flag `-b` is not matched (`-f`/`-F body=` are). Commands
-#     write the long flags (`--body`, `--body-file`), and the cheap `--body`
-#     pre-filter below is what keeps this hook off the critical path of
-#     every Bash call — widening it to short flags would cost every non-PR
-#     command a slower pre-filter for a shape callers don't produce.
+#   - Short flags `-b` and `-F` are covered on `gh pr create` and `gh pr edit`
+#     (anchored to that simple command); registered extra command families
+#     (`SYG_PR_BODY_EXTRA_COMMANDS`) require the long flags (`--body`,
+#     `--body-file`) because their `-b` means something else.
 #     `-f`/`--raw-field` carries a literal string, so `-f body=@x` is scanned
 #     as the text `@x`; `-F`/`--field body=@x` reads the file at that path.
 #   - Rule 1's scan covers the WHOLE command text, not a precisely-parsed
@@ -144,6 +148,17 @@
 #     heredoc-contains-text note in the header: anchoring `CMD_FAMILY_RE` at
 #     a command start was ruled out because runner-prefixed real shapes
 #     (`| xargs gh pr create`, `env … gh pr create`) would then fail open.
+#   - A HERE-STRING (`gh pr create --body-file - <<< "…"`) is not read by
+#     rule 2: `--body-file -` / `-F -` looks only for a `<<` heredoc, a
+#     `< PATH` redirection after `-`, or `cat PATH |` before `gh`.
+#   - Stdin fed from anything other than a heredoc, `< PATH` after `-`, or
+#     `cat PATH |` before `gh` (e.g. `generate_body | gh pr create -F -`) is
+#     not read by rule 2.
+#   - A substitution on `--body`/`-b`/`body=` that is not a plain `cat PATH`
+#     or `< PATH` with a literal unquoted path (e.g. `--body "$(cat "$F")"`)
+#     is not read as a file by rule 2 and stays as literal text.
+#   - A `&` or `|` in a quoted URL or an earlier field value ends the simple
+#     command for the `IS_POST_PR_API` check.
 #
 #   The bullets above are misses. The bullets BELOW are deliberate
 #   under-blocking — choices not to over-block. Append a new miss above this
@@ -201,10 +216,29 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib/claim-shapes.sh" || exit 0
 # escaped quote embedded in the value (`--body "she said \"hi\""`) — the
 # regex stops at the first literal quote character, the same imprecision as
 # any non-tokenizing shell scan of --body text.
+# Simple-command prefix anchoring `-b` and `-F` to the `gh … pr create|edit`
+# simple command so an earlier command's `-F` (`git commit -F x && gh pr create --fill`)
+# is not read as a PR body.
+GH_PR_CMD_PREFIX='gh[^\n;&|]*\bpr[[:space:]]+(?:create|edit)\b[^\n;&|]*?[[:space:]]'
+
+read_body_path() {
+  local resolved
+  case "$1" in
+    /*) resolved="$1" ;;
+    *) resolved="$PWD/$1" ;;
+  esac
+  if [ -r "$resolved" ]; then
+    BODY_TEXT=$(cat "$resolved" 2>/dev/null)
+    BODY_FROM_FILE=1
+    return 0
+  fi
+  return 1
+}
+
 extract_pr_body() {
   BODY_TEXT=""
   BODY_FROM_FILE=0
-  local body_file rc body resolved
+  local body_file rc body sub_file
 
   # --body-file <path> / --body-file=<path>
   body_file=$(printf '%s' "$CMD" | grep -oP -- '--body-file[= ]+\K[^\s'"'"'"]+')
@@ -212,7 +246,36 @@ extract_pr_body() {
   if [ "$rc" -gt 1 ]; then
     return 3
   fi
-  # -F body=@<path> / --field body=@<path> (the PATCH form's file shape).
+  if [ -z "$body_file" ] && [ "${IS_GH_PR_WRITE:-0}" -eq 1 ]; then
+    body_file=$(printf '%s' "$CMD_JOINED" | grep -oP -- "${GH_PR_CMD_PREFIX}"'-F(?:=|[[:space:]]*)\K[^\s'"'"'"]+')
+    rc=$?
+    if [ "$rc" -gt 1 ]; then
+      return 3
+    fi
+  fi
+  # --body-file - / -F - reads from stdin: look in order for gh's own heredoc
+  # body (inline, BODY_FROM_FILE stays 0), then `< PATH` after `-`, then
+  # `cat PATH |` before `gh`.
+  if [ "$body_file" = "-" ]; then
+    body=$(printf '%s' "$CMD_JOINED" | grep -zoP -- '(?m)^(?=[^\n]*(?:--body-file[= ]+|-F(?:=|[ \t]*))-(?:[ \t]|$))[^\n]*?(?<!<)<<(?!<)-?[ \t]*[\x27"]?(\w+)[\x27"]?[^\n]*\n\K(?s:.*?)(?=\n\1(?:\n|$))' | head -zn1 | tr -d '\0')
+    if [ -n "$body" ]; then
+      BODY_TEXT="$body"
+      return 0
+    fi
+    body_file=$(printf '%s' "$CMD" | grep -oP -- '(?:--body-file[= ]+|-F(?:=|[[:space:]]*))-[^\n;&|<>]*?(?<!<)<(?!<)[[:space:]]*\K[^\s'"'"'"<>|$()]+')
+    rc=$?
+    if [ "$rc" -gt 1 ]; then
+      return 3
+    fi
+    if [ -z "$body_file" ]; then
+      body_file=$(printf '%s' "$CMD" | grep -oP -- '\bcat[[:space:]]+\K[^\s'"'"'"<>|$()]+(?=[ \t]*\|[^\n;&|]*\bgh\b)')
+      rc=$?
+      if [ "$rc" -gt 1 ]; then
+        return 3
+      fi
+    fi
+  fi
+  # -F body=@<path> / --field body=@<path> (the PATCH/POST form's file shape).
   # `-f`/`--raw-field` sends its value as a LITERAL STRING (gh api --help:
   # "-f, --raw-field key=value  Add a string parameter in key=value format"),
   # so `-f body=@x` is inline text rather than a file reference — that shape
@@ -224,19 +287,29 @@ extract_pr_body() {
       return 3
     fi
   fi
-  if [ -n "$body_file" ]; then
-    case "$body_file" in
-      /*) resolved="$body_file" ;;
-      *) resolved="$PWD/$body_file" ;;
-    esac
-    if [ -r "$resolved" ]; then
-      BODY_TEXT=$(cat "$resolved" 2>/dev/null)
-      BODY_FROM_FILE=1
-      return 0
+  if [ -n "$body_file" ] && read_body_path "$body_file"; then
+    return 0
+  fi
+
+  # Command-substitution file forms (`--body "$(cat PATH)"`, `--body="$(cat PATH)"`,
+  # `--body "$(< PATH)"`, and the same with `-b` and `-f|-F|--field|--raw-field body=`):
+  # tried before the inline ladder so a readable literal PATH is read from disk,
+  # while anything with whitespace, quotes, `$`, parens, or angle brackets falls
+  # through to stay as text.
+  sub_file=$(printf '%s' "$CMD" | grep -oP -- '(?:--body(?:=|[[:space:]]+)|(?:-f|-F|--field|--raw-field)[[:space:]]+body=)"\$\((?:cat[[:space:]]+|<[[:space:]]*)\K[^\s'"'"'"$()<>]+(?=[[:space:]]*\)\")')
+  rc=$?
+  if [ "$rc" -gt 1 ]; then
+    return 3
+  fi
+  if [ -z "$sub_file" ] && [ "${IS_GH_PR_WRITE:-0}" -eq 1 ]; then
+    sub_file=$(printf '%s' "$CMD_JOINED" | grep -oP -- "${GH_PR_CMD_PREFIX}"'-b(?:=|[[:space:]]*)"\$\((?:cat[[:space:]]+|<[[:space:]]*)\K[^\s'"'"'"$()<>]+(?=[[:space:]]*\)\")')
+    rc=$?
+    if [ "$rc" -gt 1 ]; then
+      return 3
     fi
-    # Unreadable path: fall through to the inline forms below rather than
-    # stopping — an unreadable --body-file could coexist with an inline
-    # --body in the same command.
+  fi
+  if [ -n "$sub_file" ] && read_body_path "$sub_file"; then
+    return 0
   fi
 
   # Inline forms, most-specific (quoted) first so a quoted value's own
@@ -247,13 +320,13 @@ extract_pr_body() {
   # NUL terminator before command substitution.
   #
   # Heredoc form (`--body "$(cat <<'EOF' … EOF)"`, quoted or unquoted TAG,
-  # `--body` and `(-f|-F|--field) body=` alike): tried BEFORE the plain
-  # `[^"]*` ladder below because a literal `"` inside a heredoc is ordinary
-  # body text and would truncate a `[^"]*` capture at that first quote. `\K`
-  # after the opener's newline and a lookahead on the `\1` terminator line
+  # `--body`, `-b`, and `(-f|-F|--field|--raw-field) body=` alike): tried BEFORE
+  # the plain `[^"]*` ladder below because a literal `"` inside a heredoc is
+  # ordinary body text and would truncate a `[^"]*` capture at that first quote.
+  # `\K` after the opener's newline and a lookahead on the `\1` terminator line
   # capture only the body lines themselves; non-matching commands fall through.
   # shellcheck disable=SC2016
-  body=$(printf '%s' "$CMD" | grep -zoP -- '(?:--body(?:=|[[:space:]]+)|(?:-f|-F|--field)[[:space:]]+body=)"\$\(cat[[:space:]]*<<-?[ \t]*[\x27"]?(\w+)[\x27"]?[ \t]*\n\K(?s:.*?)(?=\n\1(?:\n|\)|$))' | head -zn1 | tr -d '\0')
+  body=$(printf '%s' "$CMD_JOINED" | grep -zoP -- '(?:--body(?:=|[[:space:]]+)|(?:-f|-F|--field|--raw-field)[[:space:]]+body=|'"${GH_PR_CMD_PREFIX}"'-b(?:=|[[:space:]]*))"\$\(cat[[:space:]]*<<-?[ \t]*[\x27"]?(\w+)[\x27"]?[ \t]*\n\K(?s:.*?)(?=\n\1(?:\n|\)|$))' | head -zn1 | tr -d '\0')
   if [ -n "$body" ]; then BODY_TEXT="$body"; return 0; fi
   body=$(printf '%s' "$CMD" | grep -zoP -- '--body="\K[^"]*' | head -zn1 | tr -d '\0')
   if [ -n "$body" ]; then BODY_TEXT="$body"; return 0; fi
@@ -268,18 +341,29 @@ extract_pr_body() {
   body=$(printf '%s' "$CMD" | grep -zoP -- '--body[[:space:]]+\K[^[:space:]"'"'"']\S*' | head -zn1 | tr -d '\0')
   if [ -n "$body" ]; then BODY_TEXT="$body"; return 0; fi
 
-  # -f body=<text> / -F body=<text> / --field body=<text> — inline string
-  # field on the PATCH form. `-f`/`--raw-field` always sends a literal
-  # string. `-F`/`--field` sends a literal string too UNLESS the value
+  if [ "${IS_GH_PR_WRITE:-0}" -eq 1 ]; then
+    body=$(printf '%s' "$CMD_JOINED" | grep -zoP -- "${GH_PR_CMD_PREFIX}"'-b(?:=|[[:space:]]*)"\K[^"]*' | head -zn1 | tr -d '\0')
+    if [ -n "$body" ]; then BODY_TEXT="$body"; return 0; fi
+    body=$(printf '%s' "$CMD_JOINED" | grep -zoP -- "${GH_PR_CMD_PREFIX}-b(?:=|[[:space:]]*)'\K[^']*" | head -zn1 | tr -d '\0')
+    if [ -n "$body" ]; then BODY_TEXT="$body"; return 0; fi
+    body=$(printf '%s' "$CMD_JOINED" | grep -zoP -- "${GH_PR_CMD_PREFIX}"'-b=\K[^[:space:]]+' | head -zn1 | tr -d '\0')
+    if [ -n "$body" ]; then BODY_TEXT="$body"; return 0; fi
+    body=$(printf '%s' "$CMD_JOINED" | grep -zoP -- "${GH_PR_CMD_PREFIX}"'-b[[:space:]]+\K[^[:space:]"'"'"']\S*' | head -zn1 | tr -d '\0')
+    if [ -n "$body" ]; then BODY_TEXT="$body"; return 0; fi
+  fi
+
+  # -f body=<text> / -F body=<text> / --field body=<text> / --raw-field body=<text> —
+  # inline string field on the PATCH/POST form. `-f`/`--raw-field` always sends
+  # a literal string. `-F`/`--field` sends a literal string too UNLESS the value
   # starts with `@`, in which case gh reads it as a file path — that shape
   # is handled above, before this ladder, so a `-F body=@path` command never
   # reaches here. Quoted forms come first so a quoted value's own spaces
   # survive.
-  body=$(printf '%s' "$CMD" | grep -zoP -- '(-f|-F|--field)[[:space:]]+body="\K[^"]*' | head -zn1 | tr -d '\0')
+  body=$(printf '%s' "$CMD" | grep -zoP -- '(-f|-F|--field|--raw-field)[[:space:]]+body="\K[^"]*' | head -zn1 | tr -d '\0')
   if [ -n "$body" ]; then BODY_TEXT="$body"; return 0; fi
-  body=$(printf '%s' "$CMD" | grep -zoP -- "(-f|-F|--field)[[:space:]]+body='\K[^']*" | head -zn1 | tr -d '\0')
+  body=$(printf '%s' "$CMD" | grep -zoP -- "(-f|-F|--field|--raw-field)[[:space:]]+body='\K[^']*" | head -zn1 | tr -d '\0')
   if [ -n "$body" ]; then BODY_TEXT="$body"; return 0; fi
-  body=$(printf '%s' "$CMD" | grep -zoP -- '(-f|-F|--field)[[:space:]]+body=\K\S+' | head -zn1 | tr -d '\0')
+  body=$(printf '%s' "$CMD" | grep -zoP -- '(-f|-F|--field|--raw-field)[[:space:]]+body=\K\S+' | head -zn1 | tr -d '\0')
   if [ -n "$body" ]; then BODY_TEXT="$body"; return 0; fi
 
   return 0
@@ -308,18 +392,19 @@ else
   # cheapest possible reject dominates. CLI flags have no case variance, so a
   # case-sensitive glob here is not a hole (unlike the nocasematch situation a
   # command-word pre-filter has to account for with `git commit`/`gh pr` prose).
-  # `body=` widens this to the `gh api -F body=@file` / `-f body=<text>` PATCH
-  # shape, which never writes literal `--body`.
+  # `body=` widens this to the `gh api -F body=@file` / `-f body=<text>`
+  # shapes, which never write literal `--body`; `pr create` and `pr edit`
+  # admit short-flag (`-b`/`-F`) PR writes, and those commands are rare so
+  # nothing is added for an ordinary Bash call.
   case "$INPUT" in
-    *"--body"* | *"body="*) ;;
+    *"--body"* | *"body="* | *"pr create"* | *"pr edit"*) ;;
     *) exit 0 ;;
   esac
 
   # Raw pre-filter #2: narrow to the PR-write command families before paying
-  # for jq when no extra command family ERE is configured. The PATCH shape
-  # always carries the literal `gh api`, so the cheap glob narrows on that;
-  # the later three-way `gh api` / `-X|--method PATCH` / `pulls/N` check below
-  # is what does the real narrowing.
+  # for jq when no extra command family ERE is configured. The PATCH/POST shapes
+  # always carry the literal `gh api`, so the cheap glob narrows on that;
+  # the later `gh api` checks below do the real narrowing.
   EXTRA_COMMANDS="${SYG_PR_BODY_EXTRA_COMMANDS:-}"
   if [ -z "$EXTRA_COMMANDS" ]; then
     case "$INPUT" in
@@ -333,31 +418,45 @@ else
 
   CMD=$(jq -r '.tool_input.command // empty' <<<"$INPUT" 2>/dev/null || echo "")
   [ -z "$CMD" ] && exit 0
+  CMD_JOINED="${CMD//\\$'\n'/ }"
 
   # Command-family check on the decoded command, case-insensitively. The `gh …`
   # alternative allows global flags between `gh` and `pr`, because adjacency-only
   # spellings miss `gh --repo owner/name pr create`. The PATCH alternative is
-  # checked as three ANDed greps (gh api / -X|--method PATCH / pulls/N) rather
-  # than one regex, so the PATCH and path tokens can appear in either order in
-  # the command.
+  # checked as ANDed greps and the POST alternative uses lookaheads within one
+  # simple command, so the method, path, and field tokens can appear in any order.
   IS_PATCH_PR_API=0
   if printf '%s' "$CMD" | grep -iE 'gh[[:space:]]+api' >/dev/null &&
     printf '%s' "$CMD" | grep -iE -- '(-X|--method)[[:space:]=]*PATCH' >/dev/null &&
     printf '%s' "$CMD" | grep -iE 'pulls/[0-9]+' >/dev/null; then
     IS_PATCH_PR_API=1
   fi
-  CMD_FAMILY_RE='gh([[:space:]]+[^[:space:]]+)*[[:space:]]+pr[[:space:]]+(create|edit)'
+  IS_POST_PR_API=0
+  if printf '%s' "$CMD_JOINED" | grep -iP -- '\bgh[[:space:]]+api\b(?=[^\n;&|]*\bpulls(?:[[:space:]"\x27?]|$))(?=[^\n;&|]*(?:-f|-F|--field|--raw-field)[[:space:]]+body=)(?![^\n;&|]*(?:-X|--method)[[:space:]=]*GET\b)' >/dev/null 2>&1; then
+    IS_POST_PR_API=1
+  fi
+  BASE_CMD_FAMILY_RE='gh([[:space:]]+[^[:space:]]+)*[[:space:]]+pr[[:space:]]+(create|edit)'
+  IS_GH_PR_WRITE=0
+  if printf '%s' "$CMD" | grep -iE "$BASE_CMD_FAMILY_RE" >/dev/null; then
+    IS_GH_PR_WRITE=1
+  fi
+  CMD_FAMILY_RE="$BASE_CMD_FAMILY_RE"
   if [ -n "$EXTRA_COMMANDS" ]; then
     CMD_FAMILY_RE="($CMD_FAMILY_RE)|($EXTRA_COMMANDS)"
   fi
-  if ! printf '%s' "$CMD" | grep -iE "$CMD_FAMILY_RE" >/dev/null &&
-    [ "$IS_PATCH_PR_API" -ne 1 ]; then
+  if [ "$IS_GH_PR_WRITE" -ne 1 ] &&
+    ! printf '%s' "$CMD" | grep -iE "$CMD_FAMILY_RE" >/dev/null &&
+    [ "$IS_PATCH_PR_API" -ne 1 ] &&
+    [ "$IS_POST_PR_API" -ne 1 ]; then
     exit 0
   fi
 
-  # Require --body/--body-file, or (for the PATCH form) a -f/-F/--field body=
-  # argument, on the decoded command.
-  if ! printf '%s' "$CMD" | grep -E -- '--body(-file)?\b|(-f|-F|--field)[[:space:]]+body=' >/dev/null; then
+  # Require --body/--body-file, or (for the PATCH/POST forms) a
+  # -f/-F/--field|--raw-field body= argument, or (when IS_GH_PR_WRITE=1) a
+  # -b/-F token in the same simple command after `pr create|edit`, on the
+  # decoded command.
+  if ! printf '%s' "$CMD" | grep -E -- '--body(-file)?\b|(-f|-F|--field|--raw-field)[[:space:]]+body=' >/dev/null &&
+    ! { [ "$IS_GH_PR_WRITE" -eq 1 ] && printf '%s' "$CMD_JOINED" | grep -P -- "${GH_PR_CMD_PREFIX}-(b|F)" >/dev/null 2>&1; }; then
     exit 0
   fi
 
@@ -404,7 +503,7 @@ run_ref_check() {
 # convention — probed unmatched without it.
 # Probes: "discloses", "SUBTASK", backticked-id, five-chained-ids, and
 # colon-after-verb cases.
-REF_PATTERN='(?<![A-Za-z])(filed as|tracked in|closes|completes|finishes):?([ \t]+[^ \t]+){0,3}[ \t]+[\x60*_(\[]*(?<![A-Za-z-])(TASK-[0-9]+|doc-[0-9]+)([\x60*_)\]]*[ \t]*[,;]?[ \t]*(and[ \t]+)?[\x60*_(\[]*(?<![A-Za-z-])(TASK-[0-9]+|doc-[0-9]+))*'
+REF_PATTERN='(?<![A-Za-z])(?:(?:filed as|tracked in|closes|completes|finishes):?(?:[ \t]+[^ \t]+){0,3}|(?:close[d]?|fix(?:es|ed)?|resolve[sd]?):?)[ \t]+[\x60*_(\[]*(?<![A-Za-z-])(TASK-[0-9]+|doc-[0-9]+)([\x60*_)\]]*[ \t]*[,;]?[ \t]*(and[ \t]+)?[\x60*_(\[]*(?<![A-Za-z-])(TASK-[0-9]+|doc-[0-9]+))*'
 REF_SPANS=$(printf '%s' "$SCAN_TEXT" | grep -oPi "$REF_PATTERN")
 RC=$?
 if [ "$RC" -gt 1 ]; then
@@ -596,11 +695,11 @@ run_claim_scan() {
     if printf '%s' "$line" | grep -iE "$CLAIM_CITE_EXEMPT_REGEX" >/dev/null; then
       continue
     fi
-    # Closing-reference narrowing: a bare `closes TASK-N`/`closes doc-N`
-    # line is exempt once the body carries an Acceptance heading — the
-    # heading is the cite for a closing reference's own claim (the item is
-    # actually done).
-    if [ "$has_acceptance" -eq 1 ] && printf '%s' "$line" | grep -iE '\bcloses?:? (TASK|doc)-[0-9]+' >/dev/null; then
+    # Closing-reference narrowing: a bare closing-reference (`closes TASK-N`,
+    # `fixes doc-N`, etc.) line is exempt once the body carries an Acceptance
+    # heading — the heading is the cite for a closing reference's own claim
+    # (the item is actually done).
+    if [ "$has_acceptance" -eq 1 ] && printf '%s' "$line" | grep -iE "$CLAIM_CLOSING_REF_REGEX" >/dev/null; then
       continue
     fi
 
