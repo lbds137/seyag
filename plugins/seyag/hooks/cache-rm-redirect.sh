@@ -53,7 +53,7 @@ PY_RC=$?
 [ -n "$HITS" ] || exit 0
 
 WORKTREE_HINT=""
-[ "$PY_RC" = 11 ] && WORKTREE_HINT=$'\n'"  agent worktrees: safe-worktree-clean --repo <repo> [--apply] (it judges the seven SAFE criteria first)."
+[ "$PY_RC" = 11 ] && WORKTREE_HINT=$'\n'"  agent worktrees: safe-worktree-clean --repo <repo> [--apply] (it judges its SAFE criteria first)."
 
 cat >&2 <<EOF
 CACHE-RM REDIRECT — use safe-clean for regenerable caches

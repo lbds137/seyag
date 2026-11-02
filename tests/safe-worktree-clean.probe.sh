@@ -635,6 +635,182 @@ else
   bad "subbranch --apply (rc $rc)"; printf '%s\n' "$out"
 fi
 
+# --- Check 9 (gitfile): repointed .git with core.fsmonitor is held, never runs git in the tree, and --apply keeps it. ---
+mk_repo fsm
+FSM="$T/fsm"
+add_tree fsm fsmbad
+add_tree fsm fsmclean
+FSM_WT="$FSM/.claude/worktrees/fsmbad"
+FSM_CRAFTED="$T/fsm-crafted.git"
+FSM_MARKER="$T/fsm-marker"
+FSM_HOOK="$T/fsm-hook.sh"
+printf '#!/bin/sh\n: > "%s"\n' "$FSM_MARKER" > "$FSM_HOOK"
+chmod +x "$FSM_HOOK"
+cp -R "$FSM/.git" "$FSM_CRAFTED"
+git --git-dir="$FSM_CRAFTED" config core.fsmonitor "$FSM_HOOK"
+printf 'gitdir: %s\n' "$FSM_CRAFTED" > "$FSM_WT/.git"
+rm -f "$FSM_MARKER"
+J_FSM=$("$TOOL" --repo "$FSM" --json)
+expect "$J_FSM" fsmbad HOLD:gitfile "repointed .git with core.fsmonitor holds as gitfile"
+expect "$J_FSM" fsmclean SAFE "clean sibling alongside repointed tree is still SAFE"
+[ ! -e "$FSM_MARKER" ] && ok "safe-worktree-clean dry run did not fire core.fsmonitor marker" \
+  || bad "safe-worktree-clean dry run fired core.fsmonitor marker"
+out_fsm=$("$TOOL" --repo "$FSM" --apply); rc_fsm=$?
+if [ "$rc_fsm" -eq 0 ] && [ ! -e "$FSM_MARKER" ] && [ -d "$FSM_WT" ] && [ ! -e "$FSM/.claude/worktrees/fsmclean" ]; then
+  ok "safe-worktree-clean --apply keeps held gitfile tree without firing core.fsmonitor and removes SAFE sibling"
+else
+  bad "safe-worktree-clean --apply on repointed tree (rc=$rc_fsm, marker=$([ -e "$FSM_MARKER" ] && echo present || echo absent))"; printf '%s\n' "$out_fsm"
+fi
+git -C "$FSM_WT" status >/dev/null 2>&1
+[ -e "$FSM_MARKER" ] && ok "positive control: direct git -C status on repointed tree fires core.fsmonitor marker" \
+  || bad "positive control: direct git -C status did not fire core.fsmonitor marker"
+
+# Nested real .git directory with core.fsmonitor staged as a gitlink: held as gitfile without firing the marker.
+mk_repo fsmnest
+FSMN="$T/fsmnest"
+add_tree fsmnest fsmnestbad
+add_tree fsmnest fsmnestclean
+FSMN_WT="$FSMN/.claude/worktrees/fsmnestbad"
+FSMN_MARKER="$T/fsmnest-marker"
+FSMN_HOOK="$T/fsmnest-hook.sh"
+printf '#!/bin/sh\n: > "%s"\n' "$FSMN_MARKER" > "$FSMN_HOOK"
+chmod +x "$FSMN_HOOK"
+mkdir "$FSMN_WT/sub"
+cp -R "$FSMN/.git" "$FSMN_WT/sub/.git"
+rm -rf "$FSMN_WT/sub/.git/worktrees"
+git -C "$FSMN_WT/sub" reset -q --hard main
+git -C "$FSMN_WT/sub" config core.fsmonitor "$FSMN_HOOK"
+git -C "$FSMN_WT" add sub 2>/dev/null
+rm -f "$FSMN_MARKER"
+J_FSMN=$("$TOOL" --repo "$FSMN" --json)
+expect "$J_FSMN" fsmnestbad HOLD:gitfile "nested real .git with core.fsmonitor holds as gitfile"
+[ ! -e "$FSMN_MARKER" ] && ok "safe-worktree-clean dry run did not fire nested core.fsmonitor marker" \
+  || bad "safe-worktree-clean dry run fired nested core.fsmonitor marker"
+out_fsmn=$("$TOOL" --repo "$FSMN" --apply); rc_fsmn=$?
+if [ "$rc_fsmn" -eq 0 ] && [ ! -e "$FSMN_MARKER" ] && [ -d "$FSMN_WT" ] && [ ! -e "$FSMN/.claude/worktrees/fsmnestclean" ]; then
+  ok "safe-worktree-clean --apply keeps held nested-gitfile tree without firing core.fsmonitor"
+else
+  bad "safe-worktree-clean --apply on nested .git tree (rc=$rc_fsmn, marker=$([ -e "$FSMN_MARKER" ] && echo present || echo absent))"; printf '%s\n' "$out_fsmn"
+fi
+git -C "$FSMN_WT" status >/dev/null 2>&1
+[ -e "$FSMN_MARKER" ] && ok "positive control: direct git -C status on staged nested repo fires core.fsmonitor marker" \
+  || bad "positive control: direct git -C status on staged nested repo did not fire core.fsmonitor marker"
+
+# Planted repo (no .git name) at sub/, untracked: dry run is HOLD:gitfile, --apply keeps the tree, marker absent; git -C "$WT/sub" status fires the marker.
+plant_repo() { # $1=dir $2=hook
+  mkdir -p "$1/objects" "$1/refs/heads"
+  printf 'ref: refs/heads/main\n' > "$1/HEAD"
+  : > "$1/objects/.keep"
+  : > "$1/refs/heads/.keep"
+  printf '[core]\n\trepositoryformatversion = 0\n\tbare = false\n\tworktree = ..\n\tfsmonitor = %s\n' "$2" > "$1/config"
+}
+mk_repo fsmplant
+FSMP="$T/fsmplant"
+add_tree fsmplant fsmplantbad
+add_tree fsmplant fsmplantclean
+FSMP_WT="$FSMP/.claude/worktrees/fsmplantbad"
+FSMP_MARKER="$T/fsmplant-marker"
+FSMP_HOOK="$T/fsmplant-hook.sh"
+printf '#!/bin/sh\n: > "%s"\n' "$FSMP_MARKER" > "$FSMP_HOOK"
+chmod +x "$FSMP_HOOK"
+plant_repo "$FSMP_WT/sub" "$FSMP_HOOK"
+rm -f "$FSMP_MARKER"
+J_FSMP=$("$TOOL" --repo "$FSMP" --json)
+expect "$J_FSMP" fsmplantbad HOLD:gitfile "planted repo at sub/ (no .git) holds as gitfile"
+[ ! -e "$FSMP_MARKER" ] && ok "safe-worktree-clean dry run did not fire planted repo core.fsmonitor marker" \
+  || bad "safe-worktree-clean dry run fired planted repo core.fsmonitor marker"
+out_fsmp=$("$TOOL" --repo "$FSMP" --apply); rc_fsmp=$?
+if [ "$rc_fsmp" -eq 0 ] && [ ! -e "$FSMP_MARKER" ] && [ -d "$FSMP_WT" ] && [ ! -e "$FSMP/.claude/worktrees/fsmplantclean" ]; then
+  ok "safe-worktree-clean --apply keeps held planted-repo tree without firing core.fsmonitor"
+else
+  bad "safe-worktree-clean --apply on planted-repo tree (rc=$rc_fsmp, marker=$([ -e "$FSMP_MARKER" ] && echo present || echo absent))"; printf '%s\n' "$out_fsmp"
+fi
+git -C "$FSMP_WT/sub" status >/dev/null 2>&1
+[ -e "$FSMP_MARKER" ] && ok "positive control: direct git -C sub status on planted repo fires core.fsmonitor marker" \
+  || bad "positive control: direct git -C sub status on planted repo did not fire core.fsmonitor marker"
+
+# Gitlink whose path is a symlink to a crafted repo outside the tree: judge_submodules must not run git -C through it.
+mk_repo fsmsym
+FSMS="$T/fsmsym"
+add_tree fsmsym fsmsymbad
+FSMS_WT="$FSMS/.claude/worktrees/fsmsymbad"
+FSMS_CRAFTED="$T/fsmsym-crafted"
+FSMS_MARKER="$T/fsmsym-marker"
+FSMS_HOOK="$T/fsmsym-hook.sh"
+git init -q "$FSMS_CRAFTED" && git -C "$FSMS_CRAFTED" commit -q --allow-empty -m crafted
+FSMS_SHA=$(git -C "$FSMS_CRAFTED" rev-parse HEAD)
+printf '#!/bin/sh\n: > "%s"\n' "$FSMS_MARKER" > "$FSMS_HOOK"
+chmod +x "$FSMS_HOOK"
+git -C "$FSMS_CRAFTED" config core.fsmonitor "$FSMS_HOOK"
+ln -s "$FSMS_CRAFTED" "$FSMS_WT/sub"
+git -C "$FSMS_WT" update-index --add --cacheinfo "160000,$FSMS_SHA,sub"
+rm -f "$FSMS_MARKER"
+J_FSMS=$("$TOOL" --repo "$FSMS" --json)
+got_fsms=$(verdict "$J_FSMS" fsmsymbad)
+case "$got_fsms" in *gitfile*) ok "fsmsymbad: gitlink at a symlink to a repo outside the tree holds as gitfile ('$got_fsms')" ;;
+  *) bad "fsmsymbad: got '$got_fsms', want gitfile among its reasons" ;; esac
+[ ! -e "$FSMS_MARKER" ] && ok "safe-worktree-clean dry run did not fire symlinked-gitlink core.fsmonitor marker" \
+  || bad "safe-worktree-clean dry run fired symlinked-gitlink core.fsmonitor marker"
+out_fsms=$("$TOOL" --repo "$FSMS" --apply); rc_fsms=$?
+if [ ! -e "$FSMS_MARKER" ] && [ -d "$FSMS_WT" ] && [ -L "$FSMS_WT/sub" ]; then
+  ok "safe-worktree-clean --apply keeps the held symlinked-gitlink tree without firing core.fsmonitor (rc=$rc_fsms)"
+else
+  bad "safe-worktree-clean --apply on symlinked-gitlink tree (rc=$rc_fsms, marker=$([ -e "$FSMS_MARKER" ] && echo present || echo absent))"; printf '%s\n' "$out_fsms"
+fi
+git -C "$FSMS_WT/sub" status >/dev/null 2>&1
+[ -e "$FSMS_MARKER" ] && ok "positive control: direct git -C sub status through the symlink fires core.fsmonitor marker" \
+  || bad "positive control: direct git -C sub status through the symlink did not fire core.fsmonitor marker"
+
+# Gitlink at a/crafted where a is a symlink to the crafted repo's parent: the resolved path is outside the tree.
+mk_repo fsmsymdir
+FSMD="$T/fsmsymdir"
+add_tree fsmsymdir fsmsymdirbad
+FSMD_WT="$FSMD/.claude/worktrees/fsmsymdirbad"
+FSMD_PARENT="$T/fsmsymdir-parent"
+FSMD_CRAFTED="$FSMD_PARENT/crafted"
+FSMD_MARKER="$T/fsmsymdir-marker"
+FSMD_HOOK="$T/fsmsymdir-hook.sh"
+mkdir -p "$FSMD_PARENT"
+git init -q "$FSMD_CRAFTED" && git -C "$FSMD_CRAFTED" commit -q --allow-empty -m crafted
+FSMD_SHA=$(git -C "$FSMD_CRAFTED" rev-parse HEAD)
+printf '#!/bin/sh\n: > "%s"\n' "$FSMD_MARKER" > "$FSMD_HOOK"
+chmod +x "$FSMD_HOOK"
+git -C "$FSMD_CRAFTED" config core.fsmonitor "$FSMD_HOOK"
+ln -s "$FSMD_PARENT" "$FSMD_WT/a"
+git -C "$FSMD_WT" update-index --add --cacheinfo "160000,$FSMD_SHA,a/crafted"
+rm -f "$FSMD_MARKER"
+J_FSMD=$("$TOOL" --repo "$FSMD" --json)
+got_fsmd=$(verdict "$J_FSMD" fsmsymdirbad)
+case "$got_fsmd" in *gitfile*) ok "fsmsymdirbad: gitlink under a symlink that resolves outside the tree holds as gitfile ('$got_fsmd')" ;;
+  *) bad "fsmsymdirbad: got '$got_fsmd', want gitfile among its reasons" ;; esac
+[ ! -e "$FSMD_MARKER" ] && ok "safe-worktree-clean dry run did not fire symlinked-parent core.fsmonitor marker" \
+  || bad "safe-worktree-clean dry run fired symlinked-parent core.fsmonitor marker"
+out_fsmd=$("$TOOL" --repo "$FSMD" --apply); rc_fsmd=$?
+if [ ! -e "$FSMD_MARKER" ] && [ -d "$FSMD_WT" ] && [ -L "$FSMD_WT/a" ]; then
+  ok "safe-worktree-clean --apply keeps the held symlinked-parent tree without firing core.fsmonitor (rc=$rc_fsmd)"
+else
+  bad "safe-worktree-clean --apply on symlinked-parent tree (rc=$rc_fsmd, marker=$([ -e "$FSMD_MARKER" ] && echo present || echo absent))"; printf '%s\n' "$out_fsmd"
+fi
+git -C "$FSMD_WT/a/crafted" status >/dev/null 2>&1
+[ -e "$FSMD_MARKER" ] && ok "positive control: direct git -C a/crafted status through the symlink fires core.fsmonitor marker" \
+  || bad "positive control: direct git -C a/crafted status through the symlink did not fire core.fsmonitor marker"
+
+# Gitlink at sub, a symlink (relative target) to a real directory inside the tree: the path resolves inside, so only the -L clause holds it.
+mk_repo fsmsyminner
+FSMI="$T/fsmsyminner"
+add_tree fsmsyminner fsmsyminnerbad
+FSMI_WT="$FSMI/.claude/worktrees/fsmsyminnerbad"
+mkdir -p "$FSMI_WT/realdir" && echo inside > "$FSMI_WT/realdir/f.txt"
+FSMI_CRAFTED="$T/fsmsyminner-crafted"
+git init -q "$FSMI_CRAFTED" && git -C "$FSMI_CRAFTED" commit -q --allow-empty -m crafted
+FSMI_SHA=$(git -C "$FSMI_CRAFTED" rev-parse HEAD)
+ln -s realdir "$FSMI_WT/sub"
+git -C "$FSMI_WT" update-index --add --cacheinfo "160000,$FSMI_SHA,sub"
+J_FSMI=$("$TOOL" --repo "$FSMI" --json)
+got_fsmi=$(verdict "$J_FSMI" fsmsyminnerbad)
+case "$got_fsmi" in *gitfile*) ok "fsmsyminnerbad: gitlink at a symlink to an in-tree directory holds as gitfile ('$got_fsmi')" ;;
+  *) bad "fsmsyminnerbad: got '$got_fsmi', want gitfile among its reasons" ;; esac
+
 # --- The rm guards pass the tool's own invocation untouched (exit 0, no output). ---
 for cmd in 'safe-worktree-clean --repo /srv/team/myrepo --apply' \
   'safe-worktree-clean --repo ~/src/node_modules-demo --apply' \

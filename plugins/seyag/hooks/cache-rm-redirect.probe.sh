@@ -81,7 +81,7 @@ hint() { # $1 want "yes" or "no", $2 command
     *) echo "FAIL not blocked: $2"; fail=1; return ;;
   esac
   case "$msg" in
-    *'  agent worktrees: safe-worktree-clean --repo <repo> [--apply] (it judges the seven SAFE criteria first)'*) got=yes ;;
+    *'  agent worktrees: safe-worktree-clean --repo <repo> [--apply] (it judges its SAFE criteria first)'*) got=yes ;;
     *safe-worktree-clean*) got=garbled ;;
   esac
   if [ "$got" = "$1" ]; then echo "ok   hint $1: $2"; else echo "FAIL hint $got want $1: $2"; fail=1; fi

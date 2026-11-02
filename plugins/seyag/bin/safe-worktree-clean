@@ -42,6 +42,13 @@
 #               no submodule with uncommitted, untracked or ignored content, commits not on any
 #               remote (including stashes, custom refs and reflogs), or a populated gitlink
 #               directory without .git (HOLD:submodule)
+#   9 gitfile   the tree's .git is a regular file pointing to its own <common>/worktrees/<id>
+#               entry under <repo>/.git, with commondir and gitdir pointing back, no nested
+#               .git exists below the tree other than gitfiles pointing under
+#               <entry>/modules/, and no directory below the tree holds HEAD with objects,
+#               refs, or commondir (worktree-gitfile-check, run before any git -C in the
+#               tree), and no gitlink path is a symlink or resolves outside the tree
+#               (judge_submodules, before git -C in that path) -> HOLD:gitfile
 # <base> is --base REF, else SYG_WORKTREE_BASE, else origin/<default branch> (origin/HEAD,
 # else origin/main), compared as the local ref stands (fetch first for a fresh verdict);
 # a configured ref that does not resolve, or no default ref, makes every tree HOLD:no-base;
@@ -377,10 +384,14 @@ branch_contained() {
   return 0
 }
 
-# Criteria 3-7 for tree index $1; criteria 1-2 are judged by the caller.
+# Criteria 3-9 for tree index $1; criteria 1-2 are judged by the caller.
 judge_git() {
   local i=$1 t=${WT_PATH[$1]} b=${WT_BRANCH[$1]} head=${WT_HEAD[$1]}
   local out p blob wt_blob idx line sha subj n_unmerged=0 first=""
+  if ! out=$(bash "$SELF_DIR/worktree-gitfile-check" --repo "$MAIN" "$t" 2>&1); then
+    hold gitfile "${out#"worktree-gitfile-check: REFUSED: $t: "}"
+    return
+  fi
   if [ -z "$BASE" ]; then
     hold no-base "$NO_BASE_REASON"
     return
@@ -528,7 +539,7 @@ judge_git() {
 }
 
 judge_submodules() {
-  local root=$1 prefix=$2 entry sub rel full sub_status sub_unpushed
+  local root=$1 prefix=$2 entry sub rel full sub_status sub_unpushed escaped full_real root_real
   local -a sub_entries=()
   if ! z_list sub_entries git -C "$root" ls-files -s -z; then
     hold git-error "git ls-files -s in ${prefix:-the tree} failed"
@@ -539,6 +550,18 @@ judge_submodules() {
     sub=${entry#*$'\t'}
     rel=${prefix:+$prefix/}$sub
     full="$root/$sub"
+    # A symlink, or a path that resolves outside the tree, would send git -C out of it: hold, never recurse.
+    escaped=false
+    if [ -L "$full" ]; then
+      escaped=true
+    elif [ -e "$full" ]; then
+      full_real=$(realpath -e -- "$full" 2>/dev/null); root_real=$(realpath -e -- "$root" 2>/dev/null)
+      [[ -n "$full_real" && -n "$root_real" && "$full_real" == "$root_real"/?* ]] || escaped=true
+    fi
+    if $escaped; then
+      hold gitfile "submodule $rel is a symlink or resolves outside the tree; git -C would run there"
+      continue
+    fi
     if [ ! -e "$full/.git" ] && [ ! -L "$full/.git" ]; then
       if [ -d "$full" ] && [ -n "$(ls -A -- "$full" 2>/dev/null)" ]; then
         hold submodule "submodule $rel is not initialised but its directory is not empty"

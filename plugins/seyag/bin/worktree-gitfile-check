@@ -1,0 +1,333 @@
+#!/bin/bash
+# worktree-gitfile-check - verify a linked worktree's .git file points to its entry under the main repo's .git/worktrees/ and refuse planted repos below the tree
+#
+# Usage:
+#   worktree-gitfile-check --repo MAIN_TOP TREE
+#
+# Judges where TREE/.git points and refuses planted repos below the tree, not
+# only where .git points, never what the main repository holds (a worker that
+# can write the real common dir is out of scope). Plain-tools only: never runs
+# git, because running `git -C TREE` when TREE/.git has been repointed at a
+# crafted gitdir can execute that gitdir's `core.fsmonitor` on the host.
+#
+# Trailing newline on the gitfile is normal: a one-line file with `\n` passes
+# (a `wc -l` of 1 and no second line, or 0 and one unterminated line). A main
+# repo whose `.git` is itself a file (a submodule or `--separate-git-dir` main)
+# or a symlink refuses (fails closed).
+#
+# Refuses on the first of:
+#   1. TREE/.git is a symlink, or is not a regular file (a real .git directory
+#      is refused: callers only pass linked worktrees).
+#   2. TREE/.git is over 4096 bytes, has more than one line, contains a NUL byte
+#      (`tr -d '\0'` byte count against `wc -c`, since bash `read` drops NULs
+#      while git stops at the first NUL), is empty, or lacks a `gitdir: ` prefix.
+#   3. The target path (relative resolves against TREE) is a symlink, does not
+#      exist, or is not a directory named `<common>/worktrees/<id>`.
+#   4. `<entry>/commondir` or `<entry>/gitdir` is a symlink, is not a regular
+#      file, is empty, or its value (relative resolves against `<entry>`) does
+#      not `realpath -m` to `<common>` and `<real TREE>/.git`.
+#   5. `<common>` is under TREE, or is not `<real MAIN_TOP>/.git`.
+#   6. Any `.git` path below TREE (`find "$REAL_TREE" -mindepth 2 \( -name .git
+#      -o -name HEAD \) -print0`) is a symlink or not a regular file, fails
+#      rule 2's single-line and `gitdir: ` checks, or its target (relative
+#      resolves against the directory holding that `.git`) does not `realpath -m`
+#      to an existing directory strictly under `<entry>/modules/`; or `find`
+#      itself fails. A real submodule of the tree passes; any other nested repo
+#      refuses, including an ignored one.
+#   7. Any `HEAD` path of any type (regular file, directory, or symlink, a
+#      dangling symlink included) below TREE (`-mindepth 2`, skipping a `HEAD`
+#      whose parent directory is named `.git`) sits in a directory DIR that also
+#      holds an entry (`-e` or `-L`, so a dangling symlink counts) named
+#      `objects`, `refs`, or `commondir`. Git's own test needs HEAD with
+#      `commondir`, or HEAD with `objects` and `refs`; this rule refuses HEAD
+#      with any one of the three, so a repo cannot be planted in two steps.
+#
+# Exit codes: 0 safe; 1 refused (`worktree-gitfile-check: REFUSED: <tree>: <reason>`
+# on stderr); 2 usage error.
+
+set -uo pipefail
+
+usage() { sed -n '2,/^$/s/^# \{0,1\}//p' "$0"; }
+
+MAIN_TOP=""
+REPO_GIVEN=false
+POSITIONALS=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h | --help)
+      usage
+      exit 0
+      ;;
+    --repo)
+      [ $# -ge 2 ] || { usage >&2; exit 2; }
+      [ -n "$2" ] || { usage >&2; exit 2; }
+      MAIN_TOP=$2
+      REPO_GIVEN=true
+      shift
+      ;;
+    --repo=*)
+      MAIN_TOP=${1#--repo=}
+      [ -n "$MAIN_TOP" ] || { usage >&2; exit 2; }
+      REPO_GIVEN=true
+      ;;
+    --)
+      shift
+      while [ $# -gt 0 ]; do
+        POSITIONALS+=("$1")
+        shift
+      done
+      break
+      ;;
+    -*)
+      usage >&2
+      exit 2
+      ;;
+    *)
+      POSITIONALS+=("$1")
+      ;;
+  esac
+  shift
+done
+
+if ! $REPO_GIVEN || [ ${#POSITIONALS[@]} -ne 1 ] || [ -z "${POSITIONALS[0]}" ]; then
+  usage >&2
+  exit 2
+fi
+
+TREE=${POSITIONALS[0]}
+
+refuse() {
+  local reason=$1
+  reason=${reason//$'\n'/ }
+  printf 'worktree-gitfile-check: REFUSED: %s: %s\n' "${TREE//$'\n'/ }" "$reason" >&2
+  exit 1
+}
+
+read_single_line() {
+  local file=$1 label=$2
+  local -n out_var=$3
+  local bytes no_nul_bytes nl_count line="" rest=""
+  bytes=$(wc -c <"$file" 2>/dev/null) || refuse "$label is not readable"
+  bytes=$((bytes + 0))
+  if [ "$bytes" -gt 4096 ]; then
+    refuse "$label exceeds 4096 bytes ($bytes bytes)"
+  fi
+  no_nul_bytes=$(tr -d '\0' <"$file" | wc -c)
+  no_nul_bytes=$((no_nul_bytes + 0))
+  if [ "$no_nul_bytes" -ne "$bytes" ]; then
+    refuse "$label contains a NUL byte"
+  fi
+  if [ "$bytes" -eq 0 ]; then
+    refuse "$label is empty"
+  fi
+  nl_count=$(wc -l <"$file")
+  nl_count=$((nl_count + 0))
+  { IFS= read -r line; IFS= read -r rest; } <"$file"
+  if [ "$nl_count" -gt 1 ] || [ -n "$rest" ]; then
+    refuse "$label has more than one line"
+  fi
+  if [ -z "$line" ]; then
+    refuse "$label is empty"
+  fi
+  # shellcheck disable=SC2034 # out_var is a nameref (local -n) to the caller's variable
+  out_var=$line
+}
+
+# 1. TREE/.git is a regular file, not a symlink or directory.
+GITFILE="$TREE/.git"
+if [ -L "$GITFILE" ]; then
+  refuse ".git is a symlink"
+fi
+if [ -d "$GITFILE" ]; then
+  refuse ".git is a directory, not a linked-worktree gitfile"
+fi
+if [ ! -f "$GITFILE" ]; then
+  refuse ".git is not a regular file"
+fi
+REAL_TREE=$(realpath -e -- "$TREE" 2>/dev/null) \
+  || refuse "worktree path does not resolve: $TREE"
+if [ -L "$REAL_TREE/.git" ] || [ ! -f "$REAL_TREE/.git" ]; then
+  refuse ".git is not a regular file"
+fi
+
+# 2. Size <= 4096, single line, no NUL byte, non-empty, 'gitdir: ' prefix.
+gitfile_line=""
+read_single_line "$GITFILE" ".git" gitfile_line
+case "$gitfile_line" in
+  "gitdir: "?*)
+    gitdir_target=${gitfile_line#"gitdir: "}
+    ;;
+  "gitdir: ")
+    refuse ".git has an empty 'gitdir: ' target"
+    ;;
+  *)
+    refuse ".git lacks 'gitdir: ' prefix"
+    ;;
+esac
+
+# 3. Target path (relative resolves against TREE) is not a symlink, exists, and
+#    is a directory named <common>/worktrees/<id>.
+case "$gitdir_target" in
+  /*) entry_path=$gitdir_target ;;
+  *) entry_path="$TREE/$gitdir_target" ;;
+esac
+while [[ $entry_path == ?*/ ]]; do
+  entry_path=${entry_path%/}
+done
+if [ -L "$entry_path" ]; then
+  refuse "gitdir target is a symlink: $gitdir_target"
+fi
+if [ ! -e "$entry_path" ]; then
+  refuse "gitdir target does not exist: $gitdir_target"
+fi
+if [ ! -d "$entry_path" ]; then
+  refuse "gitdir target is not a directory: $gitdir_target"
+fi
+entry_base=$(basename -- "$entry_path")
+if [ -z "$entry_base" ] || [ "$entry_base" = "." ] || [ "$entry_base" = ".." ] || [ "$entry_base" = "/" ]; then
+  refuse "gitdir target is not a <common>/worktrees/<id> directory: $gitdir_target"
+fi
+entry_parent_raw=$(dirname -- "$entry_path")
+while [[ $entry_parent_raw == ?*/ ]]; do
+  entry_parent_raw=${entry_parent_raw%/}
+done
+if [ -L "$entry_parent_raw" ]; then
+  refuse "gitdir worktrees parent is a symlink: $gitdir_target"
+fi
+entry_parent=$(realpath -e -- "$entry_parent_raw" 2>/dev/null) \
+  || refuse "gitdir parent does not resolve: $gitdir_target"
+if [ -L "$entry_parent/$entry_base" ]; then
+  refuse "gitdir target is a symlink: $gitdir_target"
+fi
+if [ "$(basename -- "$entry_parent")" != "worktrees" ]; then
+  refuse "gitdir target is not under <common>/worktrees/<id>: $gitdir_target"
+fi
+ENTRY="$entry_parent/$entry_base"
+COMMON=$(dirname -- "$entry_parent")
+if [ -z "$COMMON" ] || [ ! -d "$COMMON" ]; then
+  refuse "common gitdir is not a directory: $COMMON"
+fi
+
+# 4. <entry>/commondir and <entry>/gitdir: regular files, non-empty, resolving
+#    via realpath -m to <common> and <real TREE>/.git.
+COMMONDIR_FILE="$ENTRY/commondir"
+if [ -L "$COMMONDIR_FILE" ]; then
+  refuse "entry commondir is a symlink"
+fi
+if [ ! -f "$COMMONDIR_FILE" ]; then
+  refuse "entry commondir is not a regular file"
+fi
+commondir_val=""
+read_single_line "$COMMONDIR_FILE" "entry commondir" commondir_val
+case "$commondir_val" in
+  /*) commondir_raw=$commondir_val ;;
+  *) commondir_raw="$ENTRY/$commondir_val" ;;
+esac
+commondir_resolved=$(realpath -m -- "$commondir_raw" 2>/dev/null) \
+  || refuse "entry commondir does not resolve"
+
+BACK_GITDIR_FILE="$ENTRY/gitdir"
+if [ -L "$BACK_GITDIR_FILE" ]; then
+  refuse "entry gitdir is a symlink"
+fi
+if [ ! -f "$BACK_GITDIR_FILE" ]; then
+  refuse "entry gitdir is not a regular file"
+fi
+back_gitdir_val=""
+read_single_line "$BACK_GITDIR_FILE" "entry gitdir" back_gitdir_val
+case "$back_gitdir_val" in
+  /*) back_gitdir_raw=$back_gitdir_val ;;
+  *) back_gitdir_raw="$ENTRY/$back_gitdir_val" ;;
+esac
+back_gitdir_resolved=$(realpath -m -- "$back_gitdir_raw" 2>/dev/null) \
+  || refuse "entry gitdir does not resolve"
+
+if [ "$commondir_resolved" != "$COMMON" ]; then
+  refuse "entry commondir ($commondir_resolved) does not resolve to $COMMON"
+elif [ "$back_gitdir_resolved" != "$REAL_TREE/.git" ]; then
+  refuse "entry gitdir ($back_gitdir_resolved) does not resolve to $REAL_TREE/.git"
+fi
+
+# 5. <common> is not under TREE, and equals <real MAIN_TOP>/.git (a real directory).
+case "$COMMON/" in
+  "$REAL_TREE/"*)
+    refuse "common gitdir $COMMON is inside worktree $REAL_TREE"
+    ;;
+esac
+if [ ! -d "$MAIN_TOP" ]; then
+  refuse "main repo top is not a directory: $MAIN_TOP"
+fi
+REAL_MAIN=$(realpath -e -- "$MAIN_TOP" 2>/dev/null) \
+  || refuse "main repo top does not resolve: $MAIN_TOP"
+if [ -L "$REAL_MAIN/.git" ] || [ ! -d "$REAL_MAIN/.git" ]; then
+  refuse "main repo .git is not a directory: $REAL_MAIN/.git"
+fi
+if [ "$COMMON" != "$REAL_MAIN/.git" ]; then
+  refuse "common gitdir $COMMON is not $REAL_MAIN/.git"
+fi
+
+# 6. Every nested .git below TREE is a regular-file gitfile pointing to an
+#    existing directory strictly under $ENTRY/modules/; a failed find refuses.
+# 7. No directory below TREE holds HEAD with objects, refs, or commondir.
+nested_gits=()
+mapfile -d '' nested_gits < <(find "$REAL_TREE" -mindepth 2 \( -name .git -o -name HEAD \) -print0 2>/dev/null; printf '\001rc=%s\0' "$?")
+find_rc=${nested_gits[-1]:-}
+unset 'nested_gits[-1]'
+for ngit in "${nested_gits[@]}"; do
+  if [ "${ngit##*/}" = "HEAD" ]; then
+    [ -e "$ngit" ] || [ -L "$ngit" ] || continue
+    head_dir=${ngit%/HEAD}
+    if [ "${head_dir##*/}" = ".git" ]; then
+      continue
+    fi
+    rel_dir=${head_dir#"$REAL_TREE/"}
+    for sib in objects refs commondir; do
+      if [ -e "$head_dir/$sib" ] || [ -L "$head_dir/$sib" ]; then
+        refuse "planted git directory at $rel_dir (HEAD with $sib): git would take it as a repo; remove or rename it"
+      fi
+    done
+    continue
+  fi
+  rel_git=${ngit#"$REAL_TREE/"}
+  if [ -L "$ngit" ]; then
+    refuse "nested $rel_git is a symlink"
+  fi
+  if [ -d "$ngit" ]; then
+    refuse "nested $rel_git is a directory, not a regular file"
+  fi
+  if [ ! -f "$ngit" ]; then
+    refuse "nested $rel_git is not a regular file"
+  fi
+  ngit_line=""
+  read_single_line "$ngit" "nested $rel_git" ngit_line
+  case "$ngit_line" in
+    "gitdir: "?*)
+      ngit_target=${ngit_line#"gitdir: "}
+      ;;
+    "gitdir: ")
+      refuse "nested $rel_git has an empty 'gitdir: ' target"
+      ;;
+    *)
+      refuse "nested $rel_git lacks 'gitdir: ' prefix"
+      ;;
+  esac
+  ngit_dir=${ngit%/.git}
+  case "$ngit_target" in
+    /*) ngit_raw=$ngit_target ;;
+    *) ngit_raw="$ngit_dir/$ngit_target" ;;
+  esac
+  ngit_resolved=$(realpath -m -- "$ngit_raw" 2>/dev/null) \
+    || refuse "nested $rel_git gitdir target does not resolve: $ngit_target"
+  case "$ngit_resolved" in
+    "$ENTRY/modules/"?*) ;;
+    *) refuse "nested $rel_git gitdir target ($ngit_resolved) is not under $ENTRY/modules/" ;;
+  esac
+  if [ ! -d "$ngit_resolved" ]; then
+    refuse "nested $rel_git gitdir target is not an existing directory: $ngit_resolved"
+  fi
+done
+if [ "$find_rc" != $'\001rc=0' ]; then
+  refuse "find failed while scanning $REAL_TREE (an unreadable directory, or a find error): fix it or remove the tree by hand"
+fi
+
+exit 0

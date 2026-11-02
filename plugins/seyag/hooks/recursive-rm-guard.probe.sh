@@ -269,7 +269,7 @@ esac
 # A blocked delete under .claude/worktrees also names safe-worktree-clean.
 msg=$(jq -nc --arg c 'rm -rf .claude/worktrees/agent-x' '{tool_input: {command: $c}}' | CLAUDE_JOB_DIR="" bash "$HOOK" 2>&1 >/dev/null)
 case "$msg" in
-  *'safe-worktree-clean --repo <repo> [--apply] (it judges the seven SAFE criteria first)'*)
+  *'safe-worktree-clean --repo <repo> [--apply] (it judges its SAFE criteria first)'*)
     echo "ok   a worktree delete's message names safe-worktree-clean" ;;
   *) echo "FAIL a worktree delete's message lacks the safe-worktree-clean line"; fail=1 ;;
 esac

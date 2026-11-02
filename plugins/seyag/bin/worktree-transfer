@@ -27,20 +27,27 @@
 #   3 worktree-registered   resolved <worktree-path> appears in the porcelain
 #                           listing with a `branch refs/heads/<name>` line (detached
 #                           trees refuse) matching SYG_WORKTREE_BRANCH_RE
-#   4 base-unchanged        when --base SHA is given, `<sha>^{commit}` resolves and
+#   4 worktree-gitfile      `worktree-gitfile-check --repo <main> <wt>` verifies
+#                           `<wt>/.git` is a regular file pointing to its own
+#                           `<main>/.git/worktrees/<id>` entry (with `commondir` and
+#                           `gitdir` pointing back), no nested `.git` exists below
+#                           `<wt>` other than gitfiles pointing under `<entry>/modules/`,
+#                           and no directory below `<wt>` holds `HEAD` with `objects`,
+#                           `refs`, or `commondir` before any `git -C <wt>` runs
+#   5 base-unchanged        when --base SHA is given, `<sha>^{commit}` resolves and
 #                           equals the main tree's HEAD (skipped when omitted)
-#   5 no-unpushed-base      worktree HEAD equals the main tree's HEAD (ahead is as
+#   6 no-unpushed-base      worktree HEAD equals the main tree's HEAD (ahead is as
 #                           wrong as behind; runs before the patch is built)
-#   6 empty-patch           `git -C <wt> add -A` then `git -C <wt> diff --cached --binary`
+#   7 empty-patch           `git -C <wt> add -A` then `git -C <wt> diff --cached --binary`
 #                           written to a temp file is non-empty
-#   7 nothing-outside-patch no `git -C <wt> ls-files -v` entry is assume-unchanged
+#   8 nothing-outside-patch no `git -C <wt> ls-files -v` entry is assume-unchanged
 #                           (lowercase tag) or skip-worktree (`S`) on disk, every
 #                           staged gitlink (`160000`) commit resolves in the main
 #                           repo or its submodule, and every non-empty
 #                           `git -C <wt> status --porcelain` line after staging
 #                           matches `^[MADRCT] `
-#   8 apply                 `git apply --index <patchfile>` in the main root succeeds
-#   9 byte-identical        `git diff --cached --binary` in the main root matches
+#   9 apply                 `git apply --index <patchfile>` in the main root succeeds
+#  10 byte-identical        `git diff --cached --binary` in the main root matches
 #                           `<patchfile>` via `cmp`; `--binary` must appear on BOTH
 #                           sides because a plain diff renders a binary change as a
 #                           notice `git apply` fails to consume — as must --no-color
@@ -48,7 +55,7 @@
 #                           (diff.noprefix, diff.external, color.ui) cannot change
 #                           what either side produces (a mismatch leaves the main
 #                           tree staged for inspection)
-#  10 removal               `git worktree unlock <wt>`, `git worktree remove --force <wt>`,
+#  11 removal               `git worktree unlock <wt>`, `git worktree remove --force <wt>`,
 #                           then — re-checking SYG_WORKTREE_BRANCH_RE at the removal
 #                           site — `git branch -D <branch>`, then `git worktree prune`
 #
@@ -58,7 +65,7 @@
 # deleting anything.
 #
 # Stated non-goal: the two removal-failure wordings (`git worktree remove --force` vs
-# `git branch -D`) are best-effort operator messages; a refusal at check 10 never
+# `git branch -D`) are best-effort operator messages; a refusal at check 11 never
 # loses the patch because it is already applied and verified in the main tree.
 #
 # Exit codes: 0 success; 1 refusal (`STOP: <check-name>: <reason>`); 2 usage error.
@@ -156,6 +163,7 @@ trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
+SELF_DIR=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
 PASSED_CHECKS=()
 
 # 1. main-tree-identity
@@ -239,7 +247,13 @@ case $? in
 esac
 PASSED_CHECKS+=("worktree-registered")
 
-# 4. base-unchanged
+# 4. worktree-gitfile
+if ! gf_err=$(bash "$SELF_DIR/worktree-gitfile-check" --repo "$MAIN_ROOT" "$WT_PATH" 2>&1); then
+  refuse worktree-gitfile "${gf_err#"worktree-gitfile-check: REFUSED: $WT_PATH: "}"
+fi
+PASSED_CHECKS+=("worktree-gitfile")
+
+# 5. base-unchanged
 MAIN_HEAD=$(git -C "$MAIN_ROOT" rev-parse --verify "HEAD^{commit}" 2>/dev/null) \
   || refuse base-unchanged "cannot resolve main working tree HEAD"
 if $BASE_GIVEN; then
@@ -256,7 +270,7 @@ else
   PASSED_CHECKS+=("base-unchanged (skipped: no --base)")
 fi
 
-# 5. no-unpushed-base
+# 6. no-unpushed-base
 # The worktree must sit exactly on the main tree's HEAD: ahead is as wrong as
 # behind, and this check runs BEFORE the patch is built so a worker that
 # committed its work is diagnosed by its HEAD, not by an empty patch.
@@ -267,7 +281,7 @@ if [ "$WT_HEAD" != "$MAIN_HEAD" ]; then
 fi
 PASSED_CHECKS+=("no-unpushed-base")
 
-# 6. empty-patch
+# 7. empty-patch
 TMP_DIR=$(mktemp -d) || refuse empty-patch "mktemp -d failed"
 PATCH_FILE="$TMP_DIR/unit.patch"
 is_hidden_entry() {
@@ -315,7 +329,7 @@ if [ ! -s "$PATCH_FILE" ]; then
 fi
 PASSED_CHECKS+=("empty-patch")
 
-# 7. nothing-outside-patch
+# 8. nothing-outside-patch
 WT_STATUS=$(git -C "$WT_PATH" status --porcelain 2>&1) \
   || refuse nothing-outside-patch "git status --porcelain failed in worktree: $WT_STATUS"
 PATCH_STATUS_RE='^[MADRCT] '
@@ -327,12 +341,12 @@ while IFS= read -r sline; do
 done <<<"$WT_STATUS"
 PASSED_CHECKS+=("nothing-outside-patch")
 
-# 8. apply
+# 9. apply
 APPLY_ERR=$(git -C "$MAIN_ROOT" apply --index "$PATCH_FILE" 2>&1) \
   || refuse apply "git apply --index failed: $APPLY_ERR"
 PASSED_CHECKS+=("apply")
 
-# 9. byte-identical
+# 10. byte-identical
 if ! git -C "$MAIN_ROOT" diff --cached --binary --no-color --no-ext-diff --src-prefix=a/ --dst-prefix=b/ | cmp - "$PATCH_FILE" >/dev/null 2>&1; then
   KEPT_PATCH=$PATCH_FILE
   TMP_DIR=""
@@ -340,7 +354,7 @@ if ! git -C "$MAIN_ROOT" diff --cached --binary --no-color --no-ext-diff --src-p
 fi
 PASSED_CHECKS+=("byte-identical")
 
-# 10. removal
+# 11. removal
 # Ignored files in the worktree are deleted with the tree by
 # `git worktree remove --force` and are NOT part of the patch. List them on
 # stderr so nothing vanishes silently; this is a notice, not a gate — build
