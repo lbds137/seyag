@@ -107,6 +107,7 @@ and in `pnpm quality`.
 """
 
 import bisect
+import collections
 import re
 
 
@@ -2366,7 +2367,9 @@ _XARGS_NO_VALUE_LONG = {
 def strip_backtick_glue(argv):
     """Return a new list with backticks stripped from `argv`'s command word and
     last word: it reads delimiters `_tokens` leaves glued, and bash's own argv
-    has none."""
+    has none. Because glue and a literal backtick look identical in `argv`, the
+    command word or last word is dropped when it is only a backtick; middle
+    words are not touched."""
     argv = list(argv)
     if argv and argv[-1].endswith("`") and argv[-1].count("`") % 2 == 1:
         argv[-1] = argv[-1][:-1]
@@ -2847,9 +2850,7 @@ def _backtick_line_interiors(text, depth=0, regions=None, offsets=None):
     substitution subshell regardless (`echo `cmd NEWLINE env`` dumps env), so
     this surfaces those later lines. Gated on a word-bearing line after the
     first: a single-line command-position backtick span already has its
-    command in `_tokens` (and non-command-position or quoted backtick spans
-    are surfaced whole by `_unsplit_span_interiors`, which skips any interior
-    already scanned here). `$()`-family spans are not collected —
+    command in `_tokens`. `$()`-family spans are not collected —
     their interior newlines are separators in `_tokens`, so their lines are
     already visible inline — but at depth 0 each one's interior is recursed
     into ONCE, because a backtick span nested there has its newlines glued
@@ -2927,25 +2928,23 @@ def _is_command_prefix(words):
 def _unsplit_span_interiors(text, depth=0, regions=None, offsets=None):
     """The interiors of spans bash runs that `_tokens` does not split into
     commands, bodies kept so the caller's scan decides them (data, unless fed
-    to a shell): every closed,
-    non-single-quoted backtick span (quoted or unquoted, first line included)
-    except an unquoted one at command position, plus every `$(` span whose
-    opener sits inside a double-quoted region (`_dq_regions`). A span whose
-    opener sits inside a stripped heredoc body or a `#` comment
-    (`_lexer_regions`) is skipped. Each returned backtick interior has one
-    level of backslash removed before `` ` ``, `$` and `\\` (and before `"`
-    when inside double quotes, `_backtick_unescape`), as bash does before
-    parsing the span.
+    to a shell): every closed, non-single-quoted backtick span (quoted or
+    unquoted, first line included) except an unquoted one at command position,
+    plus every `$(` span whose opener sits inside a
+    double-quoted region (`_dq_regions`). A span whose opener sits inside a
+    stripped heredoc body or a `#` comment (`_lexer_regions`) is skipped. Each
+    returned backtick interior has one level of backslash removed before `` ` ``,
+    `$` and `\\` (and before `"` when inside double quotes,
+    `_backtick_unescape`), as bash does before parsing the span.
 
     An unquoted backtick span at command position (nothing but spaces, tabs,
     `(` or whitespace-separated `_LEADING_KEYWORDS` / `_ASSIGNMENT` / `time`
-    flag / `function NAME` / `case` pattern words ending in `)` preceded by
-    an even number of backslashes between the last unquoted
-    command boundary and the opener) is excluded:
-    `_tokens` already yields its interior as commands with the backtick
-    delimiters glued, and surfacing it again would count each command twice.
-    Double-quoted spans and non-command-position backtick spans are not
-    excluded.
+    flag / `function NAME` / `case` pattern words ending in `)` preceded by an
+    even number of backslashes between the last unquoted command boundary and
+    the opener) is excluded: `_tokens` already yields its interior as commands
+    with the backtick delimiters glued, and surfacing it again would count each
+    command twice. Double-quoted spans and non-command-position backtick spans
+    are not excluded.
 
     An unquoted `$(` span is not returned (`_tokens` already splits it at its
     parens), but because `substitution_span_offsets` lists only top-level
@@ -3041,20 +3040,24 @@ def simple_commands(text):
     bash, so nothing in a comment is a command and an apostrophe in it opens
     no quote.
 
-    NOT SEEN: a command inside an UNQUOTED-delimiter heredoc body's
-    substitution (`cat <<EOF\n$(…)\nEOF`, stripped as data by
-    `strip_heredoc_bodies`), a substitution or wrapper nested deeper than
-    `MAX_WRAPPER_DEPTH`, or a command a script FILE runs; a span's end is read
-    at the first `)` even inside single quotes or a `case` arm inside it
-    (`substitution_span_offsets`), so commands after that point in a quoted
-    span are not seen. (An unquoted `$(…)`
-    is split at its parens and seen; double-quoted `$(…)` spans and backtick
-    spans — quoted or not, first line included, except an unquoted backtick
-    span at command position which `_tokens` already yields with its delimiters
-    glued — are surfaced as child commands, heredoc bodies still data unless
-    fed to a shell, `_unsplit_span_interiors` and `_backtick_line_interiors`; a span whose
-    output bash EXECUTES contributes its heredoc bodies as commands too,
-    `_executed_span_interiors`.)
+    SEEN in substitutions:
+    - an unquoted `$(…)` is split at its parens and seen;
+    - double-quoted `$(…)` spans and backtick spans (quoted or not, first line
+      included, except an unquoted backtick span at command position which
+      `_tokens` already yields with its delimiters glued) are surfaced as child
+      commands, heredoc bodies still data unless fed to a shell
+      (`_unsplit_span_interiors` and `_backtick_line_interiors`);
+    - a span whose output bash EXECUTES contributes its heredoc bodies as
+      commands too (`_executed_span_interiors`).
+
+    NOT SEEN:
+    - a command inside an UNQUOTED-delimiter heredoc body's substitution
+      (`cat <<EOF\n$(…)\nEOF`, stripped as data by `strip_heredoc_bodies`);
+    - a substitution or wrapper nested deeper than `MAX_WRAPPER_DEPTH`;
+    - a command a script FILE runs;
+    - commands in a quoted span after a `)` inside single quotes or a `case`
+      arm inside it, because `substitution_span_offsets` reads the span's end
+      at the first `)`.
     """
     return [argv for argv, _ in simple_commands_context(text)]
 
@@ -3120,19 +3123,35 @@ def _command_pipelines_context(text, depth):
     # A backtick span's interior lines are commands of their own;
     # the glue reading keeps the enclosing pipeline whole (S3) but hides
     # every interior line after the first, so they are appended here.
-    backtick_interiors = _backtick_line_interiors(text, 0, heredoc_regions, offsets)
+    backtick_interiors = _backtick_line_interiors(
+        text, 0, heredoc_regions, offsets
+    )
+    unsplit_interiors = (
+        _unsplit_span_interiors(text, depth, heredoc_regions, offsets)
+        if depth < MAX_WRAPPER_DEPTH
+        else []
+    )
+    # Only spans whose unsplit twin differs need cancelling; residual: pairing
+    # is by pipeline across spans, so an identical one in two spans loses one.
+    line_counts = collections.Counter()
+    unsplit_set = set(unsplit_interiors)
     for interior in backtick_interiors:
-        pipelines.extend(
-            _pipelines_context(_tokens(interior, with_context=True), force_child=True)
-        )
+        for p in _pipelines_context(
+            _tokens(interior, with_context=True), force_child=True
+        ):
+            pipelines.append(p)
+            if interior not in unsplit_set:
+                line_counts[tuple(tuple(c) for c, _ in p)] += 1
     if depth < MAX_WRAPPER_DEPTH:
         backtick_seen = set(backtick_interiors)
-        for interior in _unsplit_span_interiors(
-            text, depth, heredoc_regions, offsets
-        ):
+        for interior in unsplit_interiors:
             if interior in backtick_seen:
                 continue
             for pipeline in _command_pipelines_context(interior, depth + 1):
+                key = tuple(tuple(c) for c, _ in pipeline)
+                if line_counts[key] > 0:
+                    line_counts[key] -= 1
+                    continue
                 pipelines.append([(c, True) for c, _ in pipeline])
     # `plain_pipelines` is built AFTER the interior extensions above, so the
     # wrapper walk descends into `bash -c`/`eval` strings that live inside

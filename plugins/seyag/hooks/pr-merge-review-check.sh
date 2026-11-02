@@ -22,14 +22,20 @@
 # positional non-flag argument is resolved with the same `gh pr view <selector>`
 # gh itself would use. Only an invocation with NO positional argument at all is
 # numberless: gh then infers the PR from the current branch, and the hook
-# resolves it the same way, in this hook's cwd. Any lookup failure fails open.
+# resolves it the same way, in this hook's cwd. Any lookup failure fails open
+# (except the review fetch itself, which refuses on failure).
+# Residual: a switch inside a quoted or backtick substitution, a wrapper string
+# (`bash -c`, `eval`) or a script file is listed after the merge, or not at
+# all, so it is not seen; a comment holding an unterminated opener, then a
+# merge with a substitution in its repo flag, stays unrefused, because the span
+# scan runs past the comment.
 #
-# Fail-open surfaces: gh lookups that cannot run (the gate only means
-# something when there is content to surface or a reminder to deliver), and
-# a missing claim-shape lib (the hook stands down entirely). The ack-state
-# WRITE on a healthy state file fails CLOSED with the escape named: an
-# allow would print the review to a stream nobody sees. The ack state
-# itself fails CLOSED: a symlink or an
+# Fail-open surfaces: gh lookups that cannot run (except the review fetch,
+# which refuses on failure; the gate only means something when there is content
+# to surface or a reminder to deliver), and a missing claim-shape lib (the hook
+# stands down entirely). The ack-state WRITE on a healthy state file fails
+# CLOSED with the escape named: an allow would print the review to a stream
+# nobody sees. The ack state itself fails CLOSED: a symlink or an
 # unreadable file at the state path is treated as NOT acked and is never
 # written through — see the state section below.
 
@@ -68,23 +74,22 @@ COMMAND=$(jq -r '.tool_input.command // empty' <<<"$INPUT" 2>/dev/null || echo "
 # depth. python3 is a dependency of the sibling guards, so this adds no new
 # one.
 #
-# Fails CLOSED by design, in both directions: an unparseable command falls
-# back to the permissive raw scan rather than arming nothing, because
-# silently not arming is the same hole under a different name.
+# An unparseable command falls back to the raw scan rather than arming
+# nothing.
 #
 # Cheap Bash-level reject FIRST. This hook is registered on every Bash call,
 # so without this guard a python3 process would start for `ls`, `git status`,
 # and every other command in the session — on a RAM-constrained machine, for
-# a check that is irrelevant to all of them. The tokenizer below only ever
-# runs on a command that at least mentions the phrase.
-# Deliberately PERMISSIVE: a bare substring test on `merge`. It only decides
-# whether to spawn python, and the tokenizer does the real work; every real
-# `gh pr merge` invocation mentions `merge`, so a substring test cannot
-# under-match one, however quoting or line continuations hide the words. The
-# cost is one python spawn for any command that merely mentions merge (`git
-# merge`, `git merge-base`, prose) — over-matching costs a spawn,
-# under-matching costs a merge.
-if [[ "$COMMAND" != *merge* ]]; then
+# a check that is irrelevant to them. The tokenizer below runs on commands
+# that pass this check.
+# Deliberately PERMISSIVE: a substring test on `merge` after stripping quotes,
+# backslashes, and newlines, which catches quote-split, backslash-split, and
+# line-continuation-split spellings.
+# Documented holes it does not catch: `$'\x6derge'`, `$M`, `eval "$CMD"`, and
+# empty-expansion splits such as `m$()erge`. The cost is one python spawn for a
+# command that merely mentions merge (`git merge`, `git merge-base`, prose) —
+# over-matching costs a spawn, under-matching costs a merge.
+if [[ ${COMMAND//[\"\'\\$'\n']/} != *merge* ]]; then
     exit 0
 fi
 
@@ -112,11 +117,14 @@ LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib"
 # Line 11: "fanout" when a merge runs under xargs/parallel (once per
 # input). Line 12: "unresolvable" when the winning repository scope is an
 # exported GH_REPO with no literal value in this command or a non-literal
-# -R/--repo/GH_REPO= value ($(), backticks, <(), $VAR).
-# A broken shell_quotes import falls back to the permissive raw scan (it
-# over-arms rather than disarms); the one residual fail-open left is python3
-# itself missing — no tokenizer exists then, `|| MERGE_EXTRACT=""` stands the
-# hook down, and reimplementing the splitter in bash is not worth that gap.
+# -R/--repo/GH_REPO= value ($(), backticks, <(), $VAR). Line 13:
+# "branchmove" when a branch switch precedes a numberless merge in the same
+# command.
+# A broken shell_quotes or outbound import falls back to the permissive raw
+# scan (it over-arms rather than disarms); the one residual fail-open left is
+# python3 itself missing — no tokenizer exists then, `|| MERGE_EXTRACT=""`
+# stands the hook down, and reimplementing the splitter in bash is not worth
+# that gap.
 MERGE_EXTRACT=$(SYG_LIB_DIR="${SYG_PR_MERGE_LIB_DIR:-$LIB_DIR}" python3 - 3<<<"$COMMAND" <<'PY' 2>/dev/null
 import os
 import re
@@ -124,11 +132,12 @@ import sys
 
 cmd = os.fsdecode(open(3, "rb").read()).removesuffix("\n")
 
-# Cheap reject before any parsing: no `merge` substring, no gate. Keeps the
-# common Bash call (which is not a merge) off the parsing path entirely, and
-# mirrors the bash-level substring test in the invoking script: every real
-# `gh pr merge` invocation mentions `merge`, so this cannot under-match one.
-if "merge" not in cmd:
+# Cheap reject before any parsing: mirrors the bash-level substring test after
+# removing quotes, backslashes, and newlines, which catches quote-split,
+# backslash-split, and line-continuation-split spellings. Documented holes it
+# does not catch: `$'\x6derge'`, `$M`, `eval "$CMD"`, and empty-expansion
+# splits such as `m$()erge`.
+if "merge" not in cmd.translate(str.maketrans("", "", "\"'\\\n")):
     sys.exit(0)
 
 # `str.isdigit()` is true for superscripts and Arabic-Indic digits; the
@@ -405,6 +414,130 @@ def carries_delete_flag(token):
     return False
 
 
+_GH_REPO_FLAG_RE = r"(?:(?:--repo=\S+|-R\S+|(?:-R|--repo)\s+\S+)\s+)*"
+
+
+def gh_pr_subcommand_args(argv, sub):
+    """Walk `argv[1:]`, collecting `-R V`, `--repo V`, `--repo=V` and `-RV`
+    that come before `pr` or between `pr` and `sub`. Any other token in those
+    positions returns None. When `pr` then `sub` are found, return the
+    collected flag tokens followed by everything after `sub`."""
+    collected = []
+    saw_pr = False
+    i = 1
+    n = len(argv)
+    while i < n:
+        tok = argv[i]
+        if not saw_pr and tok == "pr":
+            saw_pr = True
+            i += 1
+            continue
+        if saw_pr and tok == sub:
+            return collected + argv[i + 1 :]
+        if tok in ("-R", "--repo"):
+            if i + 1 >= n:
+                return None
+            collected.append(tok)
+            collected.append(argv[i + 1])
+            i += 2
+            continue
+        if tok.startswith("--repo=") or (
+            tok.startswith("-R") and len(tok) > 2
+        ):
+            collected.append(tok)
+            i += 1
+            continue
+        return None
+    return None
+
+
+def gh_pr_merge_args(argv):
+    return gh_pr_subcommand_args(argv, "merge")
+
+
+def root_sub_merge(text, depth=0):
+    """True when a command-position `gh pr merge` carries an unquoted or
+    double-quoted command substitution in a repo flag before `merge`."""
+    if (
+        depth > MAX_WRAPPER_DEPTH
+        or "gh" not in text
+        or (
+            "$(" not in text
+            and "`" not in text
+            and "__SYG_SUBVAL__" not in text
+        )
+    ):
+        return False
+    body_free, regions = _strip_heredoc(text)
+    if body_free != text and any(
+        _reads_script_from_stdin(c)
+        for pipeline in _pipelines_context(_tokens(body_free, with_context=True))
+        for c, _ in pipeline
+    ):
+        regions = []
+    offsets = substitution_span_offsets(text, regions)
+    comments = _lexer_regions(text, offsets, regions)[1]
+    pieces = []
+    pos = 0
+    cr = 0
+    for start, end, in_single in offsets:
+        if in_single:
+            continue
+        is_bt = text[start - 1] == "`"
+        opener = start - 1 if is_bt else start - 2
+        while cr < len(comments) and comments[cr][1] <= opener:
+            cr += 1
+        if cr < len(comments) and comments[cr][0] <= opener:
+            continue
+        closer = len(text) if end is None else end + 1
+        if opener < pos:
+            continue
+        if end is not None:
+            interior = text[start:end]
+            if is_bt:
+                interior = _backtick_unescape(interior, False)
+            if root_sub_merge(interior, depth + 1):
+                return True
+        pieces.append(text[pos:opener])
+        pieces.append("__SYG_SUBVAL__")
+        pos = closer
+    pieces.append(text[pos:])
+    replaced = "".join(pieces)
+    pipelines = _command_pipelines(replaced, MAX_WRAPPER_DEPTH)
+    for pipeline in pipelines:
+        for raw in pipeline:
+            argv, _ = unwrap_runners(raw)
+            base0 = os.path.basename(argv[0]).lstrip("`") if argv else ""
+            if base0 != "gh" or gh_pr_merge_args(argv) is None:
+                continue
+            saw_pr = False
+            i = 1
+            while i < len(argv):
+                tok = argv[i]
+                if not saw_pr and tok == "pr":
+                    saw_pr = True
+                    i += 1
+                    continue
+                if saw_pr and tok == "merge":
+                    break
+                if tok in ("-R", "--repo"):
+                    if "__SYG_SUBVAL__" in argv[i + 1]:
+                        return True
+                    i += 2
+                    continue
+                if (
+                    tok.startswith("--repo=")
+                    or tok.startswith("-R=")
+                    or tok.startswith("-R")
+                ) and "__SYG_SUBVAL__" in tok:
+                    return True
+                i += 1
+    for inner in _wrapped_strings(pipelines):
+        if root_sub_merge(inner, depth + 1):
+            return True
+    return False
+
+
 def legacy_scan(text):
     """The permissive raw scan, kept as the fallback for input the splitter
     cannot model.
@@ -419,7 +552,11 @@ def legacy_scan(text):
     read 9 — because guessing which longs take values is how the number walk
     in scan_invocations earns its exactness; the precise scan knows the set.
     """
-    after = re.split(r"gh\s+pr\s+merge", text, maxsplit=1)
+    after = re.split(
+        rf"gh\s+{_GH_REPO_FLAG_RE}pr\s+{_GH_REPO_FLAG_RE}merge",
+        text,
+        maxsplit=1,
+    )
     if len(after) < 2:
         return "", False, []
     skip_next = False
@@ -455,15 +592,19 @@ def token_value_role(token):
         if base in LONG_VALUE_FLAGS:
             return ("value", None)
         return ("none", None)
-    cluster = SHORT_CLUSTER.match(token)
-    if cluster is None:
+    if not token.startswith("-") or token.startswith("--") or len(token) < 2:
         return ("none", None)
-    letters = cluster.group(1)
+    letters = token[1:]
     for i, letter in enumerate(letters):
+        if not (letter.isascii() and letter.isalpha()):
+            return ("none", None)
         if letter in VALUE_TAKING_SHORTS:
             last = i == len(letters) - 1
             if letter == "R":
-                return ("repo", None if last else letters[i + 1:])
+                return (
+                    "repo",
+                    None if last else letters[i + 1:].removeprefix("="),
+                )
             return ("value", None) if last else ("none", None)
     return ("none", None)
 
@@ -473,7 +614,8 @@ def scan_invocations(text):
     bash execute it.
 
     Returns (merges, numberless, first_flag, repo, selector, invoke_count,
-    selector_repo, numberless_count, chdir, fanout, unresolvable):
+    selector_repo, numberless_count, chdir, fanout, unresolvable,
+    branchmove):
     - merges: (number, delete_flag) per invocation whose arguments carry a
       bare PR-number token, in the splitter's command order;
     - numberless: True when a real invocation exists whose arguments carry NO
@@ -513,7 +655,10 @@ def scan_invocations(text):
       GH_REPO with no literal value in this command (`export GH_REPO` /
       `declare -x GH_REPO`), an armed merge in a child context preceded by a
       child-context GH_REPO export/declare -x, or a non-literal
-      -R/--repo/GH_REPO= value (`$(...)`, backticks, `<(...)`, `$VAR`).
+      -R/--repo/GH_REPO= value (`$(...)`, backticks, `<(...)`, `$VAR`);
+    - branchmove: True when a branch switch (`git switch`, `git checkout`
+      without `--`, or `gh pr checkout`) precedes a numberless merge in
+      list order.
 
     The command word is matched by BASENAME, not literally: `/usr/bin/gh pr
     merge 7` and a mise shim path are real invocations.
@@ -555,7 +700,11 @@ def scan_invocations(text):
     first_prefix_repo = ""
     pending_prefix_repo = None
     pending_prefix_target_idx = None
+    heredoc_sub_prefix = False
+    heredoc_sub_prefix_merged = False
     chdir_seen = False
+    branch_moved_seen = False
+    branchmove = False
     commands = simple_commands_context(text)
 
     def _strip_comments_for_view(s):
@@ -681,7 +830,7 @@ def scan_invocations(text):
         # that each hold a split-sub `GH_REPO=$(…)` can pair a verdict with
         # the wrong occurrence — the misfire is a spurious or missed refusal,
         # never a wrong-repo capture; pinned by the split-sub rows.
-        nonlocal sub_pos
+        nonlocal sub_pos, heredoc_sub_prefix
         i = sub_pos
         n = len(sub_view)
         in_bt = False
@@ -709,6 +858,8 @@ def scan_invocations(text):
                     while k < n and sub_view[k] in " \t":
                         k += 1
                     is_prefix = k < n and sub_view[k] not in ";&|\n)'\""
+                    if is_prefix and "<<" in interior:
+                        heredoc_sub_prefix = True
                     n_interior = (
                         max(1, inline_command_count(interior))
                         if is_prefix
@@ -934,11 +1085,31 @@ def scan_invocations(text):
             # merge's repository unresolvable from this hook's cwd.
             chdir_seen = True
             continue
-        if not argv or base0 != "gh" \
-                or argv[1:3] != ["pr", "merge"]:
+        if argv and base0 == "git":
+            parts = git_parts(strip_redirections(argv), "")
+            if parts is not None:
+                sub, sub_args, _ = parts
+                if sub == "switch" or (
+                    sub == "checkout" and "--" not in sub_args
+                ):
+                    branch_moved_seen = True
             continue
-        args = strip_redirections(argv[3:])
+        if (
+            argv
+            and base0 == "gh"
+            and gh_pr_subcommand_args(argv, "checkout") is not None
+        ):
+            branch_moved_seen = True
+            continue
+        merge_args = (
+            gh_pr_merge_args(argv) if argv and base0 == "gh" else None
+        )
+        if merge_args is None:
+            continue
+        args = strip_redirections(merge_args)
         invoke_count += 1
+        if heredoc_sub_prefix:
+            heredoc_sub_prefix_merged = True
         # The merge itself under a chdir runner (env -C, sudo -D) is the
         # same unresolvable-scope shape.
         if chdir_seen:
@@ -1029,6 +1200,8 @@ def scan_invocations(text):
             if sel is None:
                 numberless = True
                 numberless_count += 1
+                if branch_moved_seen:
+                    branchmove = True
         else:
             merges.append((number, flag))
         if first:
@@ -1060,6 +1233,8 @@ def scan_invocations(text):
             if is_nonliteral_repo(repo):
                 unresolvable = True
                 repo = ""
+        elif heredoc_sub_prefix_merged:
+            unresolvable = True
         elif first_prefix_repo:
             if is_nonliteral_repo(first_prefix_repo):
                 unresolvable = True
@@ -1073,7 +1248,8 @@ def scan_invocations(text):
             else:
                 repo = first_repo_env
     return merges, numberless, first_flag, repo, selector, invoke_count, \
-        selector_repo, numberless_count, chdir, fanout, unresolvable
+        selector_repo, numberless_count, chdir, fanout, unresolvable, \
+        branchmove
 
 
 def deep_wrapper_args(text):
@@ -1108,7 +1284,7 @@ def deep_wrapper_args(text):
 def extract(text):
     """(number, delete_flag, all_numbers, numberless, repo, selector,
     invoke_count, selector_repo, numberless_count, chdir, fanout,
-    unresolvable) for `text`'s merges.
+    unresolvable, branchmove) for `text`'s merges.
 
     Resolution order, each step only when the previous found nothing:
     1. the precise invocation scan;
@@ -1120,53 +1296,85 @@ def extract(text):
 
     Steps 2 and 3 resolve at most one number and report NO delete flag,
     NO repo, NO selector, NO invocation count, NO selector repo, NO chdir,
-    NO fanout and NO unresolvable: they exist to OVER-arm, and the
-    not-ackable delete-branch guard, the compound refusal, -R scoping,
-    selector resolution, the chdir refusal, the fan-out refusal and the
-    unresolvable-scope refusal must never hang off an over-arm — a false
-    block with no way out, or a lookup against a repo or selector a textual
-    scan guessed at.
+    NO fanout, NO unresolvable and NO branchmove: they exist to OVER-arm, and
+    the not-ackable delete-branch guard, the compound refusal, -R scoping,
+    selector resolution, the chdir refusal, the fan-out refusal, the
+    unresolvable-scope refusal and the branch-moved refusal must never hang
+    off an over-arm — a false block with no way out, or a lookup against a
+    repo or selector a textual scan guessed at.
     """
     try:
         merges, numberless, first_flag, repo, selector, invoke_count, \
-            selector_repo, numberless_count, chdir, fanout, unresolvable = \
-            scan_invocations(text)
+            selector_repo, numberless_count, chdir, fanout, unresolvable, \
+            branchmove = scan_invocations(text)
     except Exception:
-        return legacy_scan(text) + (False, "", "", 0, "", 0, False, False, False)
+        return legacy_scan(text) + (
+            False, "", "", 0, "", 0, False, False, False, False
+        )
+    root_hit = False
+    try:
+        if root_sub_merge(text):
+            root_hit = True
+            unresolvable = True
+            invoke_count = max(invoke_count, 1)
+    except Exception:
+        pass
     if merges:
         number, flag = merges[0]
         return number, flag, [m[0] for m in merges], numberless, repo, \
             selector, invoke_count, selector_repo, numberless_count, \
-            chdir, fanout, unresolvable
-    if strip_quoted(text) is None:
-        return legacy_scan(text) + (False, "", "", 0, "", 0, False, False, False)
+            chdir, fanout, unresolvable, branchmove
+    if root_hit:
+        return "", first_flag, [], numberless, repo, selector, invoke_count, \
+            selector_repo, numberless_count, chdir, fanout, True, branchmove
+    stripped = strip_quoted(text)
+    if stripped is None:
+        return legacy_scan(text) + (
+            False, "", "", 0, "", 0, False, False, False, False
+        )
     for s in deep_wrapper_args(text):
         capped = strip_heredoc_bodies(s)
-        m = re.search(r"gh\s+pr\s+merge\s+[\"']*(\d+)", capped)
+        m = re.search(
+            rf"gh\s+{_GH_REPO_FLAG_RE}pr\s+{_GH_REPO_FLAG_RE}merge\s+[\"']*(\d+)",
+            capped,
+        )
         if m:
             return m.group(1), False, [m.group(1)], False, "", "", 0, "", \
-                0, False, False, False
+                0, False, False, False, False
     return "", first_flag, [], numberless, repo, selector, invoke_count, \
-        selector_repo, numberless_count, chdir, fanout, unresolvable
+        selector_repo, numberless_count, chdir, fanout, unresolvable, \
+        branchmove
 
 
 # The import sits HERE, not at the top: an import-time failure (a corrupt or
-# missing shell_quotes.py, an unset SYG_LIB_DIR) must fall back to the legacy
-# scan rather than exit non-zero into the shell's `|| MERGE_EXTRACT=""` and
-# silently arm nothing. The functions above
-# only touch shell_quotes names at CALL time, so defining them first is safe.
+# missing shell_quotes.py or outbound.py, an unset SYG_LIB_DIR) must fall back
+# to the legacy scan rather than exit non-zero into the shell's
+# `|| MERGE_EXTRACT=""` and silently arm nothing. The functions above
+# only touch shell_quotes and outbound names at CALL time, so defining them
+# first is safe.
 try:
     sys.path.insert(0, os.environ["SYG_LIB_DIR"])
+    from outbound import git_parts  # noqa: E402
     from shell_quotes import (  # noqa: E402
         MAX_WRAPPER_DEPTH,
         QUOTED_SPAN,
+        _backtick_unescape,
+        _command_pipelines,
+        _lexer_regions,
+        _pipelines_context,
+        _reads_script_from_stdin,
+        _strip_heredoc,
+        _tokens,
+        _wrapped_strings,
         inline_command_count,
         resolve_placeholders,
+        simple_commands,
         simple_commands_context,
         strip_heredoc_bodies,
         strip_quoted,
         strip_quoted_indexed,
         strip_redirections,
+        substitution_span_offsets,
         unwrap_runners,
         wrapped_command_strings,
     )
@@ -1175,8 +1383,9 @@ except Exception:
     print(number)
     print("1" if flag else "0")
     print(" ".join(all_numbers))
-    # All twelve lines, empty where empty — the bash reader's sed expects the
+    # All thirteen lines, empty where empty — the bash reader's sed expects the
     # full protocol, same as the extract-exception fallback below.
+    print("")
     print("")
     print("")
     print("")
@@ -1190,8 +1399,8 @@ except Exception:
 
 try:
     number, flag, all_numbers, numberless, repo, selector, invoke_count, \
-        selector_repo, numberless_count, chdir, fanout, unresolvable = \
-        extract(cmd)
+        selector_repo, numberless_count, chdir, fanout, unresolvable, \
+        branchmove = extract(cmd)
 except Exception:
     # The whole extraction, not just one stage. Anything escaping here would
     # exit non-zero, hit the shell's `|| MERGE_EXTRACT=""`, and silently arm
@@ -1206,6 +1415,7 @@ except Exception:
     chdir = False
     fanout = False
     unresolvable = False
+    branchmove = False
 print(number)
 print("1" if flag else "0")
 print(" ".join(all_numbers))
@@ -1218,6 +1428,7 @@ print(numberless_count)
 print("chdir" if chdir else "")
 print("fanout" if fanout else "")
 print("unresolvable" if unresolvable else "")
+print("branchmove" if branchmove else "")
 PY
 ) || MERGE_EXTRACT=""
 
@@ -1233,7 +1444,9 @@ PY
 # change precedes the merge in the same command. Line 11: "fanout" when a
 # merge runs under xargs/parallel. Line 12: "unresolvable" when the winning
 # repository scope is an unresolvable export/declare -x GH_REPO or non-literal
-# -R/--repo/GH_REPO= value. All empty when the extraction produced nothing.
+# -R/--repo/GH_REPO= value. Line 13: "branchmove" when a branch switch
+# precedes a numberless merge in the same command. All empty when the
+# extraction produced nothing.
 PR_NUM=$(printf '%s\n' "$MERGE_EXTRACT" | sed -n '1p')
 MERGE_DELETES_BRANCH=$(printf '%s\n' "$MERGE_EXTRACT" | sed -n '2p')
 MERGE_ALL_PRS=$(printf '%s\n' "$MERGE_EXTRACT" | sed -n '3p')
@@ -1247,6 +1460,7 @@ MERGE_NUMBERLESS_COUNT=$(printf '%s\n' "$MERGE_EXTRACT" | sed -n '9p')
 MERGE_CHDIR=$(printf '%s\n' "$MERGE_EXTRACT" | sed -n '10p')
 MERGE_FANOUT=$(printf '%s\n' "$MERGE_EXTRACT" | sed -n '11p')
 MERGE_UNRESOLVABLE=$(printf '%s\n' "$MERGE_EXTRACT" | sed -n '12p')
+MERGE_BRANCHMOVE=$(printf '%s\n' "$MERGE_EXTRACT" | sed -n '13p')
 
 # A URL selector carries its OWN repository, and gh resolves the PR there
 # even beside a -R (the URL wins). Mirror that here: the URL's repo OVERRIDES
@@ -1388,6 +1602,30 @@ if [ "$MERGE_CHDIR" = "chdir" ] && [ -z "$REPO_ARG" ]; then
         printf '  gh pr merge <PR> -R <owner>/<repo>\n\n'
         printf 'This refusal is not ackable — retrying the same shape reproduces the same\n'
         printf 'wrong-scope risk. Nothing was acked, so no state needs undoing.\n'
+        printf '%s\n' "$RULE"
+    } >&2
+    exit 2
+fi
+
+# BRANCH-MOVED REFUSAL. A branch switch (`git switch`, `git checkout`, or
+# `gh pr checkout`) before a numberless `gh pr merge` in the same command
+# means this hook resolves the PR from the branch checked out before the
+# switch runs, so it would read the review of the wrong PR while gh merges
+# the switched-to branch's PR. Placed before any network call; not ackable.
+if [ "$MERGE_BRANCHMOVE" = "branchmove" ]; then
+    {
+        printf '%s\n' "$RULE"
+        printf 'MERGE BRANCH MOVED — numberless merge after a branch switch refused\n'
+        printf '%s\n\n' "$RULE"
+        printf 'This command switches branches before a numberless `gh pr merge`, so this\n'
+        printf 'hook would resolve the current branch and read the review of the wrong PR.\n\n'
+        printf 'Pass the PR number explicitly on the merge command:\n'
+        printf '  gh pr merge <PR>\n'
+        printf 'or run the branch switch as its own command first:\n'
+        printf '  git switch <branch>\n'
+        printf '  gh pr merge\n\n'
+        printf 'This refusal is not ackable — retrying the same shape reproduces the same\n'
+        printf 'wrong-PR risk. Nothing was acked, so no state needs undoing.\n'
         printf '%s\n' "$RULE"
     } >&2
     exit 2
@@ -1598,8 +1836,8 @@ resolve_pr_view() {
 # the identity scopes the REST review fetch and the reminder ack key (no
 # hard-coded repo — this hook runs in any repository gh can resolve from
 # the cwd), the default branch decides whether a merge targets it. Fails
-# open to "": an unreadable repo means no reminder and no review fetch, the
-# same degradation a `gh` outage already causes further down.
+# open to "": an unreadable repo with no `-R` still means no fetch and no
+# gate.
 REPO=""
 DEFAULT_BRANCH=""
 REPO_RESOLVED=0
@@ -1884,12 +2122,12 @@ release_block_then_exit() {
 # updated_at so the ack key re-arms when a review EDITS its comment in place
 # (a fresh review re-runs the gate too).
 #
-# `--paginate --slurp` is required, and so is the PIPE to jq: gh rejects
+# `--paginate --slurp` is required, and jq runs as a separate step: gh rejects
 # `--slurp` together with `--jq` ("the --slurp option is not supported with
-# --jq or --template"), and asking for `--jq` anyway makes the whole fetch
-# fail into the no-review path — a silently inert gate. Piping keeps both:
-# gh emits every page wrapped in one outer array, and jq selects across all
-# of them. The pagination itself is the point: this endpoint accepts
+# --jq or --template"). Capturing gh's output first keeps both flags and
+# preserves gh's exit status so a failed fetch refuses rather than reading as
+# no review: gh emits every page wrapped in one outer array, and jq selects
+# across all of them. The pagination itself is the point: this endpoint accepts
 # per_page (and page) but not sort/direction — those belong to the
 # repository-wide comments listing — so a single ask returns the FIRST
 # (oldest) page, and on a busy PR the newest review sits past it: the filter
@@ -1901,6 +2139,7 @@ release_block_then_exit() {
 # default `claude[bot]` for repos whose review comes from another bot. The
 # login reaches jq as a --arg VALUE — data, not filter text.
 REVIEW_JSON=""
+REVIEW_FETCH_FAILED=0
 REVIEW_LOGIN="${SYG_MERGE_REVIEW_LOGIN:-claude[bot]}"
 resolve_repo
 # -R scoping: prefer the RESOLVED nameWithOwner (canonical spelling of the
@@ -1909,10 +2148,28 @@ resolve_repo
 # so a lookup blip does not silently unscope the fetch back to the cwd repo.
 REPO_FOR_FETCH="${REPO:-$(repo_slug_hoststrip "$REPO_ARG")}"
 if [ -n "$REPO_FOR_FETCH" ]; then
-    REVIEW_JSON=$(timeout 10 gh api --paginate --slurp "repos/${REPO_FOR_FETCH}/issues/${PR_NUM}/comments?per_page=100" 2>/dev/null \
-        | jq --arg login "$REVIEW_LOGIN" \
+    REVIEW_RAW=$(timeout 10 gh api --paginate --slurp "repos/${REPO_FOR_FETCH}/issues/${PR_NUM}/comments?per_page=100" 2>/dev/null)
+    if [ $? -ne 0 ] || [ -z "$REVIEW_RAW" ]; then
+        REVIEW_FETCH_FAILED=1
+    else
+        REVIEW_JSON=$(jq --arg login "$REVIEW_LOGIN" \
             '[.[][] | select(.user.login == $login)] | sort_by(.created_at) | last' \
-        2>/dev/null || echo "")
+            <<<"$REVIEW_RAW" 2>/dev/null) || REVIEW_FETCH_FAILED=1
+    fi
+fi
+
+if [ "$REVIEW_FETCH_FAILED" = 1 ]; then
+    {
+        printf '%s\n' "$RULE"
+        printf 'MERGE REVIEW UNREADABLE — the review fetch failed\n'
+        printf '%s\n\n' "$RULE"
+        printf 'The `gh api` review fetch for PR #%s failed or returned unreadable output.\n' "$PR_NUM"
+        printf 'Nothing was read, so this merge cannot be judged reviewed.\n\n'
+        printf 'Retry the merge command once `gh` works.\n\n'
+        printf 'This refusal is not ackable — nothing was read and nothing was acked.\n'
+        printf '%s\n' "$RULE"
+    } >&2
+    exit 2
 fi
 
 # No claude[bot] review comment on this PR (yet, or ever). Allow the merge —
