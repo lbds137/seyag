@@ -3,7 +3,8 @@
 # machine publish-gate.sh and upstream-submission-guard.sh walk a command line
 # with. Both guards' probes pin it end to end; this one pins it directly, so a
 # lib change cannot silently move its semantics. Pure machine assertions: no
-# gh, git or network calls.
+# gh or network calls; git runs only on the scratch repo for the
+# --show-toplevel cases.
 # Usage: tests/shell-state.probe.sh   (from anywhere)
 # SHELL_STATE_LIB_DIR overrides the library directory (positive-control use).
 
@@ -14,9 +15,11 @@ REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 LIB=${SHELL_STATE_LIB_DIR:-$REPO/plugins/seyag/hooks/lib}
 TMP=$(mktemp -d) || { echo "FAIL [setup]: mktemp"; exit 1; }
 trap 'rm -rf "$TMP"' EXIT
+export GIT_CEILING_DIRECTORIES="$TMP"
 
 LIB="$LIB" BASE="$TMP/work" HOME="$TMP/home" python3 - <<'PYEOF'
 import os
+import subprocess
 import sys
 
 sys.path.insert(0, os.environ["LIB"])
@@ -35,6 +38,12 @@ from shell_state import (
 BASE = os.environ["BASE"]
 HOME = os.environ["HOME"]
 START = BASE + "/start"  # a start cwd that differs from payload_cwd, so a reset shows
+REPO_ROOT = BASE + "/repo"
+REPO_SUB = REPO_ROOT + "/sub"
+os.makedirs(BASE + "/a", exist_ok=True)
+os.makedirs(START + "/a", exist_ok=True)
+os.makedirs(REPO_SUB, exist_ok=True)
+subprocess.run(["git", "init", "-q", REPO_ROOT], check=True)
 failures = 0
 
 
@@ -87,7 +96,7 @@ check("too many cd arguments: the directory stays", cwd_of_last("cd a; cd b c; t
 check("cd -- <dir> is followed", cwd_of_last("cd -- a; true"), BASE + "/a")
 check("cd -P <dir> is followed", cwd_of_last("cd -P a; true"), BASE + "/a")
 check("cd to a $-word resets to payload_cwd", cwd_of_last("cd $D; true", started()), BASE)
-check("cd to a backtick word resets to payload_cwd", cwd_of_last("cd `pwd`; true", started()), BASE)
+check("cd to a backtick word resets to payload_cwd", cwd_of_last("cd `f`; true", started()), BASE)
 check("cd to a glob word resets to payload_cwd", cwd_of_last("cd a*; true", started()), BASE)
 check("cd ~/sub expands to $HOME/sub (no reset)", cwd_of_last("cd ~/sub; true", started()), HOME + "/sub")
 check("cd ~ expands to $HOME", cwd_of_last("cd ~; true", started()), HOME)
@@ -227,6 +236,205 @@ check(
     "walk records each state it passes through in ctx.visited",
     sorted(ctx.visited),
     [(BASE, ()), (BASE + "/a", ())],
+)
+
+
+def cwds_of(target, text, state=None):
+    recs, _, _ = run(text, state)
+    return [cwd for name, cwd, _ in recs if name == target]
+
+
+# --- multi-world walk (and-or, pipelines, compounds, vars, unknown) -------------
+check("cd a && true with a existing: one world, a", cwds_of("true", "cd a && true"), [BASE + "/a"])
+check(
+    "cd missing && true; x: x runs at both, moved last",
+    cwds_of("x", "cd missing && true; x"),
+    [BASE, BASE + "/missing"],
+)
+check("false && cd a; x: both", cwds_of("x", "false && cd a; x"), [BASE, BASE + "/a"])
+check("false || cd a; x: both", cwds_of("x", "false || cd a; x"), [BASE, BASE + "/a"])
+check(
+    "cd a || x; y: x at start (throwaway), y at a only",
+    (cwds_of("x", "cd a || x; y"), cwds_of("y", "cd a || x; y")),
+    ([BASE], [BASE + "/a"]),
+)
+check("cd a || exit 1; y: y at a only", cwds_of("y", "cd a || exit 1; y"), [BASE + "/a"])
+check(
+    "cd missing || exit 1; y: y at missing only",
+    cwds_of("y", "cd missing || exit 1; y"),
+    [BASE + "/missing"],
+)
+check("cd a & x: both", cwds_of("x", "cd a & x"), [BASE, BASE + "/a"])
+check("cd a | x: both", cwds_of("x", "cd a | x"), [BASE, BASE + "/a"])
+check("(cd a); x: both", cwds_of("x", "(cd a); x"), [BASE, BASE + "/a"])
+check("(cd a && x): x at a only", cwds_of("x", "(cd a && x)"), [BASE + "/a"])
+check("{ cd a; }; x: a only", cwds_of("x", "{ cd a; }; x"), [BASE + "/a"])
+check("{ cd a; } & x: both", cwds_of("x", "{ cd a; } & x"), [BASE, BASE + "/a"])
+check("{ cd a; } | x: both", cwds_of("x", "{ cd a; } | x"), [BASE, BASE + "/a"])
+check(
+    "if false; then cd a; fi; x: both",
+    cwds_of("x", "if false; then cd a; fi; x"),
+    [BASE, BASE + "/a"],
+)
+check("if cd a; then x; fi: x at a only", cwds_of("x", "if cd a; then x; fi"), [BASE + "/a"])
+check(
+    "if t; then y; else cd a; x; fi: x at a and start",
+    cwds_of("x", "if t; then y; else cd a; x; fi"),
+    [BASE + "/a", BASE],
+)
+check(
+    "for d in a b; do cd a; done; x: both",
+    cwds_of("x", "for d in a b; do cd a; done; x"),
+    [BASE, BASE + "/a"],
+)
+check(
+    "case k in k) cd a;; esac; x: both",
+    cwds_of("x", "case k in k) cd a;; esac; x"),
+    [BASE, BASE + "/a"],
+)
+check(
+    "case k in a) cd a;; b) x;; esac: both at clause b",
+    cwds_of("x", "case k in a) cd a;; b) x;; esac"),
+    [BASE, BASE + "/a"],
+)
+check(
+    "case k in k) cd a; esac; x: both without ;;",
+    cwds_of("x", "case k in k) cd a; esac; x"),
+    [BASE, BASE + "/a"],
+)
+check(
+    "while f; do cd a; done; x: both",
+    cwds_of("x", "while f; do cd a; done; x"),
+    [BASE, BASE + "/a"],
+)
+check("cd a && if: x at a only", cwds_of("x", "cd a && if true; then echo; fi; x"), [BASE + "/a"])
+check("cd a && for: x at a only", cwds_of("x", "cd a && for i in 1; do echo; done; x"), [BASE + "/a"])
+check("cd a && case: x at a only", cwds_of("x", "cd a && case x in x) echo;; esac; x"), [BASE + "/a"])
+check("cd a && while: x at a only", cwds_of("x", "cd a && while false; do :; done; x"), [BASE + "/a"])
+check("cd a && { ...; } | cat: x at a only", cwds_of("x", "cd a && { echo; } | cat; x"), [BASE + "/a"])
+check(
+    "cd missing && if true; then echo; fi; x: both",
+    cwds_of("x", "cd missing && if true; then echo; fi; x"),
+    [BASE, BASE + "/missing"],
+)
+
+os.environ["D"] = "a"
+try:
+    check("cd $D with D in the environment: followed", cwd_of_last("cd $D; true", started()), START + "/a")
+    _, _, st = run("D=$(f); cd $D", started())
+    check(
+        "D in the environment and D=$(f); cd $D: still reset (mask)",
+        (st.cwd, getattr(st, "unknown", None)),
+        (BASE, True),
+    )
+    _, _, st = run("unset D; cd $D", started())
+    check("unset D; cd $D: reset", (st.cwd, getattr(st, "unknown", None)), (BASE, True))
+    _, _, st = run("cd ${D:-a}", started())
+    check("cd ${D:-a}: reset", (st.cwd, getattr(st, "unknown", None)), (BASE, True))
+    _, _, st = run('read D; cd "$D"', started())
+    check('D in the environment and read D; cd "$D": reset, unknown', (st.cwd, st.unknown), (BASE, True))
+    _, _, st = run('D+=x; cd "$D"', started())
+    check('D in the environment and D+=x; cd "$D": reset, unknown', (st.cwd, st.unknown), (BASE, True))
+    check(
+        "mapfile/readarray/printf -v/getopts mask D in the environment",
+        [
+            (run(f'{cmd}; cd "$D"', started())[2].cwd, run(f'{cmd}; cd "$D"', started())[2].unknown)
+            for cmd in ("mapfile -t D", "readarray D", "printf -v D %s b", "getopts a D")
+        ],
+        [(BASE, True)] * 4,
+    )
+finally:
+    del os.environ["D"]
+
+os.environ["D"] = "env_d"
+try:
+    check(
+        'D in the environment and export D=a; cd "$D"; x: moves to a',
+        cwds_of("x", 'export D=a; cd "$D"; x', started()),
+        [START + "/a"],
+    )
+finally:
+    del os.environ["D"]
+
+check("D=a; cd $D; x: a", cwds_of("x", "D=a; cd $D; x"), [BASE + "/a"])
+check('export D=a; cd "$D"; x: a', cwds_of("x", 'export D=a; cd "$D"; x'), [BASE + "/a"])
+check(
+    "declare/typeset/local/readonly/export -n/+x D=a; cd $D; x: a",
+    [
+        cwds_of("x", f'{cmd} D=a; cd "$D"; x')
+        for cmd in ("declare", "typeset", "local", "readonly", "export -n", "declare +x")
+    ],
+    [[BASE + "/a"]] * 6,
+)
+_, _, st = run("D=$(f); cd $D", started())
+check("D=$(f); cd $D: reset, unknown set", (st.cwd, getattr(st, "unknown", None)), (BASE, True))
+check("cd $PWD/a: followed", cwd_of_last("cd $PWD/a; true", started()), START + "/a")
+check('cd a; cd "$OLDPWD"; x: start', cwds_of("x", 'cd a; cd "$OLDPWD"; x', started()), [START])
+check("cd /a: followed", cwd_of_last("cd /a; true", started()), "/a")
+_, _, st = run('cd "$(pwd)"', started())
+check('cd "$(pwd)": stays at current dir, not unknown or uncertain', (st.cwd, st.unknown, st.uncertain), (START, False, False))
+_, _, st = run("cd `pwd`", started())
+check("cd `pwd`: stays at current dir, not unknown or uncertain", (st.cwd, st.unknown, st.uncertain), (START, False, False))
+for spelling in (
+    'cd "$(git rev-parse --show-toplevel)"',
+    "cd $(git rev-parse --show-toplevel)",
+    'cd "`git rev-parse --show-toplevel`"',
+    "cd `git rev-parse --show-toplevel`",
+):
+    _, _, st = run(spelling, State(REPO_SUB, payload_cwd=BASE))
+    check(
+        f"{spelling}: from a repo subdirectory moves to the repo root",
+        (st.cwd, st.oldpwd, st.unknown, st.uncertain),
+        (REPO_ROOT, REPO_SUB, False, False),
+    )
+_, _, st = run('cd "$(git rev-parse --show-toplevel)"', started())
+check(
+    'cd "$(git rev-parse --show-toplevel)": outside any repo is unknown',
+    (st.cwd, st.oldpwd, st.unknown, st.uncertain),
+    (BASE, START, True, True),
+)
+_, _, st = run("cd `git rev-parse --show-toplevel`", started())
+check(
+    "cd `git rev-parse --show-toplevel`: outside any repo is unknown",
+    (st.cwd, st.oldpwd, st.unknown, st.uncertain),
+    (BASE, START, True, True),
+)
+check(
+    "cd miss; x with miss never created: both worlds kept",
+    cwds_of("x", "cd miss; x"),
+    [BASE, BASE + "/miss"],
+)
+check(
+    "pushd miss; x with miss never created: both worlds kept",
+    cwds_of("x", "pushd miss; x"),
+    [BASE, BASE + "/miss"],
+)
+_, _, st = run('cd "$(pwd)/a"', started())
+check('cd "$(pwd)/a": joins current dir with the rest', (st.cwd, st.unknown, st.uncertain), (START + "/a", False, False))
+_, _, st = run("cd `pwd`/a", started())
+check("cd `pwd`/a: joins current dir with the rest", (st.cwd, st.unknown, st.uncertain), (START + "/a", False, False))
+_, _, st = run('cd "$(git rev-parse --show-toplevel)/a"', started())
+check('cd "$(git rev-parse --show-toplevel)/a": suffix stays unknown', (st.cwd, st.unknown, st.uncertain), (BASE, True, True))
+_, _, st = run("cd $NOPE; cd /abs", started())
+check("cd $NOPE; cd /abs: unknown clear", (st.cwd, getattr(st, "unknown", None)), ("/abs", False))
+_, _, st = run("cd $NOPE; cd sub", started())
+check("cd $NOPE; cd sub: unknown set", (st.cwd, getattr(st, "unknown", None)), (BASE + "/sub", True))
+worlds_7 = cwds_of(
+    "x",
+    "false && cd d1; false && cd d2; false && cd d3; false && cd d4; "
+    "false && cd d5; false && cd d6; false && cd d7; x",
+)
+check("7 relative conditional cds: at most 64 worlds, no exception", len(worlds_7), 64)
+recs_8, _, st_8 = run(
+    "false && cd d1; false && cd d2; false && cd d3; false && cd d4; "
+    "false && cd d5; false && cd d6; false && cd d7; false && cd d8; x"
+)
+x_cwds_8 = [cwd for name, cwd, _ in recs_8 if name == "x"]
+deepest_8 = BASE + "/d1/d2/d3/d4/d5/d6/d7/d8"
+check(
+    "8 conditional relative cds: at most 64 worlds, last record and final state.cwd at deepest path",
+    (len(x_cwds_8), recs_8[-1][1], st_8.cwd),
+    (64, deepest_8, deepest_8),
 )
 
 print("---")

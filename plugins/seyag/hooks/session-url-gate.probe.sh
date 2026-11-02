@@ -294,8 +294,22 @@ run 2 "cd ~ then relative -F" "$TMP/plain" HOME="$TMP/files" -- \
   "cd ~ && git commit -F leaky.txt"
 run 0 "near-miss: cd ~/other-dir then relative -F" "$TMP/plain" HOME="$TMP" -- \
   "cd ~/plain && git commit -F leaky.txt"
-run 0 "near-miss: cd \$VAR is still not followed" "$TMP/plain" HOME="$TMP" -- \
+run 2 "cd \$VAR is followed when VAR is in the environment" "$TMP/plain" HOME="$TMP" -- \
   'cd $HOME/files && git commit -F leaky.txt'
+run 2 "git commit -F \"\$PWD/leaky.txt\" expands PWD" "$TMP/files" "${NOENV[@]}" -- \
+  'git commit -F "$PWD/leaky.txt"'
+run 2 "pushd away then popd back to leaky dir before relative -F" "$TMP/files" "${NOENV[@]}" -- \
+  "pushd $TMP/plain >/dev/null && popd >/dev/null && git commit -F leaky.txt"
+CHAIN60=$(printf 'cd m%d && x; ' $(seq 1 60))"git commit -F $TMP/files/leaky.txt"
+SECONDS=0
+run 2 "latency: 60 missing-directory cds before git commit -F leaky file" "$WORK" "${NOENV[@]}" -- \
+  "$CHAIN60"
+if [ "$SECONDS" -lt 5 ]; then
+  printf 'PASS  (time %ds < 5s)  60 missing-directory cds in session-url-gate\n' "$SECONDS"
+else
+  printf 'FAIL  (time %ds >= 5s)  60 missing-directory cds in session-url-gate\n' "$SECONDS"
+  FAILURES=$((FAILURES + 1))
+fi
 
 # =============================================================================
 # Group 6: pass-through and the prefilter
@@ -417,6 +431,8 @@ run 2 "cd ~other enters a literal ~other dir before the relative -F" "$TMP/tilde
   "cd ~other && git commit -F leaky.txt"
 run 0 "near-miss: cd ~other with no literal ~other dir stays put" "$TMP/plain" "${NOENV[@]}" -- \
   "cd ~other && git commit -F leaky.txt"
+run 2 'cd "$UNSETVAR" && git commit -F leaky.txt from the leaky dir' "$TMP/files" -u UNSETVAR "${NOENV[@]}" -- \
+  'cd "$UNSETVAR" && git commit -F leaky.txt'
 
 # =============================================================================
 # Group 9: the added pre-push layer

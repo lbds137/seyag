@@ -32,12 +32,18 @@
 #     seyag.publicRepo` prints `true` (`git config seyag.publicRepo true` in
 #     each local clone; the going-public skill says when), or when the value
 #     is set but is not a boolean (fail closed, as git-hooks/pre-push reads
-#     it; lib/prepush_state.py's `public_flag`). <dir> is the event
-#     cwd moved by `cd`/`pushd` and git's `-C`, per command, as lib/outbound.py
+#     it; lib/prepush_state.py's `public_flag`). <dir> is each tracked cwd
+#     (`cd`/`pushd`/`popd`, `$NAME`/`${NAME}` expanded, both paths kept across
+#     uncertain/conditional moves, pipelines and compounds up to
+#     `MAX_WORLDS = 64`) and git's `-C`, per command, as lib/outbound.py
 #     tracks it. A <dir> not inside a git work tree (a path the tracking got
 #     wrong, a missing directory) is judged by the event cwd's repo instead,
-#     so a tracking miss in a public repo still checks. Unset or false → that
-#     command's text is not checked, and its files, diff and log are not read.
+#     so a tracking miss in a public repo still checks; a state with an
+#     unresolvable `cd` (`unknown`) resets to the event cwd (judged as usual
+#     for files, git log and diffs) and in addition always scans the command
+#     text and counts for pre-push bypasses.
+#     Unset or false → that command's text is not checked, and its files, diff
+#     and log are not read.
 #
 # WHAT IS SCANNED: every item `lib/outbound.py` returns (its docstring is the
 # list): the command text of a `git commit|tag|notes` or `gh` command, body
@@ -106,9 +112,10 @@
 # `--git-dir`/`--work-tree` and `GIT_DIR` are not followed (covered only by
 # the event-cwd fallback above); a merge commit's own changes are not read on
 # push (`git log -p` shows none without `-m`), nor pushed diffs past 4 MiB of
-# log output; outbound.py's gaps: a body read through a variable or
-# substitution, stdin redirects (`-F - < f`, `cat f | gh … --body-file -`),
-# content written earlier in the same command, annotated tag messages on push.
+# log output; outbound.py's gaps: a body read through a command substitution
+# or a dynamic/unset variable, world forking past `MAX_WORLDS = 64`, stdin
+# redirects (`-F - < f`, `cat f | gh … --body-file -`), content written
+# earlier in the same command, annotated tag messages on push.
 # Where the pre-push is in force, it covers these for what a push sends. Ways
 # past the pre-push the bypass list does not see: editing `.git/config` (or a
 # file it includes) with a non-git tool; `HOME`, `XDG_CONFIG_HOME` or `PATH`

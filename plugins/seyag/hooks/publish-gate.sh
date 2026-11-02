@@ -59,11 +59,16 @@
 # never bypassable, with a line telling the agent to pass the literal
 # owner/repo.
 #
-# EFFECTIVE DIRECTORY / EXPORTED STATE: the same tracking as the sibling —
-# `cd`/`pushd`/`popd` (compounding), `export`/`declare -x`/`typeset -x`/
-# `unset`, GIT_DIR/GIT_WORK_TREE pointing the remote reading elsewhere, and a
-# `V=VALUE` assignment in the gh command's own prefix beating an exported
-# value.
+# EFFECTIVE DIRECTORY / EXPORTED STATE: the same multi-world tracking as the
+# sibling (`lib/shell_state.py`) — `cd`/`pushd`/`popd` (compounding, `$(pwd)`
+# and `$(git rev-parse --show-toplevel)` forms followed, `$NAME` and `${NAME}`
+# expanded from `PWD`, `OLDPWD`, tracked variables — `VAR=val` and
+# `export`/`declare`/`read`/`mapfile`/`printf -v`/`getopts`/`+=` update or
+# mask a tracked variable — and the environment; conditional/uncertain moves,
+# `&`, pipelines and compounds keep both paths up to `MAX_WORLDS = 64`),
+# `export`/`declare -x`/`typeset -x`/`unset`, GIT_DIR/GIT_WORK_TREE pointing
+# the remote reading elsewhere, and a `V=VALUE` assignment in the gh command's
+# own prefix beating an exported value.
 #
 # UNBLOCK: the env var `SYG_PUBLISH_CHECKED`,
 # read ONLY from the session
