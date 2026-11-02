@@ -23,21 +23,25 @@
 # gh itself would use. Only an invocation with NO positional argument at all is
 # numberless: gh then infers the PR from the current branch, and the hook
 # resolves it the same way, in this hook's cwd. Any lookup failure fails open
-# (except the review fetch itself, which refuses on failure).
+# (except the review fetch and an unscoped repository lookup, which refuse on
+# failure).
 # Residual: a switch inside a quoted or backtick substitution, a wrapper string
 # (`bash -c`, `eval`) or a script file is listed after the merge, or not at
 # all, so it is not seen; a comment holding an unterminated opener, then a
 # merge with a substitution in its repo flag, stays unrefused, because the span
-# scan runs past the comment.
+# scan runs past the comment. Over-refusal (accepted): `git checkout file.txt;
+# gh pr merge` refuses as `MERGE BRANCH MOVED` because a pathspec with no `--`
+# cannot be told from a branch here, and the banner says to pass the number.
 #
-# Fail-open surfaces: gh lookups that cannot run (except the review fetch,
-# which refuses on failure; the gate only means something when there is content
-# to surface or a reminder to deliver), and a missing claim-shape lib (the hook
-# stands down entirely). The ack-state WRITE on a healthy state file fails
-# CLOSED with the escape named: an allow would print the review to a stream
-# nobody sees. The ack state itself fails CLOSED: a symlink or an
-# unreadable file at the state path is treated as NOT acked and is never
-# written through — see the state section below.
+# Fail-open surfaces: gh lookups that cannot run (except the review fetch and
+# an unscoped repository lookup, which refuse on failure; the gate only means
+# something when there is content to surface or a reminder to deliver), a
+# missing claim-shape lib (the hook stands down entirely), and a swallowed
+# `root_sub_merge` exception at its call in `extract`. The ack-state WRITE on
+# a healthy state file fails CLOSED with the escape named: an allow would print
+# the review to a stream nobody sees. The ack state itself fails CLOSED: a
+# symlink or an unreadable file at the state path is treated as NOT acked and
+# is never written through — see the state section below.
 
 set -uo pipefail
 
@@ -527,7 +531,6 @@ def root_sub_merge(text, depth=0):
                     continue
                 if (
                     tok.startswith("--repo=")
-                    or tok.startswith("-R=")
                     or tok.startswith("-R")
                 ) and "__SYG_SUBVAL__" in tok:
                     return True
@@ -654,8 +657,12 @@ def scan_invocations(text):
     - unresolvable: True when the winning repository scope is an exported
       GH_REPO with no literal value in this command (`export GH_REPO` /
       `declare -x GH_REPO`), an armed merge in a child context preceded by a
-      child-context GH_REPO export/declare -x, or a non-literal
-      -R/--repo/GH_REPO= value (`$(...)`, backticks, `<(...)`, `$VAR`);
+      child-context GH_REPO export/declare -x, a non-literal
+      -R/--repo/GH_REPO= value (`$(...)`, backticks, `<(...)`, `$VAR`), or
+      `heredoc_sub_prefix_merged` (`heredoc_sub_prefix` is command-wide: a
+      `GH_REPO=$(…<<…)` split-sub prefix on an earlier command such as
+      `gh pr view 1; gh pr merge 7` still refuses the merge unless shadowed
+      by a URL `selector_repo` or `-R`/`--repo`);
     - branchmove: True when a branch switch (`git switch`, `git checkout`
       without `--`, or `gh pr checkout`) precedes a numberless merge in
       list order.
@@ -1221,10 +1228,14 @@ def scan_invocations(text):
         # another command's arguments — none of them can move the merge.
         chdir_cd = False
     chdir = chdir_cd or chdir_runner
-    # Precedence (matching gh): URL selector_repo > -R/--repo > prefix
-    # GH_REPO= > earlier exported GH_REPO. Refuse when the WINNING source is
-    # unresolvable or non-literal; a shadowed lower-precedence dynamic source
-    # (`GH_REPO=$(calc) gh pr merge 2002 -R other-x`) does not refuse.
+    # Precedence (matching gh): URL selector_repo > -R/--repo >
+    # heredoc_sub_prefix_merged > prefix GH_REPO= > earlier exported GH_REPO
+    # (`heredoc_sub_prefix` is command-wide, so `heredoc_sub_prefix_merged`
+    # sits below `selector_repo` and `repo` and above `first_prefix_repo`:
+    # `GH_REPO=$(cat <<E\no/r\nE\n) gh pr view 1; gh pr merge 7` refuses).
+    # Refuse when the WINNING source is unresolvable or non-literal; a
+    # shadowed lower-precedence dynamic source (`GH_REPO=$(calc) gh pr merge
+    # 2002 -R other-x`) does not refuse.
     unresolvable = False
     if seen:
         if selector_repo:
@@ -1835,9 +1846,9 @@ resolve_pr_view() {
 # Repo identity and default branch, from one memoized `gh repo view` call:
 # the identity scopes the REST review fetch and the reminder ack key (no
 # hard-coded repo — this hook runs in any repository gh can resolve from
-# the cwd), the default branch decides whether a merge targets it. Fails
-# open to "": an unreadable repo with no `-R` still means no fetch and no
-# gate.
+# the cwd), the default branch decides whether a merge targets it. On
+# failure both stay "": the default-branch reminder is skipped, while an
+# unreadable repo with no `-R` leaves REPO_FOR_FETCH empty and refuses.
 REPO=""
 DEFAULT_BRANCH=""
 REPO_RESOLVED=0
@@ -2156,6 +2167,8 @@ if [ -n "$REPO_FOR_FETCH" ]; then
             '[.[][] | select(.user.login == $login)] | sort_by(.created_at) | last' \
             <<<"$REVIEW_RAW" 2>/dev/null) || REVIEW_FETCH_FAILED=1
     fi
+else
+    REVIEW_FETCH_FAILED=1
 fi
 
 if [ "$REVIEW_FETCH_FAILED" = 1 ]; then
@@ -2163,7 +2176,7 @@ if [ "$REVIEW_FETCH_FAILED" = 1 ]; then
         printf '%s\n' "$RULE"
         printf 'MERGE REVIEW UNREADABLE — the review fetch failed\n'
         printf '%s\n\n' "$RULE"
-        printf 'The `gh api` review fetch for PR #%s failed or returned unreadable output.\n' "$PR_NUM"
+        printf 'The repository lookup or the `gh api` review fetch for PR #%s failed, timed out or returned unreadable output.\n' "$PR_NUM"
         printf 'Nothing was read, so this merge cannot be judged reviewed.\n\n'
         printf 'Retry the merge command once `gh` works.\n\n'
         printf 'This refusal is not ackable — nothing was read and nothing was acked.\n'

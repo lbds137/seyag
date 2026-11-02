@@ -682,10 +682,11 @@ assert_api_has "…and the fetch scopes to the cwd repo, not an -R-invented one"
 assert_exit "…and blocks normally" 2
 # The discriminator for a leaked multi-line value: with the repo view
 # failing, a leaked value would fall through to the fetch URL itself.
-# Guarded, the hook has no repo to fetch from and fails open.
+# Guarded, the hook has no repo to fetch from and refuses.
 new_case; SHIM_REPO_EXIT=1
 invoke "$(printf 'gh pr merge 2002 --repo "line one\nline two"')"
-assert_exit "repo view failing: fail open" 0
+assert_exit "repo view failing: refuses" 2
+assert_stderr_has "…with MERGE REVIEW UNREADABLE" 'MERGE REVIEW UNREADABLE'
 assert_no_fetch "…no fetch ran — no -R-invented repo reached one"
 assert_api_lacks "…and the multi-line value reached no lookup" 'line one'
 SHIM_REPO_EXIT=0
@@ -733,10 +734,11 @@ assert_api_lacks "…and the assignment's repo reaches no fetch" 'repos/other-x'
 # exported one — bash exports nothing, so a later gh still reads the cwd
 # repo. Capturing it gated the merge on another repo's review. Repo view
 # fails here so the discriminator is sharp: a capture would reach the fetch
-# URL; the correct behavior is fail-open with no fetch at all.
+# URL; the correct behavior is to refuse with no fetch at all.
 new_case; SHIM_REPO_EXIT=1; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
 invoke 'GH_REPO=other-x; gh pr merge 2002 --rebase'
-assert_exit "a standalone GH_REPO= assignment exports nothing: fail open" 0
+assert_exit "a standalone GH_REPO= assignment exports nothing: refuses" 2
+assert_stderr_has "…with MERGE REVIEW UNREADABLE" 'MERGE REVIEW UNREADABLE'
 assert_no_fetch "…no fetch ran — nothing scoped the lookups"
 assert_api_lacks "…and the assignment's repo reaches no fetch" 'other-x'
 SHIM_REPO_EXIT=0
@@ -751,7 +753,8 @@ assert_api_lacks "…and the assignment's repo reaches no fetch" 'other-x'
 # `export -n` UN-exports: a flag-carrying export must never capture.
 new_case; SHIM_REPO_EXIT=1; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
 invoke 'export -n GH_REPO=other-x && gh pr merge 2002 --rebase'
-assert_exit "export -n un-exports: nothing scopes the lookups, fail open" 0
+assert_exit "export -n un-exports: nothing scopes the lookups, refuses" 2
+assert_stderr_has "…with MERGE REVIEW UNREADABLE" 'MERGE REVIEW UNREADABLE'
 assert_no_fetch "…no fetch ran"
 assert_api_lacks "…and the un-exported repo reaches no fetch" 'other-x'
 SHIM_REPO_EXIT=0
@@ -2275,11 +2278,12 @@ assert_exit "gh pr view fails: no reminder, merge allowed" 0
 assert_silent "unreadable base is silent, not a block"
 SHIM_BASE_EXIT=0
 
-# Fail-open on an unreadable repo/default-branch, the same way.
+# Unreadable repo with no -R refuses (MERGE REVIEW UNREADABLE) before the
+# reminder path is reached.
 new_case; SHIM_REPO_EXIT=1; SHIM_REVIEW_JSON=''
 invoke 'gh pr merge 2010 --rebase'
-assert_exit "gh repo view fails: no reminder, merge allowed" 0
-assert_silent "unreadable default branch is silent, not a block"
+assert_exit "gh repo view fails: refuses" 2
+assert_stderr_has "unreadable repo/default branch refuses with MERGE REVIEW UNREADABLE" 'MERGE REVIEW UNREADABLE'
 SHIM_REPO_EXIT=0
 
 # A feature PR (base ≠ default) never gets the reminder, review or not.
@@ -3374,6 +3378,14 @@ assert_stderr_lacks "D5: path checkout with tree-ish (git checkout HEAD -- f) be
 assert_pr "…and resolves branch PR" 4242
 SHIM_NUMBER_EXIT=1; SHIM_PR_NUMBER=''
 
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke 'git checkout file.txt; gh pr merge'
+assert_exit "D5: pathspec checkout without -- (git checkout file.txt; gh pr merge) is an accepted over-refusal" 2
+assert_stderr_has "…with MERGE BRANCH MOVED banner" 'MERGE BRANCH MOVED — numberless merge after a branch switch refused'
+assert_stderr_has "…telling the caller to pass the PR number" 'gh pr merge <PR>'
+assert_no_fetch "…no fetch"
+assert_no_ack "…no ack"
+
 # D6: a failed review fetch refuses instead of reading as no review.
 new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"; SHIM_API_EXIT=1
 invoke 'gh pr merge 2002 --rebase'
@@ -3444,6 +3456,12 @@ assert_stderr_lacks "D13: shadowed heredoc sub prefix with -R o/r does not get M
 assert_api_has "…and fetches repos/o/r/issues/7/comments" 'repos/o/r/issues/7/comments'
 assert_exit "…and blocks on review" 2
 SHIM_REPO_EXIT=0
+
+new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
+invoke "$(printf "GH_REPO=\$(cat <<E\no/r\nE\n) gh pr view 1; gh pr merge 7")"
+assert_exit "D13: command-wide heredoc_sub_prefix on earlier gh pr view still refuses later gh pr merge 7" 2
+assert_stderr_has "…with MERGE SCOPE UNRESOLVABLE" 'MERGE SCOPE UNRESOLVABLE'
+assert_no_fetch "…no fetch"
 
 # R4: unquoted substitution in root repo flag position refuses before any fetch.
 new_case; SHIM_PR_BASE='develop'; SHIM_REVIEW_JSON="$LGTM"
