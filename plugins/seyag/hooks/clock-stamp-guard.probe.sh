@@ -166,6 +166,88 @@ block_has "section: Edit under ## Handoff on disk blocks" "future" \
 block_has "section: placeholder under ## Next still blocks" "placeholder" \
   "$NOW_A" "$CFG_SECTION" "$(jq_edit "$F" '- old next line' $'- old next line\n- **11-02 23:3x:** y')"
 
+# --- 5b. Annotated headings, mid-line edits, checkboxes, fence cache -------------
+# A future stamp under plain `## Handoff` blocks (pinned by the Write row above).
+# Annotated and suffixed headings name the same section.
+block_has "section: future stamp under ## Handoff (rewritten 11-02; note) blocks (Write)" "future" \
+  "$NOW_A" "$CFG_SECTION" "$(jq_write "$F" $'# Log\n\n## Handoff (rewritten 11-02; note)\n\n- **11-02 23:30:** x\n')"
+block_has "section: future stamp under ## Handoff more words blocks (Write)" "future" \
+  "$NOW_A" "$CFG_SECTION" "$(jq_write "$F" $'# Log\n\n## Handoff more words\n\n- **11-02 23:30:** x\n')"
+pass_case "section: future stamp under ## Handoffs passes (Write)" \
+  "$NOW_A" "$CFG_SECTION" "$(jq_write "$F" $'# Log\n\n## Handoffs\n\n- **11-02 23:30:** x\n')"
+# Live miss: Deck saw this pass on 0.3.126 (an Edit under an annotated Handoff heading at 06:45).
+HO="$TMP/proj/handoff.md"
+printf '%s\n' '# Log' '' '## Handoff (rewritten 11-02; note)' '' '- handoff line' > "$HO"
+NOW_G=1793688300   # 11-03 06:45:00 (UTC, the probe's TZ)
+block_has "live miss: Edit under ## Handoff (rewritten 11-02; note) adds 06:50 at 06:45 (future)" "future" \
+  "$NOW_G" "$CFG_SECTION" "$(jq_edit "$HO" '- handoff line' $'- handoff line\n- **11-03 06:50:** x')"
+# Mid-line Edit: the Edit's text is judged inside its disk line.
+MID1="$TMP/proj/midline1.md"
+printf '%s\n' '# Log' '' '- call Bob about X' > "$MID1"
+MID2="$TMP/proj/midline2.md"
+printf '%s\n' '# Log' '' '- X' > "$MID2"
+pass_case "mid-line Edit: a stamp after a disk prefix of words is mid-line" \
+  "$NOW_A" "$CFG_GLOB" "$(jq_edit "$MID1" 'X' '11-05 10:00 sync')"
+block_has "mid-line control: a stamp right after the markup is leading and future" "future" \
+  "$NOW_A" "$CFG_GLOB" "$(jq_edit "$MID2" 'X' '11-05 10:00 sync')"
+# Split stamp: old_string ends inside the stamp's time field; only prefix+new+suffix forms the stamp.
+SPL="$TMP/proj/split-stamp.md"
+printf '%s\n' '# Log' '' '- **11-05 Q0:00** z' > "$SPL"
+block_has "split stamp: old ends inside a stamp; the joined stamp is future and blocks" "future" \
+  "$NOW_A" "$CFG_GLOB" "$(jq_edit "$SPL" '- **11-05 Q' '- **11-05 1')"
+# Checkboxes are task items: a stamp after [x] or [ ] is mid-line, placeholders still count.
+pass_case "checkbox: a future stamp right after [x] is a task item, not a log line" \
+  "$NOW_A" "$CFG_GLOB" "$(jq_edit "$F" '- old next line' $'- old next line\n- [x] 11-05 10:00 dentist')"
+pass_case "checkbox: a future stamp right after [ ] is a task item, not a log line" \
+  "$NOW_A" "$CFG_GLOB" "$(jq_edit "$F" '- old next line' $'- old next line\n- [ ] 11-05 10:00 dentist')"
+block_has "checkbox: a placeholder after [x] still blocks" "placeholder" \
+  "$NOW_A" "$CFG_GLOB" "$(jq_edit "$F" '- old next line' $'- old next line\n- [x] 11-05 10:3x dentist')"
+# MultiEdit: the second edit's old_string sits inside a disk fence, so its new text is code.
+FC="$TMP/proj/fence-multi.md"
+printf '%s\n' '# Log' '' '```' '- **11-02 22:10:** code' '```' '' '- old next line' > "$FC"
+pass_case "MultiEdit: a second edit inside a disk fence is code (fence cache)" \
+  "$NOW_A" "$CFG_GLOB" "$(jq_multi "$FC" '- old next line' $'- old next line\n- ok' '- **11-02 22:10:** code' $'- **11-02 22:10:** code\n- **11-04 11:25:** sample')"
+
+# --- 5c. Review round 1: replace_all, tab-ended names, sequential MultiEdit, fence close ---
+# replace_all judges every occurrence inside its own disk line.
+RA="$TMP/proj/replace-all.md"
+printf '%s\n' '# Log' '' '- call Bob X' '- X' > "$RA"
+block_has "replace_all: the second occurrence is a leading stamp and blocks" "future" \
+  "$NOW_A" "$CFG_GLOB" "$(jq -cn --arg f "$RA" --arg c "$TMP" '{tool_name:"Edit",cwd:$c,tool_input:{file_path:$f,old_string:"X",new_string:"11-05 10:00 sync",replace_all:true}}')"
+RB="$TMP/proj/replace-all-mid.md"
+printf '%s\n' '# Log' '' '- call Bob X' '- ask Ann X' > "$RB"
+pass_case "replace_all: every occurrence mid-line passes" \
+  "$NOW_A" "$CFG_GLOB" "$(jq -cn --arg f "$RB" --arg c "$TMP" '{tool_name:"Edit",cwd:$c,tool_input:{file_path:$f,old_string:"X",new_string:"11-05 10:00 sync",replace_all:true}}')"
+# A section name ends at a space, a tab or (.
+block_has "section: ## Handoff<TAB>(x) is section Handoff and blocks (Write)" "future" \
+  "$NOW_A" "$CFG_SECTION" "$(jq_write "$F" $'# Log\n\n## Handoff\t(x)\n\n- **11-02 23:30:** x\n')"
+block_has "section: ## Handoff(x) blocks (Write)" "future" \
+  "$NOW_A" "$CFG_SECTION" "$(jq_write "$F" $'# Log\n\n## Handoff(x)\n\n- **11-02 23:30:** x\n')"
+pass_case "section: ## handoff (lower case) passes (Write)" \
+  "$NOW_A" "$CFG_SECTION" "$(jq_write "$F" $'# Log\n\n## handoff\n\n- **11-02 23:30:** x\n')"
+# MultiEdit edits run in order: each sees the text the earlier edits leave.
+SEQ1="$TMP/proj/seq1.md"
+printf '%s\n' '# Log' '' '- X' > "$SEQ1"
+pass_case "MultiEdit sequential: edit 2 sees the Bob prefix edit 1 added and passes" \
+  "$NOW_A" "$CFG_GLOB" "$(jq_multi "$SEQ1" '- X' '- call Bob about X' 'X' '11-05 10:00 sync')"
+SEQ2="$TMP/proj/seq2.md"
+printf '%s\n' '# Log' '' '- call Bob about X' > "$SEQ2"
+block_has "MultiEdit sequential: edit 1 removes the prefix, so edit 2 is leading and blocks" "future" \
+  "$NOW_A" "$CFG_GLOB" "$(jq_multi "$SEQ2" '- call Bob about X' '- X' 'X' '11-05 10:00 sync')"
+# Fence cache: old_string starts on a closing fence line; the state there is the fence open before it.
+FK="$TMP/proj/fence-close.md"
+printf '%s\n' '# Log' '' '```' '- code' '```' '' '- old next line' > "$FK"
+block_has "fence cache: old starts on the closing fence line; the stamp after it is outside the fence and blocks" "future" \
+  "$NOW_A" "$CFG_GLOB" "$(jq_edit "$FK" $'```\n\n- old next line' $'```\n\n- old next line\n- **11-04 11:25:** sample')"
+
+# A MultiEdit whose first edit creates a missing file seeds the working text, so later
+# edits see its headings: the Notes section is not a configured section, so nothing blocks.
+MISS="$TMP/proj/created-notes.md"
+pass_case "MultiEdit: an empty old_string on a missing file seeds its headings (Notes is not Handoff)" \
+  "$NOW_A" "$CFG_SECTION" "$(jq_multi "$MISS" '' $'## Notes\n- X' '- X' '- 11-05 10:00 x')"
+block_has "MultiEdit: the same seeding puts a future line under ## Handoff in the section and blocks" "future" \
+  "$NOW_A" "$CFG_SECTION" "$(jq_multi "$MISS" '' $'## Handoff\n- X' '- X' '- 11-05 10:00 x')"
+
 # --- 6. Code exemption -----------------------------------------------------------
 pass_case "code span quoting a placeholder passes" \
   "$NOW_A" "$CFG_GLOB" "$(jq_edit "$F" '- old next line' $'- old next line\n- Stamp shape `11-02 23:3x` is a placeholder.')"
