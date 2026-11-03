@@ -310,5 +310,36 @@ pass_case "T with an out-of-range offset is trimmed; 10:00 local is past" \
 block_has "fence line with a lone backtick in its info string is not a fence" "placeholder" \
   "$NOW_A" "$CFG_GLOB" "$(jq_edit "$F" '- old next line' $'- old next line\n```a`b\n- **11-02 23:3x:** z')"
 
+# --- 15. Review round 3 ----------------------------------------------------------
+# Item 1: after a space, an offset is kept when the stamp has seconds (RFC 3339 style).
+pass_case "RFC 3339 space form with seconds and +00:00 passes at its instant under New York" \
+  "$NOW_D" "$CFG_GLOB" "$(jq_edit "$F" '- old next line' $'- old next line\n- 2026-11-03 04:26:07+00:00 x')" "TZ=America/New_York"
+block_has "RFC 3339 space form with seconds, 2 minutes ahead, blocks" "future" \
+  "$((NOW_D - 120))" "$CFG_GLOB" "$(jq_edit "$F" '- old next line' $'- old next line\n- 2026-11-03 04:26:07+00:00 x')" "TZ=America/New_York"
+block_has "space form without seconds keeps trimming: 04:26 read as New York local is 5 h ahead" "future" \
+  "$NOW_D" "$CFG_GLOB" "$(jq_edit "$F" '- old next line' $'- old next line\n- **2026-11-03 04:26+00:00:** x')" "TZ=America/New_York"
+
+# Item 2: an Edit whose old_string sits inside a fenced block on disk starts inside that fence.
+FENCE="$TMP/proj/fence.md"
+printf '%s\n' '# Log' '' '```' '- **11-02 22:10:** code' '```' '' '- old next line' > "$FENCE"
+pass_case "edit inside a fenced block on disk: the added stamp is code" \
+  "$NOW_A" "$CFG_GLOB" "$(jq_edit "$FENCE" '- **11-02 22:10:** code' $'- **11-02 22:10:** code\n- **11-04 11:25:** sample')"
+block_has "edit outside any fence: the same added stamp blocks" "future" \
+  "$NOW_A" "$CFG_GLOB" "$(jq_edit "$FENCE" '- old next line' $'- old next line\n- **11-04 11:25:** sample')"
+block_has "edit inside a fence whose new text closes the fence: a placeholder after it blocks" "placeholder" \
+  "$NOW_A" "$CFG_GLOB" "$(jq_edit "$FENCE" '- **11-02 22:10:** code' $'- **11-02 22:10:** code\n```\n- **11-02 23:3x:** z')"
+
+# Item 3: placeholder seconds are a placeholder; real seconds must be digits 00-59.
+block_has "placeholder seconds xx block as a placeholder" "placeholder" \
+  "$NOW_A" "$CFG_GLOB" "$(jq_edit "$F" '- old next line' $'- old next line\n- **11-02 23:30:xx** z')"
+pass_case "real seconds 60 is not a stamp" \
+  "$NOW_A" "$CFG_GLOB" "$(jq_edit "$F" '- old next line' $'- old next line\n- **11-02 22:10:60** z')"
+
+# Item 6: a non-dict entry in edits does not stop a placeholder edit from blocking.
+block_has "MultiEdit with a non-dict entry: the placeholder edit still blocks" "placeholder" \
+  "$NOW_A" "$CFG_GLOB" "$(jq -cn --arg f "$F" --arg c "$TMP" '{tool_name:"MultiEdit",cwd:$c,tool_input:{file_path:$f,edits:["junk",{old_string:"- old next line",new_string:"- old next line\n- **11-02 23:3x:** z"}]}}')"
+pass_case "MultiEdit whose edits are all non-dict entries passes without a crash" \
+  "$NOW_A" "$CFG_GLOB" "$(jq -cn --arg f "$F" --arg c "$TMP" '{tool_name:"MultiEdit",cwd:$c,tool_input:{file_path:$f,edits:["junk",42,null]}}')"
+
 [ "$fail" -eq 0 ] || { echo "FAIL: clock-stamp-guard ($fail failed, $pass passed)"; exit 1; }
 echo "PASS: clock-stamp-guard ($pass cases)"
