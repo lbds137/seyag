@@ -9,13 +9,14 @@
 # Config file: SYG_CLOCK_STAMP_PATHS_FILE, default
 # ${XDG_CONFIG_HOME:-$HOME/.config}/seyag/clock-stamp-paths. A missing, unreadable
 # or glob-less file turns the hook off (exit 0 before python starts: the [ -r ] test
-# forks nothing, and the glob check runs one grep). One path glob per line; # comments and blank lines are ignored;
-# surrounding whitespace is trimmed; a leading ~/ (or a bare ~) expands to $HOME,
-# and a ~ glob is dropped when HOME is empty. A line `section: NAME` (NAME
-# case-sensitive, trimmed) adds a section name instead of a glob. A glob matches
-# when fnmatch.fnmatchcase hits the tool's file_path made absolute (a relative path
-# resolves against the event cwd) or its realpath. fnmatch's * also matches / (so
-# ~/notes/*.md matches files in nested folders).
+# forks nothing, and the glob check runs one grep). One path glob per line;
+# # comments and blank lines are ignored; surrounding whitespace is trimmed; a
+# leading ~/ (or a bare ~) expands to $HOME, and a ~ glob is dropped when HOME is
+# empty. A line `section: NAME` (NAME case-sensitive, trimmed) adds a section name
+# instead of a glob. A glob matches when fnmatch.fnmatchcase hits the tool's
+# file_path made absolute (a relative path resolves against the event cwd) or its
+# realpath. fnmatch's * also matches / (so ~/notes/*.md matches files in nested
+# folders).
 #
 # Stamp form: a date, MM-DD or YYYY-MM-DD, then one space or T, then HH:MM, an
 # optional :SS with an optional .fraction, and an optional zone. The zone is Z (with
@@ -29,10 +30,11 @@
 # Without a zone the stamp is local time (honouring TZ). Line-leading: after
 # optional whitespace, optional markup (runs of "- ", "* ", "+ ", "> ", "#+ ", "**",
 # "__", "_"), at most one leading word (\S+ then whitespace), then the stamp. An
-# inline code span counts as one word. Any other stamp is mid-line: placeholder-
-# checked, never future-checked. An impossible date or time (02-30, hour 24, minute
-# 60) is not a stamp; an x-bearing time is a stamp only when some fill of its x
-# digits is a valid time.
+# inline code span counts as one word. A task checkbox after the markup (`[ ]`,
+# `[x]` or `[X]`) is never line-leading: its time is a schedule, not a log stamp.
+# Any other stamp is mid-line: placeholder-checked, never future-checked. An
+# impossible date or time (02-30, hour 24, minute 60) is not a stamp; an x-bearing
+# time is a stamp only when some fill of its x digits is a valid time.
 #
 # Future rule: a YYYY- stamp uses its year. An MM-DD stamp takes whichever of last
 # year, this year and next year puts it nearest to now, so a late-December stamp
@@ -42,30 +44,40 @@
 #
 # Multiset rule: only added lines are judged. The key of a stamp is (kind, stamp
 # text as written), kind being placeholder or leading. Edit: keys in new_string
-# minus keys in old_string (replace_all changes nothing). MultiEdit: each edit is
-# judged the same way, in order; any blocking edit blocks the call. Write: keys in
-# content minus keys in the file on disk (missing or unreadable = empty). For a key
-# that survives, every line of the new text that carries it is judged, and any
-# violation blocks; a carried-over copy of the same text is judged too.
+# minus keys in old_string, each occurrence judged inside its disk line (the text
+# before and after the occurrence on that line wraps both); replace_all judges every
+# occurrence, not only the first. An Edit or MultiEdit whose old_string is not in
+# the text it applies to (a call the tool itself refuses) is judged on its new text
+# alone, and the text does not change. MultiEdit: each edit is judged the same way,
+# in order, against the text the earlier edits leave; an empty old_string on a
+# missing or empty file creates the text as its new_string. Any blocking edit blocks
+# the call. Write: keys in content minus keys in the file on disk (missing or
+# unreadable = empty). For a key that survives, every line of the new text that
+# carries it is judged, and any violation blocks; a carried-over copy of the same
+# text is judged too.
 #
 # Section scope (future rule only): with no section: lines the future rule applies
 # anywhere in a matched file. With section: lines, a leading stamp is future-checked
 # only when its section is one of them. The section is the text of the last "## "
 # heading (up to three leading spaces, exactly two hashes, a closing hash run
 # stripped; ### does not count, nor a heading inside a fenced block) above the
-# stamp's line. Write: in the new content. Edit and MultiEdit: a heading in the new
-# text above the line wins; otherwise the last heading before old_string's first
-# occurrence in the file on disk. If no section can be found the stamp is judged.
-# The placeholder rule ignores sections.
+# stamp's line. A heading names section NAME when its text is NAME or starts with
+# NAME followed by a space, a tab or "(" (so "## Handoff (rewritten 11-02)" is
+# section Handoff, and "## Handoffs" is not). Write: in the new content. Edit and
+# MultiEdit: a heading in the new text above the line wins; otherwise the last
+# heading before that occurrence of old_string, in the text as earlier edits leave
+# it. If no section can be found the stamp is judged. The placeholder rule ignores
+# sections.
 #
 # Code exemption: before any scan, old and new text alike are blanked of inline code
 # spans (a backtick run up to the next run of the same length, on one line; the span
 # becomes letters, so it still counts as one word) and of fenced blocks (a ``` or
 # ~~~ fence line through the matching closing fence within the text being scanned;
 # an unclosed fence runs to the end of that text). A backtick fence line whose
-# info string holds any backtick is an inline span, not a fence. An Edit or MultiEdit
-# whose old_string first occurs on disk inside a fenced block starts its new text
-# inside that fence: the new text is code until a closing fence line within it.
+# info string holds any backtick is an inline span, not a fence. An Edit or
+# MultiEdit occurrence of old_string that sits inside a fenced block (in the text as
+# earlier edits leave it) starts its new text inside that fence: the new text is code
+# until a closing fence line within it.
 # The disk file is read only when an Edit or MultiEdit has a non-empty old_string
 # (its fence state is needed) or a Write needs it for the subtraction; its section
 # scan is built only when a section lookup needs it.
@@ -91,8 +103,6 @@
 #   - One leading word is allowed, so a line that starts with a word and then a
 #     scheduled date-time is future-checked: an over-block, escaped with a code span.
 #   - fnmatch's * crosses /.
-#   - A MultiEdit's later edits are matched against the on-disk file, not the file
-#     after the earlier edits.
 #   - A second stamp joined to the first by a hyphen (11-02 22:10-11-02 2x:30) is
 #     not seen.
 

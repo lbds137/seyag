@@ -38,6 +38,8 @@ MARKUP_RE = re.compile(r"\s*(?:(?:[-*+>]|#+)[ \t]|\*\*|__|_)*[ \t]*")
 WORD_RE = re.compile(r"\S+\s+")
 FENCE_RE = re.compile(r"[ \t]*(`{3,}|~{3,})(.*)$")
 HEADING_RE = re.compile(r"^ {0,3}##[ \t]+(.*?)(?:[ \t]+#+)?\s*$")
+# A task checkbox after the markup: its line's stamp is a schedule, never line-leading.
+CHECKBOX_RE = re.compile(r"\[[ xX]\]\s")
 
 Stamp = namedtuple("Stamp", "text year mon day hh mm ss frac zone placeholder")
 Occ = namedtuple("Occ", "line kind text stamp")
@@ -160,14 +162,6 @@ def fenced_flags(lines, fence=None):
     return flags
 
 
-def fence_at(text, off):
-    """The fence run open at character offset off of text, or None."""
-    fence = None
-    for line in text[:off].split("\n")[:-1]:
-        fence = _fence_step(fence, line)
-    return fence
-
-
 def _date_ok(year, mon, day):
     try:
         dt.date(int(year) if year else 2000, mon, day)
@@ -219,6 +213,8 @@ def parse_stamp(m):
 
 
 def _is_leading(line, markup_end, start):
+    if CHECKBOX_RE.match(line, markup_end):
+        return False
     if start == markup_end:
         return True
     m = WORD_RE.match(line, markup_end)
@@ -342,6 +338,12 @@ def instant(st, now):
     return None if best is None else best[1]
 
 
+def section_matches(sec, names):
+    """True when heading text sec is a configured name, or starts with one followed by a space, a tab or '('."""
+    return any(sec == n or (sec.startswith(n) and sec[len(n):len(n) + 1] in (" ", "\t", "("))
+               for n in names)
+
+
 def violations_for(new, old, now, names, section_of):
     out = []
     for o in added(new, old):
@@ -350,7 +352,7 @@ def violations_for(new, old, now, names, section_of):
             continue
         if names:
             sec = section_of(o.line)
-            if sec is not None and sec not in names:
+            if sec is not None and not section_matches(sec, names):
                 continue
         try:
             ep = instant(o.stamp, now)
@@ -361,16 +363,20 @@ def violations_for(new, old, now, names, section_of):
     return out
 
 
-class Disk:
-    """The file on disk. Its text is read on first use; its Scan is built only if a section
-    lookup needs it. Both are cached."""
+class Text:
+    """One state of the file's text: the disk text, or the working text after earlier MultiEdit
+    edits (built from a string). Its text is read on first use from the path; its Scan is built
+    only if a section lookup needs it, and its per-line fence table only if a fence lookup needs
+    it. All cached."""
 
-    def __init__(self, path):
+    def __init__(self, path=None, text=None):
         self.path = path
-        self._read = False
-        self._text = None
+        self._read = path is None
+        self._text = text
         self._scanned = False
         self._scan = None
+        self._starts = None
+        self._befores = None
 
     @property
     def text(self):
@@ -385,15 +391,74 @@ class Disk:
             self._scan = Scan(self.text) if self.text is not None else None
         return self._scan
 
+    def fence_at(self, off):
+        """The fence run open before the disk line holding character offset off, or None."""
+        if self._starts is None:
+            starts, befores = [], []
+            fence, pos = None, 0
+            for line in self.text.split("\n"):
+                starts.append(pos)
+                befores.append(fence)
+                fence = _fence_step(fence, line)
+                pos += len(line) + 1
+            self._starts, self._befores = starts, befores
+        return self._befores[bisect.bisect_right(self._starts, off) - 1]
 
-def section_for_edit(new, idx, disk, off):
-    """Section of new line idx: its own heading above, else the disk heading before off."""
+
+def section_for_edit(new, idx, state, off):
+    """Section of new line idx: its own heading above, else the heading before off in state's text."""
     name = new.section_above(idx)
     if name is None and off >= 0:
-        scan = disk.scan()
+        scan = state.scan()
         if scan is not None:
             name = scan.section_before(off)
     return name
+
+
+def match_offsets(text, old, replace_all):
+    """Offsets of old in text, as str.replace finds them: left to right, non-overlapping.
+    Only the first when replace_all is false."""
+    offs = []
+    i = text.find(old)
+    while i >= 0:
+        offs.append(i)
+        if not replace_all:
+            break
+        i = text.find(old, i + len(old))
+    return offs
+
+
+def replaced(text, old, new_s, replace_all):
+    """text after one Edit: the first occurrence of old becomes new_s, or every one when replace_all."""
+    return text.replace(old, new_s) if replace_all else text.replace(old, new_s, 1)
+
+
+def edit_blocks(state, old, new_s, replace_all, now, names):
+    """Violations of one Edit against state's text. Each occurrence of old is judged inside its
+    own line: the text before and after it on that line wraps both new_s and old, under the fence
+    open at the line's start (no newline is added, so line indexes hold). Blocks identical to one
+    an earlier occurrence gave are reported once."""
+    text = state.text if old else None
+    offs = match_offsets(text, old, replace_all) if text is not None else []
+    if not offs:
+        new = Scan(new_s)
+        return violations_for(new, Scan(old), now, names,
+                              lambda i, n=new: section_for_edit(n, i, state, -1))
+    blocks = []
+    for off in offs:
+        ls = text.rfind("\n", 0, off) + 1
+        end = off + len(old)
+        le = text.find("\n", end)
+        if le < 0:
+            le = len(text)
+        prefix, suffix = text[ls:off], text[end:le]
+        fence = state.fence_at(ls)
+        new = Scan(prefix + new_s + suffix, fence)
+        old_scan = Scan(prefix + old + suffix, fence)
+        got = violations_for(new, old_scan, now, names,
+                             lambda i, n=new, o=off: section_for_edit(n, i, state, o))
+        blocks += [b for b in got if b not in blocks]
+    return blocks
 
 
 def now_epoch():
@@ -447,26 +512,28 @@ def check(payload):
         return None
 
     now = now_epoch()
-    disk = Disk(abs_path)
+    state = Text(path=abs_path)
     blocks = []
     if tool == "Write":
         new = Scan(tin.get("content") if isinstance(tin.get("content"), str) else "")
-        blocks = violations_for(new, disk.scan() or Scan(""), now, names, new.section_above)
+        blocks = violations_for(new, state.scan() or Scan(""), now, names, new.section_above)
     else:
         if tool == "Edit":
-            pairs = [(tin.get("old_string"), tin.get("new_string"))]
+            pairs = [(tin.get("old_string"), tin.get("new_string"), tin.get("replace_all") is True)]
         else:
             edits = tin.get("edits") if isinstance(tin.get("edits"), list) else []
-            pairs = [(e.get("old_string"), e.get("new_string")) for e in edits if isinstance(e, dict)]
-        for old, new_text in pairs:
+            pairs = [(e.get("old_string"), e.get("new_string"), e.get("replace_all") is True)
+                     for e in edits if isinstance(e, dict)]
+        # Edits run in order, each against the text the earlier edits leave (the disk text for the first).
+        for old, new_text, replace_all in pairs:
             old = old if isinstance(old, str) else ""
-            # old_string's first occurrence on disk; new text inside a fence there starts in that fence.
-            text = disk.text if old else None
-            off = text.find(old) if text is not None else -1
-            fence = fence_at(text, off) if off >= 0 else None
-            new = Scan(new_text if isinstance(new_text, str) else "", fence)
-            blocks += violations_for(new, Scan(old), now, names,
-                                     lambda i, n=new, o=off: section_for_edit(n, i, disk, o))
+            new_s = new_text if isinstance(new_text, str) else ""
+            blocks += edit_blocks(state, old, new_s, replace_all, now, names)
+            if old and state.text is not None and old in state.text:
+                state = Text(text=replaced(state.text, old, new_s, replace_all))
+            elif not old and not state.text:
+                # An empty old_string on a missing or empty file creates it: its text is the new text.
+                state = Text(text=new_s)
     if not blocks:
         return None
     return render(blocks, now)
