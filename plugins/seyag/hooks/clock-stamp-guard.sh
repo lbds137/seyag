@@ -2,14 +2,14 @@
 # PreToolUse hook (matcher: Edit|Write|MultiEdit). Inert (exit 0) until its paths
 # file lists a glob. Blocks a write to a configured file that adds a clock stamp
 # nobody read from the clock. Two rules:
-#   1. placeholder: a stamp-shaped MM-DD HH:MM with an x or X in an hour or minute
-#      digit (23:3x, 00:xx), anywhere in an added line of a matched file;
+#   1. placeholder: a stamp-shaped MM-DD HH:MM with an x or X in an hour, minute or
+#      second digit (23:3x, 00:xx, 23:30:xx), anywhere in an added line of a matched file;
 #   2. future: a line-leading stamp later than now plus 60 seconds.
 #
 # Config file: SYG_CLOCK_STAMP_PATHS_FILE, default
 # ${XDG_CONFIG_HOME:-$HOME/.config}/seyag/clock-stamp-paths. A missing, unreadable
-# or glob-less file turns the hook off (exit 0 before python starts, with no fork
-# before that test). One path glob per line; # comments and blank lines are ignored;
+# or glob-less file turns the hook off (exit 0 before python starts: the [ -r ] test
+# forks nothing, and the glob check runs one grep). One path glob per line; # comments and blank lines are ignored;
 # surrounding whitespace is trimmed; a leading ~/ (or a bare ~) expands to $HOME,
 # and a ~ glob is dropped when HOME is empty. A line `section: NAME` (NAME
 # case-sensitive, trimmed) adds a section name instead of a glob. A glob matches
@@ -19,10 +19,13 @@
 #
 # Stamp form: a date, MM-DD or YYYY-MM-DD, then one space or T, then HH:MM, an
 # optional :SS with an optional .fraction, and an optional zone. The zone is Z (with
-# either separator) or +-HH:MM (honoured only after T, and only in the range -12:00
-# to +14:00). A +-HH:MM after a space, or outside that range, is not part of the
-# stamp: it is trimmed off and the stamp ends at the minutes. Hour and minute digits may be x or X (the
-# placeholder rule); a future check needs real digits in the date and the time.
+# either separator) or +-HH:MM. A +-HH:MM is kept after T, and after a space when the
+# stamp has seconds (RFC 3339 style); it must be in the range -12:00 to +14:00. In
+# any other case (a space with no seconds, or an out-of-range offset) it is not part
+# of the stamp: it is trimmed off and the stamp ends at the minutes, or at the seconds.
+# Hour, minute and second digits may be x or X (the placeholder rule; a placeholder
+# seconds field is only ever a placeholder); a real stamp needs digit seconds 00-59.
+# A future check needs real digits in the date and the time.
 # Without a zone the stamp is local time (honouring TZ). Line-leading: after
 # optional whitespace, optional markup (runs of "- ", "* ", "+ ", "> ", "#+ ", "**",
 # "__", "_"), at most one leading word (\S+ then whitespace), then the stamp. An
@@ -60,7 +63,12 @@
 # becomes letters, so it still counts as one word) and of fenced blocks (a ``` or
 # ~~~ fence line through the matching closing fence within the text being scanned;
 # an unclosed fence runs to the end of that text). A backtick fence line whose
-# info string holds any backtick is an inline span, not a fence.
+# info string holds any backtick is an inline span, not a fence. An Edit or MultiEdit
+# whose old_string first occurs on disk inside a fenced block starts its new text
+# inside that fence: the new text is code until a closing fence line within it.
+# The disk file is read only when an Edit or MultiEdit has a non-empty old_string
+# (its fence state is needed) or a Write needs it for the subtraction; its section
+# scan is built only when a section lookup needs it.
 #
 # Probe hook: SYG_CLOCK_STAMP_NOW (integer epoch seconds) overrides "now". It exists
 # for the probe, and a non-integer value falls back to the real clock.

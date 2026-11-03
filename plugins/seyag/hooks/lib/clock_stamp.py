@@ -28,7 +28,7 @@ STAMP_RE = re.compile(
     r"(?:(?P<year>\d{4})-)?(?P<mon>\d{2})-(?P<day>\d{2})"
     r"(?P<sep>[ T])"
     r"(?P<hh>[\dxX]{2}):(?P<mm>[\dxX]{2})"
-    r"(?::(?P<ss>\d{2})(?:\.(?P<frac>\d+))?)?"
+    r"(?::(?P<ss>[\dxX]{2})(?:\.(?P<frac>\d+))?)?"
     r"(?P<zone>Z|[+-]\d{2}:\d{2})?"
     r"(?!\d)",
     re.ASCII,
@@ -137,22 +137,35 @@ def _fence_open(line):
     return run
 
 
-def fenced_flags(lines):
-    """True for each line inside a fenced block (fence lines included)."""
-    flags = [False] * len(lines)
-    fence = None
-    for i, line in enumerate(lines):
-        if fence is None:
-            run = _fence_open(line)
-            if run:
-                fence = run
-                flags[i] = True
-        else:
-            flags[i] = True
-            s = line.strip()
-            if s and set(s) == {fence[0]} and len(s) >= len(fence):
-                fence = None
+def _fence_step(fence, line):
+    """The fence state after line, given the open fence run (or None) before it."""
+    if fence is None:
+        return _fence_open(line)
+    s = line.strip()
+    if s and set(s) == {fence[0]} and len(s) >= len(fence):
+        return None
+    return fence
+
+
+def fenced_flags(lines, fence=None):
+    """True for each line inside a fenced block (fence lines included).
+
+    fence is the fence run already open before the first line, or None.
+    """
+    flags = []
+    for line in lines:
+        before = fence
+        fence = _fence_step(fence, line)
+        flags.append(before is not None or fence is not None)
     return flags
+
+
+def fence_at(text, off):
+    """The fence run open at character offset off of text, or None."""
+    fence = None
+    for line in text[:off].split("\n")[:-1]:
+        fence = _fence_step(fence, line)
+    return fence
 
 
 def _date_ok(year, mon, day):
@@ -190,14 +203,15 @@ def parse_stamp(m):
         return None
     if not (_fill_ok(g["hh"], 23) and _fill_ok(g["mm"], 59)):
         return None
-    placeholder = any(c in "xX" for c in g["hh"] + g["mm"])
-    if not placeholder and g["ss"] is not None and int(g["ss"]) > 59:
+    if g["ss"] is not None and not _fill_ok(g["ss"], 59):
         return None
+    placeholder = any(c in "xX" for c in g["hh"] + g["mm"] + (g["ss"] or ""))
     text = m.group(0)
     zone = g["zone"]
     if zone and zone != "Z":
-        # An offset is kept only after T and in range; otherwise it is trimmed off.
-        if g["sep"] != "T" or not _offset_ok(zone):
+        # An offset is kept after T, or after a space when the stamp has seconds, and
+        # only in range; otherwise it is trimmed off.
+        if (g["sep"] != "T" and g["ss"] is None) or not _offset_ok(zone):
             text = text[: m.start("zone") - m.start()]
             zone = None
     return Stamp(text, g["year"], g["mon"], g["day"], g["hh"], g["mm"],
@@ -239,10 +253,10 @@ def occurrences(masked):
 class Scan:
     """One text, scanned once: lines, fenced flags, judged stamps and headings."""
 
-    def __init__(self, text):
+    def __init__(self, text, fence=None):
         self.text = text
         self.lines = text.split("\n")
-        self.flags = fenced_flags(self.lines)
+        self.flags = fenced_flags(self.lines, fence)
         self.masked = [" " * len(s) if f else blank_spans(s) for s, f in zip(self.lines, self.flags)]
         self.head_idx, self.head_start, self.head_name = [], [], []
         pos = 0
@@ -347,12 +361,38 @@ def violations_for(new, old, now, names, section_of):
     return out
 
 
-def section_for_edit(new, idx, disk, old):
+class Disk:
+    """The file on disk. Its text is read on first use; its Scan is built only if a section
+    lookup needs it. Both are cached."""
+
+    def __init__(self, path):
+        self.path = path
+        self._read = False
+        self._text = None
+        self._scanned = False
+        self._scan = None
+
+    @property
+    def text(self):
+        if not self._read:
+            self._text = read_text(self.path)
+            self._read = True
+        return self._text
+
+    def scan(self):
+        if not self._scanned:
+            self._scanned = True
+            self._scan = Scan(self.text) if self.text is not None else None
+        return self._scan
+
+
+def section_for_edit(new, idx, disk, off):
+    """Section of new line idx: its own heading above, else the disk heading before off."""
     name = new.section_above(idx)
-    if name is None and disk is not None and old:
-        off = disk.text.find(old)
-        if off >= 0:
-            name = disk.section_before(off)
+    if name is None and off >= 0:
+        scan = disk.scan()
+        if scan is not None:
+            name = scan.section_before(off)
     return name
 
 
@@ -407,12 +447,11 @@ def check(payload):
         return None
 
     now = now_epoch()
-    disk = read_text(abs_path)
-    disk_scan = Scan(disk) if disk is not None else None
+    disk = Disk(abs_path)
     blocks = []
     if tool == "Write":
         new = Scan(tin.get("content") if isinstance(tin.get("content"), str) else "")
-        blocks = violations_for(new, disk_scan or Scan(""), now, names, new.section_above)
+        blocks = violations_for(new, disk.scan() or Scan(""), now, names, new.section_above)
     else:
         if tool == "Edit":
             pairs = [(tin.get("old_string"), tin.get("new_string"))]
@@ -421,9 +460,13 @@ def check(payload):
             pairs = [(e.get("old_string"), e.get("new_string")) for e in edits if isinstance(e, dict)]
         for old, new_text in pairs:
             old = old if isinstance(old, str) else ""
-            new = Scan(new_text if isinstance(new_text, str) else "")
+            # old_string's first occurrence on disk; new text inside a fence there starts in that fence.
+            text = disk.text if old else None
+            off = text.find(old) if text is not None else -1
+            fence = fence_at(text, off) if off >= 0 else None
+            new = Scan(new_text if isinstance(new_text, str) else "", fence)
             blocks += violations_for(new, Scan(old), now, names,
-                                     lambda i, n=new, o=old: section_for_edit(n, i, disk_scan, o))
+                                     lambda i, n=new, o=off: section_for_edit(n, i, disk, o))
     if not blocks:
         return None
     return render(blocks, now)
