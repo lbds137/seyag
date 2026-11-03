@@ -93,8 +93,10 @@
 # `$NAME`/`${NAME}` expanded from `PWD`, `OLDPWD`, tracked variables (`VAR=val`
 # and `export`/`declare`/`typeset`/`local`/`readonly` update them; `unset`,
 # `read`, `mapfile`/`readarray`, `printf -v`, `getopts`, `+=` and
-# `$`/backtick/glob values mask the environment) and `os.environ`, `pushd DIR`
-# (cd, pushing the old one), bare `pushd` (swap), `popd` (pop back); an invalid
+# `$`/backtick/glob values mask the environment) and `os.environ` (the hook
+# process's: the session's, as the hook was started, not the live shell's),
+# `pushd DIR` (cd, pushing the old one), bare `pushd` (swap), `popd` (pop
+# back); an invalid
 # option, two operands, bare `cd` with HOME unset or `~-` with no OLDPWD is
 # bash's own error and changes nothing (a failed `pushd` pushes nothing). Conditional
 # (`&&`/`||`), background (`&`), pipeline and compound (`if`/`while`/`until`/
@@ -240,7 +242,7 @@ import sys
 # An import failure exits non-zero, which the caller treats as allow (fail-open).
 sys.path.insert(0, os.environ["HOOK_LIB"])
 from shell_quotes import strip_redirections, unwrap_runners
-from shell_state import State, TRACKED_ENV, do_cd, do_popd, do_pushd, expand_home, walk
+from shell_state import State, TRACKED_ENV, apply_dir_builtin, expand_home, walk
 
 cmd = os.fsdecode(open(3, "rb").read()).removesuffix("\n")
 payload_cwd = os.environ.get("CWD") or "."
@@ -588,7 +590,21 @@ def git_remote_get_url(base, name):
     return out.strip() if out is not None else None
 
 
+# The remote reading per (directory, GIT_DIR, GIT_WORK_TREE), kept for the
+# hook process: a walk with many worlds in one directory asks git once. A
+# failed `git remote` is cached as [] for the run too (upstream reads [] as no
+# non-own target, so it passes; not fail-closed like publish-gate).
+_REMOTES_MEMO = {}
+
+
 def git_remotes_targets(effective_dir, git_dir=None, work_tree=None):
+    key = (effective_dir, git_dir, work_tree)
+    if key not in _REMOTES_MEMO:
+        _REMOTES_MEMO[key] = _read_git_remotes_targets(effective_dir, git_dir, work_tree)
+    return list(_REMOTES_MEMO[key])
+
+
+def _read_git_remotes_targets(effective_dir, git_dir=None, work_tree=None):
     base = git_argv(effective_dir, git_dir, work_tree)
     out = git_run(base, "remote")
     if out is None:
@@ -793,18 +809,11 @@ def run_command(argv, state, ctx):
     unwrapped, info = unwrap_runners(argv)
     if not unwrapped:
         return
+    if apply_dir_builtin(argv, state):
+        return
     name = unwrapped[0]
     if set(info["runners"]) <= BUILTIN_RUNNERS:
         args = strip_redirections(unwrapped[1:])
-        if name == "cd":
-            do_cd(state, args)
-            return
-        if name == "pushd":
-            do_pushd(state, args)
-            return
-        if name == "popd":
-            do_popd(state, args)
-            return
         if name in ("export", "declare", "typeset"):
             do_export(state, args, declare=name != "export")
             return

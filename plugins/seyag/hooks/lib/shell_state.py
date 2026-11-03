@@ -292,6 +292,27 @@ def do_popd(state, args):
     chdir(state, state.stack.pop(0))
 
 
+def apply_dir_builtin(argv, state):
+    """Apply a `cd`, `pushd` or `popd` in `argv` to `state`, where `argv` is a
+    command as the walker hands it over (runner words such as `builtin` and
+    `command` may lead it, and redirections are ignored). True when it was one
+    of the three; any other command leaves `state` alone and gives False."""
+    unwrapped, info = unwrap_runners(argv)
+    if not unwrapped or not (set(info["runners"]) <= _BUILTIN_RUNNERS):
+        return False
+    name = unwrapped[0]
+    args = strip_redirections(unwrapped[1:])
+    if name == "cd":
+        do_cd(state, args)
+    elif name == "pushd":
+        do_pushd(state, args)
+    elif name == "popd":
+        do_popd(state, args)
+    else:
+        return False
+    return True
+
+
 def _tokens_of(text):
     body_free = strip_heredoc_bodies(text)
     tokens = _tokens(body_free)
@@ -530,17 +551,23 @@ def walk(text, depth, state, ctx, run_command):
             return [w], []
         return [w], [before]
 
+    def _take_matched(argv):
+        """The pending substitution spans this command's words spell (`$(span)`
+        or `` `span` ``), removed from `pending` and returned in its order."""
+        matched = []
+        if pending and depth < MAX_WRAPPER_DEPTH:
+            joined = " ".join(argv)
+            for span in list(pending):
+                forms = (f"$({span})", f"`{span}`")
+                if any(f in w for f in forms for w in argv + [joined]):
+                    pending.remove(span)
+                    matched.append(span)
+        return matched
+
     def _run_pipeline(stages, in_worlds):
         if len(stages) == 1:
             argv = stages[0]
-            matched = []
-            if pending and depth < MAX_WRAPPER_DEPTH:
-                joined = " ".join(argv)
-                for span in list(pending):
-                    forms = (f"$({span})", f"`{span}`")
-                    if any(f in w for f in forms for w in argv + [joined]):
-                        pending.remove(span)
-                        matched.append(span)
+            matched = _take_matched(argv)
             p_s, p_f = [], []
             for w in in_worlds:
                 s1, f1 = _run_one(argv, w.copy(), matched)
@@ -557,14 +584,7 @@ def walk(text, depth, state, ctx, run_command):
 
         acc = [w.copy() for w in in_worlds]
         for argv in stages:
-            matched = []
-            if pending and depth < MAX_WRAPPER_DEPTH:
-                joined = " ".join(argv)
-                for span in list(pending):
-                    forms = (f"$({span})", f"`{span}`")
-                    if any(f in w for f in forms for w in argv + [joined]):
-                        pending.remove(span)
-                        matched.append(span)
+            matched = _take_matched(argv)
             stage_s, stage_f = [], []
             for w in acc:
                 s1, f1 = _run_one(argv, w.copy(), matched)

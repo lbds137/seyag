@@ -592,6 +592,54 @@ $BIG_HEREDOC
 BIGEOF
 gh repo create --public"
 
+# =============================================================================
+# Remote lookups are memoized per hook process: many worlds in one directory
+# spawn `git remote` once. A git shim on PATH logs each call whose last word
+# is `remote` (the bare listing; get-url and config do not end in it). Each
+# `false && X<i>=1 ;` leaves a conditional that splits the walk; the 8 of them
+# give 64 worlds (the walker's cap) all in $FIX.
+# =============================================================================
+SHIM="$TMP/shim"; mkdir -p "$SHIM"
+PROBE_REAL_GIT=$(command -v git)
+export PROBE_REAL_GIT
+export PROBE_REMOTE_LOG="$TMP/remote-calls.log"
+cat >"$SHIM/git" <<'SHIMEOF'
+#!/bin/bash
+[ "$#" -gt 0 ] && [ "${!#}" = remote ] && echo remote >>"$PROBE_REMOTE_LOG"
+exec "$PROBE_REAL_GIT" "$@"
+SHIMEOF
+chmod +x "$SHIM/git"
+
+# many_worlds <label> <cwd> <cmd> [calls]: exit 2 and `git remote` run `calls`
+# times (default 1).
+many_worlds() {
+  local label="$1" cwd="$2" cmd="$3" want="${4:-1}" actual calls
+  : >"$PROBE_REMOTE_LOG"
+  printf '%s' "$cmd" \
+    | jq -Rsc --arg c "$cwd" '{tool_name:"Bash",tool_input:{command:.},cwd:$c}' \
+    | env -u SYG_PUBLISH_CHECKED PATH="$SHIM:$PATH" timeout 20 "$HOOK" >"$TMP/out" 2>&1
+  actual=$?
+  calls=$(wc -l <"$PROBE_REMOTE_LOG" | tr -d ' ')
+  if [ "$actual" -eq 2 ] && [ "$calls" -eq "$want" ]; then
+    printf 'PASS  (exit 2, git remote x%s)  %s\n' "$calls" "$label"
+  else
+    printf 'FAIL  (exit %s, expected 2; git remote x%s, expected x%s)  %s\n' "$actual" "$calls" "$want" "$label"
+    sed 's/^/      /' "$TMP/out"
+    FAILURES=$((FAILURES + 1))
+  fi
+}
+MANY=""
+for i in 1 2 3 4 5 6 7 8; do MANY="${MANY}false && X$i=1 ; "; done
+many_worlds "many worlds in one directory: one git remote lookup (repo edit)" "$FIX" \
+  "${MANY}gh repo edit --visibility=public"
+# Negative controls: the memo must not merge lookups that differ. Two
+# directories in one command look up each: two calls. The same directory with
+# another repo's GIT_DIR on the trigger reads a different remote list: two calls.
+many_worlds "negative: two directories in one command, one lookup each" "$FIX" \
+  "cd $FIX && gh repo edit --visibility=public; cd $TWO && gh repo edit --visibility=public" 2
+many_worlds "negative: same directory, GIT_DIR of another repo: a second lookup" "$FIX" \
+  "gh repo edit --visibility=public; GIT_DIR=$TWO/.git gh repo edit --visibility=public" 2
+
 echo "---"
 if [ "$FAILURES" -eq 0 ]; then
   echo "all publish-gate cases passed"

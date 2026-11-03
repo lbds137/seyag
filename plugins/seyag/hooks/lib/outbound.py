@@ -69,8 +69,9 @@ ITEMS, for every unbypassed command:
     `--input <f>`; `gh gist create|edit`: every positional file and
     `edit --add <f>`. `-` means stdin, i.e. the command text. `$NAME` and
     `${NAME}` in `<f>` (and in git `-C` and `gh repo create --source`) expand
-    from `PWD`, `OLDPWD`, simple assignments in the command text and the
-    environment before `~`, and a relative path resolves against the tracked
+    from `PWD`, `OLDPWD`, simple assignments in the command text and the hook
+    process's environment (the session's, as the hook was started, not the
+    live shell's) before `~`, and a relative path resolves against the tracked
     directory (`cd ~` and `cd ~/x` expand HOME). At most 4 MiB is read; an
     unreadable file or a path still holding `$` yields nothing.
   - ("commit <sha> <subject>", subject + "\\n" + body): the messages of the
@@ -141,7 +142,7 @@ from collections import namedtuple
 
 from shell_quotes import (command_pipelines, strip_redirections, substitution_spans,
                           unwrap_runners)
-from shell_state import State, do_cd, do_popd, do_pushd, expand_vars, walk
+from shell_state import State, apply_dir_builtin, expand_vars, walk
 import commit_diff
 from prepush_scan import short_ref
 
@@ -149,7 +150,6 @@ Item = namedtuple("Item", "label text directory kind sha")
 
 MAX_FILE = 4 * 1024 * 1024
 FILE_SUBCOMMANDS = ("commit", "tag", "notes")
-_BUILTIN_RUNNERS = {"builtin", "command"}
 _STATES_CACHE = []
 
 # git global options that take a separate value word: commit_diff's set, so
@@ -187,16 +187,7 @@ def _states_by_command(cmd, cwd):
         if k not in seen:
             seen.add(k)
             bucket.append(state.copy())
-        unwrapped, info = unwrap_runners(argv)
-        if unwrapped and set(info["runners"]) <= _BUILTIN_RUNNERS:
-            name = unwrapped[0]
-            args = strip_redirections(unwrapped[1:])
-            if name == "cd":
-                do_cd(state, args)
-            elif name == "pushd":
-                do_pushd(state, args)
-            elif name == "popd":
-                do_popd(state, args)
+        apply_dir_builtin(argv, state)
         _record_all(state)
 
     init = State(start, payload_cwd=start)
@@ -547,15 +538,18 @@ def read_file(path, directory, state=None):
 
 # git push's long options (floors as in GIT_VALUE_LONG): --all, --mirror and
 # --branches read every local branch, --tags every tag, and the value options
-# take their value word.
+# take their value word. --recurse-submodules's floor is 6: `--recu` is read
+# as it, `--rec` is ambiguous with --receive-pack (git 2.55.0).
 PUSH_BRANCH_LONG = (("--all", 4), ("--mirror", 3), ("--branches", 3))
-PUSH_VALUE_LONG = (("--push-option", 4), ("--receive-pack", 6), ("--exec", 3), ("--repo", 5))
+PUSH_VALUE_LONG = (("--push-option", 4), ("--receive-pack", 6), ("--exec", 3), ("--repo", 5),
+                   ("--recurse-submodules", 6))
 
 
 def _push_takes_value(w):
-    """True when a git push word takes the next word as its value."""
-    return w == "-o" or ("=" not in w and any(
-        is_git_long(w, name, floor) for name, floor in PUSH_VALUE_LONG))
+    """True when a long git push word takes the next word as its value (a
+    short word is _push_short's to read)."""
+    return "=" not in w and any(
+        is_git_long(w, name, floor) for name, floor in PUSH_VALUE_LONG)
 
 
 # git push's --delete (floor 4: "--de"); --no-delete's floor is 7 ("--no-de":
@@ -586,23 +580,26 @@ def _push_scan(args):
     last of --delete and --no-delete wins."""
     positionals = []
     deleting = False
+    options = True
     i = 0
     while i < len(args):
         w = args[i]
-        if is_git_long(w, *PUSH_NO_DELETE_LONG):
+        if options and w == "--":
+            options = False  # every later word is a positional
+        elif not options or not w.startswith("-"):
+            positionals.append(w)
+        elif is_git_long(w, *PUSH_NO_DELETE_LONG):
             deleting = False
         elif is_git_long(w, *PUSH_DELETE_LONG):
             deleting = True
         elif w.startswith("--"):
             if _push_takes_value(w):
                 i += 1
-        elif w.startswith("-") and len(w) > 1:
+        elif len(w) > 1:
             delete, takes_value = _push_short(w)
             deleting = deleting or delete
             if takes_value:
                 i += 1
-        elif not w.startswith("-"):
-            positionals.append(w)
         i += 1
     return positionals, deleting
 
@@ -633,19 +630,23 @@ def push_sources(args):
     sources = []
     extra = []
     positionals = []
+    options = True
     i = 0
     while i < len(args):
         w = args[i]
-        if any(is_git_long(w, name, floor) for name, floor in PUSH_BRANCH_LONG):
+        if options and w == "--":
+            options = False  # every later word is a positional
+        elif not options or not w.startswith("-"):
+            positionals.append(w)
+        elif any(is_git_long(w, name, floor) for name, floor in PUSH_BRANCH_LONG):
             extra.append("--branches")
         elif is_git_long(w, "--tags", 4):
             extra.append("--tags")
-        elif _push_takes_value(w):
+        elif w.startswith("--"):
+            if _push_takes_value(w):
+                i += 1
+        elif len(w) > 1 and _push_short(w)[1]:
             i += 1
-        elif w.startswith("-"):
-            pass
-        else:
-            positionals.append(w)
         i += 1
     for ref in positionals[1:]:  # positionals[0] is the remote
         ref = ref[1:] if ref.startswith("+") else ref

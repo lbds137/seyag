@@ -437,6 +437,36 @@ check(
     (64, deepest_8, deepest_8),
 )
 
+# --- apply_dir_builtin: only builtin runners reach the dir builtins ------------
+from shell_state import apply_dir_builtin
+
+for runner in ("sudo", "env", "nohup"):
+    st = State(BASE, payload_cwd=BASE)
+    got = (apply_dir_builtin([runner, "cd", BASE + "/a"], st), st.cwd)
+    check(f"apply_dir_builtin: {runner} cd leaves the dir (not a builtin runner)", got, (False, BASE))
+st = State(BASE, payload_cwd=BASE)
+check(
+    "apply_dir_builtin: builtin cd moves the dir",
+    (apply_dir_builtin(["builtin", "cd", BASE + "/a"], st), st.cwd),
+    (True, BASE + "/a"),
+)
+st = State(BASE, payload_cwd=BASE)
+check(
+    "apply_dir_builtin: command pushd moves the dir",
+    (apply_dir_builtin(["command", "pushd", BASE + "/a"], st), st.cwd),
+    (True, BASE + "/a"),
+)
+check(
+    "apply_dir_builtin: command popd moves back",
+    (apply_dir_builtin(["command", "popd"], st), st.cwd),
+    (True, BASE),
+)
+check(
+    "apply_dir_builtin: a non-directory command is not applied",
+    (apply_dir_builtin(["export", "X=1"], st), st.cwd),
+    (False, BASE),
+)
+
 print("---")
 if failures:
     print(f"{failures} shell-state case(s) failed")
