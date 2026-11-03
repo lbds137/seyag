@@ -81,7 +81,8 @@
 # and `$(git rev-parse --show-toplevel)` forms followed, `$NAME` and `${NAME}`
 # expanded from `PWD`, `OLDPWD`, tracked variables — `VAR=val` and
 # `export`/`declare`/`read`/`mapfile`/`printf -v`/`getopts`/`+=` update or
-# mask a tracked variable — and the environment; conditional/uncertain moves,
+# mask a tracked variable — and the hook process's environment (the session's,
+# as the hook was started, not the live shell's); conditional/uncertain moves,
 # `&`, pipelines and compounds keep both paths up to `MAX_WORLDS = 64`),
 # `export`/`declare -x`/`typeset -x`/`unset`, GIT_DIR/GIT_WORK_TREE pointing
 # the remote reading elsewhere, and a `V=VALUE` assignment in the gh command's
@@ -113,6 +114,12 @@
 #     body built so the literal never appears in the command text (a printf
 #     `%s` substitution, a key spelled with JSON unicode escapes, a variable or
 #     a file read) passes too.
+#   - The repo-edit PATCH/PUT/POST rule with field flags given alongside
+#     `--input <file>` (`gh api -X PATCH repos/o/r --input body.json -f
+#     private=false`): gh sends the field flags to the query string, not the
+#     body (`gh api --help`), yet the gate still reads them as a flip. An
+#     accepted over-block: ignoring them would pass a flip if GitHub reads
+#     the query string, and that was not run to check.
 #   - `--public=false` (a pflag boolean spelled with a value) is read as a
 #     publish — an accepted over-block.
 #   - `gh api` creates (`user/repos`, `orgs/O/repos`, `repos/O/T/generate`)
@@ -170,7 +177,7 @@ import sys
 # An import failure exits non-zero, which the caller treats as allow (fail-open).
 sys.path.insert(0, os.environ["HOOK_LIB"])
 from shell_quotes import strip_redirections, unwrap_runners
-from shell_state import State, TRACKED_ENV, do_cd, do_popd, do_pushd, expand_home, walk
+from shell_state import State, TRACKED_ENV, apply_dir_builtin, expand_home, walk
 
 cmd = os.fsdecode(open(3, "rb").read()).removesuffix("\n")
 payload_cwd = os.environ.get("CWD") or "."
@@ -635,7 +642,21 @@ def git_remote_get_url(base, name):
     return out.strip() if out is not None else None
 
 
+# The remote reading per (directory, GIT_DIR, GIT_WORK_TREE), kept for the
+# hook process: a walk with many worlds in one directory asks git once. A
+# failed `git remote` is cached as [] for the run too (publish-gate reads []
+# as unresolvable, fail-closed).
+_REMOTES_MEMO = {}
+
+
 def git_remotes_targets(effective_dir, git_dir=None, work_tree=None):
+    key = (effective_dir, git_dir, work_tree)
+    if key not in _REMOTES_MEMO:
+        _REMOTES_MEMO[key] = _read_git_remotes_targets(effective_dir, git_dir, work_tree)
+    return list(_REMOTES_MEMO[key])
+
+
+def _read_git_remotes_targets(effective_dir, git_dir=None, work_tree=None):
     base = git_argv(effective_dir, git_dir, work_tree)
     out = git_run(base, "remote")
     if out is None:
@@ -824,18 +845,11 @@ def run_command(argv, state, ctx):
     unwrapped, info = unwrap_runners(argv)
     if not unwrapped:
         return
+    if apply_dir_builtin(argv, state):
+        return
     name = unwrapped[0]
     if set(info["runners"]) <= BUILTIN_RUNNERS:
         args = strip_redirections(unwrapped[1:])
-        if name == "cd":
-            do_cd(state, args)
-            return
-        if name == "pushd":
-            do_pushd(state, args)
-            return
-        if name == "popd":
-            do_popd(state, args)
-            return
         if name in ("export", "declare", "typeset"):
             do_export(state, args, declare=name != "export")
             return

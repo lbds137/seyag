@@ -131,6 +131,12 @@ run 0 "off: terms file missing" "$PUB" SYG_PRIVATE_TERMS_FILE="$TMP/missing.txt"
   "git commit -m 'add zorbleflux'"
 run 0 "off: terms file with only comments" "$PUB" SYG_PRIVATE_TERMS_FILE="$COMMENTS" -- \
   "git commit -m 'add zorbleflux'"
+# A UTF-8 byte order mark alone is an empty terms file. The message carries the
+# BOM character, so a BOM read as a term line would block it.
+BOMF="$TMP/bom.txt"; printf '\357\273\277' >"$BOMF"
+BOMCHR=$(printf '\357\273\277')
+run 0 "off: terms file holding only a UTF-8 BOM" "$PUB" SYG_PRIVATE_TERMS_FILE="$BOMF" -- \
+  "git commit -m 'add ${BOMCHR}'"
 
 # =============================================================================
 # Not public
@@ -222,6 +228,12 @@ run 2 "push: git push origin --ta counts a tag's unpushed commit" "$PTAG" "${T[@
 assert_out "tag's commit message names the commit by sha" present "matched in: commit "
 run 2 "push: git push origin --tags counts a tag's unpushed commit" "$PTAG" "${T[@]}" -- \
   "git push origin --tags"
+# -fo takes side as -o's value, so side is not a source (HEAD, main, is clean).
+# Control: a bare -f leaves side a source, and its unpushed commit blocks.
+run 0 "push: -fo <branch>: the branch is -o's value, not a source" "$PTAG" "${T[@]}" -- \
+  "git push origin -fo side"
+run 2 "push: control: -f <branch> is a source and blocks" "$PTAG" "${T[@]}" -- \
+  "git push origin -f side"
 # A refspec's destination is text the session sees before git runs (kind: the
 # command text). A delete (':name', or the name after --delete) is not a new name.
 run 2 "push: refspec destination holding the term" "$PUB" "${T[@]}" -- \
@@ -253,6 +265,36 @@ run 2 "push: -od (o takes d as its value) is not a delete: blocks" "$PUB" "${T[@
   "git push -od origin zorbleflux-topic"
 run 2 "push: --delete then --no-delete: the last wins, blocks" "$PUB" "${T[@]}" -- \
   "git push origin --delete --no-delete zorbleflux-topic"
+# git's own option parser, as the push rows read it. Which rows fail on base
+# (the pre-fix code) and which pin behavior base already had right:
+#   pins, green on base: --no-de (re-enables the scan); --no-d (ambiguous, git
+#   refuses it, so it does not re-enable); --recurse-submodules=check; `--recu
+#   check origin <term>` (the destination is scanned); the --repo= rows (the
+#   first positional is the remote); `-- HEAD:refs/...` (a refspec after --);
+#   `$PUB -fo <word>` (the word is -o's value, not a destination); the BOM row.
+#   fail on base, fixed here: `-- -<term>` (a dash word after -- is a
+#   destination); `--recu check <origin-like> HEAD` (the value is not the
+#   remote); `$PTAG -fo side` (side is -o's value, not a source).
+run 2 "push: --no-de (prefix of --no-delete) re-enables the scan" "$PUB" "${T[@]}" -- \
+  "git push origin --delete --no-de zorbleflux-topic"
+run 0 "push: --no-d is ambiguous to git (refused): it does not re-enable" "$PUB" "${T[@]}" -- \
+  "git push origin --delete --no-d zorbleflux-topic"
+run 2 "push: after --, a -<term> word is a destination" "$PUB" "${T[@]}" -- \
+  "git push origin -- -zorbleflux-topic"
+run 2 "push: after --, a refspec destination is scanned" "$PUB" "${T[@]}" -- \
+  "git push origin -- HEAD:refs/heads/zorbleflux-x"
+run 0 "push: --recu check: the value word is not the remote (origin-like name)" "$PUB" "${T[@]}" -- \
+  "git push --recu check zorbleflux-origin HEAD"
+run 2 "push: --recu check origin <term>: the destination is scanned" "$PUB" "${T[@]}" -- \
+  "git push --recu check origin zorbleflux-topic"
+run 2 "push: --recurse-submodules=check origin <term>: destination scanned" "$PUB" "${T[@]}" -- \
+  "git push --recurse-submodules=check origin zorbleflux-topic"
+run 0 "push: --repo=origin: the first positional is the remote, not a destination" "$PUB" "${T[@]}" -- \
+  "git push --repo=origin zorbleflux-topic"
+run 2 "push: --repo=origin with a term destination after it" "$PUB" "${T[@]}" -- \
+  "git push --repo=origin origin zorbleflux-topic"
+run 0 "push: -fo <word>: the word is -o's value, not a destination" "$PUB" "${T[@]}" -- \
+  "git push origin -fo zorbleflux-topic"
 # An anchored term matches the short name of a refs/heads/ destination, as the
 # pre-push scans it.
 ANCH="$TMP/anch.txt"; printf '%s\n' '^zorbleflux' >"$ANCH"
