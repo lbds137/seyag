@@ -1,4 +1,5 @@
 #!/bin/bash
+# REPLAY-ARMED-BY: SYG_PRIVATE_TERMS_FILE
 # PreToolUse hook (matcher: Bash) — in a repo marked public, blocks outbound
 # text that holds a private term the owner listed locally: a name, a private
 # project, a personal path, anything that must not reach public history.
@@ -33,10 +34,11 @@
 #     each local clone; the going-public skill says when), or when the value
 #     is set but is not a boolean (fail closed, as git-hooks/pre-push reads
 #     it; lib/prepush_state.py's `public_flag`). <dir> is each tracked cwd
-#     (`cd`/`pushd`/`popd`, `$NAME`/`${NAME}` expanded, both paths kept across
-#     uncertain/conditional moves, pipelines and compounds up to
-#     `MAX_WORLDS = 64`) and git's `-C`, per command, as lib/outbound.py
-#     tracks it. A <dir> not inside a git work tree (a path the tracking got
+#     (`cd`/`pushd`/`popd`, `$NAME`/`${NAME}` expanded from the hook process's
+#     environment (the session's, as the hook was started, not the live
+#     shell's), both paths kept across uncertain/conditional moves, pipelines
+#     and compounds up to `MAX_WORLDS = 64`) and git's `-C`, per command, as
+#     lib/outbound.py tracks it. A <dir> not inside a git work tree (a path the tracking got
 #     wrong, a missing directory) is judged by the event cwd's repo instead,
 #     so a tracking miss in a public repo still checks; a state with an
 #     unresolvable `cd` (`unknown`) resets to the event cwd (judged as usual

@@ -227,6 +227,122 @@ printf 'Closes TASK-100\n\n## Acceptance\n- done\n' >"$BODY_FILE2"
 run_hook "$REPO" "gh pr create --base develop --body-file $BODY_FILE2"
 assert_pass "--body-file resolving ref passes"
 
+# ---- Case 5b: quoted and variable --body-file paths (E8) --------------------
+# The path word may be bare, "double-quoted" or 'single-quoted'. Bare and
+# double-quoted words expand $NAME / ${NAME} from the hook's own environment;
+# a single-quoted word is literal. Each body file carries a claim rule 1 blocks.
+E8_BODY_DIR="$TMPDIR_PROBE/e8"
+mkdir -p "$E8_BODY_DIR"
+export E8_BODY_DIR
+echo "Closes TASK-99999" >"$E8_BODY_DIR/e8-dq.txt"
+cp "$E8_BODY_DIR/e8-dq.txt" "$E8_BODY_DIR/e8-braced.txt"
+cp "$E8_BODY_DIR/e8-dq.txt" "$E8_BODY_DIR/e8-bare.txt"
+cp "$E8_BODY_DIR/e8-dq.txt" "$E8_BODY_DIR/e8-single.txt"
+# shellcheck disable=SC2016
+run_hook "$REPO" 'gh pr create --base develop --body-file "$E8_BODY_DIR/e8-dq.txt"'
+assert_blocks "double-quoted \$VAR --body-file path is read (blocks)" "task-99999"
+# shellcheck disable=SC2016
+run_hook "$REPO" 'gh pr create --base develop --body-file "${E8_BODY_DIR}/e8-braced.txt"'
+assert_blocks "double-quoted \${VAR} --body-file path is read (blocks)" "task-99999"
+# shellcheck disable=SC2016
+run_hook "$REPO" 'gh pr create --base develop --body-file $E8_BODY_DIR/e8-bare.txt'
+assert_blocks "bare \$VAR --body-file path is read (blocks)" "task-99999"
+run_hook "$REPO" "gh pr create --base develop --body-file '$E8_BODY_DIR/e8-single.txt'"
+assert_blocks "single-quoted literal --body-file path is read (blocks)" "task-99999"
+# Single quotes do not expand: the literal text names no file, so the body is
+# dropped (degraded) and the command passes. Guard row: green on the unfixed
+# code too, because the degraded path is today's behavior.
+# shellcheck disable=SC2016
+run_hook "$REPO" "gh pr create --base develop --body-file '\$E8_BODY_DIR/e8-dq.txt'"
+assert_pass "single-quoted \$VAR --body-file path is literal (degrades, passes)"
+# Degraded rows. Each names a path a WRONG implementation (one that expands an
+# unset or empty variable to nothing, or evaluates the substitution) would read:
+# a blocking file sits there, relative to the hook's cwd ($E8REPO). Correct
+# behavior degrades and passes. Green on the base code by design: base reads no
+# quoted word at all, so these pin the degraded path, not a change.
+E8REPO=$(make_repo e8repo)
+mkdir -p "$E8REPO/e8"
+echo "Closes TASK-99999" >"$E8REPO/e8-unset.txt"
+cp "$E8REPO/e8-unset.txt" "$E8REPO/e8-empty.txt"
+cp "$E8REPO/e8-unset.txt" "$E8REPO/e8/e8-sub.txt"
+unset E8_UNSET
+# shellcheck disable=SC2016
+run_hook "$E8REPO" 'gh pr create --base develop --body-file "${E8_UNSET}e8-unset.txt"'
+assert_pass "unset \${VAR} prefix degrades, does not read the empty-expansion path (passes)"
+export E8_EMPTY=""
+# shellcheck disable=SC2016
+run_hook "$E8REPO" 'gh pr create --base develop --body-file "${E8_EMPTY}e8-empty.txt"'
+assert_pass "empty-but-set \${VAR} prefix degrades, does not read the empty-expansion path (passes)"
+unset E8_EMPTY
+# shellcheck disable=SC2016
+run_hook "$E8REPO" 'gh pr create --base develop --body-file "$(printf e8)/e8-sub.txt"'
+assert_pass "\$(...) path degrades, does not evaluate the substitution (passes)"
+
+# Item 6 fix-coverage rows: other spellings of a variable path. Each FAILS on
+# the base code (base reads no quoted or ${NAME} word); they pin the new read.
+echo "Closes TASK-99999" >"$E8_BODY_DIR/e8-bare2.txt"
+cp "$E8_BODY_DIR/e8-bare2.txt" "$E8_BODY_DIR/e8-eq.txt"
+cp "$E8_BODY_DIR/e8-bare2.txt" "$E8_BODY_DIR/e8-F.txt"
+# shellcheck disable=SC2016
+run_hook "$REPO" 'gh pr create --base develop --body-file ${E8_BODY_DIR}/e8-bare2.txt'
+assert_blocks "bare \${VAR} --body-file path is read (blocks)" "task-99999"
+# shellcheck disable=SC2016
+run_hook "$REPO" 'gh pr create --base develop --body-file="$E8_BODY_DIR/e8-eq.txt"'
+assert_blocks "--body-file=\"\$VAR/x\" path is read (blocks)" "task-99999"
+# shellcheck disable=SC2016
+run_hook "$REPO" 'gh pr create --base develop -F "$E8_BODY_DIR/e8-F.txt"'
+assert_blocks "gh pr create -F \"\$VAR/x\" path is read (blocks)" "task-99999"
+
+# Item 5: the shell expands a leading ~/ only after whitespace, never after =.
+TILDE_HOME="$TMPDIR_PROBE/tilde-home"
+mkdir -p "$TILDE_HOME"
+echo "Closes TASK-99999" >"$TILDE_HOME/x"
+OLD_HOME=$HOME
+HOME="$TILDE_HOME"
+run_hook "$REPO" 'gh pr create --base develop --body-file ~/x'
+HOME="$OLD_HOME"
+assert_blocks "--body-file ~/x (spaced) expands ~ to HOME and blocks" "task-99999"
+HOME="$TILDE_HOME"
+run_hook "$REPO" 'gh pr create --base develop --body-file=~/x'
+HOME="$OLD_HOME"
+assert_pass "--body-file=~/x (after =) is literal and degrades (passes)"
+
+# Regression guards for the wrapper and ~ rows above: both are GREEN on the base
+# code too (base reads the absolute path bare and the =~/x word as a literal).
+# Item 2: a quoted wrapper's closing quote ends the word, it is not a path piece.
+WRAP_CMD="bash -c \"gh pr create --base develop --body-file $E8_BODY_DIR/e8-dq.txt\" ; echo \"done\""
+run_hook "$REPO" "$WRAP_CMD"
+assert_blocks "wrapper bash -c \"...\" ; echo: body-file word stops at the closing quote (blocks)" "task-99999"
+
+# Round 2 (item 1): shell metacharacters end a bare piece. Each body file
+# blocks; the metacharacter after the closing quote must not join the path.
+echo "Closes TASK-99999" >"$E8_BODY_DIR/e8-paren.txt"
+cp "$E8_BODY_DIR/e8-paren.txt" "$E8_BODY_DIR/e8-pipe.txt"
+cp "$E8_BODY_DIR/e8-paren.txt" "$E8_BODY_DIR/e8-semi.txt"
+# shellcheck disable=SC2016
+run_hook "$REPO" '(gh pr create --base develop --body-file "$E8_BODY_DIR/e8-paren.txt")'
+assert_blocks "(gh pr create --body-file \"x.md\") : the closing paren is not in the path (blocks)" "task-99999"
+# shellcheck disable=SC2016
+run_hook "$REPO" 'gh pr create --base develop --body-file "$E8_BODY_DIR/e8-pipe.txt"|cat'
+assert_blocks "--body-file \"\$F\"|cat : the pipe is not in the path (blocks)" "task-99999"
+# shellcheck disable=SC2016
+run_hook "$REPO" 'gh pr create --base develop --body-file "$E8_BODY_DIR/e8-semi.txt";echo'
+assert_blocks "--body-file \"x.md\";echo : the semicolon is not in the path (blocks)" "task-99999"
+
+# Round 2 (item 2): a directory is not a body file. It degrades, and the inline
+# --body still runs. Rule 2 on the inline claim is the discriminator: rule 1
+# would catch "Closes TASK-99999" from the command text on base too.
+run_hook "$REPO" 'gh pr create --base develop --body-file "$E8_BODY_DIR" --body "This fixes all 4 call sites."'
+assert_blocks "--body-file <directory> degrades; the inline --body still scans (blocks)" "all 4 call sites"
+run_hook "$REPO" 'gh pr create --base develop --body-file . --body "This fixes all 4 call sites."'
+assert_blocks "bare . --body-file degrades; the inline --body still scans (blocks)" "all 4 call sites"
+
+# Round 2 (item 3): gh's last --body-file wins. The first file is clean.
+echo "Adds a thing." >"$E8_BODY_DIR/e8-clean.txt"
+run_hook "$REPO" "gh pr create --base develop --body-file $E8_BODY_DIR/e8-clean.txt --body-file $E8_BODY_DIR/e8-paren.txt"
+assert_blocks "two --body-file flags: the last one is read (blocks)" "task-99999"
+unset E8_BODY_DIR
+
 # ---- Case 6: resolving doc ref → pass ----------------------------------------
 run_hook "$REPO" 'gh pr create --body "Tracked in doc-11."'
 assert_pass "resolving doc-11 passes"
