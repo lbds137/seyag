@@ -38,6 +38,7 @@ classifier-ledger	classifier-ledger
 handoff-pick-check	handoff-pick-check
 status-claim-cite	status-claim-cite
 dispatch-spec-ledger-gate	dispatch-spec
-@profile	full	session rules route turn-shape context guards-shell guards-outbound guards-commit guards-pr pr-watch dispatch api-credit launch-record classifier-ledger handoff-pick-check status-claim-cite dispatch-spec
+clock-stamp-guard	clock-stamp
+@profile	full	session rules route turn-shape context guards-shell guards-outbound guards-commit guards-pr pr-watch dispatch api-credit launch-record classifier-ledger handoff-pick-check status-claim-cite clock-stamp dispatch-spec
 @profile	guards	guards-shell guards-outbound guards-commit guards-pr context dispatch route session api-credit launch-record classifier-ledger
 @profile	none	session api-credit launch-record classifier-ledger
