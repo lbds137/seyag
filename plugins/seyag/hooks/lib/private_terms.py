@@ -2,8 +2,9 @@
 hooks/private-term-guard.sh (the text guard) and git-hooks/pre-push (the
 enforcement on the bytes git sends).
 
-The terms file (`SYG_PRIVATE_TERMS_FILE`) holds one Python regex per line,
-trailing whitespace (and a CR) stripped; blank lines and lines whose first
+The terms file (`SYG_PRIVATE_TERMS_FILE`) holds one Python regex per line
+(a UTF-8 byte order mark at its start is ignored), trailing whitespace (and a
+CR) stripped; blank lines and lines whose first
 non-space character is `#` are ignored. Terms match case-INSENSITIVELY; a
 `(?-i:...)` term is case-sensitive. A term is named by its number `#N`: its
 1-based index among the term lines, comments and blanks not counted. Masking
@@ -22,7 +23,8 @@ def read_terms(path):
     `path`, or None when it cannot be read."""
     try:
         with open(path, "rb") as fh:
-            raw = fh.read().decode("utf-8", "replace")
+            # utf-8-sig: a byte order mark (an editor's save) is not part of the first term
+            raw = fh.read().decode("utf-8-sig", "replace")
     except OSError:
         return None
     terms = []

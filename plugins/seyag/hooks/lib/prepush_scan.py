@@ -29,6 +29,10 @@ WHAT IS SCANNED, for each stdin line `<local ref> <local sha> <remote ref>
         a blob, so its added lines are the note text.
   - `tag`: when the local sha is an annotated tag object, `git cat-file -p`
     of it, and of each tag it points to in turn.
+  - `ref`: the remote ref's short name (`refs/heads/`, `refs/tags/` and
+    `refs/notes/` stripped) when the remote sha is zero: a ref the remote does
+    not have yet. An update of a ref the remote already has is not scanned
+    (its name is out already), and neither is a delete (it sends no local sha).
 
 Every git call runs with GIT_NO_REPLACE_OBJECTS=1 (a replace ref cannot
 hand the scan a clean stand-in), and the line diff uses `-a`, so a file git
@@ -293,6 +297,18 @@ def _scan_lines(m, commits, notes):
         raise ScanError(f"git diff-tree failed: {tail[-1] if tail else rc}")
 
 
+REF_PREFIXES = ("refs/heads/", "refs/tags/", "refs/notes/")
+
+
+def short_ref(name):
+    """A ref's short name, as the scan and lib/outbound.py's push items match
+    it: the REF_PREFIXES prefix stripped."""
+    for prefix in REF_PREFIXES:
+        if name.startswith(prefix):
+            return name[len(prefix):]
+    return name
+
+
 def scan(stdin_bytes, remote, terms_file):
     notice = None
     compiled = []
@@ -306,9 +322,11 @@ def scan(stdin_bytes, remote, terms_file):
     signal.signal(signal.SIGALRM, _on_alarm)
     order, notes, seen = [], set(), set()
     try:
-        for local_ref, local_sha, _remote_ref, remote_sha in _parse_stdin(stdin_bytes):
+        for local_ref, local_sha, remote_ref, remote_sha in _parse_stdin(stdin_bytes):
             if ZERO.match(local_sha):
                 continue
+            if ZERO.match(remote_sha):  # a new remote ref: its name goes out
+                m.check("ref", local_sha, short_ref(remote_ref))
             if _object_type(local_sha) == "tag":
                 _scan_tags(m, local_sha)
             kind = _peeled_type(local_sha)

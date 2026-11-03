@@ -170,6 +170,35 @@ git -C "$R" push -q origin "$TREE:refs/heads/treeref" >"$TMP/out" 2>&1
 [ $? -ne 0 ] && grep -qF "is a tree" "$TMP/out" \
   && ok "pushing a tree directly is refused" || bad "tree push: $(cat "$TMP/out")"
 
+# --- ref names: a ref the remote does not have yet is scanned by its short name ----
+# A new branch, a new tag and a refspec's destination are refused when the name
+# holds a term; a delete and an update of a ref the remote already has are not.
+fresh public
+git -C "$R" commit -q --allow-empty -m clean
+git -C "$R" push -q origin main:refs/heads/zorbleflux-branch >"$TMP/out" 2>&1
+[ $? -ne 0 ] && grep -qF "  ref of " "$TMP/out" && ! grep -qF zorbleflux "$TMP/out" \
+  && ok "a new branch named with a term is refused (ref, masked)" || bad "new branch name: $(cat "$TMP/out")"
+fresh public
+git -C "$R" tag zorbleflux-tag
+git -C "$R" push -q origin refs/tags/zorbleflux-tag >"$TMP/out" 2>&1
+[ $? -ne 0 ] && grep -qF "  ref of " "$TMP/out" && ! grep -qF zorbleflux "$TMP/out" \
+  && ok "a new tag named with a term is refused (ref, masked)" || bad "new tag name: $(cat "$TMP/out")"
+fresh public
+git -C "$R" commit -q --allow-empty -m clean
+git -C "$R" push -q origin HEAD:zorbleflux-x >"$TMP/out" 2>&1
+[ $? -ne 0 ] && grep -qF "  ref of " "$TMP/out" \
+  && ok "refspec HEAD:<term>-x is refused (ref)" || bad "refspec destination: $(cat "$TMP/out")"
+fresh public
+GIT_CONFIG_GLOBAL="$TMP/gbase" git -C "$R" push -q origin main:refs/heads/zorbleflux-del 2>/dev/null
+git -C "$R" push -q origin :zorbleflux-del >"$TMP/out" 2>&1 \
+  && ok "deleting a remote ref with a term in its name passes" || bad "ref delete: $(cat "$TMP/out")"
+fresh public
+GIT_CONFIG_GLOBAL="$TMP/gbase" git -C "$R" push -q origin main:refs/heads/zorbleflux-old 2>/dev/null
+git -C "$R" commit -q --allow-empty -m clean2
+git -C "$R" push -q origin main:refs/heads/zorbleflux-old >"$TMP/out" 2>&1 \
+  && ok "updating a remote ref that already has a term in its name passes" \
+  || bad "ref update: $(cat "$TMP/out")"
+
 # --- terms from git config (a push from a terminal without the env var) ---------------
 fresh public
 git -C "$R" commit -q --allow-empty -m "add zorbleflux"
