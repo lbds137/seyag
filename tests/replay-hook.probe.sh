@@ -95,4 +95,67 @@ echo "$out0" | tail -1 | grep -qxF "replay-hook: lossy-pipe-guard: 0/0 commands 
 "$RH" lossy-pipe-guard --slug nope --projects-dir "$T" >/dev/null 2>&1; rc=$?
 [ "$rc" -eq 2 ] && ok "--slug nope (nonexistent dir) exits 2" || bad "--slug nope exit=$rc"
 
+# REPLAY-ARMED-BY: a hook that is inert without a variable must say so. The
+# fixture hook lives in a copy of the tree (the script derives its hooks dir
+# from its own location), so the real plugins/ dir gains nothing.
+ARM=$(mktemp -d)
+mkdir -p "$ARM/tests" "$ARM/plugins/seyag/hooks"
+cp "$RH" "$ARM/tests/replay-hook.sh"
+cat > "$ARM/plugins/seyag/hooks/fixture-armed.sh" <<'EOF'
+#!/bin/bash
+# REPLAY-ARMED-BY: FIXTURE_ARM_VAR
+[ -n "${FIXTURE_ARM_VAR:-}" ] || exit 0
+exit 2
+EOF
+ARM_RH="$ARM/tests/replay-hook.sh"
+
+out_unset=$(env -u FIXTURE_ARM_VAR "$ARM_RH" fixture-armed --since 1 --slug proj-slug --projects-dir "$T" 2>&1)
+echo "$out_unset" | head -1 | grep -qxF "replay-hook: warning: fixture-armed is inert without FIXTURE_ARM_VAR (unset here); export it for this run" \
+  && ok "unarmed run: warning printed before the replay" || bad "unarmed run: first line is $(echo "$out_unset" | head -1)"
+echo "$out_unset" | tail -1 | grep -qF " (INERT: FIXTURE_ARM_VAR unset)" \
+  && ok "unarmed run: summary line carries (INERT: FIXTURE_ARM_VAR unset)" || bad "unarmed run: summary $(echo "$out_unset" | tail -1)"
+
+out_set=$(FIXTURE_ARM_VAR=1 "$ARM_RH" fixture-armed --since 1 --slug proj-slug --projects-dir "$T" 2>&1)
+echo "$out_set" | grep -qF "replay-hook: warning:" \
+  && bad "armed run: warning printed although the variable is set" || ok "armed run: no warning"
+echo "$out_set" | grep -qF "(INERT:" \
+  && bad "armed run: summary marked INERT although the variable is set" || ok "armed run: summary not marked INERT"
+echo "$out_set" | tail -1 | grep -qxF "replay-hook: fixture-armed: 6/6 commands blocked across 2 files" \
+  && ok "armed run: the fixture hook blocks every replayed command (6/6)" || bad "armed run: $(echo "$out_set" | tail -1)"
+# Two named variables, one set and one unset: only the unset one is named, and
+# a token that is not a shell identifier is skipped.
+mkdir -p "$ARM/plugins/seyag/hooks"
+cat > "$ARM/plugins/seyag/hooks/fixture-two.sh" <<'EOF'
+#!/bin/bash
+# REPLAY-ARMED-BY: FIXTURE_SET_VAR FIXTURE_ARM_VAR 9-not-a-name
+[ -n "${FIXTURE_ARM_VAR:-}" ] || exit 0
+exit 2
+EOF
+out_two=$(FIXTURE_SET_VAR=1 env -u FIXTURE_ARM_VAR "$ARM_RH" fixture-two --since 1 --slug proj-slug --projects-dir "$T" 2>&1)
+echo "$out_two" | grep -qxF "replay-hook: warning: fixture-two is inert without FIXTURE_ARM_VAR (unset here); export it for this run" \
+  && ok "two-var field: the unset variable is named" || bad "two-var field: $(echo "$out_two" | head -1)"
+echo "$out_two" | grep -qF "FIXTURE_SET_VAR" \
+  && bad "two-var field: the set variable was named" || ok "two-var field: the set variable is not named"
+echo "$out_two" | grep -qF "9-not-a-name" \
+  && bad "non-identifier token was named" || ok "non-identifier token is skipped"
+echo "$out_two" | tail -1 | grep -qxF "replay-hook: fixture-two: 0/6 commands blocked across 2 files (INERT: FIXTURE_ARM_VAR unset)" \
+  && ok "two-var field: summary carries exactly one INERT suffix" || bad "two-var field summary: $(echo "$out_two" | tail -1)"
+# An empty REPLAY-ARMED-BY line names nothing: no crash under set -u, no warning.
+cat > "$ARM/plugins/seyag/hooks/fixture-empty.sh" <<'EOF'
+#!/bin/bash
+# REPLAY-ARMED-BY:
+exit 0
+EOF
+out_empty=$("$ARM_RH" fixture-empty --since 1 --slug proj-slug --projects-dir "$T" 2>&1); rc=$?
+[ "$rc" -eq 0 ] && echo "$out_empty" | tail -1 | grep -qxF "replay-hook: fixture-empty: 0/6 commands blocked across 2 files" \
+  && ok "empty REPLAY-ARMED-BY line: runs clean, no warning" || bad "empty REPLAY-ARMED-BY line: rc=$rc $(echo "$out_empty" | tail -1)"
+rm -rf "$ARM"
+
+# The real hook carries the field, and the real replay names the unset switch.
+/usr/bin/grep -qxF '# REPLAY-ARMED-BY: SYG_PRIVATE_TERMS_FILE' "$REPO/plugins/seyag/hooks/private-term-guard.sh" \
+  && ok "private-term-guard.sh carries the REPLAY-ARMED-BY field" || bad "private-term-guard.sh lacks the REPLAY-ARMED-BY field"
+out_ptg=$(env -u SYG_PRIVATE_TERMS_FILE "$RH" private-term-guard --since 1 --slug proj-slug --projects-dir "$T" 2>&1)
+echo "$out_ptg" | grep -qxF "replay-hook: warning: private-term-guard is inert without SYG_PRIVATE_TERMS_FILE (unset here); export it for this run" \
+  && ok "real private-term-guard replay with the switch unset: warning printed" || bad "real private-term-guard replay: no warning"
+
 exit $fail

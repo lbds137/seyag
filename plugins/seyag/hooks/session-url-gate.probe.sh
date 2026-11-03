@@ -237,6 +237,19 @@ run 2 "push refspec HEAD:refs/heads/x" "$WORK" "${NOENV[@]}" -- \
   "git push origin HEAD:refs/heads/x"
 run 2 "push -u with +force refspec" "$WORK" "${NOENV[@]}" -- \
   "git push -u origin +leaky:leaky"
+# A refspec-only hit: the new ref NAME carries the link, the source commit is
+# clean. The advice must say to push under a ref name, not to amend a commit.
+run 2 "push to a ref name carrying a session link (refspec-only hit)" "$WORK" "${NOENV[@]}" -- \
+  "git push origin clean:refs/heads/${PREFIX}${ID}"
+assert_out "refspec-only hit: the label is push refspec" present "matched in: push refspec."
+assert_out "refspec-only hit: advises a ref name without the link" present "Push under a destination ref name without the link."
+assert_out "refspec-only hit: no commit-amend advice" absent "git commit --amend"
+assert_out "refspec-only hit: full id never echoed" absent "$ID"
+# Both kinds: the leaky commit carries the link AND the ref name does.
+run 2 "push a leaky commit to a ref name carrying a session link (both kinds)" "$WORK" "${NOENV[@]}" -- \
+  "git push origin leaky:refs/heads/${PREFIX}${ID}"
+assert_out "both kinds: the commit still gets the amend advice" present "For a commit already made, \`git commit --amend\`"
+assert_out "both kinds: the ref name also gets its advice" present "For a ref name, push under a destination name without the link."
 run 2 "push via git -C" "$TMP/plain" "${NOENV[@]}" -- \
   "git -C $WORK push origin leaky"
 run 0 "near-miss: push a clean unpushed branch by name" "$WORK" "${NOENV[@]}" -- \

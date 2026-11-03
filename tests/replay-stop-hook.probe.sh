@@ -151,4 +151,54 @@ grep -qE '^replay-stop-hook: replay failed on .*/crash-slug/blocked\.jsonl \(pyt
   && ok "crash safety: stderr names the failing file and python's exit code" \
   || bad "crash safety: stderr missing/wrong: $(cat "$CRASH_ERR")"
 
+# REPLAY-ARMED-BY for Stop hooks: the script reads its Stop list from hooks.json,
+# so the fixture is a copy of the tree with a one-entry hooks.json naming the
+# fixture hook (the real plugins/ dir gains nothing).
+ARM=$(mktemp -d)
+mkdir -p "$ARM/tests" "$ARM/plugins/seyag/hooks"
+cp "$RSH" "$ARM/tests/replay-stop-hook.sh"
+cat > "$ARM/plugins/seyag/hooks/fixture-armed.sh" <<'EOF'
+#!/bin/bash
+# REPLAY-ARMED-BY: FIXTURE_ARM_VAR
+[ -n "${FIXTURE_ARM_VAR:-}" ] || exit 0
+exit 2
+EOF
+cat > "$ARM/plugins/seyag/hooks/hooks.json" <<'EOF'
+{"hooks":{"Stop":[{"matcher":"","hooks":[{"type":"command","command":"bash \"${CLAUDE_PLUGIN_ROOT}/hooks/run.sh\" fixture-armed"}]}]}}
+EOF
+ARM_RSH="$ARM/tests/replay-stop-hook.sh"
+
+stop_unset=$(env -u FIXTURE_ARM_VAR "$ARM_RSH" fixture-armed --since 1 --slug proj-slug --projects-dir "$T" 2>&1)
+echo "$stop_unset" | head -1 | grep -qxF "replay-stop-hook: warning: fixture-armed is inert without FIXTURE_ARM_VAR (unset here); export it for this run" \
+  && ok "unarmed stop replay: warning printed before the replay" || bad "unarmed stop replay: first line is $(echo "$stop_unset" | head -1)"
+echo "$stop_unset" | tail -1 | grep -qF " (INERT: FIXTURE_ARM_VAR unset)" \
+  && ok "unarmed stop replay: summary line carries (INERT: FIXTURE_ARM_VAR unset)" || bad "unarmed stop replay: summary $(echo "$stop_unset" | tail -1)"
+
+stop_set=$(FIXTURE_ARM_VAR=1 "$ARM_RSH" fixture-armed --since 1 --slug proj-slug --projects-dir "$T" 2>&1)
+echo "$stop_set" | grep -qF "replay-stop-hook: warning:" \
+  && bad "armed stop replay: warning printed although the variable is set" || ok "armed stop replay: no warning"
+echo "$stop_set" | grep -qF "(INERT:" \
+  && bad "armed stop replay: summary marked INERT although the variable is set" || ok "armed stop replay: summary not marked INERT"
+echo "$stop_set" | tail -1 | grep -qE ': [1-9][0-9]*/[0-9]+ turn ends tripped across ' \
+  && ok "armed stop replay: the fixture hook trips turn ends" || bad "armed stop replay: $(echo "$stop_set" | tail -1)"
+rm -rf "$ARM"
+
+# api-credit-ledger.sh carries no field: it writes the ledger, and the field is
+# for gates only (a replay must not run a side-effect hook with the switch set).
+ACL="$REPO/plugins/seyag/hooks/api-credit-ledger.sh"
+[ -f "$ACL" ] && ! /usr/bin/grep -qxF '# REPLAY-ARMED-BY: SYG_CREDIT_LEDGER' "$ACL" \
+  && ok "api-credit-ledger.sh exists and carries no REPLAY-ARMED-BY field" \
+  || bad "api-credit-ledger.sh is missing, or carries the REPLAY-ARMED-BY field (it writes the ledger)"
+
+# An empty REPLAY-ARMED-BY line names nothing: no crash under set -u.
+ARM0=$(mktemp -d)
+mkdir -p "$ARM0/tests" "$ARM0/plugins/seyag/hooks"
+cp "$RSH" "$ARM0/tests/replay-stop-hook.sh"
+printf '#!/bin/bash\n# REPLAY-ARMED-BY:\nexit 0\n' > "$ARM0/plugins/seyag/hooks/fixture-empty.sh"
+printf '%s\n' '{"hooks":{"Stop":[{"matcher":"","hooks":[{"type":"command","command":"bash run.sh fixture-empty"}]}]}}' > "$ARM0/plugins/seyag/hooks/hooks.json"
+out_e=$("$ARM0/tests/replay-stop-hook.sh" fixture-empty --since 1 --slug proj-slug --projects-dir "$T" 2>&1); rc=$?
+[ "$rc" -eq 0 ] && echo "$out_e" | tail -1 | grep -qF "replay-stop-hook: fixture-empty: " \
+  && ok "empty REPLAY-ARMED-BY line (stop): runs clean, no crash" || bad "empty REPLAY-ARMED-BY line (stop): rc=$rc $(echo "$out_e" | tail -1)"
+rm -rf "$ARM0"
+
 exit $fail

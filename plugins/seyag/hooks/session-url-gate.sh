@@ -64,7 +64,8 @@
 #      value `key=@<f>` or `--input <f>`; `gh gist create|edit`: every
 #      positional file and `edit --add <f>`. `-` means stdin, i.e. the command
 #      text, already covered by 1. A path expands `$NAME`/`${NAME}` (`PWD`,
-#      `OLDPWD`, simple assignments and the environment) and `~`, and a
+#      `OLDPWD`, simple assignments and the hook process's environment: the
+#      session's, as the hook was started, not the live shell's) and `~`, and a
 #      relative path resolves against each tracked cwd (`cd`/`pushd`/`popd`
 #      across branches, as lib/outbound.py tracks it) and git's `-C`. An
 #      unreadable file is not a block.
@@ -172,16 +173,28 @@ if bypass_tokens:
     sys.exit(0)
 
 
-findings = [mask(item.label) for item in outbound_items(cmd, payload_cwd, BYPASS)
-            if SECRET.search(item.text)]
+hits = [item for item in outbound_items(cmd, payload_cwd, BYPASS)
+        if SECRET.search(item.text)]
+findings = [mask(item.label) for item in hits]
 
 if findings:
     uniq = list(dict.fromkeys(findings))
     print("blocked: a Claude session link (claude.ai/code/session_…) would go out; matched in: "
           + "; ".join(uniq) + ".")
-    print("Session links are secrets in shared history. Remove the link (relay session links "
-          "in chat only). For a commit already made, `git commit --amend` (or reword it "
-          "without an interactive editor) before pushing.")
+    # A commit hit is advised to amend the commit; a `push refspec` hit names a
+    # ref, so its advice is to push under another ref name. Both kinds get both.
+    ref_hit = any(item.label == "push refspec" for item in hits)
+    commit_hit = any(item.label != "push refspec" for item in hits)
+    advice = ("Session links are secrets in shared history. Remove the link (relay session links "
+              "in chat only).")
+    if commit_hit:
+        advice += (" For a commit already made, `git commit --amend` (or reword it "
+                   "without an interactive editor) before pushing.")
+    if ref_hit:
+        advice += (" For a ref name, push under a destination name without the link."
+                   if commit_hit else
+                   " Push under a destination ref name without the link.")
+    print(advice)
     print("Only on the owner's word: prefix the command itself with SYG_ALLOW_SESSION_URL=1.")
 PYEOF
 )

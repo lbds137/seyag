@@ -96,6 +96,17 @@
 #   <files> and <live> are both modes combined. Nothing else on stdout. Exit 0
 #   even with trips — a report, not a gate.
 #
+#   Inert switches: a hook that exits 0 unless a switch is set trips nothing in
+#   a run without it, so its header may carry `# REPLAY-ARMED-BY: VAR [VAR...]`.
+#   The field names only the variables, not every condition, so an armed replay
+#   that trips nothing is not proof by itself. Before the replay, each named VAR
+#   that is unset or empty in this environment gets a stderr line
+#   (`replay-stop-hook: warning: <hook> is inert without <VAR> (unset here);
+#   export it for this run`), and the summary line gains ` (INERT: <VAR> unset)`
+#   for each one; tokens that are not shell identifiers are skipped. The field
+#   is for gates only: a hook with side effects (one that writes files or state)
+#   must not carry it, or a replay would run it for real.
+#
 #   Runtime observed 2026-09-26: `--since 7` against
 #   blocking-question-channel-check over 87 local session-log files (2510
 #   turn ends, 1316 INFERRED across 27 files) took 4m28s wall — ~107
@@ -158,6 +169,20 @@ else
   MAXDEPTH=2
 fi
 [ -d "$SEARCH_ROOT" ] || { echo "replay-stop-hook: no such directory: $SEARCH_ROOT" >&2; exit 2; }
+
+# REPLAY-ARMED-BY (see the header): a switch the hook needs to act, unset here.
+INERT_SUFFIX=""
+ARMED_LINE=$(grep -m1 '^# REPLAY-ARMED-BY:' "$HOOKS_DIR/$HOOK_NAME.sh" 2>/dev/null || true)
+if [ -n "$ARMED_LINE" ]; then
+  read -r -a ARMED_VARS <<<"${ARMED_LINE#*REPLAY-ARMED-BY:}"
+  for armed_var in ${ARMED_VARS[@]+"${ARMED_VARS[@]}"}; do
+    [[ "$armed_var" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+    if [ -z "${!armed_var:-}" ]; then
+      echo "replay-stop-hook: warning: $HOOK_NAME is inert without $armed_var (unset here); export it for this run" >&2
+      INERT_SUFFIX="$INERT_SUFFIX (INERT: $armed_var unset)"
+    fi
+  done
+fi
 
 SCRATCH_DIR=$(mktemp -d)
 trap 'rm -rf "$SCRATCH_DIR"' EXIT
@@ -372,5 +397,5 @@ PYEOF
   fi
 done <<<"$FILE_LIST"
 
-echo "replay-stop-hook: $HOOK_NAME: $TRIPPED/$TOTAL turn ends tripped across $FILES files ($TRIPPED_INF/$TOTAL_INF inferred in $FILES_INF files without Stop records); $LIVE live blocks in the logs"
+echo "replay-stop-hook: $HOOK_NAME: $TRIPPED/$TOTAL turn ends tripped across $FILES files ($TRIPPED_INF/$TOTAL_INF inferred in $FILES_INF files without Stop records); $LIVE live blocks in the logs$INERT_SUFFIX"
 exit 0

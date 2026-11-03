@@ -74,12 +74,20 @@
 #     by rule 1; that is a claim too, so it's deliberate rather than an
 #     over-block to apologize for. Rule 2 does NOT share this gap — it never
 #     sees the command text at all, only extract_pr_body's parsed output.
-#   - A QUOTED --body-file path (`--body-file "$F"`) is not extracted — the
-#     path matcher stops at the quote, so the FILE's content goes unscanned
-#     (fail-open direction, same family as the short-flag gap). Rule 1's
-#     command-text scan still covers the rest of the command; an inline
-#     `--body` in the same command is separately picked up by
-#     extract_pr_body's own inline-value parsing, so rule 2 still sees it.
+#   - A --body-file path that names no readable file without a shell is not
+#     read: a `$(...)` or backtick in it, an unset or empty `$NAME` / `${NAME}`,
+#     or a `$` kept literal by single quotes (`--body-file '$F'`). Its FILE's
+#     content goes unscanned (fail-open direction, same family as the
+#     short-flag gap). Rule 1's command-text scan still covers the rest of the
+#     command; an inline `--body` in the same command is separately picked up
+#     by extract_pr_body's own inline-value parsing, so rule 2 still sees it.
+#     Bare, "double-quoted" and 'single-quoted' paths without a `$` are read,
+#     and bare or double-quoted `$NAME` / `${NAME}` expand from the hook's own
+#     environment (the session's, not the live shell's): a variable set earlier
+#     in the same command (`F=x; gh pr create --body-file "$F"`) is not seen,
+#     and the session's value, if any, is used instead. A word that starts
+#     bare stops at its first quote (`$D/"sub"/x.md` reads `$D/`), so a
+#     wrapper's closing quote is never taken into the path; that word degrades.
 #   - A whole-token QUOTED `-F body="@path"` is not recognized as a file
 #     reference — the `@` matcher stops at the quote — so the literal text
 #     `@path` is what gets scanned rather than the file's content (fail-open
@@ -228,6 +236,14 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib/claim-shapes.sh" || exit 0
 # simple command so an earlier command's `-F` (`git commit -F x && gh pr create --fill`)
 # is not read as a PR body.
 GH_PR_CMD_PREFIX='gh[^\n;&|]*\bpr[[:space:]]+(?:create|edit)\b[^\n;&|]*?[[:space:]]'
+# One shell word as a --body-file / -F path (`\x27` is the single quote in PCRE).
+# A word that STARTS with a quote may run on through more quoted and bare
+# pieces; a word that starts bare stops at its first quote, so a wrapper's
+# closing quote (`bash -c "gh pr create --body-file x.md" ; echo "done"`) is
+# never read as part of the path. A bare piece also stops at a shell
+# metacharacter (`;&|()<>`), so `(... --body-file "x.md")`, `"x.md"|cat` and
+# `"x.md";echo` name x.md.
+BODY_WORD_RE='(?:(?:"[^"]*"|\x27[^\x27]*\x27)(?:[^\s\x27"&|;()<>]+|"[^"]*"|\x27[^\x27]*\x27)*|[^\s\x27"&|;()<>]+)'
 
 read_body_path() {
   local resolved
@@ -235,7 +251,9 @@ read_body_path() {
     /*) resolved="$1" ;;
     *) resolved="$PWD/$1" ;;
   esac
-  if [ -r "$resolved" ]; then
+  # A regular, readable file only: a directory (`--body-file .`) degrades, and
+  # the inline ladder still runs.
+  if [ -f "$resolved" ] && [ -r "$resolved" ]; then
     BODY_TEXT=$(cat "$resolved" 2>/dev/null)
     BODY_FROM_FILE=1
     return 0
@@ -243,23 +261,115 @@ read_body_path() {
   return 1
 }
 
+# resolve_body_word RAW: sets BODY_PATH to the path the shell word RAW names,
+# or BODY_PATH_UNRESOLVED=1 when it names none this hook can read: an unset or
+# empty $NAME / ${NAME}, a $(...) or backtick, or any `$` left after expansion
+# (a single-quoted $ is literal, so it is left too). Bare and double-quoted
+# text expands $NAME from THIS hook's environment (the session's, as the hook
+# was started), never the live shell's; a leading bare `~/` is $HOME/, and only
+# when $2 is 1 (a space, not `=`, came before the word, as the shell does it).
+# Nothing is run through a shell. A word with no `$`, quote or leading `~/` is
+# its own path, so the common case never starts python.
+resolve_body_word() {
+  BODY_PATH="$1"
+  BODY_PATH_UNRESOLVED=0
+  case "$1" in
+    *'$'* | *'"'* | *"'"* | \~/*) ;;
+    *) return 0 ;;
+  esac
+  if BODY_PATH=$(python3 - "$1" "$2" <<'PYEOF' 2>/dev/null
+import os
+import re
+import sys
+
+raw = sys.argv[1]
+tilde_ok = sys.argv[2] == "1"
+pieces = re.findall(r"'[^']*'|\"[^\"]*\"|[^'\"]+", raw)
+if "".join(pieces) != raw:
+    sys.exit(1)
+out = []
+for index, piece in enumerate(pieces):
+    if piece.startswith("'"):
+        out.append(piece[1:-1])
+        continue
+    quoted = piece.startswith('"')
+    text = piece[1:-1] if quoted else piece
+    if index == 0 and not quoted and tilde_ok and text.startswith("~/"):
+        text = "$HOME/" + text[2:]
+
+    def value(match):
+        found = os.environ.get(match.group(1) or match.group(2), "")
+        if not found:
+            raise LookupError
+        return found
+
+    try:
+        text = re.sub(r"\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))", value, text)
+    except LookupError:
+        sys.exit(1)
+    out.append(text)
+path = "".join(out)
+if not path or any(ch in path for ch in "$`"):
+    sys.exit(1)
+sys.stdout.write(path)
+PYEOF
+  ); then
+    return 0
+  fi
+  BODY_PATH=""
+  BODY_PATH_UNRESOLVED=1
+}
+
+# split_flag_word MATCH FLAG: MATCH is one matched "FLAG<sep>WORD" text, and
+# sets the caller's body_file to WORD. BODY_TILDE_OK becomes 1 only for a
+# whitespace separator: the shell expands a leading `~/` after whitespace, never
+# after `=`, and a word with no separator is not tilde-expanded either.
+split_flag_word() {
+  local rest="${1#"$2"}"
+  case "$rest" in
+    =*) BODY_TILDE_OK=0; body_file="${rest#=}" ;;
+    [[:space:]]*) BODY_TILDE_OK=1; body_file="${rest#"${rest%%[![:space:]]*}"}" ;;
+    *) BODY_TILDE_OK=0; body_file="$rest" ;;
+  esac
+}
+
 extract_pr_body() {
   BODY_TEXT=""
   BODY_FROM_FILE=0
+  BODY_PATH_UNRESOLVED=0
   local body_file rc body sub_file
 
-  # --body-file <path> / --body-file=<path>
-  body_file=$(printf '%s' "$CMD" | grep -oP -- '--body-file[= ]+\K[^\s'"'"'"]+')
+  # --body-file <path> / --body-file=<path>: every match is listed in command
+  # order and the LAST one is read (gh's last flag wins). split_flag_word reads
+  # the separator, which sets BODY_TILDE_OK.
+  BODY_TILDE_OK=0
+  body_all=$(printf '%s' "$CMD" | grep -oP -- "--body-file(?:=|[[:space:]]+)${BODY_WORD_RE}")
   rc=$?
   if [ "$rc" -gt 1 ]; then
     return 3
   fi
+  body_file=""
+  if [ -n "$body_all" ]; then
+    split_flag_word "$(printf '%s\n' "$body_all" | tail -n 1)" --body-file
+  fi
+  # -F <path> on gh pr create|edit, the same last-match rule.
   if [ -z "$body_file" ] && [ "${IS_GH_PR_WRITE:-0}" -eq 1 ]; then
-    body_file=$(printf '%s' "$CMD_JOINED" | grep -oP -- "${GH_PR_CMD_PREFIX}"'-F(?:=|[[:space:]]*)\K[^\s'"'"'"]+')
+    body_all=$(printf '%s' "$CMD_JOINED" | grep -oP -- "${GH_PR_CMD_PREFIX}"'\K-F(?:=|[[:space:]]*)'"${BODY_WORD_RE}")
     rc=$?
     if [ "$rc" -gt 1 ]; then
       return 3
     fi
+    if [ -n "$body_all" ]; then
+      split_flag_word "$(printf '%s\n' "$body_all" | tail -n 1)" -F
+    fi
+  fi
+  # The matched word names a file through its quotes and $NAMEs. An
+  # unresolvable word keeps its raw text (so the fallbacks below stay skipped,
+  # as an unreadable path always has) and sets BODY_PATH_UNRESOLVED, which
+  # keeps read_body_path from being tried.
+  if [ -n "$body_file" ]; then
+    resolve_body_word "$body_file" "$BODY_TILDE_OK"
+    [ "$BODY_PATH_UNRESOLVED" -eq 1 ] || body_file="$BODY_PATH"
   fi
   # --body-file - / -F - reads from stdin: look in order for gh's own heredoc
   # body (inline, BODY_FROM_FILE stays 0), then `< PATH` after `-`, then
@@ -301,7 +411,7 @@ extract_pr_body() {
       return 3
     fi
   fi
-  if [ -n "$body_file" ] && read_body_path "$body_file"; then
+  if [ -n "$body_file" ] && [ "$BODY_PATH_UNRESOLVED" -eq 0 ] && read_body_path "$body_file"; then
     return 0
   fi
 
