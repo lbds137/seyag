@@ -35,7 +35,7 @@
 # guards' own code).
 #
 # BLOCK: exit 1; stderr names each hit by kind (message, author, committer,
-# path, added line, tag, note), object sha and the masked text: every term
+# path, added line, tag, note, ref), object sha and the masked text: every term
 # match reads `[private term #N]`, a link `claude.ai/code/session_…`.
 #
 # FAIL MODE: a missing or empty terms file means no term check (the session
@@ -158,8 +158,8 @@ print(f"seyag pre-push: blocked: {' and '.join(what)} would go out to a public r
       file=sys.stderr)
 for h in hits:
     print(h, file=sys.stderr)
-print("Rewrite what matched (amend or rebase the commit; recreate the tag or note) "
-      "and push again.", file=sys.stderr)
+print("Rewrite what matched (amend or rebase the commit; recreate the tag or note; "
+      "rename the new ref) and push again.", file=sys.stderr)
 sys.exit(1)
 PYEOF
 rc=$?

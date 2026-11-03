@@ -115,7 +115,8 @@
 # log output; outbound.py's gaps: a body read through a command substitution
 # or a dynamic/unset variable, world forking past `MAX_WORLDS = 64`, stdin
 # redirects (`-F - < f`, `cat f | gh … --body-file -`), content written
-# earlier in the same command, annotated tag messages on push.
+# earlier in the same command, annotated tag messages on push, a push's ref
+# names that are not literal refspecs (`-u origin HEAD`, `--tags`: pre-push).
 # Where the pre-push is in force, it covers these for what a push sends. Ways
 # past the pre-push the bypass list does not see: editing `.git/config` (or a
 # file it includes) with a non-git tool; `HOME`, `XDG_CONFIG_HOME` or `PATH`

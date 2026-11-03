@@ -88,6 +88,17 @@ ITEMS, for every unbypassed command:
   - ("commit <sha> <path>", line): each added line of the pushed commits
     (same sources as the message scan), from commit_diff's
     `pushed_added_lines`.
+  - ("push refspec", name): the destination of each literal refspec of a
+    `git push`, as a short name (refs/heads/, refs/tags/, refs/notes/ stripped,
+    as the pre-push scans it), so a new remote ref's name is seen before git
+    runs: `dst` of `src:dst` or `+src:dst`, else the word itself. A `:name`
+    deletion, the remote, and every name of a push that deletes are not names;
+    a push deletes when --delete (or -d in a cluster) appears anywhere, the last
+    of it and --no-delete winning. Only the words the command spells: `-u origin
+    HEAD`, a bare `git push` and `--tags` name refs only git knows (the pre-push
+    checks those). Where the pre-push owns the text (`commit_text_owner` says
+    so: lib/prepush_state.py's text_owner_judge), this item stands down: the
+    pre-push reads the new refs.
 
 KNOWN GAPS (accepted): a body read through a substitution or non-plain
 parameter expansion (`--body "$(cat f)"`, `-F "${f:-x}"`, or an unset/masked
@@ -97,7 +108,14 @@ directory (and state forks past `MAX_WORLDS = 64` dropped), a function body's
 `cd` walked as though the function ran at its definition, an unquoted empty
 expansion that vanishes from `cd`'s words (`cd $UNSET ../x`) read as two
 arguments so nothing moves, and `git push` of
-refs that git log cannot resolve (skipped). Stdin redirects: `-F - < f`,
+refs that git log cannot resolve (skipped). A push's ref names that are not
+literal refspecs (`-u origin HEAD`, a bare `git push`, `--tags`: the branch or
+tag name is git's to resolve) are checked by the pre-push, not here. Where the
+pre-push owns the text, the refspec item stands down, so an update of an
+existing term-named ref passes there too, and a new one is the pre-push's to
+refuse; where the text guard keeps the text, it cannot see the remote and
+blocks an update of an existing term-named ref as well. The way out: delete
+the ref, or the owner's `SYG_ALLOW_PRIVATE_TERM=1` on the push. Stdin redirects: `-F - < f`,
 `--body-file - < f`, `cat f | gh … --body-file -`. Annotated tag messages on
 push. commit_diff's own gaps for the staged lines (content written earlier in
 the same command does not exist yet when a PreToolUse hook runs) and pushed
@@ -125,6 +143,7 @@ from shell_quotes import (command_pipelines, strip_redirections, substitution_sp
                           unwrap_runners)
 from shell_state import State, do_cd, do_popd, do_pushd, expand_vars, walk
 import commit_diff
+from prepush_scan import short_ref
 
 Item = namedtuple("Item", "label text directory kind sha")
 
@@ -216,23 +235,45 @@ def git_parts(argv, base, state=None):
     return None
 
 
+def is_git_long(word, name, floor):
+    """True when `word` is the long option `name` (given with its `--`) as git
+    reads it: the whole name, or a prefix of at least `floor` characters (the
+    `--` counts) that git takes as the option, since git accepts any unique
+    prefix of a long option. An `=value` tail is not part of the name."""
+    opt = word.split("=", 1)[0]
+    return opt.startswith("--") and len(opt) >= floor and name.startswith(opt)
+
+
+# The floors are the shortest prefix git reads as each option, measured on git
+# commit, tag and notes add (`git <cmd> --<prefix>`: "ambiguous" or "unknown
+# option" means it is not read). A floor is the minimum over those commands,
+# so a prefix git rejects as ambiguous on one of them is read here too; git
+# then errors out on that command, which is harmless. --file's floor is 4:
+# `--fi` is ambiguous on commit (--fixup) and read as --file on tag and notes.
+GIT_FILE_OPT = ("--file", 4)
+GIT_VALUE_LONG = (("--message", 3), ("--reuse-message", 5), ("--reedit-message", 5),
+                  ("--fixup", 5), ("--squash", 4), ("--author", 4), ("--date", 4),
+                  ("--cleanup", 3), ("--template", 4), ("--trailer", 4))
+
+
 def file_values_git(args):
     """Files named by -F / --file in a git commit|tag|notes argument list.
     Short clusters are read the way git reads them: a value letter takes the
-    rest of the word, else the next word."""
+    rest of the word, else the next word. A long option may be spelled by any
+    prefix git accepts (is_git_long); a value option spelled that way still
+    takes its value word."""
     out = []
     i = 0
     while i < len(args):
         w = args[i]
         if w == "--":
             break
-        if w == "--file":
-            if i + 1 < len(args):
+        if is_git_long(w, *GIT_FILE_OPT):
+            if "=" in w:
+                out.append(w.split("=", 1)[1])
+            elif i + 1 < len(args):
                 out.append(args[i + 1])
-            i += 2
-            continue
-        if w.startswith("--file="):
-            out.append(w[len("--file="):])
+                i += 1
         elif w.startswith("-") and not w.startswith("--") and len(w) > 1:
             j = 1
             while j < len(w):
@@ -247,9 +288,8 @@ def file_values_git(args):
                 if c in "Su":  # optional attached value only
                     break
                 j += 1
-        elif w.startswith("--") and "=" not in w and w in (
-                "--message", "--reuse-message", "--reedit-message", "--fixup", "--squash",
-                "--author", "--date", "--cleanup", "--template", "--trailer"):
+        elif w.startswith("--") and "=" not in w and any(
+                is_git_long(w, name, floor) for name, floor in GIT_VALUE_LONG):
             i += 1
         i += 1
     return out
@@ -505,6 +545,90 @@ def read_file(path, directory, state=None):
     return data.decode("utf-8", "replace")
 
 
+# git push's long options (floors as in GIT_VALUE_LONG): --all, --mirror and
+# --branches read every local branch, --tags every tag, and the value options
+# take their value word.
+PUSH_BRANCH_LONG = (("--all", 4), ("--mirror", 3), ("--branches", 3))
+PUSH_VALUE_LONG = (("--push-option", 4), ("--receive-pack", 6), ("--exec", 3), ("--repo", 5))
+
+
+def _push_takes_value(w):
+    """True when a git push word takes the next word as its value."""
+    return w == "-o" or ("=" not in w and any(
+        is_git_long(w, name, floor) for name, floor in PUSH_VALUE_LONG))
+
+
+# git push's --delete (floor 4: "--de"); --no-delete's floor is 7 ("--no-de":
+# "--no-d" is ambiguous with --no-dry-run), measured on git 2.55.0.
+PUSH_DELETE_LONG = ("--delete", 4)
+PUSH_NO_DELETE_LONG = ("--no-delete", 7)
+
+
+def _push_short(w):
+    """`(delete, takes_value)` for a single-dash git push word. It walks the
+    letters: `d` is --delete; `o` (--push-option) takes the rest of the word or
+    the next word as its value, so the walk stops there (`-od` is -o with the
+    value `d`, not a delete; `-fo x` takes x)."""
+    delete = False
+    for j in range(1, len(w)):
+        c = w[j]
+        if c == "d":
+            delete = True
+        elif c == "o":
+            return delete, j == len(w) - 1
+    return delete, False
+
+
+def _push_scan(args):
+    """`(positionals, deleting)` for a git push's arguments: the positional
+    words in order (index 0 is the remote), option values skipped. git permutes
+    options, so --delete (or -d, in a cluster) counts wherever it stands; the
+    last of --delete and --no-delete wins."""
+    positionals = []
+    deleting = False
+    i = 0
+    while i < len(args):
+        w = args[i]
+        if is_git_long(w, *PUSH_NO_DELETE_LONG):
+            deleting = False
+        elif is_git_long(w, *PUSH_DELETE_LONG):
+            deleting = True
+        elif w.startswith("--"):
+            if _push_takes_value(w):
+                i += 1
+        elif w.startswith("-") and len(w) > 1:
+            delete, takes_value = _push_short(w)
+            deleting = deleting or delete
+            if takes_value:
+                i += 1
+        elif not w.startswith("-"):
+            positionals.append(w)
+        i += 1
+    return positionals, deleting
+
+
+def push_destinations(args):
+    """The destination names of a git push's literal refspecs, as the
+    pre-push scans them: `dst` of `src:dst` or `+src:dst`, else the word itself
+    (its own destination), with refs/heads/, refs/tags/ and refs/notes/
+    stripped. A `:name` deletion, the remote, and every name of a push that
+    deletes (--delete anywhere; see _push_scan) are not new names. `src:` (an
+    empty destination) names src."""
+    positionals, deleting = _push_scan(args)
+    if deleting:
+        return []
+    out = []
+    for word in positionals[1:]:  # positionals[0] is the remote
+        ref = word[1:] if word.startswith("+") else word
+        src, sep, dst = ref.partition(":")
+        if sep and not src:
+            continue  # a :name deletion
+        name = short_ref((dst or src) if sep else ref)
+        if name:
+            out.append(name)
+    return out
+
+
 def push_sources(args):
     sources = []
     extra = []
@@ -512,11 +636,11 @@ def push_sources(args):
     i = 0
     while i < len(args):
         w = args[i]
-        if w in ("--all", "--mirror", "--branches"):
+        if any(is_git_long(w, name, floor) for name, floor in PUSH_BRANCH_LONG):
             extra.append("--branches")
-        elif w == "--tags":
+        elif is_git_long(w, "--tags", 4):
             extra.append("--tags")
-        elif w in ("-o", "--push-option", "--receive-pack", "--exec", "--repo"):
+        elif _push_takes_value(w):
             i += 1
         elif w.startswith("-"):
             pass
@@ -568,6 +692,16 @@ def all_pipelines(text, depth=0):
         for span in substitution_spans(text):
             result.extend(all_pipelines(span, depth + 1))
     return result
+
+
+def _refspec_items(args, directory):
+    """Text items for the destination names of a push's literal refspecs (the
+    short names, see push_destinations), so a term in a new remote ref's name
+    is seen before git runs. The label is the constant `push refspec`, not the
+    name: session-url-gate prints the label of a hit, and the name is not to be
+    printed; the text carries the name, and dedupe keys on it."""
+    return [Item("push refspec", name, directory, "text", None)
+            for name in push_destinations(args)]
 
 
 def _push_items(sources, directory):
@@ -1057,8 +1191,14 @@ def outbound_items(cmd, cwd, bypass_assignment, dir_filter=None,
                     if sub == "commit" and exists(gdir):
                         for path, line in cached_commit_lines(gdir, args):
                             items.append(Item(f"staged {path}", line, gdir, "staged", None))
-                elif sub == "push" and exists(gdir):
-                    items.extend(cached_push_items(push_sources(args), gdir))
+                elif sub == "push":
+                    # Where the pre-push owns the text it reads the new refs
+                    # exactly (an update too); this item stands down there, on
+                    # the commit text's own condition.
+                    if st.unknown or not text_owned(gdir):
+                        items.extend(_refspec_items(args, gdir))
+                    if exists(gdir):
+                        items.extend(cached_push_items(push_sources(args), gdir))
     out = []
     seen = set()
     for it in items:

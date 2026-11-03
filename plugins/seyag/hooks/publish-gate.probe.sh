@@ -288,6 +288,112 @@ run 0 "api explicit -X GET stays read-only" "$FIX" -- \
   "gh api repos/example/one -X GET -f private=false"
 
 # =============================================================================
+# Repo creates through gh api: REST defaults `private` to false on all three
+# endpoints, so a create with no private field is a publish
+# =============================================================================
+run 2 "create: user/repos with a name, no private field, is unresolvable" "$FIX" -- \
+  "gh api user/repos -f name=x"
+assert_out "create: user/repos names an unresolvable target" present \
+  "blocked: gh api POST user/repos would make an unresolvable target"
+run 0 "create: user/repos with private=true" "$FIX" -- \
+  "gh api user/repos -f name=x -f private=true"
+run 0 "create: user/repos with -F private=true" "$FIX" -- \
+  "gh api user/repos -F private=true"
+run 2 "create: orgs/o/repos with a literal name blocks naming o/x" "$FIX" -- \
+  "gh api orgs/o/repos -f name=x"
+assert_out "create: orgs/o/repos names o/x" present "would make o/x public"
+run 0 "create: orgs/o/repos with visibility=private" "$FIX" -- \
+  "gh api orgs/o/repos -f name=x -f visibility=private"
+run 0 "create: orgs/o/repos with visibility=internal" "$FIX" -- \
+  "gh api orgs/o/repos -f name=x -f visibility=internal"
+run 2 "create: private=true with visibility=public blocks (public wins)" "$FIX" -- \
+  "gh api orgs/o/repos -f private=true -f visibility=public"
+run 2 "create: orgs/o/repos with visibility=public blocks naming o/x" "$FIX" -- \
+  "gh api orgs/o/repos -f name=x -f visibility=public"
+assert_out "create: visibility=public names o/x" present "would make o/x public"
+run 2 "create: repos/o/tpl/generate with owner and name blocks naming o2/x" "$FIX" -- \
+  "gh api repos/o/tpl/generate -f owner=o2 -f name=x"
+assert_out "create: generate names the owner given in the body" present "would make o2/x public"
+run 2 "create: generate with no owner field is unresolvable" "$FIX" -- \
+  "gh api repos/o/tpl/generate -f name=x"
+run 2 "create: a placeholder in the create path is unresolvable" "$FIX" -- \
+  "gh api orgs/{org}/repos -f name=x"
+run 2 "create: explicit POST with no fields is a publish" "$FIX" -- \
+  "gh api -X POST orgs/o/repos"
+run 0 "create: --input - with a here-string holding private true" "$FIX" -- \
+  "gh api user/repos --input - <<< '{\"name\":\"x\",\"private\":true}'"
+run 2 "create: --input - with a here-string holding private false" "$FIX" -- \
+  "gh api user/repos --input - <<< '{\"name\":\"x\",\"private\":false}'"
+run 2 "create: --input body.json (body not visible) blocks" "$FIX" -- \
+  "gh api user/repos --input body.json"
+run 0 "create: gh api user/repos (GET) stays read-only" "$FIX" -- \
+  "gh api user/repos"
+run 0 "create: gh api -X GET orgs/o/repos -f per_page=5 stays read-only" "$FIX" -- \
+  "gh api -X GET orgs/o/repos -f per_page=5"
+run 0 "create: PATCH on a create endpoint is not a create" "$FIX" -- \
+  "gh api -X PATCH orgs/o/repos -f name=x"
+run 0 "create: PUT on a create endpoint is not a create" "$FIX" -- \
+  "gh api -X PUT user/repos -f name=x"
+run 2 "create: https://api.github.com/user/repos form blocks" "$FIX" -- \
+  "gh api https://api.github.com/user/repos -f name=x"
+
+# --input: gh sends the file as the body; field flags go to the query string. A
+# named file is never visible, so it is never kept, and a create with --input
+# has no target.
+run 2 "create --input: a private word in the text does not vouch for a named file" "$FIX" -- \
+  "echo '\"private\": true'; gh api user/repos --input body.json"
+run 2 "create --input: a private word in a comment does not vouch for a named file" "$FIX" -- \
+  "gh api user/repos --input body.json # \"private\": true"
+run 2 "create --input: a -f private=true does not reach the body" "$FIX" -- \
+  "gh api user/repos -f private=true -f name=x --input b.json"
+run 2 "create --input: a named file with a literal org blocks as unresolvable" "$FIX" -- \
+  "gh api orgs/o/repos -f name=x --input b.json"
+run 2 "create --input: SYG_PUBLISH_CHECKED cannot unblock a named file" "$FIX" \
+  SYG_PUBLISH_CHECKED=o/x -- "gh api orgs/o/repos -f name=x --input b.json"
+run 2 "create --input=: the = form of a named file blocks" "$FIX" -- \
+  "gh api user/repos --input=body.json"
+
+# visibility keeps a repo private only on the org endpoint (REST lists it on
+# POST orgs/O/repos only); private=true keeps it on all three.
+run 2 "create: user/repos with visibility=private is public (ignored there)" "$FIX" -- \
+  "gh api user/repos -f name=x -f visibility=private"
+run 2 "create: generate with visibility=private is public, naming o2/x" "$FIX" -- \
+  "gh api repos/o/t/generate -f owner=o2 -f name=x -f visibility=private"
+assert_out "create: generate visibility=private names o2/x" present "would make o2/x public"
+run 2 "create --input -: visibility=private in the body is ignored on user/repos" "$FIX" -- \
+  "gh api user/repos --input - <<< '{\"name\":\"x\",\"visibility\":\"private\"}'"
+run 0 "create --input -: visibility=private in the body keeps an org create private" "$FIX" -- \
+  "gh api orgs/o/repos --input - <<< '{\"name\":\"x\",\"visibility\":\"private\"}'"
+
+# A literal name holding braces is not a literal: unresolvable.
+run 2 "create: a braces value in name= is unresolvable" "$FIX" -- \
+  "gh api orgs/o/repos -f name={repo}"
+assert_out "create: braces name names an unresolvable target" present "an unresolvable target"
+
+# A create-only unresolvable block says so, and not the non-create paragraph.
+run 2 "create: user/repos with a name is unresolvable (create paragraph)" "$FIX" -- \
+  "gh api user/repos -f name=x"
+assert_out "create: unresolvable paragraph names the create forms" present \
+  "A create through gh api names no target here, and SYG_PUBLISH_CHECKED cannot unblock it"
+assert_out "create: unresolvable display is 'an unresolvable target'" present \
+  "would make an unresolvable target public"
+assert_out "create: no 'literal owner/repo' wording on a create-only block" absent \
+  "literal owner/repo"
+assert_out "create: a create-only block has no SYG_PUBLISH_CHECKED clause" absent \
+  "on pass set SYG_PUBLISH_CHECKED"
+run 2 "mixed: a create and a repo edit keep the SYG_PUBLISH_CHECKED clause" "$FIX" -- \
+  "gh api user/repos -f name=x; gh repo edit other/two --visibility=public"
+assert_out "mixed block keeps the clause" present "on pass set SYG_PUBLISH_CHECKED"
+
+# A keep must be spelled exactly: a space around the key or value is not one.
+run 2 "create: 'private= true' (a space in the value) is not a keep" "$FIX" -- \
+  "gh api user/repos -f 'private= true' -f name=x"
+run 0 "create: generate with owner, name and private=true keeps private" "$FIX" -- \
+  "gh api repos/o/t/generate -f owner=o2 -f name=x -f private=true"
+run 0 "create: orgs/o/repos with name and private=true keeps private" "$FIX" -- \
+  "gh api orgs/o/repos -f name=x -f private=true"
+
+# =============================================================================
 # Target resolution
 # =============================================================================
 run 2 "remotes resolve the target (no -R)" "$FIX" -- \

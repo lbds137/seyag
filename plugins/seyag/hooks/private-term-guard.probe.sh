@@ -167,6 +167,23 @@ run 2 "public: gh pr create --body-file with the term" "$PUB" "${T[@]}" -- \
 assert_out "message names a body file, not its path" present "matched in: a body file."
 run 2 "public: git commit -F file with the term" "$PUB" "${T[@]}" -- \
   "git commit -F $TMP/files/body.txt"
+# git accepts a unique prefix of a long option (--fil is --file); a value option
+# spelled by prefix consumes its value (--mess ok, --mess --file f: "--file" is
+# the message, so f is not a body file)
+run 2 "public: git commit --fil <file with the term>" "$PUB" "${T[@]}" -- \
+  "git commit --fil $TMP/files/body.txt"
+run 2 "public: git commit --fil=<file with the term>" "$PUB" "${T[@]}" -- \
+  "git commit --fil=$TMP/files/body.txt"
+run 2 "public: git tag -a v1 --fil <file with the term>" "$PUB" "${T[@]}" -- \
+  "git tag -a v1 --fil $TMP/files/body.txt"
+run 2 "public: git commit --mess ok --file <file with the term>" "$PUB" "${T[@]}" -- \
+  "git commit --mess ok --file $TMP/files/body.txt"
+run 0 "public: git commit --mess --file <file>: --file is the message, not a file" "$PUB" "${T[@]}" -- \
+  "git commit --mess --file $TMP/files/body.txt"
+# A terms list that starts with a UTF-8 byte order mark: its first term still counts.
+BOMT="$TMP/bom.txt"; printf '\357\273\277%s\n' zorbleflux >"$BOMT"
+run 2 "public: a terms list starting with a BOM: the first term blocks" "$PUB" \
+  SYG_PRIVATE_TERMS_FILE="$BOMT" -- "git commit -m 'add zorbleflux'"
 
 # =============================================================================
 # Public: lines of the commit being made
@@ -191,6 +208,56 @@ assert_out "message names the commit diff by sha only" present "matched in: comm
 git -C "$PLINE" push -q origin main 2>/dev/null
 run 0 "push: the same commit once already pushed" "$PLINE" "${T[@]}" -- \
   "git push origin main"
+# --tags counts every tag as a source; HEAD (main) here is clean, so only the
+# tag's unpushed commit can block (--ta is git's prefix of --tags).
+PTAG="$TMP/ptag"; mkrepo "$PTAG" true
+git -C "$PTAG" checkout -q -b side
+git -C "$PTAG" commit -q --allow-empty -m "side zorbleflux"
+git -C "$PTAG" tag v1
+git -C "$PTAG" checkout -q main
+run 0 "push: HEAD alone is clean (control for --tags)" "$PTAG" "${T[@]}" -- \
+  "git push origin main"
+run 2 "push: git push origin --ta counts a tag's unpushed commit" "$PTAG" "${T[@]}" -- \
+  "git push origin --ta"
+assert_out "tag's commit message names the commit by sha" present "matched in: commit "
+run 2 "push: git push origin --tags counts a tag's unpushed commit" "$PTAG" "${T[@]}" -- \
+  "git push origin --tags"
+# A refspec's destination is text the session sees before git runs (kind: the
+# command text). A delete (':name', or the name after --delete) is not a new name.
+run 2 "push: refspec destination holding the term" "$PUB" "${T[@]}" -- \
+  "git push origin zorbleflux-topic"
+run 0 "push: the same refspec from a repo not marked public" "$PRIV" "${T[@]}" -- \
+  "git push origin zorbleflux-topic"
+run 2 "push: refspec src:dst with the term on the destination" "$PUB" "${T[@]}" -- \
+  "git push origin clean:zorbleflux-x"
+run 2 "push: +src:dst with the term on the destination" "$PUB" "${T[@]}" -- \
+  "git push origin +clean:zorbleflux-x"
+run 0 "push: --delete <term name> passes" "$PUB" "${T[@]}" -- \
+  "git push origin --delete zorbleflux-topic"
+run 0 "push: :<term name> deletion passes" "$PUB" "${T[@]}" -- \
+  "git push origin :zorbleflux-topic"
+run 0 "push: --del <term name> (prefix of --delete) passes" "$PUB" "${T[@]}" -- \
+  "git push origin --del zorbleflux-topic"
+run 0 "push: -d <term name> passes" "$PUB" "${T[@]}" -- \
+  "git push origin -d zorbleflux-topic"
+# git permutes options: a --delete after the names deletes them all; -d counts
+# inside a short cluster (-fd); -od is -o with the value d, not a delete; the
+# last of --delete and --no-delete wins.
+run 0 "push: a trailing --delete passes" "$PUB" "${T[@]}" -- \
+  "git push origin zorbleflux-topic --delete"
+run 0 "push: a trailing -d passes" "$PUB" "${T[@]}" -- \
+  "git push origin zorbleflux-topic -d"
+run 0 "push: -fd (d in a cluster) passes" "$PUB" "${T[@]}" -- \
+  "git push -fd origin zorbleflux-topic"
+run 2 "push: -od (o takes d as its value) is not a delete: blocks" "$PUB" "${T[@]}" -- \
+  "git push -od origin zorbleflux-topic"
+run 2 "push: --delete then --no-delete: the last wins, blocks" "$PUB" "${T[@]}" -- \
+  "git push origin --delete --no-delete zorbleflux-topic"
+# An anchored term matches the short name of a refs/heads/ destination, as the
+# pre-push scans it.
+ANCH="$TMP/anch.txt"; printf '%s\n' '^zorbleflux' >"$ANCH"
+run 2 "push: anchored term matches the short name of refs/heads/<term>-x" "$PUB" \
+  SYG_PRIVATE_TERMS_FILE="$ANCH" -- "git push origin HEAD:refs/heads/zorbleflux-x"
 
 # =============================================================================
 # Directory tracking
@@ -499,6 +566,24 @@ run 0 "pre-push active in a repo not marked public: unchanged (not checked)" "$P
 run 0 "no install: git push --no-verify passes" "$PUB" "${T[@]}" -- "git push --no-verify origin main"
 run 0 "husky repo with the install: git push --no-verify passes" "$HUSKY" "${T[@]}" "${AC[@]}" -- \
   "git push --no-verify origin main"
+# Where the pre-push is in force it owns the text of a push: the text guard
+# stands down for a literal refspec, and the pre-push reads the new ref exactly.
+# With the pre-push off, the text guard still names the destination.
+run 0 "pre-push owns the text: a new term-named ref passes the text guard" "$PUB" \
+  SYG_PRIVATE_TERMS_FILE="$TERMS" GIT_CONFIG_GLOBAL="$ACTIVE" -- \
+  "git push origin zorbleflux-topic"
+run 2 "pre-push off: the text guard names a new term-named ref (positive control)" "$PUB" \
+  SYG_PRIVATE_TERMS_FILE="$TERMS" GIT_CONFIG_GLOBAL=/dev/null -- \
+  "git push origin zorbleflux-topic"
+# The stand-down needs the same terms file in the global config: a pre-push
+# with another terms file does not own this terms file's text.
+printf '%s\n' 'quennith' >"$TMP/other-terms.txt"
+OTHERG="$TMP/gother"
+printf '[core]\n\thooksPath = %s\n[seyag]\n\tprivateTermsFile = %s\n' "$HOOKS_DIR" "$TMP/other-terms.txt" >"$OTHERG"
+run 2 "pre-push with a different global terms file does not stand down" "$PUB" \
+  SYG_PRIVATE_TERMS_FILE="$TERMS" GIT_CONFIG_GLOBAL="$OTHERG" -- \
+  "git push origin zorbleflux-topic"
+
 # From here on T carries the install, so each case runs where the hook is in force.
 T=(SYG_PRIVATE_TERMS_FILE="$TERMS" GIT_CONFIG_GLOBAL="$ACTIVE")
 run 2 "block: git push --no-verify" "$PUB" "${T[@]}" -- "git push --no-verify origin main"

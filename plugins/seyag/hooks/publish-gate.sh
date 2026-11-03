@@ -23,7 +23,24 @@
 #     `--input` while the WHOLE command text holds `"private": false` or
 #     `"visibility": "public"` (case-insensitive, quotes optional or
 #     backslash-escaped: the stdin body of a here-string, heredoc,
-#     `echo … |` or `jq -n '{private:false}' |` pipe).
+#     `echo … |` or `jq -n '{private:false}' |` pipe);
+#   - `gh api` creates: a POST (explicit, or a field with no method) to
+#     `user/repos`, `orgs/O/repos` or `repos/O/T/generate`. The test differs
+#     from the PATCH rule on purpose: REST's `private` defaults to false on all
+#     three, so a create is a publish unless a field says `private=true` (on
+#     any of the three), or `visibility=private` or `visibility=internal` on
+#     `orgs/O/repos` only (the one endpoint whose REST parameters list
+#     `visibility`; `user/repos` and `generate` ignore it), and nothing says
+#     `private=false` or `visibility=public`. No field means public here, where
+#     no field means no change for a PATCH. With `--input`, gh sends the file as
+#     the body and the fields go to the query string, so the fields count for
+#     nothing: a named file (`--input F`, `--input=F`) is never visible, so it is
+#     a publish and its target is unresolvable; `--input -` gets the same test on
+#     the command text. The target is `orgs/O/repos` with a literal `name=N` (O
+#     from the path) and `repos/O/T/generate` with a literal `owner=O2` and
+#     `name=N`; any other create (`user/repos` names the authenticated user,
+#     which only a network call could say), a placeholder, a `$` or backtick, or
+#     a missing or repeated name or owner is UNRESOLVABLE.
 # WHERE COMMANDS ARE FOUND, in EXECUTION order: the splitter's top-level
 # pipelines; a wrapper's string (`bash -c '…'`, `eval "…"`, …) right after
 # the pipeline that runs it; a command substitution (`$(…)` or backticks,
@@ -98,6 +115,17 @@
 #     a file read) passes too.
 #   - `--public=false` (a pflag boolean spelled with a value) is read as a
 #     publish — an accepted over-block.
+#   - `gh api` creates (`user/repos`, `orgs/O/repos`, `repos/O/T/generate`)
+#     are judged a publish without a visible `private=true` (or
+#     `visibility=private`/`internal` on `orgs/O/repos`), so a create that the
+#     account's own default would make private is blocked too: that default is
+#     not read.
+#   - With `--input -`, a keep word anywhere in the command text vouches for the
+#     stdin body (the whole-text read): a `"private": true` in an echo or a
+#     comment counts, though it may not be the body. Not narrowed further.
+#   - `-f private=true` sends a string, not a boolean; this is not run against
+#     the API, so whether GitHub reads it as true is not checked here (`-F`
+#     sends a boolean).
 #   - `gh api graphql` mutations are not inspected; a `GH_REPO` exported by
 #     an EARLIER Bash tool call is invisible; the other sibling gaps about
 #     subshell scope, run-time values and stdin-fed operands apply here too.
@@ -205,6 +233,13 @@ DEFAULT_FLAG_TABLE = _compile_table([], INHERITED)
 REPO_ENDPOINT_RE = re.compile(
     r"^(?:https://api\.github\.com/)?/?repos/([^/]+)/([^/?]+)(?:/)?(?:\?.*)?$"
 )
+# The three REST creates: the authenticated user's, an org's, and a template's
+# generate. The same host, slash and query tolerance as REPO_ENDPOINT_RE.
+CREATE_ENDPOINT_RE = re.compile(
+    r"^(?:https://api\.github\.com/)?/?"
+    r"(?:user/repos|orgs/(?P<org>[^/?]+)/repos|repos/(?P<tpl_owner>[^/?]+)/[^/?]+/generate)"
+    r"(?:/)?(?:\?.*)?$"
+)
 
 
 def flag_table(operands):
@@ -223,11 +258,12 @@ def flag_table(operands):
 def parse_gh_args(words):
     """words = argv[1:] of a (post-unwrap) gh invocation. Returns
     (repo_flag, operands, method, any_field, field_values, visibility,
-    public_bool, input_given), where any_field means a field-family flag of
+    public_bool, input_given, input_values), where any_field means a field-family flag of
     the current subcommand's table was given, field_values lists the
     `-f`/`-F` k=v values, visibility is the `--visibility` value, public_bool
-    means a boolean `-p`/`--public` was given, and input_given means an
-    `--input` (any value) was given."""
+    means a boolean `-p`/`--public` was given, input_given means an
+    `--input` (any value) was given, and input_values lists the value of each
+    `--input` (None when it has none)."""
     repo_flag = None
     operands = []
     method = None
@@ -236,6 +272,7 @@ def parse_gh_args(words):
     visibility = None
     public_bool = False
     input_given = False
+    input_values = []
 
     def record(long_name, value):
         nonlocal repo_flag, method, any_field, visibility, input_given
@@ -249,6 +286,7 @@ def parse_gh_args(words):
             any_field = True
             if long_name == "--input":
                 input_given = True
+                input_values.append(value)
             elif value is not None:
                 field_values.append(value)
 
@@ -303,7 +341,7 @@ def parse_gh_args(words):
         operands.append(w)
         i += 1
     return (repo_flag, operands, method, any_field, field_values, visibility,
-            public_bool, input_given)
+            public_bool, input_given, input_values)
 
 
 def field_flips_public(value):
@@ -317,6 +355,21 @@ def field_flips_public(value):
     return (k == "private" and v == "false") or (k == "visibility" and v == "public")
 
 
+def field_keeps_private(value, org_endpoint):
+    """True when a `-f`/`-F` value keeps a create private: `private=true` on
+    any of the three endpoints, and `visibility=private|internal` only on
+    `POST orgs/O/repos`, the one endpoint whose REST parameters list it
+    (`user/repos` and `generate` ignore it). Keys and values are lowercased
+    but not stripped: `private= true` is not a keep."""
+    key, eq, val = value.partition("=")
+    if not eq:
+        return False
+    k = key.lower()
+    v = val.lower()
+    return (k == "private" and v == "true") or (
+        org_endpoint and k == "visibility" and v in ("private", "internal"))
+
+
 # The JSON form of the same flip, for an `--input` body visible in the command
 # text (case-insensitive, like the field form). Quotes around the key and the
 # value are optional and may be backslash-escaped, so a double-quoted shell
@@ -328,6 +381,13 @@ INPUT_BODY_FLIP_RE = re.compile(
     r'|(?<!\w)\\*"?visibility\\*"?\s*:\s*\\*"?public(?!\w)',
     re.IGNORECASE,
 )
+# The keep-private forms of the same body, read the way INPUT_BODY_FLIP_RE
+# reads the flip. `visibility` keeps a create private only on the org endpoint
+# (see field_keeps_private), so the two forms are tested apart.
+INPUT_BODY_KEEP_PRIVATE_RE = re.compile(
+    r'(?<!\w)\\*"?private\\*"?\s*:\s*true(?!\w)', re.IGNORECASE)
+INPUT_BODY_KEEP_VISIBILITY_RE = re.compile(
+    r'(?<!\w)\\*"?visibility\\*"?\s*:\s*\\*"?(?:private|internal)(?!\w)', re.IGNORECASE)
 
 
 def gh_publication(unwrapped_argv):
@@ -340,7 +400,7 @@ def gh_publication(unwrapped_argv):
     # stay untouched.
     words = strip_redirections(unwrapped_argv[1:])
     (repo_flag, operands, method, any_field, field_values, visibility, public,
-     input_given) = parse_gh_args(words)
+     input_given, input_values) = parse_gh_args(words)
     if not operands:
         return None
     head = operands[0]
@@ -366,6 +426,10 @@ def gh_publication(unwrapped_argv):
             return None
         return {"gist": True, "api": False, "kind": "gh gist create"}
     if head == "api" and len(operands) >= 2:
+        create = CREATE_ENDPOINT_RE.match(operands[1])
+        if create:
+            return create_publication(operands[1], create, method, any_field,
+                                      field_values, input_values)
         m = REPO_ENDPOINT_RE.match(operands[1])
         if not m:
             return None
@@ -395,6 +459,75 @@ def gh_publication(unwrapped_argv):
     return None
 
 
+def literal_field(field_values, key):
+    """The one literal value of `key=value` among the field words, else None:
+    absent, repeated, empty, read from a file (`@`), holding `$` or a backtick,
+    or holding braces (a placeholder)."""
+    vals = [v[len(key) + 1:] for v in field_values if v.startswith(key + "=")]
+    if len(vals) != 1:
+        return None
+    val = vals[0]
+    if not val or val.startswith("@") or any(c in val for c in "${}`"):
+        return None
+    return val
+
+
+def create_target(endpoint, match, field_values):
+    """The (owner, name) a repo create names, or UNRESOLVABLE. `orgs/O/repos`
+    takes O from the path; `repos/O/T/generate` takes `owner=O2` from the body
+    (the template's owner is not the new repo's); both take a literal `name=N`.
+    `user/repos` names the authenticated user, which only a network call could
+    say, so it is UNRESOLVABLE; so is a placeholder, a `$` or backtick, or a
+    name with a slash."""
+    if "{" in endpoint or "$" in endpoint or "`" in endpoint:
+        return UNRESOLVABLE
+    org = match.group("org")
+    if org is None and match.group("tpl_owner") is None:
+        return UNRESOLVABLE
+    owner = org if org is not None else literal_field(field_values, "owner")
+    name = literal_field(field_values, "name")
+    if not owner or not name or "/" in name:
+        return UNRESOLVABLE
+    return (owner, name)
+
+
+def create_publication(endpoint, match, method, any_field, field_values, input_values):
+    """A repo create through `gh api`, judged as a publish unless the command
+    says private. REST's `private` defaults to false on all three endpoints,
+    so no field means public: the opposite of the PATCH rule above, where no
+    field means no change. A create is a POST (explicit, or a field with no
+    method); GET, PATCH and PUT are not creates.
+
+    With --input, gh sends the file as the body and the field flags go to the
+    query string, so the fields neither keep, flip nor name the repo. A named
+    file is never visible: never kept, and the target is unresolvable. Only
+    `--input -` (stdin) is read, through the command text (the whole-text read,
+    a known gap in the header)."""
+    explicit = method.upper() if method else None
+    is_post = (explicit == "POST") if explicit else any_field
+    if not is_post:
+        return None
+    org = match.group("org") is not None
+    if input_values:
+        stdin = all(v == "-" for v in input_values)
+        keeps = stdin and (INPUT_BODY_KEEP_PRIVATE_RE.search(cmd) is not None
+                           or (org and INPUT_BODY_KEEP_VISIBILITY_RE.search(cmd) is not None))
+        flips = stdin and INPUT_BODY_FLIP_RE.search(cmd) is not None
+        target = UNRESOLVABLE
+    else:
+        keeps = any(field_keeps_private(v, org) for v in field_values)
+        flips = any(field_flips_public(v) for v in field_values)
+        target = create_target(endpoint, match, field_values)
+    if keeps and not flips:
+        return None
+    return {
+        "gist": False, "api": True,
+        "kind": f"gh api {explicit or 'POST'} {endpoint}",
+        "create": target,
+        "repo_flag": None,
+    }
+
+
 def parse_repo_value(value):
     """(owner, repo) from a -R/--repo/GH_REPO value in any form gh accepts —
     `OWNER/REPO`, `HOST/OWNER/REPO`, a `scheme://[user@]host/o/r` URL
@@ -422,6 +555,8 @@ def parse_repo_value(value):
 # never bypassable.
 UNRESOLVABLE = ("\0unresolvable", "\0unresolvable")
 UNRESOLVABLE_DISPLAY = "an unresolvable target (pass the literal owner/repo to name it)"
+# A create-only block: there is no literal owner/repo the owner could pass.
+CREATE_UNRESOLVABLE_DISPLAY = "an unresolvable target"
 
 
 def explicit_target(value):
@@ -593,6 +728,7 @@ def usable_git_path(value):
 class Context:
     def __init__(self):
         self.blocking = []  # (kind, gist?, {display owner/repo}, unresolvable?)
+        self.unresolvable_by = []  # per unresolvable block: is it a repo create?
         self.visited = set()  # State snapshots the text passes through
         self.judged = set()  # argv tuples judged in execution order
         self.leftovers = []  # (span, depth) not placed at a command
@@ -630,7 +766,10 @@ def judge(argv, unwrapped, state, ctx):
         ctx.blocking.append((sub["kind"], True, set(), False))
         return
 
-    if sub["api"]:
+    if sub["api"] and "create" in sub:
+        # A repo create names its own target: no GH_REPO, no remotes.
+        targets = [sub["create"]]
+    elif sub["api"]:
         o, r = sub["endpoint"]
         o_ph, r_ph = o == "{owner}", r == "{repo}"
         gh_repo = explicit_target(env.get("GH_REPO"))
@@ -677,6 +816,8 @@ def judge(argv, unwrapped, state, ctx):
     if not displays and not unresolvable:
         return
     ctx.blocking.append((sub["kind"], False, displays, unresolvable))
+    if unresolvable:
+        ctx.unresolvable_by.append("create" in sub)
 
 
 def run_command(argv, state, ctx):
@@ -745,15 +886,21 @@ for _, g, ds, u in ctx.blocking:
 # names none either (never bypassable).
 for d in displays:
     slugs.add(d.lower())
+create_unresolvable = any(ctx.unresolvable_by)
+other_unresolvable = not all(ctx.unresolvable_by)
 if gist and not displays:
     displays.add("a gist")  # a gist has no repo target to name
 elif unresolvable and not displays:
-    displays.add(UNRESOLVABLE_DISPLAY)
+    # A create-only block names no literal owner/repo to pass: say what it is.
+    displays.add(UNRESOLVABLE_DISPLAY if other_unresolvable
+                 else CREATE_UNRESOLVABLE_DISPLAY)
 print(" ".join(kind_label.split()))
 print("1" if gist else "0")
 print("1" if unresolvable else "0")
 print(" ".join(", ".join(sorted(displays)).split()))
 print(":".join(sorted(slugs)))
+print("1" if create_unresolvable else "0")
+print("1" if other_unresolvable else "0")
 PYEOF
 ) || exit 0
 
@@ -764,6 +911,8 @@ GIST=$(printf '%s\n' "$RESULT" | sed -n '2p')
 UNRESOLVABLE=$(printf '%s\n' "$RESULT" | sed -n '3p')
 DISPLAYS=$(printf '%s\n' "$RESULT" | sed -n '4p')
 SLUGS=$(printf '%s\n' "$RESULT" | sed -n '5p')
+CREATE_UNRES=$(printf '%s\n' "$RESULT" | sed -n '6p')
+OTHER_UNRES=$(printf '%s\n' "$RESULT" | sed -n '7p')
 
 # The unblock lives in the SESSION environment the hook process runs in —
 # never in the command text (a prefix assignment on the gh command is not a
@@ -801,8 +950,19 @@ else
 fi
 
 {
+# A create-only unresolvable block has no slug to set: the unblock clause would
+# promise what the paragraph below says cannot happen.
+if [ "$CREATE_UNRES" = 1 ] && [ "$OTHER_UNRES" = 0 ] && [ -z "$SLUGS" ] && [ "$GIST" = 0 ]; then
+echo "blocked: $KIND would make $DISPLAYS public. Run the going-public checklist (seyag:going-public) for it first."
+else
 echo "blocked: $KIND would make $DISPLAYS public. Run the going-public checklist (seyag:going-public) for it first; on pass set SYG_PUBLISH_CHECKED=$SLUG_HINT (colon-list ok; any non-empty value for a gist) (it is read from the session's environment at start: the owner restarts the session with it exported, or runs the command herself with \`!\`)."
-if [ "$UNRESOLVABLE" = 1 ]; then
+fi
+if [ "$CREATE_UNRES" = 1 ]; then
+cat <<'EOF'
+A create through gh api names no target here, and SYG_PUBLISH_CHECKED cannot unblock it: use gh repo create OWNER/NAME --public, or orgs/<org>/repos with a literal name=, or repos/<owner>/<template>/generate with a literal owner= and name=, and no --input.
+EOF
+fi
+if [ "$OTHER_UNRES" = 1 ]; then
 cat <<'EOF'
 The target can't be read from the command text (a variable, a substitution,
 an unparsable value, or nothing to resolve): re-run with the literal
