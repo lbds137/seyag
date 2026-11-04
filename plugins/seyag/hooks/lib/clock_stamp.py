@@ -529,11 +529,15 @@ def check(payload):
             old = old if isinstance(old, str) else ""
             new_s = new_text if isinstance(new_text, str) else ""
             blocks += edit_blocks(state, old, new_s, replace_all, now, names)
-            if old and state.text is not None and old in state.text:
-                state = Text(text=replaced(state.text, old, new_s, replace_all))
-            elif not old and not state.text:
-                # An empty old_string on a missing or empty file creates it: its text is the new text.
-                state = Text(text=new_s)
+            if tool == "MultiEdit":
+                # Only MultiEdit consults this text again (its later edits are judged
+                # against it); a single Edit has no later pair, so the running text is
+                # never rebuilt for it.
+                if old and state.text is not None and old in state.text:
+                    state = Text(text=replaced(state.text, old, new_s, replace_all))
+                elif not old and not state.text:
+                    # An empty old_string on a missing or empty file creates it: its text is the new text.
+                    state = Text(text=new_s)
     if not blocks:
         return None
     return render(blocks, now)
