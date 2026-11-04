@@ -1,0 +1,147 @@
+#!/bin/bash
+# Fixture check for plugins/seyag/bin/week-burn-window, the reference helper for
+# CLAUDE_USAGE_WEEK_RESERVE_CMD: it prints 99 once the time to the weekly reset fits inside the
+# burn window (rate from the readings log's slope, plus a margin), and the hold reserve —
+# CLAUDE_USAGE_WEEK_RESERVE when that is an integer 1-99, else 75 — on every other decided path
+# (far reset, no log, unparsable or stale readings, out-of-range floats like 1e999, no usable
+# rate, past or missing reset, week >= 100), quietly and with exit 0. A set-but-invalid
+# SYG_WEEK_BURN_* override is
+# crash-class: exit 1, nothing on stdout. Fixture readings live under a probe-local
+# XDG_STATE_HOME and the clock is pinned with SYG_WEEK_BURN_NOW, so the real state log and the
+# real time are never touched.
+# Usage: tests/week-burn-window.probe.sh   (from anywhere)
+
+set -uo pipefail
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+WW=${WW_BIN:-"$REPO/plugins/seyag/bin/week-burn-window"}
+fail=0
+ok() { echo "ok:   $1"; }
+bad() { echo "FAIL: $1"; fail=1; }
+
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+mkdir -p "$tmp/state/claude-usage"
+log="$tmp/state/claude-usage/readings.jsonl"
+T=1790400000 # fixture clock; every row's epoch and reset are written relative to it
+
+rd() { printf '{"epoch":%s,"five_hour_pct":0,"weekly_pct":%s,"weekly_resets_at":%s,"ts":"fixture"}\n' "$1" "$2" "$3"; }
+
+# ww <stdout want> <label> [VAR=v ...]: run the helper against the fixture state at the test
+# clock; every decided path must print exactly one integer and exit 0.
+ww() {
+    local want=$1 label=$2; shift 2
+    out=$(env XDG_STATE_HOME="$tmp/state" SYG_WEEK_BURN_NOW="$T" "$@" "$WW"); rc=$?
+    [ "$rc" = 0 ] && [ "$out" = "$want" ] && ok "$label (got $out)" || bad "$label: rc=$rc out=[$out] want=[$want]"
+}
+
+# burn fixture: week 80->90 over 2 h (slope 5 %/h), reset inside the burn window
+# (100-90)/5 h + 30 min = 9000 s for the default margin.
+{ rd $((T - 7200)) 80 $((T + 5400)); rd $((T - 3600)) 85 $((T + 5400)); rd "$T" 90 $((T + 5400)); } > "$log"
+ww 99 "burn-on: converging week near the reset prints 99"
+
+{ rd $((T - 7200)) 80 $((T + 20000)); rd $((T - 3600)) 85 $((T + 20000)); rd "$T" 90 $((T + 20000)); } > "$log"
+ww 75 "hold-when-far: reset 20000s out sits beyond the 9000s window"
+
+rm -f "$log"
+ww 75 "no log: holds at the default 75"
+
+: > "$log"
+ww 75 "empty log: no parsable rows holds"
+
+{ echo 'not json at all'; echo '{"epoch":"x"}'; echo '[]'; rd $((T - 3600)) 85 $((T + 20000)); echo '{"epoch":1}'; rd "$T" 90 $((T + 20000)); } > "$log"
+ww 75 "mixed parsable/unparsable: garbage skipped, parsable rows hold (far reset)"
+
+{ echo 'garbage first'; rd $((T - 7200)) 80 $((T + 5400)); echo '{"weekly_pct":90}'; rd $((T - 3600)) 85 $((T + 5400)); rd "$T" 90 $((T + 5400)); } > "$log"
+ww 99 "mixed parsable/unparsable: garbage skipped, parsable rows still burn"
+
+# Out-of-range floats parse as JSON (1e999 -> inf) but crash int() with OverflowError outside
+# the skip/keep tuples: they must degrade like any other untrusted row — hold quietly, exit 0,
+# nothing on stderr, never a traceback.
+{ printf '{"epoch":1e999,"five_hour_pct":0,"weekly_pct":90,"weekly_resets_at":%s,"ts":"fixture"}\n' "$((T + 5400))"; } > "$log"
+out=$(env XDG_STATE_HOME="$tmp/state" SYG_WEEK_BURN_NOW="$T" "$WW" 2>"$tmp/err"); rc=$?
+[ $rc = 0 ] && [ "$out" = 75 ] && [ ! -s "$tmp/err" ] \
+    && ok "epoch 1e999 (inf): the row is skipped, no parsable rows holds quietly" \
+    || bad "epoch 1e999: rc=$rc out=[$out] err=[$(cat "$tmp/err")]"
+{ printf '{"epoch":%s,"five_hour_pct":0,"weekly_pct":90,"weekly_resets_at":1e999,"ts":"fixture"}\n' "$T"; } > "$log"
+out=$(env XDG_STATE_HOME="$tmp/state" SYG_WEEK_BURN_NOW="$T" "$WW" 2>"$tmp/err"); rc=$?
+[ $rc = 0 ] && [ "$out" = 75 ] && [ ! -s "$tmp/err" ] \
+    && ok "weekly_resets_at 1e999 (inf): the row is kept with the reset unknown, holds quietly" \
+    || bad "weekly_resets_at 1e999: rc=$rc out=[$out] err=[$(cat "$tmp/err")]"
+
+{ rd $((T - 25200)) 90 $((T + 5400)); } > "$log"
+ww 75 "stale latest row (7 h old): holds"
+
+{ rd $((T - 7200)) 80 $((T + 33000)); rd "$T" 90 $((T + 33000)); } > "$log"
+ww 75 "SYG_WEEK_BURN_RATE unset: slope 5 %/h window (9000s) < 33000s to reset, holds"
+ww 99 "SYG_WEEK_BURN_RATE=0.1 slows the window past the reset and flips to burn" SYG_WEEK_BURN_RATE=0.1
+
+# The slope needs its window: fewer than 2 rows in it, or fewer than 30 min between the window's
+# first and last row, is no usable rate — hold, even with a valid reset already inside where a
+# guessed window would fall. (Rows (a)-(c) pin this guard: bypassed, (a)/(c) divide by zero and
+# (b) burns on a 600 s span.)
+{ rd "$T" 90 $((T + 5400)); } > "$log"
+ww 75 "(a) one fresh row, no other row in the 6 h slope window: holds"
+
+{ rd $((T - 600)) 80 $((T + 2000)); rd "$T" 90 $((T + 2000)); } > "$log"
+ww 75 "(b) two fresh rows spanning 600 s < 1800 s: holds despite the reset inside a guessed window"
+
+{ rd $((T - 25000)) 80 $((T + 20000)); rd "$T" 90 $((T + 5400)); } > "$log"
+ww 75 "(c) latest row fresh but every other row older than 6 h: the slope window holds one row"
+
+{ rd $((T - 7200)) 80 $((T + 7260)); rd $((T - 3600)) 85 $((T + 7260)); rd "$T" 90 $((T + 7260)); } > "$log"
+ww 75 "SYG_WEEK_BURN_MARGIN_MIN=0 shrinks the window to 7200s: reset 7260s out holds" SYG_WEEK_BURN_MARGIN_MIN=0
+ww 99 "SYG_WEEK_BURN_MARGIN_MIN=30 (default) covers the same reset" SYG_WEEK_BURN_MARGIN_MIN=30
+
+# Boundary: reset exactly at the window (9000 s at week 90, slope 5 %/h, margin 30 min): <= burns.
+{ rd $((T - 7200)) 80 $((T + 9000)); rd $((T - 3600)) 85 $((T + 9000)); rd "$T" 90 $((T + 9000)); } > "$log"
+ww 99 "boundary: time-to-reset exactly the window burns (<="
+
+# A raw slope above 100 %/h clamps to 100 before the window arithmetic; the >100 branch must
+# still decide, never hold. This fixture's raw slope is 110 %/h (week 40->95 over 30 min):
+# clamped the window is 1980 s, unclamped it would be ~1964 s — the reset at 1800 s burns under
+# BOTH, so the verdict is invariant to the clamp's exact value and the row pins the clamp path
+# (a >100 rate decides), not the burn arithmetic.
+{ rd $((T - 1800)) 40 $((T + 1800)); rd "$T" 95 $((T + 1800)); } > "$log"
+ww 99 "raw slope 110 %/h clamps to 100: reset 1800 s out sits inside both windows, burns"
+
+{ rd $((T - 7200)) 90 $((T + 1000)); rd "$T" 85 $((T + 1000)); } > "$log"
+ww 75 "rate <= 0 (falling week): holds even with the reset near"
+
+{ rd $((T - 3600)) 99 $((T + 1800)); rd "$T" 100 $((T + 1800)); } > "$log"
+ww 75 "week 100: holds even with the reset inside the (empty-tail) window"
+
+{ rd $((T - 7200)) 80 $((T - 100)); rd $((T - 3600)) 85 $((T - 100)); rd "$T" 90 $((T - 100)); } > "$log"
+ww 75 "reset already past: holds"
+
+{ printf '{"epoch":%s,"weekly_pct":90}\n' "$T"; } > "$log"
+ww 75 "weekly_resets_at missing: holds"
+
+# A null weekly_resets_at keeps the row (usage-sweep's reader convention) with the reset
+# unknown. The row's presence matters: drop it and the two earlier rows (span exactly 1800 s,
+# slope 30 %/h, window 600 s + 1800 s margin) would burn on the 2400 s reset instead.
+{ rd $((T - 3600)) 80 $((T + 2400)); rd $((T - 1800)) 95 $((T + 2400)); \
+  printf '{"epoch":%s,"five_hour_pct":0,"weekly_pct":90,"weekly_resets_at":null,"ts":"fixture"}\n' "$T"; } > "$log"
+ww 75 "null weekly_resets_at on the latest row: row kept, reset unknown, holds"
+
+{ rd $((T - 7200)) 80 $((T + 20000)); rd $((T - 3600)) 85 $((T + 20000)); rd "$T" 90 $((T + 20000)); } > "$log"
+ww 82 "hold value follows CLAUDE_USAGE_WEEK_RESERVE=82" CLAUDE_USAGE_WEEK_RESERVE=82
+ww 75 "hold value ignores a non-integer CLAUDE_USAGE_WEEK_RESERVE=abc" CLAUDE_USAGE_WEEK_RESERVE=abc
+
+out=$(env XDG_STATE_HOME="$tmp/state" SYG_WEEK_BURN_NOW=abc "$WW" 2>"$tmp/err"); rc=$?
+[ $rc = 1 ] && [ -z "$out" ] && grep -q "SYG_WEEK_BURN_NOW='abc' is not an epoch" "$tmp/err" \
+    && ok "set-but-invalid SYG_WEEK_BURN_NOW: crash-class exit 1, nothing on stdout" \
+    || bad "SYG_WEEK_BURN_NOW=abc: rc=$rc out=[$out] err=[$(cat "$tmp/err")]"
+out=$(env XDG_STATE_HOME="$tmp/state" SYG_WEEK_BURN_RATE=lots "$WW" 2>"$tmp/err"); rc=$?
+[ $rc = 1 ] && [ -z "$out" ] && grep -q "SYG_WEEK_BURN_RATE='lots' is not a number" "$tmp/err" \
+    && ok "set-but-invalid SYG_WEEK_BURN_RATE: crash-class exit 1, nothing on stdout" \
+    || bad "SYG_WEEK_BURN_RATE=lots: rc=$rc out=[$out] err=[$(cat "$tmp/err")]"
+out=$(env XDG_STATE_HOME="$tmp/state" SYG_WEEK_BURN_RATE=0 "$WW" 2>"$tmp/err"); rc=$?
+[ $rc = 1 ] && [ -z "$out" ] && grep -q "SYG_WEEK_BURN_RATE='0' is not > 0" "$tmp/err" \
+    && ok "SYG_WEEK_BURN_RATE=0 (numeric, not > 0): crash-class exit 1" \
+    || bad "SYG_WEEK_BURN_RATE=0: rc=$rc out=[$out] err=[$(cat "$tmp/err")]"
+out=$(env XDG_STATE_HOME="$tmp/state" SYG_WEEK_BURN_MARGIN_MIN=-5 "$WW" 2>"$tmp/err"); rc=$?
+[ $rc = 1 ] && [ -z "$out" ] && grep -q "SYG_WEEK_BURN_MARGIN_MIN='-5' is not an integer >= 0" "$tmp/err" \
+    && ok "set-but-invalid SYG_WEEK_BURN_MARGIN_MIN: crash-class exit 1" \
+    || bad "SYG_WEEK_BURN_MARGIN_MIN=-5: rc=$rc out=[$out] err=[$(cat "$tmp/err")]"
+
+exit $fail
