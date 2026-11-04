@@ -8,7 +8,8 @@
 # usage-sweep --points consumes the readings log it writes. Also: the caller's model read from its
 # session transcript, and --json's scoped string escaping. Also: --all's three lane lines and their
 # degrades, --json's lane fields, OpenRouter dollars read-only from the statusline's credits cache,
-# per-deployment z.ai week reserve overrides (CLAUDE_USAGE_ZAI_WEEK_RESERVE_CMD / _WEEK_RESERVE),
+# per-deployment z.ai week reserve overrides (CLAUDE_USAGE_ZAI_WEEK_RESERVE_CMD / _WEEK_RESERVE)
+# and the plan-week ones (CLAUDE_USAGE_WEEK_RESERVE_CMD / _WEEK_RESERVE, integer 1-99),
 # the extra-usage budget stop (SYG_EXTRA_USAGE_BUDGET_CMD / SYG_EXTRA_USAGE_BUDGET_USD), and the
 # gate's cache-age / missing-weekly-figure stop (meter=cache) and passed-reset rows.
 # Usage: tests/claude-usage.probe.sh   (from anywhere; never touches the real cache, settings or API)
@@ -95,6 +96,56 @@ out=$(run --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
 fixture 10 80 0
 CLAUDE_USAGE_WEEK_RESERVE=85 run --ok 90 2>/dev/null; [ $? = 0 ] && ok "week 80% with CLAUDE_USAGE_WEEK_RESERVE=85: passes" || bad "week reserve override: --ok should pass"
 CLAUDE_USAGE_WEEK_RESERVE=lots run --ok 90 2>/dev/null; [ $? = 1 ] && ok "week 80% with a non-integer reserve: default 75 gates" || bad "week reserve 'lots': --ok should fail"
+# The plan week's reserve can follow a deployment command: CLAUDE_USAGE_WEEK_RESERVE_CMD (trimmed
+# integer 1-99 under a 5 s timeout, wins in success and failure; the static CLAUDE_USAGE_WEEK_RESERVE
+# is only the fallback it names). Scoped to the plan --ok branch: non-gate runs never fork it.
+wr_note() { printf 'claude-usage: CLAUDE_USAGE_WEEK_RESERVE_CMD gave no usable reserve (exit %s); plan week reserve falls back to week_reserve (%s)\n%s' "$1" "$2" "$3"; }
+wr_ignored() { printf 'claude-usage: CLAUDE_USAGE_WEEK_RESERVE=%s ignored: not an integer 1-99; using the default 75\n%s' "$1" "$2"; }
+fixture 10 85 0
+out=$(run --ok 90 2>/dev/null); [ $? = 1 ] && ok "week 85% with no CMD and no static: default 75 gates" || bad "week 85% base shape: --ok should fail"
+out=$(CLAUDE_USAGE_WEEK_RESERVE_CMD='echo 99' run --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 0 ] && [ -z "$out" ] && [ "$err" = "claude-usage: --ok pass lane=anthropic meter=5h 5h=10%<90% week=85%<99% source=api" ] \
+    && ok "week 85% with CLAUDE_USAGE_WEEK_RESERVE_CMD='echo 99': passes with 99% verdict" \
+    || bad "plan CMD 99 pass: rc=$rc out=[$out] err=[$err]"
+plan_fail75="claude-usage: --ok FAIL lane=anthropic meter=week 5h=10%<90% week=85%>=75% source=api"
+for bad_plan_cmd in 'echo x' 'true' 'echo 0' 'echo 100'; do
+    out=$(CLAUDE_USAGE_WEEK_RESERVE_CMD="$bad_plan_cmd" run --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+    [ $rc = 1 ] && [ -z "$out" ] && [ "$err" = "$(wr_note 0 75 "$plan_fail75")" ] \
+        && ok "plan CMD invalid ($bad_plan_cmd): notes exit 0 and falls back to week_reserve (75)" \
+        || bad "plan CMD invalid ($bad_plan_cmd): rc=$rc out=[$out] err=[$err]"
+done
+# A digit string longer than the static clamps accept (8 chars) is unusable too — and must be
+# rejected by the length guard, not by the [-ge] comparison, which would print "integer
+# expected" on this script's stderr ahead of the note.
+out=$(CLAUDE_USAGE_WEEK_RESERVE_CMD='printf "123456789012345678901234567890\n"' run --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 1 ] && [ -z "$out" ] && [ "$err" = "$(wr_note 0 75 "$plan_fail75")" ] \
+    && ok "plan CMD prints 30 digits: over-length, notes (exit 0) and falls back to week_reserve (75)" \
+    || bad "plan CMD 30 digits: rc=$rc out=[$out] err=[$err]"
+out=$(CLAUDE_USAGE_WEEK_RESERVE_CMD="printf '99\n'; exit 3" run --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 1 ] && [ -z "$out" ] && [ "$err" = "$(wr_note 3 75 "$plan_fail75")" ] \
+    && ok "plan CMD exit 3 with output 99: notes (exit 3), falls back to week_reserve (75)" \
+    || bad "plan CMD exit 3: rc=$rc out=[$out] err=[$err]"
+t0=${EPOCHREALTIME%.*}
+out=$(timeout 9 env CLAUDE_USAGE_WEEK_RESERVE_CMD='sleep 30; echo 99' HOME="$tmp" XDG_CACHE_HOME="$tmp" CLAUDE_USAGE_MODEL=claude-opus-5-5 "$CU" --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+t1=${EPOCHREALTIME%.*}; elapsed=$((t1 - t0))
+[ $rc = 1 ] && [ "$elapsed" -le 6 ] && [ -z "$out" ] && [ "$err" = "$(wr_note 124 75 "$plan_fail75")" ] \
+    && ok "plan CMD 'sleep 30': the 5 s timeout cuts it (exit 124), verdict in ${elapsed}s" \
+    || bad "plan CMD timeout: rc=$rc elapsed=${elapsed}s err=[$err]"
+out=$(CLAUDE_USAGE_WEEK_RESERVE=90 CLAUDE_USAGE_WEEK_RESERVE_CMD='echo 99' run --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 0 ] && [ -z "$out" ] && [ "$err" = "claude-usage: --ok pass lane=anthropic meter=5h 5h=10%<90% week=85%<99% source=api" ] \
+    && ok "plan CMD wins over static CLAUDE_USAGE_WEEK_RESERVE=90 on success" \
+    || bad "plan CMD over static success: rc=$rc out=[$out] err=[$err]"
+out=$(CLAUDE_USAGE_WEEK_RESERVE=90 CLAUDE_USAGE_WEEK_RESERVE_CMD='echo x' run --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 0 ] && [ -z "$out" ] && [ "$err" = "$(wr_note 0 90 "claude-usage: --ok pass lane=anthropic meter=5h 5h=10%<90% week=85%<90% source=api")" ] \
+    && ok "plan CMD failure falls back to week_reserve (static 90), the note names it" \
+    || bad "plan CMD fallback to static 90: rc=$rc out=[$out] err=[$err]"
+fixture 10 80 0
+for bad_static in 0 100 abc; do
+    out=$(CLAUDE_USAGE_WEEK_RESERVE=$bad_static run --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+    [ $rc = 1 ] && [ -z "$out" ] && [ "$err" = "$(wr_ignored "$bad_static" "claude-usage: --ok FAIL lane=anthropic meter=week 5h=10%<90% week=80%>=75% source=api")" ] \
+        && ok "static CLAUDE_USAGE_WEEK_RESERVE=$bad_static: ignored with the note, default 75 gates" \
+        || bad "static $bad_static: rc=$rc out=[$out] err=[$err]"
+done
 # A stale cache whose refresh fails (no credentials in hermetic HOME) discloses its age on the verdict line.
 fixture 10 50 0; touch -d "@$(($(date +%s) - 600))" "$tmp/claude-statusline/usage.json"
 out=$(run --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
@@ -414,6 +465,10 @@ out=$(CLAUDE_USAGE_ZAI_WEEK_RESERVE_CMD='printf " \t099\n "' run --ok 90 2>"$tmp
 [ $rc = 0 ] && [ -z "$out" ] && [ "$err" = "claude-usage: --ok pass lane=zai meter=zai-5h 5h=10%<80% week=98%<99% source=api" ] \
     && ok "z.ai CMD trims outer whitespace and base-10 parses 099 (upper bound 99)" \
     || bad "z.ai CMD pad/099: rc=$rc out=[$out] err=[$err]"
+out=$(CLAUDE_USAGE_ZAI_WEEK_RESERVE_CMD='echo 123456789012345678901234567890' run --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 1 ] && [ -z "$out" ] && [ "$err" = "$(zwr_note 0 75 "claude-usage: --ok FAIL lane=zai meter=week 5h=10%<80% week=98%>=75% source=api")" ] \
+    && ok "z.ai CMD 30 digits: length guard rejects it before arithmetic, no stray builtin error" \
+    || bad "z.ai CMD 30 digits: rc=$rc out=[$out] err=[$err]"
 zai_stub api 10 1
 out=$(CLAUDE_USAGE_ZAI_WEEK_RESERVE_CMD='echo 1' run --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
 [ $rc = 1 ] && [ -z "$out" ] && [ "$err" = "claude-usage: --ok FAIL lane=zai meter=week 5h=10%<80% week=1%>=1% source=api" ] \
@@ -446,10 +501,17 @@ out=$(CLAUDE_USAGE_ZAI_WEEK_RESERVE=80 run --ok 90 2>"$tmp/err"); rc=$?; err=$(c
 [ $rc = 1 ] && [ -z "$out" ] && [ "$err" = "claude-usage: --ok FAIL lane=zai meter=week 5h=10%<80% week=85%>=80% source=api" ] \
     && ok "z.ai static CLAUDE_USAGE_ZAI_WEEK_RESERVE=80: fails with week=85%>=80% verdict" \
     || bad "z.ai static 80 fail: rc=$rc out=[$out] err=[$err]"
+zwr_ignored() { printf 'claude-usage: CLAUDE_USAGE_ZAI_WEEK_RESERVE=%s ignored: not an integer 1-99; using week_reserve (75)\n%s' "$1" "$2"; }
 out=$(CLAUDE_USAGE_ZAI_WEEK_RESERVE=7x run --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
-[ $rc = 1 ] && [ -z "$out" ] && [ "$err" = "$zai_fail75" ] \
-    && ok "z.ai static non-integer '7x': default week_reserve (75) applies" \
+[ $rc = 1 ] && [ -z "$out" ] && [ "$err" = "$(zwr_ignored 7x "$zai_fail75")" ] \
+    && ok "z.ai static non-integer '7x': note + default week_reserve (75) applies" \
     || bad "z.ai static 7x: rc=$rc out=[$out] err=[$err]"
+for bad_zai_static in 0 100; do
+    out=$(CLAUDE_USAGE_ZAI_WEEK_RESERVE=$bad_zai_static run --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+    [ $rc = 1 ] && [ -z "$out" ] && [ "$err" = "$(zwr_ignored "$bad_zai_static" "$zai_fail75")" ] \
+        && ok "z.ai static CLAUDE_USAGE_ZAI_WEEK_RESERVE=$bad_zai_static: ignored with the note, week_reserve (75) gates" \
+        || bad "z.ai static $bad_zai_static: rc=$rc out=[$out] err=[$err]"
+done
 out=$(timeout 5 env CLAUDE_USAGE_ZAI_WEEK_RESERVE_CMD='echo 98' HOME="$tmp" XDG_CACHE_HOME="$tmp" CLAUDE_USAGE_MODEL=claude-opus-5-5 "$CU" --wait 2>"$tmp/wait-zai.err"); rc=$?
 [ $rc = 0 ] && grep -q "z.ai-routed" <<< "$out" \
     && [ "$(cat "$tmp/wait-zai.err")" = "claude-usage: --ok pass lane=zai meter=zai-5h 5h=10%<50% week=85%<98% source=api" ] \
