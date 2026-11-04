@@ -38,12 +38,12 @@
 #     environment (the session's, as the hook was started, not the live
 #     shell's), both paths kept across uncertain/conditional moves, pipelines
 #     and compounds up to `MAX_WORLDS = 64`) and git's `-C`, per command, as
-#     lib/outbound.py tracks it. A <dir> not inside a git work tree (a path the tracking got
-#     wrong, a missing directory) is judged by the event cwd's repo instead,
-#     so a tracking miss in a public repo still checks; a state with an
-#     unresolvable `cd` (`unknown`) resets to the event cwd (judged as usual
-#     for files, git log and diffs) and in addition always scans the command
-#     text and counts for pre-push bypasses.
+#     lib/outbound.py tracks it. A <dir> not inside a git work tree (a path
+#     the tracking got wrong, a missing directory) is judged by the event
+#     cwd's repo instead, so a tracking miss in a public repo still checks; a
+#     state with an unresolvable `cd` (`unknown`) resets to the event cwd
+#     (judged as usual for files, git log and diffs) and in addition always
+#     scans the command text and counts for pre-push bypasses.
 #     Unset or false → that command's text is not checked, and its files, diff
 #     and log are not read.
 #

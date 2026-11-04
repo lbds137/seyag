@@ -88,6 +88,9 @@
 #     and the session's value, if any, is used instead. A word that starts
 #     bare stops at its first quote (`$D/"sub"/x.md` reads `$D/`), so a
 #     wrapper's closing quote is never taken into the path; that word degrades.
+#   - With no `python3` on PATH, a body-file word containing a `$`, a quote or
+#     a leading `~/` is treated as unresolved and not read (fails open, as
+#     `resolve_body_word` does).
 #   - A whole-token QUOTED `-F body="@path"` is not recognized as a file
 #     reference — the `@` matcher stops at the quote — so the literal text
 #     `@path` is what gets scanned rather than the file's content (fail-open
@@ -337,7 +340,7 @@ extract_pr_body() {
   BODY_TEXT=""
   BODY_FROM_FILE=0
   BODY_PATH_UNRESOLVED=0
-  local body_file rc body sub_file
+  local body_file rc body sub_file body_all
 
   # --body-file <path> / --body-file=<path>: every match is listed in command
   # order and the LAST one is read (gh's last flag wins). split_flag_word reads
