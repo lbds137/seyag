@@ -78,9 +78,10 @@
 # MultiEdit occurrence of old_string that sits inside a fenced block (in the text as
 # earlier edits leave it) starts its new text inside that fence: the new text is code
 # until a closing fence line within it.
-# The disk file is read only when an Edit or MultiEdit has a non-empty old_string
-# (its fence state is needed) or a Write needs it for the subtraction; its section
-# scan is built only when a section lookup needs it.
+# The disk file is read when a Write needs it for the subtraction, when an edit's
+# non-empty old_string needs the disk-line and fence context, and for MultiEdit's
+# running text (first the disk text, then what its earlier edits leave); the
+# section scan is built only when a section lookup needs it.
 #
 # Probe hook: SYG_CLOCK_STAMP_NOW (integer epoch seconds) overrides "now". It exists
 # for the probe, and a non-integer value falls back to the real clock.
@@ -105,6 +106,12 @@
 #   - fnmatch's * crosses /.
 #   - A second stamp joined to the first by a hyphen (11-02 22:10-11-02 2x:30) is
 #     not seen.
+#   - With replace_all, occurrences sharing one disk line are each judged against
+#     that line as it was before any of them was applied, and the line quoted in
+#     a block message may never exist on disk.
+#   - A ticked checkbox item's stamp (- [x] 11-04 09:00 did) is never
+#     future-checked: the checkbox rule reads it as a schedule, and a completed
+#     log entry escapes with it.
 
 set -uo pipefail
 

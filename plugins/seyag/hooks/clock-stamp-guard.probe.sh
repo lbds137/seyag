@@ -175,7 +175,7 @@ block_has "section: future stamp under ## Handoff more words blocks (Write)" "fu
   "$NOW_A" "$CFG_SECTION" "$(jq_write "$F" $'# Log\n\n## Handoff more words\n\n- **11-02 23:30:** x\n')"
 pass_case "section: future stamp under ## Handoffs passes (Write)" \
   "$NOW_A" "$CFG_SECTION" "$(jq_write "$F" $'# Log\n\n## Handoffs\n\n- **11-02 23:30:** x\n')"
-# Live miss: Deck saw this pass on 0.3.126 (an Edit under an annotated Handoff heading at 06:45).
+# Live miss: seen passing on 0.3.126 (an Edit under an annotated Handoff heading at 06:45).
 HO="$TMP/proj/handoff.md"
 printf '%s\n' '# Log' '' '## Handoff (rewritten 11-02; note)' '' '- handoff line' > "$HO"
 NOW_G=1793688300   # 11-03 06:45:00 (UTC, the probe's TZ)
