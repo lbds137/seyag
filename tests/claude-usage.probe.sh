@@ -125,12 +125,12 @@ out=$(CLAUDE_USAGE_WEEK_RESERVE_CMD="printf '99\n'; exit 3" run --ok 90 2>"$tmp/
 [ $rc = 1 ] && [ -z "$out" ] && [ "$err" = "$(wr_note 3 75 "$plan_fail75")" ] \
     && ok "plan CMD exit 3 with output 99: notes (exit 3), falls back to week_reserve (75)" \
     || bad "plan CMD exit 3: rc=$rc out=[$out] err=[$err]"
-t0=${EPOCHREALTIME%.*}
+t0=${EPOCHREALTIME/./}
 out=$(timeout 9 env CLAUDE_USAGE_WEEK_RESERVE_CMD='sleep 30; echo 99' HOME="$tmp" XDG_CACHE_HOME="$tmp" CLAUDE_USAGE_MODEL=claude-opus-5-5 "$CU" --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
-t1=${EPOCHREALTIME%.*}; elapsed=$((t1 - t0))
-[ $rc = 1 ] && [ "$elapsed" -le 6 ] && [ -z "$out" ] && [ "$err" = "$(wr_note 124 75 "$plan_fail75")" ] \
-    && ok "plan CMD 'sleep 30': the 5 s timeout cuts it (exit 124), verdict in ${elapsed}s" \
-    || bad "plan CMD timeout: rc=$rc elapsed=${elapsed}s err=[$err]"
+t1=${EPOCHREALTIME/./}; elapsed=$(( (t1 - t0) / 1000 )) # EPOCHREALTIME carries microseconds
+[ $rc = 1 ] && [ "$elapsed" -le 6500 ] && [ -z "$out" ] && [ "$err" = "$(wr_note 124 75 "$plan_fail75")" ] \
+    && ok "plan CMD 'sleep 30': the 5 s timeout cuts it (exit 124), verdict in ${elapsed}ms" \
+    || bad "plan CMD timeout: rc=$rc elapsed=${elapsed}ms err=[$err]"
 out=$(CLAUDE_USAGE_WEEK_RESERVE=90 CLAUDE_USAGE_WEEK_RESERVE_CMD='echo 99' run --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
 [ $rc = 0 ] && [ -z "$out" ] && [ "$err" = "claude-usage: --ok pass lane=anthropic meter=5h 5h=10%<90% week=85%<99% source=api" ] \
     && ok "plan CMD wins over static CLAUDE_USAGE_WEEK_RESERVE=90 on success" \
@@ -157,12 +157,48 @@ for bad_static in 0 100 abc; do
         && ok "static CLAUDE_USAGE_WEEK_RESERVE=$bad_static: ignored with the note, default 75 gates" \
         || bad "static $bad_static: rc=$rc out=[$out] err=[$err]"
 done
-# The clamp applies on every run, but its note is gate-path only (it rides in the --ok plan
-# branch, where the reserve decides): a plain run with a bad static stays quiet on stderr.
+# The clamp applies on every run, but its note is gate-path only (it prints once at the head
+# of the --ok gate branch): a plain run with a bad static stays quiet on stderr.
 out=$(CLAUDE_USAGE_WEEK_RESERVE=lots run 2>"$tmp/err"); rc=$?
 [ $rc = 0 ] && [ ! -s "$tmp/err" ] \
     && ok "plain run with a bad CLAUDE_USAGE_WEEK_RESERVE: exit 0, stderr empty (note is gate-path only)" \
     || bad "plain run bad static: rc=$rc err=[$(cat "$tmp/err")]"
+# The note lives at the gate head, not inside the plan branch's CMD fallback: a bad static with
+# a SUCCEEDING CMD still notes (exactly once), and the CMD wins the slot.
+fixture 10 85 0
+out=$(CLAUDE_USAGE_WEEK_RESERVE=lots CLAUDE_USAGE_WEEK_RESERVE_CMD='echo 99' run --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 0 ] && [ -z "$out" ] && [ "$err" = "$(wr_ignored lots "claude-usage: --ok pass lane=anthropic meter=5h 5h=10%<90% week=85%<99% source=api")" ] \
+    && ok "plan --ok with a bad static AND a succeeding CMD: the note prints once and the CMD wins the slot (85%<99%)" \
+    || bad "plan bad static + CMD: rc=$rc out=[$out] err=[$err]"
+
+# End to end: the real helper wired to the real gate. SYG_WEEK_BURN_NOW rides the run env and
+# inherits through the CMD fork; the fixture readings and .last live under the probe's own
+# XDG_STATE_HOME. The cache's week reset sits at T+20000 (not the 2099 default) because the
+# gate run logs its own reading first: the appended row carries the cache's reset and becomes
+# the helper's latest row, so the near reset has to ride the cache for the reset to be 20000 s
+# out at all.
+T=$(date +%s)
+jq -n --arg wr "$(date -u -d "@$((T + 20000))" +%Y-%m-%dT%H:%M:%SZ)" '{
+    five_hour: {utilization: 10, resets_at: "2099-01-01T00:00:00.000000+00:00"},
+    seven_day: {utilization: 85, resets_at: $wr},
+    limits: []}' > "$tmp/claude-statusline/usage.json"
+{ printf '{"epoch":%s,"five_hour_pct":0,"weekly_pct":90,"weekly_resets_at":%s,"ts":"fixture"}\n' "$((T - 18000))" "$((T + 20000))"; } > "$log"
+printf '%s\n' "$T" > "$log.last"
+out=$(SYG_WEEK_BURN_NOW=$T CLAUDE_USAGE_WEEK_RESERVE_CMD="$REPO/plugins/seyag/bin/week-burn-window" run --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 0 ] && [ -z "$out" ] && [ "$err" = "claude-usage: --ok pass lane=anthropic meter=5h 5h=10%<90% week=85%<99% source=api" ] \
+    && ok "end to end: week-burn-window on a fresh fetch answers 99, the gate passes week=85%<99%" \
+    || bad "end-to-end fresh: rc=$rc out=[$out] err=[$err] log=[$(cat "$log")]"
+# Degraded sibling: the same fixture with the row old enough to be stale and the fetch record
+# gone. log_reading recreates .last at the cache mtime (and appends the run's own reading)
+# before the helper fork, so staleness is pinned by pushing the test clock past STALE_MAX_S
+# from both the row and the recreated fetch record: the helper holds 75 and the gate fails.
+{ printf '{"epoch":%s,"five_hour_pct":0,"weekly_pct":90,"weekly_resets_at":%s,"ts":"fixture"}\n' "$((T - 19800))" "$((T + 20000))"; } > "$log"
+rm -f "$log.last"
+out=$(SYG_WEEK_BURN_NOW=$((T + 12000)) CLAUDE_USAGE_WEEK_RESERVE_CMD="$REPO/plugins/seyag/bin/week-burn-window" run --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 1 ] && [ -z "$out" ] && [ "$err" = "claude-usage: --ok FAIL lane=anthropic meter=week 5h=10%<90% week=85%>=75% source=api" ] \
+    && ok "end to end: stale row with no fresh fetch — week-burn-window holds 75, the gate fails week=85%>=75%" \
+    || bad "end-to-end degraded: rc=$rc out=[$out] err=[$err] log=[$(cat "$log")]"
+rm -f "$log" "$log.last"
 # A stale cache whose refresh fails (no credentials in hermetic HOME) discloses its age on the verdict line.
 fixture 10 50 0; touch -d "@$(($(date +%s) - 600))" "$tmp/claude-statusline/usage.json"
 out=$(run --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
@@ -507,12 +543,18 @@ for bad_cmd in 'true' 'echo 0' 'echo "9 8"' 'echo lots'; do
         && ok "z.ai CMD invalid ($bad_cmd): notes exit 0, ignores static, falls back to 75" \
         || bad "z.ai CMD invalid ($bad_cmd): rc=$rc out=[$out] err=[$err]"
 done
-z0=${EPOCHREALTIME%.*}
+# The shared static clamp's note rides at the gate head on every lane: a bad shared
+# CLAUDE_USAGE_WEEK_RESERVE on the z.ai lane notes once, then the z.ai verdict follows.
+out=$(CLAUDE_USAGE_WEEK_RESERVE=7x run --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 1 ] && [ -z "$out" ] && [ "$err" = "$(wr_ignored 7x "$zai_fail75")" ] \
+    && ok "z.ai lane with a bad shared CLAUDE_USAGE_WEEK_RESERVE: the shared note then the z.ai verdict" \
+    || bad "z.ai shared static 7x: rc=$rc out=[$out] err=[$err]"
+z0=${EPOCHREALTIME/./}
 out=$(timeout 9 env CLAUDE_USAGE_ZAI_WEEK_RESERVE_CMD='sleep 30; echo 99' HOME="$tmp" XDG_CACHE_HOME="$tmp" CLAUDE_USAGE_MODEL=claude-opus-5-5 "$CU" --ok 90 2>"$tmp/err"); rc=$?
-z1=${EPOCHREALTIME%.*}; zelapsed=$((z1 - z0)); err=$(cat "$tmp/err")
-[ $rc = 1 ] && [ "$zelapsed" -le 6 ] && [ -z "$out" ] && [ "$err" = "$(zwr_note 124 75 "$zai_fail75")" ] \
-    && ok "z.ai CMD 'sleep 30': the 5 s timeout cuts it (exit 124), verdict in ${zelapsed}s" \
-    || bad "z.ai CMD timeout: rc=$rc elapsed=${zelapsed}s err=[$err]"
+z1=${EPOCHREALTIME/./}; zelapsed=$(( (z1 - z0) / 1000 )); err=$(cat "$tmp/err") # EPOCHREALTIME carries microseconds
+[ $rc = 1 ] && [ "$zelapsed" -le 6500 ] && [ -z "$out" ] && [ "$err" = "$(zwr_note 124 75 "$zai_fail75")" ] \
+    && ok "z.ai CMD 'sleep 30': the 5 s timeout cuts it (exit 124), verdict in ${zelapsed}ms" \
+    || bad "z.ai CMD timeout: rc=$rc elapsed=${zelapsed}ms err=[$err]"
 out=$(CLAUDE_USAGE_WEEK_RESERVE=90 CLAUDE_USAGE_ZAI_WEEK_RESERVE_CMD='exit 3' run --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
 [ $rc = 0 ] && [ -z "$out" ] && [ "$err" = "$(zwr_note 3 90 "claude-usage: --ok pass lane=zai meter=zai-5h 5h=10%<80% week=85%<90% source=api")" ] \
     && ok "z.ai CMD failure falls back to overridden shared week_reserve (90)" \

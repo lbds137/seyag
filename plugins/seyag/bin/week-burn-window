@@ -19,7 +19,11 @@
 #   week  = the latest row's weekly_pct; reset_ts = its weekly_resets_at (integer epoch)
 #   rate  = SYG_WEEK_BURN_RATE (%/h, a number > 0) when set, else the slope of weekly_pct over
 #           the rows with epoch >= now - RATE_WINDOW_S (6 h back), split by shape: >= 2 rows
-#           spanning >= MIN_SPAN_S (30 min) give rate_h = (last - first) / span_hours; >= 2
+#           spanning >= MIN_SPAN_S (30 min) give rate_h = (last - first) / span_hours, where a
+#           fresh fetch record (see Freshness) substitutes now for the latest row's epoch —
+#           the endpoint becomes (now, latest["week"]), so a meter that climbed and then
+#           parked (dedupe writes no rows) gets an honest decaying rate instead of a stale
+#           steep one; >= 2
 #           rows over a shorter span is an unreliable slope and holds. < 2 rows in the window
 #           is the parked-meter shape when the fetch record is fresh (see Freshness): dedupe
 #           leaves an unmoved meter no new rows, so a meter just fetched with < 2 in-window
@@ -32,11 +36,12 @@
 #           parked week gets no window of its own: it is computed at RATE_FLOOR, a cap that
 #           lets the parked tail burn once the reset is close enough.
 #   Freshness: the latest row counts as fresh when EITHER its epoch OR the fetch record's
-#           ($log.last's mtime; claude-usage writes it on every refresh, dedupe or not) age is
-#           within STALE_MAX_S (2 h) — a parked meter writes no new rows (dedupe) and the fetch
+#           (readings.jsonl.last's content: the fetch epoch claude-usage writes there on every
+#           refresh, dedupe or not) age is within STALE_MAX_S (2 h) — a parked meter writes no
+#           new rows (dedupe) and the fetch
 #           record is what still moves: fetched fresh with < 2 in-window rows, the reading is
 #           flat since the latest row (the rate paragraph's floor path). Both stale, or .last
-#           missing, hold: burn needs a recent
+#           missing or unparsable, hold: burn needs a recent
 #           fetch. A latest row dated more than 300 s ahead of now holds too: untrusted clock
 #           skew.
 #   Burn iff reset_ts > now AND week < 100 AND (reset_ts - now) <= burn window.
@@ -98,13 +103,14 @@ fi
 
 log="${XDG_STATE_HOME:-$HOME/.local/state}/claude-usage/readings.jsonl"
 # The fetch record claude-usage keeps next to the log (readings.jsonl.last) is rewritten on
-# every refresh, dedupe or not, so its mtime says when the meters were last actually read.
-last_mtime=0
-if [ -e "$log.last" ]; then
-    last_mtime=$(stat -c %Y "$log.last" 2>/dev/null) || last_mtime=0
-fi
+# every refresh, dedupe or not, and its CONTENT is the fetch epoch claude-usage writes there,
+# so reading its first line says when the meters were last actually read — mtime is not
+# trusted: sync and backup tools touch it without a fetch. A missing or non-integer record
+# falls back to 0 = infinitely stale; 0 needs no guard, since now - 0 > STALE_MAX_S always.
+last_fetch=$(head -n 1 "$log.last" 2>/dev/null)
+case $last_fetch in ''|*[!0-9]*) last_fetch=0 ;; esac
 python3 - "$log" "$hold" "$now" "$((margin_min * 60))" "$rate_override" \
-    "$RATE_WINDOW_S" "$MIN_SPAN_S" "$STALE_MAX_S" "$BURN_RESERVE" "$last_mtime" "$RATE_FLOOR" <<'PY' || exit 1
+    "$RATE_WINDOW_S" "$MIN_SPAN_S" "$STALE_MAX_S" "$BURN_RESERVE" "$last_fetch" "$RATE_FLOOR" <<'PY' || exit 1
 import json
 import math
 import sys
@@ -113,7 +119,7 @@ log, hold, now, margin_s = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), int(
 rate_ov = sys.argv[5] or None
 rate_window_s, min_span_s, stale_max_s, burn_reserve = (
     int(sys.argv[6]), int(sys.argv[7]), int(sys.argv[8]), int(sys.argv[9]))
-last_mtime, rate_floor = int(sys.argv[10]), float(sys.argv[11])
+last_fetch, rate_floor = int(sys.argv[10]), float(sys.argv[11])
 
 
 def hold_out():
@@ -151,7 +157,7 @@ if not rows:
     hold_out()
 rows.sort(key=lambda r: r["epoch"])
 latest = rows[-1]
-if now - latest["epoch"] > stale_max_s and now - last_mtime > stale_max_s:
+if now - latest["epoch"] > stale_max_s and now - last_fetch > stale_max_s:
     hold_out()  # stale: the latest row AND the fetch record are old (or .last is missing) —
                 # the meters could have moved since; burn needs a recent fetch, never a guess
 if latest["epoch"] > now + 300:
@@ -163,12 +169,27 @@ if rate_ov is not None:
     rate_h = float(rate_ov)
 else:
     win = [r for r in rows if r["epoch"] >= now - rate_window_s]
-    if len(win) >= 2 and win[-1]["epoch"] - win[0]["epoch"] >= min_span_s:
-        rate_h = (win[-1]["week"] - win[0]["week"]) / ((win[-1]["epoch"] - win[0]["epoch"]) / 3600)
-    elif len(win) >= 2:
-        hold_out()  # >= 2 rows but a span under MIN_SPAN_S: a slope over a tiny span is
-                    # unreliable — no reading, no burn
-    elif now - last_mtime <= stale_max_s:
+    if len(win) >= 2:
+        # A fresh fetch record (see Freshness) substitutes now for the latest row's epoch: the
+        # meters were read within STALE_MAX_S, so the latest reading still holds at now and the
+        # slope's endpoint becomes (now, latest["week"]) — a meter that climbed and then parked
+        # (dedupe writes no rows) gets an honest decaying rate instead of a stale steep one.
+        # (win[-1] indexing stays inside this branch: an empty window must reach the parked
+        # path below, never here.)
+        span_ep = now if now - last_fetch <= stale_max_s else win[-1]["epoch"]
+        if span_ep - win[0]["epoch"] >= min_span_s:
+            rate_h = (latest["week"] - win[0]["week"]) / ((span_ep - win[0]["epoch"]) / 3600)
+        else:
+            hold_out()  # >= 2 rows but a span under MIN_SPAN_S: a slope over a tiny span is
+                        # unreliable — no reading, no burn
+    elif not win:
+        # Empty window, explicit: the same split as the < 2-rows case below — a fresh fetch
+        # reads flat (the parked path), a stale one has no usable rate.
+        if now - last_fetch <= stale_max_s:
+            rate_h = 0
+        else:
+            hold_out()
+    elif now - last_fetch <= stale_max_s:
         # The parked-meter path: log_reading dedupes identical readings, so an unmoved meter
         # writes no new rows and the fetch record is what still moves. The meters were read
         # within STALE_MAX_S but the log holds < 2 in-window rows, so the reading has not

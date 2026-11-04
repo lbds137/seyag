@@ -9,7 +9,8 @@
 # set-but-invalid SYG_WEEK_BURN_* override — including one too long to do arithmetic on — is
 # crash-class: exit 1, nothing on stdout. Fixture readings live under a probe-local
 # XDG_STATE_HOME and the clock is pinned with SYG_WEEK_BURN_NOW, so the real state log and the
-# real time are never touched (.last mtimes are pinned with touch -d, the same way).
+# real time are never touched (the .last fixtures are content writes carrying the fetch epoch,
+# the same way).
 # Usage: tests/week-burn-window.probe.sh   (from anywhere)
 
 set -uo pipefail
@@ -126,29 +127,53 @@ ww 99 "rate <= 0 (falling week): the floored window covers the reset 1000s out, 
 # a single old row — fewer than 2 in the 6 h slope window — while the fresh fetch proves the
 # meters were just read: a flat reading, and the window is computed at the floor. Week 90
 # floors to a 73800 s window ((100-90)/0.5 h + 30 min); the paired rows sit 800 s inside and
-# 800 s outside it. Both rows need the .last mtime to pass the stale check (the row itself is
-# 7 h old) AND the < 2-rows floor path to burn — drop either fix and both hold 75.
+# 800 s outside it. Both rows need the .last fetch epoch to pass the stale check (the row
+# itself is 7 h old) AND the < 2-rows floor path to burn — drop either fix and both hold 75.
 rm -f "$log.last"
 { rd $((T - 25200)) 90 $((T + 73000)); } > "$log"
-touch -d "@$T" "$log.last"
+printf '%s\n' "$T" > "$log.last"
 ww 99 "parked meter: one 7 h-old row, .last fetched now, reset 73000s out inside the 73800s floored window, burns"
 { rd $((T - 25200)) 90 $((T + 74600)); } > "$log"
-touch -d "@$T" "$log.last"
+printf '%s\n' "$T" > "$log.last"
 ww 75 "parked meter: same shape, reset 74600s out sits beyond the 73800s floored window, holds"
 rm -f "$log.last"
 
 # Freshness has a second source: the fetch record .last is rewritten on every refresh, dedupe
 # or not, so a parked meter's readings can go quiet while the fetch stays recent. A climb that
 # stopped 3 h ago (85->90, then nothing): the latest row is past STALE_MAX_S, so ONLY the .last
-# mtime gets it past the stale check, and with the older row 7 h back the slope window holds
-# one row, so ONLY the < 2-rows floor path can burn it — drop either fix and this row holds.
+# fetch epoch gets it past the stale check, and with the older row 7 h back the slope window
+# holds one row, so ONLY the < 2-rows floor path can burn it — drop either fix and this row
+# holds.
 { rd $((T - 25200)) 85 $((T + 73000)); rd $((T - 10800)) 90 $((T + 73000)); } > "$log"
-touch -d "@$T" "$log.last"
-ww 99 "latest row 3 h old but .last mtime fresh: the fetch record keeps the reading fresh, floored window burns"
+printf '%s\n' "$T" > "$log.last"
+ww 99 "latest row 3 h old but .last fetched now: the fetch record keeps the reading fresh, floored window burns"
 # The degraded side of the same shape: no fetch record at all (both freshness sources stale) —
 # the stale hold, never a guess. Same log as the row above, .last removed: the only difference.
 rm -f "$log.last"
 ww 75 "latest row 3 h old and .last missing: stale row with no fetch record, holds"
+rm -f "$log.last"
+
+# The fresh-endpoint slope: a fresh fetch record substitutes now for the latest row's epoch.
+# A climb 80->90 that stopped 30 min ago (rows 5.5 h and 5 h old): pre-fix the slope spanned
+# the two rows (1800 s, 20 %/h, window 1 h < the 20000 s reset) and held; post-fix the span
+# runs to now (19800 s, ~1.82 %/h, window ~6 h) and the reset fits — burns.
+{ rd $((T - 19800)) 80 $((T + 20000)); rd $((T - 18000)) 90 $((T + 20000)); } > "$log"
+printf '%s\n' "$T" > "$log.last"
+ww 99 "parked-after-climb: fresh fetch makes the slope's endpoint now (span 5.5 h, rate ~1.82 %/h, window ~6 h), reset 20000s out burns"
+rm -f "$log.last"
+
+# The freshness read is the record's CONTENT (the fetch epoch), not its mtime:
+# (a) content says fetched now, mtime a day old — the content leg decides: fresh, parked burn.
+rm -f "$log.last"
+{ rd $((T - 25200)) 90 $((T + 73000)); } > "$log"
+printf '%s\n' "$T" > "$log.last"
+touch -d "@$((T - 100000))" "$log.last"
+ww 99 "content freshness: .last content fetched now but mtime a day old — content leg wins, parked meter burns"
+# (b) content unparsable, mtime fresh — the epoch is unread, so the fetch counts stale and the
+# stale row holds (a deliberate change from the mtime world, where fresh mtime burned).
+printf 'garbage\n' > "$log.last"
+touch -d "@$T" "$log.last"
+ww 75 "unparsable .last content: fresh mtime does not save it — fetch unread, stale row holds"
 rm -f "$log.last"
 
 { rd $((T - 3600)) 99 $((T + 1800)); rd "$T" 100 $((T + 1800)); } > "$log"

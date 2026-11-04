@@ -51,8 +51,9 @@ fi
 # and GitHub claude-review. The 80% hard stop is the CLAUDE.md "Usage Windows" protocol's job.
 # CLAUDE_USAGE_WEEK_RESERVE overrides it, but only as an integer 1-99: anything else is ignored
 # and the default stays. The clamp applies on every run, but its stderr note is gate-path only —
-# it rides in the --ok plan branch (where the reserve decides), so plain runs, --json and
-# statusline polls stay quiet. (The length guard runs before the arithmetic: bash's
+# it prints once at the head of whichever branch serves the gate check (the routed lanes' gate,
+# or the plan lane's --ok branch), so plain runs, --json and statusline polls stay quiet. (The
+# length guard runs before the arithmetic: bash's
 # $((10#...)) silently wraps on huge digit strings.) The per-deployment command override
 # CLAUDE_USAGE_WEEK_RESERVE_CMD is consulted in the --ok plan branch only (see there): it wins the
 # slot in success and failure, and this static is the fallback it names.
@@ -233,6 +234,10 @@ reset_in() {
 # zai-usage's local fallback estimate is not account truth, so it never blocks. Other lanes
 # (OpenRouter) pass: their limit is a dollar cap the provider enforces itself.
 if [ "${1:-}" = --ok ] && [ "$routed" = 1 ]; then
+    # The static reserve clamp's note, gate-path only (see the clamp above), printed here at
+    # the routed gate's head so every lane's verdict follows it; the plan lane's --ok branch
+    # prints it at its own head.
+    if [ -n "$week_reserve_note" ]; then echo "$week_reserve_note" >&2; fi
     if [ "$vendor_lane" != zai ]; then
         echo "claude-usage: --ok pass lane=$vendor_lane gate=pass-through source=none (provider enforces its own cap)" >&2
         exit 0
@@ -499,6 +504,10 @@ extra_figure() {
 
 case "${1:-}" in
     --ok)
+        # The static reserve clamp's note, gate-path only (see the clamp above): printed once
+        # here, ahead of this branch's checks and verdicts. The routed lanes print it at their
+        # own gate head further up; a gate check passes through exactly one of the two.
+        if [ -n "$week_reserve_note" ]; then echo "$week_reserve_note" >&2; fi
         # A week at the reserve blocks everything, whatever the 5h window says, unless the extra-usage
         # opt-in below applies: the last 25% is reserved for the owner and GitHub claude-review.
         # --wait then keeps polling until the weekly reset instead of waking on each fresh 5h window.
@@ -558,8 +567,6 @@ case "${1:-}" in
             else
                 echo "claude-usage: CLAUDE_USAGE_WEEK_RESERVE_CMD gave no usable reserve (exit $wr_rc); plan week reserve falls back to week_reserve ($week_reserve)" >&2
             fi
-        elif [ -n "$week_reserve_note" ]; then
-            echo "$week_reserve_note" >&2 # the clamp's note, gate-path only (see the clamp above)
         fi
         extra_used=""
         if ! { { [ "$no_five" = 1 ] || [ "$five" -lt "$thr" ]; } && [ "$week" -lt "$week_reserve" ]; } 2>/dev/null; then
