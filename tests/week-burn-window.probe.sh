@@ -1,14 +1,15 @@
 #!/bin/bash
 # Fixture check for plugins/seyag/bin/week-burn-window, the reference helper for
 # CLAUDE_USAGE_WEEK_RESERVE_CMD: it prints 99 once the time to the weekly reset fits inside the
-# burn window (rate from the readings log's slope, plus a margin), and the hold reserve —
-# CLAUDE_USAGE_WEEK_RESERVE when that is an integer 1-99, else 75 — on every other decided path
-# (far reset, no log, unparsable or stale readings, out-of-range floats like 1e999, no usable
-# rate, past or missing reset, week >= 100), quietly and with exit 0. A set-but-invalid
-# SYG_WEEK_BURN_* override is
+# burn window (rate from the readings log's slope, floored for a flat or falling week, plus a
+# margin), and the hold reserve — CLAUDE_USAGE_WEEK_RESERVE when that is an integer 1-99, else
+# 75 — on every other decided path (far reset, no log, unparsable or stale readings with no
+# fresh .last fetch record, a future-dated latest row, out-of-range floats like 1e999 or a NaN
+# weekly_pct, no usable rate, past or missing reset, week >= 100), quietly and with exit 0. A
+# set-but-invalid SYG_WEEK_BURN_* override — including one too long to do arithmetic on — is
 # crash-class: exit 1, nothing on stdout. Fixture readings live under a probe-local
 # XDG_STATE_HOME and the clock is pinned with SYG_WEEK_BURN_NOW, so the real state log and the
-# real time are never touched.
+# real time are never touched (.last mtimes are pinned with touch -d, the same way).
 # Usage: tests/week-burn-window.probe.sh   (from anywhere)
 
 set -uo pipefail
@@ -67,9 +68,19 @@ out=$(env XDG_STATE_HOME="$tmp/state" SYG_WEEK_BURN_NOW="$T" "$WW" 2>"$tmp/err")
 [ $rc = 0 ] && [ "$out" = 75 ] && [ ! -s "$tmp/err" ] \
     && ok "weekly_resets_at 1e999 (inf): the row is kept with the reset unknown, holds quietly" \
     || bad "weekly_resets_at 1e999: rc=$rc out=[$out] err=[$(cat "$tmp/err")]"
+{ printf '{"epoch":%s,"five_hour_pct":0,"weekly_pct":NaN,"weekly_resets_at":%s,"ts":"fixture"}\n' "$T" "$((T + 5400))"; } > "$log"
+out=$(env XDG_STATE_HOME="$tmp/state" SYG_WEEK_BURN_NOW="$T" "$WW" 2>"$tmp/err"); rc=$?
+[ $rc = 0 ] && [ "$out" = 75 ] && [ ! -s "$tmp/err" ] \
+    && ok "weekly_pct NaN on the latest row: non-finite drops the row, holds quietly" \
+    || bad "weekly_pct NaN: rc=$rc out=[$out] err=[$(cat "$tmp/err")]"
 
 { rd $((T - 25200)) 90 $((T + 5400)); } > "$log"
 ww 75 "stale latest row (7 h old): holds"
+# A latest row dated ahead of the clock is untrusted skew: never burn on it. Both rows sit in
+# the slope window (span 13200 s, rate 2.73 %/h, window 15000 s), so absent the future guard
+# the reset at 14900 s would burn — the row pins the guard, not the arithmetic.
+{ rd $((T - 7200)) 80 $((T + 14900)); rd $((T + 6000)) 90 $((T + 14900)); } > "$log"
+ww 75 "future-dated latest row (now + 100 min): untrusted clock skew holds despite the reset inside the slope window"
 
 { rd $((T - 7200)) 80 $((T + 33000)); rd "$T" 90 $((T + 33000)); } > "$log"
 ww 75 "SYG_WEEK_BURN_RATE unset: slope 5 %/h window (9000s) < 33000s to reset, holds"
@@ -104,8 +115,28 @@ ww 99 "boundary: time-to-reset exactly the window burns (<="
 { rd $((T - 1800)) 40 $((T + 1800)); rd "$T" 95 $((T + 1800)); } > "$log"
 ww 99 "raw slope 110 %/h clamps to 100: reset 1800 s out sits inside both windows, burns"
 
+# A parked meter: log_reading dedupes identical readings, so a week that has stopped moving
+# leaves a flat slope (rate 0) while only the fetch record keeps moving. A flat or falling rate
+# no longer holds outright: the window is computed at RATE_FLOOR — a cap, so the parked tail
+# still burns once the reset is close enough. Slope 0 over 6 h floors to a 73800 s window
+# ((100-90)/0.5 h + 30 min); the paired rows sit 800 s inside and 800 s outside it.
 { rd $((T - 7200)) 90 $((T + 1000)); rd "$T" 85 $((T + 1000)); } > "$log"
-ww 75 "rate <= 0 (falling week): holds even with the reset near"
+ww 99 "rate <= 0 (falling week): the floored window covers the reset 1000s out, burns"
+{ rd $((T - 21600)) 90 $((T + 73000)); rd $((T - 14400)) 90 $((T + 73000)); \
+  rd $((T - 7200)) 90 $((T + 73000)); rd "$T" 90 $((T + 73000)); } > "$log"
+ww 99 "flat week (slope 0 over 6 h): reset 73000s out sits inside the 73800s floored window, burns"
+{ rd $((T - 21600)) 90 $((T + 74600)); rd $((T - 14400)) 90 $((T + 74600)); \
+  rd $((T - 7200)) 90 $((T + 74600)); rd "$T" 90 $((T + 74600)); } > "$log"
+ww 75 "flat week: reset 74600s out sits beyond the 73800s floored window, holds"
+# Freshness has a second source: the fetch record .last is rewritten on every refresh, dedupe
+# or not, so a parked meter's readings can go quiet while the fetch stays recent. The latest
+# row here is 3 h old (past STALE_MAX_S) and the rows are flat, so the ONLY way this burns is
+# the .last mtime — drop that OR from the freshness check and this row holds.
+rm -f "$log.last"
+{ rd $((T - 21600)) 90 $((T + 73000)); rd $((T - 10800)) 90 $((T + 73000)); } > "$log"
+touch -d "@$T" "$log.last"
+ww 99 "latest row 3 h old but .last mtime fresh: the fetch record keeps the reading fresh, burns"
+rm -f "$log.last"
 
 { rd $((T - 3600)) 99 $((T + 1800)); rd "$T" 100 $((T + 1800)); } > "$log"
 ww 75 "week 100: holds even with the reset inside the (empty-tail) window"
@@ -143,5 +174,14 @@ out=$(env XDG_STATE_HOME="$tmp/state" SYG_WEEK_BURN_MARGIN_MIN=-5 "$WW" 2>"$tmp/
 [ $rc = 1 ] && [ -z "$out" ] && grep -q "SYG_WEEK_BURN_MARGIN_MIN='-5' is not an integer >= 0" "$tmp/err" \
     && ok "set-but-invalid SYG_WEEK_BURN_MARGIN_MIN: crash-class exit 1" \
     || bad "SYG_WEEK_BURN_MARGIN_MIN=-5: rc=$rc out=[$out] err=[$(cat "$tmp/err")]"
+
+out=$(env XDG_STATE_HOME="$tmp/state" SYG_WEEK_BURN_NOW=123456789012345678901234567890 "$WW" 2>"$tmp/err"); rc=$?
+[ $rc = 1 ] && [ -z "$out" ] && grep -q "SYG_WEEK_BURN_NOW='123456789012345678901234567890' is not an epoch" "$tmp/err" \
+    && ok "30-digit SYG_WEEK_BURN_NOW (past bash arithmetic): crash-class exit 1, nothing on stdout" \
+    || bad "30-digit NOW: rc=$rc out=[$out] err=[$(cat "$tmp/err")]"
+out=$(env XDG_STATE_HOME="$tmp/state" SYG_WEEK_BURN_MARGIN_MIN=123456789012345678901234567890 "$WW" 2>"$tmp/err"); rc=$?
+[ $rc = 1 ] && [ -z "$out" ] && grep -q "SYG_WEEK_BURN_MARGIN_MIN='123456789012345678901234567890' is not an integer >= 0" "$tmp/err" \
+    && ok "30-digit SYG_WEEK_BURN_MARGIN_MIN (past bash arithmetic): crash-class exit 1" \
+    || bad "30-digit MARGIN: rc=$rc out=[$out] err=[$(cat "$tmp/err")]"
 
 exit $fail

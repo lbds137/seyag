@@ -1,17 +1,18 @@
 #!/bin/bash
 # week-burn-window: should the plan week's tail be burned now? The reference helper for
 # CLAUDE_USAGE_WEEK_RESERVE_CMD (claude-usage's plan --ok branch reads it per gate check): it
-# prints 99 — a reserve every week comparison fails — once the time left to the weekly reset fits
-# inside the burn window, so a deployment can spend the expiring tail instead of losing it at the
-# reset. Before the window, and on any input it cannot trust, it prints the hold reserve, so a
-# gate run stays quiet outside the burn: no reading, no burn.
+# prints 99 — a reserve the week stays under, so the gate passes until 99% — once the time left
+# to the weekly reset fits inside the burn window, so a deployment can spend the expiring tail
+# instead of losing it at the reset. Before the window, and on any input it cannot trust, it
+# prints the hold reserve, so a gate run stays quiet outside the burn: no reading, no burn.
 #
 # Input: the readings log ${XDG_STATE_HOME:-$HOME/.local/state}/claude-usage/readings.jsonl
 # (claude-usage's log_reading writes it; usage-sweep's --points/--fit read it). JSONL rows
 # {"epoch": int, "weekly_pct": number, "weekly_resets_at": int, ...}; malformed lines and rows
-# without an integer epoch or a numeric weekly_pct are skipped, the way usage-sweep's reader
-# skips them (a null or wrong-typed weekly_resets_at keeps the row, with the reset unknown; an
-# out-of-range float like 1e999 parses as inf and overflows int(), and degrades the same way).
+# without an integer epoch or a finite numeric weekly_pct are skipped, the way usage-sweep's
+# reader skips them (a null or wrong-typed weekly_resets_at keeps the row, with the reset
+# unknown; an out-of-range float like 1e999 parses as inf and degrades the same way — int()
+# fields overflow it away, a non-finite weekly_pct drops the row).
 #
 # Arithmetic (constants at the top):
 #   now   = SYG_WEEK_BURN_NOW (epoch override; the test clock) else date +%s
@@ -21,37 +22,56 @@
 #           >= MIN_SPAN_S (30 min): rate_h = (last - first) / span_hours. A rate above 100
 #           clamps to 100.
 #   Burn window (seconds) = (100 - week) / rate_h hours, in seconds, + the margin
-#           (SYG_WEEK_BURN_MARGIN_MIN, integer >= 0, default MARGIN_MIN_DEFAULT = 30) in minutes.
-#   Burn iff reset_ts > now AND week < 100 AND rate_h > 0 AND (reset_ts - now) <= burn window.
+#           (SYG_WEEK_BURN_MARGIN_MIN, integer >= 0, default MARGIN_MIN_DEFAULT = 30) in
+#           minutes. A flat or falling rate (rate_h <= 0) is not spending the tail, so the
+#           parked week gets no window of its own: it is computed at RATE_FLOOR, a cap that
+#           lets the parked tail burn once the reset is close enough.
+#   Freshness: the latest row counts as fresh when EITHER its epoch OR the fetch record's
+#           ($log.last's mtime; claude-usage writes it on every refresh, dedupe or not) age is
+#           within STALE_MAX_S (2 h) — a parked meter dedupes to no new rows, and the fetch
+#           record is what still moves. Both stale, or .last missing, hold: burn needs a recent
+#           fetch. A latest row dated more than 300 s ahead of now holds too: untrusted clock
+#           skew.
+#   Burn iff reset_ts > now AND week < 100 AND (reset_ts - now) <= burn window.
+#
+#   Pacing, not a bug: while burning, the fleet consumes faster, the window shrinks below
+#   time-to-reset, and the helper flips back to hold until the rate falls again.
 #
 # Output contract: exactly one integer 1-99 and a newline on stdout, exit 0, on every decided
 # path — 99 while burning, else the hold reserve (CLAUDE_USAGE_WEEK_RESERVE when that is an
-# integer 1-99, else 75). Degraded input — missing or empty log, no parsable rows, a latest row
-# older than STALE_MAX_S (2 h), no usable rate, weekly_resets_at missing or past, week >= 100 —
-# holds quietly, because the gate's fallback stderr note only fires on unusable output and a
-# helper that always answers keeps every --ok quiet outside the burn window. Exit 1 with nothing
-# on stdout is crash-class only: a set-but-invalid SYG_WEEK_BURN_NOW, SYG_WEEK_BURN_RATE (not a
-# number > 0) or SYG_WEEK_BURN_MARGIN_MIN (not an integer >= 0), a missing python3, or an
-# unexpected failure — the gate then names it on stderr instead of holding silently.
+# integer 1-99, else 75). Degraded input — missing or empty log, no parsable rows, a stale
+# latest row with no fresh fetch record, a future-dated latest row, no usable rate,
+# weekly_resets_at missing or past, week >= 100 — holds quietly, because the gate's fallback
+# stderr note only fires on unusable output and a helper that always answers keeps every --ok
+# quiet outside the burn window. Exit 1 with nothing on stdout is crash-class only: a
+# set-but-invalid SYG_WEEK_BURN_NOW, SYG_WEEK_BURN_RATE (not a number > 0) or
+# SYG_WEEK_BURN_MARGIN_MIN (not an integer >= 0, or longer than bash arithmetic can do), a
+# missing python3, or an unexpected failure — the gate then names it on stderr instead of
+# holding silently.
 
 set -uo pipefail
 
 RATE_WINDOW_S=21600   # slope looks back 6 h at most
 MIN_SPAN_S=1800       # the slope needs >= 30 min between the window's first and last row
-STALE_MAX_S=7200      # a latest row older than 2 h holds: the meters could have moved since
+STALE_MAX_S=7200      # a reading older than 2 h is stale unless the fetch record is recent
 MARGIN_MIN_DEFAULT=30 # minutes added to the burn window
-BURN_RESERVE=99       # the print that makes every --ok week comparison fail
+BURN_RESERVE=99       # a reserve the week stays under, so the gate passes until 99%
+RATE_FLOOR=0.5        # %/h: a flat or falling week's window is computed at this floor
 
 die() { echo "week-burn-window: $1" >&2; exit 1; }
 
 now=$(date +%s)
 if [ -n "${SYG_WEEK_BURN_NOW:-}" ]; then
+    # The length guards run before the arithmetic, like the reserve override's below: bash's
+    # $((10#...)) silently wraps on huge digit strings.
     [[ $SYG_WEEK_BURN_NOW =~ ^[0-9]+$ ]] || die "SYG_WEEK_BURN_NOW='$SYG_WEEK_BURN_NOW' is not an epoch"
+    [ "${#SYG_WEEK_BURN_NOW}" -le 12 ] || die "SYG_WEEK_BURN_NOW='$SYG_WEEK_BURN_NOW' is not an epoch"
     now=$((10#$SYG_WEEK_BURN_NOW))
 fi
 margin_min=$MARGIN_MIN_DEFAULT
 if [ -n "${SYG_WEEK_BURN_MARGIN_MIN:-}" ]; then
     [[ $SYG_WEEK_BURN_MARGIN_MIN =~ ^[0-9]+$ ]] || die "SYG_WEEK_BURN_MARGIN_MIN='$SYG_WEEK_BURN_MARGIN_MIN' is not an integer >= 0"
+    [ "${#SYG_WEEK_BURN_MARGIN_MIN}" -le 12 ] || die "SYG_WEEK_BURN_MARGIN_MIN='$SYG_WEEK_BURN_MARGIN_MIN' is not an integer >= 0"
     margin_min=$((10#$SYG_WEEK_BURN_MARGIN_MIN))
 fi
 rate_override=""
@@ -70,15 +90,23 @@ if [[ ${CLAUDE_USAGE_WEEK_RESERVE:-} =~ ^[0-9]+$ ]] && [ "${#CLAUDE_USAGE_WEEK_R
 fi
 
 log="${XDG_STATE_HOME:-$HOME/.local/state}/claude-usage/readings.jsonl"
+# The fetch record claude-usage keeps next to the log (readings.jsonl.last) is rewritten on
+# every refresh, dedupe or not, so its mtime says when the meters were last actually read.
+last_mtime=0
+if [ -e "$log.last" ]; then
+    last_mtime=$(stat -c %Y "$log.last" 2>/dev/null) || last_mtime=0
+fi
 python3 - "$log" "$hold" "$now" "$((margin_min * 60))" "$rate_override" \
-    "$RATE_WINDOW_S" "$MIN_SPAN_S" "$STALE_MAX_S" "$BURN_RESERVE" <<'PY' || exit 1
+    "$RATE_WINDOW_S" "$MIN_SPAN_S" "$STALE_MAX_S" "$BURN_RESERVE" "$last_mtime" "$RATE_FLOOR" <<'PY' || exit 1
 import json
+import math
 import sys
 
 log, hold, now, margin_s = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4])
 rate_ov = sys.argv[5] or None
 rate_window_s, min_span_s, stale_max_s, burn_reserve = (
     int(sys.argv[6]), int(sys.argv[7]), int(sys.argv[8]), int(sys.argv[9]))
+last_mtime, rate_floor = int(sys.argv[10]), float(sys.argv[11])
 
 
 def hold_out():
@@ -104,7 +132,10 @@ with fh:
     for raw in fh:
         try:
             e = json.loads(raw)
-            rows.append({"epoch": int(e["epoch"]), "week": float(e["weekly_pct"]),
+            week = float(e["weekly_pct"])
+            if not math.isfinite(week):
+                raise ValueError  # NaN or an out-of-range float (1e999): drop the row, untrusted
+            rows.append({"epoch": int(e["epoch"]), "week": week,
                          "reset": parse_reset(e.get("weekly_resets_at"))})
         except (AttributeError, KeyError, TypeError, ValueError, OverflowError):
             continue  # a malformed line, or a JSON-valid one with wrong-typed/out-of-range values
@@ -113,8 +144,11 @@ if not rows:
     hold_out()
 rows.sort(key=lambda r: r["epoch"])
 latest = rows[-1]
-if now - latest["epoch"] > stale_max_s:
-    hold_out()  # stale meters: the tail may already be gone (or spent) — never burn on a guess
+if now - latest["epoch"] > stale_max_s and now - last_mtime > stale_max_s:
+    hold_out()  # stale: the latest row AND the fetch record are old (or .last is missing) —
+                # the meters could have moved since; burn needs a recent fetch, never a guess
+if latest["epoch"] > now + 300:
+    hold_out()  # future-dated latest row: untrusted clock skew
 week, reset = latest["week"], latest["reset"]
 if reset is None or reset <= now or week >= 100:
     hold_out()
@@ -128,7 +162,11 @@ else:
 if rate_h > 100:
     rate_h = 100
 if rate_h <= 0:
-    hold_out()  # flat or falling week: the reset is not approaching on its own
+    # A flat or falling meter means the tail is not being spent, so the reset is not
+    # approaching on its own: the window is computed at the floor, a cap that bounds how long
+    # a parked week may still burn — once the time left to the reset fits inside it, spend
+    # the tail instead of losing it.
+    rate_h = rate_floor
 window_s = (100 - week) / rate_h * 3600 + margin_s
 print(burn_reserve if reset - now <= window_s else hold)
 PY
