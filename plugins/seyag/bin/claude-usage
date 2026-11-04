@@ -15,7 +15,7 @@
 #                             CLAUDE_USAGE_EXTRA_OK=1 passes past the weekly reserve while extra usage is on, under its spend limit,
 #                             and spend.used is under the budget from SYG_EXTRA_USAGE_BUDGET_CMD (timeout SYG_EXTRA_USAGE_BUDGET_CMD_TIMEOUT, default 10 s) or SYG_EXTRA_USAGE_BUDGET_USD (cache at most 2 TTLs or 10 min old);
 #                             on the z.ai lane the same thresholds apply to z.ai's own quota, with the 5h one capped at 80% (Tzurot's
-#                             guests get the band above it), the week reserve overridable via CLAUDE_USAGE_ZAI_WEEK_RESERVE_CMD (integer 1-99, must return promptly) or CLAUDE_USAGE_ZAI_WEEK_RESERVE (also integer 1-99), and a quota cache over 30 minutes old treated as unavailable;
+#                             guests get the band above it), the week reserve overridable via CLAUDE_USAGE_ZAI_WEEK_RESERVE_CMD (integer 1-99 under a 5 s timeout that wins the slot in success and failure) or CLAUDE_USAGE_ZAI_WEEK_RESERVE (also integer 1-99), and a quota cache over 30 minutes old treated as unavailable;
 #                             other routed lanes (OpenRouter, a Console API key) pass at once (see below);
 #                             prints one verdict line to stderr (lane, meter, value, threshold,
 #                             source=api|estimate|none; a plan with no 5h window names meter=week and has no 5h= token; says FAIL-OPEN when it passed on an estimate)
@@ -50,16 +50,19 @@ fi
 # Fleet wind-down (2026-10-04): no new units from 75% of the week, so the rest stays for the owner
 # and GitHub claude-review. The 80% hard stop is the CLAUDE.md "Usage Windows" protocol's job.
 # CLAUDE_USAGE_WEEK_RESERVE overrides it, but only as an integer 1-99: anything else is ignored
-# with one stderr note and the default stays. (The length guard runs before the arithmetic: bash's
+# and the default stays. The clamp applies on every run, but its stderr note is gate-path only —
+# it rides in the --ok plan branch (where the reserve decides), so plain runs, --json and
+# statusline polls stay quiet. (The length guard runs before the arithmetic: bash's
 # $((10#...)) silently wraps on huge digit strings.) The per-deployment command override
 # CLAUDE_USAGE_WEEK_RESERVE_CMD is consulted in the --ok plan branch only (see there): it wins the
 # slot in success and failure, and this static is the fallback it names.
 week_reserve=75
+week_reserve_note=""
 if [[ ${CLAUDE_USAGE_WEEK_RESERVE:-} =~ ^[0-9]+$ ]] && [ "${#CLAUDE_USAGE_WEEK_RESERVE}" -le 8 ] \
     && [ "$((10#$CLAUDE_USAGE_WEEK_RESERVE))" -ge 1 ] && [ "$((10#$CLAUDE_USAGE_WEEK_RESERVE))" -le 99 ]; then
     week_reserve=$((10#$CLAUDE_USAGE_WEEK_RESERVE))
 elif [ -n "${CLAUDE_USAGE_WEEK_RESERVE:-}" ]; then
-    echo "claude-usage: CLAUDE_USAGE_WEEK_RESERVE=$CLAUDE_USAGE_WEEK_RESERVE ignored: not an integer 1-99; using the default 75" >&2
+    week_reserve_note="claude-usage: CLAUDE_USAGE_WEEK_RESERVE=$CLAUDE_USAGE_WEEK_RESERVE ignored: not an integer 1-99; using the default 75"
 fi
 # z.ai's 5h window, capped below Tzurot's free-tier cutoff: Tzurot moves guests off GLM once the
 # HIGHER of z.ai's 5h and weekly meters reaches its zaiHeadroomPercent (90), so dev work stops
@@ -69,11 +72,11 @@ zai_five_cap=80
 [[ ${CLAUDE_USAGE_ZAI_FIVE_CAP:-} =~ ^[0-9]+$ ]] && zai_five_cap=$((10#$CLAUDE_USAGE_ZAI_FIVE_CAP))
 # A deployment's z.ai weekly posture can differ from the shared week_reserve and change while the
 # machine runs (e.g. banked one-time quota resets lifting the weekly cap until spent), so the z.ai
-# --ok branch checks CLAUDE_USAGE_ZAI_WEEK_RESERVE_CMD (bash -c per gate check, trimmed stdout
-# integer 1-99; wins the slot in success and failure, falling back to week_reserve with a stderr
-# note when unusable) and static CLAUDE_USAGE_ZAI_WEEK_RESERVE (when CMD is unset/empty; itself
-# integer 1-99, anything else ignored with a stderr note). The plan lane never sees either var,
-# and non-gate runs never fork the command; the plan's own per-deployment command override
+# --ok branch checks CLAUDE_USAGE_ZAI_WEEK_RESERVE_CMD (timeout 5 bash -c per gate check, trimmed
+# stdout integer 1-99; wins the slot in success and failure, falling back to week_reserve with a
+# stderr note when unusable) and static CLAUDE_USAGE_ZAI_WEEK_RESERVE (when CMD is unset/empty;
+# itself integer 1-99, anything else ignored with a stderr note). The plan lane never sees either
+# var, and non-gate runs never fork the command; the plan's own per-deployment command override
 # CLAUDE_USAGE_WEEK_RESERVE_CMD mirrors this block in the --ok plan branch.
 
 refresh() {
@@ -253,7 +256,7 @@ if [ "${1:-}" = --ok ] && [ "$routed" = 1 ]; then
     zfive=$(jq -r '.five_hour_pct // 0' <<< "$zai"); zweek=$(jq -r '.week_pct // 0' <<< "$zai")
     zai_week_reserve=$week_reserve
     if [ -n "${CLAUDE_USAGE_ZAI_WEEK_RESERVE_CMD:-}" ]; then
-        zwr_out=$(bash -c "$CLAUDE_USAGE_ZAI_WEEK_RESERVE_CMD" 2>/dev/null); zwr_rc=$?
+        zwr_out=$(timeout 5 bash -c "$CLAUDE_USAGE_ZAI_WEEK_RESERVE_CMD" 2>/dev/null); zwr_rc=$?
         zwr_out=${zwr_out#"${zwr_out%%[![:space:]]*}"}; zwr_out=${zwr_out%"${zwr_out##*[![:space:]]}"}
         if [ "$zwr_rc" -eq 0 ] && [[ "$zwr_out" =~ ^[0-9]+$ ]] && [ "${#zwr_out}" -le 8 ] && [ "$zwr_out" -ge 1 ] && [ "$zwr_out" -le 99 ]; then
             zai_week_reserve=$((10#$zwr_out))
@@ -555,6 +558,8 @@ case "${1:-}" in
             else
                 echo "claude-usage: CLAUDE_USAGE_WEEK_RESERVE_CMD gave no usable reserve (exit $wr_rc); plan week reserve falls back to week_reserve ($week_reserve)" >&2
             fi
+        elif [ -n "$week_reserve_note" ]; then
+            echo "$week_reserve_note" >&2 # the clamp's note, gate-path only (see the clamp above)
         fi
         extra_used=""
         if ! { { [ "$no_five" = 1 ] || [ "$five" -lt "$thr" ]; } && [ "$week" -lt "$week_reserve" ]; } 2>/dev/null; then

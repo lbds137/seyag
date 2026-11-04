@@ -139,6 +139,17 @@ out=$(CLAUDE_USAGE_WEEK_RESERVE=90 CLAUDE_USAGE_WEEK_RESERVE_CMD='echo x' run --
 [ $rc = 0 ] && [ -z "$out" ] && [ "$err" = "$(wr_note 0 90 "claude-usage: --ok pass lane=anthropic meter=5h 5h=10%<90% week=85%<90% source=api")" ] \
     && ok "plan CMD failure falls back to week_reserve (static 90), the note names it" \
     || bad "plan CMD fallback to static 90: rc=$rc out=[$out] err=[$err]"
+out=$(CLAUDE_USAGE_WEEK_RESERVE_CMD='printf " \t099\n "' run --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 0 ] && [ -z "$out" ] && [ "$err" = "claude-usage: --ok pass lane=anthropic meter=5h 5h=10%<90% week=85%<99% source=api" ] \
+    && ok "plan CMD trims outer whitespace and base-10 parses 099 (upper bound 99)" \
+    || bad "plan CMD pad/099: rc=$rc out=[$out] err=[$err]"
+# The plan CMD is consulted in the --ok plan branch only: a plain run and --json never fork it.
+rm -f "$tmp/wr-ran"
+fixture 10 50 0
+CLAUDE_USAGE_WEEK_RESERVE_CMD="touch '$tmp/wr-ran'; echo 90" run >/dev/null 2>&1
+CLAUDE_USAGE_WEEK_RESERVE_CMD="touch '$tmp/wr-ran'; echo 90" run --json >/dev/null 2>&1
+[ ! -e "$tmp/wr-ran" ] && ok "plain line and --json on the plan lane never run WEEK_RESERVE_CMD" \
+    || bad "non-gate plan invocation ran WEEK_RESERVE_CMD"
 fixture 10 80 0
 for bad_static in 0 100 abc; do
     out=$(CLAUDE_USAGE_WEEK_RESERVE=$bad_static run --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
@@ -146,6 +157,12 @@ for bad_static in 0 100 abc; do
         && ok "static CLAUDE_USAGE_WEEK_RESERVE=$bad_static: ignored with the note, default 75 gates" \
         || bad "static $bad_static: rc=$rc out=[$out] err=[$err]"
 done
+# The clamp applies on every run, but its note is gate-path only (it rides in the --ok plan
+# branch, where the reserve decides): a plain run with a bad static stays quiet on stderr.
+out=$(CLAUDE_USAGE_WEEK_RESERVE=lots run 2>"$tmp/err"); rc=$?
+[ $rc = 0 ] && [ ! -s "$tmp/err" ] \
+    && ok "plain run with a bad CLAUDE_USAGE_WEEK_RESERVE: exit 0, stderr empty (note is gate-path only)" \
+    || bad "plain run bad static: rc=$rc err=[$(cat "$tmp/err")]"
 # A stale cache whose refresh fails (no credentials in hermetic HOME) discloses its age on the verdict line.
 fixture 10 50 0; touch -d "@$(($(date +%s) - 600))" "$tmp/claude-statusline/usage.json"
 out=$(run --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
@@ -442,9 +459,10 @@ run --ok 90 2>/dev/null; [ $? = 0 ] && ok "z.ai 5h 79%: passes" || bad "z.ai 5h 
 run --ok 50 2>/dev/null; [ $? = 1 ] && ok "z.ai 5h 79% with --ok 50: a lower PCT still wins" || bad "z.ai --ok 50: should fail at 79%"
 CLAUDE_USAGE_ZAI_FIVE_CAP=70 run --ok 90 2>/dev/null; [ $? = 1 ] && ok "z.ai 5h 79% with CLAUDE_USAGE_ZAI_FIVE_CAP=70: fails" || bad "z.ai cap override 70: --ok should fail at 79%"
 CLAUDE_USAGE_ZAI_FIVE_CAP=7x run --ok 90 2>/dev/null; [ $? = 0 ] && ok "z.ai 5h 79% with a non-integer cap: default 80 applies" || bad "z.ai cap '7x': --ok should pass at 79%"
-# Per-deployment z.ai week reserve: CLAUDE_USAGE_ZAI_WEEK_RESERVE_CMD (1..99, trimmed, wins in
-# success and failure; invalid/non-zero notes and falls back to week_reserve) and static
-# CLAUDE_USAGE_ZAI_WEEK_RESERVE (when CMD is unset/empty). Scoped to the z.ai --ok branch only.
+# Per-deployment z.ai week reserve: CLAUDE_USAGE_ZAI_WEEK_RESERVE_CMD (1..99, trimmed, under a
+# 5 s timeout, wins in success and failure; invalid/non-zero notes and falls back to
+# week_reserve) and static CLAUDE_USAGE_ZAI_WEEK_RESERVE (when CMD is unset/empty). Scoped to
+# the z.ai --ok branch only.
 zwr_note() { printf 'claude-usage: CLAUDE_USAGE_ZAI_WEEK_RESERVE_CMD gave no usable reserve (exit %s); z.ai week reserve falls back to week_reserve (%s)\n%s' "$1" "$2" "$3"; }
 zai_stub api 10 85
 zai_fail75="claude-usage: --ok FAIL lane=zai meter=week 5h=10%<80% week=85%>=75% source=api"
@@ -489,6 +507,12 @@ for bad_cmd in 'true' 'echo 0' 'echo "9 8"' 'echo lots'; do
         && ok "z.ai CMD invalid ($bad_cmd): notes exit 0, ignores static, falls back to 75" \
         || bad "z.ai CMD invalid ($bad_cmd): rc=$rc out=[$out] err=[$err]"
 done
+z0=${EPOCHREALTIME%.*}
+out=$(timeout 9 env CLAUDE_USAGE_ZAI_WEEK_RESERVE_CMD='sleep 30; echo 99' HOME="$tmp" XDG_CACHE_HOME="$tmp" CLAUDE_USAGE_MODEL=claude-opus-5-5 "$CU" --ok 90 2>"$tmp/err"); rc=$?
+z1=${EPOCHREALTIME%.*}; zelapsed=$((z1 - z0)); err=$(cat "$tmp/err")
+[ $rc = 1 ] && [ "$zelapsed" -le 6 ] && [ -z "$out" ] && [ "$err" = "$(zwr_note 124 75 "$zai_fail75")" ] \
+    && ok "z.ai CMD 'sleep 30': the 5 s timeout cuts it (exit 124), verdict in ${zelapsed}s" \
+    || bad "z.ai CMD timeout: rc=$rc elapsed=${zelapsed}s err=[$err]"
 out=$(CLAUDE_USAGE_WEEK_RESERVE=90 CLAUDE_USAGE_ZAI_WEEK_RESERVE_CMD='exit 3' run --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
 [ $rc = 0 ] && [ -z "$out" ] && [ "$err" = "$(zwr_note 3 90 "claude-usage: --ok pass lane=zai meter=zai-5h 5h=10%<80% week=85%<90% source=api")" ] \
     && ok "z.ai CMD failure falls back to overridden shared week_reserve (90)" \

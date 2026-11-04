@@ -115,27 +115,40 @@ ww 99 "boundary: time-to-reset exactly the window burns (<="
 { rd $((T - 1800)) 40 $((T + 1800)); rd "$T" 95 $((T + 1800)); } > "$log"
 ww 99 "raw slope 110 %/h clamps to 100: reset 1800 s out sits inside both windows, burns"
 
-# A parked meter: log_reading dedupes identical readings, so a week that has stopped moving
-# leaves a flat slope (rate 0) while only the fetch record keeps moving. A flat or falling rate
-# no longer holds outright: the window is computed at RATE_FLOOR — a cap, so the parked tail
-# still burns once the reset is close enough. Slope 0 over 6 h floors to a 73800 s window
-# ((100-90)/0.5 h + 30 min); the paired rows sit 800 s inside and 800 s outside it.
+# A flat or falling rate is not spending the tail, so the window is computed at RATE_FLOOR —
+# a cap, so the parked tail still burns once the reset is close enough. This row's slope is
+# -2.5 %/h over 2 h; floored, the window is 109800 s ((100-85)/0.5 h + 30 min).
 { rd $((T - 7200)) 90 $((T + 1000)); rd "$T" 85 $((T + 1000)); } > "$log"
 ww 99 "rate <= 0 (falling week): the floored window covers the reset 1000s out, burns"
-{ rd $((T - 21600)) 90 $((T + 73000)); rd $((T - 14400)) 90 $((T + 73000)); \
-  rd $((T - 7200)) 90 $((T + 73000)); rd "$T" 90 $((T + 73000)); } > "$log"
-ww 99 "flat week (slope 0 over 6 h): reset 73000s out sits inside the 73800s floored window, burns"
-{ rd $((T - 21600)) 90 $((T + 74600)); rd $((T - 14400)) 90 $((T + 74600)); \
-  rd $((T - 7200)) 90 $((T + 74600)); rd "$T" 90 $((T + 74600)); } > "$log"
-ww 75 "flat week: reset 74600s out sits beyond the 73800s floored window, holds"
-# Freshness has a second source: the fetch record .last is rewritten on every refresh, dedupe
-# or not, so a parked meter's readings can go quiet while the fetch stays recent. The latest
-# row here is 3 h old (past STALE_MAX_S) and the rows are flat, so the ONLY way this burns is
-# the .last mtime — drop that OR from the freshness check and this row holds.
+
+# The genuinely parked meter: log_reading dedupes identical readings, so an unmoved meter
+# writes NO new rows and the fetch record ($log.last) is what keeps moving. The log then holds
+# a single old row — fewer than 2 in the 6 h slope window — while the fresh fetch proves the
+# meters were just read: a flat reading, and the window is computed at the floor. Week 90
+# floors to a 73800 s window ((100-90)/0.5 h + 30 min); the paired rows sit 800 s inside and
+# 800 s outside it. Both rows need the .last mtime to pass the stale check (the row itself is
+# 7 h old) AND the < 2-rows floor path to burn — drop either fix and both hold 75.
 rm -f "$log.last"
-{ rd $((T - 21600)) 90 $((T + 73000)); rd $((T - 10800)) 90 $((T + 73000)); } > "$log"
+{ rd $((T - 25200)) 90 $((T + 73000)); } > "$log"
 touch -d "@$T" "$log.last"
-ww 99 "latest row 3 h old but .last mtime fresh: the fetch record keeps the reading fresh, burns"
+ww 99 "parked meter: one 7 h-old row, .last fetched now, reset 73000s out inside the 73800s floored window, burns"
+{ rd $((T - 25200)) 90 $((T + 74600)); } > "$log"
+touch -d "@$T" "$log.last"
+ww 75 "parked meter: same shape, reset 74600s out sits beyond the 73800s floored window, holds"
+rm -f "$log.last"
+
+# Freshness has a second source: the fetch record .last is rewritten on every refresh, dedupe
+# or not, so a parked meter's readings can go quiet while the fetch stays recent. A climb that
+# stopped 3 h ago (85->90, then nothing): the latest row is past STALE_MAX_S, so ONLY the .last
+# mtime gets it past the stale check, and with the older row 7 h back the slope window holds
+# one row, so ONLY the < 2-rows floor path can burn it — drop either fix and this row holds.
+{ rd $((T - 25200)) 85 $((T + 73000)); rd $((T - 10800)) 90 $((T + 73000)); } > "$log"
+touch -d "@$T" "$log.last"
+ww 99 "latest row 3 h old but .last mtime fresh: the fetch record keeps the reading fresh, floored window burns"
+# The degraded side of the same shape: no fetch record at all (both freshness sources stale) —
+# the stale hold, never a guess. Same log as the row above, .last removed: the only difference.
+rm -f "$log.last"
+ww 75 "latest row 3 h old and .last missing: stale row with no fetch record, holds"
 rm -f "$log.last"
 
 { rd $((T - 3600)) 99 $((T + 1800)); rd "$T" 100 $((T + 1800)); } > "$log"
