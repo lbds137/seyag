@@ -31,6 +31,18 @@
 # and labelled "(subagent)"; other nested JSONLs (mined-corpus reports) are
 # not.
 #
+# Hooks run with a fresh per-JSONL-file XDG_STATE_HOME, XDG_RUNTIME_DIR and
+# SYG_STATE_DIR (all in a scratch dir removed on exit), and with
+# SYG_PR_MONITOR_SEEN_FILE and SYG_PR_BODY_ACK_FILE unset, so a replay never
+# reads or writes the caller's state through those paths. The state and
+# runtime dirs are wiped and recreated before EACH file's commands, so two
+# sessions in one replay start equal — one session's ack never masks a later
+# session's identical block. Within one file the state persists across that
+# file's commands, as it did live; the next file starts empty. NOT isolated:
+# hooks that write a hardcoded /tmp/claude-$(id -u) path
+# (dispatch-posture-gate, queued-message-receipt, context-size-reminder) still
+# use the caller's /tmp state.
+#
 # A "block" is a non-zero exit from the hook script. Output: one section per
 # blocked command (command, first 200 chars, one line; slug; the hook's
 # stderr/stdout, first 3 lines), then a summary line:
@@ -41,9 +53,10 @@
 # target marked (private-term-guard needs the repo public), so an armed replay
 # that blocks nothing is not proof by itself. Before the replay, each named VAR
 # that is unset or empty in this environment gets a stderr line
-# (`replay-hook: warning: <hook-name> is inert without <VAR> (unset here);
-# export it for this run`), and the summary line gains ` (INERT: <VAR> unset)`
-# for each one; tokens that are not shell identifiers are skipped. The field is
+# (`replay-hook: warning: <hook-name> is inert without <VAR> (unset or empty
+# here); export it for this run`), and the summary line gains
+# ` (INERT: <VAR> unset or empty)` for each one; tokens that are not shell
+# identifiers are skipped. The field is
 # for gates only: a hook with side effects (one that writes files or state)
 # must not carry it, or a replay would run it for real. Nothing else is
 # printed. Exit 0 even with blocks — a report, not a gate.
@@ -100,7 +113,14 @@ else
 fi
 [ -d "$SEARCH_ROOT" ] || { echo "replay-hook: no such directory: $SEARCH_ROOT" >&2; exit 2; }
 
-# REPLAY-ARMED-BY (see the header): a switch the hook needs to act, unset here.
+# Hook state (see the header): one state and one runtime dir, wiped and
+# recreated before each JSONL file's commands.
+REPLAY_STATE=$(mktemp -d) || { echo "replay-hook: mktemp failed" >&2; exit 2; }
+trap 'rm -rf "$REPLAY_STATE"' EXIT
+mkdir -p "$REPLAY_STATE/state" "$REPLAY_STATE/runtime"
+chmod 700 "$REPLAY_STATE/runtime"
+
+# REPLAY-ARMED-BY (see the header): a switch the hook needs to act, unset or empty here.
 INERT_SUFFIX=""
 ARMED_LINE=$(grep -m1 '^# REPLAY-ARMED-BY:' "$HOOKS_DIR/$HOOK_NAME.sh" 2>/dev/null || true)
 if [ -n "$ARMED_LINE" ]; then
@@ -108,8 +128,8 @@ if [ -n "$ARMED_LINE" ]; then
   for armed_var in ${ARMED_VARS[@]+"${ARMED_VARS[@]}"}; do
     [[ "$armed_var" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
     if [ -z "${!armed_var:-}" ]; then
-      echo "replay-hook: warning: $HOOK_NAME is inert without $armed_var (unset here); export it for this run" >&2
-      INERT_SUFFIX="$INERT_SUFFIX (INERT: $armed_var unset)"
+      echo "replay-hook: warning: $HOOK_NAME is inert without $armed_var (unset or empty here); export it for this run" >&2
+      INERT_SUFFIX="$INERT_SUFFIX (INERT: $armed_var unset or empty)"
     fi
   done
 fi
@@ -143,11 +163,17 @@ while IFS= read -r f; do
     */subagents/*) slug_label="$slug_label (subagent)" ;;
   esac
 
+  # Fresh state for this file (see the header): one session's ack must never
+  # mask a later session's identical block.
+  rm -rf "$REPLAY_STATE/state" "$REPLAY_STATE/runtime"
+  mkdir -p "$REPLAY_STATE/state" "$REPLAY_STATE/runtime"
+  chmod 700 "$REPLAY_STATE/runtime"
+
   while IFS= read -r payload; do
     [ -z "$payload" ] && continue
     TOTAL=$((TOTAL + 1))
 
-    out=$(printf '%s' "$payload" | env -u CLAUDE_PROJECT_DIR bash "$HOOKS_DIR/$HOOK_NAME.sh" 2>&1)
+    out=$(printf '%s' "$payload" | env -u CLAUDE_PROJECT_DIR -u SYG_PR_MONITOR_SEEN_FILE -u SYG_PR_BODY_ACK_FILE SYG_STATE_DIR="$REPLAY_STATE/state" XDG_STATE_HOME="$REPLAY_STATE/state" XDG_RUNTIME_DIR="$REPLAY_STATE/runtime" bash "$HOOKS_DIR/$HOOK_NAME.sh" 2>&1)
     rc=$?
 
     if [ "$rc" -ne 0 ]; then

@@ -169,10 +169,10 @@ EOF
 ARM_RSH="$ARM/tests/replay-stop-hook.sh"
 
 stop_unset=$(env -u FIXTURE_ARM_VAR "$ARM_RSH" fixture-armed --since 1 --slug proj-slug --projects-dir "$T" 2>&1)
-echo "$stop_unset" | head -1 | grep -qxF "replay-stop-hook: warning: fixture-armed is inert without FIXTURE_ARM_VAR (unset here); export it for this run" \
+echo "$stop_unset" | head -1 | grep -qxF "replay-stop-hook: warning: fixture-armed is inert without FIXTURE_ARM_VAR (unset or empty here); export it for this run" \
   && ok "unarmed stop replay: warning printed before the replay" || bad "unarmed stop replay: first line is $(echo "$stop_unset" | head -1)"
-echo "$stop_unset" | tail -1 | grep -qF " (INERT: FIXTURE_ARM_VAR unset)" \
-  && ok "unarmed stop replay: summary line carries (INERT: FIXTURE_ARM_VAR unset)" || bad "unarmed stop replay: summary $(echo "$stop_unset" | tail -1)"
+echo "$stop_unset" | tail -1 | grep -qF " (INERT: FIXTURE_ARM_VAR unset or empty)" \
+  && ok "unarmed stop replay: summary line carries (INERT: FIXTURE_ARM_VAR unset or empty)" || bad "unarmed stop replay: summary $(echo "$stop_unset" | tail -1)"
 
 stop_set=$(FIXTURE_ARM_VAR=1 "$ARM_RSH" fixture-armed --since 1 --slug proj-slug --projects-dir "$T" 2>&1)
 echo "$stop_set" | grep -qF "replay-stop-hook: warning:" \
@@ -200,5 +200,64 @@ out_e=$("$ARM0/tests/replay-stop-hook.sh" fixture-empty --since 1 --slug proj-sl
 [ "$rc" -eq 0 ] && echo "$out_e" | tail -1 | grep -qF "replay-stop-hook: fixture-empty: " \
   && ok "empty REPLAY-ARMED-BY line (stop): runs clean, no crash" || bad "empty REPLAY-ARMED-BY line (stop): rc=$rc $(echo "$out_e" | tail -1)"
 rm -rf "$ARM0"
+
+# Replay state isolation for Stop hooks: the hook keeps state under
+# XDG_STATE_HOME and must never touch the caller's; each file starts empty and
+# its turn ends share the state (the first passes, the other four trip).
+ST=$(mktemp -d)
+mkdir -p "$ST/tests" "$ST/plugins/seyag/hooks"
+cp "$RSH" "$ST/tests/replay-stop-hook.sh"
+cat > "$ST/plugins/seyag/hooks/fixture-state.sh" <<'EOF'
+#!/bin/bash
+# Keeps a hit file under XDG_STATE_HOME; trips from the second call on.
+d="${XDG_STATE_HOME:-$HOME/.local/state}/seyag/fixture-state"
+mkdir -p "$d"
+had=0
+[ -s "$d/hits" ] && had=1
+echo hit >>"$d/hits"
+if [ "$had" -eq 1 ]; then
+  echo "XDG_STATE_HOME=${XDG_STATE_HOME:-}"
+  exit 2
+fi
+exit 0
+EOF
+printf '%s\n' '{"hooks":{"Stop":[{"matcher":"","hooks":[{"type":"command","command":"bash \"${CLAUDE_PLUGIN_ROOT}/hooks/run.sh\" fixture-state"}]}]}}' > "$ST/plugins/seyag/hooks/hooks.json"
+ST_RSH="$ST/tests/replay-stop-hook.sh"
+out_st1=$(XDG_STATE_HOME="$T/stop-caller-state" "$ST_RSH" fixture-state --since 1 --slug proj-slug --projects-dir "$T" 2>&1)
+[ -z "$(ls -A "$T/stop-caller-state" 2>/dev/null)" ] \
+  && ok "stop state fixture: the caller's XDG_STATE_HOME is untouched" \
+  || bad "stop state fixture wrote the caller's XDG_STATE_HOME: $(ls -A "$T/stop-caller-state")"
+echo "$out_st1" | tail -1 | grep -qF "replay-stop-hook: fixture-state: 4/5 turn ends tripped across 1 files " \
+  && ok "stop state fixture: state persists within a file (4/5 tripped)" \
+  || bad "stop state fixture within-file count: $(echo "$out_st1" | tail -1)"
+out_st2=$(XDG_STATE_HOME="$T/stop-caller-state" "$ST_RSH" fixture-state --since 1 --slug proj-slug --projects-dir "$T" 2>&1)
+[ "$(echo "$out_st1" | tail -1)" = "$(echo "$out_st2" | tail -1)" ] \
+  && ok "stop state fixture: a second replay gives the same summary (each run starts empty)" \
+  || bad "stop state fixture: second replay differs: $(echo "$out_st2" | tail -1)"
+rm -rf "$ST"
+
+# Review round 1: the caller's own overrides must not reach a Stop hook either.
+ST2=$(mktemp -d)
+mkdir -p "$ST2/tests" "$ST2/plugins/seyag/hooks"
+cp "$RSH" "$ST2/tests/replay-stop-hook.sh"
+cat > "$ST2/plugins/seyag/hooks/fixture-files.sh" <<'EOF'
+#!/bin/bash
+# Writes one marker through each override a hook honours, else its fallback.
+fb="${XDG_STATE_HOME:-$HOME/.local/state}/fallback"
+mkdir -p "$fb"
+echo x >>"${SYG_PR_MONITOR_SEEN_FILE:-$fb/seen}"
+echo x >>"${SYG_PR_BODY_ACK_FILE:-$fb/ack}"
+d="${SYG_STATE_DIR:-$fb}"
+mkdir -p "$d"
+echo x >>"$d/marker"
+exit 0
+EOF
+printf '%s\n' '{"hooks":{"Stop":[{"matcher":"","hooks":[{"type":"command","command":"bash \"${CLAUDE_PLUGIN_ROOT}/hooks/run.sh\" fixture-files"}]}]}}' > "$ST2/plugins/seyag/hooks/hooks.json"
+SYG_PR_MONITOR_SEEN_FILE="$T/stop-caller-seen" SYG_PR_BODY_ACK_FILE="$T/stop-caller-ack" SYG_STATE_DIR="$T/stop-caller-syg" \
+  XDG_STATE_HOME="$T/stop-caller-state2" "$ST2/tests/replay-stop-hook.sh" fixture-files --since 1 --slug proj-slug --projects-dir "$T" >/dev/null 2>&1
+[ ! -e "$T/stop-caller-seen" ] && [ ! -e "$T/stop-caller-ack" ] && [ ! -e "$T/stop-caller-syg" ] \
+  && ok "stop: caller overrides (SEEN, ACK, SYG_STATE_DIR) never reach a replayed hook" \
+  || bad "stop: a caller override reached the hook: $(ls -A "$T" | tr '\n' ' ')"
+rm -rf "$ST2"
 
 exit $fail

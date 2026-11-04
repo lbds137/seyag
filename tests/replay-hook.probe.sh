@@ -110,10 +110,10 @@ EOF
 ARM_RH="$ARM/tests/replay-hook.sh"
 
 out_unset=$(env -u FIXTURE_ARM_VAR "$ARM_RH" fixture-armed --since 1 --slug proj-slug --projects-dir "$T" 2>&1)
-echo "$out_unset" | head -1 | grep -qxF "replay-hook: warning: fixture-armed is inert without FIXTURE_ARM_VAR (unset here); export it for this run" \
+echo "$out_unset" | head -1 | grep -qxF "replay-hook: warning: fixture-armed is inert without FIXTURE_ARM_VAR (unset or empty here); export it for this run" \
   && ok "unarmed run: warning printed before the replay" || bad "unarmed run: first line is $(echo "$out_unset" | head -1)"
-echo "$out_unset" | tail -1 | grep -qF " (INERT: FIXTURE_ARM_VAR unset)" \
-  && ok "unarmed run: summary line carries (INERT: FIXTURE_ARM_VAR unset)" || bad "unarmed run: summary $(echo "$out_unset" | tail -1)"
+echo "$out_unset" | tail -1 | grep -qF " (INERT: FIXTURE_ARM_VAR unset or empty)" \
+  && ok "unarmed run: summary line carries (INERT: FIXTURE_ARM_VAR unset or empty)" || bad "unarmed run: summary $(echo "$out_unset" | tail -1)"
 
 out_set=$(FIXTURE_ARM_VAR=1 "$ARM_RH" fixture-armed --since 1 --slug proj-slug --projects-dir "$T" 2>&1)
 echo "$out_set" | grep -qF "replay-hook: warning:" \
@@ -132,13 +132,13 @@ cat > "$ARM/plugins/seyag/hooks/fixture-two.sh" <<'EOF'
 exit 2
 EOF
 out_two=$(FIXTURE_SET_VAR=1 env -u FIXTURE_ARM_VAR "$ARM_RH" fixture-two --since 1 --slug proj-slug --projects-dir "$T" 2>&1)
-echo "$out_two" | grep -qxF "replay-hook: warning: fixture-two is inert without FIXTURE_ARM_VAR (unset here); export it for this run" \
+echo "$out_two" | grep -qxF "replay-hook: warning: fixture-two is inert without FIXTURE_ARM_VAR (unset or empty here); export it for this run" \
   && ok "two-var field: the unset variable is named" || bad "two-var field: $(echo "$out_two" | head -1)"
 echo "$out_two" | grep -qF "FIXTURE_SET_VAR" \
   && bad "two-var field: the set variable was named" || ok "two-var field: the set variable is not named"
 echo "$out_two" | grep -qF "9-not-a-name" \
   && bad "non-identifier token was named" || ok "non-identifier token is skipped"
-echo "$out_two" | tail -1 | grep -qxF "replay-hook: fixture-two: 0/6 commands blocked across 2 files (INERT: FIXTURE_ARM_VAR unset)" \
+echo "$out_two" | tail -1 | grep -qxF "replay-hook: fixture-two: 0/6 commands blocked across 2 files (INERT: FIXTURE_ARM_VAR unset or empty)" \
   && ok "two-var field: summary carries exactly one INERT suffix" || bad "two-var field summary: $(echo "$out_two" | tail -1)"
 # An empty REPLAY-ARMED-BY line names nothing: no crash under set -u, no warning.
 cat > "$ARM/plugins/seyag/hooks/fixture-empty.sh" <<'EOF'
@@ -155,7 +155,113 @@ rm -rf "$ARM"
 /usr/bin/grep -qxF '# REPLAY-ARMED-BY: SYG_PRIVATE_TERMS_FILE' "$REPO/plugins/seyag/hooks/private-term-guard.sh" \
   && ok "private-term-guard.sh carries the REPLAY-ARMED-BY field" || bad "private-term-guard.sh lacks the REPLAY-ARMED-BY field"
 out_ptg=$(env -u SYG_PRIVATE_TERMS_FILE "$RH" private-term-guard --since 1 --slug proj-slug --projects-dir "$T" 2>&1)
-echo "$out_ptg" | grep -qxF "replay-hook: warning: private-term-guard is inert without SYG_PRIVATE_TERMS_FILE (unset here); export it for this run" \
+echo "$out_ptg" | grep -qxF "replay-hook: warning: private-term-guard is inert without SYG_PRIVATE_TERMS_FILE (unset or empty here); export it for this run" \
   && ok "real private-term-guard replay with the switch unset: warning printed" || bad "real private-term-guard replay: no warning"
+
+# Replay state isolation: a hook that keeps state under XDG_STATE_HOME or
+# XDG_RUNTIME_DIR must never touch the caller's own state, and each file
+# starts with empty state that its commands share (a file's second command
+# sees its first); the next file starts empty.
+ST=$(mktemp -d)
+mkdir -p "$ST/tests" "$ST/plugins/seyag/hooks"
+cp "$RH" "$ST/tests/replay-hook.sh"
+ST_RH="$ST/tests/replay-hook.sh"
+cat > "$ST/plugins/seyag/hooks/fixture-state.sh" <<'EOF'
+#!/bin/bash
+# Keeps a hit file under XDG_STATE_HOME; blocks from the second call on.
+d="${XDG_STATE_HOME:-$HOME/.local/state}/seyag/fixture-state"
+mkdir -p "$d"
+had=0
+[ -s "$d/hits" ] && had=1
+echo hit >>"$d/hits"
+if [ "$had" -eq 1 ]; then
+  echo "XDG_STATE_HOME=${XDG_STATE_HOME:-}"
+  exit 2
+fi
+exit 0
+EOF
+cat > "$ST/plugins/seyag/hooks/fixture-runtime.sh" <<'EOF'
+#!/bin/bash
+# Writes a marker under XDG_RUNTIME_DIR; always passes.
+if [ -n "${XDG_RUNTIME_DIR:-}" ]; then
+  mkdir -p "$XDG_RUNTIME_DIR" && echo x >"$XDG_RUNTIME_DIR/x"
+fi
+exit 0
+EOF
+out_st1=$(XDG_STATE_HOME="$T/caller-state" "$ST_RH" fixture-state --since 1 --slug proj-slug --projects-dir "$T" 2>&1)
+[ -z "$(ls -A "$T/caller-state" 2>/dev/null)" ] \
+  && ok "state fixture: the caller's XDG_STATE_HOME is untouched" \
+  || bad "state fixture wrote the caller's XDG_STATE_HOME: $(ls -A "$T/caller-state")"
+echo "$out_st1" | tail -1 | grep -qxF "replay-hook: fixture-state: 4/6 commands blocked across 2 files" \
+  && ok "state fixture: state persists within a file (each file's first command passes, the other commands block)" \
+  || bad "state fixture within-file count: $(echo "$out_st1" | tail -1)"
+out_st2=$(XDG_STATE_HOME="$T/caller-state" "$ST_RH" fixture-state --since 1 --slug proj-slug --projects-dir "$T" 2>&1)
+[ "$(echo "$out_st1" | tail -1)" = "$(echo "$out_st2" | tail -1)" ] \
+  && ok "state fixture: a second replay gives the same summary (each run starts empty)" \
+  || bad "state fixture: second replay differs: $(echo "$out_st2" | tail -1)"
+XDG_RUNTIME_DIR="$T/caller-run" "$ST_RH" fixture-runtime --since 1 --slug proj-slug --projects-dir "$T" >/dev/null 2>&1
+[ -z "$(ls -A "$T/caller-run" 2>/dev/null)" ] \
+  && ok "runtime fixture: the caller's XDG_RUNTIME_DIR is untouched" \
+  || bad "runtime fixture wrote the caller's XDG_RUNTIME_DIR: $(ls -A "$T/caller-run")"
+rm -rf "$ST"
+
+# Ack-shaped masking fixture: a hook that blocks once and then acks itself in
+# state (the pr-body-ack shape). Two JSONL sessions in ONE run replay the same
+# command: with state fresh per file both block; a run that let session 1's
+# ack mask session 2 would block only the first (1/2).
+AK=$(mktemp -d)
+mkdir -p "$AK/tests" "$AK/plugins/seyag/hooks"
+cp "$RH" "$AK/tests/replay-hook.sh"
+AK_RH="$AK/tests/replay-hook.sh"
+cat > "$AK/plugins/seyag/hooks/fixture-ack.sh" <<'EOF'
+#!/bin/bash
+# pr-body-ack shape: the first call blocks and writes the ack line; a later
+# call that finds the line passes.
+d="${XDG_STATE_HOME:-$HOME/.local/state}/seyag/fixture-ack"
+mkdir -p "$d"
+if [ -s "$d/hits" ]; then
+  exit 0
+fi
+echo hit >>"$d/hits"
+exit 2
+EOF
+mkdir -p "$AK/proj-slug"
+printf '%s\n' '{"type":"assistant","cwd":"/tmp/fixture-project","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"echo same"}}]}}' \
+  > "$AK/proj-slug/sess-a.jsonl"
+cp "$AK/proj-slug/sess-a.jsonl" "$AK/proj-slug/sess-b.jsonl"
+out_ak=$(XDG_STATE_HOME="$T/caller-state" "$AK_RH" fixture-ack --since 1 --slug proj-slug --projects-dir "$AK" 2>&1)
+echo "$out_ak" | tail -1 | grep -qxF "replay-hook: fixture-ack: 2/2 commands blocked across 2 files" \
+  && ok "ack fixture: both sessions block (session 2 does not see session 1's ack)" \
+  || bad "ack fixture masking summary: $(echo "$out_ak" | tail -1)"
+[ -z "$(ls -A "$T/caller-state" 2>/dev/null)" ] \
+  && ok "ack fixture: the caller's XDG_STATE_HOME is untouched" \
+  || bad "ack fixture wrote the caller's XDG_STATE_HOME: $(ls -A "$T/caller-state")"
+rm -rf "$AK"
+
+# Review round 1: the caller's own overrides must not reach a hook. Each one the
+# hooks honour points into $T; the fixture writes through it, or through its
+# fallback when unset. XDG_STATE_HOME is set too, so no fallback reaches HOME.
+ST2=$(mktemp -d)
+mkdir -p "$ST2/tests" "$ST2/plugins/seyag/hooks"
+cp "$RH" "$ST2/tests/replay-hook.sh"
+ST2_RH="$ST2/tests/replay-hook.sh"
+cat > "$ST2/plugins/seyag/hooks/fixture-files.sh" <<'EOF'
+#!/bin/bash
+# Writes one marker through each override a hook honours, else its fallback.
+fb="${XDG_STATE_HOME:-$HOME/.local/state}/fallback"
+mkdir -p "$fb"
+echo x >>"${SYG_PR_MONITOR_SEEN_FILE:-$fb/seen}"
+echo x >>"${SYG_PR_BODY_ACK_FILE:-$fb/ack}"
+d="${SYG_STATE_DIR:-$fb}"
+mkdir -p "$d"
+echo x >>"$d/marker"
+exit 0
+EOF
+SYG_PR_MONITOR_SEEN_FILE="$T/caller-seen" SYG_PR_BODY_ACK_FILE="$T/caller-ack" SYG_STATE_DIR="$T/caller-syg" \
+  XDG_STATE_HOME="$T/caller-state2" "$ST2_RH" fixture-files --since 1 --slug proj-slug --projects-dir "$T" >/dev/null 2>&1
+[ ! -e "$T/caller-seen" ] && [ ! -e "$T/caller-ack" ] && [ ! -e "$T/caller-syg" ] \
+  && ok "caller overrides (SEEN, ACK, SYG_STATE_DIR) never reach a replayed hook" \
+  || bad "a caller override reached the hook: $(ls -A "$T" | tr '\n' ' ')"
+rm -rf "$ST2"
 
 exit $fail

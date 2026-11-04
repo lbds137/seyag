@@ -341,6 +341,26 @@ assert_blocks "bare . --body-file degrades; the inline --body still scans (block
 echo "Adds a thing." >"$E8_BODY_DIR/e8-clean.txt"
 run_hook "$REPO" "gh pr create --base develop --body-file $E8_BODY_DIR/e8-clean.txt --body-file $E8_BODY_DIR/e8-paren.txt"
 assert_blocks "two --body-file flags: the last one is read (blocks)" "task-99999"
+
+# Cross-spelling: a --body-file flag's word is the body file even when an
+# earlier -F names another file. clean = e8-clean.txt, dirty = e8-paren.txt
+# (carries task-99999).
+run_hook "$REPO" "gh pr create --base develop -F $E8_BODY_DIR/e8-clean.txt --body-file $E8_BODY_DIR/e8-paren.txt"
+assert_blocks "-F then --body-file: the --body-file is read over an earlier -F (blocks)" "task-99999"
+# An earlier command's -F is not a body flag: the PR's own -F (clean) is read.
+run_hook "$REPO" "git commit -F $E8_BODY_DIR/e8-paren.txt && gh pr create --base develop -F $E8_BODY_DIR/e8-clean.txt"
+assert_pass "git commit -F <dirty> && gh pr create -F <clean> passes (earlier -F is not a body flag)"
+# Review round 1. A heredoc body is not command text: a -F line inside it is
+# not a body flag, and the stdin body (`--body-file -`) is still scanned. The
+# dirty line is rule-2 vocabulary only (no tracker id), so only the heredoc
+# body read can block it.
+run_hook "$REPO" $'gh pr create --base develop --body-file - <<\'EOF\'\nuse gh pr create -F notes.md\nThis fixes all 4 call sites.\nEOF'
+assert_blocks "heredoc --body-file - with a -F line in the body: the dirty heredoc line blocks" "all 4 call sites"
+# Quoted text is not flag syntax: a -F inside a quoted --title is not a body
+# flag (the -F search anchors to the gh pr command), so the real flag's dirty
+# file is the one read.
+run_hook "$REPO" "gh pr create --base develop -F $E8_BODY_DIR/e8-paren.txt --title \"fix -F handling\""
+assert_blocks "-F <dirty> --title \"fix -F handling\": the quoted -F is not a flag (blocks)" "task-99999"
 unset E8_BODY_DIR
 
 # ---- Case 6: resolving doc ref → pass ----------------------------------------

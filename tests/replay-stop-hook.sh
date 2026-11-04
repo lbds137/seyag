@@ -84,8 +84,21 @@
 #   Fed to the hook DIRECTLY (`bash plugins/seyag/hooks/<hook>.sh`, not
 #   run.sh — a project's own `.claude/hooks/<name>.sh` override would make
 #   run.sh exit 0 for everything), with `env -u CLAUDE_PROJECT_DIR -u
-#   SYG_LEDGER_PATH_RE`: the hook runs with ITS OWN defaults, not
-#   whatever the recorded project's environment happened to set.
+#   SYG_LEDGER_PATH_RE -u SYG_PR_MONITOR_SEEN_FILE -u SYG_PR_BODY_ACK_FILE`: the
+#   hook runs with ITS OWN defaults, not whatever the recorded project's
+#   environment happened to set. Hooks also run with a fresh
+#   XDG_STATE_HOME, XDG_RUNTIME_DIR and SYG_STATE_DIR (all in the run's scratch
+#   dir, fresh per JSONL file — see below), so a replay never reads or writes
+#   the caller's state through those
+#   paths, and two replays (base vs tree) start equal. The state and runtime
+#   dirs are fresh per JSONL file — each session gets its own subdir under the
+#   scratch dir, created before its spawn — so two sessions in one replay start
+#   equal and one session's ack never masks a later session's identical block;
+#   within one file the state persists across that file's turn ends, as it did
+#   live; the next file starts empty. NOT isolated: hooks that write a
+#   hardcoded /tmp/claude-$(id -u) path (dispatch-posture-gate,
+#   queued-message-receipt, context-size-reminder) still use the caller's /tmp
+#   state.
 #
 #   A trip is a non-zero exit. Output: one section per tripped turn end (last
 #   main-lane assistant text before the cut, first 200 chars; slug/file:line;
@@ -101,9 +114,10 @@
 #   The field names only the variables, not every condition, so an armed replay
 #   that trips nothing is not proof by itself. Before the replay, each named VAR
 #   that is unset or empty in this environment gets a stderr line
-#   (`replay-stop-hook: warning: <hook> is inert without <VAR> (unset here);
-#   export it for this run`), and the summary line gains ` (INERT: <VAR> unset)`
-#   for each one; tokens that are not shell identifiers are skipped. The field
+#   (`replay-stop-hook: warning: <hook> is inert without <VAR> (unset or empty
+#   here); export it for this run`), and the summary line gains
+#   ` (INERT: <VAR> unset or empty)` for each one; tokens that are not shell
+#   identifiers are skipped. The field
 #   is for gates only: a hook with side effects (one that writes files or state)
 #   must not carry it, or a replay would run it for real.
 #
@@ -170,7 +184,7 @@ else
 fi
 [ -d "$SEARCH_ROOT" ] || { echo "replay-stop-hook: no such directory: $SEARCH_ROOT" >&2; exit 2; }
 
-# REPLAY-ARMED-BY (see the header): a switch the hook needs to act, unset here.
+# REPLAY-ARMED-BY (see the header): a switch the hook needs to act, unset or empty here.
 INERT_SUFFIX=""
 ARMED_LINE=$(grep -m1 '^# REPLAY-ARMED-BY:' "$HOOKS_DIR/$HOOK_NAME.sh" 2>/dev/null || true)
 if [ -n "$ARMED_LINE" ]; then
@@ -178,14 +192,18 @@ if [ -n "$ARMED_LINE" ]; then
   for armed_var in ${ARMED_VARS[@]+"${ARMED_VARS[@]}"}; do
     [[ "$armed_var" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
     if [ -z "${!armed_var:-}" ]; then
-      echo "replay-stop-hook: warning: $HOOK_NAME is inert without $armed_var (unset here); export it for this run" >&2
-      INERT_SUFFIX="$INERT_SUFFIX (INERT: $armed_var unset)"
+      echo "replay-stop-hook: warning: $HOOK_NAME is inert without $armed_var (unset or empty here); export it for this run" >&2
+      INERT_SUFFIX="$INERT_SUFFIX (INERT: $armed_var unset or empty)"
     fi
   done
 fi
 
-SCRATCH_DIR=$(mktemp -d)
+SCRATCH_DIR=$(mktemp -d) || { echo "replay-stop-hook: mktemp failed" >&2; exit 2; }
 trap 'rm -rf "$SCRATCH_DIR"' EXIT
+# Hook state (see the header): one state and one runtime dir PER SESSION —
+# a fresh subdir per JSONL file under these, created before its spawn.
+mkdir -p "$SCRATCH_DIR/state" "$SCRATCH_DIR/runtime"
+chmod 700 "$SCRATCH_DIR/runtime"
 SCRATCH_WINDOW="$SCRATCH_DIR/window.jsonl"
 RESULTS="$SCRATCH_DIR/results"
 
@@ -214,12 +232,21 @@ while IFS= read -r f; do
   FILES=$((FILES + 1))
   slug_name=$(basename "$(dirname "$f")")
 
+  # Fresh state for this session (see the header): its own state and runtime
+  # subdir, so one session's ack never masks a later session's identical block.
+  sess_id=$(basename "$f"); sess_id=${sess_id%.jsonl}
+  HOOK_STATE="$SCRATCH_DIR/state/$slug_name/$sess_id"
+  HOOK_RUNTIME="$SCRATCH_DIR/runtime/$slug_name/$sess_id"
+  rm -rf "$HOOK_STATE" "$HOOK_RUNTIME"
+  mkdir -p "$HOOK_STATE" "$HOOK_RUNTIME"
+  chmod 700 "$HOOK_RUNTIME"
+
   rm -f "$RESULTS"
-  python3 - "$f" "$HOOK_NAME" "$HOOKS_DIR/$HOOK_NAME.sh" "$SCRATCH_WINDOW" "$RESULTS" "$slug_name" <<'PYEOF'
+  python3 - "$f" "$HOOK_NAME" "$HOOKS_DIR/$HOOK_NAME.sh" "$SCRATCH_WINDOW" "$RESULTS" "$slug_name" "$HOOK_STATE" "$HOOK_RUNTIME" <<'PYEOF'
 import sys, os, re, json, subprocess
 from collections import deque
 
-file_path, hook_name, hook_script, scratch_path, results_path, slug_name = sys.argv[1:7]
+file_path, hook_name, hook_script, scratch_path, results_path, slug_name, hook_state, hook_runtime = sys.argv[1:9]
 MIN_WINDOW_BYTES = 8_000_000
 TAIL_LINES = 4000
 FEEDBACK_PREFIX = "Stop hook feedback:"
@@ -307,7 +334,9 @@ def run_turn_end(cut_offset, cut_line_display, window_start, stop_hook_active):
         "stop_hook_active": stop_hook_active,
     }
     proc = subprocess.run(
-        ["env", "-u", "CLAUDE_PROJECT_DIR", "-u", "SYG_LEDGER_PATH_RE", "bash", hook_script],
+        ["env", "-u", "CLAUDE_PROJECT_DIR", "-u", "SYG_LEDGER_PATH_RE", "-u", "SYG_PR_MONITOR_SEEN_FILE",
+         "-u", "SYG_PR_BODY_ACK_FILE", f"SYG_STATE_DIR={hook_state}", f"XDG_STATE_HOME={hook_state}",
+         f"XDG_RUNTIME_DIR={hook_runtime}", "bash", hook_script],
         input=json.dumps(stdin_obj).encode("utf-8"),
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
     )
