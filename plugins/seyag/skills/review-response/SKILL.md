@@ -117,9 +117,9 @@ Do-it-now sends the finding back through **rule 1**, not around it: a trivial-sh
 
 For items that passed rules 1 and 2 with no conflict — trivial-shape, or semantic and `[semantic:decided]` under rule 1's second axis:
 
-1. Apply the edit as a `git commit --fixup=<target-sha>` commit. `target-sha` is the original commit that introduced the code being changed.
+1. Apply the edit as a `git commit --fixup=<target-sha>` commit — in an automerge repo (see below), a plain, properly-messaged commit instead. `target-sha` is the original commit that introduced the code being changed.
 2. Run the package-level test for the modified file.
-3. Tests pass → keep the fixup commit.
+3. Tests pass → keep the fix commit.
 4. Tests fail → **escalate to ASK immediately**, with the test failure output attached. A trivial-shape edit that breaks tests is the signal that the whitelist mis-classified it, and a `[semantic:decided]` edit that breaks tests is the signal that the finding was not engineering-only; escalation preserves the safety net.
 
 **Riders are caught at review, not at commit.** A fix that ADDS code rather than changing it gets systematically less scrutiny than planned work — "one clause" / "~10 lines" is exactly the size that skips the checks a planned change gets.
@@ -157,13 +157,14 @@ history is not one of them. Rebase-only merging is not
 rebase-before-every-push.
 
 **In repos where the merge fires automatically on review PASS, hold the
-round's whole fix batch for one gate and one push — and make them plain
-commits, not `--fixup`.** The merge completes the moment a round's verdict
-lands, and in such a repo no round is knowably final: any push can be the
-one that merges. A fix still in its own test gate — or awaiting an Ask —
-when the PASS arrives is stranded on the local branch (its remedy is a
-follow-up PR carrying it, with the review rounds that come with that); and
-pushed `fixup!` commits land unfolded in the base branch's log, because
+round's whole fix batch for one final gate and one push — and make them
+plain commits, not `--fixup`.** The merge completes the moment a round's
+verdict lands, and in such a repo no round is knowably final: any push can
+be the one that merges. A fix still in its own test gate — or awaiting an
+Ask — when the PASS arrives is stranded on the local branch; and a PASS
+that carries low findings merges with the verdict, so those fixes go in a
+follow-up PR by construction (with the review rounds that come with it).
+Pushed `fixup!` commits land unfolded in the base branch's log, because
 rebase merges preserve commits and `gh pr merge --rebase` never
 autosquashes (see above). Plain commits have no final-round problem: every
 push is merge-safe and the history is clean wherever the merge lands. The
@@ -189,7 +190,7 @@ After processing all review items in a round, present one consolidated message t
 ```
 ## Round N findings
 
-### Auto-applied (M items, M fixup commits)
+### Auto-applied (M items, M fix commits)
   [trivial:rename]     parseInput → parseUserInput  (src/handler.ts:22)
   [trivial:import]     remove unused 'Buffer'       (src/utils.ts:3)
   [trivial:comment]    fix typo in JSDoc            (src/types.ts:47)
@@ -325,7 +326,7 @@ Before each round's consolidated message:
 - [ ] Every auto-apply candidate checked against reviewer label for signal conflict (rule 2)
 - [ ] Every "no action now" item routed by what would reopen it — Do it now (this file/diff) / File the batch (a named cross-file pass) / Backlog candidate (a named observable) / Dismissed (nothing) per rule 2's deferral rows; a Do-it-now item re-enters rule 1 and lands under Auto-applied or Asks; on a process-work PR a low-priority Backlog candidate becomes a `[residue]` line in the PR body instead of a task
 - [ ] Every origin-scoped finding ("pre-existing" / "not a regression") given a merits disposition — never Dismissed on origin alone (rule 2's origin-language row)
-- [ ] Every auto-applied fixup commit has a green package-level test run (rule 3)
+- [ ] Every auto-applied fix commit has a green package-level test run (rule 3)
 - [ ] Round-N message contains all four sections, even empty ones (rule 4)
 - [ ] If this is round 4+, consolidated status menu presented instead of another iteration (rule 5)
 - [ ] If this is round 7+, findings handed off to a fresh-context implementer or the owner instead of fixed directly (rule 5a)
