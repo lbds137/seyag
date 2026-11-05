@@ -1,21 +1,21 @@
 {
   "surfaces": {
     "rules": {
-      "lines": 165,
+      "lines": 166,
       "grace_lines": 15,
-      "bytes": 21159,
+      "bytes": 21437,
       "grace_bytes": 1500
     },
     "claude-md": {
       "lines": 23,
       "grace_lines": 8,
-      "bytes": 4666,
+      "bytes": 4698,
       "grace_bytes": 800
     },
     "descriptions": {
-      "lines": 19,
+      "lines": 20,
       "grace_lines": 2,
-      "bytes": 7665,
+      "bytes": 7962,
       "grace_bytes": 600
     }
   },
