@@ -157,14 +157,22 @@ history is not one of them. Rebase-only merging is not
 rebase-before-every-push.
 
 **In repos where the merge fires automatically on review PASS, hold the
-round's whole fixup batch for one gate and one push.** The merge completes
-the moment a round's verdict lands: a fix still in its own test gate — or
-awaiting an Ask — when the PASS arrives is stranded on the local branch,
-and any `fixup!` commits already pushed land unfolded in the base branch's
-log (rebase merges preserve commits). Apply every accepted fix first,
-resolve every Ask, run one gate over the whole batch, then push once. A PR
-sitting open while an Ask waits is cheap; a stranded fix and a polluted
-base log are not.
+round's whole fix batch for one gate and one push — and make them plain
+commits, not `--fixup`.** The merge completes the moment a round's verdict
+lands, and in such a repo no round is knowably final: any push can be the
+one that merges. A fix still in its own test gate — or awaiting an Ask —
+when the PASS arrives is stranded on the local branch (its remedy is a
+follow-up PR carrying it, with the review rounds that come with that); and
+pushed `fixup!` commits land unfolded in the base branch's log, because
+rebase merges preserve commits and `gh pr merge --rebase` never
+autosquashes (see above). Plain commits have no final-round problem: every
+push is merge-safe and the history is clean wherever the merge lands. The
+fixup flow above stays for repos where a person or session controls the
+merge moment. The per-fix gates of steps 2–4 still run — each fix is
+gated when it is written; the single gate before the batch's one push is
+an extra final check, and if it fails, bisect to the failing fix and
+escalate that one. A PR sitting open while an Ask waits is cheap; a
+stranded fix is not.
 
 **A fix round re-reads what it touched**: the invariants and comments adjacent to the edited code, before push — the round-N fix that breaks the round-(N-1) fix is the self-fed signature.
 
