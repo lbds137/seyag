@@ -1,8 +1,9 @@
 #!/bin/bash
 # Fixture check for plugins/seyag/bin/week-burn-window, the reference helper for
 # CLAUDE_USAGE_WEEK_RESERVE_CMD: it prints 99 once the time to the weekly reset fits inside the
-# burn window (rate from the readings log's slope, floored for a flat or falling week, plus a
-# margin), and the hold reserve — CLAUDE_USAGE_WEEK_RESERVE when that is an integer 1-99, else
+# burn window (rate from the readings log's slope, every computed rate floored at the 1 %/h
+# capacity default, plus a margin), and the hold reserve — CLAUDE_USAGE_WEEK_RESERVE when that
+# is an integer 1-99, else
 # 75 — on every other decided path (far reset, no log, unparsable or stale readings with no
 # fresh .last fetch record, a future-dated latest row, out-of-range floats like 1e999 or a NaN
 # weekly_pct, no usable rate, past or missing reset, week >= 100), quietly and with exit 0. A
@@ -10,14 +11,16 @@
 # crash-class: exit 1, nothing on stdout. Fixture readings live under a probe-local
 # XDG_STATE_HOME and the clock is pinned with SYG_WEEK_BURN_NOW, so the real state log and the
 # real time are never touched (the .last fixtures are content writes carrying the fetch epoch,
-# the same way); host-set SYG_WEEK_BURN_RATE / SYG_WEEK_BURN_MARGIN_MIN /
+# the same way); host-set SYG_WEEK_BURN_NOW / SYG_WEEK_BURN_RATE / SYG_WEEK_BURN_MARGIN_MIN /
 # CLAUDE_USAGE_WEEK_RESERVE are cleared, since rows that need them set their own.
 # Usage: tests/week-burn-window.probe.sh   (from anywhere)
 
 set -uo pipefail
-# Hermetic against the host: machine deployments legitimately set these knobs (e.g. a
-# capacity floor while a slope fix is pending), so clear what the rows don't set themselves.
-unset SYG_WEEK_BURN_RATE SYG_WEEK_BURN_MARGIN_MIN CLAUDE_USAGE_WEEK_RESERVE
+# Hermetic against the host: machine deployments legitimately set these knobs (a capacity
+# floor or rate override while a slope fix ships, a NOW for a paused clock), so clear what the
+# rows don't set themselves — a host-exported NOW would also redden the crash-class rows with
+# the wrong stderr message (the binary validates NOW first).
+unset SYG_WEEK_BURN_NOW SYG_WEEK_BURN_RATE SYG_WEEK_BURN_MARGIN_MIN CLAUDE_USAGE_WEEK_RESERVE
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WW=${WW_BIN:-"$REPO/plugins/seyag/bin/week-burn-window"}
 fail=0
@@ -121,36 +124,55 @@ ww 99 "boundary: time-to-reset exactly the window burns (<="
 ww 99 "raw slope 110 %/h clamps to 100: reset 1800 s out sits inside both windows, burns"
 
 # A flat or falling rate is not spending the tail, so the window is computed at RATE_FLOOR —
-# a cap, so the parked tail still burns once the reset is close enough. This row's slope is
-# -2.5 %/h over 2 h; floored, the window is 109800 s ((100-85)/0.5 h + 30 min).
+# the capacity default, so the parked tail still burns once the reset is close enough. This
+# row's slope is -2.5 %/h over 2 h; floored at 1 %/h, the window is 55800 s ((100-85)/1 h +
+# 30 min).
 { rd $((T - 7200)) 90 $((T + 1000)); rd "$T" 85 $((T + 1000)); } > "$log"
-ww 99 "rate <= 0 (falling week): the floored window covers the reset 1000s out, burns"
+ww 99 "rate <= 0 (falling week): the floored window (55800s) covers the reset 1000s out, burns"
 
 # The genuinely parked meter: log_reading dedupes identical readings, so an unmoved meter
 # writes NO new rows and the fetch record ($log.last) is what keeps moving. The log then holds
 # a single old row — fewer than 2 in the 6 h slope window — while the fresh fetch proves the
 # meters were just read: a flat reading, and the window is computed at the floor. Week 90
-# floors to a 73800 s window ((100-90)/0.5 h + 30 min); the paired rows sit 800 s inside and
-# 800 s outside it. Both rows need the .last fetch epoch to pass the stale check (the row
-# itself is 7 h old) AND the < 2-rows floor path to burn — drop either fix and both hold 75.
+# floors to a 37800 s window ((100-90)/1 h + 30 min); both paired resets (73000 s, 74600 s)
+# now sit far beyond it, so the pair pins the DECISION: the .last fetch epoch gets the 7 h-old
+# row past the stale check and the < 2-rows floor path answers — floored, a far reset holds
+# instead of burning on a stretched window. Drop the .last fix and both rows hold on the stale
+# guard instead. These pair rows pin the hold side only; the two rows below pin the two parked
+# branches' burn sides (the falling-week row pins the >= 2-rows slope branch, not these).
 rm -f "$log.last"
 { rd $((T - 25200)) 90 $((T + 73000)); } > "$log"
 printf '%s\n' "$T" > "$log.last"
-ww 99 "parked meter: one 7 h-old row, .last fetched now, reset 73000s out inside the 73800s floored window, burns"
+ww 75 "parked meter: one 7 h-old row, .last fetched now, reset 73000s out beyond the 37800s floored window (floor 1.0), holds"
 { rd $((T - 25200)) 90 $((T + 74600)); } > "$log"
 printf '%s\n' "$T" > "$log.last"
-ww 75 "parked meter: same shape, reset 74600s out sits beyond the 73800s floored window, holds"
+ww 75 "parked meter: same shape, reset 74600s out also beyond the 37800s floored window, holds"
+# Burn side of the EMPTY-window parked branch: no row at all inside the 6 h slope window (the
+# single row is 7 h old), fresh .last fetch — the branch reads flat and the floored window
+# (37800 s at week 90) covers the reset 37000 s out — burns. A branch substituted with a hold
+# flips this row.
+{ rd $((T - 25200)) 90 $((T + 37000)); } > "$log"
+printf '%s\n' "$T" > "$log.last"
+ww 99 "parked meter, empty slope window: one 7 h-old row, .last fetched now, floored window (37800s) covers the reset 37000s out, burns"
+# Burn side of the ONE-in-window-row parked branch: the climb stopped 3 h ago (85->90 then
+# nothing), so only the 3 h-old row sits in the slope window and ONLY the fresh .last fetch
+# gets it past the stale check — the branch reads flat and the floored window covers the
+# 37000 s reset — burns.
+{ rd $((T - 25200)) 85 $((T + 37000)); rd $((T - 10800)) 90 $((T + 37000)); } > "$log"
+printf '%s\n' "$T" > "$log.last"
+ww 99 "parked meter, one row in the slope window: climb stopped 3 h ago, .last fetched now, floored window (37800s) covers the reset 37000s out, burns"
 rm -f "$log.last"
 
 # Freshness has a second source: the fetch record .last is rewritten on every refresh, dedupe
 # or not, so a parked meter's readings can go quiet while the fetch stays recent. A climb that
 # stopped 3 h ago (85->90, then nothing): the latest row is past STALE_MAX_S, so ONLY the .last
 # fetch epoch gets it past the stale check, and with the older row 7 h back the slope window
-# holds one row, so ONLY the < 2-rows floor path can burn it — drop either fix and this row
-# holds.
+# holds one row, so ONLY the < 2-rows floor path answers it. Floored at 1 %/h the window is
+# 37800 s, short of the 73000 s reset — a hold (at the 0.5 floor this same shape burned); drop
+# the .last fix and this row holds on the stale guard instead.
 { rd $((T - 25200)) 85 $((T + 73000)); rd $((T - 10800)) 90 $((T + 73000)); } > "$log"
 printf '%s\n' "$T" > "$log.last"
-ww 99 "latest row 3 h old but .last fetched now: the fetch record keeps the reading fresh, floored window burns"
+ww 75 "latest row 3 h old but .last fetched now: the fetch record keeps the reading decidable, floored window (37800s) short of the 73000s reset, holds"
 # The degraded side of the same shape: no fetch record at all (both freshness sources stale) —
 # the stale hold, never a guess. Same log as the row above, .last removed: the only difference.
 rm -f "$log.last"
@@ -166,18 +188,33 @@ printf '%s\n' "$T" > "$log.last"
 ww 99 "parked-after-climb: fresh fetch makes the slope's endpoint now (span 5.5 h, rate ~1.82 %/h, window ~6 h), reset 20000s out burns"
 rm -f "$log.last"
 
-# The freshness read is the record's CONTENT (the fetch epoch), not its mtime:
-# (a) content says fetched now, mtime a day old — the content leg decides: fresh, parked burn.
+# The live failure shape this floor exists for: a meter held under a gate crawls (80->81 over
+# ~4 h — the hold suppresses the rate it measures), so the fresh-endpoint decay rate is a tiny
+# positive ~0.17 %/h (readings -5.76 h and -1.86 h, mirroring the deck's live example). Nothing
+# must burn on that slope: floored at the 1 %/h capacity default the window is 19.5 h, and the
+# reset 77 h out (the live case) holds — pre-floor the ~110 h decay window swallowed it and the
+# burn printed ~3 days early.
+{ rd $((T - 20736)) 80 $((T + 277200)); rd $((T - 6696)) 81 $((T + 277200)); } > "$log"
+printf '%s\n' "$T" > "$log.last"
+ww 75 "held meter, tiny positive decay rate ~0.17 %/h: floored window 19.5h, reset 77h out holds (the burn-days-early class)"
 rm -f "$log.last"
-{ rd $((T - 25200)) 90 $((T + 73000)); } > "$log"
+
+# The freshness read is the record's CONTENT (the fetch epoch), not its mtime. Both rows put
+# the reset at 37000 s, 800 s INSIDE the 37800 s floored window, so each leg decides the verdict:
+# (a) content says fetched now, mtime a day old — the content leg decides: the reading reaches
+# the floor path and the floored window covers the 37000 s reset — burns. A mutant reading
+# .last's mtime instead holds 75 on the stale guard.
+rm -f "$log.last"
+{ rd $((T - 25200)) 90 $((T + 37000)); } > "$log"
 printf '%s\n' "$T" > "$log.last"
 touch -d "@$((T - 100000))" "$log.last"
-ww 99 "content freshness: .last content fetched now but mtime a day old — content leg wins, parked meter burns"
+ww 99 "content freshness: .last content fetched now but mtime a day old — content leg wins, the floored window (37800s) covers the reset 37000s out, burns"
 # (b) content unparsable, mtime fresh — the epoch is unread, so the fetch counts stale and the
-# stale row holds (a deliberate change from the mtime world, where fresh mtime burned).
+# stale row holds; the inverse of (a): the mtime world would burn 99 here on the fresh-mtime
+# parked path, so this row is what pins content-over-mtime from the other side.
 printf 'garbage\n' > "$log.last"
 touch -d "@$T" "$log.last"
-ww 75 "unparsable .last content: fresh mtime does not save it — fetch unread, stale row holds"
+ww 75 "unparsable .last content: fresh mtime does not save it — fetch unread, stale row holds (the mtime world would burn on the 37000s reset)"
 rm -f "$log.last"
 
 { rd $((T - 3600)) 99 $((T + 1800)); rd "$T" 100 $((T + 1800)); } > "$log"
@@ -204,15 +241,15 @@ out=$(env XDG_STATE_HOME="$tmp/state" SYG_WEEK_BURN_NOW=abc "$WW" 2>"$tmp/err");
 [ $rc = 1 ] && [ -z "$out" ] && grep -q "SYG_WEEK_BURN_NOW='abc' is not an epoch" "$tmp/err" \
     && ok "set-but-invalid SYG_WEEK_BURN_NOW: crash-class exit 1, nothing on stdout" \
     || bad "SYG_WEEK_BURN_NOW=abc: rc=$rc out=[$out] err=[$(cat "$tmp/err")]"
-out=$(env XDG_STATE_HOME="$tmp/state" SYG_WEEK_BURN_RATE=lots "$WW" 2>"$tmp/err"); rc=$?
+out=$(env XDG_STATE_HOME="$tmp/state" SYG_WEEK_BURN_NOW="$T" SYG_WEEK_BURN_RATE=lots "$WW" 2>"$tmp/err"); rc=$?
 [ $rc = 1 ] && [ -z "$out" ] && grep -q "SYG_WEEK_BURN_RATE='lots' is not a number" "$tmp/err" \
     && ok "set-but-invalid SYG_WEEK_BURN_RATE: crash-class exit 1, nothing on stdout" \
     || bad "SYG_WEEK_BURN_RATE=lots: rc=$rc out=[$out] err=[$(cat "$tmp/err")]"
-out=$(env XDG_STATE_HOME="$tmp/state" SYG_WEEK_BURN_RATE=0 "$WW" 2>"$tmp/err"); rc=$?
+out=$(env XDG_STATE_HOME="$tmp/state" SYG_WEEK_BURN_NOW="$T" SYG_WEEK_BURN_RATE=0 "$WW" 2>"$tmp/err"); rc=$?
 [ $rc = 1 ] && [ -z "$out" ] && grep -q "SYG_WEEK_BURN_RATE='0' is not > 0" "$tmp/err" \
     && ok "SYG_WEEK_BURN_RATE=0 (numeric, not > 0): crash-class exit 1" \
     || bad "SYG_WEEK_BURN_RATE=0: rc=$rc out=[$out] err=[$(cat "$tmp/err")]"
-out=$(env XDG_STATE_HOME="$tmp/state" SYG_WEEK_BURN_MARGIN_MIN=-5 "$WW" 2>"$tmp/err"); rc=$?
+out=$(env XDG_STATE_HOME="$tmp/state" SYG_WEEK_BURN_NOW="$T" SYG_WEEK_BURN_MARGIN_MIN=-5 "$WW" 2>"$tmp/err"); rc=$?
 [ $rc = 1 ] && [ -z "$out" ] && grep -q "SYG_WEEK_BURN_MARGIN_MIN='-5' is not an integer >= 0" "$tmp/err" \
     && ok "set-but-invalid SYG_WEEK_BURN_MARGIN_MIN: crash-class exit 1" \
     || bad "SYG_WEEK_BURN_MARGIN_MIN=-5: rc=$rc out=[$out] err=[$(cat "$tmp/err")]"
@@ -221,7 +258,7 @@ out=$(env XDG_STATE_HOME="$tmp/state" SYG_WEEK_BURN_NOW=123456789012345678901234
 [ $rc = 1 ] && [ -z "$out" ] && grep -q "SYG_WEEK_BURN_NOW='123456789012345678901234567890' is not an epoch" "$tmp/err" \
     && ok "30-digit SYG_WEEK_BURN_NOW (past bash arithmetic): crash-class exit 1, nothing on stdout" \
     || bad "30-digit NOW: rc=$rc out=[$out] err=[$(cat "$tmp/err")]"
-out=$(env XDG_STATE_HOME="$tmp/state" SYG_WEEK_BURN_MARGIN_MIN=123456789012345678901234567890 "$WW" 2>"$tmp/err"); rc=$?
+out=$(env XDG_STATE_HOME="$tmp/state" SYG_WEEK_BURN_NOW="$T" SYG_WEEK_BURN_MARGIN_MIN=123456789012345678901234567890 "$WW" 2>"$tmp/err"); rc=$?
 [ $rc = 1 ] && [ -z "$out" ] && grep -q "SYG_WEEK_BURN_MARGIN_MIN='123456789012345678901234567890' is not an integer >= 0" "$tmp/err" \
     && ok "30-digit SYG_WEEK_BURN_MARGIN_MIN (past bash arithmetic): crash-class exit 1" \
     || bad "30-digit MARGIN: rc=$rc out=[$out] err=[$(cat "$tmp/err")]"
