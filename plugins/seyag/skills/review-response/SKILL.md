@@ -156,6 +156,16 @@ needs `--edit` (a message change), or commits need restructuring. Tidying
 history is not one of them. Rebase-only merging is not
 rebase-before-every-push.
 
+**In repos where the merge fires automatically on review PASS, hold the
+round's whole fixup batch for one gate and one push.** The merge completes
+the moment a round's verdict lands: a fix still in its own test gate — or
+awaiting an Ask — when the PASS arrives is stranded on the local branch,
+and any `fixup!` commits already pushed land unfolded in the base branch's
+log (rebase merges preserve commits). Apply every accepted fix first,
+resolve every Ask, run one gate over the whole batch, then push once. A PR
+sitting open while an Ask waits is cheap; a stranded fix and a polluted
+base log are not.
+
 **A fix round re-reads what it touched**: the invariants and comments adjacent to the edited code, before push — the round-N fix that breaks the round-(N-1) fix is the self-fed signature.
 
 For items escalated to ASK: do not apply. Skip to rule 4.
