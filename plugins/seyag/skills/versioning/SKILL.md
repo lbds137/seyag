@@ -13,7 +13,7 @@ The project's CLAUDE.md names its version file (`plugin.json`, `package.json`, `
 
 ## Version scheme
 
-- Pre-1.0: patch per merged batch.
+- Pre-1.0: patch per merged batch; a project may reserve minor for breaking changes.
 - Post-1.0: semver — breaking → major, behavior → minor, fixes → patch.
 
 ## Notes format
@@ -22,7 +22,7 @@ One `## <version> - <YYYY-MM-DD>` section per release, newest first. Under it, `
 
 ## Source of truth
 
-Write items from the batch's commit subjects, never from memory — the range is `<prev-release-base>..HEAD` on the PR branch, written before the merge lands:
+Write items from the batch's commit subjects, never from memory — the range is `<prev-release-base>..HEAD` on the PR branch, written before the merge lands (the bump-and-notes commit itself is not an item):
 
 ```bash
 git log --format='%s' <prev-release-base>..HEAD
