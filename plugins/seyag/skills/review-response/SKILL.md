@@ -141,7 +141,8 @@ before. Pin the property the argument rests on with a test where one is
 assertable.
 
 **Fixup commits stay visible through review; they autosquash once, right
-before merge.** Keep pushing them as-is between rounds — do not `rebase
+before merge (repos where a person or session controls the merge — an
+automerge repo takes plain commits instead; see below).** Keep pushing them as-is between rounds — do not `rebase
 --autosquash` and do not force-push per round. Fixup commits sitting on the
 branch as `fixup! <target message>` are fine through review; reviewers and CI
 can read them, and a force-push per round costs a full CI + review re-run
@@ -158,9 +159,13 @@ rebase-before-every-push.
 
 **In repos where the merge fires automatically on review PASS, hold the
 round's whole fix batch for one final gate and one push — and make them
-plain commits, not `--fixup`.** The merge completes the moment a round's
-verdict lands, and in such a repo no round is knowably final: any push can
-be the one that merges. A fix still in its own test gate — or awaiting an
+plain commits, not `--fixup`.** An automerge repo is checkable: its
+CLAUDE.md or review workflow states that merges fire on the review
+verdict (an automerge job gating on it), or the open PR carries an
+auto-merge request (`gh pr view --json autoMergeRequest`). The merge
+completes the moment a round's verdict lands, and in such a repo no round
+is knowably final: any push can be the one that merges. A fix still in its
+own test gate — or awaiting an
 Ask — when the PASS arrives is stranded on the local branch; and a PASS
 that carries low findings merges with the verdict, so those fixes go in a
 follow-up PR by construction (with the review rounds that come with it).
@@ -327,6 +332,7 @@ Before each round's consolidated message:
 - [ ] Every "no action now" item routed by what would reopen it — Do it now (this file/diff) / File the batch (a named cross-file pass) / Backlog candidate (a named observable) / Dismissed (nothing) per rule 2's deferral rows; a Do-it-now item re-enters rule 1 and lands under Auto-applied or Asks; on a process-work PR a low-priority Backlog candidate becomes a `[residue]` line in the PR body instead of a task
 - [ ] Every origin-scoped finding ("pre-existing" / "not a regression") given a merits disposition — never Dismissed on origin alone (rule 2's origin-language row)
 - [ ] Every auto-applied fix commit has a green package-level test run (rule 3)
+- [ ] Automerge repo: the round's fixes are plain commits, held for one final gate and one push (rule 3)
 - [ ] Round-N message contains all four sections, even empty ones (rule 4)
 - [ ] If this is round 4+, consolidated status menu presented instead of another iteration (rule 5)
 - [ ] If this is round 7+, findings handed off to a fresh-context implementer or the owner instead of fixed directly (rule 5a)
