@@ -2,6 +2,16 @@
 
 All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY-MM-DD>` section per released version; under it, `###` categories in fixed order — Breaking Changes, Features, Bug Fixes, Improvements, Chores, Tests — empty ones omitted; items are `- **scope:** description (#PR)`, written from the version's merged commit subjects.
 
+## 0.3.134 - 2026-11-04
+
+### Bug Fixes
+
+- **reserve-week:** `week-burn-window` floors every computed rate — slope, fresh-endpoint decay, parked/flat — at the 1 %/h capacity default (raised from 0.5, where it covered only rate <= 0): a hold suppresses the very rate it measures, so a held meter's tiny positive decay slope (~0.17 %/h live) stretched the burn window to ~110 h and printed the burn ~3 days early; floored, a held or trickle week burns only once the reset is close enough, and `SYG_WEEK_BURN_RATE` still overrides entirely (#244)
+- **review-response:** the round's fixup batch is held in automerge repos (#243)
+- **review-response:** plain commits in automerge repos, with the batch gate scoped to them (#243)
+- **review-response:** the fixup flow is scoped to controlled-merge repos (#243)
+- **review-response, delegation:** the automerge carve-out is carried across review-response + delegation (#243)
+
 ## 0.3.133 - 2026-11-04
 
 ### Bug Fixes
