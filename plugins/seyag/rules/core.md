@@ -65,7 +65,7 @@ On the Anthropic lane she drives from her phone, often by voice (Remote Control)
 - Before building against a backlog or board entry, check it against the log and the code. Work listed as "next" may already have shipped.
 - Before changing a documented parameter (a retention window, TTL, cap, threshold or default), search for an earlier DECISION about it in the project's notes and tracker, not just the code that reads it. Reversing a past decision is often right, but do it deliberately and write the reason back where the decision was made.
 - Completion claims require re-reading the scope definition. Before calling a theme, plan or multi-part task done, reopen its checklist and go through the remaining items by name; a batch with an unmerged PR is not done.
-- In a project that versions, the session driving a merge bumps the version and lands the release notes in the same PR.
+- In a project that versions, the session driving a merge bumps the version and lands the release notes in the PR that completes the batch.
 
 ### Work selection finishes first
 - Work that finishes a theme outranks work that starts one. When she proposes a new direction while a theme is half done, name what's half done and what the detour costs, then let her decide. Silently shelving the old theme is the failure mode.
