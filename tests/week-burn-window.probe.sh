@@ -10,10 +10,14 @@
 # crash-class: exit 1, nothing on stdout. Fixture readings live under a probe-local
 # XDG_STATE_HOME and the clock is pinned with SYG_WEEK_BURN_NOW, so the real state log and the
 # real time are never touched (the .last fixtures are content writes carrying the fetch epoch,
-# the same way).
+# the same way); host-set SYG_WEEK_BURN_RATE / SYG_WEEK_BURN_MARGIN_MIN /
+# CLAUDE_USAGE_WEEK_RESERVE are cleared, since rows that need them set their own.
 # Usage: tests/week-burn-window.probe.sh   (from anywhere)
 
 set -uo pipefail
+# Hermetic against the host: machine deployments legitimately set these knobs (e.g. a
+# capacity floor while a slope fix is pending), so clear what the rows don't set themselves.
+unset SYG_WEEK_BURN_RATE SYG_WEEK_BURN_MARGIN_MIN CLAUDE_USAGE_WEEK_RESERVE
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WW=${WW_BIN:-"$REPO/plugins/seyag/bin/week-burn-window"}
 fail=0
