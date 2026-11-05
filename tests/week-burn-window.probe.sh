@@ -3,11 +3,11 @@
 # CLAUDE_USAGE_WEEK_RESERVE_CMD: it prints 99 once the time to the weekly reset fits inside the
 # burn window (rate from the readings log's slope, every computed rate floored at the 1 %/h
 # capacity default, plus a margin), and the hold reserve — CLAUDE_USAGE_WEEK_RESERVE when that
-# is an integer 1-99, else
-# 75 — on every other decided path (far reset, no log, unparsable or stale readings with no
-# fresh .last fetch record, a future-dated latest row, out-of-range floats like 1e999 or a NaN
-# weekly_pct, no usable rate, past or missing reset, week >= 100), quietly and with exit 0. A
-# set-but-invalid SYG_WEEK_BURN_* override — including one too long to do arithmetic on — is
+# is an integer 1-99, else 75 — on every other decided path (far reset, no log, unparsable or
+# stale readings with no fresh .last fetch record, a future-dated latest row, out-of-range
+# floats like 1e999 or a NaN weekly_pct, no usable rate, past or missing reset, week >= 100),
+# quietly and with exit 0. A set-but-invalid SYG_WEEK_BURN_* override — including one too long
+# to do arithmetic on — is
 # crash-class: exit 1, nothing on stdout. Fixture readings live under a probe-local
 # XDG_STATE_HOME and the clock is pinned with SYG_WEEK_BURN_NOW, so the real state log and the
 # real time are never touched (the .last fixtures are content writes carrying the fetch epoch,
@@ -93,6 +93,14 @@ ww 75 "future-dated latest row (now + 100 min): untrusted clock skew holds despi
 { rd $((T - 7200)) 80 $((T + 33000)); rd "$T" 90 $((T + 33000)); } > "$log"
 ww 75 "SYG_WEEK_BURN_RATE unset: slope 5 %/h window (9000s) < 33000s to reset, holds"
 ww 99 "SYG_WEEK_BURN_RATE=0.1 slows the window past the reset and flips to burn" SYG_WEEK_BURN_RATE=0.1
+
+# The override is taken as given — never floored (the > 100 clamp still applies). This row
+# discriminates the property: at 0.5 %/h the window is (100-90)/0.5 h + 30 min = 73800 s, over
+# the 50000 s reset (burns), while floored at 1 %/h it would be 37800 s, under it (holds) — the
+# 0.1 row above cannot see the floor, since its override burns either way, so dropping the
+# rate_ov-is-None guard flips only this row.
+{ rd $((T - 7200)) 80 $((T + 50000)); rd "$T" 90 $((T + 50000)); } > "$log"
+ww 99 "SYG_WEEK_BURN_RATE=0.5 (sub-floor): override taken as given, never floored — window 73800s covers the reset 50000s out, burns" SYG_WEEK_BURN_RATE=0.5
 
 # The slope needs its window: fewer than 2 rows in it, or fewer than 30 min between the window's
 # first and last row, is no usable rate — hold, even with a valid reset already inside where a
