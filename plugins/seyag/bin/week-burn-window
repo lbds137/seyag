@@ -17,9 +17,10 @@
 # Arithmetic (constants at the top):
 #   now   = SYG_WEEK_BURN_NOW (epoch override; the test clock) else date +%s
 #   week  = the latest row's weekly_pct; reset_ts = its weekly_resets_at (integer epoch)
-#   rate  = SYG_WEEK_BURN_RATE (%/h, a number > 0) when set — the full override, wins
-#           entirely and is taken as given (never floored) — else the slope of weekly_pct over
-#           the rows with epoch >= now - RATE_WINDOW_S (6 h back), split by shape: >= 2 rows
+#   rate  = SYG_WEEK_BURN_RATE (%/h, a number > 0) when set — the full override, wins entirely
+#           and is taken as given — never floored (the > 100 clamp still applies) — else the
+#           slope of weekly_pct over the rows with epoch >= now - RATE_WINDOW_S (6 h back),
+#           split by shape: >= 2 rows
 #           spanning >= MIN_SPAN_S (30 min) give rate_h = (last - first) / span_hours, where a
 #           fresh fetch record (see Freshness) substitutes now for the latest row's epoch —
 #           the endpoint becomes (now, latest["week"]), so a meter that climbed and then
@@ -30,7 +31,8 @@
 #           leaves an unmoved meter no new rows, so a meter just fetched with < 2 in-window
 #           rows has not moved since its latest row — a flat reading, rate 0, floored below.
 #           < 2 rows with the fetch record stale or missing is no usable rate: hold. A rate
-#           above 100 clamps to 100.
+#           above 100 clamps to 100; a deployment whose real burn capacity is under the 1 %/h
+#           floor should set SYG_WEEK_BURN_RATE.
 #   Burn window (seconds) = (100 - week) / rate_h hours, in seconds, + the margin
 #           (SYG_WEEK_BURN_MARGIN_MIN, integer >= 0, default MARGIN_MIN_DEFAULT = 30) in
 #           minutes. Every computed rate (slope, fresh-endpoint decay, parked/flat) is floored
@@ -72,11 +74,7 @@ MIN_SPAN_S=1800       # the slope needs >= 30 min between the window's first and
 STALE_MAX_S=7200      # a reading older than 2 h is stale unless the fetch record is recent
 MARGIN_MIN_DEFAULT=30 # minutes added to the burn window
 BURN_RESERVE=99       # a reserve the week stays under, so the gate passes until 99%
-RATE_FLOOR=1          # %/h capacity default: every computed rate floors at this. Raising it
-                      # past ~1.98 also flips tests/claude-usage.probe.sh's fresh end-to-end
-                      # row (its log fixture is week 90, reset 20000 s out: 36000/f + 1800 >=
-                      # 20000 -> f <= 1.978; runtime-verified 11-04: rate 1.9 burns, 2 holds) —
-                      # re-anchor that file on any floor change.
+RATE_FLOOR=1          # %/h capacity default: every computed rate floors at this. Raising it past ~1.98 flips tests/claude-usage.probe.sh's fresh end-to-end row — re-anchor that file on any floor change.
 
 die() { echo "week-burn-window: $1" >&2; exit 1; }
 
@@ -211,7 +209,7 @@ if rate_ov is None and rate_h < rate_floor:
     # decay, parked/flat): a hold suppresses the very rate it is holding, so a tiny positive
     # slope must not size the window — floored at the capacity default, a held or trickle
     # week burns only once the reset is close enough. The SYG_WEEK_BURN_RATE override wins
-    # entirely and is taken as given — never floored.
+    # entirely and is taken as given — never floored (the > 100 clamp still applies).
     rate_h = rate_floor
 if rate_h > 100:
     rate_h = 100
