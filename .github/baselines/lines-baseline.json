@@ -3,7 +3,7 @@
     "rules": {
       "lines": 166,
       "grace_lines": 15,
-      "bytes": 21437,
+      "bytes": 21457,
       "grace_bytes": 1500
     },
     "claude-md": {
@@ -15,7 +15,7 @@
     "descriptions": {
       "lines": 20,
       "grace_lines": 2,
-      "bytes": 7962,
+      "bytes": 7981,
       "grace_bytes": 600
     }
   },
