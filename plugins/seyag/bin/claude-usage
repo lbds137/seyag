@@ -513,9 +513,11 @@ case "${1:-}" in
         # --wait then keeps polling until the weekly reset instead of waking on each fresh 5h window.
         # CLAUDE_USAGE_EXTRA_OK=1 lifts the weekly reserve while the plan's extra usage is on, under its
         # spend limit, and has a spend reading strictly under the budget from SYG_EXTRA_USAGE_BUDGET_CMD
-        # (wins in success and failure, no fallback) or SYG_EXTRA_USAGE_BUDGET_USD. That pass spends
-        # money, so it fails closed: strict booleans, a readable spend and budget, and never on a cache
-        # older than two TTLs or 10 minutes, whichever is less.
+        # (wins in success and failure, no fallback) or SYG_EXTRA_USAGE_BUDGET_USD. The pass's meter
+        # names the biller: below 100% of the week it bills the plan (meter=plan, with a note that
+        # extra usage bills only at 100%); at 100%+ it bills extra usage (meter=extra-usage). The
+        # extra-usage path fails closed: strict booleans, a readable spend and budget, and never on a
+        # cache older than two TTLs or 10 minutes, whichever is less.
         cache_mtime=$(stat -c %Y "$cache" 2>/dev/null || echo 0)
         now=$(date +%s)
         cache_age=$(( now - cache_mtime ))
@@ -569,6 +571,7 @@ case "${1:-}" in
             fi
         fi
         extra_used=""
+        extra_ok=""
         if ! { { [ "$no_five" = 1 ] || [ "$five" -lt "$thr" ]; } && [ "$week" -lt "$week_reserve" ]; } 2>/dev/null; then
             five_op=">="; [ "$five" -lt "$thr" ] 2>/dev/null && five_op="<"
             week_op=">="; [ "$week" -lt "$week_reserve" ] 2>/dev/null && week_op="<"
@@ -607,14 +610,14 @@ case "${1:-}" in
                     fi
                 fi
                 if [ "$extra_state" = ok ]; then
-                    pass_meter="extra-usage"
+                    extra_ok=1
                 else
                     extra_reason=${extra_state#off:}
                     [ -n "$extra_reason" ] || extra_reason=disabled
                     extra_note=" extra=off ($extra_reason)"
                 fi
             fi
-            if [ "$pass_meter" != extra-usage ]; then
+            if [ "$extra_ok" != 1 ]; then
                 five_tok=" 5h=${five}%${five_op}${thr}%"
                 [ "$no_five" = 1 ] && five_tok=""
                 echo "claude-usage: --ok FAIL lane=anthropic meter=$meter${five_tok} week=${week}%${week_op}${week_reserve}%${extra_note} source=api${stale_note}${extra_hint}" >&2
@@ -634,15 +637,25 @@ case "${1:-}" in
                 fi
             done < <(sed 's/, /\n/g; s/%//g' <<< "$scoped" | grep .)
         fi
-        # An extra-usage pass names its balance: extra_figure() under the same budget
-        # read_extra_budget loaded above. Every other pass line stays as it was.
+        # A pass's meter names the biller: below 100% of the week the pass still bills the
+        # plan (the stop stays visible via week=N%>=R%); at 100%+ it genuinely bills extra
+        # usage. An extra-ok pass names its balance (both labels): extra_figure() under
+        # the same budget read_extra_budget loaded above. Every other pass line stays as
+        # it was.
         extra_bal=""
-        if [ "$pass_meter" = extra-usage ]; then
+        pass_note=""
+        if [ "$extra_ok" = 1 ]; then
             extra_bal=" extra=$(extra_figure "$extra_used")"
+            if [ "$week" -ge 100 ] 2>/dev/null; then
+                pass_meter="extra-usage"
+            else
+                pass_meter="plan"
+                pass_note=" (extra usage bills only at 100%)"
+            fi
         fi
         five_tok=" 5h=${five}%<${thr}%"
         [ "$no_five" = 1 ] && five_tok=""
-        echo "claude-usage: --ok pass lane=anthropic meter=$pass_meter${five_tok} week=${week}%${week_op}${week_reserve}%${extra_bal} source=api${stale_note}" >&2
+        echo "claude-usage: --ok pass lane=anthropic meter=$pass_meter${five_tok} week=${week}%${week_op}${week_reserve}%${extra_bal}${pass_note} source=api${stale_note}" >&2
         exit 0
         ;;
     --json)
