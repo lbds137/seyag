@@ -319,6 +319,20 @@ check_bash 2 "unexpanded --git-dir=\"\$VAR\" with live payload cwd blocks" \
   'git --git-dir="$UNSET_VAR" commit -m x' "$LIVE"
 check_bash 2 "unexpanded --work-tree=\"\$VAR\" with live payload cwd blocks" \
   'git --work-tree="$UNSET_VAR" commit -m x' "$LIVE"
+check_bash 0 "git worktree add then git -C <new-wt> commit in same command allows" \
+  "git worktree add -b n .claude/worktrees/new main && git -C .claude/worktrees/new commit -m x" "$LIVE"
+check_bash 0 "git worktree add then cd <new-wt> && git commit in same command allows" \
+  "git worktree add -b n .claude/worktrees/new main && cd .claude/worktrees/new && git commit -m x" "$LIVE"
+check_bash 0 "git worktree add -q -b then git -C <new-wt> apply --index in same command allows" \
+  "git worktree add -q -b audit-lows-b .claude/worktrees/lowsB-release $INIT_SHA && git -C .claude/worktrees/lowsB-release apply --index ../../dispatch/lowsB.patch" "$LIVE"
+check_bash 0 "git worktree add --lock --reason then git --work-tree=<new-wt> commit allows" \
+  "git worktree add --lock --reason wip -B n .claude/worktrees/new/sub main && git --work-tree=.claude/worktrees/new/sub/inner commit -m x" "$LIVE"
+check_bash 2 "git -C <non-existent-wt> commit with no worktree add still blocks" \
+  "git -C .claude/worktrees/never-made commit -m x" "$LIVE"
+check_bash 2 "cd <non-existent-wt> && git commit with no worktree add still blocks" \
+  "cd .claude/worktrees/never-made && git commit -m x" "$LIVE"
+check_bash 2 "git worktree add ../elsewhere && git commit in live root still blocks" \
+  "git worktree add ../elsewhere && git commit -m x" "$LIVE"
 
 # --- 6. Edit / Write / MultiEdit / NotebookEdit & check-ignore 128 ------------
 check_file 2 "Edit of a tracked file in live root blocks" Edit "$LIVE/tracked.txt" "$LIVE"
