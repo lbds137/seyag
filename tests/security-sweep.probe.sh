@@ -775,7 +775,7 @@ if [ -z "${SECURITY_SWEEP_SKIP_CANARIES:-}" ] && [ "$fail" -eq 0 ]; then
 
   # Canary r2-6: re-inserting chmod +x "$SS" in a temp copy of this probe fails 11
   sed 's@^\[ -x "\$SS" \]@chmod +x "\$SS" 2>/dev/null || true\n[ -x "\$SS" ]@' "${BASH_SOURCE[0]}" > "$T/mut-probe-r2-6.sh"
-  mut_out=$(SECURITY_SWEEP_SKIP_CANARIES=1 bash "$T/mut-probe-r2-6.sh" 2>&1); mut_rc=$?
+  mut_out=$(SECURITY_SWEEP_BIN="$SS" SECURITY_SWEEP_SKIP_CANARIES=1 bash "$T/mut-probe-r2-6.sh" 2>&1); mut_rc=$?
   if [ "$mut_rc" -ne 0 ] && grep -qF "FAIL: 11 non-executable SECURITY_SWEEP_BIN check (rc=0, x=1)" <<<"$mut_out"; then
     ok "canary r2-6: re-inserting chmod +x on target bin fails 11"
   else
