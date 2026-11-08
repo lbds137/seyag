@@ -26,6 +26,15 @@
 #                             zai_five_hour_pct, zai_week_pct (z.ai) | or_remaining_usd (OpenRouter, 2 dp as displayed) | api_credit_remaining_usd (Console); five_hour_absent: true when the plan cache has no 5h window (on every lane, routed ones included); extra_usage {enabled, spend_limit_reached, disabled_reason, used_usd} when in cache
 #   claude-usage --all        one line per lane on this machine (Anthropic plan, z.ai quota, API credit), whatever the
 #                             calling session's lane; always exits 0
+#   claude-usage --posture    one line, exit 0: the configured week thresholds, so a session quotes them instead of inventing
+#                             them: 'week posture: wind-down R% (no new units) · stop S% (checkpoint, wake at reset) · now W%'
+#                             (R = the reserve --ok uses, resolved the same way; S = CLAUDE_USAGE_WEEK_STOP, integer 1-99, default
+#                             80, reported only and read by no gate; W follows --ok's cache rules: ' (cache Nm old)' past the TTL,
+#                             0% plus ' (week reset since cache)' after a passed reset, '?' (with the age tag) past the gate max age or
+#                             with no weekly figure; ' · extra pass on (…)' appended under CLAUDE_USAGE_EXTRA_OK=1); on the z.ai lane
+#                             'z.ai week posture: …' with the z.ai reserve and z.ai's week %, rounded, '?' once over 30 minutes old,
+#                             never the extra clause; other routed lanes print '<lane> posture: no week gate (provider enforces its
+#                             own cap)' and never run the reserve command
 #
 # Reads the statusline's cache of /api/oauth/usage (~/.cache/claude-statusline/usage.json)
 # and refreshes it when it is older than 2 minutes, under a lock, so any number of polling
@@ -55,8 +64,9 @@ fi
 # or the plan lane's --ok branch), so plain runs, --json and statusline polls stay quiet. (The
 # length guard runs before the arithmetic: bash's
 # $((10#...)) silently wraps on huge digit strings.) The per-deployment command override
-# CLAUDE_USAGE_WEEK_RESERVE_CMD is consulted in the --ok plan branch only (see there): it wins the
-# slot in success and failure, and this static is the fallback it names.
+# CLAUDE_USAGE_WEEK_RESERVE_CMD is consulted in the --ok plan branch and --posture only (see
+# resolve_plan_week_reserve; --posture on a routed non-z.ai lane never runs it): it wins the slot
+# in success and failure, and this static is the fallback it names.
 week_reserve=75
 week_reserve_note=""
 if [[ ${CLAUDE_USAGE_WEEK_RESERVE:-} =~ ^[0-9]+$ ]] && [ "${#CLAUDE_USAGE_WEEK_RESERVE}" -le 8 ] \
@@ -64,6 +74,16 @@ if [[ ${CLAUDE_USAGE_WEEK_RESERVE:-} =~ ^[0-9]+$ ]] && [ "${#CLAUDE_USAGE_WEEK_R
     week_reserve=$((10#$CLAUDE_USAGE_WEEK_RESERVE))
 elif [ -n "${CLAUDE_USAGE_WEEK_RESERVE:-}" ]; then
     week_reserve_note="claude-usage: CLAUDE_USAGE_WEEK_RESERVE=$CLAUDE_USAGE_WEEK_RESERVE ignored: not an integer 1-99; using the default 75"
+fi
+# The week's hard stop, reported by --posture only (no gate reads it): CLAUDE_USAGE_WEEK_STOP,
+# integer 1-99, validated like the reserve above, default 80, with --posture's stderr note.
+week_stop=80
+week_stop_note=""
+if [[ ${CLAUDE_USAGE_WEEK_STOP:-} =~ ^[0-9]+$ ]] && [ "${#CLAUDE_USAGE_WEEK_STOP}" -le 8 ] \
+    && [ "$((10#$CLAUDE_USAGE_WEEK_STOP))" -ge 1 ] && [ "$((10#$CLAUDE_USAGE_WEEK_STOP))" -le 99 ]; then
+    week_stop=$((10#$CLAUDE_USAGE_WEEK_STOP))
+elif [ -n "${CLAUDE_USAGE_WEEK_STOP:-}" ]; then
+    week_stop_note="claude-usage: CLAUDE_USAGE_WEEK_STOP=$CLAUDE_USAGE_WEEK_STOP ignored: not an integer 1-99; using the default 80"
 fi
 # z.ai's 5h window, capped below Tzurot's free-tier cutoff: Tzurot moves guests off GLM once the
 # HIGHER of z.ai's 5h and weekly meters reaches its zaiHeadroomPercent (90), so dev work stops
@@ -79,6 +99,58 @@ zai_five_cap=80
 # itself integer 1-99, anything else ignored with a stderr note). The plan lane never sees either
 # var, and non-gate runs never fork the command; the plan's own per-deployment command override
 # CLAUDE_USAGE_WEEK_RESERVE_CMD mirrors this block in the --ok plan branch.
+
+# The plan week's reserve can follow a deployment command, the way the z.ai lane's can:
+# CLAUDE_USAGE_WEEK_RESERVE_CMD runs per gate check (--ok, --posture) under a 5 s timeout, stderr
+# dropped so a chatty helper can't corrupt the value. A trimmed integer 1-99 on stdout becomes the
+# reserve; anything else — non-zero exit, timeout, empty, non-integer, over-length, out of
+# 1-99 — keeps $week_reserve (this static override's value, else the default 75) with one
+# stderr note. The length guard runs before the arithmetic: the [-ge] comparison on a huge
+# digit string would print "integer expected" on this script's stderr ahead of the note.
+# The command wins the slot in success and failure: the static is only the fallback it
+# names, and non-gate runs never fork it. Sets global week_reserve.
+resolve_plan_week_reserve() {
+    local wr_out wr_rc
+    [ -n "${CLAUDE_USAGE_WEEK_RESERVE_CMD:-}" ] || return 0
+    wr_out=$(timeout 5 bash -c "$CLAUDE_USAGE_WEEK_RESERVE_CMD" 2>/dev/null); wr_rc=$?
+    wr_out=${wr_out#"${wr_out%%[![:space:]]*}"}; wr_out=${wr_out%"${wr_out##*[![:space:]]}"}
+    if [ "$wr_rc" -eq 0 ] && [[ "$wr_out" =~ ^[0-9]+$ ]] && [ "${#wr_out}" -le 8 ] \
+        && [ "$wr_out" -ge 1 ] && [ "$wr_out" -le 99 ]; then
+        week_reserve=$((10#$wr_out))
+    else
+        echo "claude-usage: CLAUDE_USAGE_WEEK_RESERVE_CMD gave no usable reserve (exit $wr_rc); plan week reserve falls back to week_reserve ($week_reserve)" >&2
+    fi
+}
+
+# The z.ai lane's week reserve (the block above documents it): CMD, else static, else week_reserve.
+# Sets global zai_week_reserve.
+resolve_zai_week_reserve() {
+    local zwr_out zwr_rc
+    zai_week_reserve=$week_reserve
+    if [ -n "${CLAUDE_USAGE_ZAI_WEEK_RESERVE_CMD:-}" ]; then
+        zwr_out=$(timeout 5 bash -c "$CLAUDE_USAGE_ZAI_WEEK_RESERVE_CMD" 2>/dev/null); zwr_rc=$?
+        zwr_out=${zwr_out#"${zwr_out%%[![:space:]]*}"}; zwr_out=${zwr_out%"${zwr_out##*[![:space:]]}"}
+        if [ "$zwr_rc" -eq 0 ] && [[ "$zwr_out" =~ ^[0-9]+$ ]] && [ "${#zwr_out}" -le 8 ] && [ "$zwr_out" -ge 1 ] && [ "$zwr_out" -le 99 ]; then
+            zai_week_reserve=$((10#$zwr_out))
+        else
+            echo "claude-usage: CLAUDE_USAGE_ZAI_WEEK_RESERVE_CMD gave no usable reserve (exit $zwr_rc); z.ai week reserve falls back to week_reserve ($week_reserve)" >&2
+        fi
+    elif [[ ${CLAUDE_USAGE_ZAI_WEEK_RESERVE:-} =~ ^[0-9]+$ ]] && [ "${#CLAUDE_USAGE_ZAI_WEEK_RESERVE}" -le 8 ] \
+        && [ "$((10#$CLAUDE_USAGE_ZAI_WEEK_RESERVE))" -ge 1 ] && [ "$((10#$CLAUDE_USAGE_ZAI_WEEK_RESERVE))" -le 99 ]; then
+        zai_week_reserve=$((10#$CLAUDE_USAGE_ZAI_WEEK_RESERVE))
+    elif [ -n "${CLAUDE_USAGE_ZAI_WEEK_RESERVE:-}" ]; then
+        echo "claude-usage: CLAUDE_USAGE_ZAI_WEEK_RESERVE=$CLAUDE_USAGE_ZAI_WEEK_RESERVE ignored: not an integer 1-99; using week_reserve ($week_reserve)" >&2
+    fi
+}
+
+# --posture's one stdout line: <prefix>week posture: wind-down R% … stop S% … now <W>[ · extra pass …].
+# $1 = "" or "z.ai ", $2 = reserve, $3 = the now token ("N%", "N% (cache Nm old)", "?"), $4 = non-empty
+# to append the extra-pass clause (the plan gate reads CLAUDE_USAGE_EXTRA_OK; the z.ai gate doesn't).
+posture_line() {
+    local line="${1}week posture: wind-down ${2}% (no new units) · stop ${week_stop}% (checkpoint, wake at reset) · now ${3}"
+    [ -n "${4:-}" ] && line="$line · extra pass on (past the wind-down while extra usage is under its limit)"
+    echo "$line"
+}
 
 refresh() {
     local age tok tmp hdr_line ra backoff now retry_at max_ahead
@@ -259,21 +331,7 @@ if [ "${1:-}" = --ok ] && [ "$routed" = 1 ]; then
         [ "$zai_age" -gt "$ttl" ] && zstale_note=" (cache $((zai_age / 60))m old)"
     fi
     zfive=$(jq -r '.five_hour_pct // 0' <<< "$zai"); zweek=$(jq -r '.week_pct // 0' <<< "$zai")
-    zai_week_reserve=$week_reserve
-    if [ -n "${CLAUDE_USAGE_ZAI_WEEK_RESERVE_CMD:-}" ]; then
-        zwr_out=$(timeout 5 bash -c "$CLAUDE_USAGE_ZAI_WEEK_RESERVE_CMD" 2>/dev/null); zwr_rc=$?
-        zwr_out=${zwr_out#"${zwr_out%%[![:space:]]*}"}; zwr_out=${zwr_out%"${zwr_out##*[![:space:]]}"}
-        if [ "$zwr_rc" -eq 0 ] && [[ "$zwr_out" =~ ^[0-9]+$ ]] && [ "${#zwr_out}" -le 8 ] && [ "$zwr_out" -ge 1 ] && [ "$zwr_out" -le 99 ]; then
-            zai_week_reserve=$((10#$zwr_out))
-        else
-            echo "claude-usage: CLAUDE_USAGE_ZAI_WEEK_RESERVE_CMD gave no usable reserve (exit $zwr_rc); z.ai week reserve falls back to week_reserve ($week_reserve)" >&2
-        fi
-    elif [[ ${CLAUDE_USAGE_ZAI_WEEK_RESERVE:-} =~ ^[0-9]+$ ]] && [ "${#CLAUDE_USAGE_ZAI_WEEK_RESERVE}" -le 8 ] \
-        && [ "$((10#$CLAUDE_USAGE_ZAI_WEEK_RESERVE))" -ge 1 ] && [ "$((10#$CLAUDE_USAGE_ZAI_WEEK_RESERVE))" -le 99 ]; then
-        zai_week_reserve=$((10#$CLAUDE_USAGE_ZAI_WEEK_RESERVE))
-    elif [ -n "${CLAUDE_USAGE_ZAI_WEEK_RESERVE:-}" ]; then
-        echo "claude-usage: CLAUDE_USAGE_ZAI_WEEK_RESERVE=$CLAUDE_USAGE_ZAI_WEEK_RESERVE ignored: not an integer 1-99; using week_reserve ($week_reserve)" >&2
-    fi
+    resolve_zai_week_reserve
     zlimit=${2:-90}; [ "$zlimit" -gt "$zai_five_cap" ] 2>/dev/null && zlimit=$zai_five_cap
     if ! { [ "$zfive" -lt "$zlimit" ] && [ "$zweek" -lt "$zai_week_reserve" ]; } 2>/dev/null; then
         zfive_op=">="; [ "$zfive" -lt "$zlimit" ] 2>/dev/null && zfive_op="<"
@@ -286,10 +344,34 @@ if [ "${1:-}" = --ok ] && [ "$routed" = 1 ]; then
     exit 0
 fi
 
+# --posture on a routed non-z.ai lane: no week gate there (as --ok passes through), so no reserve
+# resolution and no CMD fork. The label is the plain line's lane naming.
+if [ "${1:-}" = --posture ] && [ "$routed" = 1 ] && [ "$vendor_lane" != zai ]; then
+    case "$vendor_lane" in or) plabel=OpenRouter ;; console) plabel="Console API key" ;; *) plabel=${vendor_host:-routed} ;; esac
+    echo "$plabel posture: no week gate (provider enforces its own cap)"
+    exit 0
+fi
+
+# --posture on the z.ai lane answers from z.ai's quota, before any plan refresh. The week % is
+# the live quota's (the --ok branch's source), rounded, "?" when none or when the reading is over
+# --ok's 30-minute cutoff. The z.ai gate doesn't read CLAUDE_USAGE_EXTRA_OK, so no extra clause.
+if [ "${1:-}" = --posture ] && [ "$vendor_lane" = zai ]; then
+    if [ -n "$week_reserve_note" ]; then echo "$week_reserve_note" >&2; fi
+    if [ -n "$week_stop_note" ]; then echo "$week_stop_note" >&2; fi
+    resolve_zai_week_reserve
+    zj=$(zai_api_json)
+    zas_of=$(jq -r 'if (.as_of | type) == "number" then (.as_of | floor) else empty end' <<< "${zj:-null}" 2>/dev/null)
+    zpw=$(jq -r '(.week_pct | numbers | round) // empty' <<< "${zj:-null}" 2>/dev/null)
+    if [[ $zas_of =~ ^[0-9]+$ ]] && [ "$(( $(date +%s) - zas_of ))" -gt 1800 ]; then zpw=""; fi
+    znow="?"; [ -n "$zpw" ] && znow="$zpw%"
+    posture_line "z.ai " "$zai_week_reserve" "$znow"
+    exit 0
+fi
+
 refresh
-# --all reports a missing plan cache as one of its lines instead: the reads below then come up
-# empty (0 in arithmetic) and log_reading finds no cache to log.
-if [ ! -s "$cache" ] && [ "${1:-}" != --all ]; then
+# --all and --posture report a missing plan cache in their own lines instead: the reads below then
+# come up empty (0 in arithmetic) and log_reading finds no cache to log.
+if [ ! -s "$cache" ] && [ "${1:-}" != --all ] && [ "${1:-}" != --posture ]; then
     echo "claude-usage: no usage data (no cache and the refresh failed)" >&2
     exit 2
 fi
@@ -367,6 +449,29 @@ plan_line() {
         echo "$week_line"
     else
         echo "$five_line · $week_line"
+    fi
+}
+
+# The plan gate's cache clock, shared by --ok and --posture: sets cache_mtime, now, cache_age and
+# gate_max_age (CLAUDE_USAGE_GATE_MAX_AGE, default 6 h, floored at the TTL).
+cache_clock() {
+    cache_mtime=$(stat -c %Y "$cache" 2>/dev/null || echo 0)
+    now=$(date +%s)
+    cache_age=$(( now - cache_mtime ))
+    gate_max_age=21600
+    if [[ ${CLAUDE_USAGE_GATE_MAX_AGE:-} =~ ^[0-9]+$ ]] && [ "$((10#$CLAUDE_USAGE_GATE_MAX_AGE))" -ge "$ttl" ]; then
+        gate_max_age=$((10#$CLAUDE_USAGE_GATE_MAX_AGE))
+    fi
+}
+
+# Sets stale_note (" (cache Nm old)" past the TTL) and, when the week reset passed after the cache
+# was written, week=0 plus " (week reset since cache)"; --ok and --posture share it.
+cache_week_stale() {
+    stale_note=""
+    [ "$cache_age" -gt "$ttl" ] && stale_note=" (cache $((cache_age / 60))m old)"
+    if [ "${week_reset:-0}" -gt 0 ] && [ "$cache_mtime" -lt "$week_reset" ] && [ "$week_reset" -le "$now" ]; then
+        week=0
+        stale_note="$stale_note (week reset since cache)"
     fi
 }
 
@@ -518,13 +623,7 @@ case "${1:-}" in
         # extra usage bills only at 100%); at 100%+ it bills extra usage (meter=extra-usage). The
         # extra-usage path fails closed: strict booleans, a readable spend and budget, and never on a
         # cache older than two TTLs or 10 minutes, whichever is less.
-        cache_mtime=$(stat -c %Y "$cache" 2>/dev/null || echo 0)
-        now=$(date +%s)
-        cache_age=$(( now - cache_mtime ))
-        gate_max_age=21600
-        if [[ ${CLAUDE_USAGE_GATE_MAX_AGE:-} =~ ^[0-9]+$ ]] && [ "$((10#$CLAUDE_USAGE_GATE_MAX_AGE))" -ge "$ttl" ]; then
-            gate_max_age=$((10#$CLAUDE_USAGE_GATE_MAX_AGE))
-        fi
+        cache_clock
         if [ "$cache_age" -gt "$gate_max_age" ]; then
             echo "claude-usage: --ok FAIL lane=anthropic meter=cache cache=$((cache_age / 60))m>$((gate_max_age / 60))m source=none: the usage refresh keeps failing" >&2
             exit 1
@@ -533,12 +632,7 @@ case "${1:-}" in
             echo "claude-usage: --ok FAIL lane=anthropic meter=cache source=none: the usage cache holds no weekly figure" >&2
             exit 1
         fi
-        stale_note=""
-        [ "$cache_age" -gt "$ttl" ] && stale_note=" (cache $((cache_age / 60))m old)"
-        if [ "${week_reset:-0}" -gt 0 ] && [ "$cache_mtime" -lt "$week_reset" ] && [ "$week_reset" -le "$now" ]; then
-            week=0
-            stale_note="$stale_note (week reset since cache)"
-        fi
+        cache_week_stale
         if [ "${five_reset:-0}" -gt 0 ] && [ "$cache_mtime" -lt "$five_reset" ] && [ "$five_reset" -le "$now" ]; then
             five=0
             stale_note="$stale_note (5h reset since cache)"
@@ -551,25 +645,8 @@ case "${1:-}" in
         pass_meter="5h"
         [ "$no_five" = 1 ] && pass_meter="week"
         week_op="<"
-        # The plan week's reserve can follow a deployment command, the way the z.ai lane's can:
-        # CLAUDE_USAGE_WEEK_RESERVE_CMD runs per gate check under a 5 s timeout, stderr dropped so a
-        # chatty helper can't corrupt the value. A trimmed integer 1-99 on stdout becomes the
-        # reserve; anything else — non-zero exit, timeout, empty, non-integer, over-length, out of
-        # 1-99 — keeps $week_reserve (this static override's value, else the default 75) with one
-        # stderr note. The length guard runs before the arithmetic: the [-ge] comparison on a huge
-        # digit string would print "integer expected" on this script's stderr ahead of the note.
-        # The command wins the slot in success and failure: the static is only the fallback it
-        # names, and non-gate runs never fork it.
-        if [ -n "${CLAUDE_USAGE_WEEK_RESERVE_CMD:-}" ]; then
-            wr_out=$(timeout 5 bash -c "$CLAUDE_USAGE_WEEK_RESERVE_CMD" 2>/dev/null); wr_rc=$?
-            wr_out=${wr_out#"${wr_out%%[![:space:]]*}"}; wr_out=${wr_out%"${wr_out##*[![:space:]]}"}
-            if [ "$wr_rc" -eq 0 ] && [[ "$wr_out" =~ ^[0-9]+$ ]] && [ "${#wr_out}" -le 8 ] \
-                && [ "$wr_out" -ge 1 ] && [ "$wr_out" -le 99 ]; then
-                week_reserve=$((10#$wr_out))
-            else
-                echo "claude-usage: CLAUDE_USAGE_WEEK_RESERVE_CMD gave no usable reserve (exit $wr_rc); plan week reserve falls back to week_reserve ($week_reserve)" >&2
-            fi
-        fi
+        # The plan week's reserve may follow CLAUDE_USAGE_WEEK_RESERVE_CMD (see the resolver).
+        resolve_plan_week_reserve
         extra_used=""
         extra_ok=""
         if ! { { [ "$no_five" = 1 ] || [ "$five" -lt "$thr" ]; } && [ "$week" -lt "$week_reserve" ]; } 2>/dev/null; then
@@ -674,6 +751,25 @@ case "${1:-}" in
         all_lanes
         exit 0
         ;;
+    --posture)
+        if [ -n "$week_reserve_note" ]; then echo "$week_reserve_note" >&2; fi
+        if [ -n "$week_stop_note" ]; then echo "$week_stop_note" >&2; fi
+        resolve_plan_week_reserve
+        # "now" follows --ok's cache rules: the age tag, a week reset since the cache reads 0%, and
+        # a cache past the gate's max age (or with no weekly figure) reads "?".
+        pnow="?"
+        if [ -s "$cache" ]; then
+            cache_clock
+            cache_week_stale
+            if [ "$cache_age" -le "$gate_max_age" ] && jq -e '(.seven_day.utilization | type) == "number"' "$cache" >/dev/null 2>&1; then
+                pnow="${week}%"
+            fi
+            pnow="$pnow$stale_note"
+        fi
+        pextra=""; [ "${CLAUDE_USAGE_EXTRA_OK:-}" = 1 ] && pextra=1
+        posture_line "" "$week_reserve" "$pnow" "$pextra"
+        exit 0
+        ;;
     "")
         # No Fable-vs-week target (usage parity dropped 2026-10-04): use the best and most
         # cost-effective model for the job, and keep Fable, which burns the week fastest, low.
@@ -728,7 +824,7 @@ case "${1:-}" in
         echo "$note$(plan_line)$extra_tail$tail"
         ;;
     *)
-        sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'
+        sed -n '2,37p' "$0" | sed 's/^# \{0,1\}//'
         exit 2
         ;;
 esac
