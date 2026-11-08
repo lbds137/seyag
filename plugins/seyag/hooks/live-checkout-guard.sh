@@ -6,7 +6,8 @@
 #
 # LIVE ROOTS:
 #   (a) the git toplevel of ${CLAUDE_PLUGIN_ROOT:-<hooks dir>/..} when inside a
-#       git working tree, unless SYG_LIVE_CHECKOUT_AUTO=0; plus
+#       git working tree carrying `.claude-plugin/marketplace.json` at its
+#       toplevel, unless SYG_LIVE_CHECKOUT_AUTO=0; plus
 #   (b) each colon-separated absolute path in SYG_LIVE_CHECKOUTS resolved to its
 #       git toplevel (non-repos and relative entries ignored).
 #   Empty set -> exit 0 immediately.
@@ -34,7 +35,8 @@
 #     BLOCK:
 #       - `checkout` / `switch` to anything other than the default branch
 #         (including `-b`, `-B`, `-c`, `-C`, `--create`, `--force-create`,
-#         `-d`, `--detach`, `--orphan`, a sha, a tag);
+#         `-d`, `--detach`, `--orphan`, `-`, `@{-N}`, a sha, a tag, or a
+#         remote-only branch `checkout <branch>` would DWIM-create);
 #       - `checkout <ref> [--] <paths>` and `restore --source=<ref>` /
 #         `-s <ref>` where <ref> is not the default branch or HEAD;
 #       - `stash` except `list` / `show`;
@@ -42,8 +44,11 @@
 #       - `merge`, `rebase`, `cherry-pick`, `revert`, `am` (except `--abort` or
 #         `--quit`);
 #       - `read-tree` with `-u` or `-m`;
-#       - `pull` without `--ff-only`, or `pull --ff-only` with a refspec other
-#         than the default branch;
+#       - `update-ref` whose first ref operand is `HEAD` or `refs/heads/*`
+#         (including `-d`), or with `--stdin`, and `symbolic-ref HEAD <ref>`
+#         or `symbolic-ref -d HEAD`;
+#       - `pull` without `--ff-only`, or `pull --ff-only` with a remote other
+#         than `origin` or a refspec other than the default branch;
 #       - `apply` with `--apply` or `--index`, or without `--check` / `--stat` /
 #         `--numstat` / `--summary`;
 #       - `bisect start`.
@@ -53,8 +58,8 @@
 #       - `checkout <default>` / `switch <default>`;
 #       - `merge` / `rebase` / `cherry-pick` / `revert` / `am` with `--abort`
 #         or `--quit`;
-#       - `pull --ff-only` (with no refspec, a remote alone, or a remote plus
-#         the default branch), `fetch`, all read-only subcommands;
+#       - `pull --ff-only` (with no positional, `origin` alone, or `origin`
+#         plus the default branch), `fetch`, all read-only subcommands;
 #       - `worktree add|list|remove|prune`;
 #       - `branch` (creating a branch ref does not move the checkout).
 #
@@ -68,8 +73,9 @@
 #   only on exit 1 (not ignored). Paths under `<root>/.git/` are blocked too.
 #
 # BYPASS:
-#   `SYG_ALLOW_LIVE_CHECKOUT=1` as a word in the command's own text (Bash), or
-#   in the hook's environment (all tools), for an action the owner approved.
+#   `SYG_ALLOW_LIVE_CHECKOUT=1` as an assignment prefix on the git command (or
+#   exported earlier in the command), or in the hook's environment (all tools),
+#   for an action the owner approved.
 #
 # KNOWN BOUNDS:
 #   - Bash-level file writes into the live checkout (`sed -i`, `>` / `>>`
@@ -136,7 +142,7 @@ PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-$(cd "$HOOKS_DIR/.." && pwd)}"
 
 LIVE_ROOTS=""
 add_live_root() {
-  local cand="$1" info top gd cd gd_real cd_real top_real
+  local cand="$1" need_marketplace="${2:-0}" info top gd cd gd_real cd_real top_real
   [ -n "$cand" ] && [ -d "$cand" ] || return 0
   info=$(git -C "$cand" rev-parse --show-toplevel --git-dir --git-common-dir 2>/dev/null) || return 0
   top=$(printf '%s\n' "$info" | sed -n '1p')
@@ -150,6 +156,9 @@ add_live_root() {
   # Only the MAIN working tree of a live repo is live; linked worktrees are not.
   [ -n "$gd_real" ] && [ "$gd_real" = "$cd_real" ] || return 0
   top_real=$(realpath "$top" 2>/dev/null || printf '%s' "$top")
+  if [ "$need_marketplace" = "1" ] && [ ! -f "$top_real/.claude-plugin/marketplace.json" ]; then
+    return 0
+  fi
   case $'\n'"$LIVE_ROOTS"$'\n' in
     *$'\n'"$top_real"$'\n'*) ;;
     *) LIVE_ROOTS="${LIVE_ROOTS:+$LIVE_ROOTS$'\n'}$top_real" ;;
@@ -157,7 +166,7 @@ add_live_root() {
 }
 
 if [ "${SYG_LIVE_CHECKOUT_AUTO:-1}" != "0" ]; then
-  add_live_root "$PLUGIN_ROOT"
+  add_live_root "$PLUGIN_ROOT" 1
 fi
 if [ -n "${SYG_LIVE_CHECKOUTS:-}" ]; then
   IFS=':' read -r -a _syg_extra_roots <<<"$SYG_LIVE_CHECKOUTS"
@@ -287,14 +296,11 @@ stripped = strip_quoted_indexed(strip_heredoc_bodies(cmd))
 if stripped is None:
     # Unterminated quote: fail open.
     sys.exit(0)
-view = stripped[0]
-
-# Bypass word anywhere in the command's unquoted text.
-if re.search(r"(?:^|[\s;|&()`])SYG_ALLOW_LIVE_CHECKOUT=1(?:$|[\s;|&()`])", view):
-    sys.exit(0)
 
 ASSIGN_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$", re.S)
+PREV_BRANCH_RE = re.compile(r"^@\{-[0-9]+\}$")
 BUILTIN_RUNNERS = {"builtin", "command"}
+LIVE_TRACKED_ENV = set(TRACKED_ENV) | {"SYG_ALLOW_LIVE_CHECKOUT"}
 
 GIT_GLOBAL_VALUE_OPTS = {
     "-c",
@@ -313,21 +319,12 @@ PWD_SUBST = ("$(pwd)", "`pwd`", '"$(pwd)"', '"`pwd`"')
 
 SWITCH_BLOCK_LONG = {"--create", "--force-create", "--detach", "--orphan"}
 SWITCH_BLOCK_SHORT = set("cCd")
-SWITCH_VALUE_OPTS = {"--conflict", "--track"}
 
 CHECKOUT_VALUE_OPTS = {
-    "--conflict",
     "--pathspec-from-file",
-    "-U",
-    "--unified",
-    "--inter-hunk-context",
 }
 RESTORE_VALUE_OPTS = {
-    "--conflict",
     "--pathspec-from-file",
-    "-U",
-    "--unified",
-    "--inter-hunk-context",
 }
 PULL_VALUE_OPTS = {
     "-s",
@@ -474,6 +471,46 @@ def is_commit(eff_dir, rev):
         return False
 
 
+def is_tracked_or_existing_path(eff_dir, path):
+    if not is_valid_dir(eff_dir) or not path:
+        return False
+    if os.path.lexists(posixpath.join(eff_dir, path)):
+        return True
+    try:
+        r = subprocess.run(
+            ["git", "-C", eff_dir, "ls-files", "--error-unmatch", "--", path],
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=5,
+        )
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+def has_remote_branch(eff_dir, branch):
+    if not is_valid_dir(eff_dir) or not branch or branch == "HEAD":
+        return False
+    try:
+        r = subprocess.run(
+            ["git", "-C", eff_dir, "for-each-ref", "--format=%(refname)", "refs/remotes"],
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=5,
+        )
+        if r.returncode != 0:
+            return False
+        for line in r.stdout.splitlines():
+            parts = line.strip().split("/", 3)
+            if len(parts) == 4 and parts[0] == "refs" and parts[1] == "remotes" and parts[3] == branch:
+                return True
+        return False
+    except Exception:
+        return False
+
+
 def apply_dir_step(step, cur_dir, uncertain, state, ctx):
     """Apply a `-C <step>` directory change; return `(new_dir, new_uncertain)`.
     An unresolvable or non-existent target (unless equal to or under a recorded
@@ -520,13 +557,10 @@ def judge_switch(rest, default_br):
             pos.extend(rest[i + 1 :])
             break
         if w.startswith("--"):
-            name, eq, _ = w.partition("=")
+            name, _, _ = w.partition("=")
             if name in SWITCH_BLOCK_LONG:
                 return f"git switch {name} in live checkout"
-            if name in SWITCH_VALUE_OPTS and not eq:
-                i += 2
-            else:
-                i += 1
+            i += 1
             continue
         if w.startswith("-") and w != "-":
             for ch in w[1:]:
@@ -583,7 +617,19 @@ def judge_checkout(rest, default_br, eff_dir):
     if not pos_before:
         return None
     pos0 = pos_before[0]
+    if len(pos_before) == 1 and (pos0 == "-" or PREV_BRANCH_RE.match(pos0)):
+        return f"git checkout '{pos0}' in live checkout (default branch is '{default_br}')"
+    if PREV_BRANCH_RE.match(pos0) and len(pos_before) > 1:
+        return f"git checkout {pos0} -- <paths> in live checkout (only '{default_br}' or 'HEAD' is allowed)"
     if not is_commit(eff_dir, pos0):
+        if (
+            len(pos_before) == 1
+            and "--no-guess" not in before_dd
+            and pos0 != default_br
+            and not is_tracked_or_existing_path(eff_dir, pos0)
+            and has_remote_branch(eff_dir, pos0)
+        ):
+            return f"git checkout '{pos0}' in live checkout (default branch is '{default_br}')"
         return None
     if len(pos_before) > 1:
         if pos0 in (default_br, "HEAD"):
@@ -672,11 +718,78 @@ def judge_pull(rest, default_br):
             continue
         pos.append(w)
         i += 1
-    if len(pos) <= 1:
+    if not pos:
         return None
-    if len(pos) == 2 and pos[1] == default_br:
+    if pos[0] != "origin":
+        return f"git pull --ff-only from '{pos[0]}' in live checkout (only 'origin' is allowed)"
+    if len(pos) == 1 or (len(pos) == 2 and pos[1] == default_br):
         return None
     return f"git pull --ff-only with refspec '{' '.join(pos[1:])}' in live checkout (only '{default_br}' is allowed)"
+
+
+def judge_update_ref(rest):
+    if "-h" in rest or "--help" in rest:
+        return None
+    pos = []
+    i = 0
+    while i < len(rest):
+        w = rest[i]
+        if w == "--":
+            pos.extend(rest[i + 1 :])
+            break
+        if w == "--stdin":
+            return "git update-ref --stdin in live checkout"
+        if w.startswith("--"):
+            i += 1
+            continue
+        if w.startswith("-") and w != "-":
+            shorts = w[1:]
+            for idx, ch in enumerate(shorts):
+                if ch == "m":
+                    if idx == len(shorts) - 1:
+                        i += 1
+                    break
+            i += 1
+            continue
+        pos.append(w)
+        i += 1
+    if pos and (pos[0] == "HEAD" or pos[0].startswith("refs/heads/")):
+        return f"git update-ref {pos[0]} in live checkout"
+    return None
+
+
+def judge_symbolic_ref(rest):
+    if "-h" in rest or "--help" in rest:
+        return None
+    pos = []
+    delete = False
+    i = 0
+    while i < len(rest):
+        w = rest[i]
+        if w == "--":
+            pos.extend(rest[i + 1 :])
+            break
+        if w.startswith("--"):
+            if w == "--delete":
+                delete = True
+            i += 1
+            continue
+        if w.startswith("-") and w != "-":
+            shorts = w[1:]
+            for idx, ch in enumerate(shorts):
+                if ch == "d":
+                    delete = True
+                if ch == "m":
+                    if idx == len(shorts) - 1:
+                        i += 1
+                    break
+            i += 1
+            continue
+        pos.append(w)
+        i += 1
+    if pos and pos[0] == "HEAD" and (delete or len(pos) >= 2):
+        return "git symbolic-ref HEAD in live checkout"
+    return None
 
 
 def judge_subcommand(subcmd, rest, default_br, eff_dir):
@@ -711,6 +824,10 @@ def judge_subcommand(subcmd, rest, default_br, eff_dir):
             if w.startswith("-") and not w.startswith("--") and ("u" in w[1:] or "m" in w[1:]):
                 return "git read-tree with -u/-m in live checkout"
         return None
+    if subcmd == "update-ref":
+        return judge_update_ref(rest)
+    if subcmd == "symbolic-ref":
+        return judge_symbolic_ref(rest)
     if subcmd == "pull":
         return judge_pull(rest, default_br)
     if subcmd == "apply":
@@ -758,7 +875,7 @@ def do_export(state, args, declare):
     for w in args[i:]:
         m = ASSIGN_RE.match(w)
         name = m.group(1) if m else w
-        if name not in TRACKED_ENV:
+        if name not in LIVE_TRACKED_ENV:
             continue
         if unexport:
             state.env.pop(name, None)
@@ -876,19 +993,8 @@ class Context:
 
 
 def judge_git(argv, unwrapped, info, state, ctx):
-    if "SYG_ALLOW_LIVE_CHECKOUT=1" in argv or state.vars.get("SYG_ALLOW_LIVE_CHECKOUT") == "1":
-        return
-    cur_dir = state.cwd
-    uncertain = state.unknown or not is_known_dir(cur_dir, ctx)
-    if uncertain:
-        cur_dir = payload_cwd
-        uncertain = not is_known_dir(cur_dir, ctx)
-
     prefix_len = max(0, len(argv) - len(unwrapped))
     prefix = argv[:prefix_len]
-    if info.get("chdir"):
-        cur_dir, uncertain = apply_runner_chdirs(prefix, cur_dir, uncertain, state, ctx)
-
     env = dict(state.env)
     p_idx = 0
     while p_idx < len(prefix):
@@ -902,9 +1008,21 @@ def judge_git(argv, unwrapped, info, state, ctx):
             p_idx += 1
             continue
         m = ASSIGN_RE.match(pw)
-        if m and m.group(1) in ("GIT_DIR", "GIT_WORK_TREE"):
+        if m and m.group(1) in LIVE_TRACKED_ENV:
             env[m.group(1)] = m.group(2)
         p_idx += 1
+
+    if env.get("SYG_ALLOW_LIVE_CHECKOUT") == "1":
+        return
+
+    cur_dir = state.cwd
+    uncertain = state.unknown or not is_known_dir(cur_dir, ctx)
+    if uncertain:
+        cur_dir = payload_cwd
+        uncertain = not is_known_dir(cur_dir, ctx)
+
+    if info.get("chdir"):
+        cur_dir, uncertain = apply_runner_chdirs(prefix, cur_dir, uncertain, state, ctx)
 
     has_work_tree = "GIT_WORK_TREE" in env
     work_tree_val = env.get("GIT_WORK_TREE")
