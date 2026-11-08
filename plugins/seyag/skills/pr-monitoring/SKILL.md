@@ -174,20 +174,26 @@ gh api "repos/{owner}/{repo}/actions/runs/<run-id>/jobs?per_page=100" \
     closed it on merge. A `gh issue view <url>` that fails (for example, a
     repo the token cannot read) is reported, never treated as closed.
   - Local head branch: a rebase or squash merge leaves `git branch -d`
-    reporting "not fully merged". Run `branch-sweep` (dry run) and find this
-    head branch's line by its exact name (a prefix like `foo` also matches
+    reporting "not fully merged". Fetch first (`git fetch origin`), then run
+    `branch-sweep` (dry run; it fetches by default) and find this head
+    branch's line by its exact name (a prefix like `foo` also matches
     `foo-2`). ELIGIBLE: delete that one branch with
     `git branch -D -- <branch>`.
     - SKIP because the branch is checked out in a worktree: when that is the
-      unit's own finished worktree, remove it with
-      `safe-worktree-clean --apply` (it removes only trees it judges SAFE,
-      together with their branch; a HOLD tree is left and reported), then
-      re-run the dry run. Any other SKIP: leave it and report it.
+      unit's own finished worktree, run `git fetch origin`, then
+      `safe-worktree-clean` (dry run). Only when its line for that tree says
+      SAFE, remove that one tree with `git worktree remove <path>`, then run
+      `git branch -D -- <branch>`. A HOLD line, or a refusal from
+      `git worktree remove`: leave it and report it. Any other SKIP: leave
+      it and report it.
     - DIFFERS after a rebase or squash merge onto a base that moved is
       expected (branch-sweep matches identical trees only); it does not mean
       unmerged work. Leave it and report it.
-    - No line: nothing to delete. Never `--apply` for one PR's cleanup: it
-      deletes every eligible branch in the repo.
+    - No line: nothing to delete.
+
+    Never `branch-sweep --apply` or `safe-worktree-clean --apply` for one
+    PR's close-out: each acts on every eligible branch or SAFE tree in the
+    repo.
 
 ## Why the gate is shaped this way
 
