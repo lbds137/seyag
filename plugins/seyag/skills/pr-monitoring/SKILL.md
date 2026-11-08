@@ -42,6 +42,9 @@ cd '<toplevel>' && pr-ci-wait <N> --sha $(git rev-parse 'refs/heads/<branch>')
   from the `Monitor` tool's own guidance — do not "correct" it back:
   `TaskList` cannot see a watcher, so its own timeout is the only thing
   bounding it. If it expires, re-arm.
+- **A first `Monitor` call that fails with InputValidationError right after
+  loading it through ToolSearch: retry the identical call once.** A second
+  failure is real: fix the input.
 - **Wait on `pr-ci-wait`, never on a `sleep` or a hand-written poll loop** —
   both were measured emitting a premature `CI_COMPLETE`.
 
@@ -156,6 +159,25 @@ gh api "repos/{owner}/{repo}/actions/runs/<run-id>/jobs?per_page=100" \
 - **Re-derive diffstats against the MERGE-BASE.** When the target branch
   moved under a long-lived feature branch, re-derive diffstats and counts
   against `$(git merge-base <target> HEAD)`, not the target's current `HEAD`.
+- **After an automerge lands, close out by hand.** Each step follows the one
+  before it:
+  - Read the merge:
+    `gh pr view <N> --json state,mergeCommit,closingIssuesReferences`.
+    `state` must be `MERGED` before anything else.
+  - Each linked issue in `closingIssuesReferences`: take its `url`, read
+    `gh issue view <url> --json state -q .state`, and only when it prints
+    `OPEN` run
+    `gh issue close <url> --comment "Fixed by <mergeCommit.oid> (#<N>)."`.
+    Pass the full URL, not a bare number: a link can point at another repo,
+    and a bare number would hit this repo's issue. GitHub may already have
+    closed it on merge.
+  - Local head branch: a rebase or squash merge leaves `git branch -d`
+    reporting "not fully merged". Run `branch-sweep` (dry run) and find this
+    head branch's line by its exact name (a prefix like `foo` also matches
+    `foo-2`). ELIGIBLE: delete that one branch with `git branch -D <branch>`.
+    DIFFERS or SKIP (for example, still checked out in a worktree): leave it
+    and report it. No line: nothing to delete. Never `--apply` for one PR's
+    cleanup: it deletes every eligible branch in the repo.
 
 ## Why the gate is shaped this way
 
