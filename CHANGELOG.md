@@ -2,6 +2,18 @@
 
 All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY-MM-DD>` section per released version; under it, `###` categories in fixed order — Breaking Changes, Features, Bug Fixes, Improvements, Chores, Tests — empty ones omitted; items are `- **scope:** description (#PR)`, written from the version's merged commit subjects.
 
+## 0.3.142 - 2026-11-08
+
+### Bug Fixes
+
+- **security-sweep:** when `--cap` expires, the run now stops its `gh` children too (it leads its own process group and sends it SIGTERM, as GNU timeout does) instead of leaving them to run to their per-call timeout; a cap firing during a cache write lets the write finish, so no partial `.tmp` file is left behind, whichever thread is writing.
+
+### Improvements
+
+- **session-start:** the detached cache-warming run is built as its own argument list instead of by rewriting one index of the capped run's list.
+- **security-sweep probes:** the cap rows bound wall time at 8 s (was 20 s); docs say "a built-in 2 s cap".
+- **delegation skill:** § Concurrency has one wait rule for jobs the harness doesn't report on — a scheduled one-shot tick running a non-blocking status check, never until/while loops, blocking background waits or hand-written Monitor loops (Agent-tool workers need no tick), with PR CI (`pr-ci-wait`) as the stated exception and a pr-monitoring pointer back; the placement check cuts both names at the first dot and stops while unrecorded (#260).
+
 ## 0.3.141 - 2026-11-08
 
 ### Bug Fixes
