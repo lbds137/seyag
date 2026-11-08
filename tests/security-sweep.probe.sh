@@ -7,20 +7,11 @@
 set -uo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SS="${SECURITY_SWEEP_BIN:-$REPO/plugins/seyag/bin/security-sweep}"
-[ -f "$SS" ] && [ ! -x "$SS" ] && chmod +x "$SS" 2>/dev/null || true
-[ -f "${BASH_SOURCE[0]}" ] && [ ! -x "${BASH_SOURCE[0]}" ] && chmod +x "${BASH_SOURCE[0]}" 2>/dev/null || true
-if [ ! -f "$SS" ]; then
-  echo "FAIL: security-sweep missing at $SS"
-  exit 1
-fi
-if [ ! -x "$SS" ]; then
-  echo "FAIL: security-sweep is not executable at $SS"
-  exit 1
-fi
-
 fail=0
 ok() { echo "ok:   $1"; }
 bad() { echo "FAIL: $1"; [ -n "${2:-}" ] && printf '      got: %s\n' "$2"; fail=1; }
+
+[ -x "$SS" ] || { bad "security-sweep is not executable at $SS"; exit 1; }
 
 T="$(mktemp -d)"
 trap 'rm -rf "$T"' EXIT
@@ -129,17 +120,22 @@ if [ "$rc" -eq 0 ] \
     .[0].surfaces["code-scanning"] == {
       "state": "count",
       "count": 4,
+      "numbers": [1, 2, 3, 4],
       "by_severity": {"critical": 1, "high": 1, "medium": 1, "none": 1},
+      "rules": ["py/sql-injection", "py/path-injection", "actions/missing-workflow-permissions", "py/unused-import"],
       "rules_critical_high": ["py/sql-injection", "py/path-injection"]
     } and
     .[0].surfaces["dependabot"] == {
       "state": "count",
       "count": 2,
-      "by_severity": {"high": 1, "low": 1}
+      "numbers": [10, 11],
+      "by_severity": {"high": 1, "low": 1},
+      "packages": ["urllib3", "idna"]
     } and
     .[0].surfaces["secret-scanning"] == {
       "state": "count",
       "count": 1,
+      "numbers": [20],
       "types": ["Example Token"]
     } and
     .[0].stale == {}
@@ -148,6 +144,35 @@ if [ "$rc" -eq 0 ] \
   ok "1b --json shape matches spec and contains no secret value"
 else
   bad "1b --json shape (rc=$rc)" "$(cat "$T/out" "$T/err")"
+fi
+
+# 1c: --json deduplicates rule ids and package names in cache order while keeping all alert numbers
+mkdir -p "$T/fixtures/example-org_dup"
+cat > "$T/fixtures/example-org_dup/code-scanning.out" <<'EOF'
+[
+  {"number": 7, "rule": {"id": "py/sql-injection", "security_severity_level": "critical"}, "tool": {"name": "CodeQL"}},
+  {"number": 8, "rule": {"id": "py/sql-injection", "security_severity_level": "critical"}, "tool": {"name": "CodeQL"}},
+  {"number": 9, "rule": {"id": "py/unused-import", "security_severity_level": "low"}, "tool": {"name": "CodeQL"}}
+]
+EOF
+cat > "$T/fixtures/example-org_dup/dependabot.out" <<'EOF'
+[
+  {"number": 12, "security_advisory": {"severity": "high"}, "dependency": {"package": {"name": "urllib3"}}},
+  {"number": 13, "security_advisory": {"severity": "medium"}, "dependency": {"package": {"name": "urllib3"}}},
+  {"number": 14, "security_advisory": {"severity": "low"}, "dependency": {"package": {"name": "idna"}}}
+]
+EOF
+run_ss -R example-org/dup --json
+if [ "$rc" -eq 0 ] \
+  && jq -e '
+    .repos[0].surfaces["code-scanning"].numbers == [7, 8, 9] and
+    .repos[0].surfaces["code-scanning"].rules == ["py/sql-injection", "py/unused-import"] and
+    .repos[0].surfaces["dependabot"].numbers == [12, 13, 14] and
+    .repos[0].surfaces["dependabot"].packages == ["urllib3", "idna"]
+  ' "$T/out" >/dev/null 2>&1; then
+  ok "1c --json deduplicates rules and packages while preserving alert numbers in cache order"
+else
+  bad "1c --json dedup identifiers (rc=$rc)" "$(cat "$T/out" "$T/err")"
 fi
 
 # 5. Claim 5: Cache freshness, --no-cache, and expiry
@@ -255,6 +280,44 @@ if [ "$rc" -eq 0 ] \
   ok "3e SECURITY_SWEEP_GH_TIMEOUT=1 with 3s gh sleep maps surface to error, exits 0, and prints fetch failed (gh exit 124)"
 else
   bad "3e gh timeout (rc=$rc)" "out=$(cat "$T/out") err=$(cat "$T/err")"
+fi
+
+# 3f: every OFF_MARKERS entry maps its surface to off on the default line, and --strict with only off surfaces exits 0
+check_off_marker() {
+  local label="$1" surf="$2" msg="$3"
+  reset_state
+  mkdir -p "$T/fixtures/example-org_widget"
+  printf '{"message":"%s"}\n' "$msg" > "$T/fixtures/example-org_widget/$surf.out"
+  printf 'gh: %s (HTTP 403)\n' "$msg" > "$T/fixtures/example-org_widget/$surf.err"
+  printf '1\n' > "$T/fixtures/example-org_widget/$surf.rc"
+  run_ss -R example-org/widget
+  if [ "$rc" -eq 0 ] && [ "$(cat "$T/out")" = "example-org/widget: clean (off: $surf)" ] && [ ! -s "$T/err" ]; then
+    ok "$label off marker '$msg' maps $surf to off"
+  else
+    bad "$label off marker '$msg' (rc=$rc)" "out=$(cat "$T/out") err=$(cat "$T/err")"
+  fi
+}
+
+check_off_marker "3f-1" "code-scanning" "Code scanning is not enabled"
+check_off_marker "3f-2" "code-scanning" "no analysis found"
+check_off_marker "3f-3" "code-scanning" "Advanced Security must be enabled"
+check_off_marker "3f-4" "secret-scanning" "Secret scanning is disabled"
+check_off_marker "3f-5" "dependabot" "Dependabot alerts are disabled"
+check_off_marker "3f-6" "dependabot" "Dependabot alerts are not available for archived repositories"
+
+reset_state
+mkdir -p "$T/fixtures/example-org_widget"
+printf '{"message":"no analysis found"}\n' > "$T/fixtures/example-org_widget/code-scanning.out"
+printf '1\n' > "$T/fixtures/example-org_widget/code-scanning.rc"
+printf '{"message":"Dependabot alerts are disabled"}\n' > "$T/fixtures/example-org_widget/dependabot.out"
+printf '1\n' > "$T/fixtures/example-org_widget/dependabot.rc"
+printf '{"message":"Secret scanning is disabled"}\n' > "$T/fixtures/example-org_widget/secret-scanning.out"
+printf '1\n' > "$T/fixtures/example-org_widget/secret-scanning.rc"
+run_ss -R example-org/widget --strict
+if [ "$rc" -eq 0 ] && [ "$(cat "$T/out")" = "example-org/widget: clean (off: code-scanning, dependabot, secret-scanning)" ] && [ ! -s "$T/err" ]; then
+  ok "3f-strict --strict with only off surfaces exits 0"
+else
+  bad "3f-strict --strict with only off surfaces (rc=$rc)" "out=$(cat "$T/out") err=$(cat "$T/err")"
 fi
 
 # 4. Claim 4: --strict exit codes and stale cache fallback on error
@@ -365,17 +428,45 @@ fi
 # 6d & 6e: invalid repo token exits 0 normally and 2 under --strict, with stderr message
 reset_state
 run_ss -R not-a-repo
-if [ "$rc" -eq 0 ] && [ ! -s "$T/out" ] && [ "$(cat "$T/err")" = "security-sweep: invalid repo 'not-a-repo' (expected owner/name)" ]; then
+if [ "$rc" -eq 0 ] && [ ! -s "$T/out" ] && [ "$(cat "$T/err")" = "security-sweep: invalid repo 'not-a-repo' (expected owner/name), skipped" ]; then
   ok "6d -R not-a-repo exits 0 with invalid repo stderr message"
 else
   bad "6d -R not-a-repo (rc=$rc)" "out=$(cat "$T/out") err=$(cat "$T/err")"
 fi
 
 run_ss -R not-a-repo --strict
-if [ "$rc" -eq 2 ] && [ ! -s "$T/out" ] && [ "$(cat "$T/err")" = "security-sweep: invalid repo 'not-a-repo' (expected owner/name)" ]; then
+if [ "$rc" -eq 2 ] && [ ! -s "$T/out" ] && [ "$(cat "$T/err")" = "security-sweep: invalid repo 'not-a-repo' (expected owner/name), skipped" ]; then
   ok "6e -R not-a-repo --strict exits 2 with invalid repo stderr message"
 else
   bad "6e -R not-a-repo --strict (rc=$rc)" "out=$(cat "$T/out") err=$(cat "$T/err")"
+fi
+
+# 6f, 6g, 6h: invalid repo token is skipped and remaining valid repos are swept; under --strict exit is >=2 (1 wins on alert)
+reset_state
+mkdir -p "$T/fixtures/example-org_widget"
+run_ss -R bad -R example-org/widget
+if [ "$rc" -eq 0 ] && [ "$(cat "$T/out")" = "example-org/widget: clean" ] \
+  && [ "$(cat "$T/err")" = "security-sweep: invalid repo 'bad' (expected owner/name), skipped" ]; then
+  ok "6f -R bad -R example-org/widget skips bad token, sweeps widget, and names skip on stderr"
+else
+  bad "6f skip invalid repo (rc=$rc)" "out=$(cat "$T/out") err=$(cat "$T/err")"
+fi
+
+run_ss -R bad -R example-org/widget --no-cache --strict
+if [ "$rc" -eq 2 ] && [ "$(cat "$T/out")" = "example-org/widget: clean" ] \
+  && [ "$(cat "$T/err")" = "security-sweep: invalid repo 'bad' (expected owner/name), skipped" ]; then
+  ok "6g -R bad -R example-org/widget --strict exits 2 when swept repo is clean"
+else
+  bad "6g skip invalid repo --strict clean (rc=$rc)" "out=$(cat "$T/out") err=$(cat "$T/err")"
+fi
+
+printf '[{"number":1,"rule":{"id":"r1","security_severity_level":"critical"},"tool":{"name":"CodeQL"}}]\n' > "$T/fixtures/example-org_widget/code-scanning.out"
+run_ss -R bad -R example-org/widget --no-cache --strict
+if [ "$rc" -eq 1 ] && grep -qF "code-scanning 1" "$T/out" \
+  && [ "$(cat "$T/err")" = "security-sweep: invalid repo 'bad' (expected owner/name), skipped" ]; then
+  ok "6h -R bad -R example-org/widget --strict exits 1 when swept repo trips alert threshold"
+else
+  bad "6h skip invalid repo --strict alert wins (rc=$rc)" "out=$(cat "$T/out") err=$(cat "$T/err")"
 fi
 
 # 7. Claim 7: --all-repos-from file with comments and two repos -> two lines
@@ -392,6 +483,21 @@ if [ "$rc" -eq 0 ] && [ "$(cat "$T/out")" = "$(printf 'example-org/widget: clean
   ok "7 --all-repos-from ignores comments and sweeps both repos in order"
 else
   bad "7 --all-repos-from (rc=$rc)" "$(cat "$T/out" "$T/err")"
+fi
+
+# 7b: non-UTF-8 --all-repos-from file -> --strict exits 2 (0 without --strict) and prints cannot read on stderr
+printf '\xff\xfe\n' > "$T/bad-utf8.txt"
+run_ss --all-repos-from "$T/bad-utf8.txt" --strict
+if [ "$rc" -eq 2 ] && [ ! -s "$T/out" ] && grep -qF "security-sweep: cannot read $T/bad-utf8.txt:" "$T/err"; then
+  ok "7b non-UTF-8 --all-repos-from file under --strict exits 2 with cannot read stderr message"
+else
+  bad "7b non-UTF-8 --all-repos-from --strict (rc=$rc)" "out=$(cat "$T/out") err=$(cat "$T/err")"
+fi
+run_ss --all-repos-from "$T/bad-utf8.txt"
+if [ "$rc" -eq 0 ] && [ ! -s "$T/out" ] && grep -qF "security-sweep: cannot read $T/bad-utf8.txt:" "$T/err"; then
+  ok "7c non-UTF-8 --all-repos-from file without --strict exits 0 with cannot read stderr message"
+else
+  bad "7c non-UTF-8 --all-repos-from default (rc=$rc)" "out=$(cat "$T/out") err=$(cat "$T/err")"
 fi
 
 # 8. Claim 8: Paginated output ([..][..] concatenated) counts both pages
@@ -484,6 +590,31 @@ else
   bad "9d --session-line exception suppression (rc=$rc)" "out=$(cat "$T/out") err=$(cat "$T/err")"
 fi
 
+# 9e & 9f: outside --session-line, an unexpected Exception from main prints class name only and exits 1 (2 under --strict)
+python3 - "$CACHE_FILE" <<'PY'
+import json, sys, time
+json.dump({
+    "fetched_at": time.time(),
+    "surfaces": {
+        "code-scanning": {"state": "count", "count": 1, "by_severity": {"critical": "x"}},
+        "dependabot": {"state": "off"},
+        "secret-scanning": {"state": "off"},
+    },
+}, open(sys.argv[1], "w"))
+PY
+run_ss -R example-org/widget
+if [ "$rc" -eq 1 ] && [ ! -s "$T/out" ] && [ "$(cat "$T/err")" = "security-sweep: internal error: TypeError" ]; then
+  ok "9e unexpected Exception outside --session-line prints class name only and exits 1"
+else
+  bad "9e internal error default exit (rc=$rc)" "out=$(cat "$T/out") err=$(cat "$T/err")"
+fi
+run_ss -R example-org/widget --strict
+if [ "$rc" -eq 2 ] && [ ! -s "$T/out" ] && [ "$(cat "$T/err")" = "security-sweep: internal error: TypeError" ]; then
+  ok "9f unexpected Exception under --strict prints class name only and exits 2"
+else
+  bad "9f internal error --strict exit (rc=$rc)" "out=$(cat "$T/out") err=$(cat "$T/err")"
+fi
+
 # --help check
 "$SS" --help >"$T/help" 2>&1; hrc=$?
 if [ "$hrc" -eq 0 ] && grep -qF "SECURITY_SWEEP_GH" "$T/help" && grep -qF -- "--session-line" "$T/help"; then
@@ -497,8 +628,19 @@ else
   bad "10b --help SECURITY_SWEEP_GH_TIMEOUT (rc=$hrc)" "$(cat "$T/help")"
 fi
 
-# Positive controls / canaries on mutated copies of security-sweep (skipped during recursive self-calls)
-if [ -z "${SECURITY_SWEEP_SKIP_CANARIES:-}" ]; then
+if [ -z "${SECURITY_SWEEP_SKIP_NONEXEC:-}" ]; then
+  # 11: probe must not chmod +x a non-executable target bin; it must fail the [ -x ] assertion instead
+  cp "$SS" "$T/nonexec-ss" && chmod 644 "$T/nonexec-ss"
+  nonexec_out=$(SECURITY_SWEEP_BIN="$T/nonexec-ss" SECURITY_SWEEP_SKIP_NONEXEC=1 SECURITY_SWEEP_SKIP_CANARIES=1 bash "${BASH_SOURCE[0]}" 2>&1); nonexec_rc=$?
+  if [ "$nonexec_rc" -ne 0 ] && [ ! -x "$T/nonexec-ss" ] && grep -qF "FAIL: security-sweep is not executable" <<<"$nonexec_out"; then
+    ok "11 non-executable SECURITY_SWEEP_BIN fails [ -x ] check without chmodding the file"
+  else
+    bad "11 non-executable SECURITY_SWEEP_BIN check (rc=$nonexec_rc, x=$([ -x "$T/nonexec-ss" ] && echo 1 || echo 0))" "$(head -n 3 <<<"$nonexec_out")"
+  fi
+fi
+
+# Positive controls / canaries on mutated copies of security-sweep (skipped during recursive self-calls or when a base row failed)
+if [ -z "${SECURITY_SWEEP_SKIP_CANARIES:-}" ] && [ "$fail" -eq 0 ]; then
   # Canary 1a: mutating rule.security_severity_level to rule.severity fails 1a and 1b
   sed 's/security_severity_level/severity/g' "$SS" > "$T/mut-1a" && chmod +x "$T/mut-1a"
   mut_out=$(SECURITY_SWEEP_BIN="$T/mut-1a" SECURITY_SWEEP_SKIP_CANARIES=1 bash "${BASH_SOURCE[0]}" 2>&1); mut_rc=$?
@@ -558,7 +700,7 @@ if [ -z "${SECURITY_SWEEP_SKIP_CANARIES:-}" ]; then
   fi
 
   # Canary r1-2: reverting invalid-repo exit code to unconditional 2 fails 6d
-  sed '/expected owner\/name/{n;s/return 2 if args.strict else 0/return 2/;}' "$SS" > "$T/mut-r1-2" && chmod +x "$T/mut-r1-2"
+  sed '/if not repos:/{n;s/return 2 if args.strict else 0/return 2/;}' "$SS" > "$T/mut-r1-2" && chmod +x "$T/mut-r1-2"
   mut_out=$(SECURITY_SWEEP_BIN="$T/mut-r1-2" SECURITY_SWEEP_SKIP_CANARIES=1 bash "${BASH_SOURCE[0]}" 2>&1); mut_rc=$?
   if [ "$mut_rc" -ne 0 ] && grep -qF "FAIL: 6d -R not-a-repo" <<<"$mut_out"; then
     ok "canary r1-2: reverting invalid-repo exit code to unconditional 2 fails 6d"
@@ -582,6 +724,62 @@ if [ -z "${SECURITY_SWEEP_SKIP_CANARIES:-}" ]; then
     ok "canary r1-4: removing --session-line exception guard fails 9d"
   else
     bad "canary r1-4 did not fail 9d as expected (rc=$mut_rc)" "$mut_out"
+  fi
+
+  # Canary r2-1 (purpose canary): reverting OFF_MARKERS check to two strings fails 'no analysis found' row (3f-2) and 4 others (5 total)
+  sed 's/if any(m in combined for m in OFF_MARKERS):/if "Code scanning is not enabled" in combined or "Secret scanning is disabled" in combined:/' "$SS" > "$T/mut-r2-1" && chmod +x "$T/mut-r2-1"
+  mut_out=$(SECURITY_SWEEP_BIN="$T/mut-r2-1" SECURITY_SWEEP_SKIP_CANARIES=1 bash "${BASH_SOURCE[0]}" 2>&1); mut_rc=$?
+  fail_n=$(grep -c '^FAIL:' <<<"$mut_out")
+  if [ "$mut_rc" -ne 0 ] && [ "$fail_n" -eq 5 ] \
+    && grep -qF "FAIL: 3f-2 off marker 'no analysis found'" <<<"$mut_out" \
+    && grep -qF "FAIL: 3f-strict --strict with only off surfaces" <<<"$mut_out"; then
+    ok "canary r2-1 (purpose canary): reverting fix 1 fails $fail_n assertions including 'no analysis found' (3f-2, 3f-3, 3f-5, 3f-6, 3f-strict)"
+  else
+    bad "canary r2-1 did not fail expected off-marker rows (rc=$mut_rc, fail_n=$fail_n)" "$mut_out"
+  fi
+
+  # Canary r2-3: reverting UnicodeDecodeError and __main__ Exception catch fails 7b, 7c, 9e, 9f
+  sed -e 's/except (OSError, UnicodeDecodeError) as e:/except OSError as e:/' -e 's/except Exception as e:/except SystemExit:/' "$SS" > "$T/mut-r2-3" && chmod +x "$T/mut-r2-3"
+  mut_out=$(SECURITY_SWEEP_BIN="$T/mut-r2-3" SECURITY_SWEEP_SKIP_CANARIES=1 bash "${BASH_SOURCE[0]}" 2>&1); mut_rc=$?
+  if [ "$mut_rc" -ne 0 ] \
+    && grep -qF "FAIL: 7b non-UTF-8 --all-repos-from --strict" <<<"$mut_out" \
+    && grep -qF "FAIL: 9e internal error default exit" <<<"$mut_out" \
+    && grep -qF "FAIL: 9f internal error --strict exit" <<<"$mut_out"; then
+    ok "canary r2-3: reverting fix 3 fails 7b, 9e, and 9f"
+  else
+    bad "canary r2-3 did not fail 7b/9e/9f as expected (rc=$mut_rc)" "$mut_out"
+  fi
+
+  # Canary r2-4: reverting invalid-repo skip to immediate return fails 6d, 6e, 6f, 6g, 6h
+  sed -e 's/, skipped//' -e 's/had_invalid_repo = True/return 2 if args.strict else 0/' "$SS" > "$T/mut-r2-4" && chmod +x "$T/mut-r2-4"
+  mut_out=$(SECURITY_SWEEP_BIN="$T/mut-r2-4" SECURITY_SWEEP_SKIP_CANARIES=1 bash "${BASH_SOURCE[0]}" 2>&1); mut_rc=$?
+  if [ "$mut_rc" -ne 0 ] \
+    && grep -qF "FAIL: 6f skip invalid repo" <<<"$mut_out" \
+    && grep -qF "FAIL: 6g skip invalid repo --strict clean" <<<"$mut_out" \
+    && grep -qF "FAIL: 6h skip invalid repo --strict alert wins" <<<"$mut_out"; then
+    ok "canary r2-4: reverting fix 4 fails 6f, 6g, and 6h"
+  else
+    bad "canary r2-4 did not fail 6f/6g/6h as expected (rc=$mut_rc)" "$mut_out"
+  fi
+
+  # Canary r2-5: omitting numbers/rules/packages from json_surface fails 1b and 1c
+  sed -e '/"numbers":/d' -e '/"rules":/d' -e '/"packages":/d' "$SS" > "$T/mut-r2-5" && chmod +x "$T/mut-r2-5"
+  mut_out=$(SECURITY_SWEEP_BIN="$T/mut-r2-5" SECURITY_SWEEP_SKIP_CANARIES=1 bash "${BASH_SOURCE[0]}" 2>&1); mut_rc=$?
+  if [ "$mut_rc" -ne 0 ] \
+    && grep -qF "FAIL: 1b --json shape" <<<"$mut_out" \
+    && grep -qF "FAIL: 1c --json dedup identifiers" <<<"$mut_out"; then
+    ok "canary r2-5: reverting fix 5 fails 1b and 1c"
+  else
+    bad "canary r2-5 did not fail 1b/1c as expected (rc=$mut_rc)" "$mut_out"
+  fi
+
+  # Canary r2-6: re-inserting chmod +x "$SS" in a temp copy of this probe fails 11
+  sed 's@^\[ -x "\$SS" \]@chmod +x "\$SS" 2>/dev/null || true\n[ -x "\$SS" ]@' "${BASH_SOURCE[0]}" > "$T/mut-probe-r2-6.sh"
+  mut_out=$(SECURITY_SWEEP_SKIP_CANARIES=1 bash "$T/mut-probe-r2-6.sh" 2>&1); mut_rc=$?
+  if [ "$mut_rc" -ne 0 ] && grep -qF "FAIL: 11 non-executable SECURITY_SWEEP_BIN check (rc=0, x=1)" <<<"$mut_out"; then
+    ok "canary r2-6: re-inserting chmod +x on target bin fails 11"
+  else
+    bad "canary r2-6 did not fail 11 as expected (rc=$mut_rc)" "$mut_out"
   fi
 fi
 

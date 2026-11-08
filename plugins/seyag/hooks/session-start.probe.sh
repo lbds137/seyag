@@ -238,8 +238,8 @@ prune "$J/state" "" "$J/bin"
 # - runs on startup/clear when syg_enabled security and SYG_SECURITY_SWEEP=1 or SYG_SECURITY_SWEEP_REPOS is set
 # - version line stays FIRST
 # - env unset, SYG_DISABLE=security, CLAUDE_CODE_ENTRYPOINT=sdk-cli, source compact, or a >2s timeout adds no line
-[ -f "$REAL_ROOT/bin/security-sweep" ] && [ ! -x "$REAL_ROOT/bin/security-sweep" ] && chmod +x "$REAL_ROOT/bin/security-sweep" 2>/dev/null || true
-[ -f "$REAL_ROOT/../../tests/security-sweep.probe.sh" ] && [ ! -x "$REAL_ROOT/../../tests/security-sweep.probe.sh" ] && chmod +x "$REAL_ROOT/../../tests/security-sweep.probe.sh" 2>/dev/null || true
+# - a >2s timeout (exit 124) detaches a cache-warming run so the next startup reads a warm cache
+[ -x "$REAL_ROOT/bin/security-sweep" ] && ok "security-sweep bin is executable" || bad "security-sweep bin is not executable at $REAL_ROOT/bin/security-sweep"
 ln -s "$REAL_ROOT/bin" "$TMP/root/bin"
 mkdir -p "$TMP/sec-bin" "$TMP/sec-repo"
 git init -q "$TMP/sec-repo"
@@ -309,12 +309,36 @@ else
 fi
 
 t0=$SECONDS
-runsec startup SYG_SECURITY_SWEEP=1 STUB_GH_SLEEP=5
+runsec startup SYG_SECURITY_SWEEP=1 STUB_GH_SLEEP=3
 elapsed=$((SECONDS - t0))
 if [ "$RC" = 0 ] && [ "$elapsed" -le 4 ] && valid && [ "$(ctx)" = "seyag plugin unknown" ]; then
-  ok "security-sweep stub sleeping 5s times out within ~2s (${elapsed}s), exit 0, no security line"
+  ok "security-sweep stub sleeping 3s times out within ~2s (${elapsed}s), exit 0, no security line"
 else
   bad "security-sweep timeout (rc=$RC, elapsed=${elapsed}s)" "$OUT"
+fi
+
+SEC_CACHE="$TMP/sec-state/seyag/security-sweep/example-org_widget.json"
+for _ in $(seq 1 30); do
+  [ -s "$SEC_CACHE" ] && break
+  sleep 0.5
+done
+if [ -s "$SEC_CACHE" ]; then
+  sleep 0.1
+  ok "security-sweep timeout detached warm run populates cache file"
+else
+  bad "security-sweep timeout detached warm run did not populate $SEC_CACHE within 15s"
+fi
+
+OUT=$(cd "$TMP/sec-repo" && jq -nc '{session_id: "probe", source: "startup"}' \
+  | env -u SYG_MEM_GATE_CMD -u SYG_LONG_JOB_CMD \
+    CLAUDE_PLUGIN_ROOT="$TMP/root" SYG_USER_RULES_DIR="$TMP/rules-linked" SYG_STATE_DIR="$TMP/state" \
+    XDG_STATE_HOME="$TMP/sec-state" SECURITY_SWEEP_GH="$TMP/sec-bin/gh" \
+    SYG_SECURITY_SWEEP=1 STUB_GH_SLEEP=3 bash "$HOOK" 2>/dev/null)
+RC=$?
+if [ "$RC" = 0 ] && valid && [[ "$(ctx | head -1)" == "seyag plugin "* ]] && ctx | grep -qxF "$WANT_SEC"; then
+  ok "security-sweep second startup after timeout warm run reads warm cache and emits security line"
+else
+  bad "security-sweep second startup after timeout warm run" "$OUT"
 fi
 
 runsec compact SYG_SECURITY_SWEEP=1
@@ -337,6 +361,28 @@ else
     ok "canary 10: dropping syg_enabled security makes SYG_DISABLE=security row fail as expected"
   else
     bad "canary 10: dropping syg_enabled security did not fail SYG_DISABLE=security check" "$OUT"
+  fi
+fi
+
+# Canary 11: removing the detached warm launch on exit 124 makes the second-start assertion fail
+sed 's/elif \[ "\$SEC_RC" -eq 124 \]; then/elif false; then/' "$HOOK" > "$TMP/hook-no-warm.sh"
+if grep -q 'SEC_RC" -eq 124' "$TMP/hook-no-warm.sh"; then
+  bad "canary 11: mutation of SEC_RC -eq 124 did not apply"
+else
+  SAVED_HOOK="$HOOK"
+  HOOK="$TMP/hook-no-warm.sh"
+  runsec startup SYG_SECURITY_SWEEP=1 STUB_GH_SLEEP=3
+  sleep 3.5
+  OUT=$(cd "$TMP/sec-repo" && jq -nc '{session_id: "probe", source: "startup"}' \
+    | env -u SYG_MEM_GATE_CMD -u SYG_LONG_JOB_CMD \
+      CLAUDE_PLUGIN_ROOT="$TMP/root" SYG_USER_RULES_DIR="$TMP/rules-linked" SYG_STATE_DIR="$TMP/state" \
+      XDG_STATE_HOME="$TMP/sec-state" SECURITY_SWEEP_GH="$TMP/sec-bin/gh" \
+      SYG_SECURITY_SWEEP=1 STUB_GH_SLEEP=3 bash "$HOOK" 2>/dev/null)
+  HOOK="$SAVED_HOOK"
+  if [ ! -s "$SEC_CACHE" ] && ! ctx | grep -qxF "$WANT_SEC"; then
+    ok "canary 11: removing warm launch makes second-start assertion fail as expected"
+  else
+    bad "canary 11: removing warm launch did not fail second-start assertion" "$OUT"
   fi
 fi
 
