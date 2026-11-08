@@ -38,11 +38,12 @@ git init -q -b main "$LIVE" >/dev/null 2>&1 || {
   git init -q "$LIVE" >/dev/null 2>&1
   git -C "$LIVE" symbolic-ref HEAD refs/heads/main >/dev/null 2>&1
 }
-mkdir -p "$PLUGIN_SUB" "$LIVE/.claude/dispatch"
+mkdir -p "$PLUGIN_SUB" "$LIVE/.claude-plugin" "$LIVE/.claude/dispatch"
 printf '*.log\n.claude/dispatch/\nbuild/\n' >"$LIVE/.gitignore"
+printf '{"name":"demo","plugins":[{"name":"demo","source":"./plugins/demo"}]}\n' >"$LIVE/.claude-plugin/marketplace.json"
 echo "tracked" >"$LIVE/tracked.txt"
 echo "plugin" >"$PLUGIN_SUB/hook.sh"
-git -C "$LIVE" add .gitignore tracked.txt plugins/demo/hook.sh >/dev/null 2>&1
+git -C "$LIVE" add .gitignore .claude-plugin/marketplace.json tracked.txt plugins/demo/hook.sh >/dev/null 2>&1
 git -C "$LIVE" -c user.email=probe@example.invalid -c user.name=probe \
   commit -q -m "initial" >/dev/null 2>&1
 INIT_SHA=$(git -C "$LIVE" rev-parse --short HEAD)
@@ -51,18 +52,21 @@ git -C "$LIVE" branch other >/dev/null 2>&1
 git -C "$LIVE" remote add origin "$ORIGIN" >/dev/null 2>&1
 git -C "$LIVE" push -q -u origin main >/dev/null 2>&1
 git -C "$LIVE" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main >/dev/null 2>&1
+git -C "$LIVE" update-ref refs/remotes/origin/remote-only "$INIT_SHA" >/dev/null 2>&1
 
 git -C "$LIVE" worktree add -q -b feat-wt "$WT" main >/dev/null 2>&1
 mkdir -p "$LIVE/.claude/worktrees"
 git -C "$LIVE" worktree add -q -b feat-nested "$NESTED_WT" main >/dev/null 2>&1
 
-# Second repo for SYG_LIVE_CHECKOUTS (with origin/HEAD -> origin/trunk).
+# Second repo for SYG_LIVE_CHECKOUTS and no-marketplace auto check (with origin/HEAD -> origin/trunk).
 git init -q -b trunk "$SECOND" >/dev/null 2>&1 || {
   git init -q "$SECOND" >/dev/null 2>&1
   git -C "$SECOND" symbolic-ref HEAD refs/heads/trunk >/dev/null 2>&1
 }
+mkdir -p "$SECOND/plugins/sub"
 echo "second" >"$SECOND/app.txt"
-git -C "$SECOND" add app.txt >/dev/null 2>&1
+echo "sub" >"$SECOND/plugins/sub/hook.sh"
+git -C "$SECOND" add app.txt plugins/sub/hook.sh >/dev/null 2>&1
 git -C "$SECOND" -c user.email=probe@example.invalid -c user.name=probe \
   commit -q -m "init second" >/dev/null 2>&1
 git -C "$SECOND" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/trunk >/dev/null 2>&1
@@ -73,9 +77,10 @@ if [ ! -e "$WT/.git" ] || [ ! -e "$NESTED_WT/.git" ] || [ ! -d "$SECOND/.git" ];
 fi
 if ! git -C "$LIVE" rev-parse --verify -q refs/heads/other >/dev/null 2>&1 \
   || ! git -C "$LIVE" rev-parse --verify -q refs/tags/v1.0 >/dev/null 2>&1 \
+  || ! git -C "$LIVE" rev-parse --verify -q refs/remotes/origin/remote-only >/dev/null 2>&1 \
   || ! git -C "$LIVE" symbolic-ref -q refs/remotes/origin/HEAD >/dev/null 2>&1 \
   || ! git -C "$SECOND" symbolic-ref -q refs/remotes/origin/HEAD >/dev/null 2>&1; then
-  echo "FAIL [setup]: missing other branch, v1.0 tag, or origin/HEAD in fixture repos"
+  echo "FAIL [setup]: missing other branch, v1.0 tag, remote-only ref, or origin/HEAD in fixture repos"
   exit 1
 fi
 
@@ -161,6 +166,16 @@ check_file() {
 
 # --- 1. Branch switching & checkout in live root ------------------------------
 check_bash 2 "switch to a feature branch blocks" "git switch other" "$LIVE"
+check_bash 2 "switch - blocks" "git switch -" "$LIVE"
+check_bash 2 "switch @{-1} blocks" "git switch @{-1}" "$LIVE"
+check_bash 2 "switch --track origin/x blocks" "git switch --track origin/x" "$LIVE"
+count=$((count + 1))
+if grep -qF "origin/x" <<<"$LAST_ERR"; then
+  echo "ok   [switch-track]: git switch --track origin/x block message names origin/x"
+else
+  echo "FAIL [switch-track]: git switch --track origin/x block message missing origin/x: $LAST_ERR"
+  fail=1
+fi
 check_bash 2 "switch -c new branch blocks" "git switch -c feat-x" "$LIVE"
 check_bash 2 "switch -C existing branch blocks" "git switch -C main" "$LIVE"
 check_bash 2 "switch --create blocks" "git switch --create feat-x" "$LIVE"
@@ -170,6 +185,13 @@ check_bash 0 "switch main (default branch) allows" "git switch main" "$LIVE"
 check_bash 0 "switch -q main allows" "git switch -q main" "$LIVE"
 
 check_bash 2 "checkout feature branch blocks" "git checkout other" "$LIVE"
+check_bash 2 "checkout - blocks" "git checkout -" "$LIVE"
+check_bash 2 "checkout @{-1} blocks" "git checkout @{-1}" "$LIVE"
+check_bash 2 "checkout @{-2} blocks" "git checkout @{-2}" "$LIVE"
+check_bash 2 "checkout remote-only branch (DWIM) blocks" "git checkout remote-only" "$LIVE"
+check_bash 0 "checkout --no-guess remote-only branch allows" "git checkout --no-guess remote-only" "$LIVE"
+check_bash 0 "checkout non-existent non-remote name allows" "git checkout no-such-branch-or-file" "$LIVE"
+check_bash 2 "checkout --conflict=diff3 other blocks" "git checkout --conflict=diff3 other" "$LIVE"
 check_bash 2 "checkout -b new branch blocks" "git checkout -b feat-x" "$LIVE"
 check_bash 2 "checkout -B branch blocks" "git checkout -B main" "$LIVE"
 check_bash 2 "checkout --detach blocks" "git checkout --detach" "$LIVE"
@@ -243,9 +265,30 @@ check_bash 2 "read-tree -m blocks" "git read-tree -m HEAD" "$LIVE"
 check_bash 2 "read-tree -um blocks" "git read-tree -um HEAD" "$LIVE"
 check_bash 0 "read-tree without -u/-m allows" "git read-tree HEAD" "$LIVE"
 
+check_bash 2 "update-ref HEAD blocks" "git update-ref HEAD $INIT_SHA" "$LIVE"
+check_bash 2 "update-ref refs/heads/main blocks" "git update-ref refs/heads/main $INIT_SHA" "$LIVE"
+check_bash 2 "update-ref -d refs/heads/other blocks" "git update-ref -d refs/heads/other" "$LIVE"
+check_bash 2 "update-ref -m reason refs/heads/main blocks" "git update-ref -m reason refs/heads/main $INIT_SHA" "$LIVE"
+check_bash 2 "update-ref --stdin blocks" "git update-ref --stdin" "$LIVE"
+check_bash 0 "update-ref refs/remotes/origin/main allows" "git update-ref refs/remotes/origin/main $INIT_SHA" "$LIVE"
+check_bash 0 "update-ref refs/tags/v1.0 allows" "git update-ref refs/tags/v1.0 $INIT_SHA" "$LIVE"
+check_bash 2 "symbolic-ref HEAD <ref> blocks" "git symbolic-ref HEAD refs/heads/other" "$LIVE"
+check_bash 2 "symbolic-ref -m reason HEAD <ref> blocks" "git symbolic-ref -m reason HEAD refs/heads/other" "$LIVE"
+check_bash 0 "symbolic-ref HEAD (read, one operand) allows" "git symbolic-ref HEAD" "$LIVE"
+check_bash 0 "symbolic-ref --short -q HEAD (read) allows" "git symbolic-ref --short -q HEAD" "$LIVE"
+check_bash 2 "symbolic-ref -d HEAD blocks" "git symbolic-ref -d HEAD" "$LIVE"
+check_bash 2 "symbolic-ref --delete HEAD blocks" "git symbolic-ref --delete HEAD" "$LIVE"
+check_bash 0 "symbolic-ref -d refs/remotes/origin/HEAD allows" "git symbolic-ref -d refs/remotes/origin/HEAD" "$LIVE"
+check_bash 0 "pull --ff-only origin main allows" "git pull --ff-only origin main" "$LIVE"
+check_bash 0 "SYG_ALLOW_LIVE_CHECKOUT=1 prefix on git allows" "SYG_ALLOW_LIVE_CHECKOUT=1 git commit -m x" "$LIVE"
+check_bash 0 "symbolic-ref refs/remotes/origin/HEAD <ref> allows" \
+  "git symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main" "$LIVE"
+
 check_bash 0 "pull --ff-only (no refspec) allows" "git pull --ff-only" "$LIVE"
 check_bash 0 "pull --ff-only origin allows" "git pull --ff-only origin" "$LIVE"
 check_bash 0 "pull --ff-only origin main allows" "git pull --ff-only origin main" "$LIVE"
+check_bash 2 "pull --ff-only non-origin remote blocks" "git pull --ff-only upstream" "$LIVE"
+check_bash 2 "pull --ff-only non-origin remote with default branch blocks" "git pull --ff-only upstream main" "$LIVE"
 check_bash 2 "pull --ff-only origin feat blocks" "git pull --ff-only origin feat" "$LIVE"
 check_bash 2 "pull --ff-only origin main feat blocks" "git pull --ff-only origin main feat" "$LIVE"
 check_bash 2 "pull without --ff-only blocks" "git pull origin main" "$LIVE"
@@ -375,6 +418,11 @@ check_bash 0 "CLAUDE_PLUGIN_ROOT pointing at a non-git dir allows git commit" \
 check_file 0 "CLAUDE_PLUGIN_ROOT pointing at a non-git dir allows Edit" \
   Edit "$LIVE/tracked.txt" "$LIVE" CLAUDE_PLUGIN_ROOT="$NOREPO"
 
+check_bash 0 "CLAUDE_PLUGIN_ROOT inside repo without .claude-plugin/marketplace.json is inert (Bash)" \
+  "git commit -m x" "$SECOND" CLAUDE_PLUGIN_ROOT="$SECOND/plugins/sub"
+check_file 0 "CLAUDE_PLUGIN_ROOT inside repo without .claude-plugin/marketplace.json is inert (Edit)" \
+  Edit "$SECOND/app.txt" "$SECOND" CLAUDE_PLUGIN_ROOT="$SECOND/plugins/sub"
+
 check_bash 0 "SYG_LIVE_CHECKOUT_AUTO=0 disables auto plugin root detection (Bash)" \
   "git commit -m x" "$LIVE" SYG_LIVE_CHECKOUT_AUTO=0
 check_file 0 "SYG_LIVE_CHECKOUT_AUTO=0 disables auto plugin root detection (Edit)" \
@@ -400,6 +448,14 @@ check_bash 0 "SYG_ALLOW_LIVE_CHECKOUT=1 as prefix word in command allows" \
   "SYG_ALLOW_LIVE_CHECKOUT=1 git commit -m x" "$LIVE"
 check_bash 0 "SYG_ALLOW_LIVE_CHECKOUT=1 after env in command allows" \
   "env SYG_ALLOW_LIVE_CHECKOUT=1 git switch other" "$LIVE"
+check_bash 0 "export SYG_ALLOW_LIVE_CHECKOUT=1 earlier in command allows" \
+  "export SYG_ALLOW_LIVE_CHECKOUT=1 && git commit -m x" "$LIVE"
+check_bash 2 "true SYG_ALLOW_LIVE_CHECKOUT=1; git commit still blocks" \
+  "true SYG_ALLOW_LIVE_CHECKOUT=1; git commit -m x" "$LIVE"
+check_bash 2 "SYG_ALLOW_LIVE_CHECKOUT=1 on earlier command only still blocks later git commit" \
+  "SYG_ALLOW_LIVE_CHECKOUT=1 true && git commit -m x" "$LIVE"
+check_bash 2 "SYG_ALLOW_LIVE_CHECKOUT=1 as git argument still blocks" \
+  "git commit -m SYG_ALLOW_LIVE_CHECKOUT=1" "$LIVE"
 check_bash 2 "SYG_ALLOW_LIVE_CHECKOUT=1 only inside quoted commit message still blocks" \
   'git commit -m "mention SYG_ALLOW_LIVE_CHECKOUT=1 in msg"' "$LIVE"
 check_bash 0 "SYG_ALLOW_LIVE_CHECKOUT=1 in hook environment allows Bash" \
