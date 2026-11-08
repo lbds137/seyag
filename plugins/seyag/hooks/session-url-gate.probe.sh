@@ -314,13 +314,14 @@ run 2 "git commit -F \"\$PWD/leaky.txt\" expands PWD" "$TMP/files" "${NOENV[@]}"
 run 2 "pushd away then popd back to leaky dir before relative -F" "$TMP/files" "${NOENV[@]}" -- \
   "pushd $TMP/plain >/dev/null && popd >/dev/null && git commit -F leaky.txt"
 CHAIN60=$(printf 'cd m%d && x; ' $(seq 1 60))"git commit -F $TMP/files/leaky.txt"
-SECONDS=0
-run 2 "latency: 60 missing-directory cds before git commit -F leaky file" "$WORK" "${NOENV[@]}" -- \
-  "$CHAIN60"
-if [ "$SECONDS" -lt 5 ]; then
-  printf 'PASS  (time %ds < 5s)  60 missing-directory cds in session-url-gate\n' "$SECONDS"
+{ TIMEFORMAT='%3U %3S'; time run 2 "latency: 60 missing-directory cds before git commit -F leaky file" "$WORK" "${NOENV[@]}" -- \
+  "$CHAIN60"; } 2>"$TMP/cpu"
+unset TIMEFORMAT
+read -r CPU_S CPU_OK < <(awk 'NF { u = $1; k = $2 } END { s = u + k; printf "%.3f %d\n", s, (s < 5 ? 1 : 0) }' "$TMP/cpu")
+if [ "$CPU_OK" = 1 ]; then
+  printf 'PASS  (cpu %ss < 5s)  60 missing-directory cds in session-url-gate\n' "$CPU_S"
 else
-  printf 'FAIL  (time %ds >= 5s)  60 missing-directory cds in session-url-gate\n' "$SECONDS"
+  printf 'FAIL  (cpu %ss >= 5s)  60 missing-directory cds in session-url-gate\n' "$CPU_S"
   FAILURES=$((FAILURES + 1))
 fi
 

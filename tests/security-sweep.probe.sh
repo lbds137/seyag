@@ -20,8 +20,12 @@ mkdir -p "$T/bin" "$T/state" "$T/fixtures"
 cat > "$T/bin/gh" <<EOF
 #!/bin/bash
 printf '%s\n' "\$*" >> "$T/gh.log"
-if [ -f "$T/gh-sleep" ]; then
-  sleep "\$(cat "$T/gh-sleep")"
+if [ -f "$T/gh-hold" ]; then
+  _hold="\$(cat "$T/gh-hold")"
+  for ((_i = 0; _i < 300; _i++)); do
+    [ -e "\$_hold" ] && break
+    sleep 0.1
+  done
 fi
 ep=""
 for arg in "\$@"; do
@@ -57,7 +61,7 @@ EOF
 chmod +x "$T/bin/gh"
 
 reset_state() {
-  rm -rf "$T/state" "$T/fixtures" "$T/gh.log" "$T/gh-sleep"
+  rm -rf "$T/state" "$T/fixtures" "$T/gh.log" "$T/gh-hold" "$T/lock-ready" "$T/lock-release"
   mkdir -p "$T/state" "$T/fixtures"
   : > "$T/gh.log"
 }
@@ -207,6 +211,87 @@ else
   bad "5c expired cache refetch (rc=$rc, calls=$(wc -l <"$T/gh.log"))"
 fi
 
+# 5d, 5e, 5f, 5g: corrupt cache surface entries (count: "x", by_severity: [], alerts: [1], rules_by_severity: {"critical": [1]}) are rejected by is_valid_cached_surface and refetched
+python3 - "$CACHE_FILE" <<'PY'
+import json, sys, time
+p = sys.argv[1]
+json.dump({
+    "fetched_at": time.time(),
+    "surfaces": {
+        "code-scanning": {"state": "count", "count": "x"},
+        "dependabot": {"state": "off"},
+        "secret-scanning": {"state": "off"},
+    },
+}, open(p, "w"))
+PY
+: > "$T/gh.log"
+run_ss -R example-org/widget
+if [ "$rc" -eq 0 ] && [ "$(wc -l <"$T/gh.log")" -eq 3 ] && [ "$(cat "$T/out")" = "$WANT_LINE" ] && [ ! -s "$T/err" ]; then
+  ok "5d corrupt cache with count: \"x\" (fresh fetched_at) refetches and prints fixture line"
+else
+  bad "5d corrupt cache count: \"x\" (rc=$rc, calls=$(wc -l <"$T/gh.log"))" "out=$(cat "$T/out") err=$(cat "$T/err")"
+fi
+
+python3 - "$CACHE_FILE" <<'PY'
+import json, sys, time
+p = sys.argv[1]
+json.dump({
+    "fetched_at": time.time(),
+    "surfaces": {
+        "code-scanning": {"state": "count", "count": 1, "by_severity": []},
+        "dependabot": {"state": "off"},
+        "secret-scanning": {"state": "off"},
+    },
+}, open(p, "w"))
+PY
+: > "$T/gh.log"
+run_ss -R example-org/widget
+if [ "$rc" -eq 0 ] && [ "$(wc -l <"$T/gh.log")" -eq 3 ] && [ "$(cat "$T/out")" = "$WANT_LINE" ] && [ ! -s "$T/err" ]; then
+  ok "5e corrupt cache with by_severity: [] (fresh fetched_at) refetches and prints fixture line"
+else
+  bad "5e corrupt cache by_severity: [] (rc=$rc, calls=$(wc -l <"$T/gh.log"))" "out=$(cat "$T/out") err=$(cat "$T/err")"
+fi
+
+python3 - "$CACHE_FILE" <<'PY'
+import json, sys, time
+p = sys.argv[1]
+json.dump({
+    "fetched_at": time.time(),
+    "surfaces": {
+        "code-scanning": {"state": "count", "count": 1, "alerts": [1]},
+        "dependabot": {"state": "off"},
+        "secret-scanning": {"state": "off"},
+    },
+}, open(p, "w"))
+PY
+: > "$T/gh.log"
+run_ss -R example-org/widget
+if [ "$rc" -eq 0 ] && [ "$(wc -l <"$T/gh.log")" -eq 3 ] && [ "$(cat "$T/out")" = "$WANT_LINE" ] && [ ! -s "$T/err" ]; then
+  ok "5f corrupt cache with alerts: [1] (fresh fetched_at) refetches and prints fixture line"
+else
+  bad "5f corrupt cache alerts: [1] (rc=$rc, calls=$(wc -l <"$T/gh.log"))" "out=$(cat "$T/out") err=$(cat "$T/err")"
+fi
+
+python3 - "$CACHE_FILE" <<'PY'
+import json, sys, time
+p = sys.argv[1]
+json.dump({
+    "fetched_at": time.time(),
+    "surfaces": {
+        "code-scanning": {"state": "count", "count": 1, "by_severity": {"critical": 1}, "rules_by_severity": {"critical": [1]}},
+        "dependabot": {"state": "off"},
+        "secret-scanning": {"state": "off"},
+    },
+}, open(p, "w"))
+PY
+: > "$T/gh.log"
+run_ss -R example-org/widget
+if [ "$rc" -eq 0 ] && [ "$(wc -l <"$T/gh.log")" -eq 3 ] && [ "$(cat "$T/out")" = "$WANT_LINE" ] && [ ! -s "$T/err" ]; then
+  ok "5g corrupt cache with rules_by_severity: {\"critical\": [1]} (fresh fetched_at) refetches and prints fixture line"
+else
+  bad "5g corrupt cache rules_by_severity: {\"critical\": [1]} (rc=$rc, calls=$(wc -l <"$T/gh.log"))" "out=$(cat "$T/out") err=$(cat "$T/err")"
+fi
+
 # 3. Claim 3: off vs error states (code-scanning not enabled -> off; secret-scanning disabled -> off; Not Found -> error)
 reset_state
 mkdir -p "$T/fixtures/example-org_widget"
@@ -268,16 +353,18 @@ else
   bad "3d --json off/error shape (rc=$rc)" "$(cat "$T/out")"
 fi
 
-# 3e: gh timeout via SECURITY_SWEEP_GH_TIMEOUT=1 with stub gh sleeping 3 s
+# 3e: gh timeout via SECURITY_SWEEP_GH_TIMEOUT=1 with stub gh held on a release marker
 reset_state
 mkdir -p "$T/fixtures/example-org_widget"
-printf '3\n' > "$T/gh-sleep"
+rm -f "$T/gh-release-3e"
+printf '%s\n' "$T/gh-release-3e" > "$T/gh-hold"
 SECURITY_SWEEP_GH_TIMEOUT=1 SECURITY_SWEEP_GH="$T/bin/gh" XDG_STATE_HOME="$T/state" "$SS" -R example-org/widget >"$T/out" 2>"$T/err"
 rc=$?
+: > "$T/gh-release-3e"
 if [ "$rc" -eq 0 ] \
   && [ "$(cat "$T/out")" = "example-org/widget: code-scanning error · dependabot error · secret-scanning error" ] \
   && grep -qF "fetch failed (gh exit 124)" "$T/err"; then
-  ok "3e SECURITY_SWEEP_GH_TIMEOUT=1 with 3s gh sleep maps surface to error, exits 0, and prints fetch failed (gh exit 124)"
+  ok "3e SECURITY_SWEEP_GH_TIMEOUT=1 with held gh maps surface to error, exits 0, and prints fetch failed (gh exit 124)"
 else
   bad "3e gh timeout (rc=$rc)" "out=$(cat "$T/out") err=$(cat "$T/err")"
 fi
@@ -569,15 +656,15 @@ else
   bad "9c --session-line two repos (rc=$rc)" "out=$(cat "$T/out") err=$(cat "$T/err")"
 fi
 
-# 9d: --session-line with wrong-typed cached data raising inside formatting exits 0 with empty stderr
+# 9d: --session-line with an unexpected Exception inside main exits 0 with empty stderr
 reset_state
 mkdir -p "$T/state/seyag/security-sweep"
 python3 - "$CACHE_FILE" <<'PY'
-import json, sys, time
+import json, sys
 json.dump({
-    "fetched_at": time.time(),
+    "fetched_at": 10**400,
     "surfaces": {
-        "code-scanning": {"state": "count", "count": "x"},
+        "code-scanning": {"state": "off"},
         "dependabot": {"state": "off"},
         "secret-scanning": {"state": "off"},
     },
@@ -590,13 +677,13 @@ else
   bad "9d --session-line exception suppression (rc=$rc)" "out=$(cat "$T/out") err=$(cat "$T/err")"
 fi
 
-# 9e & 9f: outside --session-line, an unexpected Exception from main prints class name only and exits 1 (2 under --strict)
+# 9e & 9f: outside --session-line, an unexpected Exception from main (TypeError when alerts[].rule.id is an int in format_code_scanning_detail) prints class name only and exits 1 (2 under --strict)
 python3 - "$CACHE_FILE" <<'PY'
 import json, sys, time
 json.dump({
     "fetched_at": time.time(),
     "surfaces": {
-        "code-scanning": {"state": "count", "count": 1, "by_severity": {"critical": "x"}},
+        "code-scanning": {"state": "count", "count": 1, "by_severity": {"critical": 1}, "alerts": [{"rule": {"security_severity_level": "critical", "id": 1}}]},
         "dependabot": {"state": "off"},
         "secret-scanning": {"state": "off"},
     },
@@ -613,6 +700,127 @@ if [ "$rc" -eq 2 ] && [ ! -s "$T/out" ] && [ "$(cat "$T/err")" = "security-sweep
   ok "9f unexpected Exception under --strict prints class name only and exits 2"
 else
   bad "9f internal error --strict exit (rc=$rc)" "out=$(cat "$T/out") err=$(cat "$T/err")"
+fi
+
+# 9g: --session-line -R -foo/bar (leading-dash token after -R) exits 0 with empty stdout and stderr
+reset_state
+run_ss --session-line -R -foo/bar
+if [ "$rc" -eq 0 ] && [ ! -s "$T/out" ] && [ ! -s "$T/err" ]; then
+  ok "9g --session-line -R -foo/bar exits 0 with empty stdout and stderr"
+else
+  bad "9g --session-line -R -foo/bar (rc=$rc)" "out=$(cat "$T/out") err=$(cat "$T/err")"
+fi
+
+# 9h: --session-line --repo=-foo/bar -R example-org/widget sweeps widget and prints its alert line
+reset_state
+mkdir -p "$T/fixtures/example-org_widget"
+printf '[{"number":1,"rule":{"id":"r1","security_severity_level":"critical"},"tool":{"name":"CodeQL"}}]\n' > "$T/fixtures/example-org_widget/code-scanning.out"
+run_ss --session-line --repo=-foo/bar -R example-org/widget
+WANT_9H="security: example-org/widget: 1 code-scanning (1 critical) — dispositions per skill seyag:security-sweep"
+if [ "$rc" -eq 0 ] && [ "$(cat "$T/out")" = "$WANT_9H" ] && [ ! -s "$T/err" ]; then
+  ok "9h --session-line --repo=-foo/bar -R example-org/widget prints widget alert line and exits 0"
+else
+  bad "9h --session-line --repo=-foo/bar -R example-org/widget (rc=$rc)" "out=$(cat "$T/out") err=$(cat "$T/err")"
+fi
+
+# 9i: --session-line --cap 1 with held gh exits 124 before the hold ends
+reset_state
+mkdir -p "$T/fixtures/example-org_widget"
+rm -f "$T/gh-release-9i"
+printf '%s\n' "$T/gh-release-9i" > "$T/gh-hold"
+t0=$SECONDS
+run_ss --session-line --cap 1 -R example-org/widget
+elapsed=$((SECONDS - t0))
+: > "$T/gh-release-9i"
+if [ "$rc" -eq 124 ] && [ "$elapsed" -lt 20 ] && [ ! -s "$T/out" ] && [ ! -s "$T/err" ]; then
+  ok "9i --session-line --cap 1 with held gh exits 124 before hold ends (${elapsed}s < 20s)"
+else
+  bad "9i --session-line --cap 1 (rc=$rc, elapsed=${elapsed}s)" "out=$(cat "$T/out") err=$(cat "$T/err")"
+fi
+
+# 9j & 9k: --warm-cache deduplicates via non-blocking flock and populates cache when unheld
+reset_state
+mkdir -p "$T/fixtures/example-org_widget"
+printf '[{"number":1,"rule":{"id":"r1","security_severity_level":"critical"},"tool":{"name":"CodeQL"}}]\n' > "$T/fixtures/example-org_widget/code-scanning.out"
+python3 - "$T/state" "$T/lock-ready" "$T/lock-release" <<'PY' &
+import fcntl, hashlib, os, sys, time
+d = os.path.join(sys.argv[1], "seyag", "security-sweep")
+os.makedirs(d, exist_ok=True)
+h = hashlib.sha1(b"example-org/widget").hexdigest()[:12]
+fd = os.open(os.path.join(d, f".warm-{h}.lock"), os.O_CREAT | os.O_RDWR, 0o600)
+fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+open(sys.argv[2], "w").close()
+for _ in range(300):
+    if os.path.exists(sys.argv[3]):
+        break
+    time.sleep(0.1)
+PY
+LOCK_PID=$!
+for _ in $(seq 1 100); do
+  [ -e "$T/lock-ready" ] && break
+  sleep 0.05
+done
+run_ss --warm-cache -R example-org/widget
+rc_held=$rc
+calls_held=$(wc -l <"$T/gh.log")
+out_held=$(cat "$T/out")
+err_held=$(cat "$T/err")
+: > "$T/lock-release"
+wait "$LOCK_PID" 2>/dev/null || true
+if [ "$rc_held" -eq 0 ] && [ "$calls_held" -eq 0 ] && [ -z "$out_held" ] && [ -z "$err_held" ] && [ ! -s "$CACHE_FILE" ]; then
+  ok "9j --warm-cache with lock held exits 0 immediately without invoking gh"
+else
+  bad "9j --warm-cache held lock (rc=$rc_held, calls=$calls_held)" "out=$out_held err=$err_held"
+fi
+
+run_ss --warm-cache -R example-org/widget
+if [ "$rc" -eq 0 ] && [ -s "$CACHE_FILE" ] && [ ! -s "$T/out" ] && [ ! -s "$T/err" ]; then
+  ok "9k --warm-cache without lock hold populates cache file with empty stdout and stderr"
+else
+  bad "9k --warm-cache unheld (rc=$rc)" "out=$(cat "$T/out") err=$(cat "$T/err")"
+fi
+
+# 9l: --session --repo=-foo/bar (abbreviated flag) is refused with exit 2 and unrecognized arguments on stderr
+reset_state
+run_ss --session --repo=-foo/bar
+if [ "$rc" -eq 2 ] && [ ! -s "$T/out" ] && grep -qF "unrecognized arguments: --session" "$T/err"; then
+  ok "9l --session --repo=-foo/bar is refused as an abbreviated flag (rc=2, stderr names --session)"
+else
+  bad "9l abbreviated --session flag (rc=$rc)" "out=$(cat "$T/out") err=$(cat "$T/err")"
+fi
+
+# 9m: --warm-cache lock digest sorts the repo set so reverse-order -R flags share the same lock
+reset_state
+mkdir -p "$T/fixtures/example-org_a" "$T/fixtures/example-org_widget"
+python3 - "$T/state" "$T/lock-ready" "$T/lock-release" <<'PY' &
+import fcntl, hashlib, os, sys, time
+d = os.path.join(sys.argv[1], "seyag", "security-sweep")
+os.makedirs(d, exist_ok=True)
+h = hashlib.sha1(" ".join(sorted(["example-org/a", "example-org/widget"])).encode("utf-8")).hexdigest()[:12]
+fd = os.open(os.path.join(d, f".warm-{h}.lock"), os.O_CREAT | os.O_RDWR, 0o600)
+fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+open(sys.argv[2], "w").close()
+for _ in range(300):
+    if os.path.exists(sys.argv[3]):
+        break
+    time.sleep(0.1)
+PY
+LOCK_PID=$!
+for _ in $(seq 1 100); do
+  [ -e "$T/lock-ready" ] && break
+  sleep 0.05
+done
+run_ss --warm-cache -R example-org/widget -R example-org/a
+rc_held=$rc
+calls_held=$(wc -l <"$T/gh.log")
+out_held=$(cat "$T/out")
+err_held=$(cat "$T/err")
+: > "$T/lock-release"
+wait "$LOCK_PID" 2>/dev/null || true
+if [ "$rc_held" -eq 0 ] && [ "$calls_held" -eq 0 ] && [ -z "$out_held" ] && [ -z "$err_held" ]; then
+  ok "9m --warm-cache with reverse-order -R flags hits sorted repo-set lock without invoking gh"
+else
+  bad "9m --warm-cache sorted repo-set lock (rc=$rc_held, calls=$calls_held)" "out=$out_held err=$err_held"
 fi
 
 # --help check
@@ -718,7 +926,8 @@ if [ -z "${SECURITY_SWEEP_SKIP_CANARIES:-}" ] && [ "$fail" -eq 0 ]; then
   fi
 
   # Canary r1-4: removing --session-line exception guard fails 9d
-  sed 's/if "--session-line" in sys.argv\[1:\]:/if False:/' "$SS" > "$T/mut-r1-4" && chmod +x "$T/mut-r1-4"
+  sed 's/if "--session-line" in sys.argv\[1:\] or "--warm-cache" in sys.argv\[1:\]:/if False:/' "$SS" > "$T/mut-r1-4" && chmod +x "$T/mut-r1-4"
+  cmp -s "$SS" "$T/mut-r1-4" && bad "canary r1-4: mutation did not apply (pattern drifted from the bin)"
   mut_out=$(SECURITY_SWEEP_BIN="$T/mut-r1-4" SECURITY_SWEEP_SKIP_CANARIES=1 bash "${BASH_SOURCE[0]}" 2>&1); mut_rc=$?
   if [ "$mut_rc" -ne 0 ] && grep -qF "FAIL: 9d --session-line exception suppression" <<<"$mut_out"; then
     ok "canary r1-4: removing --session-line exception guard fails 9d"
@@ -780,6 +989,55 @@ if [ -z "${SECURITY_SWEEP_SKIP_CANARIES:-}" ] && [ "$fail" -eq 0 ]; then
     ok "canary r2-6: re-inserting chmod +x on target bin fails 11"
   else
     bad "canary r2-6 did not fail 11 as expected (rc=$mut_rc)" "$mut_out"
+  fi
+
+  # Canary r3-1: removing quiet parser suppression fails 9g on stderr
+  sed 's/if self.quiet:/if False:/' "$SS" > "$T/mut-r3-1" && chmod +x "$T/mut-r3-1"
+  mut_out=$(SECURITY_SWEEP_BIN="$T/mut-r3-1" SECURITY_SWEEP_SKIP_CANARIES=1 bash "${BASH_SOURCE[0]}" 2>&1); mut_rc=$?
+  if [ "$mut_rc" -ne 0 ] && grep -qF "FAIL: 9g --session-line -R -foo/bar" <<<"$mut_out"; then
+    ok "canary r3-1: removing quiet parser suppression fails 9g"
+  else
+    bad "canary r3-1 did not fail 9g as expected (rc=$mut_rc)" "$mut_out"
+  fi
+
+  # Canary r3-2: deleting signal.setitimer call fails 9i
+  sed '/signal\.setitimer(/d' "$SS" > "$T/mut-r3-2" && chmod +x "$T/mut-r3-2"
+  mut_out=$(SECURITY_SWEEP_BIN="$T/mut-r3-2" SECURITY_SWEEP_SKIP_CANARIES=1 bash "${BASH_SOURCE[0]}" 2>&1); mut_rc=$?
+  if [ "$mut_rc" -ne 0 ] && grep -qF "FAIL: 9i --session-line --cap 1" <<<"$mut_out"; then
+    ok "canary r3-2: deleting setitimer call fails 9i"
+  else
+    bad "canary r3-2 did not fail 9i as expected (rc=$mut_rc)" "$mut_out"
+  fi
+
+  # Canary r3-3: making warm-cache flock acquisition a no-op fails 9j
+  sed 's/fcntl\.flock(warm_lock_fd, fcntl\.LOCK_EX | fcntl\.LOCK_NB)/pass/' "$SS" > "$T/mut-r3-3" && chmod +x "$T/mut-r3-3"
+  mut_out=$(SECURITY_SWEEP_BIN="$T/mut-r3-3" SECURITY_SWEEP_SKIP_CANARIES=1 bash "${BASH_SOURCE[0]}" 2>&1); mut_rc=$?
+  if [ "$mut_rc" -ne 0 ] && grep -qF "FAIL: 9j --warm-cache held lock" <<<"$mut_out"; then
+    ok "canary r3-3: making warm-cache flock acquisition a no-op fails 9j"
+  else
+    bad "canary r3-3 did not fail 9j as expected (rc=$mut_rc)" "$mut_out"
+  fi
+
+  # Canary r3-6: reverting is_valid_cached_surface to the base check fails 5d, 5e, 5f, and 5g
+  sed 's/def is_valid_cached_surface(sdata):/def is_valid_cached_surface(sdata):\n    return isinstance(sdata, dict) and sdata.get("state") in ("count", "off")/' "$SS" > "$T/mut-r3-6" && chmod +x "$T/mut-r3-6"
+  mut_out=$(SECURITY_SWEEP_BIN="$T/mut-r3-6" SECURITY_SWEEP_SKIP_CANARIES=1 bash "${BASH_SOURCE[0]}" 2>&1); mut_rc=$?
+  if [ "$mut_rc" -ne 0 ] \
+    && grep -qF "FAIL: 5d corrupt cache count: \"x\"" <<<"$mut_out" \
+    && grep -qF "FAIL: 5e corrupt cache by_severity: []" <<<"$mut_out" \
+    && grep -qF "FAIL: 5f corrupt cache alerts: [1]" <<<"$mut_out" \
+    && grep -qF "FAIL: 5g corrupt cache rules_by_severity: {\"critical\": [1]}" <<<"$mut_out"; then
+    ok "canary r3-6: reverting is_valid_cached_surface to base version fails 5d, 5e, 5f, and 5g"
+  else
+    bad "canary r3-6 did not fail 5d, 5e, 5f, and 5g as expected (rc=$mut_rc)" "$mut_out"
+  fi
+
+  # Canary r3-7: dropping sorted( in warm-cache lock digest fails 9m
+  sed 's/sorted(repos)/repos/' "$SS" > "$T/mut-r3-7" && chmod +x "$T/mut-r3-7"
+  mut_out=$(SECURITY_SWEEP_BIN="$T/mut-r3-7" SECURITY_SWEEP_SKIP_CANARIES=1 bash "${BASH_SOURCE[0]}" 2>&1); mut_rc=$?
+  if [ "$mut_rc" -ne 0 ] && grep -qF "FAIL: 9m --warm-cache sorted repo-set lock" <<<"$mut_out"; then
+    ok "canary r3-7: dropping sorted( in warm-cache lock digest fails 9m"
+  else
+    bad "canary r3-7 did not fail 9m as expected (rc=$mut_rc)" "$mut_out"
   fi
 fi
 
