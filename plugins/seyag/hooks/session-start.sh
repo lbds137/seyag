@@ -7,7 +7,9 @@
 # see the README). This hook only:
 # - startup / clear: prints "seyag plugin <version>" (deck-sessions
 #   greps it from session logs),
-#   then warns in one line if that rules link is missing (component `rules`).
+#   then warns in one line if that rules link is missing (component `rules`),
+#   and when opted in (`SYG_SECURITY_SWEEP=1` or `SYG_SECURITY_SWEEP_REPOS`)
+#   appends `bin/security-sweep --session-line` (2 s cap; component `security`).
 # - compact: adds the post-compaction recovery checklist (the failure class
 #   where re-suggested settings, dropped promises and lost work-stack pointers
 #   keep recurring; component `rules`). Adapted from Tzurot's session-start.sh.
@@ -94,6 +96,24 @@ case "$SOURCE" in
     done
     [ -n "$linked" ] || ! syg_enabled rules || TEXT="${TEXT:+$TEXT
 }The seyag plugin's core rules are not loaded (no file in $RULES_DIR matches its rules/core.md). Tell the owner; the fix is in the seyag README under Install, and it takes effect in the next session."
+
+    if syg_enabled security \
+      && { [ "${SYG_SECURITY_SWEEP:-}" = 1 ] || [ -n "${SYG_SECURITY_SWEEP_REPOS:-}" ]; } \
+      && [ -x "$PLUGIN_ROOT/bin/security-sweep" ]; then
+      SWEEP=("$PLUGIN_ROOT/bin/security-sweep" --session-line)
+      if [ -n "${SYG_SECURITY_SWEEP_REPOS:-}" ]; then
+        read -r -d '' -a _syg_repos <<<"$SYG_SECURITY_SWEEP_REPOS" || true
+        for _syg_r in "${_syg_repos[@]+"${_syg_repos[@]}"}"; do
+          SWEEP+=(-R "$_syg_r")
+        done
+      fi
+      command -v timeout >/dev/null 2>&1 && SWEEP=(timeout 2 "${SWEEP[@]}")
+      if SEC_LINE=$("${SWEEP[@]}" 2>/dev/null); then
+        SEC_LINE=${SEC_LINE%%$'\n'*}
+        [ -z "$SEC_LINE" ] || TEXT="${TEXT:+$TEXT
+}$SEC_LINE"
+      fi
+    fi
     ;;
   compact)
     if syg_enabled rules; then

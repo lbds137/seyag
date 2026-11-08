@@ -13,7 +13,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 # Hermetic: the fixtures below set the SYG_ knobs explicitly, so an ambient
 # SYG_ variable must not override them.
-unset SYG_STATE_DIR SYG_STATE_MAX_DAYS SYG_USER_RULES_DIR SYG_INSTALLED_PLUGINS SYG_PROFILE SYG_ENABLE SYG_DISABLE SYG_MEM_GATE_CMD SYG_LONG_JOB_CMD
+unset SYG_STATE_DIR SYG_STATE_MAX_DAYS SYG_USER_RULES_DIR SYG_INSTALLED_PLUGINS SYG_PROFILE SYG_ENABLE SYG_DISABLE SYG_MEM_GATE_CMD SYG_LONG_JOB_CMD SYG_SECURITY_SWEEP SYG_SECURITY_SWEEP_REPOS SECURITY_SWEEP_GH CLAUDE_CODE_ENTRYPOINT
 # The git-hooks relink acts on ${XDG_DATA_HOME}/seyag/git-hooks: a scratch one,
 # so a run with the real plugin root never re-points a real install.
 export XDG_DATA_HOME="$TMP/xdg"
@@ -233,5 +233,111 @@ prune "$L"; prune "$L/"; prune "$L//"   # pins the slash stripping; the [ ! -L ]
 J="$TMP/nojq"; mkdir -p "$J/bin" "$J/state"; chmod 700 "$J/state"; ln -s /usr/bin/find /usr/bin/id "$J/bin/"; old "$J/state/queued-receipt-state-y"
 prune "$J/state" "" "$J/bin"
 [ ! -e "$J/state/queued-receipt-state-y" ] && ok "prunes even without jq" || bad "no jq: pruning skipped"
+
+# Security sweep opt-in line (component `security`):
+# - runs on startup/clear when syg_enabled security and SYG_SECURITY_SWEEP=1 or SYG_SECURITY_SWEEP_REPOS is set
+# - version line stays FIRST
+# - env unset, SYG_DISABLE=security, CLAUDE_CODE_ENTRYPOINT=sdk-cli, source compact, or a >2s timeout adds no line
+[ -f "$REAL_ROOT/bin/security-sweep" ] && [ ! -x "$REAL_ROOT/bin/security-sweep" ] && chmod +x "$REAL_ROOT/bin/security-sweep" 2>/dev/null || true
+[ -f "$REAL_ROOT/../../tests/security-sweep.probe.sh" ] && [ ! -x "$REAL_ROOT/../../tests/security-sweep.probe.sh" ] && chmod +x "$REAL_ROOT/../../tests/security-sweep.probe.sh" 2>/dev/null || true
+ln -s "$REAL_ROOT/bin" "$TMP/root/bin"
+mkdir -p "$TMP/sec-bin" "$TMP/sec-repo"
+git init -q "$TMP/sec-repo"
+git -C "$TMP/sec-repo" remote add origin "https://github.com/example-org/widget.git"
+cat > "$TMP/sec-bin/gh" <<'EOF'
+#!/bin/bash
+if [ -n "${STUB_GH_SLEEP:-}" ]; then
+  sleep "$STUB_GH_SLEEP"
+fi
+case "$*" in
+  *repos/example-org/widget/code-scanning/alerts*)
+    printf '[{"number":1,"rule":{"id":"r1","security_severity_level":"critical"},"tool":{"name":"CodeQL"}}]\n' ;;
+  *repos/example-org/gadget/dependabot/alerts*)
+    printf '[{"number":2,"security_advisory":{"severity":"high"},"dependency":{"package":{"name":"pkg-a"}}}]\n' ;;
+  *)
+    printf '[]\n' ;;
+esac
+EOF
+chmod +x "$TMP/sec-bin/gh"
+
+runsec() { # $1 source, rest = env assignments
+  local src=$1
+  shift
+  rm -rf "$TMP/sec-state"
+  OUT=$(cd "$TMP/sec-repo" && jq -nc --arg s "$src" '{session_id: "probe", source: $s}' \
+    | env -u SYG_MEM_GATE_CMD -u SYG_LONG_JOB_CMD \
+      CLAUDE_PLUGIN_ROOT="$TMP/root" SYG_USER_RULES_DIR="$TMP/rules-linked" SYG_STATE_DIR="$TMP/state" \
+      XDG_STATE_HOME="$TMP/sec-state" SECURITY_SWEEP_GH="$TMP/sec-bin/gh" "$@" bash "$HOOK" 2>/dev/null)
+  RC=$?
+}
+
+WANT_SEC="security: example-org/widget: 1 code-scanning (1 critical) — dispositions per skill seyag:security-sweep"
+runsec startup SYG_SECURITY_SWEEP=1
+if [ "$RC" = 0 ] && valid && [[ "$(ctx | head -1)" == "seyag plugin "* ]] && ctx | grep -qxF "$WANT_SEC"; then
+  ok "security-sweep startup with SYG_SECURITY_SWEEP=1: version line first, then security line"
+else
+  bad "security-sweep startup with SYG_SECURITY_SWEEP=1" "$OUT"
+fi
+
+WANT_SEC_REPOS="security: example-org/widget: 1 code-scanning (1 critical); example-org/gadget: 1 dependabot — dispositions per skill seyag:security-sweep"
+runsec clear SYG_SECURITY_SWEEP_REPOS="example-org/widget example-org/gadget"
+if [ "$RC" = 0 ] && valid && [[ "$(ctx | head -1)" == "seyag plugin "* ]] && ctx | grep -qxF "$WANT_SEC_REPOS"; then
+  ok "security-sweep clear with SYG_SECURITY_SWEEP_REPOS: sweeps listed repos with version line first"
+else
+  bad "security-sweep clear with SYG_SECURITY_SWEEP_REPOS" "$OUT"
+fi
+
+runsec startup
+if [ "$RC" = 0 ] && valid && [ "$(ctx)" = "seyag plugin unknown" ]; then
+  ok "security-sweep env unset: no security line"
+else
+  bad "security-sweep env unset: expected version line only" "$OUT"
+fi
+
+runsec startup SYG_SECURITY_SWEEP=1 SYG_DISABLE=security
+if [ "$RC" = 0 ] && valid && [ "$(ctx)" = "seyag plugin unknown" ]; then
+  ok "security-sweep SYG_DISABLE=security: no security line"
+else
+  bad "security-sweep SYG_DISABLE=security: expected version line only" "$OUT"
+fi
+
+runsec startup SYG_SECURITY_SWEEP=1 CLAUDE_CODE_ENTRYPOINT=sdk-cli
+if [ "$RC" = 0 ] && valid && [ "$(ctx)" = "seyag plugin unknown" ]; then
+  ok "security-sweep headless (CLAUDE_CODE_ENTRYPOINT=sdk-cli): no security line"
+else
+  bad "security-sweep headless: expected version line only" "$OUT"
+fi
+
+t0=$SECONDS
+runsec startup SYG_SECURITY_SWEEP=1 STUB_GH_SLEEP=5
+elapsed=$((SECONDS - t0))
+if [ "$RC" = 0 ] && [ "$elapsed" -le 4 ] && valid && [ "$(ctx)" = "seyag plugin unknown" ]; then
+  ok "security-sweep stub sleeping 5s times out within ~2s (${elapsed}s), exit 0, no security line"
+else
+  bad "security-sweep timeout (rc=$RC, elapsed=${elapsed}s)" "$OUT"
+fi
+
+runsec compact SYG_SECURITY_SWEEP=1
+if [ "$RC" = 0 ] && valid && ctx | grep -q 'POST-COMPACTION RECOVERY' && ! ctx | grep -q '^security:'; then
+  ok "security-sweep compact: no security line"
+else
+  bad "security-sweep compact: unexpected security line" "$OUT"
+fi
+
+# Canary 10: dropping `syg_enabled security` from a temp copy of session-start.sh fails the SYG_DISABLE=security check
+sed 's/syg_enabled security/true/' "$HOOK" > "$TMP/hook-no-sec-gate.sh"
+if grep -q 'syg_enabled security' "$TMP/hook-no-sec-gate.sh"; then
+  bad "canary 10: mutation of syg_enabled security did not apply"
+else
+  SAVED_HOOK="$HOOK"
+  HOOK="$TMP/hook-no-sec-gate.sh"
+  runsec startup SYG_SECURITY_SWEEP=1 SYG_DISABLE=security
+  HOOK="$SAVED_HOOK"
+  if [ "$(ctx)" != "seyag plugin unknown" ] && ctx | grep -qxF "$WANT_SEC"; then
+    ok "canary 10: dropping syg_enabled security makes SYG_DISABLE=security row fail as expected"
+  else
+    bad "canary 10: dropping syg_enabled security did not fail SYG_DISABLE=security check" "$OUT"
+  fi
+fi
 
 exit $fail

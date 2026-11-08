@@ -2,8 +2,9 @@
 # Tab-separated. Hook lines: <hook-name><TAB><component>. Every hook in hooks.json
 # appears exactly once (tests/hook-wiring.probe.sh pins it).
 # Profile lines: @profile<TAB><name><TAB><space-separated components>.
-# "rules" is not a hook: it gates the rules-link warning and the post-compaction
-# checklist in session-start. "session" always runs.
+# "rules" and "security" are not hooks: "rules" gates the rules-link warning and
+# the post-compaction checklist in session-start; "security" gates the opt-in
+# security-sweep line in session-start. "session" always runs.
 # Env: SYG_PROFILE (base set, default full), SYG_ENABLE, SYG_DISABLE (DISABLE wins).
 session-start	session
 route-check	route
@@ -40,6 +41,6 @@ status-claim-cite	status-claim-cite
 dispatch-spec-ledger-gate	dispatch-spec
 clock-stamp-guard	clock-stamp
 live-checkout-guard	live-checkout
-@profile	full	session rules route turn-shape context guards-shell guards-outbound guards-commit guards-pr pr-watch dispatch api-credit launch-record classifier-ledger handoff-pick-check status-claim-cite clock-stamp dispatch-spec live-checkout
+@profile	full	session rules route turn-shape context guards-shell guards-outbound guards-commit guards-pr pr-watch dispatch api-credit launch-record classifier-ledger handoff-pick-check status-claim-cite clock-stamp dispatch-spec live-checkout security
 @profile	guards	guards-shell guards-outbound guards-commit guards-pr context dispatch route session api-credit launch-record classifier-ledger live-checkout
 @profile	none	session api-credit launch-record classifier-ledger

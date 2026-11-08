@@ -1,0 +1,599 @@
+#!/usr/bin/env python3
+"""security-sweep: surface open GitHub security alerts (code-scanning, dependabot, secret-scanning).
+
+Usage:
+  security-sweep [-R owner/name ...] [--all-repos-from FILE] [--json] [--strict] [--session-line] [--no-cache]
+
+Options:
+  -R, --repo owner/name   Repository to sweep (repeatable).
+  --all-repos-from FILE   Read whitespace-separated owner/name tokens from FILE (# starts a comment).
+                          With neither -R nor --all-repos-from, uses the cwd's `git remote get-url origin`.
+  --json                  Emit machine-readable JSON summary.
+  --strict                Exit 1 on open critical/high code-scanning or any open secret-scanning alert;
+                          exit 2 on an uncached surface error or unparseable origin remote.
+  --session-line          Print nothing unless >=1 open alert exists; then print a single summary line.
+                          Silent on errors and off surfaces; never writes to stderr.
+  --no-cache              Bypass the 300s fresh cache and fetch live from GitHub.
+  -h, --help              Show this help message and exit.
+
+Cache:
+  ${XDG_STATE_HOME:-$HOME/.local/state}/seyag/security-sweep/<owner>_<name>.json (fresh <= 300s).
+  Only filtered metadata fields are kept at fetch time; secret values and raw remote URLs are
+  never printed, logged or cached.
+
+Test seam (environment):
+  SECURITY_SWEEP_GH          Overrides the `gh` binary path.
+  SECURITY_SWEEP_GH_TIMEOUT  Overrides the per-call `gh` timeout in seconds (positive int, default 60).
+
+Exit codes: 0 always, except under --strict (1 alert threshold met, 2 uncached fetch/origin error).
+"""
+import argparse
+from concurrent.futures import ThreadPoolExecutor
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+import time
+
+SURFACES = ("code-scanning", "dependabot", "secret-scanning")
+SEVERITIES = ("critical", "high", "medium", "low", "none")
+CACHE_TTL_S = 300
+GH_TIMEOUT_S = 60
+REPO_RE = re.compile(r"^([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)$")
+HTTPS_REMOTE_RE = re.compile(
+    r"^https://(?:[^/@\s]+@)?github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+?)(?:\.git)?/?$"
+)
+SSH_REMOTE_RE = re.compile(
+    r"^(?:git@github\.com:|ssh://(?:[^/@\s]+@)?github\.com/)([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+?)(?:\.git)?/?$"
+)
+
+
+class Parser(argparse.ArgumentParser):
+    def error(self, message):
+        self.print_usage(sys.stderr)
+        print(f"security-sweep: {message}", file=sys.stderr)
+        sys.exit(2)
+
+
+def gh_bin():
+    return os.environ.get("SECURITY_SWEEP_GH") or "gh"
+
+
+def gh_timeout_s():
+    raw = os.environ.get("SECURITY_SWEEP_GH_TIMEOUT")
+    if raw is not None:
+        try:
+            val = int(raw)
+            if val > 0:
+                return val
+        except ValueError:
+            pass
+    return GH_TIMEOUT_S
+
+
+def state_dir():
+    base = os.environ.get("XDG_STATE_HOME") or os.path.join(os.path.expanduser("~"), ".local", "state")
+    return os.path.join(base, "seyag", "security-sweep")
+
+
+def cache_path(repo):
+    owner, name = repo.split("/", 1)
+    return os.path.join(state_dir(), f"{owner}_{name}.json")
+
+
+def valid_repo(token):
+    m = REPO_RE.match(token)
+    if not m:
+        return False
+    owner, name = m.group(1), m.group(2)
+    return owner not in (".", "..") and name not in (".", "..")
+
+
+def parse_origin_url(raw_url):
+    url = raw_url.strip()
+    if url.endswith(".git"):
+        url = url[:-4]
+    elif url.endswith(".git/"):
+        url = url[:-5]
+    for rx in (HTTPS_REMOTE_RE, SSH_REMOTE_RE):
+        m = rx.match(url)
+        if m:
+            cand = m.group(1)
+            if valid_repo(cand):
+                return cand
+    return None
+
+
+def resolve_origin_repo():
+    try:
+        p = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if p.returncode != 0:
+        return None
+    return parse_origin_url(p.stdout)
+
+
+def parse_paginated_list(raw):
+    dec = json.JSONDecoder()
+    idx = 0
+    n = len(raw)
+    out = []
+    saw = False
+    while idx < n:
+        while idx < n and raw[idx].isspace():
+            idx += 1
+        if idx >= n:
+            break
+        val, idx = dec.raw_decode(raw, idx)
+        if not isinstance(val, list):
+            raise ValueError("expected JSON list")
+        for item in val:
+            if not isinstance(item, dict):
+                raise ValueError("expected JSON object in alert list")
+            out.append(item)
+        saw = True
+    if not saw:
+        raise ValueError("empty JSON output")
+    return out
+
+
+def summarize_code_scanning(raw_items):
+    alerts = []
+    by_sev = {}
+    rules_by_sev = {"critical": [], "high": []}
+    rules_ch = []
+    for a in raw_items:
+        rule = a.get("rule") if isinstance(a.get("rule"), dict) else {}
+        tool = a.get("tool") if isinstance(a.get("tool"), dict) else {}
+        sev_raw = rule.get("security_severity_level")
+        sev = sev_raw.lower() if isinstance(sev_raw, str) else ""
+        if sev not in ("critical", "high", "medium", "low"):
+            sev = "none"
+        rid = rule.get("id")
+        rid = rid if isinstance(rid, str) and rid else "unknown"
+        tname = tool.get("name")
+        tname = tname if isinstance(tname, str) else ""
+        alerts.append({
+            "number": a.get("number"),
+            "rule": {"id": rid, "security_severity_level": sev},
+            "tool": {"name": tname},
+        })
+    for item in alerts:
+        sev = item["rule"]["security_severity_level"]
+        rid = item["rule"]["id"]
+        by_sev[sev] = by_sev.get(sev, 0) + 1
+        if sev in ("critical", "high"):
+            if rid not in rules_by_sev[sev]:
+                rules_by_sev[sev].append(rid)
+    for sev in ("critical", "high"):
+        for rid in rules_by_sev[sev]:
+            if rid not in rules_ch:
+                rules_ch.append(rid)
+    ordered_sev = {s: by_sev[s] for s in SEVERITIES if by_sev.get(s, 0) > 0}
+    return {
+        "state": "count",
+        "count": len(alerts),
+        "by_severity": ordered_sev,
+        "rules_critical_high": rules_ch,
+        "rules_by_severity": {s: rules_by_sev[s] for s in ("critical", "high") if rules_by_sev[s]},
+        "alerts": alerts,
+    }
+
+
+def summarize_dependabot(raw_items):
+    alerts = []
+    by_sev = {}
+    for a in raw_items:
+        adv = a.get("security_advisory") if isinstance(a.get("security_advisory"), dict) else {}
+        dep = a.get("dependency") if isinstance(a.get("dependency"), dict) else {}
+        pkg = dep.get("package") if isinstance(dep.get("package"), dict) else {}
+        sev_raw = adv.get("severity")
+        sev = sev_raw.lower() if isinstance(sev_raw, str) else ""
+        if sev not in ("critical", "high", "medium", "low"):
+            sev = "none"
+        pname = pkg.get("name")
+        pname = pname if isinstance(pname, str) else ""
+        alerts.append({
+            "number": a.get("number"),
+            "security_advisory": {"severity": sev},
+            "dependency": {"package": {"name": pname}},
+        })
+        by_sev[sev] = by_sev.get(sev, 0) + 1
+    ordered_sev = {s: by_sev[s] for s in SEVERITIES if by_sev.get(s, 0) > 0}
+    return {
+        "state": "count",
+        "count": len(alerts),
+        "by_severity": ordered_sev,
+        "alerts": alerts,
+    }
+
+
+def summarize_secret_scanning(raw_items):
+    alerts = []
+    types = []
+    for a in raw_items:
+        t = a.get("secret_type_display_name")
+        t = t if isinstance(t, str) and t else "secret"
+        alerts.append({
+            "number": a.get("number"),
+            "secret_type_display_name": t,
+        })
+        if t not in types:
+            types.append(t)
+    return {
+        "state": "count",
+        "count": len(alerts),
+        "types": types,
+        "alerts": alerts,
+    }
+
+
+def fetch_surface(repo, surface):
+    endpoint = f"repos/{repo}/{surface}/alerts?state=open&per_page=100"
+    try:
+        p = subprocess.run(
+            [gh_bin(), "api", "--paginate", endpoint],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=gh_timeout_s(),
+        )
+    except subprocess.TimeoutExpired:
+        return {"state": "error"}, 124
+    except OSError:
+        return {"state": "error"}, 127
+    if p.returncode != 0:
+        combined = (p.stdout or "") + "\n" + (p.stderr or "")
+        if "Code scanning is not enabled" in combined or "Secret scanning is disabled" in combined:
+            return {"state": "off"}, None
+        return {"state": "error"}, p.returncode
+    try:
+        raw_items = parse_paginated_list(p.stdout or "")
+    except ValueError:
+        return {"state": "error"}, 0
+    if surface == "code-scanning":
+        return summarize_code_scanning(raw_items), None
+    if surface == "dependabot":
+        return summarize_dependabot(raw_items), None
+    return summarize_secret_scanning(raw_items), None
+
+
+def read_cache(repo):
+    path = cache_path(repo)
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    fetched_at = data.get("fetched_at")
+    surfaces = data.get("surfaces")
+    if not isinstance(fetched_at, (int, float)) or not isinstance(surfaces, dict):
+        return None
+    return {"fetched_at": float(fetched_at), "surfaces": surfaces}
+
+
+def write_cache(repo, fetched_at, surfaces):
+    d = state_dir()
+    owner, name = repo.split("/", 1)
+    try:
+        os.makedirs(d, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=d, prefix=f".{owner}_{name}.", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump({"fetched_at": int(fetched_at), "surfaces": surfaces}, f)
+            os.replace(tmp, os.path.join(d, f"{owner}_{name}.json"))
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+    except OSError:
+        pass
+
+
+def is_valid_cached_surface(sdata):
+    return isinstance(sdata, dict) and sdata.get("state") in ("count", "off")
+
+
+def process_repo(repo, surface_pool, no_cache, now):
+    cached = read_cache(repo)
+    if not no_cache and cached is not None:
+        age_s = now - cached["fetched_at"]
+        csurfs = cached["surfaces"]
+        if age_s <= CACHE_TTL_S and all(is_valid_cached_surface(csurfs.get(s)) for s in SURFACES):
+            return {
+                "repo": repo,
+                "surfaces": {s: csurfs[s] for s in SURFACES},
+                "stale": {},
+                "errors": [],
+            }
+
+    futures = {s: surface_pool.submit(fetch_surface, repo, s) for s in SURFACES}
+    surfaces = {}
+    stale = {}
+    errors = []
+    for s in SURFACES:
+        sdata, err_rc = futures[s].result()
+        if sdata.get("state") == "error":
+            if cached is not None and is_valid_cached_surface(cached["surfaces"].get(s)):
+                surfaces[s] = cached["surfaces"][s]
+                stale[s] = max(0, int((now - cached["fetched_at"]) // 60))
+            else:
+                surfaces[s] = {"state": "error"}
+                errors.append((repo, s, err_rc if err_rc is not None else 1))
+        else:
+            surfaces[s] = sdata
+
+    if any(is_valid_cached_surface(surfaces[s]) for s in SURFACES):
+        stamp = cached["fetched_at"] if (stale and cached is not None) else now
+        write_cache(repo, stamp, surfaces)
+
+    return {
+        "repo": repo,
+        "surfaces": surfaces,
+        "stale": stale,
+        "errors": errors,
+    }
+
+
+def format_code_scanning_detail(sdata):
+    by_sev = sdata.get("by_severity") or {}
+    rules_by_sev = sdata.get("rules_by_severity") or {}
+    if not rules_by_sev and isinstance(sdata.get("alerts"), list):
+        tmp = {"critical": [], "high": []}
+        for a in sdata["alerts"]:
+            r = a.get("rule") or {}
+            sev = r.get("security_severity_level")
+            rid = r.get("id")
+            if sev in ("critical", "high") and rid and rid not in tmp[sev]:
+                tmp[sev].append(rid)
+        rules_by_sev = tmp
+    parts = []
+    for sev in SEVERITIES:
+        k = by_sev.get(sev, 0)
+        if k <= 0:
+            continue
+        if sev in ("critical", "high") and rules_by_sev.get(sev):
+            parts.append(f"{k} {sev}: {', '.join(rules_by_sev[sev])}")
+        else:
+            parts.append(f"{k} {sev}")
+    return "; ".join(parts)
+
+
+def format_dependabot_detail(sdata):
+    by_sev = sdata.get("by_severity") or {}
+    parts = [f"{by_sev[sev]} {sev}" for sev in SEVERITIES if by_sev.get(sev, 0) > 0]
+    return "; ".join(parts)
+
+
+def format_default_line(res):
+    repo = res["repo"]
+    surfaces = res["surfaces"]
+    stale = res["stale"]
+    if not stale and all(
+        surfaces[s].get("state") == "off"
+        or (surfaces[s].get("state") == "count" and surfaces[s].get("count", 0) == 0)
+        for s in SURFACES
+    ):
+        off_list = [s for s in SURFACES if surfaces[s].get("state") == "off"]
+        suffix = f" (off: {', '.join(off_list)})" if off_list else ""
+        return f"{repo}: clean{suffix}"
+
+    segs = []
+    for s in SURFACES:
+        sdata = surfaces[s]
+        st = sdata.get("state")
+        if st == "off":
+            seg = f"{s} off"
+        elif st == "error":
+            seg = f"{s} error"
+        else:
+            cnt = sdata.get("count", 0)
+            if cnt == 0:
+                seg = f"{s} 0"
+            elif s == "code-scanning":
+                detail = format_code_scanning_detail(sdata)
+                seg = f"{s} {cnt} ({detail})" if detail else f"{s} {cnt}"
+            elif s == "dependabot":
+                detail = format_dependabot_detail(sdata)
+                seg = f"{s} {cnt} ({detail})" if detail else f"{s} {cnt}"
+            else:
+                types = sdata.get("types") or []
+                seg = f"{s} {cnt} ({', '.join(types)})" if types else f"{s} {cnt}"
+        if s in stale:
+            seg += f" stale age={stale[s]}m"
+        segs.append(seg)
+    return f"{repo}: {' · '.join(segs)}"
+
+
+def json_surface(surface, sdata):
+    st = sdata.get("state")
+    if st != "count":
+        return {"state": st}
+    cnt = sdata.get("count", 0)
+    if surface == "code-scanning":
+        return {
+            "state": "count",
+            "count": cnt,
+            "by_severity": sdata.get("by_severity") or {},
+            "rules_critical_high": sdata.get("rules_critical_high") or [],
+        }
+    if surface == "dependabot":
+        return {
+            "state": "count",
+            "count": cnt,
+            "by_severity": sdata.get("by_severity") or {},
+        }
+    return {
+        "state": "count",
+        "count": cnt,
+        "types": sdata.get("types") or [],
+    }
+
+
+def format_session_line(results):
+    repo_parts = []
+    for res in results:
+        surfaces = res["surfaces"]
+        s_parts = []
+        for s in SURFACES:
+            sdata = surfaces[s]
+            if sdata.get("state") != "count":
+                continue
+            cnt = sdata.get("count", 0)
+            if cnt <= 0:
+                continue
+            if s == "code-scanning":
+                by_sev = sdata.get("by_severity") or {}
+                ch = [f"{by_sev[k]} {k}" for k in ("critical", "high") if by_sev.get(k, 0) > 0]
+                if ch:
+                    s_parts.append(f"{cnt} code-scanning ({', '.join(ch)})")
+                else:
+                    s_parts.append(f"{cnt} code-scanning")
+            else:
+                s_parts.append(f"{cnt} {s}")
+        if s_parts:
+            repo_parts.append(f"{res['repo']}: {', '.join(s_parts)}")
+    if not repo_parts:
+        return ""
+    return f"security: {'; '.join(repo_parts)} — dispositions per skill seyag:security-sweep"
+
+
+def strict_exit_code(results):
+    has_alert_fail = False
+    has_error = False
+    for res in results:
+        surfaces = res["surfaces"]
+        cs = surfaces["code-scanning"]
+        if cs.get("state") == "count":
+            by_sev = cs.get("by_severity") or {}
+            if by_sev.get("critical", 0) > 0 or by_sev.get("high", 0) > 0:
+                has_alert_fail = True
+        ss = surfaces["secret-scanning"]
+        if ss.get("state") == "count" and ss.get("count", 0) > 0:
+            has_alert_fail = True
+        for s in SURFACES:
+            if surfaces[s].get("state") == "error":
+                has_error = True
+    if has_alert_fail:
+        return 1
+    if has_error:
+        return 2
+    return 0
+
+
+def load_repos_file(path):
+    repos = []
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            clean = line.split("#", 1)[0]
+            for tok in clean.split():
+                repos.append(tok)
+    return repos
+
+
+def build_parser():
+    p = Parser(
+        prog="security-sweep",
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p.add_argument("-R", "--repo", dest="repos", action="append", default=[], metavar="owner/name")
+    p.add_argument("--all-repos-from", metavar="FILE")
+    p.add_argument("--json", action="store_true")
+    p.add_argument("--strict", action="store_true")
+    p.add_argument("--session-line", action="store_true")
+    p.add_argument("--no-cache", action="store_true")
+    return p
+
+
+def main(argv):
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    raw_repos = list(args.repos)
+    if args.all_repos_from is not None:
+        try:
+            raw_repos.extend(load_repos_file(args.all_repos_from))
+        except OSError as e:
+            if not args.session_line:
+                print(f"security-sweep: cannot read {args.all_repos_from}: {e}", file=sys.stderr)
+            return 2 if args.strict else 0
+
+    if not raw_repos:
+        origin_repo = resolve_origin_repo()
+        if origin_repo is None:
+            if not args.session_line:
+                print("security-sweep: origin is not a github.com repo", file=sys.stderr)
+            return 2 if args.strict else 0
+        raw_repos = [origin_repo]
+
+    repos = []
+    for r in raw_repos:
+        if not valid_repo(r):
+            if not args.session_line:
+                print(f"security-sweep: invalid repo '{r}' (expected owner/name)", file=sys.stderr)
+            return 2 if args.strict else 0
+        if r not in repos:
+            repos.append(r)
+
+    now = time.time()
+    n_workers = min(12, max(1, len(repos) * 3))
+    n_repo_workers = min(12, max(1, len(repos)))
+    with ThreadPoolExecutor(max_workers=n_workers) as surface_pool:
+        with ThreadPoolExecutor(max_workers=n_repo_workers) as repo_pool:
+            repo_futures = [
+                repo_pool.submit(process_repo, r, surface_pool, args.no_cache, now)
+                for r in repos
+            ]
+            results = [f.result() for f in repo_futures]
+
+    if not args.session_line:
+        for res in results:
+            for repo, surf, err_rc in res["errors"]:
+                print(f"security-sweep: {repo} {surf}: fetch failed (gh exit {err_rc})", file=sys.stderr)
+
+    if args.session_line:
+        line = format_session_line(results)
+        if line:
+            print(line)
+    elif args.json:
+        out = {
+            "repos": [
+                {
+                    "repo": res["repo"],
+                    "surfaces": {s: json_surface(s, res["surfaces"][s]) for s in SURFACES},
+                    "stale": res["stale"],
+                }
+                for res in results
+            ]
+        }
+        print(json.dumps(out))
+    else:
+        for res in results:
+            print(format_default_line(res))
+
+    if args.strict:
+        return strict_exit_code(results)
+    return 0
+
+
+if __name__ == "__main__":
+    if "--session-line" in sys.argv[1:]:
+        try:
+            sys.exit(main(sys.argv[1:]))
+        except Exception:
+            sys.exit(0)
+    sys.exit(main(sys.argv[1:]))
