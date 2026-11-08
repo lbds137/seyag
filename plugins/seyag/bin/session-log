@@ -924,6 +924,8 @@ def cmd_mark(a):
 
 MID_TAG_RE = re.compile(r"^<([a-z][a-z0-9-]*)[\s>/]")
 HOOK_ERR_RE = re.compile(r"^\w+:\w+ hook error: \[(.*?)\]:")
+HOOK_INDEX_RE = re.compile(r"^command hook \d+$")
+RULE_LINE_RE = re.compile(r"[─-╿\-=_\s]*")
 BYPASS_RE = re.compile(r"\b((?:SYG|HARNESS)_(?:ALLOW_[A-Z_]+|[A-Z_]+_CHECKED))=")
 CLASSIFIER_REASON_RE = re.compile(r"Reason: \[([^\]]*)\]")
 ERROR_CLASSES = (("classifier-unavailable", re.compile(r"is temporarily unavailable")),
@@ -955,10 +957,28 @@ def hook_name(bracket):
     return re.sub(r"\.(sh|py|js)$", "", os.path.basename(tok)) or "?"
 
 
+def banner_name(body):
+    """The guard name from a plugin block's banner: the first body line that is not blank or a rule (box-drawing,
+    dash, equals or underscore run), cut at the title's separator, lowercased and slugged, with runs of dashes
+    collapsed, edge dashes stripped and the result capped at 60 characters (edge dashes stripped again after the
+    cap). "" when there is none, so the caller falls back to the index."""
+    line = next((ln for ln in body.splitlines() if not RULE_LINE_RE.fullmatch(ln)), "")
+    title = re.split(r" — | - |:", line, maxsplit=1)[0].strip().lower()
+    slug = re.sub(r"-+", "-", re.sub(r"[^a-z0-9-]", "", re.sub(r"[\s_]+", "-", title))).strip("-")
+    return slug[:60].strip("-")
+
+
+def hook_label(bracket, body):
+    """hook_name, except a "command hook <N>" bracket is an index, so its name comes from the banner in the body."""
+    if HOOK_INDEX_RE.match(bracket):
+        return banner_name(body) or hook_name(bracket)
+    return hook_name(bracket)
+
+
 def error_class(text):
     text = text.strip()
     if m := HOOK_ERR_RE.match(text):
-        return "hook:" + mask(hook_name(m.group(1)))
+        return "hook:" + mask(hook_label(m.group(1), text[m.end():]))
     if "denied by the Claude Code auto mode classifier" in text or "server-side auto mode classifier" in text:
         r = CLASSIFIER_REASON_RE.search(text)
         return "classifier-denied:" + (mask(r.group(1))[:60] if r else "unbracketed")
