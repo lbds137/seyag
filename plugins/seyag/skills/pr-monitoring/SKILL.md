@@ -48,7 +48,10 @@ cd '<toplevel>' && pr-ci-wait <N> --sha $(git rev-parse 'refs/heads/<branch>')
   second failure is real: fix the input.
 - **Wait on `pr-ci-wait`, never on a `sleep` or a hand-written poll loop** —
   both were measured emitting a premature `CI_COMPLETE`.
-  This purpose-built watcher is for PR CI only; any other long wait (a worker, a test suite) follows the scheduled-tick bullet in `seyag:delegation` § Concurrency and economy, which bans hand-written `Monitor` loops.
+  This purpose-built watcher is for PR CI only; any other long wait the
+  harness does not report back on (a headless worker, a long-job runner
+  job, a test suite) follows the scheduled-tick bullet in `seyag:delegation`
+  § Concurrency and economy, which bans hand-written `Monitor` loops.
 
 ## When the Monitor fires
 
