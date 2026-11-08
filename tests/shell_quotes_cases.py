@@ -935,17 +935,18 @@ for label, token, values, next_index, want in PLACEHOLDER_CASES:
 
 # ---------------------------------------------------------------------------
 # Performance bounds (M5)
-# Wall-clock is the pinned property. Every timing is the MINIMUM of two runs,
-# so one loaded sample cannot fail the run; the bounds (2.0s here and
+# CPU time of this process is the pinned property (time.process_time), so other
+# processes' load on a shared machine does not count against it. Every timing is
+# the MINIMUM of two runs, absorbing the remaining noise; the bounds (2.0s here and
 # _PERF_BOUND_S = 2.0s below) catch gross regressions — the discriminating
 # linear-vs-quadratic pin is the lossy-pipe 64k rejoin probe.
 # ---------------------------------------------------------------------------
-_t0 = time.monotonic()
+_t0 = time.process_time()
 _dd_pls = command_pipelines('echo ' + '$${' * 40000 + '; env')
-_dd_elapsed = time.monotonic() - _t0
-_t0 = time.monotonic()
+_dd_elapsed = time.process_time() - _t0
+_t0 = time.process_time()
 command_pipelines('echo ' + '$${' * 40000 + '; env')
-_dd_elapsed = min(_dd_elapsed, time.monotonic() - _t0)
+_dd_elapsed = min(_dd_elapsed, time.process_time() - _t0)
 check_all(
     'perf: command_pipelines on 40k $${ finishes in <2s and yields env',
     [
@@ -954,14 +955,14 @@ check_all(
     ],
 )
 
-_t0 = time.monotonic()
+_t0 = time.process_time()
 _hd_pls = command_pipelines('cat <<A\n' * 16000)
 _hd_openers = heredoc_openers('cat <<A\n' * 16000)
-_hd_elapsed = time.monotonic() - _t0
-_t0 = time.monotonic()
+_hd_elapsed = time.process_time() - _t0
+_t0 = time.process_time()
 command_pipelines('cat <<A\n' * 16000)
 heredoc_openers('cat <<A\n' * 16000)
-_hd_elapsed = min(_hd_elapsed, time.monotonic() - _t0)
+_hd_elapsed = min(_hd_elapsed, time.process_time() - _t0)
 check_all(
     'perf: command_pipelines and heredoc_openers on 16k unterminated <<A finishes in <2s',
     [
@@ -1149,18 +1150,18 @@ report(
 )
 
 
-# Sized for a loaded shared machine — min-of-two already absorbs single-sample spikes; evidence in the PR body.
+# The bound is CPU seconds of this process, so other processes' load on a shared machine does not count against it; min-of-two absorbs the remaining noise.
 _PERF_BOUND_S = 2.0
 
 
 def _timed(fn, arg):
-    # Min of two runs: one loaded sample cannot fail the run.
-    t0 = time.monotonic()
+    # CPU time, min of two runs: one noisy sample cannot fail the row.
+    t0 = time.process_time()
     out = fn(arg)
-    elapsed = time.monotonic() - t0
-    t0 = time.monotonic()
+    elapsed = time.process_time() - t0
+    t0 = time.process_time()
     fn(arg)
-    return min(elapsed, time.monotonic() - t0), out
+    return min(elapsed, time.process_time() - t0), out
 
 
 def _env_pipeline(pipelines):
@@ -1192,7 +1193,7 @@ _PERF_INPUTS = [
 ]
 # The same inputs with a `<<` appended, so strip_heredoc_bodies really scans
 # them (without one it returns at once: no opener can match).
-# Bound: _PERF_BOUND_S (2.0s), min-of-two: a loaded sample reruns, a real slowdown fails.
+# Bound: _PERF_BOUND_S (2.0s CPU time), min-of-two: absorbs the remaining noise, a real slowdown fails.
 _PERF_INPUTS += [(label + " + ' <<E'", inp + ' <<E') for label, inp in _PERF_INPUTS]
 for label, inp in _PERF_INPUTS:
     for fn in (strip_heredoc_bodies, command_pipelines):
