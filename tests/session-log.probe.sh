@@ -358,6 +358,29 @@ printf '{"type":"assistant","timestamp":"2026-10-01T16:00:01Z","requestId":"q1",
 CLAUDE_PROJECTS_DIR="$SHORT" run stats --since 2026-10-01 --until 2026-10-01 --by slug && hdr=$(sed -n 2p "$T/out") && row=$(sed -n 3p "$T/out") \
   && [ "${row:0:2}" = ab ] && h_pre=${hdr%%driver*} && r_pre=${row%%anthropic:*} && [ ${#h_pre} = ${#r_pre} ] \
   && ok "--by slug with a 2-char project keeps header and data aligned (min width = header word)" || bad "short-project alignment: $(cat "$T/out")"
+# A plugin hook block reported as "command hook <N>" is named by its banner title in the body (rule lines skipped);
+# a body with no title falls back to the index. Own projects root, so no earlier count moves.
+CMDH="$T/stats-cmdhook"; mkdir -p "$CMDH/-home-deck-cmdhook"
+cat > "$CMDH/-home-deck-cmdhook/$S_ID.jsonl" <<'EOF'
+{"type":"assistant","timestamp":"2026-10-01T16:00:01Z","requestId":"c1","message":{"id":"msg_cmd1","model":"claude-opus-5-5","content":[{"type":"tool_use","id":"tc1","name":"Bash","input":{"command":"a"}},{"type":"tool_use","id":"tc2","name":"Bash","input":{"command":"b"}},{"type":"tool_use","id":"tc3","name":"Bash","input":{"command":"c"}},{"type":"tool_use","id":"tc4","name":"Bash","input":{"command":"d"}},{"type":"tool_use","id":"tc5","name":"Bash","input":{"command":"e"}},{"type":"tool_use","id":"tc6","name":"Bash","input":{"command":"f"}},{"type":"tool_use","id":"tc7","name":"Bash","input":{"command":"g"}},{"type":"tool_use","id":"tc8","name":"Bash","input":{"command":"h"}},{"type":"tool_use","id":"tc9","name":"Bash","input":{"command":"i"}},{"type":"tool_use","id":"tc10","name":"Bash","input":{"command":"j"}},{"type":"tool_use","id":"tc11","name":"Bash","input":{"command":"k"}}]}}
+{"type":"user","timestamp":"2026-10-01T16:00:02Z","message":{"content":[{"type":"tool_result","tool_use_id":"tc1","is_error":true,"content":"PreToolUse:Bash hook error: [command hook 11]: ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\nCWD-DRIFT GUARD — linked-worktree command blocked (warn-once)\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"}]}}
+{"type":"user","timestamp":"2026-10-01T16:00:03Z","message":{"content":[{"type":"tool_result","tool_use_id":"tc2","is_error":true,"content":"PreToolUse:Bash hook error: [command hook 6]: \n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\nLOSSY PIPE GUARD — commit/push output filtered\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"}]}}
+{"type":"user","timestamp":"2026-10-01T16:00:04Z","message":{"content":[{"type":"tool_result","tool_use_id":"tc3","is_error":true,"content":"PreToolUse:Bash hook error: [command hook 11]: CWD-DRIFT GUARD — linked-worktree command blocked"}]}}
+{"type":"user","timestamp":"2026-10-01T16:00:05Z","message":{"content":[{"type":"tool_result","tool_use_id":"tc4","is_error":true,"content":"PreToolUse:Bash hook error: [command hook 7]: ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"}]}}
+{"type":"user","timestamp":"2026-10-01T16:00:06Z","message":{"content":[{"type":"tool_result","tool_use_id":"tc5","is_error":true,"content":"PreToolUse:Bash hook error: [command hook 8]: PYTHON-HEREDOC EDIT GUARD — inline script rewrites a file it reads"}]}}
+{"type":"user","timestamp":"2026-10-01T16:00:07Z","message":{"content":[{"type":"tool_result","tool_use_id":"tc6","is_error":true,"content":"PreToolUse:Bash hook error: [command hook 9]: EDIT_LOCK: reason text"}]}}
+{"type":"user","timestamp":"2026-10-01T16:00:08Z","message":{"content":[{"type":"tool_result","tool_use_id":"tc7","is_error":true,"content":"PreToolUse:Bash hook error: [command hook 10]: PATH - guard body"}]}}
+{"type":"user","timestamp":"2026-10-01T16:00:09Z","message":{"content":[{"type":"tool_result","tool_use_id":"tc8","is_error":true,"content":"PreToolUse:Bash hook error: [command hook 12]: === T ==="}]}}
+{"type":"user","timestamp":"2026-10-01T16:00:10Z","message":{"content":[{"type":"tool_result","tool_use_id":"tc9","is_error":true,"content":"PreToolUse:Bash hook error: [command hook 13]: A / B guard"}]}}
+{"type":"user","timestamp":"2026-10-01T16:00:11Z","message":{"content":[{"type":"tool_result","tool_use_id":"tc10","is_error":true,"content":"PreToolUse:Bash hook error: [command hook 14]: QWERTYUIOPQWERTYUIOPQWERTYUIOPQWERTYUIOPQWERTYUIOPQWERTYUIOPQWERTYUIOPQWERTYUIOPQWERTYUIOPQWERTYUIOPQWERTY"}]}}
+{"type":"user","timestamp":"2026-10-01T16:00:12Z","message":{"content":[{"type":"tool_result","tool_use_id":"tc11","is_error":true,"content":"PreToolUse:Bash hook error: [command hook 15]: +++ ---"}]}}
+EOF
+CLAUDE_PROJECTS_DIR="$CMDH" run stats --since 2026-10-01 --until 2026-10-01 --json \
+  && [ "$(jq 'dict(sorted(g["anthropic:claude-opus-5-5"]["error_classes"].items()))')" = "{'hook:15': 1, 'hook:7': 1, 'hook:a-b-guard': 1, 'hook:cwd-drift-guard': 2, 'hook:edit-lock': 1, 'hook:lossy-pipe-guard': 1, 'hook:path': 1, 'hook:python-heredoc-edit-guard': 1, 'hook:qwertyuiopqwertyuiopqwertyuiopqwertyuiopqwertyuiopqwertyuiop': 1, 'hook:t': 1}" ] \
+  && ok "command hook <N> blocks are named by banner title (rule lines skipped, em dash, colon and dash cuts, underscores to dashes); a rules-only body falls back to the index" \
+  || bad "command hook names: $(jq 'dict(sorted(g["anthropic:claude-opus-5-5"]["error_classes"].items()))') $(cat "$T/out")"
+[ "$(python3 -c 'import json,sys; print(sorted(json.load(sys.stdin)["retries"]))' < "$T/out")" = "['15', '7', 'a-b-guard', 'cwd-drift-guard', 'edit-lock', 'lossy-pipe-guard', 'path', 'python-heredoc-edit-guard', 'qwertyuiopqwertyuiopqwertyuiopqwertyuiopqwertyuiopqwertyuiop', 't']" ] \
+  && ok "retries keys carry the same names as the error classes" || bad "command hook retries keys: $(python3 -c 'import json,sys; print(sorted(json.load(sys.stdin)["retries"]))' < "$T/out")"
 # The usage key is (gk(drv), message.id, requestId): one (id, requestId) pair under two drivers stays two entries.
 DUP="$T/stats-dup"; mkdir -p "$DUP/-home-deck-dup"
 cat > "$DUP/-home-deck-dup/$S_ID.jsonl" <<EOF
