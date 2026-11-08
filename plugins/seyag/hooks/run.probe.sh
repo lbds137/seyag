@@ -299,8 +299,9 @@ evstub odd-key      "echo '{\"continue\":false,\"hookSpecificOutput\":{\"hookEve
 evstub odd-nested   "echo '{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"updatedInput\":{}}}'"
 evstub exit-one     'echo OUT-ONE; echo ERR-ONE >&2; exit 1'
 evstub note-err     'echo NOTE-ERR >&2; exit 0'
-evstub sleeper-one  'sleep 1; echo SLEPT-ONE'
-evstub sleeper-two  'sleep 1; echo SLEPT-TWO'
+mkdir -p "$TMP/ev-rdv"
+evstub sleeper-one  ": > \"$TMP/ev-rdv/one\"; for ((i=0; i<100; i++)); do [ -f \"$TMP/ev-rdv/two\" ] && { echo SLEPT-ONE; exit 0; }; sleep 0.1; done; echo NO-PEER-ONE; exit 0"
+evstub sleeper-two  ": > \"$TMP/ev-rdv/two\"; for ((i=0; i<100; i++)); do [ -f \"$TMP/ev-rdv/one\" ] && { echo SLEPT-TWO; exit 0; }; sleep 0.1; done; echo NO-PEER-TWO; exit 0"
 printf '#!/bin/bash\nIN=$(cat)\nprintf "PROMPT:%%s\\n" "$(jq -r .prompt <<<"$IN")"\n' > "$TMP/ev-stubs/echo-prompt.sh"
 {
   for f in "$TMP"/ev-stubs/*.sh; do printf '%s\tstubs\n' "$(basename "$f" .sh)"; done
@@ -532,14 +533,16 @@ check "event: an exit-0 hook's stderr passes through" 0 "$EVRC" "$(ctxjson PreTo
 ev ev-note PostToolUse "$(pl Bash)"
 check "event: an exit-0 hook's stderr passes through on a block too" 2 "$EVRC" "" "$EVOUT" $'BLOCK-A\n\nNOTE-ERR' "$EVERR"
 
+# Overlap is proven by the rendezvous, not by a time budget, so machine load
+# cannot fail it and a serial run cannot pass it.
 evplug ev-par "UserPromptSubmit;;sleeper-one sleeper-two"
 t0=$(date +%s%N)
 ev ev-par UserPromptSubmit "$PROMPT"
 ms=$((($(date +%s%N) - t0) / 1000000))
-if [ "$EVRC" = 0 ] && [ "$ms" -lt 1800 ] && [ "$EVOUT" = "$(ctxjson UserPromptSubmit 'SLEPT-ONE\n\nSLEPT-TWO')" ]; then
-  echo "ok   [0]: event: hooks run in parallel (two 1 s sleepers took ${ms} ms)"
+if [ "$EVRC" = 0 ] && [ "$EVOUT" = "$(ctxjson UserPromptSubmit 'SLEPT-ONE\n\nSLEPT-TWO')" ]; then
+  echo "ok   [0]: event: hooks run in parallel (both sleepers saw each other's marker; ${ms} ms)"
 else
-  echo "FAIL [rc $EVRC, ${ms} ms, stdout '$EVOUT', want rc 0 under 1800 ms and both sleepers' output]: event: hooks run in parallel"
+  echo "FAIL [rc $EVRC, ${ms} ms, stdout '$EVOUT', want rc 0 and both sleepers' rendezvous output (a serial run prints NO-PEER-ONE)]: event: hooks run in parallel"
   fail=1
 fi
 

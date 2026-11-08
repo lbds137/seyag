@@ -168,11 +168,16 @@ run() {
   # RESULT of an earlier expansion — which `env` recognizes regardless (bash
   # only treats a LITERAL, parse-time NAME=value token as an inline
   # assignment prefix; env inspects each argv string at runtime instead).
+  #
+  # The MAX_S and GRACE_S defaults are give-up ceilings that only a case
+  # asserting a give-up reaches, and every such case sets its own short value;
+  # a sub-second default let a loaded machine end a releasing case early
+  # (CI_GATE_TIMEOUT/review-missing after 2 of 3 polls).
   OUT=$(cd "$FIXTURE_REPO" && timeout "$CASE_TIMEOUT" env -i \
     PATH="$FAKE_BIN:$PATH" HOME="$HOME" PYTHONDONTWRITEBYTECODE=1 \
     PR_CI_WAIT_POLL_S="${PR_CI_WAIT_POLL_S:-0.05}" \
-    PR_CI_WAIT_MAX_S="${PR_CI_WAIT_MAX_S:-0.3}" \
-    PR_CI_WAIT_GRACE_S="${PR_CI_WAIT_GRACE_S:-0.3}" \
+    PR_CI_WAIT_MAX_S="${PR_CI_WAIT_MAX_S:-5}" \
+    PR_CI_WAIT_GRACE_S="${PR_CI_WAIT_GRACE_S:-5}" \
     PR_CI_WAIT_HEARTBEAT_S="${PR_CI_WAIT_HEARTBEAT_S:-600}" \
     PR_CI_WAIT_SETTLE_S="${PR_CI_WAIT_SETTLE_S:-0}" \
     PR_CI_WAIT_QUIET_S="${PR_CI_WAIT_QUIET_S:-0.3}" \
@@ -380,9 +385,9 @@ HELP_RC=$?
 #          case that never asked for an anchor -------------------------------
 export SYG_CI_ANCHOR=Probes  # exported in THIS probe's own shell on purpose
 D=$(seq_dir ambient-leak-check "[$DONE_CI]")
-# PR_CI_WAIT_MAX_S must comfortably exceed PR_CI_WAIT_QUIET_S (both default
-# to 0.3s otherwise) — under load the two can race, timing out just short of
-# the quiet window and reading as a false regression rather than a real one.
+# PR_CI_WAIT_MAX_S must comfortably exceed PR_CI_WAIT_QUIET_S (5s vs 0.3s,
+# matching run()'s defaults) — under load equal values race, timing out just
+# short of the quiet window and reading as a false regression rather than a real one.
 run "ambient SYG_CI_ANCHOR in the CALLING shell does not leak in" 0 \
   FAKE_GH_SEQ_DIR="$D" SYG_CI_REVIEW= PR_CI_WAIT_QUIET_S=0.3 PR_CI_WAIT_POLL_S=0.1 PR_CI_WAIT_MAX_S=5
 unset SYG_CI_ANCHOR
