@@ -225,7 +225,7 @@ LAST_LINE=$(printf '%s\n' "$LAST_ERR" | tail -n 1)
 if grep -qF "$LIVE_REAL" <<<"$LAST_ERR" \
   && grep -qF "default branch: main" <<<"$LAST_ERR" \
   && grep -qF "this checkout's files are the code every session loads" <<<"$LAST_ERR" \
-  && grep -qF "git worktree add -b <branch> $LIVE_REAL/.claude/worktrees/<name> main" <<<"$LAST_ERR" \
+  && grep -qF "git fetch origin && git worktree add -b <branch> $LIVE_REAL/.claude/worktrees/<name> origin/main" <<<"$LAST_ERR" \
   && grep -qF "edit the same path inside that worktree" <<<"$LAST_ERR" \
   && [[ "$LAST_LINE" == *SYG_ALLOW_LIVE_CHECKOUT=1* ]]; then
   echo "ok   [banner]: block message names live root, default branch, why, worktree fix, and bypass on last line"
@@ -293,6 +293,14 @@ check_bash 2 "pull --ff-only origin feat blocks" "git pull --ff-only origin feat
 check_bash 2 "pull --ff-only origin main feat blocks" "git pull --ff-only origin main feat" "$LIVE"
 check_bash 2 "pull without --ff-only blocks" "git pull origin main" "$LIVE"
 check_bash 2 "bare pull blocks" "git pull" "$LIVE"
+check_bash 2 "pull --ff-only --ff blocks" "git pull --ff-only --ff" "$LIVE"
+check_bash 0 "pull --ff --ff-only allows" "git pull --ff --ff-only" "$LIVE"
+check_bash 2 "pull --ff-only --rebase blocks" "git pull --ff-only --rebase" "$LIVE"
+check_bash 2 "pull --ff-only --rebase=merges blocks" "git pull --ff-only --rebase=merges" "$LIVE"
+check_bash 0 "pull --ff-only --rebase=false allows" "git pull --ff-only --rebase=false" "$LIVE"
+check_bash 2 "pull --ff-only -r blocks" "git pull --ff-only -r" "$LIVE"
+check_bash 2 "pull -qr --ff-only blocks" "git pull -qr --ff-only" "$LIVE"
+check_bash 0 "pull --ff-only --no-rebase allows" "git pull --ff-only --no-rebase" "$LIVE"
 
 check_bash 0 "apply --check allows" "git apply --check patch.diff" "$LIVE"
 check_bash 0 "apply --stat allows" "git apply --stat patch.diff" "$LIVE"
@@ -301,6 +309,18 @@ check_bash 0 "apply --summary allows" "git apply --summary patch.diff" "$LIVE"
 check_bash 2 "apply --stat --apply blocks" "git apply --stat --apply patch.diff" "$LIVE"
 check_bash 2 "apply --stat --index blocks" "git apply --stat --index patch.diff" "$LIVE"
 check_bash 2 "apply without check/stat/numstat/summary blocks" "git apply patch.diff" "$LIVE"
+
+check_bash 2 "clean -fdx blocks" "git clean -fdx" "$LIVE"
+check_bash 0 "clean -n allows" "git clean -n" "$LIVE"
+check_bash 0 "clean -ndx allows" "git clean -ndx" "$LIVE"
+check_bash 0 "clean --dry-run -fdx allows" "git clean --dry-run -fdx" "$LIVE"
+check_bash 2 "sparse-checkout set foo blocks" "git sparse-checkout set foo" "$LIVE"
+check_bash 2 "sparse-checkout add foo blocks" "git sparse-checkout add foo" "$LIVE"
+check_bash 2 "sparse-checkout reapply blocks" "git sparse-checkout reapply" "$LIVE"
+check_bash 2 "sparse-checkout init blocks" "git sparse-checkout init" "$LIVE"
+check_bash 2 "sparse-checkout disable blocks" "git sparse-checkout disable" "$LIVE"
+check_bash 0 "sparse-checkout list allows" "git sparse-checkout list" "$LIVE"
+check_bash 0 "sparse-checkout check-rules allows" "git sparse-checkout check-rules" "$LIVE"
 
 check_bash 2 "bisect start blocks" "git bisect start" "$LIVE"
 check_bash 0 "bisect log allows" "git bisect log" "$LIVE"
@@ -342,8 +362,16 @@ check_bash 2 "git --git-dir=<live/.git> --work-tree=<live> commit from unrelated
   "git --git-dir=$LIVE/.git --work-tree=$LIVE commit -m x" "$NOREPO"
 check_bash 0 "git --git-dir=<other/.git> commit from live cwd allows" \
   "git --git-dir=$SECOND/.git commit -m x" "$LIVE"
-check_bash 0 "git --work-tree=<linked-wt> commit from live cwd allows" \
+check_bash 2 "git --work-tree=<linked-wt> commit from live cwd blocks" \
   "git --work-tree=$WT commit -m x" "$LIVE"
+check_bash 2 "git --work-tree=<linked-wt> checkout other from live cwd blocks" \
+  "git --work-tree=$WT checkout other" "$LIVE"
+check_bash 2 "GIT_DIR=<live/.git> git --work-tree=<linked-wt> checkout other from elsewhere blocks" \
+  "GIT_DIR=$LIVE/.git git --work-tree=$WT checkout other" "$NOREPO"
+check_bash 2 "git --work-tree=<live> commit from non-live repo cwd blocks" \
+  "git --work-tree=$LIVE commit -m x" "$SECOND"
+check_bash 0 "git --work-tree=<linked-wt> commit from inside linked worktree allows" \
+  "git --work-tree=$WT commit -m x" "$WT"
 check_bash 0 "git --git-dir=<other/.git> --work-tree=<other> commit from live cwd allows" \
   "git --git-dir=$SECOND/.git --work-tree=$SECOND commit -m x" "$LIVE"
 check_bash 2 "GIT_DIR=<live/.git> prefix git commit from unrelated cwd blocks" \
@@ -368,8 +396,8 @@ check_bash 0 "git worktree add then cd <new-wt> && git commit in same command al
   "git worktree add -b n .claude/worktrees/new main && cd .claude/worktrees/new && git commit -m x" "$LIVE"
 check_bash 0 "git worktree add -q -b then git -C <new-wt> apply --index in same command allows" \
   "git worktree add -q -b audit-lows-b .claude/worktrees/lowsB-release $INIT_SHA && git -C .claude/worktrees/lowsB-release apply --index ../../dispatch/lowsB.patch" "$LIVE"
-check_bash 0 "git worktree add --lock --reason then git --work-tree=<new-wt> commit allows" \
-  "git worktree add --lock --reason wip -B n .claude/worktrees/new/sub main && git --work-tree=.claude/worktrees/new/sub/inner commit -m x" "$LIVE"
+check_bash 0 "git worktree add --lock --reason then git -C <new-wt> --work-tree=<new-wt> commit allows" \
+  "git worktree add --lock --reason wip -B n .claude/worktrees/new/sub main && git -C .claude/worktrees/new/sub --work-tree=.claude/worktrees/new/sub/inner commit -m x" "$LIVE"
 check_bash 2 "git -C <non-existent-wt> commit with no worktree add still blocks" \
   "git -C .claude/worktrees/never-made commit -m x" "$LIVE"
 check_bash 2 "cd <non-existent-wt> && git commit with no worktree add still blocks" \
