@@ -24,10 +24,13 @@
 #   and prefix assignments, wrapper strings, and command substitutions) and
 #   resolves each git invocation's effective directory (after cd/pushd, then
 #   `git -C <dir>` and `--work-tree` / `GIT_WORK_TREE`, or `--git-dir` /
-#   `GIT_DIR` when only a git-dir is named). An unreadable cd target or an
-#   unexpanded `$VAR` / glob in `-C`, `--work-tree`, `--git-dir`, `GIT_DIR`, or
-#   `GIT_WORK_TREE` falls back to the payload cwd (the cwd-drift-guard
-#   baseline). When the effective target is a live root:
+#   `GIT_DIR` when only a git-dir is named). A target equal to or under a path
+#   recorded from an earlier `git worktree add` in the same command is treated
+#   as a linked worktree (not live) even before the directory exists on disk;
+#   any other non-existent or unreadable cd target, or unexpanded `$VAR` / glob
+#   in `-C`, `--work-tree`, `--git-dir`, `GIT_DIR`, or `GIT_WORK_TREE`, falls
+#   back to the payload cwd (the cwd-drift-guard baseline). When the effective
+#   target is a live root:
 #     BLOCK:
 #       - `checkout` / `switch` to anything other than the default branch
 #         (including `-b`, `-B`, `-c`, `-C`, `--create`, `--force-create`,
@@ -367,6 +370,20 @@ def is_valid_dir(d):
     return bool(d and d.startswith("/") and posixpath.isdir(d))
 
 
+def is_in_new_worktree(d, ctx):
+    if not d or not d.startswith("/"):
+        return False
+    norm = posixpath.normpath(d)
+    for wt in ctx.new_worktrees:
+        if norm == wt or norm.startswith(wt.rstrip("/") + "/"):
+            return True
+    return False
+
+
+def is_known_dir(d, ctx):
+    return is_valid_dir(d) or is_in_new_worktree(d, ctx)
+
+
 def worktree_live_root(d):
     """Return the canonical toplevel if `d` is inside a live root's MAIN working
     tree, else None."""
@@ -457,19 +474,21 @@ def is_commit(eff_dir, rev):
         return False
 
 
-def apply_dir_step(step, cur_dir, uncertain, state):
+def apply_dir_step(step, cur_dir, uncertain, state, ctx):
     """Apply a `-C <step>` directory change; return `(new_dir, new_uncertain)`.
-    An unresolvable or non-existent target marks `uncertain=True` and resets to
-    `payload_cwd`."""
+    An unresolvable or non-existent target (unless equal to or under a recorded
+    new linked worktree) marks `uncertain=True` and resets to `payload_cwd`."""
     if step is None:
         return payload_cwd, True
     step = expand_vars(step, state)
     step = expand_home(step)
     if step in PWD_SUBST:
-        if uncertain or not is_valid_dir(cur_dir):
+        if uncertain or not is_known_dir(cur_dir, ctx):
             return payload_cwd, True
         return cur_dir, False
     if step in TOPLEVEL_SUBST:
+        if not uncertain and is_in_new_worktree(cur_dir, ctx):
+            return cur_dir, False
         base = payload_cwd if (uncertain or not is_valid_dir(cur_dir)) else cur_dir
         top = git_toplevel_of(base)
         if top and is_valid_dir(top):
@@ -479,13 +498,13 @@ def apply_dir_step(step, cur_dir, uncertain, state):
         return payload_cwd, True
     if step.startswith("/"):
         cand = posixpath.normpath(step)
-        if is_valid_dir(cand):
+        if is_known_dir(cand, ctx):
             return cand, False
         return payload_cwd, True
-    if uncertain or not is_valid_dir(cur_dir):
+    if uncertain or not is_known_dir(cur_dir, ctx):
         return payload_cwd, True
     cand = posixpath.normpath(posixpath.join(cur_dir, step))
-    if is_valid_dir(cand):
+    if is_known_dir(cand, ctx):
         return cand, False
     return payload_cwd, True
 
@@ -762,7 +781,7 @@ def do_unset(state, args):
         state.env.pop(w, None)
 
 
-def apply_runner_chdirs(prefix_words, cur_dir, uncertain, state):
+def apply_runner_chdirs(prefix_words, cur_dir, uncertain, state, ctx):
     """Apply `env -C <dir>` / `env --chdir=<dir>` steps in the runner prefix;
     any other runner chdir (`sudo -D`) marks the directory uncertain."""
     i = 0
@@ -770,21 +789,79 @@ def apply_runner_chdirs(prefix_words, cur_dir, uncertain, state):
         w = prefix_words[i]
         if w in ("-C", "--chdir"):
             step = prefix_words[i + 1] if i + 1 < len(prefix_words) else None
-            cur_dir, uncertain = apply_dir_step(step, cur_dir, uncertain, state)
+            cur_dir, uncertain = apply_dir_step(step, cur_dir, uncertain, state, ctx)
             i += 2
             continue
         if w.startswith("--chdir="):
-            cur_dir, uncertain = apply_dir_step(w[len("--chdir=") :], cur_dir, uncertain, state)
+            cur_dir, uncertain = apply_dir_step(w[len("--chdir=") :], cur_dir, uncertain, state, ctx)
             i += 1
             continue
         if w.startswith("-C") and len(w) > 2 and not w.startswith("--"):
-            cur_dir, uncertain = apply_dir_step(w[2:], cur_dir, uncertain, state)
+            cur_dir, uncertain = apply_dir_step(w[2:], cur_dir, uncertain, state, ctx)
             i += 1
             continue
         if w == "-D" or w.startswith("--chdir"):
             return payload_cwd, True
         i += 1
     return cur_dir, uncertain
+
+
+def record_worktree_add(rest, eff_dir, state, ctx):
+    """When `rest` is `add [options] <path> [<commit-ish>]`, resolve `<path>`
+    against `eff_dir` and record it in `ctx.new_worktrees`."""
+    if "-h" in rest or "--help" in rest:
+        return
+    add_idx = None
+    for idx, w in enumerate(rest):
+        if w == "--":
+            break
+        if w.startswith("-") and w != "-":
+            continue
+        if w == "add":
+            add_idx = idx
+        break
+    if add_idx is None:
+        return
+    wt_raw = None
+    j = add_idx + 1
+    while j < len(rest):
+        w = rest[j]
+        if w == "--":
+            if j + 1 < len(rest):
+                wt_raw = rest[j + 1]
+            break
+        if w.startswith("--"):
+            name, eq, _ = w.partition("=")
+            if name == "--reason" and not eq:
+                j += 2
+            else:
+                j += 1
+            continue
+        if w.startswith("-") and w != "-":
+            shorts = w[1:]
+            for s_idx, ch in enumerate(shorts):
+                if ch in ("b", "B"):
+                    if s_idx == len(shorts) - 1:
+                        j += 1
+                    break
+            j += 1
+            continue
+        wt_raw = w
+        break
+    if not wt_raw:
+        return
+    wt_exp = expand_home(expand_vars(wt_raw, state))
+    if not wt_exp or unresolvable_cd_target(wt_exp):
+        return
+    if wt_exp.startswith("/"):
+        wt_abs = posixpath.normpath(wt_exp)
+    elif eff_dir and eff_dir.startswith("/"):
+        wt_abs = posixpath.normpath(posixpath.join(eff_dir, wt_exp))
+    else:
+        return
+    for cand in (wt_abs, posixpath.normpath(os.path.realpath(wt_abs))):
+        if not any(r == cand or r.startswith(cand.rstrip("/") + "/") for r in live_roots):
+            ctx.new_worktrees.add(cand)
 
 
 class Context:
@@ -795,21 +872,22 @@ class Context:
         self.judged = set()
         self.leftovers = []
         self.leftover_mode = False
+        self.new_worktrees = set()
 
 
 def judge_git(argv, unwrapped, info, state, ctx):
     if "SYG_ALLOW_LIVE_CHECKOUT=1" in argv or state.vars.get("SYG_ALLOW_LIVE_CHECKOUT") == "1":
         return
     cur_dir = state.cwd
-    uncertain = state.unknown or not is_valid_dir(cur_dir)
+    uncertain = state.unknown or not is_known_dir(cur_dir, ctx)
     if uncertain:
         cur_dir = payload_cwd
-        uncertain = not is_valid_dir(cur_dir)
+        uncertain = not is_known_dir(cur_dir, ctx)
 
     prefix_len = max(0, len(argv) - len(unwrapped))
     prefix = argv[:prefix_len]
     if info.get("chdir"):
-        cur_dir, uncertain = apply_runner_chdirs(prefix, cur_dir, uncertain, state)
+        cur_dir, uncertain = apply_runner_chdirs(prefix, cur_dir, uncertain, state, ctx)
 
     env = dict(state.env)
     p_idx = 0
@@ -848,11 +926,11 @@ def judge_git(argv, unwrapped, info, state, ctx):
             break
         if w == "-C":
             step = args[i + 1] if i + 1 < len(args) else None
-            cur_dir, uncertain = apply_dir_step(step, cur_dir, uncertain, state)
+            cur_dir, uncertain = apply_dir_step(step, cur_dir, uncertain, state, ctx)
             i += 2
             continue
         if w.startswith("-C") and len(w) > 2:
-            cur_dir, uncertain = apply_dir_step(w[2:], cur_dir, uncertain, state)
+            cur_dir, uncertain = apply_dir_step(w[2:], cur_dir, uncertain, state, ctx)
             i += 1
             continue
         if w == "--work-tree":
@@ -892,18 +970,27 @@ def judge_git(argv, unwrapped, info, state, ctx):
     gd_unexpanded = has_git_dir and (not gd_expanded or unresolvable_cd_target(gd_expanded))
 
     if has_work_tree:
-        cur_dir, uncertain = apply_dir_step(work_tree_val, cur_dir, uncertain, state)
+        cur_dir, uncertain = apply_dir_step(work_tree_val, cur_dir, uncertain, state, ctx)
         if gd_unexpanded:
             uncertain = True
-        eff_dir = payload_cwd if (uncertain or not is_valid_dir(cur_dir)) else cur_dir
+        eff_dir = payload_cwd if (uncertain or not is_known_dir(cur_dir, ctx)) else cur_dir
+        if subcmd == "worktree":
+            record_worktree_add(rest, eff_dir, state, ctx)
+        if is_in_new_worktree(eff_dir, ctx):
+            return
         live_root = worktree_live_root(eff_dir)
     elif has_git_dir:
-        if gd_unexpanded or (not gd_expanded.startswith("/") and (uncertain or not is_valid_dir(cur_dir))):
+        if gd_unexpanded or (not gd_expanded.startswith("/") and (uncertain or not is_known_dir(cur_dir, ctx))):
             eff_dir = payload_cwd
+            if subcmd == "worktree":
+                record_worktree_add(rest, eff_dir, state, ctx)
             live_root = worktree_live_root(eff_dir)
         else:
             gd_path = gd_expanded if gd_expanded.startswith("/") else posixpath.join(cur_dir, gd_expanded)
             gd_real = os.path.realpath(gd_path)
+            if subcmd == "worktree":
+                base_dir = payload_cwd if (uncertain or not is_known_dir(cur_dir, ctx)) else cur_dir
+                record_worktree_add(rest, base_dir, state, ctx)
             live_root = None
             for r in sorted(live_roots):
                 if gd_real == os.path.realpath(posixpath.join(r, ".git")):
@@ -913,7 +1000,11 @@ def judge_git(argv, unwrapped, info, state, ctx):
                 return
             eff_dir = live_root
     else:
-        eff_dir = payload_cwd if (uncertain or not is_valid_dir(cur_dir)) else cur_dir
+        eff_dir = payload_cwd if (uncertain or not is_known_dir(cur_dir, ctx)) else cur_dir
+        if subcmd == "worktree":
+            record_worktree_add(rest, eff_dir, state, ctx)
+        if is_in_new_worktree(eff_dir, ctx):
+            return
         live_root = worktree_live_root(eff_dir)
 
     if not live_root:
@@ -948,7 +1039,13 @@ def run_command(argv, state, ctx):
     name = raw_name.rsplit("/", 1)[-1].lower()
     if name != "git":
         return
-    key = (tuple(argv), state.cwd, state.unknown, tuple(sorted(state.env.items())))
+    key = (
+        tuple(argv),
+        state.cwd,
+        state.unknown,
+        tuple(sorted(state.env.items())),
+        frozenset(ctx.new_worktrees),
+    )
     if ctx.leftover_mode:
         if any(k[0] == tuple(argv) for k in ctx.judged):
             return
