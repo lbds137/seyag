@@ -12,7 +12,7 @@ description: "When `security-sweep` reports open GitHub security alerts (code sc
 - `security-sweep` — inspects the cwd repo's `origin` remote (5-minute cache under `${XDG_STATE_HOME:-$HOME/.local/state}/seyag/security-sweep/`). The `origin` parser accepts only `github.com` (https/ssh); SSH host aliases and GHE hosts get `origin is not a github.com repo` — pass `-R owner/name` (or set `SYG_SECURITY_SWEEP_REPOS` for SessionStart) as the workaround.
 - `security-sweep -R owner/name [-R ...]` or `--all-repos-from FILE` — inspects explicit repos (`#` comments in `FILE`; invalid `owner/name` tokens are skipped with a stderr warning while valid repos still run).
 - `security-sweep --json` — machine-readable per-repo summary (`count` surfaces include alert `numbers` in cache order, plus deduped `rules` and `rules_critical_high` for `code-scanning`, deduped `packages` for `dependabot`, and `types` for `secret-scanning`; secret values are stripped at fetch time and never cached or printed).
-- `security-sweep --strict` — for scripts/cron: exit `1` on any critical/high code-scanning alert or any open secret-scanning alert; exit `2` on any `error` surface with no cached fallback, a skipped invalid repo token, an unreadable/unparseable repo source, or an internal error (outside `--strict`, internal errors exit `1`); else `0`. Add `--no-cache` to bypass the 5-minute cache.
+- `security-sweep --strict` — for scripts/cron: exit `1` on any critical/high code-scanning alert or any open secret-scanning alert; exit `2` on any `error` surface with no cached fallback, a skipped invalid repo token, an unreadable/unparseable repo source, or an internal error (exit `1` wins when both hold: an alert exit can hide fetch errors, which stderr still names per surface and `--json` marks `error`; outside `--strict`, internal errors exit `1`); else `0`. Add `--no-cache` to bypass the 5-minute cache.
 
 ## 2. Dispositions (every open alert gets one)
 
@@ -28,5 +28,5 @@ description: "When `security-sweep` reports open GitHub security alerts (code sc
 
 ## 4. SessionStart opt-in wiring
 
-- Set `SYG_SECURITY_SWEEP=1` (cwd repo) or `SYG_SECURITY_SWEEP_REPOS="owner/a owner/b"` in `.claude/settings.json` under `env` to run `security-sweep --session-line` on `startup` and `clear` (2 s timeout, detaching a background cache-warming run on timeout; silent when clean or on error).
+- Set `SYG_SECURITY_SWEEP=1` (cwd repo) or `SYG_SECURITY_SWEEP_REPOS="owner/a owner/b"` in `.claude/settings.json` under `env` to run `security-sweep --session-line --cap 2` on `startup` and `clear` (2 s cap (built in; no `timeout` binary needed), detaching a background `--warm-cache` run on timeout; silent when clean or on error).
 - `SYG_DISABLE=security` switches the SessionStart sweep off (and headless `sdk-*` runs skip `security` automatically).

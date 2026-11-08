@@ -246,8 +246,11 @@ git init -q "$TMP/sec-repo"
 git -C "$TMP/sec-repo" remote add origin "https://github.com/example-org/widget.git"
 cat > "$TMP/sec-bin/gh" <<'EOF'
 #!/bin/bash
-if [ -n "${STUB_GH_SLEEP:-}" ]; then
-  sleep "$STUB_GH_SLEEP"
+if [ -n "${STUB_GH_HOLD:-}" ]; then
+  for ((_i = 0; _i < 300; _i++)); do
+    [ -e "$STUB_GH_HOLD" ] && break
+    sleep 0.1
+  done
 fi
 case "$*" in
   *repos/example-org/widget/code-scanning/alerts*)
@@ -287,6 +290,13 @@ else
   bad "security-sweep clear with SYG_SECURITY_SWEEP_REPOS" "$OUT"
 fi
 
+runsec startup SYG_SECURITY_SWEEP_REPOS="-bad/x example-org/widget"
+if [ "$RC" = 0 ] && valid && [[ "$(ctx | head -1)" == "seyag plugin "* ]] && ctx | grep -qxF "$WANT_SEC"; then
+  ok "security-sweep startup with leading-dash token in SYG_SECURITY_SWEEP_REPOS: sweeps valid widget repo"
+else
+  bad "security-sweep startup with leading-dash token in SYG_SECURITY_SWEEP_REPOS" "$OUT"
+fi
+
 runsec startup
 if [ "$RC" = 0 ] && valid && [ "$(ctx)" = "seyag plugin unknown" ]; then
   ok "security-sweep env unset: no security line"
@@ -308,14 +318,16 @@ else
   bad "security-sweep headless: expected version line only" "$OUT"
 fi
 
+rm -f "$TMP/gh-release"
 t0=$SECONDS
-runsec startup SYG_SECURITY_SWEEP=1 STUB_GH_SLEEP=3
+runsec startup SYG_SECURITY_SWEEP=1 STUB_GH_HOLD="$TMP/gh-release"
 elapsed=$((SECONDS - t0))
-if [ "$RC" = 0 ] && [ "$elapsed" -le 4 ] && valid && [ "$(ctx)" = "seyag plugin unknown" ]; then
-  ok "security-sweep stub sleeping 3s times out within ~2s (${elapsed}s), exit 0, no security line"
+if [ "$RC" = 0 ] && [ "$elapsed" -lt 20 ] && valid && [ "$(ctx)" = "seyag plugin unknown" ]; then
+  ok "security-sweep held stub times out within 2s cap (${elapsed}s < 20s), exit 0, no security line"
 else
   bad "security-sweep timeout (rc=$RC, elapsed=${elapsed}s)" "$OUT"
 fi
+: > "$TMP/gh-release"
 
 SEC_CACHE="$TMP/sec-state/seyag/security-sweep/example-org_widget.json"
 for _ in $(seq 1 30); do
@@ -333,7 +345,7 @@ OUT=$(cd "$TMP/sec-repo" && jq -nc '{session_id: "probe", source: "startup"}' \
   | env -u SYG_MEM_GATE_CMD -u SYG_LONG_JOB_CMD \
     CLAUDE_PLUGIN_ROOT="$TMP/root" SYG_USER_RULES_DIR="$TMP/rules-linked" SYG_STATE_DIR="$TMP/state" \
     XDG_STATE_HOME="$TMP/sec-state" SECURITY_SWEEP_GH="$TMP/sec-bin/gh" \
-    SYG_SECURITY_SWEEP=1 STUB_GH_SLEEP=3 bash "$HOOK" 2>/dev/null)
+    SYG_SECURITY_SWEEP=1 STUB_GH_HOLD="$TMP/gh-never-released" bash "$HOOK" 2>/dev/null)
 RC=$?
 if [ "$RC" = 0 ] && valid && [[ "$(ctx | head -1)" == "seyag plugin "* ]] && ctx | grep -qxF "$WANT_SEC"; then
   ok "security-sweep second startup after timeout warm run reads warm cache and emits security line"
@@ -371,18 +383,37 @@ if grep -q 'SEC_RC" -eq 124' "$TMP/hook-no-warm.sh"; then
 else
   SAVED_HOOK="$HOOK"
   HOOK="$TMP/hook-no-warm.sh"
-  runsec startup SYG_SECURITY_SWEEP=1 STUB_GH_SLEEP=3
+  rm -f "$TMP/gh-release-c11" "$TMP/gh-release-c11-2"
+  runsec startup SYG_SECURITY_SWEEP=1 STUB_GH_HOLD="$TMP/gh-release-c11"
+  : > "$TMP/gh-release-c11"
   sleep 3.5
   OUT=$(cd "$TMP/sec-repo" && jq -nc '{session_id: "probe", source: "startup"}' \
     | env -u SYG_MEM_GATE_CMD -u SYG_LONG_JOB_CMD \
       CLAUDE_PLUGIN_ROOT="$TMP/root" SYG_USER_RULES_DIR="$TMP/rules-linked" SYG_STATE_DIR="$TMP/state" \
       XDG_STATE_HOME="$TMP/sec-state" SECURITY_SWEEP_GH="$TMP/sec-bin/gh" \
-      SYG_SECURITY_SWEEP=1 STUB_GH_SLEEP=3 bash "$HOOK" 2>/dev/null)
+      SYG_SECURITY_SWEEP=1 STUB_GH_HOLD="$TMP/gh-release-c11-2" bash "$HOOK" 2>/dev/null)
+  : > "$TMP/gh-release-c11-2"
   HOOK="$SAVED_HOOK"
   if [ ! -s "$SEC_CACHE" ] && ! ctx | grep -qxF "$WANT_SEC"; then
     ok "canary 11: removing warm launch makes second-start assertion fail as expected"
   else
     bad "canary 11: removing warm launch did not fail second-start assertion" "$OUT"
+  fi
+fi
+
+# Canary 12: reverting "--repo=$_syg_r" to -R "$_syg_r" makes the leading-dash SYG_SECURITY_SWEEP_REPOS assertion fail
+sed 's/"--repo=\$_syg_r"/-R "$_syg_r"/' "$HOOK" > "$TMP/hook-dash-repo.sh"
+if grep -q -- '--repo=\$_syg_r' "$TMP/hook-dash-repo.sh"; then
+  bad "canary 12: mutation of --repo=\$_syg_r did not apply"
+else
+  SAVED_HOOK="$HOOK"
+  HOOK="$TMP/hook-dash-repo.sh"
+  runsec startup SYG_SECURITY_SWEEP_REPOS="-bad/x example-org/widget"
+  HOOK="$SAVED_HOOK"
+  if [ "$RC" = 0 ] && [ "$(ctx)" = "seyag plugin unknown" ] && ! ctx | grep -qxF "$WANT_SEC"; then
+    ok "canary 12: reverting --repo=\$_syg_r to -R \"\$_syg_r\" makes leading-dash repo row fail as expected"
+  else
+    bad "canary 12: reverting --repo=\$_syg_r did not fail leading-dash repo assertion" "$OUT"
   fi
 fi
 

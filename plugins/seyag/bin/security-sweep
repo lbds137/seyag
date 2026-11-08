@@ -2,7 +2,7 @@
 """security-sweep: surface open GitHub security alerts (code-scanning, dependabot, secret-scanning).
 
 Usage:
-  security-sweep [-R owner/name ...] [--all-repos-from FILE] [--json] [--strict] [--session-line] [--no-cache]
+  security-sweep [-R owner/name ...] [--all-repos-from FILE] [--json] [--strict] [--session-line] [--warm-cache] [--cap SECONDS] [--no-cache]
 
 Options:
   -R, --repo owner/name   Repository to sweep (repeatable).
@@ -10,9 +10,12 @@ Options:
                           With neither -R nor --all-repos-from, uses the cwd's `git remote get-url origin`.
   --json                  Emit machine-readable JSON summary.
   --strict                Exit 1 on open critical/high code-scanning or any open secret-scanning alert;
-                          exit 2 on an uncached surface error, skipped invalid repo, unparseable origin, or internal error.
+                          exit 2 on an uncached surface error, skipped invalid repo, unparseable origin, or internal error
+                          (exit 1 wins when both hold: an alert exit can hide fetch errors, which stderr still names per surface and --json marks error).
   --session-line          Print nothing unless >=1 open alert exists; then print a single summary line.
                           Silent on errors and off surfaces; never writes to stderr.
+  --warm-cache            Populate the cache like --session-line but print nothing; exits 0 at once if another warm run holds the repo-set flock.
+  --cap SECONDS           Exit 124 after SECONDS (positive float), no `timeout` binary needed; SessionStart passes --cap 2.
   --no-cache              Bypass the 300s fresh cache and fetch live from GitHub.
   -h, --help              Show this help message and exit.
 
@@ -25,13 +28,17 @@ Test seam (environment):
   SECURITY_SWEEP_GH          Overrides the `gh` binary path.
   SECURITY_SWEEP_GH_TIMEOUT  Overrides the per-call `gh` timeout in seconds (positive int, default 60).
 
-Exit codes: 0 by default (1 on internal error), except under --strict (1 alert threshold met, 2 uncached fetch/origin/repo/internal error).
+Exit codes: 0 by default (1 on internal error; 124 on --cap timeout), except under --strict (1 alert threshold met, 2 uncached fetch/origin/repo/internal error; exit 1 wins when both hold: an alert exit can hide fetch errors, which stderr still names per surface and --json marks error).
 """
 import argparse
 from concurrent.futures import ThreadPoolExecutor
+import fcntl
+import hashlib
 import json
+import math
 import os
 import re
+import signal
 import subprocess
 import sys
 import tempfile
@@ -41,9 +48,10 @@ SURFACES = ("code-scanning", "dependabot", "secret-scanning")
 SEVERITIES = ("critical", "high", "medium", "low", "none")
 CACHE_TTL_S = 300
 GH_TIMEOUT_S = 60
-# The first two code-scanning and the secret-scanning and archived-dependabot markers
-# were observed live (11-08); `Advanced Security must be enabled` and
-# `Dependabot alerts are disabled` are from the reviewer and unprobed.
+# The first two code-scanning, the secret-scanning and the archived-dependabot markers
+# were observed live; `Advanced Security must be enabled` and `Dependabot alerts are disabled`
+# were not observed in a live probe of 60 repositories (private repos without code
+# scanning return the first marker), kept because a mismatch fails safe as `error`.
 OFF_MARKERS = (
     "Code scanning is not enabled",
     "no analysis found",
@@ -62,7 +70,13 @@ SSH_REMOTE_RE = re.compile(
 
 
 class Parser(argparse.ArgumentParser):
+    def __init__(self, *args, quiet=False, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.quiet = quiet
+
     def error(self, message):
+        if self.quiet:
+            sys.exit(0)
         self.print_usage(sys.stderr)
         print(f"security-sweep: {message}", file=sys.stderr)
         sys.exit(2)
@@ -315,7 +329,42 @@ def write_cache(repo, fetched_at, surfaces):
 
 
 def is_valid_cached_surface(sdata):
-    return isinstance(sdata, dict) and sdata.get("state") in ("count", "off")
+    if not isinstance(sdata, dict):
+        return False
+    st = sdata.get("state")
+    if st == "off":
+        return True
+    if st != "count":
+        return False
+    cnt = sdata.get("count")
+    if isinstance(cnt, bool) or not isinstance(cnt, int) or cnt < 0:
+        return False
+    if "by_severity" in sdata:
+        by_sev = sdata["by_severity"]
+        if not isinstance(by_sev, dict) or any(
+            isinstance(v, bool) or not isinstance(v, int) for v in by_sev.values()
+        ):
+            return False
+    if "rules_by_severity" in sdata:
+        rbs = sdata["rules_by_severity"]
+        if not isinstance(rbs, dict) or any(
+            not isinstance(v, list) or any(not isinstance(x, str) for x in v)
+            for v in rbs.values()
+        ):
+            return False
+    if "rules_critical_high" in sdata:
+        rch = sdata["rules_critical_high"]
+        if not isinstance(rch, list) or any(not isinstance(x, str) for x in rch):
+            return False
+    if "alerts" in sdata:
+        alerts = sdata["alerts"]
+        if not isinstance(alerts, list) or any(not isinstance(a, dict) for a in alerts):
+            return False
+    if "types" in sdata:
+        types = sdata["types"]
+        if not isinstance(types, list) or any(not isinstance(x, str) for x in types):
+            return False
+    return True
 
 
 def process_repo(repo, surface_pool, no_cache, now):
@@ -534,24 +583,44 @@ def load_repos_file(path):
     return repos
 
 
-def build_parser():
+def positive_float(raw):
+    try:
+        val = float(raw)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"invalid positive float: '{raw}'")
+    if not (0 < val <= 86400 and math.isfinite(val)):
+        raise argparse.ArgumentTypeError(f"invalid positive float: '{raw}'")
+    return val
+
+
+def build_parser(quiet=False):
     p = Parser(
         prog="security-sweep",
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
+        allow_abbrev=False,
+        quiet=quiet,
     )
     p.add_argument("-R", "--repo", dest="repos", action="append", default=[], metavar="owner/name")
     p.add_argument("--all-repos-from", metavar="FILE")
     p.add_argument("--json", action="store_true")
     p.add_argument("--strict", action="store_true")
     p.add_argument("--session-line", action="store_true")
+    p.add_argument("--warm-cache", action="store_true")
+    p.add_argument("--cap", type=positive_float, metavar="SECONDS")
     p.add_argument("--no-cache", action="store_true")
     return p
 
 
 def main(argv):
-    parser = build_parser()
+    quiet = "--session-line" in argv or "--warm-cache" in argv
+    parser = build_parser(quiet=quiet)
     args = parser.parse_args(argv)
+    if args.cap is not None:
+        signal.signal(signal.SIGALRM, lambda *_: os._exit(124))
+        signal.setitimer(signal.ITIMER_REAL, args.cap)
+    if args.warm_cache:
+        args.session_line = True
 
     raw_repos = list(args.repos)
     if args.all_repos_from is not None:
@@ -583,6 +652,19 @@ def main(argv):
     if not repos:
         return 2 if args.strict else 0
 
+    warm_lock_fd = None
+    if args.warm_cache:
+        d = state_dir()
+        os.makedirs(d, exist_ok=True)
+        digest = hashlib.sha1(" ".join(sorted(repos)).encode("utf-8")).hexdigest()[:12]
+        lock_path = os.path.join(d, f".warm-{digest}.lock")
+        warm_lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(warm_lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            os.close(warm_lock_fd)
+            return 0
+
     now = time.time()
     n_workers = min(12, max(1, len(repos) * 3))
     n_repo_workers = min(12, max(1, len(repos)))
@@ -599,7 +681,9 @@ def main(argv):
             for repo, surf, err_rc in res["errors"]:
                 print(f"security-sweep: {repo} {surf}: fetch failed (gh exit {err_rc})", file=sys.stderr)
 
-    if args.session_line:
+    if args.warm_cache:
+        pass
+    elif args.session_line:
         line = format_session_line(results)
         if line:
             print(line)
@@ -625,7 +709,7 @@ def main(argv):
 
 
 if __name__ == "__main__":
-    if "--session-line" in sys.argv[1:]:
+    if "--session-line" in sys.argv[1:] or "--warm-cache" in sys.argv[1:]:
         try:
             sys.exit(main(sys.argv[1:]))
         except Exception:

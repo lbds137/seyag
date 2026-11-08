@@ -105,18 +105,17 @@ case "$SOURCE" in
       if [ -n "${SYG_SECURITY_SWEEP_REPOS:-}" ]; then
         read -r -d '' -a _syg_repos <<<"$SYG_SECURITY_SWEEP_REPOS" || true
         for _syg_r in "${_syg_repos[@]+"${_syg_repos[@]}"}"; do
-          SWEEP+=(-R "$_syg_r")
+          SWEEP+=("--repo=$_syg_r")
         done
       fi
-      TIMED_SWEEP=("${SWEEP[@]}")
-      command -v timeout >/dev/null 2>&1 && TIMED_SWEEP=(timeout 2 "${SWEEP[@]}")
-      SEC_LINE=$("${TIMED_SWEEP[@]}" 2>/dev/null)
+      SEC_LINE=$("${SWEEP[@]}" --cap 2 2>/dev/null)
       SEC_RC=$?
       if [ "$SEC_RC" -eq 0 ]; then
         SEC_LINE=${SEC_LINE%%$'\n'*}
         [ -z "$SEC_LINE" ] || TEXT="${TEXT:+$TEXT
 }$SEC_LINE"
       elif [ "$SEC_RC" -eq 124 ]; then
+        SWEEP[1]=--warm-cache
         if command -v setsid >/dev/null 2>&1; then
           setsid "${SWEEP[@]}" </dev/null >/dev/null 2>&1 &
         else
