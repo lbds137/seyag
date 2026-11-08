@@ -20,6 +20,7 @@ mkdir -p "$T/bin" "$T/state" "$T/fixtures"
 cat > "$T/bin/gh" <<EOF
 #!/bin/bash
 printf '%s\n' "\$*" >> "$T/gh.log"
+printf '%s\n' "\$\$" >> "$T/gh-pids"
 if [ -f "$T/gh-hold" ]; then
   _hold="\$(cat "$T/gh-hold")"
   for ((_i = 0; _i < 300; _i++)); do
@@ -61,7 +62,7 @@ EOF
 chmod +x "$T/bin/gh"
 
 reset_state() {
-  rm -rf "$T/state" "$T/fixtures" "$T/gh.log" "$T/gh-hold" "$T/lock-ready" "$T/lock-release"
+  rm -rf "$T/state" "$T/fixtures" "$T/gh.log" "$T/gh-pids" "$T/gh-hold" "$T/lock-ready" "$T/lock-release"
   mkdir -p "$T/state" "$T/fixtures"
   : > "$T/gh.log"
 }
@@ -732,10 +733,153 @@ t0=$SECONDS
 run_ss --session-line --cap 1 -R example-org/widget
 elapsed=$((SECONDS - t0))
 : > "$T/gh-release-9i"
-if [ "$rc" -eq 124 ] && [ "$elapsed" -lt 20 ] && [ ! -s "$T/out" ] && [ ! -s "$T/err" ]; then
-  ok "9i --session-line --cap 1 with held gh exits 124 before hold ends (${elapsed}s < 20s)"
+if [ "$rc" -eq 124 ] && [ "$elapsed" -le 8 ] && [ ! -s "$T/out" ] && [ ! -s "$T/err" ]; then
+  ok "9i --session-line --cap 1 with held gh exits 124 before hold ends (${elapsed}s <= 8s)"
 else
   bad "9i --session-line --cap 1 (rc=$rc, elapsed=${elapsed}s)" "out=$(cat "$T/out") err=$(cat "$T/err")"
+fi
+
+# 9n: --cap 1 expiry stops the held gh children
+reset_state
+mkdir -p "$T/fixtures/example-org_widget"
+rm -f "$T/gh-release-9n"
+printf '%s\n' "$T/gh-release-9n" > "$T/gh-hold"
+run_ss --session-line --cap 1 -R example-org/widget
+live_pids=""
+if [ -s "$T/gh-pids" ]; then
+  for _ in $(seq 1 30); do
+    live_pids=""
+    while IFS= read -r _pid; do
+      [ -n "$_pid" ] && kill -0 "$_pid" 2>/dev/null && live_pids="${live_pids:+$live_pids }$_pid"
+    done < "$T/gh-pids"
+    [ -z "$live_pids" ] && break
+    sleep 0.1
+  done
+fi
+: > "$T/gh-release-9n"
+if [ "$rc" -eq 124 ] && [ -s "$T/gh-pids" ] && [ -z "$live_pids" ]; then
+  ok "9n --cap 1 expiry stops the held gh children ($(wc -l <"$T/gh-pids") pids gone)"
+else
+  bad "9n --cap 1 expiry stops the held gh children (rc=$rc, live=$live_pids)"
+fi
+
+# 9o: --cap firing mid-write finishes the cache write and exits 124 with no .tmp file left behind
+rm -rf "$T/state9o"
+python3 - "$SS" "$T/state9o" >"$T/out" 2>"$T/err" <<'PY'
+import importlib.machinery, importlib.util, os, signal, sys
+path, state = sys.argv[1], sys.argv[2]
+os.environ["XDG_STATE_HOME"] = state
+loader = importlib.machinery.SourceFileLoader("ss", path)
+spec = importlib.util.spec_from_loader("ss", loader)
+mod = importlib.util.module_from_spec(spec)
+loader.exec_module(mod)
+signal.signal(signal.SIGALRM, mod._cap_fire)
+real_dump = mod.json.dump
+def wrapped_dump(*a, **kw):
+    os.kill(os.getpid(), signal.SIGALRM)
+    return real_dump(*a, **kw)
+mod.json.dump = wrapped_dump
+mod.write_cache(
+    "example-org/widget",
+    1,
+    {
+        "code-scanning": {"state": "off"},
+        "dependabot": {"state": "off"},
+        "secret-scanning": {"state": "off"},
+    },
+)
+print("returned")
+sys.exit(0)
+PY
+rc9o=$?
+CACHE_9O="$T/state9o/seyag/security-sweep/example-org_widget.json"
+if [ "$rc9o" -eq 124 ] \
+  && [ -f "$CACHE_9O" ] \
+  && python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$CACHE_9O" >/dev/null 2>&1 \
+  && [ -z "$(find "$T/state9o" -name '*.tmp' 2>/dev/null)" ]; then
+  ok "9o --cap firing during write_cache finishes cache write and exits 124 with no .tmp file"
+else
+  bad "9o --cap mid-write (rc=$rc9o)" "out=$(cat "$T/out") err=$(cat "$T/err") files=$(find "$T/state9o" 2>/dev/null)"
+fi
+
+# 9p: _cap_pending set before write_cache skips the write and exits 124 with no cache or .tmp file
+rm -rf "$T/state9p"
+python3 - "$SS" "$T/state9p" >"$T/out" 2>"$T/err" <<'PY'
+import importlib.machinery, importlib.util, os, sys
+path, state = sys.argv[1], sys.argv[2]
+os.environ["XDG_STATE_HOME"] = state
+loader = importlib.machinery.SourceFileLoader("ss", path)
+spec = importlib.util.spec_from_loader("ss", loader)
+mod = importlib.util.module_from_spec(spec)
+loader.exec_module(mod)
+mod._cap_pending = True
+mod.write_cache(
+    "example-org/widget",
+    1,
+    {
+        "code-scanning": {"state": "off"},
+        "dependabot": {"state": "off"},
+        "secret-scanning": {"state": "off"},
+    },
+)
+print("returned")
+sys.exit(0)
+PY
+rc9p=$?
+CACHE_9P="$T/state9p/seyag/security-sweep/example-org_widget.json"
+if [ "$rc9p" -eq 124 ] \
+  && [ ! -e "$CACHE_9P" ] \
+  && [ -z "$(find "$T/state9p" -name '*.tmp' 2>/dev/null)" ]; then
+  ok "9p _cap_pending before write_cache skips write and exits 124 with no .tmp file"
+else
+  bad "9p _cap_pending before write_cache (rc=$rc9p)" "out=$(cat "$T/out") err=$(cat "$T/err") files=$(find "$T/state9p" 2>/dev/null)"
+fi
+
+# 9q: --cap firing during a worker-thread write_cache finishes the write and exits 124
+rm -rf "$T/state9q"
+python3 - "$SS" "$T/state9q" >"$T/out" 2>"$T/err" <<'PY'
+import importlib.machinery, importlib.util, os, signal, sys, threading
+path, state = sys.argv[1], sys.argv[2]
+os.environ["XDG_STATE_HOME"] = state
+loader = importlib.machinery.SourceFileLoader("ss", path)
+spec = importlib.util.spec_from_loader("ss", loader)
+mod = importlib.util.module_from_spec(spec)
+loader.exec_module(mod)
+os.setpgid(0, 0)
+signal.signal(signal.SIGTERM, lambda *_: os._exit(124))
+signal.signal(signal.SIGALRM, mod._cap_fire)
+real_dump = mod.json.dump
+def wrapped_dump(*a, **kw):
+    os.kill(os.getpid(), signal.SIGALRM)
+    return real_dump(*a, **kw)
+mod.json.dump = wrapped_dump
+t = threading.Thread(
+    target=mod.write_cache,
+    args=(
+        "example-org/widget",
+        1,
+        {
+            "code-scanning": {"state": "off"},
+            "dependabot": {"state": "off"},
+            "secret-scanning": {"state": "off"},
+        },
+    ),
+)
+t.start()
+while t.is_alive():
+    t.join(0.05)
+print("returned")
+sys.exit(0)
+PY
+rc9q=$?
+CACHE_9Q="$T/state9q/seyag/security-sweep/example-org_widget.json"
+if [ "$rc9q" -eq 124 ] \
+  && [ -f "$CACHE_9Q" ] \
+  && python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$CACHE_9Q" >/dev/null 2>&1 \
+  && [ -z "$(find "$T/state9q" -name '*.tmp' 2>/dev/null)" ]; then
+  ok "9q --cap firing during a worker-thread write_cache finishes the write and exits 124"
+else
+  bad "9q --cap worker-thread mid-write (rc=$rc9q)" "out=$(cat "$T/out") err=$(cat "$T/err") files=$(find "$T/state9q" 2>/dev/null)"
 fi
 
 # 9j & 9k: --warm-cache deduplicates via non-blocking flock and populates cache when unheld
@@ -1038,6 +1182,47 @@ if [ -z "${SECURITY_SWEEP_SKIP_CANARIES:-}" ] && [ "$fail" -eq 0 ]; then
     ok "canary r3-7: dropping sorted( in warm-cache lock digest fails 9m"
   else
     bad "canary r3-7 did not fail 9m as expected (rc=$mut_rc)" "$mut_out"
+  fi
+
+  # Canary r4-1: firing _cap_exit immediately during write_cache fails 9o
+  sed 's/    if _cap_writes == 0:/    if True:/' "$SS" > "$T/mut-r4-1" && chmod +x "$T/mut-r4-1"
+  cmp -s "$SS" "$T/mut-r4-1" && bad "canary r4-1: mutation did not apply (pattern drifted from the bin)"
+  mut_out=$(SECURITY_SWEEP_BIN="$T/mut-r4-1" SECURITY_SWEEP_SKIP_CANARIES=1 bash "${BASH_SOURCE[0]}" 2>&1); mut_rc=$?
+  if [ "$mut_rc" -ne 0 ] && grep -qF "FAIL: 9o --cap mid-write" <<<"$mut_out"; then
+    ok "canary r4-1: ignoring _cap_writes in _cap_fire fails 9o"
+  else
+    bad "canary r4-1 did not fail 9o as expected (rc=$mut_rc)" "$mut_out"
+  fi
+
+  # Canary r4-2 (purpose canary): replacing os.killpg with pass fails 9n
+  sed 's/os.killpg(os.getpgrp(), signal.SIGTERM)/pass/' "$SS" > "$T/mut-r4-2" && chmod +x "$T/mut-r4-2"
+  cmp -s "$SS" "$T/mut-r4-2" && bad "canary r4-2: mutation did not apply (pattern drifted from the bin)"
+  mut_out=$(SECURITY_SWEEP_BIN="$T/mut-r4-2" SECURITY_SWEEP_SKIP_CANARIES=1 bash "${BASH_SOURCE[0]}" 2>&1); mut_rc=$?
+  fail_n=$(grep -c '^FAIL:' <<<"$mut_out")
+  if [ "$mut_rc" -ne 0 ] && grep -qF "FAIL: 9n --cap 1 expiry stops the held gh children" <<<"$mut_out"; then
+    ok "canary r4-2 (purpose canary): replacing os.killpg with pass fails $fail_n assertion (9n)"
+  else
+    bad "canary r4-2 did not fail 9n as expected (rc=$mut_rc, fail_n=$fail_n)" "$mut_out"
+  fi
+
+  # Canary r4-3: ignoring skip in write_cache fails 9p
+  sed 's/        if not skip:/        if True:/' "$SS" > "$T/mut-r4-3" && chmod +x "$T/mut-r4-3"
+  cmp -s "$SS" "$T/mut-r4-3" && bad "canary r4-3: mutation did not apply (pattern drifted from the bin)"
+  mut_out=$(SECURITY_SWEEP_BIN="$T/mut-r4-3" SECURITY_SWEEP_SKIP_CANARIES=1 bash "${BASH_SOURCE[0]}" 2>&1); mut_rc=$?
+  if [ "$mut_rc" -ne 0 ] && grep -qF "FAIL: 9p _cap_pending before write_cache" <<<"$mut_out"; then
+    ok "canary r4-3: ignoring skip in write_cache fails 9p"
+  else
+    bad "canary r4-3 did not fail 9p as expected (rc=$mut_rc)" "$mut_out"
+  fi
+
+  # Canary r4-4: calling signal.signal in _cap_exit fails 9q
+  sed 's/^def _cap_exit():$/def _cap_exit():\n    signal.signal(signal.SIGTERM, signal.SIG_IGN)/' "$SS" > "$T/mut-r4-4" && chmod +x "$T/mut-r4-4"
+  cmp -s "$SS" "$T/mut-r4-4" && bad "canary r4-4: mutation did not apply (pattern drifted from the bin)"
+  mut_out=$(SECURITY_SWEEP_BIN="$T/mut-r4-4" SECURITY_SWEEP_SKIP_CANARIES=1 bash "${BASH_SOURCE[0]}" 2>&1); mut_rc=$?
+  if [ "$mut_rc" -ne 0 ] && grep -qF "FAIL: 9q --cap worker-thread mid-write" <<<"$mut_out"; then
+    ok "canary r4-4: calling signal.signal in _cap_exit fails 9q"
+  else
+    bad "canary r4-4 did not fail 9q as expected (rc=$mut_rc)" "$mut_out"
   fi
 fi
 

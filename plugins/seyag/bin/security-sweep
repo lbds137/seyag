@@ -15,7 +15,7 @@ Options:
   --session-line          Print nothing unless >=1 open alert exists; then print a single summary line.
                           Silent on errors and off surfaces; never writes to stderr.
   --warm-cache            Populate the cache like --session-line but print nothing; exits 0 at once if another warm run holds the repo-set flock.
-  --cap SECONDS           Exit 124 after SECONDS (positive float), no `timeout` binary needed; SessionStart passes --cap 2.
+  --cap SECONDS           Exit 124 after SECONDS (positive float), no `timeout` binary needed; the run leads its own process group and sends SIGTERM to it (gh children included) on expiry, finishing an in-flight cache write first; a SIGTERM received during a capped run also exits 124; SessionStart passes --cap 2. Like GNU timeout, a capped run leaves the terminal's foreground group, so Ctrl-C does not reach it.
   --no-cache              Bypass the 300s fresh cache and fetch live from GitHub.
   -h, --help              Show this help message and exit.
 
@@ -42,6 +42,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 SURFACES = ("code-scanning", "dependabot", "secret-scanning")
@@ -308,24 +309,57 @@ def read_cache(repo):
     return {"fetched_at": float(fetched_at), "surfaces": surfaces}
 
 
-def write_cache(repo, fetched_at, surfaces):
-    d = state_dir()
-    owner, name = repo.split("/", 1)
+_cap_lock = threading.Lock()
+_cap_writes = 0
+_cap_pending = False
+
+
+def _cap_exit():
     try:
-        os.makedirs(d, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=d, prefix=f".{owner}_{name}.", suffix=".tmp")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump({"fetched_at": int(fetched_at), "surfaces": surfaces}, f)
-            os.replace(tmp, os.path.join(d, f"{owner}_{name}.json"))
-        except BaseException:
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass
-            raise
+        if os.getpgrp() == os.getpid():
+            os.killpg(os.getpgrp(), signal.SIGTERM)
     except OSError:
         pass
+    os._exit(124)
+
+
+def _cap_fire(*_):
+    global _cap_pending
+    _cap_pending = True
+    if _cap_writes == 0:
+        _cap_exit()
+
+
+def write_cache(repo, fetched_at, surfaces):
+    global _cap_writes
+    with _cap_lock:
+        _cap_writes += 1
+        skip = _cap_pending
+    try:
+        if not skip:
+            d = state_dir()
+            owner, name = repo.split("/", 1)
+            try:
+                os.makedirs(d, exist_ok=True)
+                fd, tmp = tempfile.mkstemp(dir=d, prefix=f".{owner}_{name}.", suffix=".tmp")
+                try:
+                    with os.fdopen(fd, "w", encoding="utf-8") as f:
+                        json.dump({"fetched_at": int(fetched_at), "surfaces": surfaces}, f)
+                    os.replace(tmp, os.path.join(d, f"{owner}_{name}.json"))
+                except BaseException:
+                    try:
+                        os.unlink(tmp)
+                    except OSError:
+                        pass
+                    raise
+            except OSError:
+                pass
+    finally:
+        with _cap_lock:
+            _cap_writes -= 1
+            fire = _cap_pending and _cap_writes == 0
+        if fire:
+            _cap_exit()
 
 
 def is_valid_cached_surface(sdata):
@@ -617,7 +651,12 @@ def main(argv):
     parser = build_parser(quiet=quiet)
     args = parser.parse_args(argv)
     if args.cap is not None:
-        signal.signal(signal.SIGALRM, lambda *_: os._exit(124))
+        try:
+            os.setpgid(0, 0)
+        except OSError:
+            pass
+        signal.signal(signal.SIGTERM, lambda *_: os._exit(124))
+        signal.signal(signal.SIGALRM, _cap_fire)
         signal.setitimer(signal.ITIMER_REAL, args.cap)
     if args.warm_cache:
         args.session_line = True

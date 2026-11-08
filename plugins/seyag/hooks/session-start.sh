@@ -101,13 +101,14 @@ case "$SOURCE" in
     if syg_enabled security \
       && { [ "${SYG_SECURITY_SWEEP:-}" = 1 ] || [ -n "${SYG_SECURITY_SWEEP_REPOS:-}" ]; } \
       && [ -x "$PLUGIN_ROOT/bin/security-sweep" ]; then
-      SWEEP=("$PLUGIN_ROOT/bin/security-sweep" --session-line)
+      _syg_rargs=()
       if [ -n "${SYG_SECURITY_SWEEP_REPOS:-}" ]; then
         read -r -d '' -a _syg_repos <<<"$SYG_SECURITY_SWEEP_REPOS" || true
         for _syg_r in "${_syg_repos[@]+"${_syg_repos[@]}"}"; do
-          SWEEP+=("--repo=$_syg_r")
+          _syg_rargs+=("--repo=$_syg_r")
         done
       fi
+      SWEEP=("$PLUGIN_ROOT/bin/security-sweep" --session-line "${_syg_rargs[@]+"${_syg_rargs[@]}"}")
       SEC_LINE=$("${SWEEP[@]}" --cap 2 2>/dev/null)
       SEC_RC=$?
       if [ "$SEC_RC" -eq 0 ]; then
@@ -115,11 +116,11 @@ case "$SOURCE" in
         [ -z "$SEC_LINE" ] || TEXT="${TEXT:+$TEXT
 }$SEC_LINE"
       elif [ "$SEC_RC" -eq 124 ]; then
-        SWEEP[1]=--warm-cache
+        WARM=("$PLUGIN_ROOT/bin/security-sweep" --warm-cache "${_syg_rargs[@]+"${_syg_rargs[@]}"}")
         if command -v setsid >/dev/null 2>&1; then
-          setsid "${SWEEP[@]}" </dev/null >/dev/null 2>&1 &
+          setsid "${WARM[@]}" </dev/null >/dev/null 2>&1 &
         else
-          nohup "${SWEEP[@]}" </dev/null >/dev/null 2>&1 &
+          nohup "${WARM[@]}" </dev/null >/dev/null 2>&1 &
         fi
       fi
     fi
