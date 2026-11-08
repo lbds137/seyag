@@ -322,8 +322,8 @@ rm -f "$TMP/gh-release"
 t0=$SECONDS
 runsec startup SYG_SECURITY_SWEEP=1 STUB_GH_HOLD="$TMP/gh-release"
 elapsed=$((SECONDS - t0))
-if [ "$RC" = 0 ] && [ "$elapsed" -lt 20 ] && valid && [ "$(ctx)" = "seyag plugin unknown" ]; then
-  ok "security-sweep held stub times out within 2s cap (${elapsed}s < 20s), exit 0, no security line"
+if [ "$RC" = 0 ] && [ "$elapsed" -le 8 ] && valid && [ "$(ctx)" = "seyag plugin unknown" ]; then
+  ok "security-sweep held stub times out within 2s cap (${elapsed}s <= 8s), exit 0, no security line"
 else
   bad "security-sweep timeout (rc=$RC, elapsed=${elapsed}s)" "$OUT"
 fi

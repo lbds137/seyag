@@ -28,5 +28,5 @@ description: "When `security-sweep` reports open GitHub security alerts (code sc
 
 ## 4. SessionStart opt-in wiring
 
-- Set `SYG_SECURITY_SWEEP=1` (cwd repo) or `SYG_SECURITY_SWEEP_REPOS="owner/a owner/b"` in `.claude/settings.json` under `env` to run `security-sweep --session-line --cap 2` on `startup` and `clear` (2 s cap (built in; no `timeout` binary needed), detaching a background `--warm-cache` run on timeout; silent when clean or on error).
+- Set `SYG_SECURITY_SWEEP=1` (cwd repo) or `SYG_SECURITY_SWEEP_REPOS="owner/a owner/b"` in `.claude/settings.json` under `env` to run `security-sweep --session-line --cap 2` on `startup` and `clear` (a built-in 2 s cap, no `timeout` binary needed; on timeout a background `--warm-cache` run is detached; silent when clean or on error).
 - `SYG_DISABLE=security` switches the SessionStart sweep off (and headless `sdk-*` runs skip `security` automatically).
