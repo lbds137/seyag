@@ -9,10 +9,10 @@ description: "When `security-sweep` reports open GitHub security alerts (code sc
 
 ## 1. Running the tool
 
-- `security-sweep` — inspects the cwd repo's `origin` remote (5-minute cache under `${XDG_STATE_HOME:-$HOME/.local/state}/seyag/security-sweep/`).
-- `security-sweep -R owner/name [-R ...]` or `--all-repos-from FILE` — inspects explicit repos (`#` comments in `FILE`).
-- `security-sweep --json` — machine-readable per-repo summary (secret values are stripped at fetch time and never cached or printed).
-- `security-sweep --strict` — for scripts/cron: exit `1` on any critical/high code-scanning alert or any open secret-scanning alert; exit `2` on any `error` surface with no cached fallback; else `0`. Add `--no-cache` to bypass the 5-minute cache.
+- `security-sweep` — inspects the cwd repo's `origin` remote (5-minute cache under `${XDG_STATE_HOME:-$HOME/.local/state}/seyag/security-sweep/`). The `origin` parser accepts only `github.com` (https/ssh); SSH host aliases and GHE hosts get `origin is not a github.com repo` — pass `-R owner/name` (or set `SYG_SECURITY_SWEEP_REPOS` for SessionStart) as the workaround.
+- `security-sweep -R owner/name [-R ...]` or `--all-repos-from FILE` — inspects explicit repos (`#` comments in `FILE`; invalid `owner/name` tokens are skipped with a stderr warning while valid repos still run).
+- `security-sweep --json` — machine-readable per-repo summary (`count` surfaces include alert `numbers` in cache order, plus deduped `rules` and `rules_critical_high` for `code-scanning`, deduped `packages` for `dependabot`, and `types` for `secret-scanning`; secret values are stripped at fetch time and never cached or printed).
+- `security-sweep --strict` — for scripts/cron: exit `1` on any critical/high code-scanning alert or any open secret-scanning alert; exit `2` on any `error` surface with no cached fallback, a skipped invalid repo token, an unreadable/unparseable repo source, or an internal error (outside `--strict`, internal errors exit `1`); else `0`. Add `--no-cache` to bypass the 5-minute cache.
 
 ## 2. Dispositions (every open alert gets one)
 
@@ -24,9 +24,9 @@ description: "When `security-sweep` reports open GitHub security alerts (code sc
 
 - **Critical/high or secret-scanning alerts:** any open critical/high alert or ANY open `secret-scanning` alert reports to the owner like a production finding through the formal channel alongside the prose report (core rules § *Talking to the owner*).
 - **Secret-scanning alerts:** **rotate the secret first**, then clean git history only with the owner. Never print or echo the secret value.
-- **`off` surfaces:** when a surface reports `off` (`Code scanning is not enabled` or `Secret scanning is disabled`), mention it once; enabling scanning is the owner's call.
+- **`off` surfaces:** when a surface reports `off` (`Code scanning is not enabled`, `no analysis found`, `Advanced Security must be enabled`, `Secret scanning is disabled`, `Dependabot alerts are disabled` or `Dependabot alerts are not available for archived repositories`), mention it once; enabling scanning is the owner's call.
 
 ## 4. SessionStart opt-in wiring
 
-- Set `SYG_SECURITY_SWEEP=1` (cwd repo) or `SYG_SECURITY_SWEEP_REPOS="owner/a owner/b"` in `.claude/settings.json` under `env` to run `security-sweep --session-line` on `startup` and `clear` (2 s timeout; silent when clean or on error).
+- Set `SYG_SECURITY_SWEEP=1` (cwd repo) or `SYG_SECURITY_SWEEP_REPOS="owner/a owner/b"` in `.claude/settings.json` under `env` to run `security-sweep --session-line` on `startup` and `clear` (2 s timeout, detaching a background cache-warming run on timeout; silent when clean or on error).
 - `SYG_DISABLE=security` switches the SessionStart sweep off (and headless `sdk-*` runs skip `security` automatically).

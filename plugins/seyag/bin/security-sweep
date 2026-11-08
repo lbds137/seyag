@@ -10,7 +10,7 @@ Options:
                           With neither -R nor --all-repos-from, uses the cwd's `git remote get-url origin`.
   --json                  Emit machine-readable JSON summary.
   --strict                Exit 1 on open critical/high code-scanning or any open secret-scanning alert;
-                          exit 2 on an uncached surface error or unparseable origin remote.
+                          exit 2 on an uncached surface error, skipped invalid repo, unparseable origin, or internal error.
   --session-line          Print nothing unless >=1 open alert exists; then print a single summary line.
                           Silent on errors and off surfaces; never writes to stderr.
   --no-cache              Bypass the 300s fresh cache and fetch live from GitHub.
@@ -25,7 +25,7 @@ Test seam (environment):
   SECURITY_SWEEP_GH          Overrides the `gh` binary path.
   SECURITY_SWEEP_GH_TIMEOUT  Overrides the per-call `gh` timeout in seconds (positive int, default 60).
 
-Exit codes: 0 always, except under --strict (1 alert threshold met, 2 uncached fetch/origin error).
+Exit codes: 0 by default (1 on internal error), except under --strict (1 alert threshold met, 2 uncached fetch/origin/repo/internal error).
 """
 import argparse
 from concurrent.futures import ThreadPoolExecutor
@@ -41,6 +41,17 @@ SURFACES = ("code-scanning", "dependabot", "secret-scanning")
 SEVERITIES = ("critical", "high", "medium", "low", "none")
 CACHE_TTL_S = 300
 GH_TIMEOUT_S = 60
+# The first two code-scanning and the secret-scanning and archived-dependabot markers
+# were observed live (11-08); `Advanced Security must be enabled` and
+# `Dependabot alerts are disabled` are from the reviewer and unprobed.
+OFF_MARKERS = (
+    "Code scanning is not enabled",
+    "no analysis found",
+    "Advanced Security must be enabled",
+    "Secret scanning is disabled",
+    "Dependabot alerts are disabled",
+    "Dependabot alerts are not available for archived repositories",
+)
 REPO_RE = re.compile(r"^([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)$")
 HTTPS_REMOTE_RE = re.compile(
     r"^https://(?:[^/@\s]+@)?github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+?)(?:\.git)?/?$"
@@ -253,7 +264,7 @@ def fetch_surface(repo, surface):
         return {"state": "error"}, 127
     if p.returncode != 0:
         combined = (p.stdout or "") + "\n" + (p.stderr or "")
-        if "Code scanning is not enabled" in combined or "Secret scanning is disabled" in combined:
+        if any(m in combined for m in OFF_MARKERS):
             return {"state": "off"}, None
         return {"state": "error"}, p.returncode
     try:
@@ -423,22 +434,41 @@ def json_surface(surface, sdata):
     if st != "count":
         return {"state": st}
     cnt = sdata.get("count", 0)
+    alerts = sdata.get("alerts") if isinstance(sdata.get("alerts"), list) else []
+    numbers = [a.get("number") for a in alerts if isinstance(a, dict) and a.get("number") is not None]
     if surface == "code-scanning":
+        rules = []
+        for a in alerts:
+            if isinstance(a, dict):
+                rid = (a.get("rule") or {}).get("id")
+                if isinstance(rid, str) and rid and rid not in rules:
+                    rules.append(rid)
         return {
             "state": "count",
             "count": cnt,
+            "numbers": numbers,
             "by_severity": sdata.get("by_severity") or {},
+            "rules": rules,
             "rules_critical_high": sdata.get("rules_critical_high") or [],
         }
     if surface == "dependabot":
+        packages = []
+        for a in alerts:
+            if isinstance(a, dict):
+                pname = ((a.get("dependency") or {}).get("package") or {}).get("name")
+                if isinstance(pname, str) and pname and pname not in packages:
+                    packages.append(pname)
         return {
             "state": "count",
             "count": cnt,
+            "numbers": numbers,
             "by_severity": sdata.get("by_severity") or {},
+            "packages": packages,
         }
     return {
         "state": "count",
         "count": cnt,
+        "numbers": numbers,
         "types": sdata.get("types") or [],
     }
 
@@ -471,9 +501,9 @@ def format_session_line(results):
     return f"security: {'; '.join(repo_parts)} — dispositions per skill seyag:security-sweep"
 
 
-def strict_exit_code(results):
+def strict_exit_code(results, had_invalid_repo=False):
     has_alert_fail = False
-    has_error = False
+    has_error = had_invalid_repo
     for res in results:
         surfaces = res["surfaces"]
         cs = surfaces["code-scanning"]
@@ -527,7 +557,7 @@ def main(argv):
     if args.all_repos_from is not None:
         try:
             raw_repos.extend(load_repos_file(args.all_repos_from))
-        except OSError as e:
+        except (OSError, UnicodeDecodeError) as e:
             if not args.session_line:
                 print(f"security-sweep: cannot read {args.all_repos_from}: {e}", file=sys.stderr)
             return 2 if args.strict else 0
@@ -541,13 +571,17 @@ def main(argv):
         raw_repos = [origin_repo]
 
     repos = []
+    had_invalid_repo = False
     for r in raw_repos:
         if not valid_repo(r):
+            had_invalid_repo = True
             if not args.session_line:
-                print(f"security-sweep: invalid repo '{r}' (expected owner/name)", file=sys.stderr)
-            return 2 if args.strict else 0
+                print(f"security-sweep: invalid repo '{r}' (expected owner/name), skipped", file=sys.stderr)
+            continue
         if r not in repos:
             repos.append(r)
+    if not repos:
+        return 2 if args.strict else 0
 
     now = time.time()
     n_workers = min(12, max(1, len(repos) * 3))
@@ -586,7 +620,7 @@ def main(argv):
             print(format_default_line(res))
 
     if args.strict:
-        return strict_exit_code(results)
+        return strict_exit_code(results, had_invalid_repo=had_invalid_repo)
     return 0
 
 
@@ -596,4 +630,8 @@ if __name__ == "__main__":
             sys.exit(main(sys.argv[1:]))
         except Exception:
             sys.exit(0)
-    sys.exit(main(sys.argv[1:]))
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except Exception as e:
+        print(f"security-sweep: internal error: {type(e).__name__}", file=sys.stderr)
+        sys.exit(2 if "--strict" in sys.argv[1:] else 1)

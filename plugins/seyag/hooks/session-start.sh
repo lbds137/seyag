@@ -9,7 +9,8 @@
 #   greps it from session logs),
 #   then warns in one line if that rules link is missing (component `rules`),
 #   and when opted in (`SYG_SECURITY_SWEEP=1` or `SYG_SECURITY_SWEEP_REPOS`)
-#   appends `bin/security-sweep --session-line` (2 s cap; component `security`).
+#   appends `bin/security-sweep --session-line` (2 s cap, detaching a background
+#   cache-warming run on timeout exit 124; component `security`).
 # - compact: adds the post-compaction recovery checklist (the failure class
 #   where re-suggested settings, dropped promises and lost work-stack pointers
 #   keep recurring; component `rules`). Adapted from Tzurot's session-start.sh.
@@ -107,11 +108,20 @@ case "$SOURCE" in
           SWEEP+=(-R "$_syg_r")
         done
       fi
-      command -v timeout >/dev/null 2>&1 && SWEEP=(timeout 2 "${SWEEP[@]}")
-      if SEC_LINE=$("${SWEEP[@]}" 2>/dev/null); then
+      TIMED_SWEEP=("${SWEEP[@]}")
+      command -v timeout >/dev/null 2>&1 && TIMED_SWEEP=(timeout 2 "${SWEEP[@]}")
+      SEC_LINE=$("${TIMED_SWEEP[@]}" 2>/dev/null)
+      SEC_RC=$?
+      if [ "$SEC_RC" -eq 0 ]; then
         SEC_LINE=${SEC_LINE%%$'\n'*}
         [ -z "$SEC_LINE" ] || TEXT="${TEXT:+$TEXT
 }$SEC_LINE"
+      elif [ "$SEC_RC" -eq 124 ]; then
+        if command -v setsid >/dev/null 2>&1; then
+          setsid "${SWEEP[@]}" </dev/null >/dev/null 2>&1 &
+        else
+          nohup "${SWEEP[@]}" </dev/null >/dev/null 2>&1 &
+        fi
       fi
     fi
     ;;
