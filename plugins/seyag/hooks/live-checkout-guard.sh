@@ -23,15 +23,15 @@
 #   Walks the command in execution order via lib/shell_quotes.py and
 #   lib/shell_state.py (tracking cd/pushd/popd, GIT_DIR/GIT_WORK_TREE exports
 #   and prefix assignments, wrapper strings, and command substitutions) and
-#   resolves each git invocation's effective directory (after cd/pushd, then
-#   `git -C <dir>` and `--work-tree` / `GIT_WORK_TREE`, or `--git-dir` /
-#   `GIT_DIR` when only a git-dir is named). A target equal to or under a path
-#   recorded from an earlier `git worktree add` in the same command is treated
-#   as a linked worktree (not live) even before the directory exists on disk;
-#   any other non-existent or unreadable cd target, or unexpanded `$VAR` / glob
-#   in `-C`, `--work-tree`, `--git-dir`, `GIT_DIR`, or `GIT_WORK_TREE`, falls
-#   back to the payload cwd (the cwd-drift-guard baseline). When the effective
-#   target is a live root:
+#   resolves each git invocation's repository (`--git-dir` / `GIT_DIR` when
+#   given, else the directory git starts in after cd/pushd and `git -C <dir>`)
+#   plus its work tree (`--work-tree` / `GIT_WORK_TREE` when given). A target
+#   equal to or under a path recorded from an earlier `git worktree add` in the
+#   same command is treated as a linked worktree (not live) even before the
+#   directory exists on disk; any other non-existent or unreadable cd target,
+#   or unexpanded `$VAR` / glob in `-C`, `--work-tree`, `--git-dir`, `GIT_DIR`,
+#   or `GIT_WORK_TREE`, falls back to the payload cwd (the cwd-drift-guard
+#   baseline). When either the repository or the work tree is a live root:
 #     BLOCK:
 #       - `checkout` / `switch` to anything other than the default branch
 #         (including `-b`, `-B`, `-c`, `-C`, `--create`, `--force-create`,
@@ -47,10 +47,14 @@
 #       - `update-ref` whose first ref operand is `HEAD` or `refs/heads/*`
 #         (including `-d`), or with `--stdin`, and `symbolic-ref HEAD <ref>`
 #         or `symbolic-ref -d HEAD`;
-#       - `pull` without `--ff-only`, or `pull --ff-only` with a remote other
-#         than `origin` or a refspec other than the default branch;
+#       - `pull` unless the last of `--ff` / `--no-ff` / `--ff-only` is
+#         `--ff-only`, or with `--rebase` / `-r` (except `--rebase=false`), or
+#         `pull --ff-only` with a remote other than `origin` or a refspec other
+#         than the default branch;
 #       - `apply` with `--apply` or `--index`, or without `--check` / `--stat` /
 #         `--numstat` / `--summary`;
+#       - `clean` without `-n` / `--dry-run`;
+#       - `sparse-checkout` with `set`, `add`, `reapply`, `init`, or `disable`;
 #       - `bisect start`.
 #     ALLOW everything else, including:
 #       - `checkout [--] <paths>` and plain `restore` (or with `--source` / `-s`
@@ -87,6 +91,10 @@
 #   - Unjudged shapes: variable or escaped command names (`$GIT commit`,
 #     `g\it`), `eval` of an unexpanded variable, `submodule update`, and
 #     `branch -m` of the current branch.
+#   - `--git-dir` / `GIT_DIR` naming a NON-live repository with no work tree,
+#     run from inside a live root: git uses the cwd as that repository's work
+#     tree, so its checkout writes into live files; judged by the repository
+#     only, so allowed.
 #
 # FAIL-OPEN:
 #   Malformed JSON, missing jq/python3/git, or any internal error -> exit 0
@@ -194,7 +202,7 @@ emit_block() {
 LIVE-CHECKOUT GUARD — blocked: $reason
 Live root: $root (default branch: $def_branch)
 Why: this checkout's files are the code every session loads; switching branches, stashing, committing, or leaving tracked edits in it makes that state live in every session on the machine.
-Fix: do the work in a linked worktree (git worktree add -b <branch> $root/.claude/worktrees/<name> $def_branch) and commit/push from there; for Edit/Write, edit the same path inside that worktree.
+Fix: do the work in a linked worktree (git fetch origin && git worktree add -b <branch> $root/.claude/worktrees/<name> origin/$def_branch) and commit/push from there; for Edit/Write, edit the same path inside that worktree.
 Bypass (only for an action the owner approved): SYG_ALLOW_LIVE_CHECKOUT=1
 EOF
   exit 2
@@ -358,6 +366,7 @@ ABORTABLE_SUBCMDS = {
     "am",
 }
 APPLY_SAFE_FLAGS = {"--check", "--stat", "--numstat", "--summary"}
+SPARSE_CHECKOUT_BLOCK_SUBCMDS = {"set", "add", "reapply", "init", "disable"}
 
 _WT_MEMO = {}
 _DEF_BRANCH_MEMO = {}
@@ -690,18 +699,25 @@ def judge_restore(rest, default_br):
 def judge_pull(rest, default_br):
     if "-h" in rest or "--help" in rest:
         return None
-    before_dd = rest[: rest.index("--")] if "--" in rest else rest
-    if "--ff-only" not in before_dd or "--no-ff" in before_dd:
-        return "git pull without --ff-only in live checkout"
     pos = []
+    last_ff = None
     i = 0
     while i < len(rest):
         w = rest[i]
         if w == "--":
             pos.extend(rest[i + 1 :])
             break
+        if w in ("--ff", "--no-ff", "--ff-only"):
+            last_ff = w
+            i += 1
+            continue
         if w.startswith("--"):
-            name, eq, _ = w.partition("=")
+            name, eq, val = w.partition("=")
+            if name == "--rebase":
+                if not eq or val != "false":
+                    return "git pull with --rebase in live checkout"
+                i += 1
+                continue
             if name in PULL_VALUE_OPTS and not eq:
                 i += 2
             else:
@@ -710,6 +726,8 @@ def judge_pull(rest, default_br):
         if w.startswith("-") and w != "-":
             shorts = w[1:]
             for idx, ch in enumerate(shorts):
+                if ch == "r":
+                    return "git pull with --rebase in live checkout"
                 if f"-{ch}" in PULL_VALUE_OPTS:
                     if idx == len(shorts) - 1:
                         i += 1
@@ -718,6 +736,8 @@ def judge_pull(rest, default_br):
             continue
         pos.append(w)
         i += 1
+    if last_ff != "--ff-only":
+        return "git pull without --ff-only in live checkout"
     if not pos:
         return None
     if pos[0] != "origin":
@@ -792,6 +812,37 @@ def judge_symbolic_ref(rest):
     return None
 
 
+def judge_clean(rest):
+    if "-h" in rest or "--help" in rest:
+        return None
+    before_dd = rest[: rest.index("--")] if "--" in rest else rest
+    i = 0
+    while i < len(before_dd):
+        w = before_dd[i]
+        if w == "--dry-run":
+            return None
+        if w.startswith("--"):
+            name, eq, _ = w.partition("=")
+            if name == "--exclude" and not eq:
+                i += 2
+            else:
+                i += 1
+            continue
+        if w.startswith("-") and w != "-":
+            shorts = w[1:]
+            for idx, ch in enumerate(shorts):
+                if ch == "n":
+                    return None
+                if ch == "e":
+                    if idx == len(shorts) - 1:
+                        i += 1
+                    break
+            i += 1
+            continue
+        i += 1
+    return "git clean in live checkout"
+
+
 def judge_subcommand(subcmd, rest, default_br, eff_dir):
     if subcmd == "switch":
         return judge_switch(rest, default_br)
@@ -841,6 +892,16 @@ def judge_subcommand(subcmd, rest, default_br, eff_dir):
         ):
             return None
         return "git apply in live checkout"
+    if subcmd == "clean":
+        return judge_clean(rest)
+    if subcmd == "sparse-checkout":
+        if "-h" in rest or "--help" in rest:
+            return None
+        before_dd = rest[: rest.index("--")] if "--" in rest else rest
+        first_pos = next((w for w in before_dd if not w.startswith("-")), None)
+        if first_pos in SPARSE_CHECKOUT_BLOCK_SUBCMDS:
+            return f"git sparse-checkout {first_pos} in live checkout"
+        return None
     if subcmd == "bisect":
         if "-h" in rest or "--help" in rest:
             return None
@@ -1087,47 +1148,44 @@ def judge_git(argv, unwrapped, info, state, ctx):
     gd_expanded = expand_home(expand_vars(git_dir_val, state)) if git_dir_val is not None else None
     gd_unexpanded = has_git_dir and (not gd_expanded or unresolvable_cd_target(gd_expanded))
 
-    if has_work_tree:
-        cur_dir, uncertain = apply_dir_step(work_tree_val, cur_dir, uncertain, state, ctx)
-        if gd_unexpanded:
-            uncertain = True
-        eff_dir = payload_cwd if (uncertain or not is_known_dir(cur_dir, ctx)) else cur_dir
-        if subcmd == "worktree":
-            record_worktree_add(rest, eff_dir, state, ctx)
-        if is_in_new_worktree(eff_dir, ctx):
-            return
-        live_root = worktree_live_root(eff_dir)
-    elif has_git_dir:
+    start_dir = payload_cwd if (uncertain or not is_known_dir(cur_dir, ctx)) else cur_dir
+
+    if has_git_dir:
         if gd_unexpanded or (not gd_expanded.startswith("/") and (uncertain or not is_known_dir(cur_dir, ctx))):
-            eff_dir = payload_cwd
-            if subcmd == "worktree":
-                record_worktree_add(rest, eff_dir, state, ctx)
-            live_root = worktree_live_root(eff_dir)
+            repo_dir = payload_cwd
+            repo_live_root = None if is_in_new_worktree(repo_dir, ctx) else worktree_live_root(repo_dir)
         else:
             gd_path = gd_expanded if gd_expanded.startswith("/") else posixpath.join(cur_dir, gd_expanded)
             gd_real = os.path.realpath(gd_path)
-            if subcmd == "worktree":
-                base_dir = payload_cwd if (uncertain or not is_known_dir(cur_dir, ctx)) else cur_dir
-                record_worktree_add(rest, base_dir, state, ctx)
-            live_root = None
+            repo_live_root = None
             for r in sorted(live_roots):
                 if gd_real == os.path.realpath(posixpath.join(r, ".git")):
-                    live_root = r
+                    repo_live_root = r
                     break
-            if not live_root:
-                return
-            eff_dir = live_root
     else:
-        eff_dir = payload_cwd if (uncertain or not is_known_dir(cur_dir, ctx)) else cur_dir
-        if subcmd == "worktree":
-            record_worktree_add(rest, eff_dir, state, ctx)
-        if is_in_new_worktree(eff_dir, ctx):
-            return
-        live_root = worktree_live_root(eff_dir)
+        repo_live_root = None if is_in_new_worktree(start_dir, ctx) else worktree_live_root(start_dir)
 
+    wt_live_root = None
+    wt_eff_dir = start_dir
+    if has_work_tree:
+        wt_dir, wt_uncertain = apply_dir_step(work_tree_val, cur_dir, uncertain, state, ctx)
+        if gd_unexpanded:
+            wt_uncertain = True
+        wt_eff_dir = payload_cwd if (wt_uncertain or not is_known_dir(wt_dir, ctx)) else wt_dir
+        if not is_in_new_worktree(wt_eff_dir, ctx):
+            wt_live_root = worktree_live_root(wt_eff_dir)
+
+    if subcmd == "worktree":
+        base_dir = wt_eff_dir if has_work_tree else (payload_cwd if gd_unexpanded else start_dir)
+        record_worktree_add(rest, base_dir, state, ctx)
+
+    live_root = repo_live_root or wt_live_root
     if not live_root:
         return
 
+    # Pathspecs resolve against the directory git starts in; keep it when the
+    # repository was discovered from there and no other work tree is named.
+    eff_dir = start_dir if (repo_live_root and not has_git_dir and not has_work_tree) else live_root
     def_br = default_branch(live_root)
     reason = judge_subcommand(subcmd, rest, def_br, eff_dir)
     if reason:
