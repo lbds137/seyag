@@ -1,12 +1,15 @@
 #!/bin/bash
-# safe-worktree-clean - judge agent worktrees (--all: every linked one) for safe removal; --apply removes SAFE ones
+# safe-worktree-clean - judge agent worktrees (--all: every linked one) for safe removal; --apply removes SAFE ones; --apply-hold backs up and removes approved HOLD ones
 #
 # Usage:
-#   safe-worktree-clean [--apply] [--repo DIR] [--base REF] [--all] [--only PATH]... [--locks] [--locks-apply] [--json]
+#   safe-worktree-clean [--apply] [--repo DIR]... [--repos-file FILE] [--apply-hold ID] [--base REF] [--all] [--only PATH]... [--locks] [--locks-apply] [--json]
 #
 # Judges every worktree under <repo>/.claude/worktrees/ (--all: every linked worktree wherever it
-# lives; --repo DIR, default: the current repo) and prints SAFE or HOLD:<reason> for each; HOLD
-# trees go into one batched report.
+# lives; --repo DIR repeatable, default: the current repo; --repos-file FILE reads one repo path
+# per line, skipping blank lines and # comments and expanding ~/, exiting 2 if the file is
+# missing) and prints SAFE or HOLD:<reason> for each; HOLD trees go into one batched report.
+# With several repos in total, runs once per repo in the given order (--only applies to one repo
+# and exits 2 with several repos).
 # Dry run by default. --apply removes each SAFE tree on its own (unlock, git worktree remove
 # --force, git branch -D, then one git worktree prune); a HOLD never blocks another tree.
 # A tree is SAFE only when ALL hold, and any check that cannot run is a HOLD:
@@ -49,6 +52,40 @@
 #               refs, or commondir (worktree-gitfile-check, run before any git -C in the
 #               tree), and no gitlink path is a symlink or resolves outside the tree
 #               (judge_submodules, before git -C in that path) -> HOLD:gitfile
+# Approvable HOLD trees and plan id: a HOLD tree under <repo>/.claude/worktrees/ whose reason
+# codes are all in {unmerged, dirty, untracked-new, untracked-differs, ignored, branch-name,
+# detached-unreferenced} and that has no unmerged index entries (`git ls-files -u`) is approvable
+# ("approvable": true in --json; listed after the HOLD report as
+# `  approvable with --apply-hold: <rel path>`); any other code or an unmerged index entry keeps
+# the tree held under every mode. A repo's plan id (`hold plan: <id>`, JSON `"hold_plan"`, null
+# when no tree is approvable) is the first 12 hex of sha256 over each approvable tree in path
+# order: path, branch (or empty), `git rev-parse HEAD`, sorted reason lines, and `tree_state_sha`
+# (sha256 over `git status --porcelain=v1 -z --ignored --untracked-files=all`, `git diff --binary
+# HEAD`, `git diff --binary --cached HEAD` for the index, and the file contents via `git
+# hash-object --no-filters` or symlink target via `readlink` of each untracked and
+# non-cache/non-regenerable ignored file), NUL-separated. Across several repos, `sweep plan: <id>`
+# (JSON `"sweep_plan"`) is the first 12 hex of sha256 over the repos' `<repo path>\0<plan id or
+# empty>` lines in the given order when any repo has an approvable tree.
+# --apply-hold ID (also --apply-hold=ID; implies --apply; refuses with --all, exit 2): removing a
+# HOLD tree is the owner's call; pass the id from the dry run they approved. Recomputes the plan
+# id (the sweep id across several repos) and verifies the resolved backup dir lies outside the
+# repo and all its listed worktrees and is not on tmpfs/ramfs (unless
+# SYG_WORKTREE_BACKUP_ALLOW_VOLATILE=1) before removing anything; a plan mismatch or a rejected
+# backup dir exits 2 and removes nothing (SAFE trees included). Across several repos, each repo's
+# run re-verifies its own plan before removing, so a repo that changed after an earlier repo was
+# applied exits 2 and keeps its trees (the sweep can end partly applied; the exit code says so).
+# On a match, SAFE trees go as --apply, and each approvable HOLD tree is backed up under
+# `umask 077` (dirs 0700, files 0600) to
+# `${SYG_WORKTREE_BACKUP_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/seyag/worktree-backups}/<YYYY-MM-DDTHHMMSS>/<repo basename>--<tree basename>--<first 8 hex of sha256 of repo path>/`
+# with `tree.tgz` (every file except .git and ignored entries accepted by is_cache_path or
+# regen_verdict), `branch.bundle` (`git bundle create` of the branch or HEAD excluding <base>,
+# omitted when there are no commits beyond <base>), `reflog.pack` (commits in the HEAD or branch
+# reflog not in the bundle or on <base>, omitted when none), `uncommitted.patch` (`git diff
+# --binary HEAD`), `staged.patch` (`git diff --binary --cached HEAD`), `changes.txt` (including
+# reflog-only commits and ignored entries excluded as cache/regenerable), and `README.txt`,
+# verified with `tar --quoting-style=literal -tzf`, `git bundle verify`, and `git index-pack` and
+# re-checked for cwd, state, and lock changes before unlock / `git worktree remove --force` /
+# `git branch -D`.
 # <base> is --base REF, else SYG_WORKTREE_BASE, else origin/<default branch> (origin/HEAD,
 # else origin/main), compared as the local ref stands (fetch first for a fresh verdict);
 # a configured ref that does not resolve, or no default ref, makes every tree HOLD:no-base;
@@ -62,26 +99,65 @@
 # --locks also lists index.lock files in the repo's .git and every worktree's git dir; a lock
 # is stale when it is 0 bytes, older than SYG_WORKTREE_LOCK_AGE_MIN minutes (integer, default
 # 10), and no live git process works in the repo. --locks-apply deletes exactly the stale ones.
-# --json prints one JSON object instead of text.
-# Exit: 0 done; 1 --apply found no SAFE tree (nothing removed); 2 usage or not a git repo;
-# 3 a removal or lock deletion failed.
+# --json prints one JSON object instead of text (`{"repos": [...], "sweep_plan": ...}` when
+# sweeping several repos).
+# Exit: 0 done; 1 --apply found no removable tree (nothing removed); 2 usage, plan mismatch, or
+# not a git repo; 3 a backup, removal, or lock deletion failed. With several repos: 3 if any
+# child exits 3, else 2 if any exits 2, else 1 only if every child exits 1, else 0.
 
 set -uo pipefail
 
 usage() { sed -n '2,/^[^#]/s/^# \{0,1\}//p' "$0"; }
+trim() { local s=$1; s=${s#"${s%%[![:space:]]*}"}; printf '%s' "${s%"${s##*[![:space:]]}"}"; }
 
-APPLY=false ALL=false LOCKS=false LOCKS_APPLY=false JSON=false REPO=. BASE_ARG="" BASE_SRC=""
-ONLY_RAW=() ONLY_REAL=()
+APPLY=false APPLY_HOLD="" ALL=false LOCKS=false LOCKS_APPLY=false JSON=false BASE_ARG="" BASE_SRC=""
+REPOS=() ONLY_RAW=() ONLY_REAL=()
+
+add_repos_file() {
+  local f=$1 line
+  if [ -z "$f" ] || [ ! -f "$f" ] || [ ! -r "$f" ]; then
+    echo "safe-worktree-clean: cannot read --repos-file: $f" >&2
+    exit 2
+  fi
+  while IFS= read -r line || [ -n "$line" ]; do
+    line=$(trim "${line%$'\r'}")
+    case "$line" in "" | "#"*) continue ;; esac
+    case "$line" in
+      [~]) line=$HOME ;;
+      [~]/*) line="$HOME/${line#[~]/}" ;;
+    esac
+    REPOS+=("$line")
+  done <"$f"
+}
+
 while [ $# -gt 0 ]; do
   case "$1" in
     -h | --help) usage; exit 0 ;;
     --apply) APPLY=true ;;
+    --apply-hold)
+      [ $# -ge 2 ] || { usage >&2; exit 2; }
+      case "$2" in "" | -*) echo "safe-worktree-clean: --apply-hold needs a plan id" >&2; usage >&2; exit 2 ;; esac
+      APPLY_HOLD=$2; APPLY=true; shift ;;
+    --apply-hold=*)
+      APPLY_HOLD=${1#--apply-hold=}
+      case "$APPLY_HOLD" in "" | -*) echo "safe-worktree-clean: --apply-hold needs a plan id" >&2; usage >&2; exit 2 ;; esac
+      APPLY=true ;;
     --all) ALL=true ;;
     --locks) LOCKS=true ;;
     --locks-apply) LOCKS=true; LOCKS_APPLY=true ;;
     --json) JSON=true ;;
-    --repo) [ $# -ge 2 ] || { usage >&2; exit 2; }; REPO=$2; shift ;;
-    --repo=*) REPO=${1#--repo=} ;;
+    --repo)
+      [ $# -ge 2 ] || { usage >&2; exit 2; }
+      [ -n "$2" ] || { echo "safe-worktree-clean: --repo needs a path" >&2; usage >&2; exit 2; }
+      REPOS+=("$2"); shift ;;
+    --repo=*)
+      [ -n "${1#--repo=}" ] || { echo "safe-worktree-clean: --repo needs a path" >&2; usage >&2; exit 2; }
+      REPOS+=("${1#--repo=}") ;;
+    --repos-file)
+      [ $# -ge 2 ] || { usage >&2; exit 2; }
+      add_repos_file "$2"; shift ;;
+    --repos-file=*)
+      add_repos_file "${1#--repos-file=}" ;;
     --only)
       [ $# -ge 2 ] || { usage >&2; exit 2; }
       [ -n "$2" ] || { echo "safe-worktree-clean: --only needs a path" >&2; usage >&2; exit 2; }
@@ -101,6 +177,15 @@ while [ $# -gt 0 ]; do
   esac
   shift
 done
+[ ${#REPOS[@]} -gt 0 ] || REPOS=(.)
+if [ -n "$APPLY_HOLD" ] && $ALL; then
+  echo "safe-worktree-clean: --apply-hold cannot be used with --all" >&2
+  exit 2
+fi
+if [ ${#REPOS[@]} -gt 1 ] && [ ${#ONLY_RAW[@]} -gt 0 ]; then
+  echo "safe-worktree-clean: --only applies to one repo" >&2
+  exit 2
+fi
 if [ -z "$BASE_SRC" ] && [ -n "${SYG_WORKTREE_BASE:-}" ]; then
   BASE_ARG=$SYG_WORKTREE_BASE
   BASE_SRC="SYG_WORKTREE_BASE"
@@ -110,7 +195,212 @@ case $BASE_ARG in -*)
   echo "safe-worktree-clean: base ref from $BASE_SRC may not start with '-': $BASE_ARG" >&2; exit 2 ;;
 esac
 
-SELF_DIR=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
+SELF=$(readlink -f "${BASH_SOURCE[0]}")
+SELF_DIR=$(cd "$(dirname "$SELF")" && pwd)
+BACKUP_ROOT=$(realpath -m -- "${SYG_WORKTREE_BACKUP_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/seyag/worktree-backups}")
+RUN_STAMP=${SYG_WORKTREE_RUN_STAMP:-$(date +%Y-%m-%dT%H%M%S)}
+RUN_DIR=$(realpath -m -- "$BACKUP_ROOT/$RUN_STAMP")
+
+check_backup_volatile() {
+  [ "${SYG_WORKTREE_BACKUP_ALLOW_VOLATILE:-}" = 1 ] && return 0
+  local probe=$RUN_DIR fstype
+  while [ ! -e "$probe" ] && [ "$probe" != "/" ] && [ -n "$probe" ]; do
+    probe=$(dirname -- "$probe")
+  done
+  fstype=$(stat -f -c %T -- "$probe" 2>/dev/null) || fstype=""
+  case "$fstype" in
+    tmpfs | ramfs)
+      echo "safe-worktree-clean: backup dir $RUN_DIR is on $fstype (lost on reboot); choose a persistent SYG_WORKTREE_BACKUP_DIR or set SYG_WORKTREE_BACKUP_ALLOW_VOLATILE=1" >&2
+      exit 2
+      ;;
+  esac
+}
+
+if [ ${#REPOS[@]} -gt 1 ]; then
+  declare -A SEEN_MAIN_ENTRY=()
+  for r in "${REPOS[@]}"; do
+    r_main_raw=""
+    if r_porc=$(git -C "$r" worktree list --porcelain -z 2>/dev/null | tr '\0' '\036'); then
+      while IFS= read -r -d $'\036' wf; do
+        case "$wf" in
+          "worktree "*) r_main_raw=${wf#worktree }; break ;;
+        esac
+      done <<<"$r_porc"
+    fi
+    [ -n "$r_main_raw" ] || continue
+    r_main_res=$(realpath -m -- "$r_main_raw")
+    if [ -n "${SEEN_MAIN_ENTRY[$r_main_res]+set}" ]; then
+      echo "safe-worktree-clean: ${SEEN_MAIN_ENTRY[$r_main_res]} and $r are the same repo ($r_main_res); list it once" >&2
+      exit 2
+    fi
+    SEEN_MAIN_ENTRY[$r_main_res]=$r
+  done
+
+  COMMON_ARGS=()
+  $ALL && COMMON_ARGS+=(--all)
+  if $LOCKS_APPLY; then
+    COMMON_ARGS+=(--locks-apply)
+  elif $LOCKS; then
+    COMMON_ARGS+=(--locks)
+  fi
+  [ "$BASE_SRC" = "--base" ] && COMMON_ARGS+=(--base "$BASE_ARG")
+
+  R_MAINS=() R_PLANS=()
+  has_hold_plan=false
+  if [ -n "$APPLY_HOLD" ]; then
+    DRY_ARGS=()
+    $ALL && DRY_ARGS+=(--all)
+    $LOCKS && DRY_ARGS+=(--locks)
+    [ "$BASE_SRC" = "--base" ] && DRY_ARGS+=(--base "$BASE_ARG")
+    for r in "${REPOS[@]}"; do
+      if d_out=$(bash "$SELF" --repo "$r" --json "${DRY_ARGS[@]}"); then
+        IFS=$'\036' read -r r_main r_plan < <(
+          python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+print((d.get("repo") or "") + "\x1e" + (d.get("hold_plan") or ""))
+' <<<"$d_out"
+        )
+        R_MAINS+=("$r_main")
+        R_PLANS+=("$r_plan")
+        [ -n "$r_plan" ] && has_hold_plan=true
+        r_wts=()
+        while IFS= read -r -d $'\036' wf; do
+          case "$wf" in "worktree "*) r_wts+=("$(realpath -m -- "${wf#worktree }")") ;; esac
+        done < <(git -C "$r" worktree list --porcelain -z 2>/dev/null | tr '\0' '\036')
+        for wi in $(seq 1 $((${#r_wts[@]} - 1))) 0; do
+          [ "$wi" -ge 0 ] && [ "$wi" -lt "${#r_wts[@]}" ] || continue
+          wp=${r_wts[$wi]}
+          if [ "$RUN_DIR" = "$wp" ] || [[ "$RUN_DIR" == "${wp%/}/"* ]]; then
+            echo "safe-worktree-clean: backup dir $RUN_DIR is inside $wp; choose SYG_WORKTREE_BACKUP_DIR outside the repo and its worktrees" >&2
+            exit 2
+          fi
+        done
+      else
+        echo "safe-worktree-clean: $r: dry run failed; nothing removed" >&2
+        exit 2
+      fi
+    done
+    check_backup_volatile
+    SWEEP_PLAN=""
+    if $has_hold_plan; then
+      SWEEP_PLAN=$(
+        for idx in "${!REPOS[@]}"; do
+          printf '%s\0%s\n' "${R_MAINS[$idx]}" "${R_PLANS[$idx]}"
+        done | sha256sum | cut -c1-12
+      )
+    fi
+    if [ -z "$SWEEP_PLAN" ] || [ "$APPLY_HOLD" != "$SWEEP_PLAN" ]; then
+      echo "safe-worktree-clean: hold plan changed: approved $APPLY_HOLD, now ${SWEEP_PLAN:-none}; rerun the dry run and get a fresh yes" >&2
+      exit 2
+    fi
+    export SYG_WORKTREE_RUN_STAMP=$RUN_STAMP
+  fi
+
+  any_3=false any_2=false all_1=true
+  JSON_OBJS=()
+  for idx in "${!REPOS[@]}"; do
+    r=${REPOS[$idx]}
+    child_extra=()
+    if [ -n "$APPLY_HOLD" ]; then
+      if [ -n "${R_PLANS[$idx]}" ]; then
+        child_extra+=(--apply-hold "${R_PLANS[$idx]}")
+      else
+        child_extra+=(--apply)
+      fi
+    elif $APPLY; then
+      child_extra+=(--apply)
+    fi
+    $JSON && child_extra+=(--json)
+    c_out=$(SYG_WORKTREE_SWEEP_CHILD=1 bash "$SELF" --repo "$r" "${COMMON_ARGS[@]}" "${child_extra[@]}")
+    c_rc=$?
+    [ "$c_rc" -eq 3 ] && any_3=true
+    [ "$c_rc" -eq 2 ] && any_2=true
+    [ "$c_rc" -ne 1 ] && all_1=false
+    if $JSON; then
+      if [ -n "$c_out" ]; then
+        JSON_OBJS+=("$c_out")
+        if [ -z "$APPLY_HOLD" ]; then
+          IFS=$'\036' read -r r_main r_plan < <(
+            python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+print((d.get("repo") or "") + "\x1e" + (d.get("hold_plan") or ""))
+' <<<"$c_out"
+          )
+          R_MAINS+=("$r_main")
+          R_PLANS+=("$r_plan")
+          [ -n "$r_plan" ] && has_hold_plan=true
+        fi
+      else
+        err_json=$(python3 -c 'import json, sys; print(json.dumps({"repo": sys.argv[1], "error": f"exit {sys.argv[2]}"}))' "$r" "$c_rc")
+        JSON_OBJS+=("$err_json")
+        if [ -z "$APPLY_HOLD" ]; then
+          R_MAINS+=("$(realpath -m -- "$r")")
+          R_PLANS+=("")
+        fi
+      fi
+    else
+      [ -z "$c_out" ] || printf '%s\n' "$c_out"
+      if [ -z "$APPLY_HOLD" ]; then
+        if [ -n "$c_out" ]; then
+          first_line=${c_out%%$'\n'*}
+          r_main=${first_line#repo: }
+          r_main=${r_main%%  base: *}
+          r_plan=$(sed -n 's/^hold plan: \([0-9a-f]\{12\}\)$/\1/p' <<<"$c_out" | tail -n 1)
+        else
+          r_main=$(realpath -m -- "$r")
+          r_plan=""
+        fi
+        R_MAINS+=("$r_main")
+        R_PLANS+=("$r_plan")
+        [ -n "$r_plan" ] && has_hold_plan=true
+      fi
+    fi
+  done
+
+  if [ -z "$APPLY_HOLD" ]; then
+    SWEEP_PLAN=""
+    if $has_hold_plan; then
+      SWEEP_PLAN=$(
+        for idx in "${!REPOS[@]}"; do
+          printf '%s\0%s\n' "${R_MAINS[$idx]}" "${R_PLANS[$idx]}"
+        done | sha256sum | cut -c1-12
+      )
+    fi
+  fi
+
+  if $JSON; then
+    {
+      printf '%s\0' "$SWEEP_PLAN"
+      for j in "${JSON_OBJS[@]}"; do
+        printf '%s\0' "$j"
+      done
+    } | python3 -c '
+import json, sys
+f = sys.stdin.buffer.read().decode("utf-8", "surrogateescape").split("\0")[:-1]
+sweep_plan = f[0] or None
+repos = [json.loads(x) for x in f[1:] if x]
+print(json.dumps({"repos": repos, "sweep_plan": sweep_plan}, indent=2))
+'
+  else
+    if [ -n "$APPLY_HOLD" ]; then
+      shopt -s nullglob
+      bk_readmes=("$RUN_DIR"/*/README.txt)
+      shopt -u nullglob
+      [ ${#bk_readmes[@]} -eq 0 ] || echo "backups: $RUN_DIR"
+    elif [ -n "$SWEEP_PLAN" ]; then
+      echo "sweep plan: $SWEEP_PLAN"
+    fi
+  fi
+
+  if $any_3; then exit 3
+  elif $any_2; then exit 2
+  elif $all_1; then exit 1
+  else exit 0; fi
+fi
+
+REPO=${REPOS[0]}
 COMMON=$(git -C "$REPO" rev-parse --path-format=absolute --git-common-dir 2>&1) || {
   echo "safe-worktree-clean: not a git repo: $REPO ($COMMON)" >&2; exit 2; }
 PORCELAIN=$(git -C "$REPO" worktree list --porcelain -z | tr '\0' '\036') || {
@@ -169,7 +459,6 @@ fi
 REGEN_FILE=.claude/worktree-regenerable
 REGEN_GLOBS=()
 declare -A REGEN_TEMPLATE=()
-trim() { local s=$1; s=${s#"${s%%[![:space:]]*}"}; printf '%s' "${s%"${s##*[![:space:]]}"}"; }
 # A glob of only *s, optionally after one dot (*, **, .*), matches every path or every dotfile,
 # .env secrets included: refused. $1 the glob, $2 where it came from (for the warning).
 # A trailing / (gitignore's directory form) is dropped: ignored paths are matched without it.
@@ -644,7 +933,7 @@ if [ ${#TREES[@]} -gt 0 ]; then
 fi
 
 # Judge every tree; record the verdict.
-V_IDX=() V_VERDICT=() V_REASONS=() V_ACTION=()
+V_IDX=() V_VERDICT=() V_REASONS=() V_APPROVABLE=() V_ACTION=() V_HOLD_REMOVED=()
 for i in "${TREES[@]}"; do
   REASONS=()
   t=${WT_PATH[$i]}
@@ -669,14 +958,394 @@ for i in "${TREES[@]}"; do
     judge_git "$i"
   fi
   V_IDX+=("$i")
-  if [ ${#REASONS[@]} -eq 0 ]; then V_VERDICT+=(SAFE); V_REASONS+=(""); else
-    V_VERDICT+=(HOLD); V_REASONS+=("$(printf '%s\n' "${REASONS[@]}")"); fi
+  if [ ${#REASONS[@]} -eq 0 ]; then
+    V_VERDICT+=(SAFE)
+    V_REASONS+=("")
+    V_APPROVABLE+=(false)
+  else
+    V_VERDICT+=(HOLD)
+    reasons_str=$(printf '%s\n' "${REASONS[@]}")
+    V_REASONS+=("$reasons_str")
+    approvable=false
+    case "$(realpath -m -- "$t")/" in
+      "$WT_ROOT"/?*)
+        approvable=true
+        while IFS=$'\t' read -r code _; do
+          case "$code" in
+            unmerged | dirty | untracked-new | untracked-differs | ignored | branch-name | detached-unreferenced) ;;
+            *) approvable=false; break ;;
+          esac
+        done <<<"$reasons_str"
+        if $approvable; then
+          if ! unmerged_idx=$(git -C "$t" ls-files -u 2>/dev/null) || [ -n "$unmerged_idx" ]; then
+            approvable=false
+          fi
+        fi
+        ;;
+    esac
+    V_APPROVABLE+=("$approvable")
+  fi
   V_ACTION+=("")
+  V_HOLD_REMOVED+=(false)
 done
 
-# Apply: each SAFE tree independently; a failed step stops that tree only.
+# Populate array $1 with each untracked path and each ignored path not accepted by
+# is_cache_path/regen_verdict in tree $2 (for an ignored directory, every regular file
+# or symlink below it in LC_ALL=C sorted order).
+at_risk_files() {
+  local -n ar_out=$1
+  local t=$2 entry p q rv sub
+  local -a st=()
+  ar_out=()
+  z_list st git -C "$t" status --porcelain=v1 -z --no-renames --ignored=matching --untracked-files=all || return 1
+  for entry in "${st[@]}"; do
+    case "$entry" in
+      "?? "*)
+        p=${entry#"?? "}
+        q=${p%/}
+        if [ -L "$t/$q" ] || [ -f "$t/$q" ]; then
+          ar_out+=("$q")
+        elif [ -d "$t/$q" ]; then
+          while IFS= read -r -d '' sub; do
+            ar_out+=("$q/$sub")
+          done < <(find "$t/$q" \( -type f -o -type l \) -printf '%P\0' 2>/dev/null | LC_ALL=C sort -z)
+        fi
+        ;;
+      "!! "*)
+        p=${entry#"!! "}
+        q=${p%/}
+        regen_verdict "$t" "$p"
+        rv=$?
+        if [ "$rv" -eq 0 ] || { [ "$rv" -ne 2 ] && [ ${#CACHE_NAMES[@]} -gt 0 ] && is_cache_path "$t" "$p"; }; then
+          continue
+        fi
+        if [ -L "$t/$q" ] || [ -f "$t/$q" ]; then
+          ar_out+=("$q")
+        elif [ -d "$t/$q" ]; then
+          while IFS= read -r -d '' sub; do
+            ar_out+=("$q/$sub")
+          done < <(find "$t/$q" \( -type f -o -type l \) -printf '%P\0' 2>/dev/null | LC_ALL=C sort -z)
+        fi
+        ;;
+    esac
+  done
+  return 0
+}
+
+tree_state_sha() {
+  local t=$1 p f_hash
+  local -a risk_files=()
+  at_risk_files risk_files "$t" 2>/dev/null || true
+  {
+    git -C "$t" status --porcelain=v1 -z --ignored --untracked-files=all 2>/dev/null
+    git -C "$t" diff --binary HEAD 2>/dev/null
+    git -C "$t" diff --binary --cached HEAD 2>/dev/null
+    for p in "${risk_files[@]}"; do
+      if [ -L "$t/$p" ]; then
+        f_hash=$(readlink -- "$t/$p" 2>/dev/null)
+      else
+        f_hash=$(git -C "$t" hash-object --no-filters -- "$p" 2>/dev/null)
+      fi
+      printf '%s\0%s\0' "$p" "$f_hash"
+    done
+  } | sha256sum | cut -d' ' -f1
+}
+
+# Plan id over approvable HOLD trees in path order.
+HOLD_PLAN=""
+V_HEAD_SHA=() V_STATE_SHA=()
+app_lines=()
+for k in "${!V_IDX[@]}"; do
+  ${V_APPROVABLE[$k]} || continue
+  app_lines+=("${WT_PATH[${V_IDX[$k]}]}"$'\t'"$k")
+done
+if [ ${#app_lines[@]} -gt 0 ]; then
+  mapfile -t sorted_app < <(printf '%s\n' "${app_lines[@]}" | LC_ALL=C sort -t $'\t' -k1,1)
+  for entry in "${sorted_app[@]}"; do
+    k=${entry##*$'\t'}
+    t=${WT_PATH[${V_IDX[$k]}]}
+    V_HEAD_SHA[k]=$(git -C "$t" rev-parse HEAD 2>/dev/null)
+    V_STATE_SHA[k]=$(tree_state_sha "$t")
+  done
+  HOLD_PLAN=$(
+    for entry in "${sorted_app[@]}"; do
+      k=${entry##*$'\t'}
+      i=${V_IDX[$k]}
+      t=${WT_PATH[$i]}
+      b=${WT_BRANCH[$i]}
+      sorted_reasons=$(LC_ALL=C sort <<<"${V_REASONS[$k]}")
+      printf '%s\0%s\0%s\0%s\0%s\0' "$t" "$b" "${V_HEAD_SHA[$k]}" "$sorted_reasons" "${V_STATE_SHA[$k]}"
+    done | sha256sum | cut -c1-12
+  )
+fi
+
+if [ -n "$APPLY_HOLD" ]; then
+  for i in $(seq 1 "$cur") 0; do
+    wp=$(realpath -m -- "${WT_PATH[$i]}")
+    if [ "$RUN_DIR" = "$wp" ] || [[ "$RUN_DIR" == "${wp%/}/"* ]]; then
+      echo "safe-worktree-clean: backup dir $RUN_DIR is inside $wp; choose SYG_WORKTREE_BACKUP_DIR outside the repo and its worktrees" >&2
+      exit 2
+    fi
+  done
+  check_backup_volatile
+  if [ -z "$HOLD_PLAN" ] || [ "$APPLY_HOLD" != "$HOLD_PLAN" ]; then
+    echo "safe-worktree-clean: hold plan changed: approved $APPLY_HOLD, now ${HOLD_PLAN:-none}; rerun the dry run and get a fresh yes" >&2
+    exit 2
+  fi
+fi
+
+BACKUP_ERR=""
+BK_DIR=""
+backup_tree() {
+  local k=$2 t=${WT_PATH[$1]} b=${WT_BRANCH[$1]} head=${WT_HEAD[$1]}
+  local repo_base tree_base main_sha err entry p q rv commits_out status_txt head_sha bundle_ref
+  local q_main q_bundle q_reflog q_tgz q_staged restore_git tar_list t_entry reflog_tips="" reflog_only="" reflog_lines=""
+  local -a ig_status=() tar_excludes=() excluded_entries=() top_entries=() expected_in_tar=() diff_head=()
+  local -A in_tar=()
+  repo_base=$(basename -- "$MAIN")
+  tree_base=$(basename -- "$t")
+  main_sha=$(printf '%s' "$MAIN" | sha256sum | cut -c1-8)
+  BK_DIR="$RUN_DIR/${repo_base}--${tree_base}--${main_sha}"
+  if ! err=$(umask 077 && mkdir -p -- "$RUN_DIR" && chmod 0700 "$RUN_DIR" 2>&1); then
+    BACKUP_ERR=$err
+    return 1
+  fi
+  if [ -e "$BK_DIR" ] || [ -L "$BK_DIR" ]; then
+    BACKUP_ERR="$BK_DIR already exists"
+    return 1
+  fi
+  if ! err=$(umask 077 && mkdir -- "$BK_DIR" && chmod 0700 "$BK_DIR" 2>&1); then
+    if [ -e "$BK_DIR" ] || [ -L "$BK_DIR" ]; then
+      BACKUP_ERR="$BK_DIR already exists"
+    else
+      BACKUP_ERR=$err
+    fi
+    return 1
+  fi
+  if ! z_list ig_status git -C "$t" status --porcelain=v1 -z --no-renames --ignored=matching --untracked-files=all; then
+    BACKUP_ERR="git status --ignored in the tree failed"
+    return 1
+  fi
+  if ! at_risk_files expected_in_tar "$t"; then
+    BACKUP_ERR="git status --ignored in the tree failed"
+    return 1
+  fi
+  if ! z_list diff_head git -C "$t" diff --name-only -z --no-renames HEAD; then
+    BACKUP_ERR="git diff --name-only HEAD in the tree failed"
+    return 1
+  fi
+  for p in "${diff_head[@]}"; do
+    if [ -e "$t/$p" ] || [ -L "$t/$p" ]; then
+      expected_in_tar+=("$p")
+    fi
+  done
+  for entry in "${ig_status[@]}"; do
+    case "$entry" in "!! "*) ;; *) continue ;; esac
+    p=${entry#!! }
+    q=${p%/}
+    regen_verdict "$t" "$p"
+    rv=$?
+    if [ "$rv" -eq 0 ] || { [ "$rv" -ne 2 ] && [ ${#CACHE_NAMES[@]} -gt 0 ] && is_cache_path "$t" "$p"; }; then
+      tar_excludes+=("--exclude=$q")
+      excluded_entries+=("$q")
+    fi
+  done
+  while IFS= read -r -d '' entry; do
+    entry=${entry#./}
+    [ "$entry" = "." ] || [ "$entry" = ".git" ] && continue
+    top_entries+=("$entry")
+  done < <(find "$t" -mindepth 1 -maxdepth 1 -printf '%P\0' 2>/dev/null)
+  if [ ${#top_entries[@]} -gt 0 ]; then
+    if ! err=$(umask 077 && tar -C "$t" --anchored --no-wildcards "${tar_excludes[@]}" \
+      -czf "$BK_DIR/tree.tgz" -- "${top_entries[@]}" 2>&1); then
+      BACKUP_ERR="tar failed: $err"
+      return 1
+    fi
+  else
+    if ! err=$(umask 077 && tar -C "$t" -czf "$BK_DIR/tree.tgz" --files-from=/dev/null 2>&1); then
+      BACKUP_ERR="tar failed: $err"
+      return 1
+    fi
+  fi
+  chmod 0600 "$BK_DIR/tree.tgz" 2>/dev/null || true
+
+  if ! commits_out=$(git -C "$t" log --oneline "$BASE..HEAD" 2>&1); then
+    BACKUP_ERR="git log failed: $commits_out"
+    return 1
+  fi
+  bundle_ref=${b:+refs/heads/$b}
+  bundle_ref=${bundle_ref:-HEAD}
+  if [ -n "$commits_out" ]; then
+    if ! err=$(umask 077 && git -C "$t" bundle create "$BK_DIR/branch.bundle" "$BASE..$bundle_ref" 2>&1); then
+      BACKUP_ERR="git bundle create failed: $err"
+      return 1
+    fi
+    chmod 0600 "$BK_DIR/branch.bundle" 2>/dev/null || true
+  fi
+
+  reflog_tips=$(
+    {
+      git -C "$t" rev-list --walk-reflogs HEAD 2>/dev/null || true
+      if [ -n "$b" ]; then
+        git -C "$t" rev-list --walk-reflogs "refs/heads/$b" 2>/dev/null || true
+      fi
+    } | LC_ALL=C sort -u
+  )
+  if [ -n "$reflog_tips" ]; then
+    if ! reflog_only=$(git -C "$t" rev-list --stdin "^$BASE" "^$bundle_ref" <<<"$reflog_tips" 2>&1); then
+      BACKUP_ERR="git rev-list for reflogs failed: $reflog_only"
+      return 1
+    fi
+  fi
+  if [ -n "$reflog_only" ]; then
+    if ! reflog_lines=$(git -C "$t" log --no-walk --stdin --format='%H %s' <<<"$reflog_only" 2>&1); then
+      BACKUP_ERR="git log for reflogs failed: $reflog_lines"
+      return 1
+    fi
+    if ! (
+      umask 077
+      git -C "$t" rev-list --objects --stdin "^$BASE" <<<"$reflog_only" \
+        | git -C "$t" pack-objects -q --stdout >"$BK_DIR/reflog.pack"
+    ) 2>"$BK_DIR/.err"; then
+      BACKUP_ERR="reflog.pack failed: $(cat "$BK_DIR/.err" 2>/dev/null)"
+      rm -f "$BK_DIR/.err"
+      return 1
+    fi
+    rm -f "$BK_DIR/.err"
+    chmod 0600 "$BK_DIR/reflog.pack" 2>/dev/null || true
+  fi
+
+  if ! (umask 077 && git -C "$t" diff --binary HEAD >"$BK_DIR/uncommitted.patch" 2>"$BK_DIR/.err"); then
+    BACKUP_ERR="git diff failed: $(cat "$BK_DIR/.err" 2>/dev/null)"
+    rm -f "$BK_DIR/.err"
+    return 1
+  fi
+  rm -f "$BK_DIR/.err"
+  chmod 0600 "$BK_DIR/uncommitted.patch" 2>/dev/null || true
+
+  if ! (umask 077 && git -C "$t" diff --binary --cached HEAD >"$BK_DIR/staged.patch" 2>"$BK_DIR/.err"); then
+    BACKUP_ERR="git diff --cached failed: $(cat "$BK_DIR/.err" 2>/dev/null)"
+    rm -f "$BK_DIR/.err"
+    return 1
+  fi
+  rm -f "$BK_DIR/.err"
+  chmod 0600 "$BK_DIR/staged.patch" 2>/dev/null || true
+
+  if ! status_txt=$(git -C "$t" status --porcelain=v1 --ignored --untracked-files=all 2>&1); then
+    BACKUP_ERR="git status failed: $status_txt"
+    return 1
+  fi
+  if ! (
+    umask 077
+    {
+      printf '=== HOLD reasons ===\n'
+      while IFS=$'\t' read -r code detail; do
+        printf 'HOLD:%s  %s\n' "$code" "$detail"
+      done <<<"${V_REASONS[$k]}"
+      printf '\n=== Commits (%s..HEAD) ===\n' "$BASE"
+      if [ -n "$commits_out" ]; then
+        printf '%s\n' "$commits_out"
+      else
+        printf 'no commits beyond %s\n' "$BASE"
+      fi
+      printf '\n=== Commits only in reflogs (in reflog.pack) ===\n'
+      if [ -n "$reflog_lines" ]; then
+        printf '%s\n' "$reflog_lines"
+      else
+        printf 'none\n'
+      fi
+      printf '\n=== Status ===\n'
+      [ -z "$status_txt" ] || printf '%s\n' "$status_txt"
+      printf '\n=== Excluded as cache/regenerable (not in tree.tgz) ===\n'
+      if [ ${#excluded_entries[@]} -gt 0 ]; then
+        printf '%s\n' "${excluded_entries[@]}"
+      else
+        printf 'none\n'
+      fi
+    } >"$BK_DIR/changes.txt"
+  ) 2>"$BK_DIR/.err"; then
+    BACKUP_ERR="writing changes.txt failed: $(cat "$BK_DIR/.err" 2>/dev/null)"
+    rm -f "$BK_DIR/.err"
+    return 1
+  fi
+  rm -f "$BK_DIR/.err"
+  chmod 0600 "$BK_DIR/changes.txt" 2>/dev/null || true
+
+  if ! tar_list=$(tar --quoting-style=literal -tzf "$BK_DIR/tree.tgz" 2>"$BK_DIR/.err"); then
+    BACKUP_ERR="tar verify failed: $(cat "$BK_DIR/.err" 2>/dev/null)"
+    rm -f "$BK_DIR/.err"
+    return 1
+  fi
+  rm -f "$BK_DIR/.err"
+  while IFS= read -r t_entry; do
+    [ -n "$t_entry" ] || continue
+    in_tar[$t_entry]=1
+    in_tar[${t_entry%/}]=1
+  done <<<"$tar_list"
+  for p in "${expected_in_tar[@]}"; do
+    if [ -z "${in_tar[$p]+set}" ]; then
+      BACKUP_ERR="tree.tgz lacks $p"
+      return 1
+    fi
+  done
+  if [ -f "$BK_DIR/branch.bundle" ]; then
+    if ! err=$(git -C "$t" bundle verify "$BK_DIR/branch.bundle" 2>&1 >/dev/null); then
+      BACKUP_ERR="bundle verify failed: $err"
+      return 1
+    fi
+  fi
+  if [ -f "$BK_DIR/reflog.pack" ]; then
+    if ! err=$(umask 077 && git -C "$t" index-pack -o "$BK_DIR/reflog.idx" "$BK_DIR/reflog.pack" 2>&1 >/dev/null); then
+      BACKUP_ERR="reflog.pack verify failed: $err"
+      return 1
+    fi
+    chmod 0600 "$BK_DIR/reflog.idx" 2>/dev/null || true
+    [ ! -f "$BK_DIR/reflog.rev" ] || chmod 0600 "$BK_DIR/reflog.rev" 2>/dev/null || true
+  fi
+
+  head_sha=$(git -C "$t" rev-parse HEAD 2>/dev/null) || head_sha=$head
+  printf -v q_main '%q' "$MAIN"
+  printf -v q_bundle '%q' "$BK_DIR/branch.bundle"
+  printf -v q_reflog '%q' "$BK_DIR/reflog.pack"
+  printf -v q_tgz '%q' "$BK_DIR/tree.tgz"
+  printf -v q_staged '%q' "$BK_DIR/staged.patch"
+  if [ -f "$BK_DIR/branch.bundle" ]; then
+    restore_git="  git -C $q_main fetch $q_bundle ${b:-HEAD}:${b:-restored-worktree}"
+  else
+    restore_git="  no branch.bundle: no commits beyond $BASE"
+  fi
+  if [ -f "$BK_DIR/reflog.pack" ]; then
+    restore_git+=$'\n'"  git -C $q_main index-pack --stdin --fix-thin < $q_reflog  # then: git -C $q_main branch <name> <sha from changes.txt>"
+  fi
+  if ! (
+    umask 077
+    cat >"$BK_DIR/README.txt" <<EOF
+repo: $MAIN
+tree: $t
+branch: ${b:-detached}
+HEAD: $head_sha
+base: $BASE
+
+Restore:
+$restore_git
+  git -C <tree or new worktree> apply --index $q_staged
+  tar -xzf $q_tgz -C <dest>
+EOF
+  ) 2>"$BK_DIR/.err"; then
+    BACKUP_ERR="writing README.txt failed: $(cat "$BK_DIR/.err" 2>/dev/null)"
+    rm -f "$BK_DIR/.err"
+    return 1
+  fi
+  rm -f "$BK_DIR/.err"
+  chmod 0600 "$BK_DIR/README.txt" 2>/dev/null || true
+  return 0
+}
+
+# Apply: each SAFE tree independently (and with --apply-hold, each approvable HOLD tree after
+# a verified backup); a failed step stops that tree only.
 rc=0
 removed=0
+backed_up=0
 if $APPLY; then
   for k in "${!V_IDX[@]}"; do
     [ "${V_VERDICT[$k]}" = SAFE ] || continue
@@ -693,6 +1362,77 @@ if $APPLY; then
     fi
     V_ACTION[k]="removed${b:+, branch $b deleted}"
   done
+  if [ -n "$APPLY_HOLD" ]; then
+    for k in "${!V_IDX[@]}"; do
+      ${V_APPROVABLE[$k]} || continue
+      i=${V_IDX[$k]} t=${WT_PATH[$i]} b=${WT_BRANCH[$i]}
+      if ! backup_tree "$i" "$k"; then
+        V_ACTION[k]="failed: backup: ${BACKUP_ERR//$'\n'/ }"; rc=3; continue
+      fi
+      backed_up=$((backed_up + 1))
+      live_pid=""
+      cwd_ok=true
+      cwd_scan=$(proc_scan cwd "$t" | tr '\0' '\036') || cwd_ok=false
+      while IFS= read -r -d $'\036' _p && IFS= read -r -d $'\036' _pid; do
+        live_pid=$_pid
+      done <<<"$cwd_scan"
+      if [ -n "$live_pid" ]; then
+        V_ACTION[k]="backed up to $BK_DIR; kept: pid $live_pid has its cwd inside the tree"; rc=3; continue
+      fi
+      now_head=$(git -C "$t" rev-parse HEAD 2>/dev/null)
+      now_state=$(tree_state_sha "$t")
+      if ! $cwd_ok || [ "$now_head" != "${V_HEAD_SHA[$k]}" ] || [ "$now_state" != "${V_STATE_SHA[$k]}" ]; then
+        V_ACTION[k]="backed up to $BK_DIR; kept: tree changed during backup"; rc=3; continue
+      fi
+      now_porcelain=$(git -C "$MAIN" worktree list --porcelain -z 2>/dev/null | tr '\0' '\036') || now_porcelain=""
+      now_locked=false now_lock_reason="" in_target=false found_target=false
+      while IFS= read -r -d $'\036' f; do
+        case "$f" in
+          "worktree "*)
+            if [ "${f#worktree }" = "$t" ]; then
+              in_target=true found_target=true
+            else
+              in_target=false
+            fi
+            ;;
+          locked) $in_target && now_locked=true ;;
+          "locked "*)
+            if $in_target; then
+              now_locked=true
+              now_lock_reason=${f#locked }
+            fi
+            ;;
+        esac
+      done <<<"$now_porcelain"
+      lock_changed=false
+      if ! $found_target; then
+        lock_changed=true
+      elif $now_locked; then
+        if ! ${WT_LOCKED[$i]}; then
+          lock_changed=true
+        elif [[ $now_lock_reason =~ (^|[^[:alnum:]_])[Pp][Ii][Dd][\ :=]+([0-9]+) ]]; then
+          [ -d "/proc/${BASH_REMATCH[2]}" ] && lock_changed=true
+        else
+          lock_changed=true
+        fi
+      fi
+      if $lock_changed; then
+        V_ACTION[k]="backed up to $BK_DIR; kept: tree locked during backup"; rc=3; continue
+      fi
+      if $now_locked && ! err=$(git -C "$MAIN" worktree unlock "$t" 2>&1); then
+        V_ACTION[k]="backed up to $BK_DIR; failed: unlock: ${err//$'\n'/ }"; rc=3; continue
+      fi
+      if ! err=$(git -C "$MAIN" worktree remove --force "$t" 2>&1); then
+        V_ACTION[k]="backed up to $BK_DIR; failed: remove: ${err//$'\n'/ }"; rc=3; continue
+      fi
+      V_HOLD_REMOVED[k]=true
+      removed=$((removed + 1))
+      if [ -n "$b" ] && ! err=$(git -C "$MAIN" branch -D "$b" 2>&1); then
+        V_ACTION[k]="backed up to $BK_DIR; removed; branch delete failed: ${err//$'\n'/ }"; rc=3; continue
+      fi
+      V_ACTION[k]="backed up to $BK_DIR; removed${b:+, branch $b deleted}"
+    done
+  fi
   [ "$removed" -eq 0 ] || git -C "$MAIN" worktree prune >/dev/null 2>&1 || rc=3
   [ "$removed" -gt 0 ] || [ "$rc" -ne 0 ] || rc=1
 fi
@@ -738,11 +1478,11 @@ rel() { local p; p=$(realpath -m -- "$1"); printf '%s' "${p#"$MAIN"/}"; }
 
 if $JSON; then
   {
-    printf '%s\0%s\0%s\0%s\0%s\0' "$MAIN" "$BASE" "$APPLY" "$LOCKS" "${#V_IDX[@]}"
+    printf '%s\0%s\0%s\0%s\0%s\0%s\0' "$MAIN" "$BASE" "$APPLY" "$LOCKS" "$HOLD_PLAN" "${#V_IDX[@]}"
     for k in "${!V_IDX[@]}"; do
       i=${V_IDX[$k]}
-      printf '%s\0%s\0%s\0%s\0%s\0' "${WT_PATH[$i]}" "${WT_BRANCH[$i]}" "${V_VERDICT[$k]}" \
-        "${V_REASONS[$k]}" "${V_ACTION[$k]}"
+      printf '%s\0%s\0%s\0%s\0%s\0%s\0' "${WT_PATH[$i]}" "${WT_BRANCH[$i]}" "${V_VERDICT[$k]}" \
+        "${V_APPROVABLE[$k]}" "${V_REASONS[$k]}" "${V_ACTION[$k]}"
     done
     for k in "${!L_PATH[@]}"; do
       printf '%s\0%s\0%s\0%s\0' "${L_PATH[$k]}" "${L_VERDICT[$k]}" "${L_DETAIL[$k]}" "${L_ACTION[$k]}"
@@ -750,19 +1490,21 @@ if $JSON; then
   } | python3 -c '
 import json, sys
 f = sys.stdin.buffer.read().decode("utf-8", "surrogateescape").split("\0")[:-1]
-repo, base, apply_, locks, n = f[:5]
-f = f[5:]
+repo, base, apply_, locks, hold_plan, n = f[:6]
+f = f[6:]
 trees = []
 for k in range(int(n)):
-    path, branch, verdict, reasons, action = f[5 * k:5 * k + 5]
+    path, branch, verdict, approvable, reasons, action = f[6 * k:6 * k + 6]
     trees.append({"path": path, "branch": branch or None, "verdict": verdict,
+                  "approvable": approvable == "true",
                   "reasons": [dict(zip(("code", "detail"), r.split("\t", 1)))
                               for r in reasons.splitlines()],
                   "action": action or None})
-f = f[5 * int(n):]
+f = f[6 * int(n):]
 lks = [{"path": f[i], "verdict": f[i + 1], "detail": f[i + 2], "action": f[i + 3] or None}
        for i in range(0, len(f), 4)]
-out = {"repo": repo, "base": base or None, "apply": apply_ == "true", "worktrees": trees}
+out = {"repo": repo, "base": base or None, "apply": apply_ == "true",
+       "hold_plan": hold_plan or None, "worktrees": trees}
 if locks == "true":
     out["locks"] = lks
 print(json.dumps(out, indent=2))
@@ -772,25 +1514,47 @@ fi
 
 echo "repo: $MAIN  base: ${BASE:-none}  $($ALL && echo 'worktrees judged' || echo 'agent worktrees'): ${#V_IDX[@]}$($APPLY || echo '  (dry run; --apply removes the SAFE ones)')"
 nhold=0
+nhold_removed=0
 for k in "${!V_IDX[@]}"; do
   i=${V_IDX[$k]}
   if [ "${V_VERDICT[$k]}" = SAFE ]; then
     printf 'SAFE  %s  [%s]%s\n' "$(rel "${WT_PATH[$i]}")" "${WT_BRANCH[$i]:-detached}" \
       "${V_ACTION[$k]:+  ${V_ACTION[$k]}}"
+  elif ${V_HOLD_REMOVED[$k]}; then
+    nhold_removed=$((nhold_removed + 1))
   else
     nhold=$((nhold + 1))
   fi
 done
+if [ "$nhold_removed" -gt 0 ]; then
+  echo "HOLD removed after backup: $nhold_removed tree(s)"
+  for k in "${!V_IDX[@]}"; do
+    ${V_HOLD_REMOVED[$k]} || continue
+    i=${V_IDX[$k]}
+    printf '  %s  [%s]  %s\n' "$(rel "${WT_PATH[$i]}")" "${WT_BRANCH[$i]:-detached}" "${V_ACTION[$k]}"
+  done
+fi
 if [ "$nhold" -gt 0 ]; then
   echo "HOLD report: $nhold tree(s) left in place"
   for k in "${!V_IDX[@]}"; do
-    [ "${V_VERDICT[$k]}" = HOLD ] || continue
+    if [ "${V_VERDICT[$k]}" != HOLD ] || ${V_HOLD_REMOVED[$k]}; then continue; fi
     i=${V_IDX[$k]}
-    printf '  %s  [%s]\n' "$(rel "${WT_PATH[$i]}")" "${WT_BRANCH[$i]:-detached}"
+    printf '  %s  [%s]%s\n' "$(rel "${WT_PATH[$i]}")" "${WT_BRANCH[$i]:-detached}" \
+      "${V_ACTION[$k]:+  ${V_ACTION[$k]}}"
     while IFS=$'\t' read -r code detail; do
       printf '    HOLD:%s  %s\n' "$code" "$detail"
     done <<<"${V_REASONS[$k]}"
   done
+  if [ -n "$HOLD_PLAN" ] && [ -z "$APPLY_HOLD" ]; then
+    for k in "${!V_IDX[@]}"; do
+      ${V_APPROVABLE[$k]} || continue
+      printf '  approvable with --apply-hold: %s\n' "$(rel "${WT_PATH[${V_IDX[$k]}]}")"
+    done
+    echo "hold plan: $HOLD_PLAN"
+  fi
+fi
+if [ -z "${SYG_WORKTREE_SWEEP_CHILD:-}" ] && [ "$backed_up" -gt 0 ]; then
+  echo "backups: $RUN_DIR"
 fi
 if $APPLY && [ "$removed" -eq 0 ] && [ "$rc" -eq 1 ]; then echo "nothing removed: no SAFE tree"; fi
 if $LOCKS; then
