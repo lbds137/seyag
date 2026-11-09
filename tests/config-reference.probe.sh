@@ -143,10 +143,12 @@ elif grep -q 'docs/config.md' "$TMP/err.d"; then
 else
   fail "(d) stderr did not name docs/config.md: $(cat "$TMP/err.d")"
 fi
-python3 "$SCRIPT" --root "$TMP" --write
+if ! python3 "$SCRIPT" --root "$TMP" --write 2>"$TMP/err.d.write"; then
+  fail "(d) restoring docs/config.md with --write failed: $(cat "$TMP/err.d.write")"
+fi
 
 # (e) Bad scope and bad group in knobs.tsv -> --check fails naming offending value.
-sed -i 's/SYG_ALPHA\tuser\tguards/SYG_ALPHA\tbogus_scope\tguards/' "$TMP/plugins/seyag/config/knobs.tsv"
+sed -i $'s/SYG_ALPHA\tuser\tguards/SYG_ALPHA\tbogus_scope\tguards/' "$TMP/plugins/seyag/config/knobs.tsv"
 if python3 "$SCRIPT" --root "$TMP" --check 2>"$TMP/err.e1"; then
   fail "(e1) --check passed despite invalid scope bogus_scope"
 elif grep -q 'SYG_ALPHA' "$TMP/err.e1" && grep -q 'bogus_scope' "$TMP/err.e1"; then
@@ -156,7 +158,7 @@ else
 fi
 write_valid_tsv
 
-sed -i 's/SYG_ALPHA\tuser\tguards/SYG_ALPHA\tuser\tbogus_group/' "$TMP/plugins/seyag/config/knobs.tsv"
+sed -i $'s/SYG_ALPHA\tuser\tguards/SYG_ALPHA\tuser\tbogus_group/' "$TMP/plugins/seyag/config/knobs.tsv"
 if python3 "$SCRIPT" --root "$TMP" --check 2>"$TMP/err.e2"; then
   fail "(e2) --check passed despite invalid group bogus_group"
 elif grep -q 'SYG_ALPHA' "$TMP/err.e2" && grep -q 'bogus_group' "$TMP/err.e2"; then
@@ -176,6 +178,133 @@ else
   fail "(f) stderr did not name duplicate SYG_ALPHA: $(cat "$TMP/err.f")"
 fi
 write_valid_tsv
+
+# (g) Bare $SYG_INDIA in a fixture file -> passes with a row, fails naming SYG_INDIA without it.
+echo 'echo "$SYG_INDIA"' >>"$TMP/plugins/seyag/hooks/sample.sh"
+printf 'SYG_INDIA\tuser\tguards\tunset\tBare variable reference.\n' >>"$TMP/plugins/seyag/config/knobs.tsv"
+if ! python3 "$SCRIPT" --root "$TMP" --write 2>"$TMP/err.g.w"; then
+  fail "(g) --write failed with bare \$SYG_INDIA row: $(cat "$TMP/err.g.w")"
+elif ! python3 "$SCRIPT" --root "$TMP" --check 2>"$TMP/err.g.c1"; then
+  fail "(g) --check failed with bare \$SYG_INDIA row: $(cat "$TMP/err.g.c1")"
+else
+  write_valid_tsv
+  if python3 "$SCRIPT" --root "$TMP" --check 2>"$TMP/err.g.c2"; then
+    fail "(g) --check passed after removing SYG_INDIA row"
+  elif grep -q 'SYG_INDIA' "$TMP/err.g.c2"; then
+    ok "(g) bare \$SYG_INDIA passes --check with a row and fails naming SYG_INDIA without it"
+  else
+    fail "(g) stderr did not name SYG_INDIA: $(cat "$TMP/err.g.c2")"
+  fi
+fi
+sed -i '/SYG_INDIA/d' "$TMP/plugins/seyag/hooks/sample.sh"
+write_valid_tsv
+if ! python3 "$SCRIPT" --root "$TMP" --write 2>"$TMP/err.g.restore"; then
+  fail "(g) restoring docs/config.md with --write failed: $(cat "$TMP/err.g.restore")"
+fi
+
+# (h) awk ENVIRON["SYG_JULIET"] in a fixture file -> passes with a row, fails naming SYG_JULIET without it.
+echo 'awk '\''BEGIN { print ENVIRON["SYG_JULIET"] }'\''' >>"$TMP/plugins/seyag/hooks/sample.sh"
+printf 'SYG_JULIET\tuser\tguards\tunset\tAwk ENVIRON reference.\n' >>"$TMP/plugins/seyag/config/knobs.tsv"
+if ! python3 "$SCRIPT" --root "$TMP" --write 2>"$TMP/err.h.w"; then
+  fail "(h) --write failed with SYG_JULIET row: $(cat "$TMP/err.h.w")"
+elif ! python3 "$SCRIPT" --root "$TMP" --check 2>"$TMP/err.h.c1"; then
+  fail "(h) --check failed with SYG_JULIET row: $(cat "$TMP/err.h.c1")"
+else
+  write_valid_tsv
+  if python3 "$SCRIPT" --root "$TMP" --check 2>"$TMP/err.h.c2"; then
+    fail "(h) --check passed after removing SYG_JULIET row"
+  elif grep -q 'SYG_JULIET' "$TMP/err.h.c2"; then
+    ok "(h) awk ENVIRON[\"SYG_JULIET\"] passes --check with a row and fails naming SYG_JULIET without it"
+  else
+    fail "(h) stderr did not name SYG_JULIET: $(cat "$TMP/err.h.c2")"
+  fi
+fi
+sed -i '/SYG_JULIET/d' "$TMP/plugins/seyag/hooks/sample.sh"
+write_valid_tsv
+if ! python3 "$SCRIPT" --root "$TMP" --write 2>"$TMP/err.h.restore"; then
+  fail "(h) restoring docs/config.md with --write failed: $(cat "$TMP/err.h.restore")"
+fi
+
+# (i) User row with an empty description -> --check fails.
+sed -i $'s/^SYG_ALPHA\t.*/SYG_ALPHA\tuser\tguards\t1\t/' "$TMP/plugins/seyag/config/knobs.tsv"
+if python3 "$SCRIPT" --root "$TMP" --check 2>"$TMP/err.i"; then
+  fail "(i) --check passed despite empty description on SYG_ALPHA"
+elif grep -q 'SYG_ALPHA' "$TMP/err.i" && grep -qi 'empty description' "$TMP/err.i"; then
+  ok "(i) user row with empty description fails --check"
+else
+  fail "(i) stderr did not report empty description on SYG_ALPHA: $(cat "$TMP/err.i")"
+fi
+write_valid_tsv
+
+# (j) Row with an empty default -> --check fails.
+sed -i $'s/^SYG_ALPHA\tuser\tguards\t1\t/SYG_ALPHA\tuser\tguards\t\t/' "$TMP/plugins/seyag/config/knobs.tsv"
+if python3 "$SCRIPT" --root "$TMP" --check 2>"$TMP/err.j"; then
+  fail "(j) --check passed despite empty default on SYG_ALPHA"
+elif grep -q 'SYG_ALPHA' "$TMP/err.j" && grep -qi 'empty default' "$TMP/err.j"; then
+  ok "(j) row with empty default fails --check"
+else
+  fail "(j) stderr did not report empty default on SYG_ALPHA: $(cat "$TMP/err.j")"
+fi
+write_valid_tsv
+
+# (k) Row with 4 fields -> --check fails.
+sed -i $'s/^SYG_ALPHA\t.*/SYG_ALPHA\tuser\tguards\t1/' "$TMP/plugins/seyag/config/knobs.tsv"
+if python3 "$SCRIPT" --root "$TMP" --check 2>"$TMP/err.k"; then
+  fail "(k) --check passed despite 4-field row on SYG_ALPHA"
+elif grep -q 'SYG_ALPHA' "$TMP/err.k" && grep -q '4 fields' "$TMP/err.k"; then
+  ok "(k) row with 4 fields fails --check"
+else
+  fail "(k) stderr did not report 4 fields on SYG_ALPHA: $(cat "$TMP/err.k")"
+fi
+write_valid_tsv
+
+# (l) Description of 221 characters -> --check fails.
+DESC_221="$(printf '%*s' 221 '' | tr ' ' 'x')"
+sed -i $'s/^SYG_ALPHA\t.*/SYG_ALPHA\tuser\tguards\t1\t'"$DESC_221"$'/' "$TMP/plugins/seyag/config/knobs.tsv"
+if python3 "$SCRIPT" --root "$TMP" --check 2>"$TMP/err.l"; then
+  fail "(l) --check passed despite 221-character description on SYG_ALPHA"
+elif grep -q 'SYG_ALPHA' "$TMP/err.l" && grep -q '221 chars' "$TMP/err.l"; then
+  ok "(l) description of 221 characters fails --check"
+else
+  fail "(l) stderr did not report 221-character description on SYG_ALPHA: $(cat "$TMP/err.l")"
+fi
+write_valid_tsv
+
+# (m) knobs.tsv itself is not scanned when a row description mentions SYG_KILO.
+sed -i $'s/^SYG_ALPHA\t.*/SYG_ALPHA\tuser\tguards\t1\tControls alpha guard alongside SYG_KILO./' "$TMP/plugins/seyag/config/knobs.tsv"
+if ! python3 "$SCRIPT" --root "$TMP" --write 2>"$TMP/err.m.w"; then
+  fail "(m) --write failed when knobs.tsv description mentioned SYG_KILO: $(cat "$TMP/err.m.w")"
+elif python3 "$SCRIPT" --root "$TMP" --check 2>"$TMP/err.m"; then
+  ok "(m) knobs.tsv itself is not scanned when a row description mentions SYG_KILO"
+else
+  fail "(m) --check failed when knobs.tsv description mentioned SYG_KILO: $(cat "$TMP/err.m")"
+fi
+write_valid_tsv
+if ! python3 "$SCRIPT" --root "$TMP" --write 2>"$TMP/err.m.restore"; then
+  fail "(m) restoring docs/config.md with --write failed: $(cat "$TMP/err.m.restore")"
+fi
+
+# (n) Non-UTF-8 file under plugins/seyag/bin containing SYG_LIMA is skipped.
+printf 'SYG_LIMA\xff\n' >"$TMP/plugins/seyag/bin/non-utf8-bin"
+if python3 "$SCRIPT" --root "$TMP" --check 2>"$TMP/err.n"; then
+  ok "(n) non-UTF-8 file under plugins/seyag/bin containing SYG_LIMA is skipped"
+else
+  fail "(n) non-UTF-8 file was not skipped: $(cat "$TMP/err.n")"
+fi
+rm -f "$TMP/plugins/seyag/bin/non-utf8-bin"
+
+# (o) CRLF-converted docs/config.md -> --check fails.
+sed -i 's/$/\r/' "$TMP/docs/config.md"
+if python3 "$SCRIPT" --root "$TMP" --check 2>"$TMP/err.o"; then
+  fail "(o) --check passed despite CRLF-converted docs/config.md"
+elif grep -q 'docs/config.md' "$TMP/err.o"; then
+  ok "(o) CRLF-converted docs/config.md fails --check"
+else
+  fail "(o) stderr did not name docs/config.md on CRLF doc: $(cat "$TMP/err.o")"
+fi
+if ! python3 "$SCRIPT" --root "$TMP" --write 2>"$TMP/err.o.restore"; then
+  fail "(o) restoring docs/config.md with --write failed: $(cat "$TMP/err.o.restore")"
+fi
 
 # Live check against the repository root.
 if python3 "$SCRIPT" --root "$REPO_ROOT" --check 2>"$TMP/err.live"; then
