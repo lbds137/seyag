@@ -1,7 +1,7 @@
 #!/bin/bash
 # Fixture check for bin/branch-sweep against a throwaway git repo.
 # Usage: tests/branch-sweep.probe.sh   (from anywhere)
-# Keep this probe under ~215 lines; grow it only to pin a behavior nothing else pins.
+# Keep this probe under ~230 lines; grow it only to pin a behavior nothing else pins.
 
 set -uo pipefail
 BS="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/plugins/seyag/bin/branch-sweep"
@@ -174,6 +174,20 @@ outp=$( (cd "$R" && "$BS" --no-fetch --prefix wip) 2>&1 ); rc=$?
 [ $rc = 0 ] && grep -q "^DIFFERS wip-b$" <<< "$outp" \
   && ! grep -qE 'feat-a|rework-c|SKIP' <<< "$outp" \
   && ok "--prefix wip: reports only wip-b" || bad "--prefix wip (rc $rc; out: $(head -c 400 <<< "$outp"))"
+outom=$( (cd "$R" && "$BS" --no-fetch --only feat-a --only rework-c) 2>&1 ); rc=$?
+[ $rc = 0 ] && grep -qF "ELIGIBLE feat-a (tree identical to $SQ)" <<< "$outom" \
+  && grep -q "^DIFFERS rework-c$" <<< "$outom" && ! grep -qE 'wip-b|SKIP' <<< "$outom" \
+  && ok "repeated --only: reports feat-a and rework-c" || bad "repeated --only (rc $rc; out: $(head -c 400 <<< "$outom"))"
+outop=$( (cd "$R" && "$BS" --no-fetch --only feat-a --prefix wip) 2>&1 ); rc=$?
+[ $rc = 0 ] && grep -qF "ELIGIBLE feat-a (tree identical to $SQ)" <<< "$outop" \
+  && grep -q "^DIFFERS wip-b$" <<< "$outop" && ! grep -qE 'rework-c|SKIP' <<< "$outop" \
+  && ok "--only + --prefix union: reports feat-a and wip-b" || bad "--only + --prefix (rc $rc; out: $(head -c 400 <<< "$outop"))"
+git -C "$R" branch wip-eq "$SQ"
+outpa=$( (cd "$R" && "$BS" --no-fetch --prefix wip --apply) 2>&1 ); rc=$?
+[ $rc = 0 ] && ! git -C "$R" rev-parse --verify -q refs/heads/wip-eq >/dev/null \
+  && git -C "$R" rev-parse --verify -q refs/heads/wip-b >/dev/null \
+  && git -C "$R" rev-parse --verify -q refs/heads/feat-a >/dev/null \
+  && ok "--prefix wip --apply: deletes wip-eq, keeps wip-b and feat-a" || bad "--prefix wip --apply (rc $rc; out: $(head -c 400 <<< "$outpa"))"
 FEAT_A=$(git -C "$R" rev-parse refs/heads/feat-a)
 outoa=$( (cd "$R" && "$BS" --no-fetch --only feat-a --apply) 2>&1 ); rc=$?
 refs_after=$(git -C "$R" show-ref)

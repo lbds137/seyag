@@ -57,7 +57,8 @@
 # --only PATH (also --only=PATH; repeatable) narrows the run to the named worktree(s) among
 # those this run would judge (resolved relative to the caller's cwd before cd /); a PATH that
 # matches none of them exits 2 before any judging or removal. --only PATH --apply is the
-# per-tree close-out form; --locks is unaffected by --only.
+# per-tree close-out form; a matched --only does not narrow --locks (it still lists every
+# worktree's index.lock), but an unmatched --only exits 2 before --locks runs.
 # --locks also lists index.lock files in the repo's .git and every worktree's git dir; a lock
 # is stale when it is 0 bytes, older than SYG_WORKTREE_LOCK_AGE_MIN minutes (integer, default
 # 10), and no live git process works in the repo. --locks-apply deletes exactly the stale ones.
