@@ -2,7 +2,7 @@
 # safe-worktree-clean - judge agent worktrees (--all: every linked one) for safe removal; --apply removes SAFE ones
 #
 # Usage:
-#   safe-worktree-clean [--apply] [--repo DIR] [--base REF] [--all] [--locks] [--locks-apply] [--json]
+#   safe-worktree-clean [--apply] [--repo DIR] [--base REF] [--all] [--only PATH]... [--locks] [--locks-apply] [--json]
 #
 # Judges every worktree under <repo>/.claude/worktrees/ (--all: every linked worktree wherever it
 # lives; --repo DIR, default: the current repo) and prints SAFE or HOLD:<reason> for each; HOLD
@@ -54,6 +54,10 @@
 # a configured ref that does not resolve, or no default ref, makes every tree HOLD:no-base;
 # for a repo whose integration branch is not its default branch (e.g. git-flow develop),
 # set it to that branch's remote-tracking ref. A configured ref starting with - exits 2.
+# --only PATH (also --only=PATH; repeatable) narrows the run to the named worktree(s) among
+# those this run would judge (resolved relative to the caller's cwd before cd /); a PATH that
+# matches none of them exits 2 before any judging or removal. --only PATH --apply is the
+# per-tree close-out form; --locks is unaffected by --only.
 # --locks also lists index.lock files in the repo's .git and every worktree's git dir; a lock
 # is stale when it is 0 bytes, older than SYG_WORKTREE_LOCK_AGE_MIN minutes (integer, default
 # 10), and no live git process works in the repo. --locks-apply deletes exactly the stale ones.
@@ -66,6 +70,7 @@ set -uo pipefail
 usage() { sed -n '2,/^[^#]/s/^# \{0,1\}//p' "$0"; }
 
 APPLY=false ALL=false LOCKS=false LOCKS_APPLY=false JSON=false REPO=. BASE_ARG="" BASE_SRC=""
+ONLY_RAW=() ONLY_REAL=()
 while [ $# -gt 0 ]; do
   case "$1" in
     -h | --help) usage; exit 0 ;;
@@ -76,6 +81,13 @@ while [ $# -gt 0 ]; do
     --json) JSON=true ;;
     --repo) [ $# -ge 2 ] || { usage >&2; exit 2; }; REPO=$2; shift ;;
     --repo=*) REPO=${1#--repo=} ;;
+    --only)
+      [ $# -ge 2 ] || { usage >&2; exit 2; }
+      [ -n "$2" ] || { echo "safe-worktree-clean: --only needs a path" >&2; usage >&2; exit 2; }
+      ONLY_RAW+=("$2"); shift ;;
+    --only=*)
+      [ -n "${1#--only=}" ] || { echo "safe-worktree-clean: --only needs a path" >&2; usage >&2; exit 2; }
+      ONLY_RAW+=("${1#--only=}") ;;
     --base)
       [ $# -ge 2 ] || { usage >&2; exit 2; }
       [ -n "$2" ] || { echo "safe-worktree-clean: --base needs a ref" >&2; usage >&2; exit 2; }
@@ -103,6 +115,9 @@ COMMON=$(git -C "$REPO" rev-parse --path-format=absolute --git-common-dir 2>&1) 
 PORCELAIN=$(git -C "$REPO" worktree list --porcelain -z | tr '\0' '\036') || {
   echo "safe-worktree-clean: git worktree list failed in $REPO" >&2; exit 2; }
 COMMON=$(realpath -e -- "$COMMON")
+for p in "${ONLY_RAW[@]}"; do
+  ONLY_REAL+=("$(realpath -m -- "$p")")
+done
 # Every later command names its directory, and no process of this tool may sit in a tree.
 cd / || exit 2
 
@@ -590,6 +605,32 @@ for i in $(seq 1 "$cur"); do
     case "$(realpath -m -- "${WT_PATH[$i]}")/" in "$WT_ROOT"/?*) TREES+=("$i") ;; esac
   fi
 done
+if [ ${#ONLY_RAW[@]} -gt 0 ]; then
+  for k in "${!ONLY_RAW[@]}"; do
+    matched=false
+    for i in "${TREES[@]}"; do
+      if [ "$(realpath -m -- "${WT_PATH[$i]}")" = "${ONLY_REAL[$k]}" ]; then
+        matched=true
+        break
+      fi
+    done
+    if ! $matched; then
+      echo "safe-worktree-clean: --only ${ONLY_RAW[$k]}: not a worktree this run judges in $MAIN (agent trees under .claude/worktrees/; --all widens)" >&2
+      exit 2
+    fi
+  done
+  only_trees=()
+  for i in "${TREES[@]}"; do
+    tp=$(realpath -m -- "${WT_PATH[$i]}")
+    for op in "${ONLY_REAL[@]}"; do
+      if [ "$tp" = "$op" ]; then
+        only_trees+=("$i")
+        break
+      fi
+    done
+  done
+  TREES=("${only_trees[@]}")
+fi
 declare -A CWD_PID=()
 CWD_SCAN_OK=true
 if [ ${#TREES[@]} -gt 0 ]; then

@@ -178,26 +178,26 @@ gh api "repos/{owner}/{repo}/actions/runs/<run-id>/jobs?per_page=100" \
     closed it on merge. A `gh issue view <url>` that fails (for example, a
     repo the token cannot read) is reported, never treated as closed.
   - Local head branch: a rebase or squash merge leaves `git branch -d`
-    reporting "not fully merged". Fetch first (`git fetch origin`), then run
-    `branch-sweep` (dry run; it fetches by default) and find this head
-    branch's line by its exact name (a prefix like `foo` also matches
-    `foo-2`). ELIGIBLE: delete that one branch with
-    `git branch -D -- <branch>`.
+    reporting "not fully merged". Run `branch-sweep --only <branch>` (dry
+    run; it fetches by default, so no separate `git fetch origin` before it).
+    ELIGIBLE: delete that one branch with
+    `branch-sweep --only <branch> --apply`.
     - SKIP because the branch is checked out in a worktree: when that is the
-      unit's own finished worktree, run `git fetch origin`, then
-      `safe-worktree-clean` (dry run). Only when its line for that tree says
-      SAFE, remove that one tree with `git worktree remove <path>`, then run
-      `git branch -D -- <branch>`. A HOLD line, or a refusal from
-      `git worktree remove`: leave it and report it. Any other SKIP: leave
-      it and report it.
+      unit's own finished worktree, run `safe-worktree-clean --only <path>`
+      (dry run; `branch-sweep`'s fetch refreshed the base unless its `fetch:`
+      line says failed or skipped, in which case run `git fetch origin` first
+      — a stale base only makes the verdict more conservative). Only when its
+      line says SAFE, run `safe-worktree-clean --only <path> --apply` (it
+      removes the tree and deletes its branch). A HOLD line, or any other
+      SKIP: leave it and report it.
     - DIFFERS after a rebase or squash merge onto a base that moved is
       expected (branch-sweep matches identical trees only); it does not mean
       unmerged work. Leave it and report it.
-    - No line: nothing to delete.
+    - `ABSENT`: nothing to delete.
 
-    Never `branch-sweep --apply` or `safe-worktree-clean --apply` for one
-    PR's close-out: each acts on every eligible branch or SAFE tree in the
-    repo.
+    Never `branch-sweep --apply` or `safe-worktree-clean --apply` without
+    `--only` for one PR's close-out: unscoped, each acts on every eligible
+    branch or SAFE tree in the repo.
 
 ## Why the gate is shaped this way
 
