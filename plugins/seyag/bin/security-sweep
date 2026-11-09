@@ -15,7 +15,7 @@ Options:
   --session-line          Print nothing unless >=1 open alert exists; then print a single summary line.
                           Silent on errors and off surfaces; never writes to stderr.
   --warm-cache            Populate the cache like --session-line but print nothing; exits 0 at once if another warm run holds the repo-set flock.
-  --cap SECONDS           Exit 124 after SECONDS (positive float), no `timeout` binary needed; the run leads its own process group (when setpgid succeeds) and sends SIGTERM to it (gh children included) on expiry, finishing an in-flight cache write first; a SIGTERM received during a capped run is handled the same way (group SIGTERM, any in-flight cache write finished first, exit 124); a second SIGTERM exits at once, even mid-write, which may leave a `.tmp` file; SessionStart passes --cap 2. Like GNU timeout, a capped run leaves the terminal's foreground group, so Ctrl-C does not reach it, and it ignores SIGTTIN/SIGTTOU so terminal output under `stty tostop` does not stop it.
+  --cap SECONDS           Exit 124 after SECONDS (positive float), no `timeout` binary needed; the run leads its own process group (when setpgid succeeds) and sends SIGTERM to it (gh children included) on expiry, finishing an in-flight cache write first for at most 1 s more (past that grace it exits mid-write, which may leave a `.tmp` file); a SIGTERM received during a capped run is handled the same way (group SIGTERM, any in-flight cache write finished first, exit 124); a second SIGTERM exits at once, even mid-write, which may leave a `.tmp` file; SessionStart passes --cap 2. Like GNU timeout, a capped run leaves the terminal's foreground group, so Ctrl-C does not reach it, and it ignores SIGTTIN/SIGTTOU so terminal output under `stty tostop` does not stop it.
   --no-cache              Bypass the 300s fresh cache and fetch live from GitHub.
   -h, --help              Show this help message and exit.
 
@@ -314,11 +314,14 @@ _cap_writes = 0
 _cap_pending = False
 _cap_exits = 0
 _cap_terms = 0
+_cap_alarms = 0
+_CAP_GRACE_S = 1.0
 
 
 def _cap_exit():
     # Entries 1 and 2 each signal the group, so a second signal racing the first entry's killpg cannot exit before the group is signalled.
     # Entry 3 (the self-sent group SIGTERM re-entering) exits at once, which bounds the recursion.
+    # When the run leads its group, entry 1's own group SIGTERM re-enters as entry 2, so the group gets SIGTERM twice per capped exit; gh children stop on the first.
     global _cap_exits
     _cap_exits += 1
     if _cap_exits > 2:
@@ -332,13 +335,20 @@ def _cap_exit():
 
 
 def _cap_fire(signum, _frame):
-    global _cap_pending, _cap_terms
+    global _cap_pending, _cap_terms, _cap_alarms
     _cap_pending = True
     if signum == signal.SIGTERM:
         _cap_terms += 1
+    elif signum == signal.SIGALRM:
+        _cap_alarms += 1
     # A second SIGTERM exits even mid-write, so a write stuck on a stalled filesystem cannot hold the run (it may leave a .tmp file behind).
     if _cap_writes == 0 or _cap_terms >= 2:
         _cap_exit()
+    # The cap expired mid-write: the write gets _CAP_GRACE_S more, then the run exits even mid-write, so --cap bounds wall time on a stalled filesystem (it may leave a .tmp file behind).
+    if _cap_alarms >= 2:
+        _cap_exit()
+    if _cap_alarms == 1 and signum == signal.SIGALRM:
+        signal.setitimer(signal.ITIMER_REAL, _CAP_GRACE_S)
 
 
 def _install_cap(seconds):

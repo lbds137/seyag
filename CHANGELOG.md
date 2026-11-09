@@ -2,6 +2,20 @@
 
 All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY-MM-DD>` section per released version; under it, `###` categories in fixed order — Breaking Changes, Features, Bug Fixes, Improvements, Chores, Tests — empty ones omitted; items are `- **scope:** description (#PR)`, written from the version's merged commit subjects.
 
+## 0.3.145 - 2026-11-08
+
+### Features
+
+- **safe-worktree-clean / branch-sweep:** `safe-worktree-clean --only PATH` (exit 2 for a path the run would not judge) and `branch-sweep --only NAME` / `--prefix P` (`ABSENT` for a missing `--only` name); the pr-monitoring close-out uses them, one scoped command per step with no separate fetch and `--apply` only with `--only`; every SKIP/HOLD gate still applies (#268).
+
+### Bug Fixes
+
+- **security-sweep:** `--cap` now bounds wall time when the cap expires mid-write: the write gets 1 s more, then the run exits even mid-write (it may leave a `.tmp` file); the `_cap_exit` comment notes the group gets SIGTERM twice per capped exit (#TBD).
+
+### Tests
+
+- **security-sweep probes:** row 9w (cap grace past a stalled write) with canary r7-1; 9v waits for the first SIGTERM to be handled before sending the second; the purpose canary names the FAIL it stopped on (#TBD).
+
 ## 0.3.144 - 2026-11-08
 
 ### Bug Fixes
