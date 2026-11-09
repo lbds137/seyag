@@ -1,6 +1,6 @@
 #!/bin/bash
 # Fixture check for plugins/seyag/bin/worktree-transfer — run after ANY
-# edit to the script. 26 cases assert the fixed check order, refusal shapes,
+# edit to the script. 49 cases assert the fixed check order, refusal shapes,
 # branch-regex gating, and byte-identical staged transfer over hermetic
 # throwaway git repos under $(mktemp -d):
 #   1. cwd inside the linked worktree -> STOP: main-tree-identity
@@ -38,6 +38,29 @@
 #      no-unpushed-base (the HEAD diagnosis fires before the empty-patch check)
 #  26. a gitignored non-build file in the worktree -> transfer succeeds and the
 #      output lists the file as deleted-with-the-tree
+#  27. skip-worktree edit in the worktree -> STOP: nothing-outside-patch, tree kept and main untouched
+#  28. assume-unchanged edit in the worktree -> STOP: nothing-outside-patch, tree kept and main untouched
+#  29. untracked nested repo in the worktree -> STOP: worktree-gitfile, tree kept
+#  30. apply.whitespace=fix with trailing whitespace in patch -> STOP: byte-identical, tree kept
+#  31. apply.whitespace=error with trailing whitespace in patch -> STOP: apply, tree kept
+#  32. sparse worker tree with in-cone edit -> transfer succeeds
+#  33. sparse worker tree with on-disk skip-worktree edit -> STOP: nothing-outside-patch
+#  34. gitlink at a path with a space, commit in main's module store -> transfer succeeds
+#  35. gitlink at a path with a quote, commit in main's module store -> transfer succeeds
+#  36. repointed .git with core.fsmonitor -> STOP: worktree-gitfile without firing fsmonitor
+#  37. untracked nested repo with core.fsmonitor -> STOP: worktree-gitfile without firing fsmonitor
+#  38. planted repo at sub/ (no .git name) -> STOP: worktree-gitfile without firing fsmonitor
+#  39. --rebase-base fast-forward: main advanced on README.md only -> transfer succeeds with rebase-proof line
+#  40. --rebase-base conflict: main changed touched src/app.js -> STOP: rebase-proof naming src/app.js
+#  41. --rebase-base squash merge with identical trees -> transfer succeeds with 'whole trees identical'
+#  42. --rebase-base stacked branch commit not on main -> STOP: rebase-proof naming feat.txt
+#  43. --rebase-base file/directory boundary conflict -> STOP: rebase-proof naming src/data.bin/inner.txt
+#  44. --rebase-base literal special-char filenames (src/*.js, :odd.txt) with sibling src/other.js changed on main -> transfer succeeds
+#  45. --rebase-base --base mismatch vs match -> STOP: base-unchanged on main HEAD, exit 0 on worktree HEAD
+#  46. behind-main refusal without --rebase-base -> stderr suggests 'rerun with --rebase-base'
+#  47. --rebase-base literal glob conflict: main and patch both edit src/*.js -> STOP: rebase-proof naming src/*.js
+#  48. --rebase-base reverse file/directory boundary: patch adds src/newdir/x.txt, main commits file src/newdir -> STOP: rebase-proof naming src/newdir
+#  49. --rebase-base scale: main adds 5000 files under bulk/ -> transfer succeeds with rebase-proof line
 #
 # Stated non-goal: the two removal-failure wordings (`git worktree remove --force`
 # vs `git branch -D` in check 11) are not constructible without root tricks; the
@@ -381,7 +404,7 @@ c16_fail=0
 c16_reason=""
 if [ "$rc" -ne 0 ]; then
   c16_fail=1; c16_reason="rc=$rc out=$out"
-elif ! grep -qF 'checks passed: main-tree-identity, main-tree-clean, worktree-registered, worktree-gitfile, base-unchanged (skipped: no --base), no-unpushed-base, empty-patch, nothing-outside-patch, apply, byte-identical, removal' <<<"$out"; then
+elif ! grep -qF 'checks passed: main-tree-identity, main-tree-clean, worktree-registered, worktree-gitfile, base-unchanged (skipped: no --base), no-unpushed-base, empty-patch, nothing-outside-patch, rebase-proof (skipped: no --rebase-base), apply, byte-identical, removal' <<<"$out"; then
   c16_fail=1; c16_reason="missing checks passed line in: $out"
 elif ! grep -qxF 'worktree removed' <<<"$out"; then
   c16_fail=1; c16_reason="missing 'worktree removed' in: $out"
@@ -500,6 +523,7 @@ err=$(cd "$R22" && bash "$TOOL" .wt-old 2>&1 >/dev/null)
 rc=$?
 if [ "$rc" -eq 1 ] && [[ $err == "STOP: no-unpushed-base:"* ]] \
   && grep -q 'differs from the main tree HEAD' <<<"$err" \
+  && grep -qF 'rerun with --rebase-base' <<<"$err" \
   && [ -d "$R22/.wt-old" ] \
   && git -C "$R22" rev-parse --verify -q refs/heads/worktree-agent-old >/dev/null; then
   record_case 0 "case 22: worktree behind main HEAD refuses STOP: no-unpushed-base (differing HEADs named)"
@@ -887,6 +911,263 @@ if [ "$rc" -eq 1 ] && [[ $err == "STOP: worktree-gitfile:"* ]] \
 else
   record_case 1 "case 38: planted repo at sub/ (no .git)" \
     "rc=$rc marker_before=$marker38_before marker_after=$marker38_after sub_in_main=$([ -e "$R38/sub" ] && echo present || echo absent) err=$err"
+fi
+
+# Case 39: --rebase-base fast-forward: worktree cut at the old base, main
+# advanced with a commit touching only README.md -> exit 0, staged in main,
+# rebase-proof line, worktree and branch removed.
+mk_fixture r39
+R39="$T/r39"
+printf 'Later docs on main.\n' >>"$R39/README.md"
+git -C "$R39" add README.md >/dev/null 2>&1
+git -C "$R39" commit -q --no-verify -m 'advance main on README' >/dev/null 2>&1
+out=$(cd "$R39" && bash "$TOOL" --rebase-base .wt 2>&1)
+rc=$?
+main_porcelain39=$(git -C "$R39" status --porcelain)
+if [ "$rc" -eq 0 ] \
+  && [ "$(cat "$R39/src/app.js" 2>/dev/null)" = "export const value = 2;" ] \
+  && [ -f "$R39/src/new.js" ] \
+  && [ ! -e "$R39/src/old.js" ] \
+  && [ -n "$main_porcelain39" ] && ! grep -vqE '^[MADRCT]  ' <<<"$main_porcelain39" \
+  && grep -q '^rebase-proof: .*identical at worktree HEAD ' <<<"$out" \
+  && grep -qF 'no-unpushed-base (deferred to rebase-proof)' <<<"$out" \
+  && grep -qF ', rebase-proof, apply' <<<"$out" \
+  && [ ! -e "$R39/.wt" ] \
+  && ! git -C "$R39" rev-parse --verify -q refs/heads/worktree-agent-t1 >/dev/null; then
+  record_case 0 "case 39: --rebase-base fast-forward transfers onto advanced main with rebase-proof"
+else
+  record_case 1 "case 39: --rebase-base fast-forward" "rc=$rc out=$out porcelain=$main_porcelain39"
+fi
+
+# Case 40: --rebase-base when main changed a touched file (src/app.js) ->
+# exit 1, STOP: rebase-proof: naming src/app.js, worktree and branch kept, main clean.
+mk_fixture r40
+R40="$T/r40"
+printf 'export const value = 99;\n' >"$R40/src/app.js"
+git -C "$R40" add src/app.js >/dev/null 2>&1
+git -C "$R40" commit -q --no-verify -m 'advance main on src/app.js' >/dev/null 2>&1
+err=$(cd "$R40" && bash "$TOOL" --rebase-base .wt 2>&1 >/dev/null)
+rc=$?
+if [ "$rc" -eq 1 ] && [[ $err == "STOP: rebase-proof:"* ]] \
+  && grep -qF 'src/app.js' <<<"$err" \
+  && [ -d "$R40/.wt" ] \
+  && git -C "$R40" rev-parse --verify -q refs/heads/worktree-agent-t1 >/dev/null \
+  && [ -z "$(git -C "$R40" status --porcelain)" ]; then
+  record_case 0 "case 40: --rebase-base refuses STOP: rebase-proof when main changed touched src/app.js"
+else
+  record_case 1 "case 40: --rebase-base conflict on src/app.js" "rc=$rc err=$err"
+fi
+
+# Case 41: --rebase-base squash merge with identical trees -> exit 0, proof line
+# contains 'whole trees identical'.
+mk_fixture r41
+R41="$T/r41"
+git -C "$R41" checkout -q -b feat >/dev/null 2>&1
+printf 'feature content\n' >"$R41/feat.txt"
+git -C "$R41" add feat.txt >/dev/null 2>&1
+git -C "$R41" commit -q --no-verify -m 'feat commit' >/dev/null 2>&1
+(cd "$R41" && git worktree add -q -b worktree-agent-sq .wt-sq feat >/dev/null 2>&1)
+populate_wt "$R41/.wt-sq"
+git -C "$R41" checkout -q main >/dev/null 2>&1
+git -C "$R41" merge -q --squash feat >/dev/null 2>&1
+git -C "$R41" commit -q --no-verify -m 'squash feat' >/dev/null 2>&1
+out=$(cd "$R41" && bash "$TOOL" --rebase-base .wt-sq 2>&1)
+rc=$?
+if [ "$rc" -eq 0 ] \
+  && grep -q '^rebase-proof: .*whole trees identical$' <<<"$out" \
+  && [ -f "$R41/src/new.js" ] \
+  && [ -f "$R41/feat.txt" ] \
+  && [ ! -e "$R41/.wt-sq" ] \
+  && ! git -C "$R41" rev-parse --verify -q refs/heads/worktree-agent-sq >/dev/null; then
+  record_case 0 "case 41: --rebase-base after squash-merge with identical trees transfers and notes whole trees identical"
+else
+  record_case 1 "case 41: --rebase-base squash identical trees" "rc=$rc out=$out"
+fi
+
+# Case 42: --rebase-base when worktree's branch commit is not on main ->
+# exit 1, STOP: rebase-proof: naming feat.txt, nothing staged in main.
+mk_fixture r42
+R42="$T/r42"
+git -C "$R42" checkout -q -b feat >/dev/null 2>&1
+printf 'feature content\n' >"$R42/feat.txt"
+git -C "$R42" add feat.txt >/dev/null 2>&1
+git -C "$R42" commit -q --no-verify -m 'feat commit' >/dev/null 2>&1
+(cd "$R42" && git worktree add -q -b worktree-agent-unmerged .wt-unmerged feat >/dev/null 2>&1)
+populate_wt "$R42/.wt-unmerged"
+git -C "$R42" checkout -q main >/dev/null 2>&1
+printf 'Unrelated main docs.\n' >>"$R42/README.md"
+git -C "$R42" add README.md >/dev/null 2>&1
+git -C "$R42" commit -q --no-verify -m 'advance main on README' >/dev/null 2>&1
+err=$(cd "$R42" && bash "$TOOL" --rebase-base .wt-unmerged 2>&1 >/dev/null)
+rc=$?
+if [ "$rc" -eq 1 ] && [[ $err == "STOP: rebase-proof:"* ]] \
+  && grep -qF 'feat.txt' <<<"$err" \
+  && [ -d "$R42/.wt-unmerged" ] \
+  && [ -z "$(git -C "$R42" status --porcelain)" ]; then
+  record_case 0 "case 42: --rebase-base with unmerged branch commit refuses STOP: rebase-proof naming feat.txt"
+else
+  record_case 1 "case 42: --rebase-base unmerged branch commit" "rc=$rc err=$err"
+fi
+
+# Case 43: --rebase-base file/directory boundary: worktree adds file src/data.bin,
+# main commits src/data.bin/inner.txt -> exit 1, STOP: rebase-proof: naming src/data.bin/inner.txt.
+mk_fixture r43
+R43="$T/r43"
+mkdir -p "$R43/src/data.bin"
+printf 'inside dir\n' >"$R43/src/data.bin/inner.txt"
+git -C "$R43" add src/data.bin/inner.txt >/dev/null 2>&1
+git -C "$R43" commit -q --no-verify -m 'add directory at src/data.bin' >/dev/null 2>&1
+err=$(cd "$R43" && bash "$TOOL" --rebase-base .wt 2>&1 >/dev/null)
+rc=$?
+if [ "$rc" -eq 1 ] && [[ $err == "STOP: rebase-proof:"* ]] \
+  && grep -qF 'src/data.bin/inner.txt' <<<"$err" \
+  && [ -d "$R43/.wt" ] \
+  && [ -z "$(git -C "$R43" status --porcelain)" ]; then
+  record_case 0 "case 43: --rebase-base file/directory boundary conflict refuses STOP: rebase-proof naming src/data.bin/inner.txt"
+else
+  record_case 1 "case 43: --rebase-base file/directory boundary" "rc=$rc err=$err"
+fi
+
+# Case 44: --rebase-base literal names: worktree adds src/*.js and :odd.txt,
+# main advanced on README.md and sibling src/other.js -> exit 0, both files staged in main.
+mk_fixture r44
+R44="$T/r44"
+printf 'export const other = 1;\n' >"$R44/src/other.js"
+git -C "$R44" add src/other.js >/dev/null 2>&1
+git -C "$R44" commit -q --no-verify -m 'add src/other.js in base' >/dev/null 2>&1
+(cd "$R44" && git worktree add -q -b worktree-agent-lit .wt-lit >/dev/null 2>&1)
+populate_wt "$R44/.wt-lit"
+printf 'glob-named file\n' >"$R44/.wt-lit/src/*.js"
+printf 'colon-named file\n' >"$R44/.wt-lit/:odd.txt"
+printf 'Later docs.\n' >>"$R44/README.md"
+printf 'export const other = 2;\n' >"$R44/src/other.js"
+git -C "$R44" add README.md src/other.js >/dev/null 2>&1
+git -C "$R44" commit -q --no-verify -m 'advance main on README and src/other.js' >/dev/null 2>&1
+out=$(cd "$R44" && bash "$TOOL" --rebase-base .wt-lit 2>&1)
+rc=$?
+main_porcelain44=$(git -C "$R44" status --porcelain)
+if [ "$rc" -eq 0 ] \
+  && [ -f "$R44/src/*.js" ] \
+  && [ -f "$R44/:odd.txt" ] \
+  && grep -qF 'A  src/*.js' <<<"$main_porcelain44" \
+  && grep -qF 'A  :odd.txt' <<<"$main_porcelain44" \
+  && [ ! -e "$R44/.wt-lit" ]; then
+  record_case 0 "case 44: --rebase-base with literal special-character filenames (src/*.js, :odd.txt) transfers and stages both"
+else
+  record_case 1 "case 44: --rebase-base literal names" "rc=$rc out=$out porcelain=$main_porcelain44"
+fi
+
+# Case 45: --rebase-base --base <wrong sha> (main's new HEAD) -> STOP: base-unchanged:
+# containing 'is not --base'; --rebase-base --base <worktree HEAD> on the same fixture -> exit 0.
+mk_fixture r45
+R45="$T/r45"
+WT_HEAD45=$(git -C "$R45/.wt" rev-parse HEAD)
+printf 'Later docs.\n' >>"$R45/README.md"
+git -C "$R45" add README.md >/dev/null 2>&1
+git -C "$R45" commit -q --no-verify -m 'advance main on README' >/dev/null 2>&1
+NEW_MAIN45=$(git -C "$R45" rev-parse HEAD)
+err_wrong=$(cd "$R45" && bash "$TOOL" --rebase-base --base "$NEW_MAIN45" .wt 2>&1 >/dev/null)
+rc_wrong=$?
+out_right=$(cd "$R45" && bash "$TOOL" --rebase-base --base "$WT_HEAD45" .wt 2>&1)
+rc_right=$?
+if [ "$rc_wrong" -eq 1 ] && [[ $err_wrong == "STOP: base-unchanged:"* ]] \
+  && grep -qF 'is not --base' <<<"$err_wrong" \
+  && [ "$rc_right" -eq 0 ] \
+  && [ -f "$R45/src/new.js" ] \
+  && [ ! -e "$R45/.wt" ]; then
+  record_case 0 "case 45: --rebase-base --base checks worktree HEAD (refuses main's new HEAD, accepts worktree HEAD)"
+else
+  record_case 1 "case 45: --rebase-base --base" "rc_wrong=$rc_wrong err_wrong=$err_wrong rc_right=$rc_right out_right=$out_right"
+fi
+
+# Case 46: Discoverability: case 22's setup without --rebase-base -> stderr
+# contains 'rerun with --rebase-base'.
+mk_fixture r46
+R46="$T/r46"
+MAIN_HEAD46=$(git -C "$R46" rev-parse HEAD)
+printf 'Later docs.\n' >>"$R46/README.md"
+git -C "$R46" add README.md >/dev/null 2>&1
+git -C "$R46" commit -q --no-verify -m 'advance main' >/dev/null 2>&1
+(cd "$R46" && git worktree add -q -b worktree-agent-old .wt-old "$MAIN_HEAD46" >/dev/null 2>&1)
+populate_wt "$R46/.wt-old"
+err46_nobase=$(cd "$R46" && bash "$TOOL" .wt-old 2>&1 >/dev/null)
+rc46_nobase=$?
+err46_base=$(cd "$R46" && bash "$TOOL" --base "$MAIN_HEAD46" .wt-old 2>&1 >/dev/null)
+rc46_base=$?
+if [ "$rc46_nobase" -eq 1 ] && [[ $err46_nobase == "STOP: no-unpushed-base:"* ]] \
+  && grep -qF 'rerun with --rebase-base' <<<"$err46_nobase" \
+  && [ "$rc46_base" -eq 1 ] && [[ $err46_base == "STOP: base-unchanged:"* ]] \
+  && grep -qF 'rerun with --rebase-base' <<<"$err46_base"; then
+  record_case 0 "case 46: behind-main refusals without --rebase-base suggest rerun with --rebase-base"
+else
+  record_case 1 "case 46: discoverability" "rc_nobase=$rc46_nobase err_nobase=$err46_nobase rc_base=$rc46_base err_base=$err46_base"
+fi
+
+# Case 47: --rebase-base literal glob conflict: main's commit changes a
+# committed file literally named src/*.js that the patch also edits ->
+# exit 1, STOP: rebase-proof: naming src/*.js.
+mk_fixture r47
+R47="$T/r47"
+printf 'glob v1\n' >"$R47/src/*.js"
+git -C "$R47" add -A >/dev/null 2>&1
+git -C "$R47" commit -q --no-verify -m 'add literal src/*.js in base' >/dev/null 2>&1
+(cd "$R47" && git worktree add -q -b worktree-agent-glob .wt-glob >/dev/null 2>&1)
+populate_wt "$R47/.wt-glob"
+printf 'glob wt edit\n' >"$R47/.wt-glob/src/*.js"
+printf 'glob main edit\n' >"$R47/src/*.js"
+git -C "$R47" add -A >/dev/null 2>&1
+git -C "$R47" commit -q --no-verify -m 'advance main on literal src/*.js' >/dev/null 2>&1
+err=$(cd "$R47" && bash "$TOOL" --rebase-base .wt-glob 2>&1 >/dev/null)
+rc=$?
+if [ "$rc" -eq 1 ] && [[ $err == "STOP: rebase-proof:"* ]] \
+  && grep -qF 'src/*.js' <<<"$err" \
+  && [ -d "$R47/.wt-glob" ] \
+  && [ -z "$(git -C "$R47" status --porcelain)" ]; then
+  record_case 0 "case 47: --rebase-base refuses STOP: rebase-proof naming literal src/*.js when both main and patch edit it"
+else
+  record_case 1 "case 47: --rebase-base literal glob conflict" "rc=$rc err=$err"
+fi
+
+# Case 48: --rebase-base reverse file/directory boundary: the patch adds
+# src/newdir/x.txt; main commits a FILE src/newdir -> exit 1,
+# STOP: rebase-proof: naming src/newdir.
+mk_fixture r48
+R48="$T/r48"
+mkdir -p "$R48/.wt/src/newdir"
+printf 'inside newdir\n' >"$R48/.wt/src/newdir/x.txt"
+printf 'file at src/newdir\n' >"$R48/src/newdir"
+git -C "$R48" add src/newdir >/dev/null 2>&1
+git -C "$R48" commit -q --no-verify -m 'add file at src/newdir' >/dev/null 2>&1
+err=$(cd "$R48" && bash "$TOOL" --rebase-base .wt 2>&1 >/dev/null)
+rc=$?
+if [ "$rc" -eq 1 ] && [[ $err == "STOP: rebase-proof:"* ]] \
+  && grep -qF 'src/newdir' <<<"$err" \
+  && [ -d "$R48/.wt" ] \
+  && [ -z "$(git -C "$R48" status --porcelain)" ]; then
+  record_case 0 "case 48: --rebase-base reverse file/directory boundary refuses STOP: rebase-proof naming src/newdir"
+else
+  record_case 1 "case 48: --rebase-base reverse file/directory boundary" "rc=$rc err=$err"
+fi
+
+# Case 49: --rebase-base scale: main's commit adds 5000 files under bulk/,
+# patch is populate_wt's -> exit 0 and the proof line is printed.
+mk_fixture r49
+R49="$T/r49"
+mkdir -p "$R49/bulk"
+for i in $(seq 1 5000); do
+  printf '%s\n' "$i" >"$R49/bulk/f-$i.txt"
+done
+git -C "$R49" add bulk >/dev/null 2>&1
+git -C "$R49" commit -q --no-verify -m 'add 5000 bulk files' >/dev/null 2>&1
+out=$(cd "$R49" && bash "$TOOL" --rebase-base .wt 2>&1)
+rc=$?
+if [ "$rc" -eq 0 ] \
+  && grep -q '^rebase-proof: .*identical at worktree HEAD ' <<<"$out" \
+  && [ -f "$R49/src/new.js" ] \
+  && [ ! -e "$R49/.wt" ]; then
+  record_case 0 "case 49: --rebase-base scale (5000 files under bulk/) transfers and prints rebase-proof line"
+else
+  record_case 1 "case 49: --rebase-base scale" "rc=$rc out=$out"
 fi
 
 [ "$fail" -eq 0 ] || exit 1
