@@ -2,11 +2,27 @@
 
 All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY-MM-DD>` section per released version; under it, `###` categories in fixed order — Breaking Changes, Features, Bug Fixes, Improvements, Chores, Tests — empty ones omitted; items are `- **scope:** description (#PR)`, written from the version's merged commit subjects.
 
+## 0.3.148 - 2026-11-09
+
+### Bug Fixes
+
+- **pr-body-ref-gate:** reads the body file gh actually posts: `--body-file` and `-F` are one flag and the last occurrence wins across both spellings (it read the first `-F`, and preferred `--body-file` over a later `-F`); the search runs on a masked view, so a flag inside a quoted argument (substitutions in it included), a `#` comment or a heredoc body never counts, and a `bash -c` / `eval` string is searched when the outer command has no flag; a python3 failure skips the body-file read instead of exiting the hook.
+- **shell_quotes:** the heredoc opener recognizes a backslash-quoted delimiter (`<<\EOF`) and delimiters with non-word characters (`<<'END-X'`), whose bodies were left unstripped; new public `masked_view`, a length-preserving view with quoted spans, comments and heredoc bodies filled.
+- **worktree-transfer:** when main HEAD is behind, the refusal hint follows the relation: an unpulled main gets `git pull --ff-only`, commits missing from main get "land them on main first"; the rebase-proof conflict refusal attributes each path ("changed on main" / "changed only on the worktree's branch"), including criss-cross merges; a worker's empty commits no longer refuse (#279).
+
+### Improvements
+
+- **core rules, driver-choice:** the week's wind-down and stop thresholds come from `claude-usage --posture`, not the memory; the README row says the same.
+
+### Tests
+
+- **pr-body-ref-gate probes:** 18 rows for flag order across spellings, continuations, escaped quotes, multi-line and substitution-bearing quoted text, `cat <<A <<B`, `<<\EOF`, `<<'END-X'` and a heredoc body's trailing `\`; shell_quotes cases for the widened opener and `masked_view`; a scanner-parity row for shell-fed `<<\EOF` / `<<'END-X'` bodies; the branch-switch `<<\EOF` row now reads its target like its quoted siblings.
+
 ## 0.3.147 - 2026-11-09
 
 ### Tests
 
-- **security-sweep probes:** rows 9w and 9x share one mid-write harness (`cap_mid_write.py`, mode `alarm` or `term-alarm`) instead of two copies; new canary r7-2 (a grace re-arm that requires no prior SIGTERM) fails 9x only.
+- **security-sweep probes:** rows 9w and 9x share one mid-write harness (`cap_mid_write.py`, mode `alarm` or `term-alarm`) instead of two copies; new canary r7-2 (a grace re-arm that requires no prior SIGTERM) fails 9x only (#278).
 - **safe-worktree-clean probes:** the two-flag `--only` row's tree4 setup is checked (a failed `add_tree` no longer lets `! grep tree4` pass vacuously), and the `--only <nosuch> --locks-apply` row asserts its exit-2 message and the lock's STALE eligibility (#277).
 
 ## 0.3.146 - 2026-11-09
