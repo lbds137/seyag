@@ -118,11 +118,11 @@ Do-it-now sends the finding back through **rule 1**, not around it: a trivial-sh
 A finding names one site; the defect is usually a class (the same omission in sibling helpers, the same pattern at other call sites, the same stale sentence in other docs), so every finding that will be auto-applied, decided or asked is swept after rules 1 and 2 classify it and before it is applied or presented as an Ask: the sites the sweep finds are part of what the owner approves.
 
 1. Write the class as ONE command (a `git grep` for the pattern, or a symbol or reference search) and run it.
-2. Positive-control it: confirm the command matches the instance the reviewer reported (core.md § "Negative existence and the grep rule" ("Positive-control a pattern before trusting its absence")). If it does not, fix the pattern first.
+2. Positive-control it: confirm the command matches the instance the reviewer reported (core.md § Negative existence and the grep rule, its "Positive-control a pattern before trusting its absence" bullet). If it does not, fix the pattern first.
 3. Read each hit and mark it sound or defective. A hit is a site of the class, not a defect. When the defect is a missing element (a field absent from a stub), choose a pattern that matches the sound siblings and the defective one alike, and inspect each.
 4. Record `command → N sites, M defective`.
 5. Defective sites in files this PR already touches take the finding's own route: fixed with it when it is auto-applied or decided, or included in the Ask when it is an Ask (one Ask, not one per site). A site whose own edit shape (rule 1) is harder than the finding's (a semantic change beside a trivial rename) routes by its own shape: it joins or becomes an Ask. Defective sites outside the PR's files go through rule 2's deferral table (usually **File the batch**: a class sweep is a named pass) and are never silently left.
-6. In a dispatched round (rule 3a), the driver runs the sweep while writing the spec and lists the defective sites in it, then re-runs the same command against the worker's worktree before the push: every defective site is fixed or dispositioned.
+6. In a dispatched round (rule 3a), the driver runs the sweep while writing the spec and puts the sweep command and its defective sites in it, then re-runs the same command against the worker's worktree before the push: every defective site is fixed or dispositioned.
 
 **When a real sweep is required vs. `n/a`**: every rename, every semantic finding, and any finding that names a pattern ("also in X", "same as Y") needs a real command; a search showing a single caller counts as that command (`→ 1 site, 1 defective`). `sweep: n/a` is accepted only with a checkable reason: a one-token typo or a removal a named lint rule or tool already covers.
 
@@ -201,7 +201,7 @@ For items escalated to ASK: do not apply. Skip to rule 4 (the item already carri
 
 ### 3a. Review-round fixes are a dispatch
 
-seyag:delegation already owns this: a review round's fixes are batched into ONE worker dispatch, the worker applies and gates, the driver reads the diff, and the round cap there matches this skill's. Follow that skill; this skill adds one driver step to it, rule 2a's class sweep (the spec lists the defective sites, and the driver re-runs the command against the worker's worktree before the push). (Dedupe port: the source skill carried the dispatch section in-skill; the seyag version points at delegation, the single owner of the dispatch model.)
+seyag:delegation already owns this: a review round's fixes are batched into ONE worker dispatch, the worker applies and gates, the driver reads the diff, and the round cap there matches this skill's. Follow that skill; this skill adds one driver step to it, rule 2a's class sweep (the spec carries the sweep command and its defective sites, and the driver re-runs the command against the worker's worktree before the push). (Dedupe port: the source skill carried the dispatch section in-skill; the seyag version points at delegation, the single owner of the dispatch model.)
 
 ### 4. Batch-present at end of round
 
@@ -212,7 +212,7 @@ After processing all review items in a round, present one consolidated message t
 
 ### Auto-applied (M items, M fix commits)
   [trivial:rename]     parseInput → parseUserInput  (src/handler.ts:22)
-                       sweep: git grep -n 'parseInput' → 1 site, 1 defective, renamed here
+                       sweep: git grep -n 'parseInput' → 3 sites (def + 2 callers), 3 defective, renamed here
   [trivial:import]     remove unused 'Buffer'       (src/utils.ts:3)
                        sweep: n/a, no-unused-imports lint rule covers it
   [trivial:comment]    fix typo in JSDoc            (src/types.ts:47)
@@ -228,15 +228,17 @@ After processing all review items in a round, present one consolidated message t
 
 #### 1. [semantic:control-flow] Replace early-return guard with if/else
    Reviewer: "This endpoint should reject unauthenticated requests early."
-   Sweep: git grep -n 'if (!auth)' src/routes/ → 4 sites, 2 defective, both in this proposal
+   sweep: git grep -n 'if (!auth)' src/routes/ → 4 sites, 2 defective, both in this proposal
    Agent analysis: Agree. Proposed diff:
      - if (!auth) return 401
+     + if (auth) { ... } else { return 401 }
+     - if (!auth) return 401   (src/routes/admin.ts:14)
      + if (auth) { ... } else { return 401 }
    Approve / Reject / Modify?
 
 #### 2. [semantic:logic] Change `&&` to `||` in guard
    Reviewer (nit): "I think this should be ||"
-   Sweep: git grep -n 'isGuarded(' → 1 site, 1 defective
+   sweep: git grep -n 'isGuarded(' → 1 site, 1 defective
    Agent analysis: This is a truthiness flip — escalating per signal conflict.
    Approve / Reject / Modify?
 
