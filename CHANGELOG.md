@@ -12,7 +12,13 @@ All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY
 
 - **security-sweep:** `--cap` now bounds wall time when the cap expires mid-write: the write gets 1 s more, then the run exits even mid-write (it may leave a `.tmp` file); the `_cap_exit` comment notes the group gets SIGTERM twice per capped exit (#270).
 
+### Improvements
+
+- **safe-worktree-clean:** the header says a matched `--only` does not narrow `--locks`, and an unmatched one exits 2 before `--locks` runs (#269).
+
 ### Tests
+
+- **safe-worktree-clean / branch-sweep probes:** rows pin repeated `--only`, the `--only`/`--prefix` union, `--prefix --apply` and `--only --json` (#269).
 
 - **security-sweep probes:** row 9w (cap grace past a stalled write) with canary r7-1; 9v waits for the first SIGTERM to be handled before sending the second; the purpose canary names the FAIL it stopped on (#270).
 
