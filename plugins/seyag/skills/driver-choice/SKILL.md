@@ -1,6 +1,6 @@
 ---
 name: driver-choice
-description: 'Which model should drive a session: classify the next unit of work (big-picture or drain) and recommend the big-picture lane only when the cheaper lane would do the unit clearly worse, at a clean boundary with the handoff on disk. Use at session start, when a new theme begins, when the work class changes (design to drain or back), when the weekly meter crosses the memory''s wind-down threshold, or when the owner asks which model should drive.'
+description: 'Which model should drive a session: classify the next unit of work (big-picture or drain) and recommend the big-picture lane only when the cheaper lane would do the unit clearly worse, at a clean boundary with the handoff on disk. Use at session start, when a new theme begins, when the work class changes (design to drain or back), when the weekly meter crosses its wind-down threshold, or when the owner asks which model should drive.'
 ---
 
 # Driver choice
@@ -9,7 +9,7 @@ The strongest model burns the shared week fastest, so it is spent only where it 
 
 ## Lanes
 
-Name lanes, not model versions; which model fills each lane, the wind-down threshold and the spend posture are machine-local policy in the shared memory ("Model roles + usage posture"), not in this skill.
+Name lanes, not model versions; which model fills each lane and the spend posture are machine-local policy in the shared memory ("Model roles + usage posture"), and the week thresholds are the meter's configuration, not this skill's.
 
 | Lane | Work class | Examples |
 |---|---|---|
@@ -22,11 +22,11 @@ Ambiguous class → the lane you are already in. Half design, half drain → spl
 
 ## The meter
 
-The plan meter (`claude-usage` here; the memory names it) prints the weekly usage. Read it before the recommendation; never quote an old reading. The wind-down threshold and the LARGE-unit hold live in the memory.
+The plan meter (`claude-usage` here; the memory names it) prints the weekly usage. Read it before the recommendation; never quote an old reading. `claude-usage --posture` prints the configured wind-down and stop thresholds beside the week's usage; quote them from it, never from memory. The LARGE-unit hold lives in the memory.
 
 1. **Drain units** always go to the orchestrator lane (recommend a switch if you are the big-picture driver).
 2. **A big-picture unit** goes to the big-picture lane only when the orchestrator lane would do it clearly worse, and the recommendation names why. Otherwise it goes to the orchestrator.
-3. **At or past the memory's weekly wind-down threshold**, everything goes to the orchestrator lane, and LARGE units are held per the memory.
+3. **At or past the weekly wind-down threshold** (`--posture`), everything goes to the orchestrator lane, and LARGE units are held per the memory.
 
 For "will the next units fit the week" questions, run usage-sweep --since <session start> --points for this project's meter points, instead of eyeballing from the live percentage.
 
