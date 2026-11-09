@@ -1589,6 +1589,11 @@ rm -f "$tmp/claude-statusline/usage.json"
 out=$(run --posture 2>/dev/null); rc=$?
 [ $rc = 0 ] && [ "$out" = "$(posture_line "" 75 80 '?')" ] \
     && ok "--posture with no cache: now ?" || bad "--posture no cache: rc=$rc out=[$out]"
+fixture 10 50 0
+jq '.seven_day.utilization = null' "$tmp/claude-statusline/usage.json" > "$tmp/u.tmp" && mv "$tmp/u.tmp" "$tmp/claude-statusline/usage.json"
+out=$(run --posture 2>/dev/null)
+[ "$out" = "$(posture_line "" 75 80 '?')" ] \
+    && ok "--posture: a fresh cache with null weekly utilization prints now ?" || bad "--posture null weekly: out=[$out]"
 # A stale reading is not "now": --posture applies --ok's cache rules (age tag, reset-since-cache,
 # the gate's max age).
 fixture 10 50 0; touch -d "@$(($(date +%s) - 600))" "$tmp/claude-statusline/usage.json"
@@ -1606,6 +1611,21 @@ touch -d "@$(($(date +%s) - 600))" "$tmp/claude-statusline/usage.json"
 out=$(run --posture 2>/dev/null)
 [ "$out" = "$(posture_line "" 75 80 '0% (cache 10m old) (week reset since cache)')" ] \
     && ok "--posture: a cache from before the passed week reset reads now 0% (week reset since cache)" || bad "--posture reset since cache: out=[$out]"
+fixture 10 50 0
+jq --arg r "$(date -u -d "@$(($(date +%s) - 60))" +%Y-%m-%dT%H:%M:%S.000000+00:00)" '.seven_day.resets_at = $r' \
+    "$tmp/claude-statusline/usage.json" > "$tmp/u.tmp" && mv "$tmp/u.tmp" "$tmp/claude-statusline/usage.json"
+touch -d "@$(($(date +%s) - 600))" "$tmp/claude-statusline/usage.json"
+out=$(CLAUDE_USAGE_GATE_MAX_AGE=300 run --posture 2>/dev/null)
+[ "$out" = "$(posture_line "" 75 80 '? (cache 10m old)')" ] \
+    && ok "--posture: a cache past the gate's max age drops (week reset since cache) beside ?" || bad "--posture over max age after reset: out=[$out]"
+fixture 10 50 0
+jq --arg r "$(date -u -d "@$(($(date +%s) - 60))" +%Y-%m-%dT%H:%M:%S.000000+00:00)" '.seven_day.resets_at = $r' \
+    "$tmp/claude-statusline/usage.json" > "$tmp/u.tmp" && mv "$tmp/u.tmp" "$tmp/claude-statusline/usage.json"
+jq '.seven_day.utilization = null' "$tmp/claude-statusline/usage.json" > "$tmp/u.tmp" && mv "$tmp/u.tmp" "$tmp/claude-statusline/usage.json"
+touch -d "@$(($(date +%s) - 600))" "$tmp/claude-statusline/usage.json"
+out=$(run --posture 2>/dev/null)
+[ "$out" = "$(posture_line "" 75 80 '? (cache 10m old)')" ] \
+    && ok "--posture: a cache with no weekly figure drops (week reset since cache) beside ?" || bad "--posture null weekly after reset: out=[$out]"
 # Routed non-zai lanes have no week gate and never fork the reserve command.
 sentinel="$tmp/wr-sentinel"; rm -f "$sentinel"
 posture_routed() { # posture_routed <label> <expected>: run --posture under the current route
@@ -1634,6 +1654,9 @@ out=$(CLAUDE_USAGE_ZAI_WEEK_RESERVE=98 run --posture 2>"$tmp/err"); rc=$?; err=$
     && ok "--posture (z.ai): z.ai week posture with wind-down 98 and the z.ai week %" || bad "--posture z.ai: rc=$rc out=[$out] err=[$err]"
 out=$(CLAUDE_USAGE_ZAI_WEEK_RESERVE_CMD='echo 97' run --posture 2>/dev/null)
 [ "$out" = "$(posture_line "z.ai " 97 80 61%)" ] && ok "--posture (z.ai): ZAI_WEEK_RESERVE_CMD wins" || bad "--posture z.ai CMD: out=[$out]"
+out=$(CLAUDE_USAGE_ZAI_WEEK_RESERVE_CMD='exit 3' run --posture 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 0 ] && [ "$out" = "$(posture_line "z.ai " 75 80 61%)" ] && [ "$err" = "$(zwr_note 3 75 "")" ] \
+    && ok "--posture (z.ai): failing ZAI_WEEK_RESERVE_CMD falls back to 75 with the gate's note on stderr" || bad "--posture z.ai CMD fail: rc=$rc out=[$out] err=[$err]"
 out=$(CLAUDE_USAGE_EXTRA_OK=1 run --posture 2>/dev/null)
 [ "$out" = "$(posture_line "z.ai " 75 80 61%)" ] && ok "--posture (z.ai): CLAUDE_USAGE_EXTRA_OK=1 adds no extra-pass clause" || bad "--posture z.ai extra ok: out=[$out]"
 out=$(CLAUDE_USAGE_WEEK_STOP=abc run --posture 2>"$tmp/err"); err=$(cat "$tmp/err")
@@ -1644,10 +1667,13 @@ out=$(run --posture 2>/dev/null)
 [ "$out" = "$(posture_line "z.ai " 75 80 62%)" ] && ok "--posture (z.ai): a fractional week % is rounded" || bad "--posture z.ai fractional: out=[$out]"
 printf '#!/bin/sh\necho '\''{"source":"api","as_of":%s,"five_hour_pct":10,"week_pct":61}'\''\n' "$(( $(date +%s) - 1860 ))" > "$tmp/.local/bin/zai-usage"
 out=$(run --posture 2>/dev/null)
-[ "$out" = "$(posture_line "z.ai " 75 80 '?')" ] && ok "--posture (z.ai): a quota reading over --ok's 30m cutoff prints now ?" || bad "--posture z.ai stale as_of: out=[$out]"
+[ "$out" = "$(posture_line "z.ai " 75 80 '? (cache 31m old)')" ] && ok "--posture (z.ai): a quota reading over --ok's 30m cutoff prints now ? with the age tag" || bad "--posture z.ai stale as_of: out=[$out]"
 printf '#!/bin/sh\necho '\''{"source":"api","as_of":%s,"five_hour_pct":10,"week_pct":61}'\''\n' "$(( $(date +%s) - 600 ))" > "$tmp/.local/bin/zai-usage"
 out=$(run --posture 2>/dev/null)
-[ "$out" = "$(posture_line "z.ai " 75 80 61%)" ] && ok "--posture (z.ai): a 10m-old quota reading still counts" || bad "--posture z.ai 10m as_of: out=[$out]"
+[ "$out" = "$(posture_line "z.ai " 75 80 '61% (cache 10m old)')" ] && ok "--posture (z.ai): a 10m-old quota reading still counts with the age tag" || bad "--posture z.ai 10m as_of: out=[$out]"
+printf '#!/bin/sh\necho '\''{"source":"api","as_of":%s,"five_hour_pct":10,"week_pct":61}'\''\n' "$(( $(date +%s) - 30 ))" > "$tmp/.local/bin/zai-usage"
+out=$(run --posture 2>/dev/null)
+[ "$out" = "$(posture_line "z.ai " 75 80 61%)" ] && ok "--posture (z.ai): a 30s-old quota reading has no age tag" || bad "--posture z.ai 30s as_of: out=[$out]"
 zai_stub fail 10 61
 out=$(run --posture 2>/dev/null); rc=$?
 [ $rc = 0 ] && [ "$out" = "$(posture_line "z.ai " 75 80 '?')" ] \

@@ -30,11 +30,12 @@
 #                             them: 'week posture: wind-down R% (no new units) · stop S% (checkpoint, wake at reset) · now W%'
 #                             (R = the reserve --ok uses, resolved the same way; S = CLAUDE_USAGE_WEEK_STOP, integer 1-99, default
 #                             80, reported only and read by no gate; W follows --ok's cache rules: ' (cache Nm old)' past the TTL,
-#                             0% plus ' (week reset since cache)' after a passed reset, '?' (with the age tag) past the gate max age or
-#                             with no weekly figure; ' · extra pass on (…)' appended under CLAUDE_USAGE_EXTRA_OK=1); on the z.ai lane
-#                             'z.ai week posture: …' with the z.ai reserve and z.ai's week %, rounded, '?' once over 30 minutes old,
-#                             never the extra clause; other routed lanes print '<lane> posture: no week gate (provider enforces its
-#                             own cap)' and never run the reserve command
+#                             0% plus ' (week reset since cache)' after a passed reset (beside a figure only), '?' (with the age
+#                             tag once past the TTL) past the gate max age or with no weekly figure; ' · extra pass on (…)'
+#                             appended under CLAUDE_USAGE_EXTRA_OK=1); on the z.ai lane 'z.ai week posture: …' with the z.ai
+#                             reserve and z.ai's week %, rounded, tagged ' (cache Nm old)' past the TTL like --ok and '?' with the
+#                             age tag once over 30 minutes old, never the extra clause; other routed lanes print '<lane> posture:
+#                             no week gate (provider enforces its own cap)' and never run the reserve command
 #
 # Reads the statusline's cache of /api/oauth/usage (~/.cache/claude-statusline/usage.json)
 # and refreshes it when it is older than 2 minutes, under a lock, so any number of polling
@@ -353,8 +354,9 @@ if [ "${1:-}" = --posture ] && [ "$routed" = 1 ] && [ "$vendor_lane" != zai ]; t
 fi
 
 # --posture on the z.ai lane answers from z.ai's quota, before any plan refresh. The week % is
-# the live quota's (the --ok branch's source), rounded, "?" when none or when the reading is over
-# --ok's 30-minute cutoff. The z.ai gate doesn't read CLAUDE_USAGE_EXTRA_OK, so no extra clause.
+# the live quota's (the --ok branch's source), rounded, tagged " (cache Nm old)" past the TTL like
+# --ok, "?" when none, and "?" with the age tag once the reading is over --ok's 30-minute cutoff.
+# The z.ai gate doesn't read CLAUDE_USAGE_EXTRA_OK, so no extra clause.
 if [ "${1:-}" = --posture ] && [ "$vendor_lane" = zai ]; then
     if [ -n "$week_reserve_note" ]; then echo "$week_reserve_note" >&2; fi
     if [ -n "$week_stop_note" ]; then echo "$week_stop_note" >&2; fi
@@ -362,8 +364,14 @@ if [ "${1:-}" = --posture ] && [ "$vendor_lane" = zai ]; then
     zj=$(zai_api_json)
     zas_of=$(jq -r 'if (.as_of | type) == "number" then (.as_of | floor) else empty end' <<< "${zj:-null}" 2>/dev/null)
     zpw=$(jq -r '(.week_pct | numbers | round) // empty' <<< "${zj:-null}" 2>/dev/null)
-    if [[ $zas_of =~ ^[0-9]+$ ]] && [ "$(( $(date +%s) - zas_of ))" -gt 1800 ]; then zpw=""; fi
+    zstale_note=""
+    if [[ $zas_of =~ ^[0-9]+$ ]]; then
+        zai_age=$(( $(date +%s) - zas_of ))
+        [ "$zai_age" -gt "$ttl" ] && zstale_note=" (cache $((zai_age / 60))m old)"
+        [ "$zai_age" -gt 1800 ] && zpw=""
+    fi
     znow="?"; [ -n "$zpw" ] && znow="$zpw%"
+    znow="$znow$zstale_note"
     posture_line "z.ai " "$zai_week_reserve" "$znow"
     exit 0
 fi
@@ -763,6 +771,8 @@ case "${1:-}" in
             cache_week_stale
             if [ "$cache_age" -le "$gate_max_age" ] && jq -e '(.seven_day.utilization | type) == "number"' "$cache" >/dev/null 2>&1; then
                 pnow="${week}%"
+            else
+                stale_note=${stale_note%" (week reset since cache)"}
             fi
             pnow="$pnow$stale_note"
         fi
