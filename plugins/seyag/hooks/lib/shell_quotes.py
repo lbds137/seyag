@@ -70,6 +70,7 @@ In this plugin (hooks/):
                                   the lower-stakes drift-warning case)
     grep-escaped-dollar-guard.sh  strip_heredoc_bodies
     pr-body-ref-gate.sh           MASK_FILL, MAX_WRAPPER_DEPTH, masked_view,
+                                  simple_commands, unwrap_runners,
                                   wrapped_command_strings
     pr-monitor-reminder.sh        _words, strip_heredoc_bodies
     broad-walk-guard.sh           command_pipelines (the shared command splitter),
@@ -1450,11 +1451,11 @@ def _extract_spans(text, skip_single_quoted, regions=None):
 # character (`<<'END-X'`, `<<END.X`). A wider marker strips more body text:
 # recoverable for a caller scanning command text, but a body fed to a shell
 # (`bash <<\EOF`) is then unscanned by a strip-only caller, exactly as a
-# `<<'EOF'` body already was; simple_commands surfaces such bodies. An optional leading backslash (`<<\EOF`, bash's third
-# quoting form) is matched before the quote group, so group 2 stays empty and
-# `_heredoc_marker`, which reads from group 2's start, derives `EOF`. Each hook
-# strips the heredoc forms its own matching cares about (module docstring), so
-# the two need not agree.
+# `<<'EOF'` body already was; simple_commands surfaces such bodies. An optional
+# leading backslash (`<<\EOF`, bash's third quoting form) is matched before the
+# quote group, so group 2 stays empty and `_heredoc_marker`, which reads from
+# group 2's start, derives `EOF`. Each hook strips the heredoc forms its own
+# matching cares about (module docstring), so the two need not agree.
 #
 # PUBLIC, unlike the other module-private names: lossy-pipe-guard.sh has to
 # REJOIN an emptied heredoc onto its opener line, and the opener half of that
@@ -1841,9 +1842,9 @@ def masked_view(text, join_continuations=False):
     with two spaces, the length-preserving form of joining the two lines with
     a blank between them. That is NOT bash, which removes the pair with no
     blank (`--body-file\\` NEWLINE `x` is the one word `--body-filex`); it
-    follows the calling hook's `CMD_JOINED` convention. One inside a heredoc body or a quoted span is data
-    and is filled like the rest of it, so a body line ending in `\\` never
-    joins its terminator."""
+    follows the calling hook's `CMD_JOINED` convention. One inside a heredoc
+    body or a quoted span is data and is filled like the rest of it, so a
+    body line ending in `\\` never joins its terminator."""
     _stripped, regions = _strip_heredoc(text)
     scan_text = text
     if regions:
