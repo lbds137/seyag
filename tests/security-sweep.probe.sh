@@ -1084,16 +1084,14 @@ else
   bad "9v second SIGTERM mid-write (rc=$rc9v)" "out=$(cat "$T/out") err=$(cat "$T/err") files=$(find "$T/state9v" 2>/dev/null)"
 fi
 
-# 9w: --cap expiry during a stalled worker-thread write exits after the grace instead of waiting for the write
+# Shared harness for 9w (mode alarm) and 9x (mode term-alarm); the mode picks the signal sequence sent mid-write.
 # SIGALRM is masked on the main thread (pool threads inherit the mask) and unmasked only by the writing worker,
 # so every SIGALRM (the cap's and the grace re-arm's) lands on that worker: main must still run the handler while the write stalls.
-reset_state
-mkdir -p "$T/fixtures/example-org_widget"
-rm -rf "$T/state9w"
-t0=$SECONDS
-SECURITY_SWEEP_GH="$T/bin/gh" python3 - "$SS" "$T/state9w" >"$T/out" 2>"$T/err" <<'PY'
+cat >"$T/cap_mid_write.py" <<'PY'
 import importlib.machinery, importlib.util, os, signal, sys, time
-path, state = sys.argv[1], sys.argv[2]
+path, state, mode = sys.argv[1], sys.argv[2], sys.argv[3]
+if mode not in ("alarm", "term-alarm"):
+    sys.exit("cap_mid_write: unknown mode " + mode)
 os.environ["XDG_STATE_HOME"] = state
 loader = importlib.machinery.SourceFileLoader("ss", path)
 spec = importlib.util.spec_from_loader("ss", loader)
@@ -1102,10 +1100,20 @@ loader.exec_module(mod)
 real_dump = mod.json.dump
 def wrapped_dump(*a, **kw):
     signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGALRM})
-    os.kill(os.getpid(), signal.SIGALRM)
-    deadline = time.monotonic() + 5
-    while not mod._cap_pending and time.monotonic() < deadline:
-        time.sleep(0.005)
+    if mode == "alarm":
+        os.kill(os.getpid(), signal.SIGALRM)
+        deadline = time.monotonic() + 5
+        while not mod._cap_pending and time.monotonic() < deadline:
+            time.sleep(0.005)
+    elif mode == "term-alarm":
+        os.kill(os.getpid(), signal.SIGTERM)
+        deadline = time.monotonic() + 5
+        while mod._cap_terms < 1 and time.monotonic() < deadline:
+            time.sleep(0.005)
+        os.kill(os.getpid(), signal.SIGALRM)
+        deadline = time.monotonic() + 5
+        while mod._cap_alarms < 1 and time.monotonic() < deadline:
+            time.sleep(0.005)
     time.sleep(8)
     return real_dump(*a, **kw)
 mod.json.dump = wrapped_dump
@@ -1114,6 +1122,13 @@ rc = mod.main(["--cap", "3600", "--no-cache", "-R", "example-org/widget"])
 print("returned", rc)
 sys.exit(0)
 PY
+
+# 9w: --cap expiry during a stalled worker-thread write exits after the grace instead of waiting for the write
+reset_state
+mkdir -p "$T/fixtures/example-org_widget"
+rm -rf "$T/state9w"
+t0=$SECONDS
+SECURITY_SWEEP_GH="$T/bin/gh" python3 "$T/cap_mid_write.py" "$SS" "$T/state9w" alarm >"$T/out" 2>"$T/err"
 rc9w=$?
 elapsed9w=$((SECONDS - t0))
 CACHE_9W="$T/state9w/seyag/security-sweep/example-org_widget.json"
@@ -1131,33 +1146,7 @@ reset_state
 mkdir -p "$T/fixtures/example-org_widget"
 rm -rf "$T/state9x"
 t0=$SECONDS
-SECURITY_SWEEP_GH="$T/bin/gh" python3 - "$SS" "$T/state9x" >"$T/out" 2>"$T/err" <<'PY'
-import importlib.machinery, importlib.util, os, signal, sys, time
-path, state = sys.argv[1], sys.argv[2]
-os.environ["XDG_STATE_HOME"] = state
-loader = importlib.machinery.SourceFileLoader("ss", path)
-spec = importlib.util.spec_from_loader("ss", loader)
-mod = importlib.util.module_from_spec(spec)
-loader.exec_module(mod)
-real_dump = mod.json.dump
-def wrapped_dump(*a, **kw):
-    signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGALRM})
-    os.kill(os.getpid(), signal.SIGTERM)
-    deadline = time.monotonic() + 5
-    while mod._cap_terms < 1 and time.monotonic() < deadline:
-        time.sleep(0.005)
-    os.kill(os.getpid(), signal.SIGALRM)
-    deadline = time.monotonic() + 5
-    while mod._cap_alarms < 1 and time.monotonic() < deadline:
-        time.sleep(0.005)
-    time.sleep(8)
-    return real_dump(*a, **kw)
-mod.json.dump = wrapped_dump
-signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGALRM})
-rc = mod.main(["--cap", "3600", "--no-cache", "-R", "example-org/widget"])
-print("returned", rc)
-sys.exit(0)
-PY
+SECURITY_SWEEP_GH="$T/bin/gh" python3 "$T/cap_mid_write.py" "$SS" "$T/state9x" term-alarm >"$T/out" 2>"$T/err"
 rc9x=$?
 elapsed9x=$((SECONDS - t0))
 CACHE_9X="$T/state9x/seyag/security-sweep/example-org_widget.json"
@@ -1353,8 +1342,10 @@ if [ -z "${SECURITY_SWEEP_SKIP_CANARIES:-}" ] && [ "$fail" -eq 0 ]; then
   cmp -s "$SS" "$T/mut-r7-1" && bad "canary r7-1: mutation did not apply (pattern drifted from the bin)"
   sed 's/_, pending = wait_futures(pending, timeout=_MAIN_WAIT_S)/_, pending = wait_futures(pending)/' "$SS" > "$T/mut-r8-1" && chmod +x "$T/mut-r8-1"
   cmp -s "$SS" "$T/mut-r8-1" && bad "canary r8-1: mutation did not apply (pattern drifted from the bin)"
+  sed 's/    if _cap_alarms == 1 and signum == signal.SIGALRM:/    if _cap_alarms == 1 and signum == signal.SIGALRM and _cap_terms == 0:/' "$SS" > "$T/mut-r7-2" && chmod +x "$T/mut-r7-2"
+  cmp -s "$SS" "$T/mut-r7-2" && bad "canary r7-2: mutation did not apply (pattern drifted from the bin)"
 
-  # Space out the hold/timeout-bound canaries (r5-3, r1-3, r7-1, r3-2, r8-1) across the full-run
+  # Space out the hold/timeout-bound canaries (r5-3, r1-3, r7-1, r3-2, r8-1, r7-2) across the full-run
   # canaries so at most ~1 slot is sleeping at a time while the other 3 run CPU work,
   # and finish with the shortest stop-at-fail canaries to avoid tail latency.
   if command -v script >/dev/null 2>&1; then
@@ -1375,6 +1366,7 @@ if [ -z "${SECURITY_SWEEP_SKIP_CANARIES:-}" ] && [ "$fail" -eq 0 ]; then
   launch_canary "r8-1" "$T/mut-r8-1" 1
   launch_canary "r6-2" "$T/mut-r6-2" 1
   launch_canary "r6-1" "$T/mut-r6-1" 1
+  launch_canary "r7-2" "$T/mut-r7-2" 0
   launch_canary "r2-6" "$SS" 1 "$T/mut-probe-r2-6.sh"
   launch_canary "r3-7" "$T/mut-r3-7" 1
   launch_canary "r3-3" "$T/mut-r3-3" 1
@@ -1661,6 +1653,15 @@ if [ -z "${SECURITY_SWEEP_SKIP_CANARIES:-}" ] && [ "$fail" -eq 0 ]; then
     ok "canary r8-1: a blocking main-thread wait fails 9w"
   else
     canary_bad "canary r8-1 did not fail 9w as expected (rc=$mut_rc)" "$mut_out"
+  fi
+
+  # Canary r7-2: a grace re-arm that requires no prior SIGTERM fails 9x only
+  load_canary "r7-2"
+  fail_n=$(grep -c '^FAIL:' <<<"$mut_out")
+  if [ "$mut_rc" -ne 0 ] && [ "$fail_n" -eq 1 ] && grep -qF "FAIL: 9x" <<<"$mut_out"; then
+    ok "canary r7-2: a grace re-arm that requires no prior SIGTERM fails $fail_n assertion (9x)"
+  else
+    canary_bad "canary r7-2 did not fail 9x only (rc=$mut_rc, fail_n=$fail_n)" "$mut_out"
   fi
 fi
 
