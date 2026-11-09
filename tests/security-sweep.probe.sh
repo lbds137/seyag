@@ -988,13 +988,97 @@ else
   SECURITY_SWEEP_GH="$T/bin/gh" XDG_STATE_HOME="$T/state" \
     timeout 20 script -qfec "stty tostop; \"$SS\" --cap 8 --no-cache -R example-org/widget; echo rc=\$?" /dev/null >"$T/out" 2>"$T/err"
   rc9t=$?
-  if [ "$rc9t" -ne 124 ] && [ "$rc9t" -eq 0 ] \
+  # script -e returns the inner shell's last command (echo), so rc9t only shows timeout(1) did not fire; the grep for rc=0 checks the sweep's own exit code.
+  if [ "$rc9t" -eq 0 ] \
     && grep -qF "example-org/widget: clean" "$T/out" \
     && grep -qF "rc=0" "$T/out"; then
     ok "9t --cap under stty tostop prints and exits instead of stopping on SIGTTOU"
   else
     bad "9t --cap under tostop (rc=$rc9t)" "out=$(cat "$T/out") err=$(cat "$T/err")"
   fi
+fi
+
+# 9u: a racing second entry still signals the group
+rm -f "$T/9u.pid"
+python3 - "$SS" "$T/9u.pid" >"$T/out" 2>"$T/err" <<'PY'
+import importlib.machinery, importlib.util, os, signal, subprocess, sys
+path, pid_file = sys.argv[1], sys.argv[2]
+loader = importlib.machinery.SourceFileLoader("ss", path)
+spec = importlib.util.spec_from_loader("ss", loader)
+mod = importlib.util.module_from_spec(spec)
+loader.exec_module(mod)
+mod._install_cap(3600)
+proc = subprocess.Popen(["sleep", "30"])
+with open(pid_file, "w", encoding="utf-8") as f:
+    f.write(f"{proc.pid}\n")
+mod._cap_exits = 1
+mod._cap_fire(signal.SIGALRM, None)
+print("returned")
+sys.exit(0)
+PY
+rc9u=$?
+pid9u=""
+[ -s "$T/9u.pid" ] && pid9u=$(cat "$T/9u.pid")
+alive9u=1
+if [ -n "$pid9u" ]; then
+  for _ in $(seq 1 30); do
+    if ! kill -0 "$pid9u" 2>/dev/null; then
+      alive9u=0
+      break
+    fi
+    sleep 0.1
+  done
+  if [ "$alive9u" -eq 1 ]; then
+    kill "$pid9u" 2>/dev/null || true
+  fi
+fi
+if [ "$rc9u" -eq 124 ] \
+  && [ -n "$pid9u" ] \
+  && [ "$alive9u" -eq 0 ] \
+  && ! grep -qF "returned" "$T/out"; then
+  ok "9u a racing second _cap_exit entry still signals the group"
+else
+  bad "9u racing second entry (rc=$rc9u)" "alive=$alive9u out=$(cat "$T/out") err=$(cat "$T/err")"
+fi
+
+# 9v: a second SIGTERM escalates past an in-flight write
+rm -rf "$T/state9v"
+python3 - "$SS" "$T/state9v" >"$T/out" 2>"$T/err" <<'PY'
+import importlib.machinery, importlib.util, os, signal, sys, time
+path, state = sys.argv[1], sys.argv[2]
+os.environ["XDG_STATE_HOME"] = state
+loader = importlib.machinery.SourceFileLoader("ss", path)
+spec = importlib.util.spec_from_loader("ss", loader)
+mod = importlib.util.module_from_spec(spec)
+loader.exec_module(mod)
+mod._install_cap(3600)
+real_dump = mod.json.dump
+def wrapped_dump(*a, **kw):
+    os.kill(os.getpid(), signal.SIGTERM)
+    os.kill(os.getpid(), signal.SIGTERM)
+    time.sleep(5)
+    return real_dump(*a, **kw)
+mod.json.dump = wrapped_dump
+mod.write_cache(
+    "example-org/widget",
+    1,
+    {
+        "code-scanning": {"state": "off"},
+        "dependabot": {"state": "off"},
+        "secret-scanning": {"state": "off"},
+    },
+)
+print("returned")
+sys.exit(0)
+PY
+rc9v=$?
+CACHE_9V="$T/state9v/seyag/security-sweep/example-org_widget.json"
+if [ "$rc9v" -eq 124 ] \
+  && [ ! -e "$CACHE_9V" ] \
+  && ! grep -qF "returned" "$T/out"; then
+  ok "9v a second SIGTERM exits mid-write instead of waiting for it"
+else
+  bad "9v second SIGTERM mid-write (rc=$rc9v)" "out=$(cat "$T/out") err=$(cat "$T/err") files=$(find "$T/state9v" 2>/dev/null)"
 fi
 
 # 9j & 9k: --warm-cache deduplicates via non-blocking flock and populates cache when unheld
@@ -1129,7 +1213,9 @@ if [ -z "${SECURITY_SWEEP_SKIP_CANARIES:-}" ] && [ "$fail" -eq 0 ]; then
     local id="$1"
     mut_out=$(cat "$T/canary-$id.out")
     mut_rc=$(cat "$T/canary-$id.rc")
+    mut_first_fail=$(grep -m1 '^FAIL:' <<<"$mut_out")
   }
+  canary_bad() { bad "$1; first FAIL: ${mut_first_fail:-none}" "$2"; }
 
   # Phase 1: build every mutant (sed, cmp guard, chmod), then launch canary re-runs
   # concurrently (at most 4 at a time), longest-running first so hold/timeout waits overlap.
@@ -1153,7 +1239,7 @@ if [ -z "${SECURITY_SWEEP_SKIP_CANARIES:-}" ] && [ "$fail" -eq 0 ]; then
   sed 's/fcntl\.flock(warm_lock_fd, fcntl\.LOCK_EX | fcntl\.LOCK_NB)/pass/' "$SS" > "$T/mut-r3-3" && chmod +x "$T/mut-r3-3"
   sed 's/def is_valid_cached_surface(sdata):/def is_valid_cached_surface(sdata):\n    return isinstance(sdata, dict) and sdata.get("state") in ("count", "off")/' "$SS" > "$T/mut-r3-6" && chmod +x "$T/mut-r3-6"
   sed 's/sorted(repos)/repos/' "$SS" > "$T/mut-r3-7" && chmod +x "$T/mut-r3-7"
-  sed 's/    if _cap_writes == 0:/    if True:/' "$SS" > "$T/mut-r4-1" && chmod +x "$T/mut-r4-1"
+  sed 's/    if _cap_writes == 0 or _cap_terms >= 2:/    if True:/' "$SS" > "$T/mut-r4-1" && chmod +x "$T/mut-r4-1"
   cmp -s "$SS" "$T/mut-r4-1" && bad "canary r4-1: mutation did not apply (pattern drifted from the bin)"
   sed 's/os.killpg(os.getpgrp(), signal.SIGTERM)/pass/' "$SS" > "$T/mut-r4-2" && chmod +x "$T/mut-r4-2"
   cmp -s "$SS" "$T/mut-r4-2" && bad "canary r4-2: mutation did not apply (pattern drifted from the bin)"
@@ -1163,12 +1249,16 @@ if [ -z "${SECURITY_SWEEP_SKIP_CANARIES:-}" ] && [ "$fail" -eq 0 ]; then
   cmp -s "$SS" "$T/mut-r4-4" && bad "canary r4-4: mutation did not apply (pattern drifted from the bin)"
   sed 's/    signal\.signal(signal\.SIGTERM, _cap_fire)/    signal.signal(signal.SIGTERM, lambda *_: os._exit(124))/' "$SS" > "$T/mut-r5-1" && chmod +x "$T/mut-r5-1"
   cmp -s "$SS" "$T/mut-r5-1" && bad "canary r5-1: mutation did not apply (pattern drifted from the bin)"
-  sed 's/    if _cap_exiting:/    if False:/' "$SS" > "$T/mut-r5-2" && chmod +x "$T/mut-r5-2"
+  sed 's/    if _cap_exits > 2:/    if False:/' "$SS" > "$T/mut-r5-2" && chmod +x "$T/mut-r5-2"
   cmp -s "$SS" "$T/mut-r5-2" && bad "canary r5-2: mutation did not apply (pattern drifted from the bin)"
   if command -v script >/dev/null 2>&1; then
     sed '/signal\.signal(signal\.SIGTTOU, signal\.SIG_IGN)/d' "$SS" > "$T/mut-r5-3" && chmod +x "$T/mut-r5-3"
     cmp -s "$SS" "$T/mut-r5-3" && bad "canary r5-3: mutation did not apply (pattern drifted from the bin)"
   fi
+  sed 's/    if _cap_exits > 2:/    if _cap_exits > 1:/' "$SS" > "$T/mut-r6-1" && chmod +x "$T/mut-r6-1"
+  cmp -s "$SS" "$T/mut-r6-1" && bad "canary r6-1: mutation did not apply (pattern drifted from the bin)"
+  sed 's/_cap_terms >= 2/_cap_terms >= 99/' "$SS" > "$T/mut-r6-2" && chmod +x "$T/mut-r6-2"
+  cmp -s "$SS" "$T/mut-r6-2" && bad "canary r6-2: mutation did not apply (pattern drifted from the bin)"
 
   # Space out the hold/timeout-bound canaries (r5-3, r1-3, r3-2) across the full-run
   # canaries so at most ~1 slot is sleeping at a time while the other 3 run CPU work,
@@ -1187,6 +1277,8 @@ if [ -z "${SECURITY_SWEEP_SKIP_CANARIES:-}" ] && [ "$fail" -eq 0 ]; then
   launch_canary "r3-2" "$T/mut-r3-2" 1
   launch_canary "r5-1" "$T/mut-r5-1" 0
   launch_canary "r5-2" "$T/mut-r5-2" 0
+  launch_canary "r6-2" "$T/mut-r6-2" 1
+  launch_canary "r6-1" "$T/mut-r6-1" 1
   launch_canary "r2-6" "$SS" 1 "$T/mut-probe-r2-6.sh"
   launch_canary "r3-7" "$T/mut-r3-7" 1
   launch_canary "r3-3" "$T/mut-r3-3" 1
@@ -1214,7 +1306,7 @@ if [ -z "${SECURITY_SWEEP_SKIP_CANARIES:-}" ] && [ "$fail" -eq 0 ]; then
   if [ "$mut_rc" -ne 0 ] && grep -qF "FAIL: 1a default line" <<<"$mut_out" && grep -qF "FAIL: 1b --json shape" <<<"$mut_out"; then
     ok "canary 1a: mutating rule.security_severity_level -> rule.severity fails 1a and 1b"
   else
-    bad "canary 1a did not fail as expected (rc=$mut_rc)" "$mut_out"
+    canary_bad "canary 1a did not fail as expected (rc=$mut_rc)" "$mut_out"
   fi
 
   # Canary 1b: omitting rules_critical_high fails 1b
@@ -1222,7 +1314,7 @@ if [ -z "${SECURITY_SWEEP_SKIP_CANARIES:-}" ] && [ "$fail" -eq 0 ]; then
   if [ "$mut_rc" -ne 0 ] && grep -qF "FAIL: 1b --json shape" <<<"$mut_out"; then
     ok "canary 1b: omitting rules_critical_high fails 1b"
   else
-    bad "canary 1b did not fail as expected (rc=$mut_rc)" "$mut_out"
+    canary_bad "canary 1b did not fail as expected (rc=$mut_rc)" "$mut_out"
   fi
 
   # Canary 2: removing secret-scanning field filter fails 2 (secret value leak check)
@@ -1230,7 +1322,7 @@ if [ -z "${SECURITY_SWEEP_SKIP_CANARIES:-}" ] && [ "$fail" -eq 0 ]; then
   if [ "$mut_rc" -ne 0 ] && grep -qF "FAIL: 2 secret value leaked into stdout, stderr, or state cache" <<<"$mut_out"; then
     ok "canary 2: removing secret-scanning field filter fails secret leak check"
   else
-    bad "canary 2 did not fail as expected (rc=$mut_rc)" "$mut_out"
+    canary_bad "canary 2 did not fail as expected (rc=$mut_rc)" "$mut_out"
   fi
 
   # Canary 3: treating every nonzero gh exit as off fails 3c Not Found row
@@ -1238,7 +1330,7 @@ if [ -z "${SECURITY_SWEEP_SKIP_CANARIES:-}" ] && [ "$fail" -eq 0 ]; then
   if [ "$mut_rc" -ne 0 ] && grep -qF "FAIL: 3c Not Found error mapping" <<<"$mut_out"; then
     ok "canary 3: treating every nonzero gh exit as off fails 3c Not Found row"
   else
-    bad "canary 3 did not fail as expected (rc=$mut_rc)" "$mut_out"
+    canary_bad "canary 3 did not fail as expected (rc=$mut_rc)" "$mut_out"
   fi
 
   # Purpose canary: --session-line returning empty unconditionally fails 2 assertions here (9b, 9c)
@@ -1258,7 +1350,7 @@ if [ -z "${SECURITY_SWEEP_SKIP_CANARIES:-}" ] && [ "$fail" -eq 0 ]; then
   if [ "$mut_rc" -ne 0 ] && [ "$fail_n" -eq 1 ] && grep -qF "FAIL: 4g --strict error stderr" <<<"$mut_out"; then
     ok "canary r1-1 (strict stderr purpose canary): reverting fix 1 fails $fail_n assertion (4g)"
   else
-    bad "canary r1-1 did not fail 4g as expected (rc=$mut_rc, fail_n=$fail_n)" "$mut_out"
+    canary_bad "canary r1-1 did not fail 4g as expected (rc=$mut_rc, fail_n=$fail_n)" "$mut_out"
   fi
 
   # Canary r1-2: reverting invalid-repo exit code to unconditional 2 fails 6d
@@ -1266,7 +1358,7 @@ if [ -z "${SECURITY_SWEEP_SKIP_CANARIES:-}" ] && [ "$fail" -eq 0 ]; then
   if [ "$mut_rc" -ne 0 ] && grep -qF "FAIL: 6d -R not-a-repo" <<<"$mut_out"; then
     ok "canary r1-2: reverting invalid-repo exit code to unconditional 2 fails 6d"
   else
-    bad "canary r1-2 did not fail 6d as expected (rc=$mut_rc)" "$mut_out"
+    canary_bad "canary r1-2 did not fail 6d as expected (rc=$mut_rc)" "$mut_out"
   fi
 
   # Canary r1-3: removing gh subprocess timeout fails 3e
@@ -1274,7 +1366,7 @@ if [ -z "${SECURITY_SWEEP_SKIP_CANARIES:-}" ] && [ "$fail" -eq 0 ]; then
   if [ "$mut_rc" -ne 0 ] && grep -qF "FAIL: 3e gh timeout" <<<"$mut_out"; then
     ok "canary r1-3: removing gh subprocess timeout fails 3e"
   else
-    bad "canary r1-3 did not fail 3e as expected (rc=$mut_rc)" "$mut_out"
+    canary_bad "canary r1-3 did not fail 3e as expected (rc=$mut_rc)" "$mut_out"
   fi
 
   # Canary r1-4: removing --session-line exception guard fails 9d
@@ -1282,7 +1374,7 @@ if [ -z "${SECURITY_SWEEP_SKIP_CANARIES:-}" ] && [ "$fail" -eq 0 ]; then
   if [ "$mut_rc" -ne 0 ] && grep -qF "FAIL: 9d --session-line exception suppression" <<<"$mut_out"; then
     ok "canary r1-4: removing --session-line exception guard fails 9d"
   else
-    bad "canary r1-4 did not fail 9d as expected (rc=$mut_rc)" "$mut_out"
+    canary_bad "canary r1-4 did not fail 9d as expected (rc=$mut_rc)" "$mut_out"
   fi
 
   # Canary r2-1 (purpose canary): reverting OFF_MARKERS check to two strings fails 'no analysis found' row (3f-2) and 4 others (5 total)
@@ -1293,7 +1385,7 @@ if [ -z "${SECURITY_SWEEP_SKIP_CANARIES:-}" ] && [ "$fail" -eq 0 ]; then
     && grep -qF "FAIL: 3f-strict --strict with only off surfaces" <<<"$mut_out"; then
     ok "canary r2-1 (purpose canary): reverting fix 1 fails $fail_n assertions including 'no analysis found' (3f-2, 3f-3, 3f-5, 3f-6, 3f-strict)"
   else
-    bad "canary r2-1 did not fail expected off-marker rows (rc=$mut_rc, fail_n=$fail_n)" "$mut_out"
+    canary_bad "canary r2-1 did not fail expected off-marker rows (rc=$mut_rc, fail_n=$fail_n)" "$mut_out"
   fi
 
   # Canary r2-3: reverting UnicodeDecodeError and __main__ Exception catch fails 7b, 7c, 9e, 9f
@@ -1304,7 +1396,7 @@ if [ -z "${SECURITY_SWEEP_SKIP_CANARIES:-}" ] && [ "$fail" -eq 0 ]; then
     && grep -qF "FAIL: 9f internal error --strict exit" <<<"$mut_out"; then
     ok "canary r2-3: reverting fix 3 fails 7b, 9e, and 9f"
   else
-    bad "canary r2-3 did not fail 7b/9e/9f as expected (rc=$mut_rc)" "$mut_out"
+    canary_bad "canary r2-3 did not fail 7b/9e/9f as expected (rc=$mut_rc)" "$mut_out"
   fi
 
   # Canary r2-4: reverting invalid-repo skip to immediate return fails 6d, 6e, 6f, 6g, 6h
@@ -1315,7 +1407,7 @@ if [ -z "${SECURITY_SWEEP_SKIP_CANARIES:-}" ] && [ "$fail" -eq 0 ]; then
     && grep -qF "FAIL: 6h skip invalid repo --strict alert wins" <<<"$mut_out"; then
     ok "canary r2-4: reverting fix 4 fails 6f, 6g, and 6h"
   else
-    bad "canary r2-4 did not fail 6f/6g/6h as expected (rc=$mut_rc)" "$mut_out"
+    canary_bad "canary r2-4 did not fail 6f/6g/6h as expected (rc=$mut_rc)" "$mut_out"
   fi
 
   # Canary r2-5: omitting numbers/rules/packages from json_surface fails 1b and 1c
@@ -1325,7 +1417,7 @@ if [ -z "${SECURITY_SWEEP_SKIP_CANARIES:-}" ] && [ "$fail" -eq 0 ]; then
     && grep -qF "FAIL: 1c --json dedup identifiers" <<<"$mut_out"; then
     ok "canary r2-5: reverting fix 5 fails 1b and 1c"
   else
-    bad "canary r2-5 did not fail 1b/1c as expected (rc=$mut_rc)" "$mut_out"
+    canary_bad "canary r2-5 did not fail 1b/1c as expected (rc=$mut_rc)" "$mut_out"
   fi
 
   # Canary r2-6: re-inserting chmod +x "$SS" in a temp copy of this probe fails 11
@@ -1333,7 +1425,7 @@ if [ -z "${SECURITY_SWEEP_SKIP_CANARIES:-}" ] && [ "$fail" -eq 0 ]; then
   if [ "$mut_rc" -ne 0 ] && grep -qF "FAIL: 11 non-executable SECURITY_SWEEP_BIN check (rc=0, x=1)" <<<"$mut_out"; then
     ok "canary r2-6: re-inserting chmod +x on target bin fails 11"
   else
-    bad "canary r2-6 did not fail 11 as expected (rc=$mut_rc)" "$mut_out"
+    canary_bad "canary r2-6 did not fail 11 as expected (rc=$mut_rc)" "$mut_out"
   fi
 
   # Canary r3-1: removing quiet parser suppression fails 9g on stderr
@@ -1341,7 +1433,7 @@ if [ -z "${SECURITY_SWEEP_SKIP_CANARIES:-}" ] && [ "$fail" -eq 0 ]; then
   if [ "$mut_rc" -ne 0 ] && grep -qF "FAIL: 9g --session-line -R -foo/bar" <<<"$mut_out"; then
     ok "canary r3-1: removing quiet parser suppression fails 9g"
   else
-    bad "canary r3-1 did not fail 9g as expected (rc=$mut_rc)" "$mut_out"
+    canary_bad "canary r3-1 did not fail 9g as expected (rc=$mut_rc)" "$mut_out"
   fi
 
   # Canary r3-2: deleting signal.setitimer call fails 9i
@@ -1349,7 +1441,7 @@ if [ -z "${SECURITY_SWEEP_SKIP_CANARIES:-}" ] && [ "$fail" -eq 0 ]; then
   if [ "$mut_rc" -ne 0 ] && grep -qF "FAIL: 9i --session-line --cap 1" <<<"$mut_out"; then
     ok "canary r3-2: deleting setitimer call fails 9i"
   else
-    bad "canary r3-2 did not fail 9i as expected (rc=$mut_rc)" "$mut_out"
+    canary_bad "canary r3-2 did not fail 9i as expected (rc=$mut_rc)" "$mut_out"
   fi
 
   # Canary r3-3: making warm-cache flock acquisition a no-op fails 9j
@@ -1357,7 +1449,7 @@ if [ -z "${SECURITY_SWEEP_SKIP_CANARIES:-}" ] && [ "$fail" -eq 0 ]; then
   if [ "$mut_rc" -ne 0 ] && grep -qF "FAIL: 9j --warm-cache held lock" <<<"$mut_out"; then
     ok "canary r3-3: making warm-cache flock acquisition a no-op fails 9j"
   else
-    bad "canary r3-3 did not fail 9j as expected (rc=$mut_rc)" "$mut_out"
+    canary_bad "canary r3-3 did not fail 9j as expected (rc=$mut_rc)" "$mut_out"
   fi
 
   # Canary r3-6: reverting is_valid_cached_surface to the base check fails 5d, 5e, 5f, and 5g
@@ -1369,7 +1461,7 @@ if [ -z "${SECURITY_SWEEP_SKIP_CANARIES:-}" ] && [ "$fail" -eq 0 ]; then
     && grep -qF "FAIL: 5g corrupt cache rules_by_severity: {\"critical\": [1]}" <<<"$mut_out"; then
     ok "canary r3-6: reverting is_valid_cached_surface to base version fails 5d, 5e, 5f, and 5g"
   else
-    bad "canary r3-6 did not fail 5d, 5e, 5f, and 5g as expected (rc=$mut_rc)" "$mut_out"
+    canary_bad "canary r3-6 did not fail 5d, 5e, 5f, and 5g as expected (rc=$mut_rc)" "$mut_out"
   fi
 
   # Canary r3-7: dropping sorted( in warm-cache lock digest fails 9m
@@ -1377,7 +1469,7 @@ if [ -z "${SECURITY_SWEEP_SKIP_CANARIES:-}" ] && [ "$fail" -eq 0 ]; then
   if [ "$mut_rc" -ne 0 ] && grep -qF "FAIL: 9m --warm-cache sorted repo-set lock" <<<"$mut_out"; then
     ok "canary r3-7: dropping sorted( in warm-cache lock digest fails 9m"
   else
-    bad "canary r3-7 did not fail 9m as expected (rc=$mut_rc)" "$mut_out"
+    canary_bad "canary r3-7 did not fail 9m as expected (rc=$mut_rc)" "$mut_out"
   fi
 
   # Canary r4-1: firing _cap_exit immediately during write_cache fails 9o
@@ -1385,7 +1477,7 @@ if [ -z "${SECURITY_SWEEP_SKIP_CANARIES:-}" ] && [ "$fail" -eq 0 ]; then
   if [ "$mut_rc" -ne 0 ] && grep -qF "FAIL: 9o --cap mid-write" <<<"$mut_out"; then
     ok "canary r4-1: ignoring _cap_writes in _cap_fire fails 9o"
   else
-    bad "canary r4-1 did not fail 9o as expected (rc=$mut_rc)" "$mut_out"
+    canary_bad "canary r4-1 did not fail 9o as expected (rc=$mut_rc)" "$mut_out"
   fi
 
   # Canary r4-2 (purpose canary): replacing os.killpg with pass fails 9n
@@ -1394,7 +1486,7 @@ if [ -z "${SECURITY_SWEEP_SKIP_CANARIES:-}" ] && [ "$fail" -eq 0 ]; then
   if [ "$mut_rc" -ne 0 ] && grep -qF "FAIL: 9n --cap 1 expiry stops the held gh children" <<<"$mut_out"; then
     ok "canary r4-2 (purpose canary): replacing os.killpg with pass fails $fail_n assertion (9n)"
   else
-    bad "canary r4-2 did not fail 9n as expected (rc=$mut_rc, fail_n=$fail_n)" "$mut_out"
+    canary_bad "canary r4-2 did not fail 9n as expected (rc=$mut_rc, fail_n=$fail_n)" "$mut_out"
   fi
 
   # Canary r4-3: ignoring skip in write_cache fails 9p
@@ -1402,7 +1494,7 @@ if [ -z "${SECURITY_SWEEP_SKIP_CANARIES:-}" ] && [ "$fail" -eq 0 ]; then
   if [ "$mut_rc" -ne 0 ] && grep -qF "FAIL: 9p _cap_pending before write_cache" <<<"$mut_out"; then
     ok "canary r4-3: ignoring skip in write_cache fails 9p"
   else
-    bad "canary r4-3 did not fail 9p as expected (rc=$mut_rc)" "$mut_out"
+    canary_bad "canary r4-3 did not fail 9p as expected (rc=$mut_rc)" "$mut_out"
   fi
 
   # Canary r4-4: calling signal.signal in _cap_exit fails 9q
@@ -1410,7 +1502,7 @@ if [ -z "${SECURITY_SWEEP_SKIP_CANARIES:-}" ] && [ "$fail" -eq 0 ]; then
   if [ "$mut_rc" -ne 0 ] && grep -qF "FAIL: 9q --cap worker-thread mid-write" <<<"$mut_out"; then
     ok "canary r4-4: calling signal.signal in _cap_exit fails 9q"
   else
-    bad "canary r4-4 did not fail 9q as expected (rc=$mut_rc)" "$mut_out"
+    canary_bad "canary r4-4 did not fail 9q as expected (rc=$mut_rc)" "$mut_out"
   fi
 
   # Canary r5-1 (purpose canary): reverting SIGTERM handler to os._exit(124) fails 9r
@@ -1420,15 +1512,15 @@ if [ -z "${SECURITY_SWEEP_SKIP_CANARIES:-}" ] && [ "$fail" -eq 0 ]; then
     && grep -qF "FAIL: 9s external SIGTERM worker-thread mid-write" <<<"$mut_out"; then
     ok "canary r5-1 (purpose canary): reverting SIGTERM handler to os._exit(124) fails $fail_n assertions (9r and 9s)"
   else
-    bad "canary r5-1 did not fail 9r as expected (rc=$mut_rc, fail_n=$fail_n)" "$mut_out"
+    canary_bad "canary r5-1 did not fail 9r as expected (rc=$mut_rc, fail_n=$fail_n)" "$mut_out"
   fi
 
-  # Canary r5-2: disabling _cap_exiting re-entry guard in _cap_exit fails 9r with RecursionError
+  # Canary r5-2: disabling the _cap_exits recursion bound in _cap_exit fails 9r with RecursionError
   load_canary "r5-2"
   if [ "$mut_rc" -ne 0 ] && grep -qF "FAIL: 9r" <<<"$mut_out"; then
-    ok "canary r5-2: disabling _cap_exiting re-entry guard fails 9r (RecursionError)"
+    ok "canary r5-2: disabling the _cap_exits recursion bound fails 9r (RecursionError)"
   else
-    bad "canary r5-2 did not fail 9r as expected (rc=$mut_rc)" "$mut_out"
+    canary_bad "canary r5-2 did not fail 9r as expected (rc=$mut_rc)" "$mut_out"
   fi
 
   # Canary r5-3: removing SIGTTOU ignore fails 9t
@@ -1439,8 +1531,24 @@ if [ -z "${SECURITY_SWEEP_SKIP_CANARIES:-}" ] && [ "$fail" -eq 0 ]; then
     if [ "$mut_rc" -ne 0 ] && grep -qF "FAIL: 9t" <<<"$mut_out"; then
       ok "canary r5-3: removing SIGTTOU ignore fails 9t"
     else
-      bad "canary r5-3 did not fail 9t as expected (rc=$mut_rc)" "$mut_out"
+      canary_bad "canary r5-3 did not fail 9t as expected (rc=$mut_rc)" "$mut_out"
     fi
+  fi
+
+  # Canary r6-1: exiting on the second _cap_exit entry without killpg fails 9u
+  load_canary "r6-1"
+  if [ "$mut_rc" -ne 0 ] && grep -qF "FAIL: 9u" <<<"$mut_out"; then
+    ok "canary r6-1: exiting on the second _cap_exit entry without killpg fails 9u"
+  else
+    canary_bad "canary r6-1 did not fail 9u as expected (rc=$mut_rc)" "$mut_out"
+  fi
+
+  # Canary r6-2: never escalating a repeated SIGTERM fails 9v
+  load_canary "r6-2"
+  if [ "$mut_rc" -ne 0 ] && grep -qF "FAIL: 9v" <<<"$mut_out"; then
+    ok "canary r6-2: never escalating a repeated SIGTERM fails 9v"
+  else
+    canary_bad "canary r6-2 did not fail 9v as expected (rc=$mut_rc)" "$mut_out"
   fi
 fi
 
