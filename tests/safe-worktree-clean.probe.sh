@@ -865,6 +865,20 @@ else
   bad "--only <tree3> --apply HOLD (rc $rc)"; printf '%s\n' "$out"
 fi
 git -C "$O" worktree unlock "$O/.claude/worktrees/tree3"
+out=$("$TOOL" --repo "$O" --only "$O/.claude/worktrees/tree2" --only "$O/.claude/worktrees/tree3"); rc=$?
+if [ "$rc" -eq 0 ] \
+  && grep -q '^SAFE  \.claude/worktrees/tree2  \[worktree-agent-tree2\]$' <<<"$out" \
+  && grep -q '^SAFE  \.claude/worktrees/tree3  \[worktree-agent-tree3\]$' <<<"$out"; then
+  ok "two --only flags dry run lists both tree2 and tree3 as SAFE"
+else
+  bad "two --only flags dry run (rc $rc)"; printf '%s\n' "$out"
+fi
+out=$("$TOOL" --repo "$O" --json --only "$O/.claude/worktrees/tree2"); rc=$?
+if [ "$rc" -eq 0 ] && python3 -c 'import json,sys; w=json.load(sys.stdin)["worktrees"]; assert len(w)==1 and w[0]["path"].endswith("/tree2") and w[0]["verdict"]=="SAFE"' <<<"$out"; then
+  ok "--json --only <tree2> has one worktrees entry ending with /tree2 and verdict SAFE"
+else
+  bad "--json --only <tree2> (rc $rc)"; printf '%s\n' "$out"
+fi
 git -C "$O" worktree add -q -b worktree-agent-outside "$T/outside-tree"
 err=$("$TOOL" --repo "$O" --only "$T/outside-tree" 2>&1 >/dev/null); rc=$?
 if [ "$rc" -eq 2 ] \
@@ -880,6 +894,8 @@ if { [ "$rc" -eq 0 ] || [ "$rc" -eq 1 ]; } && grep -q 'outside-tree' <<<"$out" \
 else
   bad "--all --only <outside-tree> dry run (rc $rc)"; printf '%s\n' "$out"
 fi
+git -C "$O" worktree remove --force "$T/outside-tree"
+git -C "$O" branch -D worktree-agent-outside >/dev/null
 
 # --- The rm guards pass the tool's own invocation untouched (exit 0, no output). ---
 for cmd in 'safe-worktree-clean --repo /srv/team/myrepo --apply' \
