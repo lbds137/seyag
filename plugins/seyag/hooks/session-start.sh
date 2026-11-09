@@ -9,7 +9,7 @@
 #   greps it from session logs),
 #   then warns in one line if that rules link is missing (component `rules`),
 #   and when opted in (`SYG_SECURITY_SWEEP=1` or `SYG_SECURITY_SWEEP_REPOS`)
-#   appends `bin/security-sweep --session-line` (2 s cap, plus at most 1 s for an
+#   appends `bin/security-sweep --session-line` (2 s cap, plus about 1 s for an
 #   in-flight cache write, detaching a background cache-warming run on timeout
 #   exit 124; component `security`).
 # - compact: adds the post-compaction recovery checklist (the failure class
