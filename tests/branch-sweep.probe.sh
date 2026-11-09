@@ -182,9 +182,10 @@ outop=$( (cd "$R" && "$BS" --no-fetch --only feat-a --prefix wip) 2>&1 ); rc=$?
 [ $rc = 0 ] && grep -qF "ELIGIBLE feat-a (tree identical to $SQ)" <<< "$outop" \
   && grep -q "^DIFFERS wip-b$" <<< "$outop" && ! grep -qE 'rework-c|SKIP' <<< "$outop" \
   && ok "--only + --prefix union: reports feat-a and wip-b" || bad "--only + --prefix (rc $rc; out: $(head -c 400 <<< "$outop"))"
-git -C "$R" branch wip-eq "$SQ"
+git -C "$R" branch wip-eq "$SQ" || bad "create wip-eq"
 outpa=$( (cd "$R" && "$BS" --no-fetch --prefix wip --apply) 2>&1 ); rc=$?
 [ $rc = 0 ] && ! git -C "$R" rev-parse --verify -q refs/heads/wip-eq >/dev/null \
+  && grep -qF "deleted wip-eq (matching SHA $SQ)" <<< "$outpa" && ! grep -q 'deleted feat-a' <<< "$outpa" \
   && git -C "$R" rev-parse --verify -q refs/heads/wip-b >/dev/null \
   && git -C "$R" rev-parse --verify -q refs/heads/feat-a >/dev/null \
   && ok "--prefix wip --apply: deletes wip-eq, keeps wip-b and feat-a" || bad "--prefix wip --apply (rc $rc; out: $(head -c 400 <<< "$outpa"))"
