@@ -252,7 +252,7 @@ Exception: the per-command `SYG_ALLOW_*` bypasses of the shell guards are writte
 | `SYG_SWEEP_VALID_FRAGMENTS` | `bin/removed-identifier-sweep` | Internal env variable exporting validated SYG_SWEEP_EXCLUDE_PATHS fragments to awk in removed-identifier-sweep. |
 | `SYG_USER_RULES_DIR` | `hooks/session-start.sh` | Test seam overriding the user rules directory checked by session-start against rules/core.md. |
 | `SYG_WEEK_BURN_NOW` | `bin/week-burn-window` | Test clock (epoch seconds) overriding current time in week-burn-window. |
-| `SYG_WORKTREE_RUN_STAMP` | `bin/safe-worktree-clean` | Internal timestamp directory name exported from a multi-repo safe-worktree-clean --apply-hold parent to child runs. |
+| `SYG_WORKTREE_RUN_STAMP` | `bin/safe-worktree-clean` | Internal timestamp directory name exported from a multi-repo safe-worktree-clean --apply-hold parent to child runs; a value that is empty or not a plain name ([0-9A-Za-z][0-9A-Za-z._-]*) exits 2. |
 | `SYG_WORKTREE_SWEEP_CHILD` | `bin/safe-worktree-clean` | Internal marker set to 1 when safe-worktree-clean invokes itself per repo in a multi-repo sweep. |
 | `ZAI_SPEND_MODELS_URL` | `bin/zai-usage` | Test seam overriding the z.ai model-usage API URL in zai-usage. |
 | `ZAI_SPEND_PEAK_UTC` | `bin/zai-usage` | Test seam overriding peak hours (interpreted in UTC+8) for local transcript weighting in zai-usage. |

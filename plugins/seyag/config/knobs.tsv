@@ -172,7 +172,7 @@ SYG_WORKTREE_BASE	user	worktrees	origin/<default branch>	Base git ref against wh
 SYG_WORKTREE_BRANCH_RE	user	worktrees	^worktree-agent-	Extended regex that agent worktree branch names must match in safe-worktree-clean and worktree-transfer.
 SYG_WORKTREE_LOCK_AGE_MIN	user	worktrees	10	Age in minutes (integer) after which a 0-byte index.lock with no live git process counts as stale.
 SYG_WORKTREE_REGENERABLE	user	worktrees	unset	Whitespace-separated path globs treated as safe-to-delete regenerable ignored paths in safe-worktree-clean.
-SYG_WORKTREE_RUN_STAMP	internal	worktrees	<YYYY-MM-DDTHHMMSS>	Internal timestamp directory name exported from a multi-repo safe-worktree-clean --apply-hold parent to child runs.
+SYG_WORKTREE_RUN_STAMP	internal	worktrees	<YYYY-MM-DDTHHMMSS>	Internal timestamp directory name exported from a multi-repo safe-worktree-clean --apply-hold parent to child runs; a value that is empty or not a plain name ([0-9A-Za-z][0-9A-Za-z._-]*) exits 2.
 SYG_WORKTREE_SWEEP_CHILD	internal	worktrees	unset	Internal marker set to 1 when safe-worktree-clean invokes itself per repo in a multi-repo sweep.
 SYG_WSDIFF_LENIENT_NAMES	user	worktrees	unset	Whitespace-separated basenames or .ext suffixes treated as whitespace-lenient by whitespace-only-diff.
 ZAI_AUTH_TOKEN	user	usage	unset	z.ai API bearer token for zai-usage. Lookup order: lane key file, then keys get (which prefers this env var over the store), then session env or settings.json when routed to z.ai.
