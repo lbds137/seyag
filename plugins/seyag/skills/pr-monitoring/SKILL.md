@@ -189,7 +189,9 @@ gh api "repos/{owner}/{repo}/actions/runs/<run-id>/jobs?per_page=100" \
       — a stale base only makes the verdict more conservative). Only when its
       line says SAFE, run `safe-worktree-clean --only <path> --apply` (it
       removes the tree and deletes its branch). A HOLD line, or any other
-      SKIP: leave it and report it.
+      SKIP: leave it and report it. A HOLD on the unit's own tree is reported,
+      and `--apply-hold <id>` only runs on the owner's yes for the printed
+      `hold plan:` id.
     - DIFFERS after a rebase or squash merge onto a base that moved is
       expected (branch-sweep matches identical trees only); it does not mean
       unmerged work. Leave it and report it.
