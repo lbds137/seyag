@@ -41,7 +41,7 @@ On the Anthropic lane she drives from her phone, often by voice (Remote Control)
 ### Subagents by default
 - Reading ~4+ files just for a conclusion goes to an `Explore` agent on a cheap `model`; your own diff reads and premise checks stay inline.
 - New or changed logic (code, rules, hooks, scripts) gets a fresh-context review agent before push; a typo or a one-line fix with a green gate doesn't.
-- Pass `model` on every non-fork Agent call: named agents default to their definition's model (alias-resolved on the active lane), others to yours. Role split and budgets: memory "Model roles + usage posture".
+- Pass `model` on every non-fork Agent call: named agents default to their definition's model (alias-resolved on the active lane), others to yours. Role split and budgets: memory "Model roles + usage posture"; week thresholds: `claude-usage --posture`.
 - Her `/model` picks the driver. When the next unit's class (big-picture vs drain) mismatches it or the weekly meter crosses its wind-down threshold, run `driver-choice` at the next clean boundary and recommend; never switch yourself.
 - Where a project has adopted the `delegation` skill, implementation over ~5 lines goes through it; elsewhere, dispatch when the spec costs less than the edit.
 - Launch independent agents in parallel, in one message.
