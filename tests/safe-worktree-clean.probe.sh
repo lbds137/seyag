@@ -865,10 +865,12 @@ else
   bad "--only <tree3> --apply HOLD (rc $rc)"; printf '%s\n' "$out"
 fi
 git -C "$O" worktree unlock "$O/.claude/worktrees/tree3"
+add_tree onlyrepo tree4
 out=$("$TOOL" --repo "$O" --only "$O/.claude/worktrees/tree2" --only "$O/.claude/worktrees/tree3"); rc=$?
 if [ "$rc" -eq 0 ] \
   && grep -q '^SAFE  \.claude/worktrees/tree2  \[worktree-agent-tree2\]$' <<<"$out" \
-  && grep -q '^SAFE  \.claude/worktrees/tree3  \[worktree-agent-tree3\]$' <<<"$out"; then
+  && grep -q '^SAFE  \.claude/worktrees/tree3  \[worktree-agent-tree3\]$' <<<"$out" \
+  && ! grep -q 'tree4' <<<"$out"; then
   ok "two --only flags dry run lists both tree2 and tree3 as SAFE"
 else
   bad "two --only flags dry run (rc $rc)"; printf '%s\n' "$out"
@@ -879,6 +881,21 @@ if [ "$rc" -eq 0 ] && python3 -c 'import json,sys; w=json.load(sys.stdin)["workt
 else
   bad "--json --only <tree2> (rc $rc)"; printf '%s\n' "$out"
 fi
+t3_lock="$(git -C "$O/.claude/worktrees/tree3" rev-parse --git-dir)/index.lock"
+: > "$t3_lock"; touch -d '30 minutes ago' "$t3_lock"
+out=$("$TOOL" --repo "$O" --only "$O/.claude/worktrees/tree2" --locks); rc=$?
+if [ "$rc" -eq 0 ] && grep -qF "STALE  $t3_lock" <<<"$out"; then
+  ok "--only <tree2> --locks still lists tree3's stale index.lock"
+else
+  bad "--only <tree2> --locks (rc $rc)"; printf '%s\n' "$out"
+fi
+err=$("$TOOL" --repo "$O" --only "$O/.claude/worktrees/nosuch" --locks-apply 2>&1 >/dev/null); rc=$?
+if [ "$rc" -eq 2 ] && [ -e "$t3_lock" ]; then
+  ok "--only <nosuch> --locks-apply exits 2 before --locks runs and leaves the lock in place"
+else
+  bad "--only <nosuch> --locks-apply (rc $rc, err '$err')"
+fi
+rm -f "$t3_lock"
 git -C "$O" worktree add -q -b worktree-agent-outside "$T/outside-tree"
 err=$("$TOOL" --repo "$O" --only "$T/outside-tree" 2>&1 >/dev/null); rc=$?
 if [ "$rc" -eq 2 ] \
