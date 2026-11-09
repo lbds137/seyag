@@ -9,6 +9,10 @@ import sys
 from pathlib import Path
 
 # Add any new environment variable prefix or exact name scanned in plugins/ here.
+# Not scanned: variables that the Claude Code harness, gh, the shell or XDG define and
+# seyag only reads (CLAUDE_PROJECT_DIR, CLAUDE_PLUGIN_ROOT, CLAUDE_JOB_DIR, CLAUDE_CODE_*,
+# ANTHROPIC_BASE_URL, ANTHROPIC_AUTH_TOKEN, ANTHROPIC_API_KEY, GH_*, XDG_*, HOME). The exact
+# names above that come from those systems are listed because seyag honours them as overrides.
 SCAN_PREFIXES = (
     "SYG_",
     "CLAUDE_USAGE_",
@@ -21,10 +25,17 @@ SCAN_PREFIXES = (
     "LINES_CHECK_",
     "OPENROUTER_",
     "CC_ROUTE_",
+    "PR_CI_WAIT_",
 )
 SCAN_EXACT_NAMES = (
     "CLAUDE_PROJECTS_DIR",
     "CLAUDE_SESSION_ARCHIVE",
+    "SESSION_LEDGER",
+    "SEYAG_KEYS_BIN",
+    "CLAUDE_VERSIONS_DIR",
+    "CLAUDE_PLUGIN_REGISTRY",
+    "ANTHROPIC_ADMIN_API_KEY",
+    "CLAUDE_CONFIG_DIR",
 )
 
 GROUPS = (
@@ -191,7 +202,7 @@ def render_doc(rows: dict[str, dict[str, str]], scanned: dict[str, set[str]]) ->
         "",
         "## Scope",
         "",
-        f"Every environment variable with prefix {prefixes_list}, plus {exact_list}, read by non-test, non-markdown files under `plugins/`.",
+        f"Every environment variable with prefix {prefixes_list}, plus {exact_list}, found in files under `plugins/` other than `*.md` and `*.probe.sh`. Not listed: variables that the Claude Code harness, `gh`, the shell or XDG define and seyag only reads (for example `CLAUDE_PROJECT_DIR`, `CLAUDE_PLUGIN_ROOT`, `CLAUDE_JOB_DIR`, `CLAUDE_CODE_*`, `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY`, `GH_*`, `XDG_*`, `HOME`); the listed names from those systems are ones seyag honours as overrides. `Found in` lists every such file that mentions the name, comments included.",
         "",
         "## How to set a value",
         "",
@@ -204,6 +215,8 @@ def render_doc(rows: dict[str, dict[str, str]], scanned: dict[str, set[str]]) ->
         "  }",
         "}",
         "```",
+        "",
+        "Exception: the per-command `SYG_ALLOW_*` bypasses of the shell guards are written into the command itself (for example `SYG_ALLOW_RM=1 rm -r build`), not into settings; each row says so. `SYG_ALLOW_LIVE_CHECKOUT` is the one also read from the environment. Two guards also accept their legacy aliases `TZUROT_ALLOW_HEREDOC_EDIT=1` and `TZUROT_ALLOW_GREP_DOLLAR=1` the same way.",
     ]
 
     for group in GROUPS:
@@ -219,7 +232,7 @@ def render_doc(rows: dict[str, dict[str, str]], scanned: dict[str, set[str]]) ->
                 "",
                 f"## {group}",
                 "",
-                "| Name | Default | What it does | Read by |",
+                "| Name | Default | What it does | Found in |",
                 "| --- | --- | --- | --- |",
             ]
         )
@@ -239,7 +252,7 @@ def render_doc(rows: dict[str, dict[str, str]], scanned: dict[str, set[str]]) ->
                 "",
                 "## Internal names",
                 "",
-                "| Name | Read by | Note |",
+                "| Name | Found in | Note |",
                 "| --- | --- | --- |",
             ]
         )
@@ -292,7 +305,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.write:
         doc_path.parent.mkdir(parents=True, exist_ok=True)
-        doc_path.write_text(rendered, encoding="utf-8")
+        doc_path.write_bytes(rendered.encode("utf-8"))
         return 0
 
     if not doc_path.is_file():
@@ -303,12 +316,12 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     try:
-        current = doc_path.read_text(encoding="utf-8")
+        mismatch = doc_path.read_bytes() != rendered.encode("utf-8")
     except OSError as exc:
         print(f"config-reference: cannot read docs/config.md: {exc}", file=sys.stderr)
         return 1
 
-    if current != rendered:
+    if mismatch:
         print(
             "config-reference: docs/config.md is out of date with plugins/seyag/config/knobs.tsv; regenerate with python3 tests/config-reference.py --write",
             file=sys.stderr,
