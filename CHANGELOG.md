@@ -11,7 +11,7 @@ All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY
 ### Improvements
 
 - **pr-monitoring skill:** the wait pointer is scoped to waits the harness doesn't report back on (#262).
-- **review-response skill:** rule 2a — each finding's class gets one positive-controlled sweep, recorded as `command → N sites, M defective`, before it is applied or presented; delegation's "Sweep outward" bullet matches (#263).
+- **review-response skill:** rule 2a — each finding's class gets one positive-controlled sweep, recorded as `command → N sites, M defective`, before it is applied or presented; delegation's "Sweep outward" bullet matches (#263); its review lows tighten the rule's wording, example sites and cite (#264).
 
 ### Tests
 
