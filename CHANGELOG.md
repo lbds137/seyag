@@ -1,12 +1,12 @@
 # Changelog
 
-All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY-MM-DD>` section per released version; under it, `###` categories in fixed order — Breaking Changes, Features, Bug Fixes, Improvements, Chores, Tests — empty ones omitted; items are `- **scope:** description (#PR)`, written from the version's merged commit subjects.
+All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY-MM-DD>` section per released version; under it, `###` categories in fixed order — Breaking Changes, Features, Bug Fixes, Improvements, Chores, Tests — empty ones omitted; items are `- **scope:** description (#267)`, written from the version's merged commit subjects.
 
 ## 0.3.144 - 2026-11-08
 
 ### Bug Fixes
 
-- **security-sweep:** a second signal racing a capped run's exit can no longer skip the group SIGTERM (the first two exit entries each signal the group); a second SIGTERM exits at once even mid-write, so a write stuck on a stalled filesystem cannot hold the run (#PR).
+- **security-sweep:** a second signal racing a capped run's exit can no longer skip the group SIGTERM (the first two exit entries each signal the group); a second SIGTERM exits at once even mid-write, so a write stuck on a stalled filesystem cannot hold the run (#267).
 
 ### Improvements
 
@@ -14,7 +14,7 @@ All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY
 
 ### Tests
 
-- **security-sweep probes:** rows 9u (racing exit entry) and 9v (second SIGTERM mid-write) with canaries r6-1 and r6-2; a canary that did not fail its target row names the FAIL it stopped on; 9t drops a redundant condition and says which check reads the sweep's own exit code (#PR).
+- **security-sweep probes:** rows 9u (racing exit entry) and 9v (second SIGTERM mid-write) with canaries r6-1 and r6-2; a canary that did not fail its target row names the FAIL it stopped on; 9t drops a redundant condition and says which check reads the sweep's own exit code (#267).
 
 ## 0.3.143 - 2026-11-08
 
