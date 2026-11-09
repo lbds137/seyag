@@ -6,17 +6,17 @@ All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY
 
 ### Bug Fixes
 
-- **pr-body-ref-gate:** reads the body file gh actually posts: `--body-file` and `-F` are one flag and the last occurrence wins across both spellings (it read the first `-F`, and preferred `--body-file` over a later `-F`); the search runs on a masked view, so a flag inside a quoted argument (substitutions in it included), a `#` comment or a heredoc body never counts, and a `bash -c` / `eval` string is searched when the outer command has no flag; a python3 failure skips the body-file read instead of exiting the hook.
-- **shell_quotes:** the heredoc opener recognizes a backslash-quoted delimiter (`<<\EOF`) and delimiters with non-word characters (`<<'END-X'`), whose bodies were left unstripped; new public `masked_view`, a length-preserving view with quoted spans, comments and heredoc bodies filled.
+- **pr-body-ref-gate:** reads the body file gh actually posts: `--body-file` and `-F` are one flag and the last occurrence wins across both spellings (it read the first `-F`, and preferred `--body-file` over a later `-F`); the search runs on a masked view, so a flag inside a quoted argument (substitutions in it included), a `#` comment or a heredoc body never counts, and a `bash -c` / `eval` string is searched when the outer command has no flag; a python3 failure skips the body-file read instead of exiting the hook (#280).
+- **shell_quotes:** the heredoc opener recognizes a backslash-quoted delimiter (`<<\EOF`) and delimiters with non-word characters (`<<'END-X'`), whose bodies were left unstripped; new public `masked_view`, a length-preserving view with quoted spans, comments and heredoc bodies filled (#280).
 - **worktree-transfer:** when main HEAD is behind, the refusal hint follows the relation: an unpulled main gets `git pull --ff-only`, commits missing from main get "land them on main first"; the rebase-proof conflict refusal attributes each path ("changed on main" / "changed only on the worktree's branch"), including criss-cross merges; a worker's empty commits no longer refuse (#279).
 
 ### Improvements
 
-- **core rules, driver-choice:** the week's wind-down and stop thresholds come from `claude-usage --posture`, not the memory; the README row says the same.
+- **core rules, driver-choice:** the week's wind-down and stop thresholds come from `claude-usage --posture`, not the memory; the README row says the same (#280).
 
 ### Tests
 
-- **pr-body-ref-gate probes:** 18 rows for flag order across spellings, continuations, escaped quotes, multi-line and substitution-bearing quoted text, `cat <<A <<B`, `<<\EOF`, `<<'END-X'` and a heredoc body's trailing `\`; shell_quotes cases for the widened opener and `masked_view`; a scanner-parity row for shell-fed `<<\EOF` / `<<'END-X'` bodies; the branch-switch `<<\EOF` row now reads its target like its quoted siblings.
+- **pr-body-ref-gate probes:** 18 rows for flag order across spellings, continuations, escaped quotes, multi-line and substitution-bearing quoted text, `cat <<A <<B`, `<<\EOF`, `<<'END-X'` and a heredoc body's trailing `\`; shell_quotes cases for the widened opener and `masked_view`; a scanner-parity row for shell-fed `<<\EOF` / `<<'END-X'` bodies; the branch-switch `<<\EOF` row now reads its target like its quoted siblings (#280).
 
 ## 0.3.147 - 2026-11-09
 
