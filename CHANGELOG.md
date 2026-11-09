@@ -6,12 +6,12 @@ All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY
 
 ### Features
 
-- **config reference:** `docs/config.md` lists every environment setting seyag's plugin code reads (`SYG_*` plus `CLAUDE_USAGE_*`, `ZAI_*`, `PR_CI_WAIT_*`, eight more prefixes and eight exact names; 179 in all, 134 user-facing), each with its default, what it does and the files that mention it, grouped by component, with internal names (test clocks, plumbing) listed separately. It is generated from the hand-kept `plugins/seyag/config/knobs.tsv` by `tests/config-reference.py`; README points to it.
+- **config reference:** `docs/config.md` lists every environment setting seyag's plugin code reads (`SYG_*` plus `CLAUDE_USAGE_*`, `ZAI_*`, `PR_CI_WAIT_*`, eight more prefixes and eight exact names; 179 in all, 134 user-facing), each with its default, what it does and the files that mention it, grouped by component, with internal names (test clocks, plumbing) listed separately. It is generated from the hand-kept `plugins/seyag/config/knobs.tsv` by `tests/config-reference.py`; README points to it (#283).
 - **safe-worktree-clean:** sweeps several repos in one run (`--repo` repeatable, `--repos-file`); `--apply-hold <plan id>` removes HOLD trees that only hold uncommitted or unmerged work after a verified backup (tree.tgz, branch.bundle, reflog.pack, staged/uncommitted patches, changes.txt, README restore commands), one owner approval per sweep; a stale id, a backup dir inside the repo or on tmpfs (override SYG_WORKTREE_BACKUP_ALLOW_VOLATILE=1), or a repo listed twice exits 2 with nothing removed (#282).
 
 ### Tests
 
-- **config-reference probe:** fails when the code reads a name with no `knobs.tsv` row, a row names nothing the code reads, a row is malformed (field count, scope, group, empty default or description, over 220 characters, duplicate), or `docs/config.md` differs byte-for-byte from the render (CRLF included); positive controls for `${X:-}`, bare `$X`, `os.environ.get`, awk `ENVIRON[...]`, and exclusions for `.md`, `*.probe.sh`, non-UTF-8 files and `knobs.tsv` itself.
+- **config-reference probe:** fails when the code reads a name with no `knobs.tsv` row, a row names nothing the code reads, a row is malformed (field count, scope, group, empty default or description, over 220 characters, duplicate), or `docs/config.md` differs byte-for-byte from the render (CRLF included); positive controls for `${X:-}`, bare `$X`, `os.environ.get`, awk `ENVIRON[...]`, and exclusions for `.md`, `*.probe.sh`, non-UTF-8 files and `knobs.tsv` itself (#283).
 
 ## 0.3.149 - 2026-11-09
 
