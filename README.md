@@ -4,6 +4,8 @@ A Claude Code plugin marketplace with one plugin, `seyag`. The plugin is the por
 
 It assumes the owner does not read diffs and is rarely watching the live transcript — on the Anthropic lane she drives from her phone, often by voice; on other lanes she's at the Deck keyboard or RDP-typing from her phone. Agent review and automated checks are the quality gate, and any blocking question has to go through `AskUserQuestion` so it rises above the transcript.
 
+Every environment setting seyag reads, with its default and the files that read it: [docs/config.md](docs/config.md) (generated from `plugins/seyag/config/knobs.tsv`; `tests/config-reference.probe.sh` keeps it in step with the code).
+
 ## What's in it
 
 | Path | What it is |
