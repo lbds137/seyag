@@ -36,9 +36,12 @@
 #                           `refs`, or `commondir` before any `git -C <wt>` runs
 #   5 base-unchanged        when --base SHA is given, `<sha>^{commit}` resolves and
 #                           equals the main tree's HEAD, or under --rebase-base the
-#                           worktree's HEAD (the dispatch base; skipped when omitted)
+#                           worktree's HEAD (the dispatch base; skipped when
+#                           omitted); a worktree HEAD that does not resolve also refuses base-unchanged
 #   6 no-unpushed-base      worktree HEAD equals the main tree's HEAD (ahead is as
-#                           wrong as behind; runs before the patch is built); under
+#                           wrong as behind; runs before the patch is built; when
+#                           main is an ancestor of worktree HEAD, the behind-main
+#                           hint replaces the --rebase-base suggestion); under
 #                           --rebase-base, deferred to check 9 `rebase-proof`
 #   7 empty-patch           `git -C <wt> add -A` then `git -C <wt> diff --cached --binary`
 #                           written to a temp file is non-empty
@@ -57,7 +60,10 @@
 #                           file-vs-directory prefix boundaries, then prints the
 #                           proof line on success; check 11 `byte-identical`
 #                           remains the backstop, so rebase-proof is an early
-#                           refusal with a readable proof, not the only guard
+#                           refusal with a readable proof, not the only guard. A
+#                           main HEAD that is an ancestor of worktree HEAD refuses
+#                           first with a pull-or-land hint; conflict refusals
+#                           attribute each path to main or the worktree's branch
 #  10 apply                 `git apply --index <patchfile>` in the main root succeeds
 #  11 byte-identical        `git diff --cached --binary` in the main root matches
 #                           `<patchfile>` via `cmp`; `--binary` must appear on BOTH
@@ -269,11 +275,48 @@ if ! gf_err=$(bash "$SELF_DIR/worktree-gitfile-check" --repo "$MAIN_ROOT" "$WT_P
 fi
 PASSED_CHECKS+=("worktree-gitfile")
 
+behind_hint() {
+  local ahead=$1 label=$2 up_sha up_name
+  if [ "$MAIN_HEAD" = "$ahead" ] || ! git -C "$MAIN_ROOT" merge-base --is-ancestor "$MAIN_HEAD" "$ahead" 2>/dev/null; then
+    return 1
+  fi
+  if up_sha=$(git -C "$MAIN_ROOT" rev-parse --verify -q '@{upstream}^{commit}' 2>/dev/null) \
+    && [ -n "$up_sha" ] \
+    && git -C "$MAIN_ROOT" merge-base --is-ancestor "$ahead" "$up_sha" 2>/dev/null \
+    && up_name=$(git -C "$MAIN_ROOT" rev-parse --abbrev-ref '@{upstream}' 2>/dev/null) \
+    && [ -n "$up_name" ]; then
+    printf 'main HEAD is behind %s and its upstream %s already has %s: run git pull --ff-only in the main tree, then rerun' "$label" "$up_name" "$label"
+  else
+    local wc_note=""
+    [ "$label" = "worktree HEAD" ] && wc_note=" (a worker commit?)"
+    printf 'main HEAD is behind %s: %s has commit(s) main lacks%s; land them on main first, --rebase-base cannot transfer onto a main that lacks them' "$label" "$label" "$wc_note"
+  fi
+  return 0
+}
+
+join_first_5() {
+  local joined="" limit=$# i=0 item
+  [ "$limit" -gt 5 ] && limit=5
+  for item in "$@"; do
+    [ "$i" -lt "$limit" ] || break
+    if [ -n "$joined" ]; then
+      joined="$joined, $item"
+    else
+      joined=$item
+    fi
+    i=$((i + 1))
+  done
+  if [ $# -gt 5 ]; then
+    joined="$joined (+$(( $# - 5 )) more)"
+  fi
+  printf '%s' "$joined"
+}
+
 # 5. base-unchanged
 MAIN_HEAD=$(git -C "$MAIN_ROOT" rev-parse --verify "HEAD^{commit}" 2>/dev/null) \
   || refuse base-unchanged "cannot resolve main working tree HEAD"
 WT_HEAD=$(git -C "$WT_PATH" rev-parse HEAD 2>&1) \
-  || refuse no-unpushed-base "git rev-parse HEAD failed in worktree: $WT_HEAD"
+  || refuse base-unchanged "git rev-parse HEAD failed in worktree: $WT_HEAD"
 if $BASE_GIVEN; then
   case "$BASE_ARG" in
     -*) refuse base-unchanged "cannot resolve --base '$BASE_ARG' to a commit" ;;
@@ -286,6 +329,9 @@ if $BASE_GIVEN; then
     fi
   else
     if [ "$RESOLVED_BASE" != "$MAIN_HEAD" ]; then
+      if b_hint=$(behind_hint "$RESOLVED_BASE" 'the --base commit'); then
+        refuse base-unchanged "main HEAD ($MAIN_HEAD) differs from --base ($RESOLVED_BASE); $b_hint"
+      fi
       refuse base-unchanged "main HEAD ($MAIN_HEAD) moved from --base ($RESOLVED_BASE); if main moved by a merge, rerun with --rebase-base"
     fi
   fi
@@ -304,6 +350,9 @@ if $REBASE_BASE; then
   PASSED_CHECKS+=("no-unpushed-base (deferred to rebase-proof)")
 else
   if [ "$WT_HEAD" != "$MAIN_HEAD" ]; then
+    if b_hint=$(behind_hint "$WT_HEAD" 'worktree HEAD'); then
+      refuse no-unpushed-base "worktree HEAD ($WT_HEAD) differs from the main tree HEAD ($MAIN_HEAD); $b_hint"
+    fi
     refuse no-unpushed-base "worktree HEAD ($WT_HEAD) differs from the main tree HEAD ($MAIN_HEAD); the patch was built on a base the main tree no longer matches; if main moved by a merge, rerun with --rebase-base"
   fi
   PASSED_CHECKS+=("no-unpushed-base")
@@ -381,6 +430,20 @@ if $REBASE_BASE; then
   [ ${#MBS[@]} -gt 0 ] || refuse rebase-proof "no merge base between worktree HEAD and main HEAD"
   MB=${MBS[0]}
 
+  if b_hint=$(behind_hint "$WT_HEAD" 'worktree HEAD'); then
+    AHEAD_RAW=()
+    if ! z_list AHEAD_RAW git -C "$MAIN_ROOT" diff --name-only -z --no-renames --ignore-submodules=none "$MAIN_HEAD" "$WT_HEAD" 2>/dev/null; then
+      refuse rebase-proof "git diff --name-only failed between main HEAD and worktree HEAD"
+    fi
+    AHEAD_PATHS=()
+    for p in "${AHEAD_RAW[@]}"; do
+      [ -n "$p" ] && AHEAD_PATHS+=("$p")
+    done
+    if [ ${#AHEAD_PATHS[@]} -gt 0 ]; then
+      refuse rebase-proof "main HEAD (${MAIN_HEAD:0:12}) is an ancestor of worktree HEAD (${WT_HEAD:0:12}); $b_hint; paths on the worktree's branch: $(join_first_5 "${AHEAD_PATHS[@]}")"
+    fi
+  fi
+
   declare -A BRANCH_SET=() PATCH_SET=() GUARD=() GUARD_DIRS=()
   for mb in "${MBS[@]}"; do
     BRANCH_DIFF_RAW=()
@@ -436,20 +499,39 @@ if $REBASE_BASE; then
   done
 
   if [ ${#CONFLICT_PATHS[@]} -gt 0 ]; then
-    conflict_joined=""
-    limit=${#CONFLICT_PATHS[@]}
-    [ "$limit" -gt 5 ] && limit=5
-    for ((i = 0; i < limit; i++)); do
-      if [ -n "$conflict_joined" ]; then
-        conflict_joined="$conflict_joined, ${CONFLICT_PATHS[i]}"
+    declare -A MAIN_SET=()
+    for mb in "${MBS[@]}"; do
+      MAIN_DIFF_RAW=()
+      if ! z_list MAIN_DIFF_RAW git -C "$MAIN_ROOT" diff --name-only -z --no-renames --ignore-submodules=none "$mb" "$MAIN_HEAD" 2>/dev/null; then
+        refuse rebase-proof "git diff --name-only failed between merge-base and main HEAD"
+      fi
+      for p in "${MAIN_DIFF_RAW[@]}"; do
+        [ -n "$p" ] || continue
+        MAIN_SET["$p"]=1
+      done
+    done
+    MAIN_CONFLICTS=()
+    BRANCH_CONFLICTS=()
+    for cpath in "${CONFLICT_PATHS[@]}"; do
+      if [[ -n ${MAIN_SET["$cpath"]:-} ]]; then
+        MAIN_CONFLICTS+=("$cpath")
       else
-        conflict_joined="${CONFLICT_PATHS[i]}"
+        BRANCH_CONFLICTS+=("$cpath")
       fi
     done
-    if [ ${#CONFLICT_PATHS[@]} -gt 5 ]; then
-      conflict_joined="$conflict_joined (+$(( ${#CONFLICT_PATHS[@]} - 5 )) more)"
+    conflict_parts=""
+    if [ ${#MAIN_CONFLICTS[@]} -gt 0 ]; then
+      conflict_parts="changed on main: $(join_first_5 "${MAIN_CONFLICTS[@]}")"
     fi
-    refuse rebase-proof "main changed path(s) this transfer depends on: $conflict_joined"
+    if [ ${#BRANCH_CONFLICTS[@]} -gt 0 ]; then
+      branch_part="changed only on the worktree's branch: $(join_first_5 "${BRANCH_CONFLICTS[@]}")"
+      if [ -n "$conflict_parts" ]; then
+        conflict_parts="$conflict_parts; $branch_part"
+      else
+        conflict_parts=$branch_part
+      fi
+    fi
+    refuse rebase-proof "path(s) this transfer depends on differ between worktree HEAD (${WT_HEAD:0:12}) and main HEAD (${MAIN_HEAD:0:12}): $conflict_parts"
   fi
 
   MB_LABEL=${MB:0:12}
