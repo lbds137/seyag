@@ -15,7 +15,7 @@ Options:
   --session-line          Print nothing unless >=1 open alert exists; then print a single summary line.
                           Silent on errors and off surfaces; never writes to stderr.
   --warm-cache            Populate the cache like --session-line but print nothing; exits 0 at once if another warm run holds the repo-set flock.
-  --cap SECONDS           Exit 124 after SECONDS (positive float), no `timeout` binary needed; the run leads its own process group (when setpgid succeeds) and sends SIGTERM to it (gh children included) on expiry, finishing an in-flight cache write first for at most 1 s more (past that grace it exits mid-write, which may leave a `.tmp` file); a SIGTERM received during a capped run is handled the same way (group SIGTERM, any in-flight cache write finished first, exit 124); a second SIGTERM exits at once, even mid-write, which may leave a `.tmp` file; SessionStart passes --cap 2. Like GNU timeout, a capped run leaves the terminal's foreground group, so Ctrl-C does not reach it, and it ignores SIGTTIN/SIGTTOU so terminal output under `stty tostop` does not stop it.
+  --cap SECONDS           Exit 124 after SECONDS (positive float), no `timeout` binary needed; the run leads its own process group (when setpgid succeeds) and sends SIGTERM to it (gh children included) on expiry, finishing an in-flight cache write first for about 1 s more (past that grace it exits mid-write, which may leave a `.tmp` file); a SIGTERM received during a capped run is handled the same way (group SIGTERM, any in-flight cache write finished first, exit 124); a second SIGTERM exits at once, even mid-write, which may leave a `.tmp` file; SessionStart passes --cap 2. Like GNU timeout, a capped run leaves the terminal's foreground group, so Ctrl-C does not reach it, and it ignores SIGTTIN/SIGTTOU so terminal output under `stty tostop` does not stop it.
   --no-cache              Bypass the 300s fresh cache and fetch live from GitHub.
   -h, --help              Show this help message and exit.
 
@@ -31,7 +31,7 @@ Test seam (environment):
 Exit codes: 0 by default (1 on internal error; 124 on --cap timeout), except under --strict (1 alert threshold met, 2 uncached fetch/origin/repo/internal error; exit 1 wins when both hold: an alert exit can hide fetch errors, which stderr still names per surface and --json marks error).
 """
 import argparse
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, wait as wait_futures
 import fcntl
 import hashlib
 import json
@@ -315,7 +315,9 @@ _cap_pending = False
 _cap_exits = 0
 _cap_terms = 0
 _cap_alarms = 0
+# The grace bounds a stalled write only while cache writes run off the main thread (main() writes from repo_pool workers): a main-thread write stuck in the kernel cannot run the handler, so a caller writing on the main thread through the module API gets no such bound.
 _CAP_GRACE_S = 1.0
+_MAIN_WAIT_S = 0.1
 
 
 def _cap_exit():
@@ -742,6 +744,10 @@ def main(argv):
                 repo_pool.submit(process_repo, r, surface_pool, args.no_cache, now)
                 for r in repos
             ]
+            # Wait in short slices, not a blocking result(): a cap alarm or SIGTERM the kernel delivers to a worker thread runs its handler only when the main thread next wakes.
+            pending = set(repo_futures)
+            while pending:
+                _, pending = wait_futures(pending, timeout=_MAIN_WAIT_S)
             results = [f.result() for f in repo_futures]
 
     if not args.session_line:

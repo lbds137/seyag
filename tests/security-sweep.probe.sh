@@ -1085,10 +1085,13 @@ else
 fi
 
 # 9w: --cap expiry during a stalled worker-thread write exits after the grace instead of waiting for the write
+# SIGALRM is masked on the main thread (pool threads inherit the mask) and unmasked only by the writing worker,
+# so every SIGALRM (the cap's and the grace re-arm's) lands on that worker: main must still run the handler while the write stalls.
+reset_state
+mkdir -p "$T/fixtures/example-org_widget"
 rm -rf "$T/state9w"
 t0=$SECONDS
-python3 - "$SS" "$T/state9w" >"$T/out" 2>"$T/err" <<'PY'
-from concurrent.futures import ThreadPoolExecutor
+SECURITY_SWEEP_GH="$T/bin/gh" python3 - "$SS" "$T/state9w" >"$T/out" 2>"$T/err" <<'PY'
 import importlib.machinery, importlib.util, os, signal, sys, time
 path, state = sys.argv[1], sys.argv[2]
 os.environ["XDG_STATE_HOME"] = state
@@ -1096,9 +1099,9 @@ loader = importlib.machinery.SourceFileLoader("ss", path)
 spec = importlib.util.spec_from_loader("ss", loader)
 mod = importlib.util.module_from_spec(spec)
 loader.exec_module(mod)
-mod._install_cap(3600)
 real_dump = mod.json.dump
 def wrapped_dump(*a, **kw):
+    signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGALRM})
     os.kill(os.getpid(), signal.SIGALRM)
     deadline = time.monotonic() + 5
     while not mod._cap_pending and time.monotonic() < deadline:
@@ -1106,19 +1109,9 @@ def wrapped_dump(*a, **kw):
     time.sleep(8)
     return real_dump(*a, **kw)
 mod.json.dump = wrapped_dump
-with ThreadPoolExecutor(max_workers=1) as pool:
-    fut = pool.submit(
-        mod.write_cache,
-        "example-org/widget",
-        1,
-        {
-            "code-scanning": {"state": "off"},
-            "dependabot": {"state": "off"},
-            "secret-scanning": {"state": "off"},
-        },
-    )
-    fut.result()
-print("returned")
+signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGALRM})
+rc = mod.main(["--cap", "3600", "--no-cache", "-R", "example-org/widget"])
+print("returned", rc)
 sys.exit(0)
 PY
 rc9w=$?
@@ -1131,6 +1124,50 @@ if [ "$rc9w" -eq 124 ] \
   ok "9w --cap expiry during a stalled write exits after the grace (${elapsed9w}s <= 4s)"
 else
   bad "9w --cap grace mid-write (rc=$rc9w, elapsed=${elapsed9w}s)" "out=$(cat "$T/out") err=$(cat "$T/err") files=$(find "$T/state9w" 2>/dev/null)"
+fi
+
+# 9x: a SIGTERM then the cap alarm during a stalled write still exits after the grace (the re-arm does not depend on _cap_terms)
+reset_state
+mkdir -p "$T/fixtures/example-org_widget"
+rm -rf "$T/state9x"
+t0=$SECONDS
+SECURITY_SWEEP_GH="$T/bin/gh" python3 - "$SS" "$T/state9x" >"$T/out" 2>"$T/err" <<'PY'
+import importlib.machinery, importlib.util, os, signal, sys, time
+path, state = sys.argv[1], sys.argv[2]
+os.environ["XDG_STATE_HOME"] = state
+loader = importlib.machinery.SourceFileLoader("ss", path)
+spec = importlib.util.spec_from_loader("ss", loader)
+mod = importlib.util.module_from_spec(spec)
+loader.exec_module(mod)
+real_dump = mod.json.dump
+def wrapped_dump(*a, **kw):
+    signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGALRM})
+    os.kill(os.getpid(), signal.SIGTERM)
+    deadline = time.monotonic() + 5
+    while mod._cap_terms < 1 and time.monotonic() < deadline:
+        time.sleep(0.005)
+    os.kill(os.getpid(), signal.SIGALRM)
+    deadline = time.monotonic() + 5
+    while mod._cap_alarms < 1 and time.monotonic() < deadline:
+        time.sleep(0.005)
+    time.sleep(8)
+    return real_dump(*a, **kw)
+mod.json.dump = wrapped_dump
+signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGALRM})
+rc = mod.main(["--cap", "3600", "--no-cache", "-R", "example-org/widget"])
+print("returned", rc)
+sys.exit(0)
+PY
+rc9x=$?
+elapsed9x=$((SECONDS - t0))
+CACHE_9X="$T/state9x/seyag/security-sweep/example-org_widget.json"
+if [ "$rc9x" -eq 124 ] \
+  && [ ! -e "$CACHE_9X" ] \
+  && ! grep -qF "returned" "$T/out" \
+  && [ "$elapsed9x" -le 4 ]; then
+  ok "9x SIGTERM then cap alarm during a stalled write exits after the grace (${elapsed9x}s <= 4s)"
+else
+  bad "9x SIGTERM then cap alarm mid-write (rc=$rc9x, elapsed=${elapsed9x}s)" "out=$(cat "$T/out") err=$(cat "$T/err") files=$(find "$T/state9x" 2>/dev/null)"
 fi
 
 # 9j & 9k: --warm-cache deduplicates via non-blocking flock and populates cache when unheld
@@ -1314,25 +1351,28 @@ if [ -z "${SECURITY_SWEEP_SKIP_CANARIES:-}" ] && [ "$fail" -eq 0 ]; then
   cmp -s "$SS" "$T/mut-r6-2" && bad "canary r6-2: mutation did not apply (pattern drifted from the bin)"
   sed 's/    if _cap_alarms >= 2:/    if False:/' "$SS" > "$T/mut-r7-1" && chmod +x "$T/mut-r7-1"
   cmp -s "$SS" "$T/mut-r7-1" && bad "canary r7-1: mutation did not apply (pattern drifted from the bin)"
+  sed 's/_, pending = wait_futures(pending, timeout=_MAIN_WAIT_S)/_, pending = wait_futures(pending)/' "$SS" > "$T/mut-r8-1" && chmod +x "$T/mut-r8-1"
+  cmp -s "$SS" "$T/mut-r8-1" && bad "canary r8-1: mutation did not apply (pattern drifted from the bin)"
 
-  # Space out the hold/timeout-bound canaries (r5-3, r1-3, r3-2) across the full-run
+  # Space out the hold/timeout-bound canaries (r5-3, r1-3, r7-1, r3-2, r8-1) across the full-run
   # canaries so at most ~1 slot is sleeping at a time while the other 3 run CPU work,
   # and finish with the shortest stop-at-fail canaries to avoid tail latency.
   if command -v script >/dev/null 2>&1; then
     launch_canary "r5-3" "$T/mut-r5-3" 1
   fi
   launch_canary "1a" "$T/mut-1a" 0
-  launch_canary "r7-1" "$T/mut-r7-1" 1
   launch_canary "purpose" "$T/mut-purpose" 0
   launch_canary "r2-1" "$T/mut-r2-1" 0
   launch_canary "r1-3" "$T/mut-r1-3" 1
   launch_canary "r2-3" "$T/mut-r2-3" 0
   launch_canary "r2-4" "$T/mut-r2-4" 0
+  launch_canary "r7-1" "$T/mut-r7-1" 1
   launch_canary "r2-5" "$T/mut-r2-5" 0
   launch_canary "r3-6" "$T/mut-r3-6" 0
   launch_canary "r3-2" "$T/mut-r3-2" 1
   launch_canary "r5-1" "$T/mut-r5-1" 0
   launch_canary "r5-2" "$T/mut-r5-2" 0
+  launch_canary "r8-1" "$T/mut-r8-1" 1
   launch_canary "r6-2" "$T/mut-r6-2" 1
   launch_canary "r6-1" "$T/mut-r6-1" 1
   launch_canary "r2-6" "$SS" 1 "$T/mut-probe-r2-6.sh"
@@ -1613,6 +1653,14 @@ if [ -z "${SECURITY_SWEEP_SKIP_CANARIES:-}" ] && [ "$fail" -eq 0 ]; then
     ok "canary r7-1: never escalating a second cap alarm fails 9w"
   else
     canary_bad "canary r7-1 did not fail 9w as expected (rc=$mut_rc)" "$mut_out"
+  fi
+
+  # Canary r8-1: a blocking main-thread wait fails 9w
+  load_canary "r8-1"
+  if [ "$mut_rc" -ne 0 ] && grep -qF "FAIL: 9w" <<<"$mut_out"; then
+    ok "canary r8-1: a blocking main-thread wait fails 9w"
+  else
+    canary_bad "canary r8-1 did not fail 9w as expected (rc=$mut_rc)" "$mut_out"
   fi
 fi
 
