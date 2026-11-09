@@ -69,6 +69,8 @@ In this plugin (hooks/):
                                   QUOTED_SPAN, ESCAPED_BLANK (substitution-blind,
                                   the lower-stakes drift-warning case)
     grep-escaped-dollar-guard.sh  strip_heredoc_bodies
+    pr-body-ref-gate.sh           MASK_FILL, MAX_WRAPPER_DEPTH, masked_view,
+                                  wrapped_command_strings
     pr-monitor-reminder.sh        _words, strip_heredoc_bodies
     broad-walk-guard.sh           command_pipelines (the shared command splitter),
                                   unwrap_runners, strip_redirections
@@ -1441,12 +1443,18 @@ def _extract_spans(text, skip_single_quoted, regions=None):
 # its trailing `<` plus a bare word matches the same characters, and the marker
 # then never terminates, so the whole remainder of the span would be dropped.
 #
-# The marker is `\w+`, deliberately WIDER than pr-merge-review-check.sh's own
-# stripper (`[A-Za-z_][A-Za-z_0-9]*`): bash accepts a digit-leading delimiter
-# (`cat <<1EOF`), and a wider marker over-strips, which only ever removes
-# candidate text a caller would scan — the recoverable direction here. Each
-# hook strips the heredoc forms its own matching cares about (module docstring),
-# so the two need not agree.
+# The marker is any run of word characters bash allows in a delimiter (no
+# blank, metacharacter, quote, backslash or backtick), deliberately WIDER than
+# pr-merge-review-check.sh's own stripper (`[A-Za-z_][A-Za-z_0-9]*`): bash
+# accepts a digit-leading delimiter (`cat <<1EOF`) and one with a non-word
+# character (`<<'END-X'`, `<<END.X`). A wider marker strips more body text:
+# recoverable for a caller scanning command text, but a body fed to a shell
+# (`bash <<\EOF`) is then unscanned by a strip-only caller, exactly as a
+# `<<'EOF'` body already was; simple_commands surfaces such bodies. An optional leading backslash (`<<\EOF`, bash's third
+# quoting form) is matched before the quote group, so group 2 stays empty and
+# `_heredoc_marker`, which reads from group 2's start, derives `EOF`. Each hook
+# strips the heredoc forms its own matching cares about (module docstring), so
+# the two need not agree.
 #
 # PUBLIC, unlike the other module-private names: lossy-pipe-guard.sh has to
 # REJOIN an emptied heredoc onto its opener line, and the opener half of that
@@ -1461,7 +1469,9 @@ def _extract_spans(text, skip_single_quoted, regions=None):
 # `<<E"OF"` survives it unchanged); and both consumers are pinned by the
 # heredoc and here-string cases in lossy-pipe-guard.probe.sh, which is where a
 # change to the pattern would surface.
-HEREDOC_OPENER = re.compile(r"(?<!<)<<(-?)\s*(['\"]?)(\w+)\2(?:['\"]?\w+['\"]?)*")
+HEREDOC_OPENER = re.compile(
+    r"(?<!<)<<(-?)\s*\\?(['\"]?)([^\s;&|()<>'\"\\`]+)\2(?:['\"]?[^\s;&|()<>'\"\\`]+['\"]?)*"
+)
 
 
 def _heredoc_marker(match):
@@ -1797,6 +1807,72 @@ def _strip_heredoc(text):
             out.append(text[cursor:])
             return "".join(out), regions
         pos = cursor
+
+
+# The fill `masked_view` writes over data: a private-use codepoint next to
+# `QUOTED_SPAN`/`ESCAPED_BLANK`, so it is neither whitespace nor a word or flag
+# character to a caller's regex.
+MASK_FILL = "\ue002"
+
+
+def masked_view(text, join_continuations=False):
+    """Return `text` with every character that is DATA rather than command
+    syntax replaced by `MASK_FILL`, one fill per character, so the view has
+    exactly `len(text)` characters and an offset found in it is the same
+    offset in `text` — the caller slices the raw word there.
+
+    Data is: every quoted span, its quote characters included (`'…'`,
+    `"…"`, `$'…'`, `$"…"`; an escaped `\\"` inside double quotes does not end
+    the span, and a span may cross newlines); every `#` comment; and every
+    heredoc body with its terminator line, as `strip_heredoc_bodies` finds
+    them (`cat <<A <<B` fills both). A double-quoted span is filled whole,
+    including any backtick or `$(…)` substitution nested inside it: the
+    quoted word is one argument whatever its substitution prints. The opener
+    line itself, its unquoted words, escapes and UNQUOTED backtick/`$(…)`
+    spans stay as written (bash word-splits their output into real words).
+
+    Built on `_scan` (the bash-words reader) and `_strip_heredoc`'s regions;
+    the heredoc bodies are blanked before the scan so a quote inside a body
+    cannot open a span over the command text after it. A quote left open at
+    the end of the text is read the way `_scan` reads it: an ordinary
+    character, with the scan continuing unquoted.
+
+    `join_continuations=True` replaces each command-text backslash-newline
+    with two spaces, the length-preserving form of joining the two lines with
+    a blank between them. That is NOT bash, which removes the pair with no
+    blank (`--body-file\\` NEWLINE `x` is the one word `--body-filex`); it
+    follows the calling hook's `CMD_JOINED` convention. One inside a heredoc body or a quoted span is data
+    and is filled like the rest of it, so a body line ending in `\\` never
+    joins its terminator."""
+    _stripped, regions = _strip_heredoc(text)
+    scan_text = text
+    if regions:
+        chars = list(text)
+        for start, end in regions:
+            chars[start:end] = "_" * (end - start)
+        scan_text = "".join(chars)
+    view = [MASK_FILL] * len(text)
+    # `_scan` reports a backtick span nested in double quotes with
+    # inside-backtick contexts but WITHOUT the outer-level backtick `char`
+    # events an unquoted span gets, so an inside-backtick event counts as
+    # command text only while an unquoted span is open.
+    unquoted_bt = False
+    for kind, payload, pos, ctx in _scan(scan_text):
+        if ctx[1] and not unquoted_bt:
+            continue
+        if kind == "char" and payload == "`" and not ctx[1]:
+            unquoted_bt = not unquoted_bt
+        if kind == "run":
+            view[pos : pos + len(payload)] = text[pos : pos + len(payload)]
+        elif kind == "char":
+            view[pos] = text[pos]
+        elif kind == "escape":
+            view[pos : pos + 2] = text[pos : pos + 2]
+        elif kind == "continuation":
+            view[pos : pos + 2] = "  " if join_continuations else text[pos : pos + 2]
+    for start, end in regions:
+        view[start:end] = MASK_FILL * (end - start)
+    return "".join(view)
 
 
 def substitution_spans_matching(raw_text, predicate):

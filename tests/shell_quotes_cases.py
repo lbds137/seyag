@@ -23,9 +23,11 @@ sys.path.insert(0, LIB_DIR)
 
 from shell_quotes import (  # noqa: E402
     HEREDOC_OPENER,
+    MASK_FILL,
     executed_segments,
     heredoc_openers,
     inline_command_count,
+    masked_view,
     resolve_placeholders,
     strip_backtick_glue,
     strip_heredoc_bodies,
@@ -425,6 +427,21 @@ HEREDOC_CASES = [
         'cat <<EOF\nEOF \nbody\nEOF\nafter\n',
         'cat <<EOF\n\nafter\n',
     ),
+    (
+        "a single-quoted <<'END-X' delimiter with a non-word char strips its END-X body",
+        "cat <<'END-X' > b.md\nline -F x\nEND-X\nafter\n",
+        "cat <<'END-X' > b.md\n\nafter\n",
+    ),
+    (
+        'an unquoted <<END-X delimiter strips its END-X body',
+        'cat <<END-X\nline -F x\nEND-X\nafter\n',
+        'cat <<END-X\n\nafter\n',
+    ),
+    (
+        'a backslash-quoted <<\\EOF delimiter strips its EOF body',
+        'cat <<\\EOF > b.md\nbody --body-file x\nEOF\nafter\n',
+        'cat <<\\EOF > b.md\n\nafter\n',
+    ),
 ]
 
 for label, inp, want in HEREDOC_CASES:
@@ -462,6 +479,8 @@ for inp, want in [
     ("cat <<-'EOF'", ['-', "'", 'EOF']),
     ('cat <<"EOF"', ['', '"', 'EOF']),
     ('cat <<EOF', ['', '', 'EOF']),
+    ("cat <<'END-X'", ['', "'", 'END-X']),
+    ('cat <<\\EOF', ['', '', 'EOF']),
 ]:
     got = opener_groups(inp)
     _checks.append((got == want, got, want))
@@ -900,6 +919,117 @@ INDEXED_CASES = [
 
 for label, inp, want in INDEXED_CASES:
     check_equal(label, strip_quoted_indexed(inp), want)
+
+# ---------------------------------------------------------------------------
+# masked_view — [label, input, join_continuations, expected]; `F` is MASK_FILL.
+# Every case is length-preserving, so a regex offset in the view is the raw
+# offset in the input.
+# ---------------------------------------------------------------------------
+F = MASK_FILL
+MASKED_VIEW_CASES = [
+    (
+        'a double-quoted span is filled, quotes included',
+        'gh pr create -F a --title "x -F b"',
+        False,
+        'gh pr create -F a --title ' + F * 8,
+    ),
+    (
+        'an escaped \\" does not end a double-quoted span',
+        'gh pr create -F d --title "a \\" -F c \\" b"',
+        False,
+        'gh pr create -F d --title ' + F * 16,
+    ),
+    (
+        'a multi-line double-quoted span is filled across its newline',
+        'gh pr create -F d --body "S\nPass --body-file p"',
+        False,
+        'gh pr create -F d --body ' + F * 22,
+    ),
+    (
+        'a gh inside a quoted title stays filled',
+        'gh pr create -F d --title "how gh pr create -F works"',
+        False,
+        'gh pr create -F d --title ' + F * 27,
+    ),
+    (
+        'a single-quoted span and a # comment are filled',
+        "echo 'x' # it's --body-file y\nz",
+        False,
+        'echo ' + F * 3 + ' ' + F * 20 + '\nz',
+    ),
+    (
+        'a heredoc body and its terminator are filled; the opener line stays',
+        "cat <<'EOF'\n--body-file x\nEOF\ngh",
+        False,
+        'cat <<' + F * 5 + '\n' + F * 17 + '\ngh',
+    ),
+    (
+        'cat <<A <<B fills both bodies',
+        'cat <<A <<B\nbody -F a\nA\nbody -F b\nB\ngh',
+        False,
+        # The second body's region starts at the first one's end, so the
+        # newline between them is inside it (`_strip_heredoc` regions).
+        'cat <<A <<B\n' + F * 23 + '\ngh',
+    ),
+    (
+        'a <<\\EOF body is filled',
+        'cat <<\\EOF\nbody -F x\nEOF\ngh',
+        False,
+        'cat <<\\EOF\n' + F * 13 + '\ngh',
+    ),
+    (
+        "a <<'END-X' body is filled",
+        "cat <<'END-X'\nbody -F x\nEND-X\ngh",
+        False,
+        'cat <<' + F * 7 + '\n' + F * 15 + '\ngh',
+    ),
+    (
+        'join_continuations turns a command-text backslash-newline into two spaces',
+        'gh pr create --body-file\\\n"p"',
+        True,
+        'gh pr create --body-file  ' + F * 3,
+    ),
+    (
+        'without join_continuations a backslash-newline is kept as written',
+        'gh pr create --body-file\\\np',
+        False,
+        'gh pr create --body-file\\\np',
+    ),
+    (
+        "a heredoc body's trailing backslash stays inside the filled body while the opener line's continuation joins",
+        "gh pr create --body-file - <<'EOF' --title t\\\n --base x\nbody \\\nEOF\n",
+        True,
+        'gh pr create --body-file - <<' + F * 5 + ' --title t   --base x\n' + F * 10 + '\n',
+    ),
+    (
+        'an unterminated quote is left unfilled, as bash_words reads a stray quote',
+        'gh pr create -F a --title "x',
+        False,
+        'gh pr create -F a --title "x',
+    ),
+    (
+        'a backtick substitution inside a double-quoted span is filled with it',
+        'gh --title "x `a -F b` y"',
+        False,
+        'gh --title ' + F * len('"x `a -F b` y"'),
+    ),
+    (
+        'a $(...) substitution inside a double-quoted span is filled with it',
+        'gh --title "x $(a -F b) y"',
+        False,
+        'gh --title ' + F * len('"x $(a -F b) y"'),
+    ),
+    (
+        'an unquoted $(...) and backtick substitution stay visible',
+        'gh --title x$(a -F b)y `c -F d`',
+        False,
+        'gh --title x$(a -F b)y `c -F d`',
+    ),
+]
+
+for label, inp, join, want in MASKED_VIEW_CASES:
+    got = masked_view(inp, join_continuations=join)
+    report(label, got == want and len(got) == len(inp), got, want)
 
 # ---------------------------------------------------------------------------
 # resolve_placeholders — [label, token, values, next_index, expected]

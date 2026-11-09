@@ -92,6 +92,14 @@ class HeredocToShell(ParityCase):
                 command = f"{shell} {opener}\ngit commit -m x\nEOF"
                 self.check_runs(f"{shell} fed {opener}", command)
 
+    def test_backslash_and_non_word_delimiters_surface_and_stay_data(self):
+        # `<<\EOF` and a delimiter with a non-word character (`<<'END-X'`)
+        # are recognized openers: a shell runs the body, cat keeps it data.
+        self.check_runs("bash fed <<\\EOF", "bash <<\\EOF\ngit commit -m x\nEOF")
+        self.check_runs("bash fed <<'END-X'", "bash <<'END-X'\ngit commit -m x\nEND-X")
+        self.check_inert("cat <<\\EOF", "cat <<\\EOF\ngit commit -m x\nEOF")
+        self.check_inert("cat <<'END-X'", "cat <<'END-X'\ngit commit -m x\nEND-X")
+
     def test_indented_body_of_a_dash_heredoc_surfaces(self):
         self.check_runs("<<- body, tab indented", "bash <<-EOF\n\tgit commit -m x\n\tEOF")
 

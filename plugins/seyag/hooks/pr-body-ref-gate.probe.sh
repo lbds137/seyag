@@ -361,6 +361,48 @@ assert_blocks "heredoc --body-file - with a -F line in the body: the dirty hered
 # file is the one read.
 run_hook "$REPO" "gh pr create --base develop -F $E8_BODY_DIR/e8-paren.txt --title \"fix -F handling\""
 assert_blocks "-F <dirty> --title \"fix -F handling\": the quoted -F is not a flag (blocks)" "task-99999"
+
+# Flag-last: `--body-file` and `-F` are one flag (gh pr create --help:
+# "-F, --body-file file"), so gh reads the LAST one in command order, across
+# both spellings. clean = e8-clean.txt, dirty = e8-paren.txt.
+run_hook "$REPO" 'gh pr create --base develop -F "$E8_BODY_DIR/e8-clean.txt" -F "$E8_BODY_DIR/e8-paren.txt"'
+assert_blocks "two -F flags: the last (dirty) is read (blocks)" "task-99999"
+run_hook "$REPO" 'gh pr create --base develop -F "$E8_BODY_DIR/e8-paren.txt" -F "$E8_BODY_DIR/e8-clean.txt"'
+assert_pass "two -F flags, dirty first: the last (clean) is read (passes)"
+run_hook "$REPO" 'gh pr create --base develop --body-file "$E8_BODY_DIR/e8-clean.txt" -F "$E8_BODY_DIR/e8-paren.txt"'
+assert_blocks "--body-file then -F: the last (dirty) is read (blocks)" "task-99999"
+run_hook "$REPO" 'gh pr create --base develop --body-file "$E8_BODY_DIR/e8-paren.txt" -F "$E8_BODY_DIR/e8-clean.txt"'
+assert_pass "--body-file then -F: the last (clean) is read (passes)"
+run_hook "$REPO" 'gh pr edit 5 -F "$E8_BODY_DIR/e8-clean.txt" -F "$E8_BODY_DIR/e8-paren.txt"'
+assert_blocks "gh pr edit 5 -F clean -F dirty: the last (dirty) is read (blocks)" "task-99999"
+run_hook "$REPO" 'gh pr create --base develop --body-file "$E8_BODY_DIR/e8-paren.txt"\'$'\n''--title t'
+assert_blocks "--body-file <dirty>\\ + newline + --title t: the joined word is read (blocks)" "task-99999"
+run_hook "$REPO" 'gh pr create --base develop --body-file\'$'\n''"$E8_BODY_DIR/e8-paren.txt"'
+assert_blocks "--body-file\\ + newline + <dirty>: the joined flag and word are read (blocks)" "task-99999"
+run_hook "$REPO" 'gh pr create --base develop --body-file "$E8_BODY_DIR/e8-paren.txt" --title "see --body-file $E8_BODY_DIR/e8-clean.txt"'
+assert_blocks "--body-file <dirty> --title \"see --body-file x\": the quoted --body-file is not a flag (blocks)" "task-99999"
+# Quote and heredoc vectors (review r2 items 2-5): the flag search reads a
+# masked view of the command, so quoted text and heredoc bodies hold no flags.
+run_hook "$REPO" 'gh pr create --base develop -F "$E8_BODY_DIR/e8-paren.txt" --title "a \" -F $E8_BODY_DIR/e8-clean.txt \" b"'
+assert_blocks "an escaped \\\" does not end the quoted --title: its -F is not a flag (blocks)" "task-99999"
+run_hook "$REPO" 'bash -c "gh pr create --base develop --title \"x\" -F $E8_BODY_DIR/e8-paren.txt"'
+assert_blocks "bash -c \"... --title \\\"x\\\" -F <dirty>\": the wrapped -F is read (blocks)" "task-99999"
+run_hook "$REPO" 'bash -c "gh pr create --base develop -F $E8_BODY_DIR/e8-clean.txt -F $E8_BODY_DIR/e8-paren.txt"'
+assert_blocks "bash -c \"gh pr create -F clean -F dirty\": the wrapped last -F is read (blocks)" "task-99999"
+run_hook "$REPO" 'gh pr create --base develop -F "$E8_BODY_DIR/e8-paren.txt" --body "Summary'$'\n''Pass --body-file $E8_BODY_DIR/e8-clean.txt to it"'
+assert_blocks "a multi-line quoted --body does not yield its prose --body-file (blocks)" "task-99999"
+run_hook "$REPO" 'gh pr create --base develop -F "$E8_BODY_DIR/e8-paren.txt" --title "how gh pr create -F $E8_BODY_DIR/e8-clean.txt works"'
+assert_blocks "a gh inside a quoted --title does not un-mask its -F (blocks)" "task-99999"
+run_hook "$REPO" 'gh pr create --base develop -F "$E8_BODY_DIR/e8-paren.txt" --title "see `echo -F $E8_BODY_DIR/e8-clean.txt`"'
+assert_blocks "a backtick substitution inside a quoted --title is data: its -F is not a flag (blocks)" "task-99999"
+run_hook "$REPO" 'gh pr create --base develop --body-file "$E8_BODY_DIR/e8-paren.txt"; cat <<A <<B >/dev/null'$'\n''x'$'\n''A'$'\n''--body-file $E8_BODY_DIR/e8-clean.txt'$'\n''B'
+assert_blocks "cat <<A <<B: the second body's --body-file is not a flag (blocks)" "task-99999"
+run_hook "$REPO" 'gh pr create --base develop --body-file "$E8_BODY_DIR/e8-paren.txt"; cat <<\EOF >/dev/null'$'\n''--body-file $E8_BODY_DIR/e8-clean.txt'$'\n''EOF'
+assert_blocks "cat <<\\EOF: the body's --body-file is not a flag (blocks)" "task-99999"
+run_hook "$REPO" 'gh pr create --base develop --body-file "$E8_BODY_DIR/e8-paren.txt"; cat <<'\''END-X'\'' >/dev/null'$'\n''--body-file $E8_BODY_DIR/e8-clean.txt'$'\n''END-X'
+assert_blocks "cat <<'END-X': the body's --body-file is not a flag (blocks)" "task-99999"
+run_hook "$REPO" 'gh pr create --base develop --body-file "$E8_BODY_DIR/e8-paren.txt"; cat <<'\''EOF'\'' >/dev/null'$'\n''--body-file $E8_BODY_DIR/e8-clean.txt \'$'\n''EOF'
+assert_blocks "a heredoc body line ending in \\ does not join its terminator: the body's --body-file is not a flag (blocks)" "task-99999"
 unset E8_BODY_DIR
 
 # ---- Case 6: resolving doc ref → pass ----------------------------------------
