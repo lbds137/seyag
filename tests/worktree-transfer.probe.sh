@@ -1,6 +1,6 @@
 #!/bin/bash
 # Fixture check for plugins/seyag/bin/worktree-transfer — run after ANY
-# edit to the script. 49 cases assert the fixed check order, refusal shapes,
+# edit to the script. 56 cases assert the fixed check order, refusal shapes,
 # branch-regex gating, and byte-identical staged transfer over hermetic
 # throwaway git repos under $(mktemp -d):
 #   1. cwd inside the linked worktree -> STOP: main-tree-identity
@@ -51,9 +51,9 @@
 #  37. untracked nested repo with core.fsmonitor -> STOP: worktree-gitfile without firing fsmonitor
 #  38. planted repo at sub/ (no .git name) -> STOP: worktree-gitfile without firing fsmonitor
 #  39. --rebase-base fast-forward: main advanced on README.md only -> transfer succeeds with rebase-proof line
-#  40. --rebase-base conflict: main changed touched src/app.js -> STOP: rebase-proof naming src/app.js
+#  40. --rebase-base conflict: touched src/app.js changed on main -> STOP: rebase-proof naming changed on main: src/app.js
 #  41. --rebase-base squash merge with identical trees -> transfer succeeds with 'whole trees identical'
-#  42. --rebase-base stacked branch commit not on main -> STOP: rebase-proof naming feat.txt
+#  42. --rebase-base stacked branch commit not on main -> STOP: rebase-proof naming changed only on the worktree's branch: feat.txt
 #  43. --rebase-base file/directory boundary conflict -> STOP: rebase-proof naming src/data.bin/inner.txt
 #  44. --rebase-base literal special-char filenames (src/*.js, :odd.txt) with sibling src/other.js changed on main -> transfer succeeds
 #  45. --rebase-base --base mismatch vs match -> STOP: base-unchanged on main HEAD, exit 0 on worktree HEAD
@@ -61,6 +61,13 @@
 #  47. --rebase-base literal glob conflict: main and patch both edit src/*.js -> STOP: rebase-proof naming src/*.js
 #  48. --rebase-base reverse file/directory boundary: patch adds src/newdir/x.txt, main commits file src/newdir -> STOP: rebase-proof naming src/newdir
 #  49. --rebase-base scale: main adds 5000 files under bulk/ -> transfer succeeds with rebase-proof line
+#  50. --rebase-base worker commit (main is ancestor of worktree HEAD, no upstream or upstream lacking commit) -> STOP: rebase-proof with land-on-main hint and README.md
+#  51. unpulled main (origin/main ahead of local main) -> git pull --ff-only hint across --rebase-base, default, and --base
+#  52. --rebase-base criss-cross merge bases -> second merge-base exposes conflict path alongside first
+#  53. --rebase-base patch delete vs main edit on src/old.js -> STOP: rebase-proof naming changed on main: src/old.js
+#  54. --rebase-base patch rename vs main edit on README.md -> STOP: rebase-proof naming changed on main: README.md
+#  55. orphan worktree (unborn HEAD) -> STOP: base-unchanged naming rev-parse HEAD failed in worktree
+#  56. --rebase-base empty worker commit -> transfer succeeds with rebase-proof line
 #
 # Stated non-goal: the two removal-failure wordings (`git worktree remove --force`
 # vs `git branch -D` in check 11) are not constructible without root tricks; the
@@ -939,23 +946,27 @@ else
   record_case 1 "case 39: --rebase-base fast-forward" "rc=$rc out=$out porcelain=$main_porcelain39"
 fi
 
-# Case 40: --rebase-base when main changed a touched file (src/app.js) ->
-# exit 1, STOP: rebase-proof: naming src/app.js, worktree and branch kept, main clean.
+# Case 40: --rebase-base when a touched file (src/app.js) changed on main ->
+# exit 1, STOP: rebase-proof: naming changed on main: src/app.js, worktree and branch kept, main clean.
 mk_fixture r40
 R40="$T/r40"
-printf 'export const value = 99;\n' >"$R40/src/app.js"
-git -C "$R40" add src/app.js >/dev/null 2>&1
-git -C "$R40" commit -q --no-verify -m 'advance main on src/app.js' >/dev/null 2>&1
-err=$(cd "$R40" && bash "$TOOL" --rebase-base .wt 2>&1 >/dev/null)
-rc=$?
-if [ "$rc" -eq 1 ] && [[ $err == "STOP: rebase-proof:"* ]] \
-  && grep -qF 'src/app.js' <<<"$err" \
-  && [ -d "$R40/.wt" ] \
-  && git -C "$R40" rev-parse --verify -q refs/heads/worktree-agent-t1 >/dev/null \
-  && [ -z "$(git -C "$R40" status --porcelain)" ]; then
-  record_case 0 "case 40: --rebase-base refuses STOP: rebase-proof when main changed touched src/app.js"
+if ! printf 'export const value = 99;\n' >"$R40/src/app.js" \
+  || ! git -C "$R40" add src/app.js >/dev/null 2>&1 \
+  || ! git -C "$R40" commit -q --no-verify -m 'advance main on src/app.js' >/dev/null 2>&1; then
+  record_case 1 "case 40: --rebase-base conflict on src/app.js" "setup: advance main on src/app.js failed"
 else
-  record_case 1 "case 40: --rebase-base conflict on src/app.js" "rc=$rc err=$err"
+  err=$(cd "$R40" && bash "$TOOL" --rebase-base .wt 2>&1 >/dev/null)
+  rc=$?
+  if [ "$rc" -eq 1 ] && [[ $err == "STOP: rebase-proof:"* ]] \
+    && grep -qF 'src/app.js' <<<"$err" \
+    && grep -qF 'changed on main: src/app.js' <<<"$err" \
+    && [ -d "$R40/.wt" ] \
+    && git -C "$R40" rev-parse --verify -q refs/heads/worktree-agent-t1 >/dev/null \
+    && [ -z "$(git -C "$R40" status --porcelain)" ]; then
+    record_case 0 "case 40: --rebase-base refuses STOP: rebase-proof when main changed touched src/app.js"
+  else
+    record_case 1 "case 40: --rebase-base conflict on src/app.js" "rc=$rc err=$err"
+  fi
 fi
 
 # Case 41: --rebase-base squash merge with identical trees -> exit 0, proof line
@@ -988,25 +999,31 @@ fi
 # exit 1, STOP: rebase-proof: naming feat.txt, nothing staged in main.
 mk_fixture r42
 R42="$T/r42"
-git -C "$R42" checkout -q -b feat >/dev/null 2>&1
-printf 'feature content\n' >"$R42/feat.txt"
-git -C "$R42" add feat.txt >/dev/null 2>&1
-git -C "$R42" commit -q --no-verify -m 'feat commit' >/dev/null 2>&1
-(cd "$R42" && git worktree add -q -b worktree-agent-unmerged .wt-unmerged feat >/dev/null 2>&1)
-populate_wt "$R42/.wt-unmerged"
-git -C "$R42" checkout -q main >/dev/null 2>&1
-printf 'Unrelated main docs.\n' >>"$R42/README.md"
-git -C "$R42" add README.md >/dev/null 2>&1
-git -C "$R42" commit -q --no-verify -m 'advance main on README' >/dev/null 2>&1
-err=$(cd "$R42" && bash "$TOOL" --rebase-base .wt-unmerged 2>&1 >/dev/null)
-rc=$?
-if [ "$rc" -eq 1 ] && [[ $err == "STOP: rebase-proof:"* ]] \
-  && grep -qF 'feat.txt' <<<"$err" \
-  && [ -d "$R42/.wt-unmerged" ] \
-  && [ -z "$(git -C "$R42" status --porcelain)" ]; then
-  record_case 0 "case 42: --rebase-base with unmerged branch commit refuses STOP: rebase-proof naming feat.txt"
+if ! git -C "$R42" checkout -q -b feat >/dev/null 2>&1 \
+  || ! printf 'feature content\n' >"$R42/feat.txt" \
+  || ! git -C "$R42" add feat.txt >/dev/null 2>&1 \
+  || ! git -C "$R42" commit -q --no-verify -m 'feat commit' >/dev/null 2>&1 \
+  || ! (cd "$R42" && git worktree add -q -b worktree-agent-unmerged .wt-unmerged feat >/dev/null 2>&1) \
+  || ! populate_wt "$R42/.wt-unmerged" \
+  || ! git -C "$R42" checkout -q main >/dev/null 2>&1 \
+  || ! printf 'Unrelated main docs.\n' >>"$R42/README.md" \
+  || ! git -C "$R42" add README.md >/dev/null 2>&1 \
+  || ! git -C "$R42" commit -q --no-verify -m 'advance main on README' >/dev/null 2>&1; then
+  record_case 1 "case 42: --rebase-base unmerged branch commit" "setup: unmerged branch fixture failed"
 else
-  record_case 1 "case 42: --rebase-base unmerged branch commit" "rc=$rc err=$err"
+  err=$(cd "$R42" && bash "$TOOL" --rebase-base .wt-unmerged 2>&1 >/dev/null)
+  rc=$?
+  if [ "$rc" -eq 1 ] && [[ $err == "STOP: rebase-proof:"* ]] \
+    && grep -qF 'feat.txt' <<<"$err" \
+    && grep -qF "changed only on the worktree's branch: feat.txt" <<<"$err" \
+    && ! grep -qF 'changed on main' <<<"$err" \
+    && [ -d "$R42/.wt-unmerged" ] \
+    && git -C "$R42" rev-parse --verify -q refs/heads/worktree-agent-unmerged >/dev/null \
+    && [ -z "$(git -C "$R42" status --porcelain)" ]; then
+    record_case 0 "case 42: --rebase-base with unmerged branch commit refuses STOP: rebase-proof naming feat.txt"
+  else
+    record_case 1 "case 42: --rebase-base unmerged branch commit" "rc=$rc err=$err"
+  fi
 fi
 
 # Case 43: --rebase-base file/directory boundary: worktree adds file src/data.bin,
@@ -1168,6 +1185,252 @@ if [ "$rc" -eq 0 ] \
   record_case 0 "case 49: --rebase-base scale (5000 files under bulk/) transfers and prints rebase-proof line"
 else
   record_case 1 "case 49: --rebase-base scale" "rc=$rc out=$out"
+fi
+
+# Case 50: --rebase-base when worktree has a commit ahead of main (no upstream on main,
+# then with upstream origin/main lacking the worktree commit) ->
+# exit 1, STOP: rebase-proof: naming ancestor relation, land-on-main hint, and README.md.
+mk_fixture r50
+R50="$T/r50"
+if ! printf 'worker committed README line\n' >>"$R50/.wt/README.md" \
+  || ! git -C "$R50/.wt" add README.md >/dev/null 2>&1 \
+  || ! git -C "$R50/.wt" commit -q --no-verify -m 'worker commit on README' >/dev/null 2>&1 \
+  || git -C "$R50" rev-parse --verify -q '@{upstream}^{commit}' >/dev/null 2>&1; then
+  record_case 1 "case 50: worker commit ahead of main" "setup: failed to commit README.md in .wt with no main upstream"
+else
+  err=$(cd "$R50" && bash "$TOOL" --rebase-base .wt 2>&1 >/dev/null)
+  rc=$?
+  if ! git -C "$R50" branch -q --set-upstream-to=origin/main main >/dev/null 2>&1; then
+    record_case 1 "case 50: worker commit ahead of main" "setup: failed to set upstream on main"
+  else
+    err2=$(cd "$R50" && bash "$TOOL" --rebase-base .wt 2>&1 >/dev/null)
+    rc2=$?
+    if [ "$rc" -eq 1 ] && [[ $err == "STOP: rebase-proof:"* ]] \
+      && grep -qF 'is an ancestor of worktree HEAD' <<<"$err" \
+      && grep -qF 'land them on main first' <<<"$err" \
+      && grep -qF 'README.md' <<<"$err" \
+      && [ "$rc2" -eq 1 ] && [[ $err2 == "STOP: rebase-proof:"* ]] \
+      && grep -qF 'land them on main first' <<<"$err2" \
+      && ! grep -qF 'git pull --ff-only' <<<"$err2" \
+      && [ -d "$R50/.wt" ] \
+      && git -C "$R50" rev-parse --verify -q refs/heads/worktree-agent-t1 >/dev/null \
+      && [ -z "$(git -C "$R50" status --porcelain)" ]; then
+      record_case 0 "case 50: --rebase-base with worker commit ahead of main refuses STOP: rebase-proof with land-on-main hint and README.md"
+    else
+      record_case 1 "case 50: worker commit ahead of main" "rc=$rc err=$err rc2=$rc2 err2=$err2"
+    fi
+  fi
+fi
+
+# Case 51: unpulled main (origin/main one commit ahead of local main, upstream set):
+# (a) --rebase-base -> STOP: rebase-proof: with 'run git pull --ff-only in the main tree'
+# (b) without flags -> STOP: no-unpushed-base: with 'git pull --ff-only' and no 'rerun with --rebase-base'
+# (c) --base <origin/main sha> without --rebase-base -> STOP: base-unchanged: with 'git pull --ff-only' and no 'rerun with --rebase-base'
+mk_fixture r51
+R51="$T/r51"
+R51_CLONE="$T/r51-clone"
+if ! git clone -q "$T/r51-origin.git" "$R51_CLONE" >/dev/null 2>&1 \
+  || ! git -C "$R51_CLONE" config user.email probe@example.invalid \
+  || ! git -C "$R51_CLONE" config user.name 'Probe Harness' \
+  || ! git -C "$R51_CLONE" config commit.gpgsign false \
+  || ! printf 'Upstream advance.\n' >>"$R51_CLONE/README.md" \
+  || ! git -C "$R51_CLONE" add README.md >/dev/null 2>&1 \
+  || ! git -C "$R51_CLONE" commit -q --no-verify -m 'advance origin/main' >/dev/null 2>&1 \
+  || ! git -C "$R51_CLONE" push -q origin main >/dev/null 2>&1 \
+  || ! git -C "$R51" fetch -q origin >/dev/null 2>&1 \
+  || ! git -C "$R51" branch -q --set-upstream-to=origin/main main >/dev/null 2>&1 \
+  || ! (cd "$R51" && git worktree add -q -b worktree-agent-up .wt-up origin/main >/dev/null 2>&1) \
+  || ! populate_wt "$R51/.wt-up"; then
+  record_case 1 "case 51: unpulled main" "setup: failed to advance origin/main and create .wt-up"
+else
+  LOCAL51=$(git -C "$R51" rev-parse HEAD 2>/dev/null || true)
+  ORIGIN51=$(git -C "$R51" rev-parse origin/main 2>/dev/null || true)
+  if [ -z "$LOCAL51" ] || [ -z "$ORIGIN51" ] || [ "$LOCAL51" = "$ORIGIN51" ] \
+    || ! git -C "$R51" merge-base --is-ancestor "$LOCAL51" "$ORIGIN51" 2>/dev/null; then
+    record_case 1 "case 51: unpulled main" "setup: local main ($LOCAL51) is not a strict ancestor of origin/main ($ORIGIN51)"
+  else
+    err51a=$(cd "$R51" && bash "$TOOL" --rebase-base .wt-up 2>&1 >/dev/null)
+    rc51a=$?
+    err51b=$(cd "$R51" && bash "$TOOL" .wt-up 2>&1 >/dev/null)
+    rc51b=$?
+    err51c=$(cd "$R51" && bash "$TOOL" --base "$ORIGIN51" .wt-up 2>&1 >/dev/null)
+    rc51c=$?
+    if [ "$rc51a" -eq 1 ] && [[ $err51a == "STOP: rebase-proof:"* ]] \
+      && grep -qF 'run git pull --ff-only in the main tree' <<<"$err51a" \
+      && [ "$rc51b" -eq 1 ] && [[ $err51b == "STOP: no-unpushed-base:"* ]] \
+      && grep -qF 'git pull --ff-only' <<<"$err51b" \
+      && ! grep -qF 'rerun with --rebase-base' <<<"$err51b" \
+      && [ "$rc51c" -eq 1 ] && [[ $err51c == "STOP: base-unchanged:"* ]] \
+      && grep -qF 'git pull --ff-only' <<<"$err51c" \
+      && ! grep -qF 'rerun with --rebase-base' <<<"$err51c" \
+      && [ -d "$R51/.wt-up" ] \
+      && git -C "$R51" rev-parse --verify -q refs/heads/worktree-agent-up >/dev/null \
+      && [ -z "$(git -C "$R51" status --porcelain)" ]; then
+      record_case 0 "case 51: unpulled main hints git pull --ff-only across --rebase-base, default, and --base"
+    else
+      record_case 1 "case 51: unpulled main" "rc_a=$rc51a err_a=$err51a rc_b=$rc51b err_b=$err51b rc_c=$rc51c err_c=$err51c"
+    fi
+  fi
+fi
+
+# Case 52: criss-cross merge bases (A1, B1) where the second merge-base exposes a
+# conflict path p unchanged from the first merge-base to WT_HEAD -> STOP: rebase-proof:
+# naming both p and q.
+mk_fixture r52
+R52="$T/r52"
+if ! git -C "$R52" checkout -q -b side-a >/dev/null 2>&1 \
+  || ! printf 'v1\n' >"$R52/cc-a.txt" \
+  || ! git -C "$R52" add cc-a.txt >/dev/null 2>&1 \
+  || ! git -C "$R52" commit -q --no-verify -m 'A1: add cc-a.txt' >/dev/null 2>&1 \
+  || ! git -C "$R52" checkout -q main >/dev/null 2>&1 \
+  || ! git -C "$R52" checkout -q -b side-b >/dev/null 2>&1 \
+  || ! printf 'v1\n' >"$R52/cc-b.txt" \
+  || ! git -C "$R52" add cc-b.txt >/dev/null 2>&1 \
+  || ! git -C "$R52" commit -q --no-verify -m 'B1: add cc-b.txt' >/dev/null 2>&1 \
+  || ! git -C "$R52" checkout -q side-a >/dev/null 2>&1 \
+  || ! git -C "$R52" merge -q --no-edit --no-verify side-b >/dev/null 2>&1 \
+  || ! git -C "$R52" checkout -q main >/dev/null 2>&1 \
+  || ! git -C "$R52" merge -q --ff-only side-b >/dev/null 2>&1 \
+  || ! git -C "$R52" merge -q --no-commit side-a~1 >/dev/null 2>&1 \
+  || ! printf 'main-v2\n' >"$R52/cc-a.txt" \
+  || ! printf 'main-v2\n' >"$R52/cc-b.txt" \
+  || ! git -C "$R52" add cc-a.txt cc-b.txt >/dev/null 2>&1 \
+  || ! git -C "$R52" commit -q --no-verify -m 'B2: merge A1 into B1 with main edits' >/dev/null 2>&1 \
+  || ! (cd "$R52" && git worktree add -q -b worktree-agent-cc .wt-cc side-a >/dev/null 2>&1) \
+  || ! printf 'export const value = 2;\n' >"$R52/.wt-cc/src/app.js"; then
+  record_case 1 "case 52: criss-cross second merge-base" "setup: failed to construct criss-cross graph"
+else
+  WT_HEAD52=$(git -C "$R52/.wt-cc" rev-parse HEAD 2>/dev/null || true)
+  MAIN_HEAD52=$(git -C "$R52" rev-parse HEAD 2>/dev/null || true)
+  mapfile -t CC_MBS < <(git -C "$R52" merge-base --all "$WT_HEAD52" "$MAIN_HEAD52" 2>/dev/null)
+  if [ "${#CC_MBS[@]}" -ne 2 ]; then
+    record_case 1 "case 52: criss-cross second merge-base" "setup: expected 2 merge bases, got ${#CC_MBS[@]}"
+  else
+    MB0_DIFF=$(git -C "$R52" diff --name-only "${CC_MBS[0]}" "$WT_HEAD52" 2>/dev/null)
+    MB1_DIFF=$(git -C "$R52" diff --name-only "${CC_MBS[1]}" "$WT_HEAD52" 2>/dev/null)
+    if grep -qxF 'cc-a.txt' <<<"$MB1_DIFF" && ! grep -qxF 'cc-a.txt' <<<"$MB0_DIFF"; then
+      cc_p="cc-a.txt"
+      cc_q="cc-b.txt"
+    else
+      cc_p="cc-b.txt"
+      cc_q="cc-a.txt"
+    fi
+    if grep -qxF "$cc_p" <<<"$MB0_DIFF" \
+      || ! grep -qxF "$cc_p" <<<"$MB1_DIFF" \
+      || ! grep -qxF "$cc_q" <<<"$MB0_DIFF" \
+      || grep -qxF "$cc_q" <<<"$MB1_DIFF"; then
+      record_case 1 "case 52: criss-cross second merge-base" "setup: per-base membership failed (mb0=$MB0_DIFF mb1=$MB1_DIFF p=$cc_p q=$cc_q)"
+    else
+      err=$(cd "$R52" && bash "$TOOL" --rebase-base .wt-cc 2>&1 >/dev/null)
+      rc=$?
+      if [ "$rc" -eq 1 ] && [[ $err == "STOP: rebase-proof:"* ]] \
+        && grep -qF "$cc_p" <<<"$err" \
+        && grep -qF "$cc_q" <<<"$err" \
+        && grep -qF 'changed on main:' <<<"$err" \
+        && ! grep -qF "changed only on the worktree's branch" <<<"$err" \
+        && [ -d "$R52/.wt-cc" ] \
+        && git -C "$R52" rev-parse --verify -q refs/heads/worktree-agent-cc >/dev/null \
+        && [ -z "$(git -C "$R52" status --porcelain)" ]; then
+        record_case 0 "case 52: criss-cross second merge-base exposes conflict path ($cc_p alongside $cc_q)"
+      else
+        record_case 1 "case 52: criss-cross second merge-base" "rc=$rc err=$err"
+      fi
+    fi
+  fi
+fi
+
+# Case 53: --rebase-base patch delete vs main edit on src/old.js ->
+# exit 1, STOP: rebase-proof: containing 'changed on main: src/old.js'.
+mk_fixture r53
+R53="$T/r53"
+if ! printf 'export const obsolete = false;\n' >"$R53/src/old.js" \
+  || ! git -C "$R53" add src/old.js >/dev/null 2>&1 \
+  || ! git -C "$R53" commit -q --no-verify -m 'edit src/old.js on main' >/dev/null 2>&1; then
+  record_case 1 "case 53: patch delete vs main edit" "setup: failed to commit src/old.js edit on main"
+else
+  err=$(cd "$R53" && bash "$TOOL" --rebase-base .wt 2>&1 >/dev/null)
+  rc=$?
+  if [ "$rc" -eq 1 ] && [[ $err == "STOP: rebase-proof:"* ]] \
+    && grep -qF 'changed on main: src/old.js' <<<"$err" \
+    && [ -d "$R53/.wt" ] \
+    && git -C "$R53" rev-parse --verify -q refs/heads/worktree-agent-t1 >/dev/null \
+    && [ -z "$(git -C "$R53" status --porcelain)" ]; then
+    record_case 0 "case 53: --rebase-base refuses STOP: rebase-proof when patch deletes src/old.js and main edited it"
+  else
+    record_case 1 "case 53: patch delete vs main edit" "rc=$rc err=$err"
+  fi
+fi
+
+# Case 54: --rebase-base patch rename (README.md -> docs/README.md) vs main edit on README.md ->
+# exit 1, STOP: rebase-proof: containing 'changed on main: README.md'.
+mk_fixture r54
+R54="$T/r54"
+if ! mkdir -p "$R54/.wt/docs" \
+  || ! mv "$R54/.wt/README.md" "$R54/.wt/docs/README.md" \
+  || ! printf 'Main edited README.\n' >>"$R54/README.md" \
+  || ! git -C "$R54" add README.md >/dev/null 2>&1 \
+  || ! git -C "$R54" commit -q --no-verify -m 'edit README.md on main' >/dev/null 2>&1; then
+  record_case 1 "case 54: patch rename vs main edit" "setup: failed to rename README.md in .wt and edit on main"
+else
+  err=$(cd "$R54" && bash "$TOOL" --rebase-base .wt 2>&1 >/dev/null)
+  rc=$?
+  if [ "$rc" -eq 1 ] && [[ $err == "STOP: rebase-proof:"* ]] \
+    && grep -qF 'changed on main: README.md' <<<"$err" \
+    && [ -d "$R54/.wt" ] \
+    && git -C "$R54" rev-parse --verify -q refs/heads/worktree-agent-t1 >/dev/null \
+    && [ -z "$(git -C "$R54" status --porcelain)" ]; then
+    record_case 0 "case 54: --rebase-base refuses STOP: rebase-proof naming old path README.md when patch renames it and main edited it"
+  else
+    record_case 1 "case 54: patch rename vs main edit" "rc=$rc err=$err"
+  fi
+fi
+
+# Case 55: orphan worktree (git worktree add --orphan -b worktree-agent-orph .wt-orph) ->
+# passes checks 1-4 and fails rev-parse HEAD at check 5 with STOP: base-unchanged:.
+mk_fixture r55
+R55="$T/r55"
+if ! (cd "$R55" && git worktree add -q --orphan -b worktree-agent-orph .wt-orph >/dev/null 2>&1); then
+  record_case 1 "case 55: orphan worktree rev-parse HEAD failure" "setup: git worktree add --orphan failed"
+else
+  err=$(cd "$R55" && bash "$TOOL" .wt-orph 2>&1 >/dev/null)
+  rc=$?
+  if [ "$rc" -eq 1 ] && [[ $err == "STOP: base-unchanged:"* ]] \
+    && grep -qF 'rev-parse HEAD failed in worktree' <<<"$err" \
+    && [ -d "$R55/.wt-orph" ] \
+    && [ "$(git -C "$R55/.wt-orph" symbolic-ref -q HEAD 2>/dev/null)" = "refs/heads/worktree-agent-orph" ] \
+    && [ -z "$(git -C "$R55" status --porcelain)" ]; then
+    record_case 0 "case 55: orphan worktree refuses STOP: base-unchanged when rev-parse HEAD fails"
+  else
+    record_case 1 "case 55: orphan worktree rev-parse HEAD failure" "rc=$rc err=$err"
+  fi
+fi
+
+# Case 56: --rebase-base when worker made only an empty commit ->
+# AHEAD_PATHS is empty so ancestor check falls through and transfer succeeds.
+mk_fixture r56
+R56="$T/r56"
+if ! git -C "$R56/.wt" commit -q --allow-empty --no-verify -m empty >/dev/null 2>&1; then
+  record_case 1 "case 56: empty worker commit transfers" "setup: commit --allow-empty failed"
+else
+  MAIN56=$(git -C "$R56" rev-parse HEAD 2>/dev/null || true)
+  WT56=$(git -C "$R56/.wt" rev-parse HEAD 2>/dev/null || true)
+  if [ -z "$MAIN56" ] || [ -z "$WT56" ] || [ "$MAIN56" = "$WT56" ] \
+    || ! git -C "$R56" merge-base --is-ancestor "$MAIN56" "$WT56" 2>/dev/null; then
+    record_case 1 "case 56: empty worker commit transfers" "setup: main HEAD ($MAIN56) is not a strict ancestor of worktree HEAD ($WT56)"
+  else
+    out=$(cd "$R56" && bash "$TOOL" --rebase-base .wt 2>"$T/r56.err")
+    rc=$?
+    err56=$(cat "$T/r56.err" 2>/dev/null || true)
+    if [ "$rc" -eq 0 ] \
+      && grep -q '^rebase-proof: ' <<<"$out" \
+      && [ -f "$R56/src/new.js" ] \
+      && [ ! -e "$R56/.wt" ] \
+      && ! git -C "$R56" rev-parse --verify -q refs/heads/worktree-agent-t1 >/dev/null; then
+      record_case 0 "case 56: --rebase-base with empty worker commit transfers and prints rebase-proof line"
+    else
+      record_case 1 "case 56: empty worker commit transfers" "rc=$rc out=$out err=$err56"
+    fi
+  fi
 fi
 
 [ "$fail" -eq 0 ] || exit 1
