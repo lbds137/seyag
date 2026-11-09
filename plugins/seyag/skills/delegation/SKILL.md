@@ -47,8 +47,9 @@ Every dispatch carries these sections by name; a missing one is a gap the worker
 <The design decisions already made. The worker executes; it never designs.>
 <When the unit's floor is red-first: add the new failing case first, run it against the
 unfixed code (through the project's check gate, where checks are gated), only then edit.
-The case uses only names that exist before the fix: one the fix adds raises on the unfixed
-code, so the row's result comes from that error, not from the behavior under test.>
+Its red must come from its own assertion: a name only the fix adds fails earlier (raises, or
+does not compile), so reach the behavior through names that exist before the fix where it
+can be, and otherwise confirm the red names that missing name rather than reading it as a pass.>
 
 ## Premise ledger
 > A premise about a value's form or state at a pipeline stage cites the producer line that establishes it AT that stage, never a similar-looking site elsewhere — the form at the stage is exactly what the spec's next step consumes.
