@@ -865,7 +865,8 @@ else
   bad "--only <tree3> --apply HOLD (rc $rc)"; printf '%s\n' "$out"
 fi
 git -C "$O" worktree unlock "$O/.claude/worktrees/tree3"
-add_tree onlyrepo tree4
+add_tree onlyrepo tree4 && [ -d "$O/.claude/worktrees/tree4" ] \
+  || { bad "setup: add_tree onlyrepo tree4 failed"; git -C "$O" worktree list; }
 out=$("$TOOL" --repo "$O" --only "$O/.claude/worktrees/tree2" --only "$O/.claude/worktrees/tree3"); rc=$?
 if [ "$rc" -eq 0 ] \
   && grep -q '^SAFE  \.claude/worktrees/tree2  \[worktree-agent-tree2\]$' <<<"$out" \
@@ -889,11 +890,15 @@ if [ "$rc" -eq 0 ] && grep -qF "STALE  $t3_lock" <<<"$out"; then
 else
   bad "--only <tree2> --locks (rc $rc)"; printf '%s\n' "$out"
 fi
+pre=$("$TOOL" --repo "$O" --locks)
 err=$("$TOOL" --repo "$O" --only "$O/.claude/worktrees/nosuch" --locks-apply 2>&1 >/dev/null); rc=$?
-if [ "$rc" -eq 2 ] && [ -e "$t3_lock" ]; then
+if grep -qF "STALE  $t3_lock" <<<"$pre" \
+  && [ "$rc" -eq 2 ] \
+  && grep -qF "safe-worktree-clean: --only $O/.claude/worktrees/nosuch: not a worktree this run judges in $O (agent trees under .claude/worktrees/; --all widens)" <<<"$err" \
+  && [ -e "$t3_lock" ]; then
   ok "--only <nosuch> --locks-apply exits 2 before --locks runs and leaves the lock in place"
 else
-  bad "--only <nosuch> --locks-apply (rc $rc, err '$err')"
+  bad "--only <nosuch> --locks-apply (rc $rc, err '$err')"; printf '%s\n' "$pre"
 fi
 rm -f "$t3_lock"
 git -C "$O" worktree add -q -b worktree-agent-outside "$T/outside-tree"
