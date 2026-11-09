@@ -2,7 +2,7 @@
 # worktree-transfer - transfer a delegation worker's uncommitted worktree changes into the main tree, verify byte-identity, and remove the worktree and branch
 #
 # Usage:
-#   worktree-transfer [--base SHA] <worktree-path>
+#   worktree-transfer [--base SHA] [--rebase-base] <worktree-path>
 #
 # Run from the MAIN working tree, never from inside the transferred worktree.
 # Stages everything the worker left uncommitted in <worktree-path> into one
@@ -35,9 +35,11 @@
 #                           and no directory below `<wt>` holds `HEAD` with `objects`,
 #                           `refs`, or `commondir` before any `git -C <wt>` runs
 #   5 base-unchanged        when --base SHA is given, `<sha>^{commit}` resolves and
-#                           equals the main tree's HEAD (skipped when omitted)
+#                           equals the main tree's HEAD, or under --rebase-base the
+#                           worktree's HEAD (the dispatch base; skipped when omitted)
 #   6 no-unpushed-base      worktree HEAD equals the main tree's HEAD (ahead is as
-#                           wrong as behind; runs before the patch is built)
+#                           wrong as behind; runs before the patch is built); under
+#                           --rebase-base, deferred to check 9 `rebase-proof`
 #   7 empty-patch           `git -C <wt> add -A` then `git -C <wt> diff --cached --binary`
 #                           written to a temp file is non-empty
 #   8 nothing-outside-patch no `git -C <wt> ls-files -v` entry is assume-unchanged
@@ -46,8 +48,18 @@
 #                           repo or its submodule, and every non-empty
 #                           `git -C <wt> status --porcelain` line after staging
 #                           matches `^[MADRCT] `
-#   9 apply                 `git apply --index <patchfile>` in the main root succeeds
-#  10 byte-identical        `git diff --cached --binary` in the main root matches
+#   9 rebase-proof          under --rebase-base (skipped otherwise), finds every
+#                           merge-base of worktree HEAD and main HEAD and verifies
+#                           that no path in G (paths the worktree's branch changed
+#                           since any merge-base union the patch's paths from
+#                           RAW_DIFF) conflicts with any path in X (paths differing
+#                           between worktree HEAD and main HEAD), including
+#                           file-vs-directory prefix boundaries, then prints the
+#                           proof line on success; check 11 `byte-identical`
+#                           remains the backstop, so rebase-proof is an early
+#                           refusal with a readable proof, not the only guard
+#  10 apply                 `git apply --index <patchfile>` in the main root succeeds
+#  11 byte-identical        `git diff --cached --binary` in the main root matches
 #                           `<patchfile>` via `cmp`; `--binary` must appear on BOTH
 #                           sides because a plain diff renders a binary change as a
 #                           notice `git apply` fails to consume — as must --no-color
@@ -55,7 +67,7 @@
 #                           (diff.noprefix, diff.external, color.ui) cannot change
 #                           what either side produces (a mismatch leaves the main
 #                           tree staged for inspection)
-#  11 removal               `git worktree unlock <wt>`, `git worktree remove --force <wt>`,
+#  12 removal               `git worktree unlock <wt>`, `git worktree remove --force <wt>`,
 #                           then — re-checking SYG_WORKTREE_BRANCH_RE at the removal
 #                           site — `git branch -D <branch>`, then `git worktree prune`
 #
@@ -65,7 +77,7 @@
 # deleting anything.
 #
 # Stated non-goal: the two removal-failure wordings (`git worktree remove --force` vs
-# `git branch -D`) are best-effort operator messages; a refusal at check 11 never
+# `git branch -D`) are best-effort operator messages; a refusal at check 12 never
 # loses the patch because it is already applied and verified in the main tree.
 #
 # Exit codes: 0 success; 1 refusal (`STOP: <check-name>: <reason>`); 2 usage error.
@@ -85,6 +97,7 @@ refuse() {
 
 BASE_ARG=""
 BASE_GIVEN=false
+REBASE_BASE=false
 POSITIONALS=()
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -103,6 +116,9 @@ while [ $# -gt 0 ]; do
       BASE_ARG=${1#--base=}
       [ -n "$BASE_ARG" ] || { usage >&2; exit 2; }
       BASE_GIVEN=true
+      ;;
+    --rebase-base)
+      REBASE_BASE=true
       ;;
     --)
       shift
@@ -256,14 +272,22 @@ PASSED_CHECKS+=("worktree-gitfile")
 # 5. base-unchanged
 MAIN_HEAD=$(git -C "$MAIN_ROOT" rev-parse --verify "HEAD^{commit}" 2>/dev/null) \
   || refuse base-unchanged "cannot resolve main working tree HEAD"
+WT_HEAD=$(git -C "$WT_PATH" rev-parse HEAD 2>&1) \
+  || refuse no-unpushed-base "git rev-parse HEAD failed in worktree: $WT_HEAD"
 if $BASE_GIVEN; then
   case "$BASE_ARG" in
     -*) refuse base-unchanged "cannot resolve --base '$BASE_ARG' to a commit" ;;
   esac
   RESOLVED_BASE=$(git -C "$MAIN_ROOT" rev-parse --verify "$BASE_ARG^{commit}" 2>/dev/null) \
     || refuse base-unchanged "cannot resolve --base '$BASE_ARG' to a commit"
-  if [ "$RESOLVED_BASE" != "$MAIN_HEAD" ]; then
-    refuse base-unchanged "main HEAD ($MAIN_HEAD) moved from --base ($RESOLVED_BASE)"
+  if $REBASE_BASE; then
+    if [ "$RESOLVED_BASE" != "$WT_HEAD" ]; then
+      refuse base-unchanged "worktree HEAD ($WT_HEAD) is not --base ($RESOLVED_BASE)"
+    fi
+  else
+    if [ "$RESOLVED_BASE" != "$MAIN_HEAD" ]; then
+      refuse base-unchanged "main HEAD ($MAIN_HEAD) moved from --base ($RESOLVED_BASE); if main moved by a merge, rerun with --rebase-base"
+    fi
   fi
   PASSED_CHECKS+=("base-unchanged")
 else
@@ -271,15 +295,19 @@ else
 fi
 
 # 6. no-unpushed-base
-# The worktree must sit exactly on the main tree's HEAD: ahead is as wrong as
-# behind, and this check runs BEFORE the patch is built so a worker that
-# committed its work is diagnosed by its HEAD, not by an empty patch.
-WT_HEAD=$(git -C "$WT_PATH" rev-parse HEAD 2>&1) \
-  || refuse no-unpushed-base "git rev-parse HEAD failed in worktree: $WT_HEAD"
-if [ "$WT_HEAD" != "$MAIN_HEAD" ]; then
-  refuse no-unpushed-base "worktree HEAD ($WT_HEAD) differs from the main tree HEAD ($MAIN_HEAD); the patch was built on a base the main tree no longer matches"
+# Without --rebase-base, the worktree must sit on the main tree's HEAD (ahead is
+# as wrong as behind), and this check runs BEFORE the patch is built so a worker
+# that committed its work is diagnosed by its HEAD, not by an empty patch. With
+# --rebase-base, the check is deferred and a worker commit is diagnosed by
+# rebase-proof naming its paths.
+if $REBASE_BASE; then
+  PASSED_CHECKS+=("no-unpushed-base (deferred to rebase-proof)")
+else
+  if [ "$WT_HEAD" != "$MAIN_HEAD" ]; then
+    refuse no-unpushed-base "worktree HEAD ($WT_HEAD) differs from the main tree HEAD ($MAIN_HEAD); the patch was built on a base the main tree no longer matches; if main moved by a merge, rerun with --rebase-base"
+  fi
+  PASSED_CHECKS+=("no-unpushed-base")
 fi
-PASSED_CHECKS+=("no-unpushed-base")
 
 # 7. empty-patch
 TMP_DIR=$(mktemp -d) || refuse empty-patch "mktemp -d failed"
@@ -341,12 +369,110 @@ while IFS= read -r sline; do
 done <<<"$WT_STATUS"
 PASSED_CHECKS+=("nothing-outside-patch")
 
-# 9. apply
+# 9. rebase-proof
+REBASE_PROOF_LINE=""
+if $REBASE_BASE; then
+  MB_OUT=$(git -C "$MAIN_ROOT" merge-base --all "$WT_HEAD" "$MAIN_HEAD" 2>/dev/null) \
+    || refuse rebase-proof "no merge base between worktree HEAD and main HEAD"
+  MBS=()
+  while IFS= read -r mb_line; do
+    [ -n "$mb_line" ] && MBS+=("$mb_line")
+  done <<<"$MB_OUT"
+  [ ${#MBS[@]} -gt 0 ] || refuse rebase-proof "no merge base between worktree HEAD and main HEAD"
+  MB=${MBS[0]}
+
+  declare -A BRANCH_SET=() PATCH_SET=() GUARD=() GUARD_DIRS=()
+  for mb in "${MBS[@]}"; do
+    BRANCH_DIFF_RAW=()
+    if ! z_list BRANCH_DIFF_RAW git -C "$MAIN_ROOT" diff --name-only -z --no-renames --ignore-submodules=none "$mb" "$WT_HEAD" 2>/dev/null; then
+      refuse rebase-proof "git diff --name-only failed between merge-base and worktree HEAD"
+    fi
+    for p in "${BRANCH_DIFF_RAW[@]}"; do
+      [ -n "$p" ] || continue
+      BRANCH_SET["$p"]=1
+      GUARD["$p"]=1
+    done
+  done
+
+  for ((i = 0; i + 1 < ${#RAW_DIFF[@]}; i += 2)); do
+    p=${RAW_DIFF[i + 1]}
+    [ -n "$p" ] || continue
+    PATCH_SET["$p"]=1
+    GUARD["$p"]=1
+  done
+
+  for g in "${!GUARD[@]}"; do
+    dir=$g
+    while [[ $dir == */* ]]; do
+      dir=${dir%/*}
+      [ -n "$dir" ] && GUARD_DIRS["$dir"]=1
+    done
+  done
+
+  DIFF_RAW=()
+  if ! z_list DIFF_RAW git -C "$MAIN_ROOT" diff --name-only -z --no-renames --ignore-submodules=none "$WT_HEAD" "$MAIN_HEAD" 2>/dev/null; then
+    refuse rebase-proof "git diff --name-only failed between worktree HEAD and main HEAD"
+  fi
+
+  CONFLICT_PATHS=()
+  for x in "${DIFF_RAW[@]}"; do
+    [ -n "$x" ] || continue
+    conflict=false
+    if [[ -n ${GUARD["$x"]:-} || -n ${GUARD_DIRS["$x"]:-} ]]; then
+      conflict=true
+    else
+      dir=$x
+      while [[ $dir == */* ]]; do
+        dir=${dir%/*}
+        if [ -n "$dir" ] && [[ -n ${GUARD["$dir"]:-} ]]; then
+          conflict=true
+          break
+        fi
+      done
+    fi
+    if $conflict; then
+      CONFLICT_PATHS+=("$x")
+    fi
+  done
+
+  if [ ${#CONFLICT_PATHS[@]} -gt 0 ]; then
+    conflict_joined=""
+    limit=${#CONFLICT_PATHS[@]}
+    [ "$limit" -gt 5 ] && limit=5
+    for ((i = 0; i < limit; i++)); do
+      if [ -n "$conflict_joined" ]; then
+        conflict_joined="$conflict_joined, ${CONFLICT_PATHS[i]}"
+      else
+        conflict_joined="${CONFLICT_PATHS[i]}"
+      fi
+    done
+    if [ ${#CONFLICT_PATHS[@]} -gt 5 ]; then
+      conflict_joined="$conflict_joined (+$(( ${#CONFLICT_PATHS[@]} - 5 )) more)"
+    fi
+    refuse rebase-proof "main changed path(s) this transfer depends on: $conflict_joined"
+  fi
+
+  MB_LABEL=${MB:0:12}
+  if [ ${#MBS[@]} -gt 1 ]; then
+    MB_LABEL="$MB_LABEL (+$(( ${#MBS[@]} - 1 )) more merge bases)"
+  fi
+  REBASE_PROOF_LINE="rebase-proof: ${#GUARD[@]} path(s) identical at worktree HEAD ${WT_HEAD:0:12} and main HEAD ${MAIN_HEAD:0:12} (${#BRANCH_SET[@]} changed on the worktree's branch since merge-base $MB_LABEL, ${#PATCH_SET[@]} in the patch)"
+  WT_TREE=$(git -C "$MAIN_ROOT" rev-parse --verify "$WT_HEAD^{tree}" 2>/dev/null || true)
+  MAIN_TREE=$(git -C "$MAIN_ROOT" rev-parse --verify "$MAIN_HEAD^{tree}" 2>/dev/null || true)
+  if [ -n "$WT_TREE" ] && [ "$WT_TREE" = "$MAIN_TREE" ]; then
+    REBASE_PROOF_LINE="$REBASE_PROOF_LINE; whole trees identical"
+  fi
+  PASSED_CHECKS+=("rebase-proof")
+else
+  PASSED_CHECKS+=("rebase-proof (skipped: no --rebase-base)")
+fi
+
+# 10. apply
 APPLY_ERR=$(git -C "$MAIN_ROOT" apply --index "$PATCH_FILE" 2>&1) \
   || refuse apply "git apply --index failed: $APPLY_ERR"
 PASSED_CHECKS+=("apply")
 
-# 10. byte-identical
+# 11. byte-identical
 if ! git -C "$MAIN_ROOT" diff --cached --binary --no-color --no-ext-diff --src-prefix=a/ --dst-prefix=b/ | cmp - "$PATCH_FILE" >/dev/null 2>&1; then
   KEPT_PATCH=$PATCH_FILE
   TMP_DIR=""
@@ -354,7 +480,7 @@ if ! git -C "$MAIN_ROOT" diff --cached --binary --no-color --no-ext-diff --src-p
 fi
 PASSED_CHECKS+=("byte-identical")
 
-# 11. removal
+# 12. removal
 # Ignored files in the worktree are deleted with the tree by
 # `git worktree remove --force` and are NOT part of the patch. List them on
 # stderr so nothing vanishes silently; this is a notice, not a gate — build
@@ -383,6 +509,9 @@ if ! $BASE_GIVEN; then
 fi
 
 git -C "$MAIN_ROOT" diff --cached --stat
+if [ -n "$REBASE_PROOF_LINE" ]; then
+  printf '%s\n' "$REBASE_PROOF_LINE"
+fi
 checks_joined=""
 for c in "${PASSED_CHECKS[@]}"; do
   if [ -n "$checks_joined" ]; then
