@@ -946,12 +946,10 @@ ROWS = [
         'git switch -c feat/x && git commit -F - <<"EOF"\nmsg $(date)\nEOF',
         ("feat/x", None, False),
     ),
-    # Observed, fail-closed: shell_quotes.strip_heredoc_bodies does not strip a
-    # backslash-quoted delimiter's body, so its newline voids the read.
     (
-        "a backslash-quoted delimiter is not stripped, so not read",
+        "a backslash-quoted delimiter keeps the body inert",
         "git switch -c feat/x && git commit -F - <<\\EOF\nmsg $(date)\nEOF",
-        (None, None, False),
+        ("feat/x", None, False),
     ),
     ("a here-string is not a heredoc", "git switch -c feat/x && git commit -F - <<<msg", ("feat/x", None, False)),
     (

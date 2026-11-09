@@ -88,9 +88,17 @@
 #     and the session's value, if any, is used instead. A word that starts
 #     bare stops at its first quote (`$D/"sub"/x.md` reads `$D/`), so a
 #     wrapper's closing quote is never taken into the path; that word degrades.
-#   - With no `python3` on PATH, a body-file word containing a `$`, a quote or
-#     a leading `~/` is treated as unresolved and not read (fails open, as
-#     `resolve_body_word` does).
+#   - When `python3` is missing or fails, the
+#     `--body-file` / `-F` search yields no body file, so no body FILE is read
+#     (`--body-file -` stdin bodies included); the `-F body=@path` form, the
+#     substitution and inline-value ladders and rule 1's command-text scan
+#     still run (fail-open direction, never a block).
+#   - The `--body-file` / `-F` search masks quoted spans, `#` comments and
+#     heredoc bodies through shell_quotes.py, so a heredoc delimiter that lib
+#     does not recognize leaves its body as command text, and a flag spelled
+#     there can be read as the last one. An UNTERMINATED heredoc's body stays
+#     command text the same way. A flag inside a `bash -c` / `eval`
+#     string is searched only when the outer command has none.
 #   - A whole-token QUOTED `-F body="@path"` is not recognized as a file
 #     reference — the `@` matcher stops at the quote — so the literal text
 #     `@path` is what gets scanned rather than the file's content (fail-open
@@ -237,9 +245,15 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib/claim-shapes.sh" || exit 0
 # any non-tokenizing shell scan of --body text.
 # Simple-command prefix anchoring `-b` and `-F` to the `gh … pr create|edit`
 # simple command so an earlier command's `-F` (`git commit -F x && gh pr create --fill`)
-# is not read as a PR body.
+# is not read as a PR body. find_body_file_flag's python has its own copy of
+# this span for `-F` (`gh_span`), but it runs on the MASKED view, where a
+# quoted `;` no longer ends the simple command; the uses of this raw prefix,
+# among them the required-flag pre-check on raw CMD_JOINED in the main body,
+# still end the span at a quoted `;`/`&`/`|` (see the KNOWN GAPS bullet on a
+# `;`, `&` or `|` in a quoted argument), so the two can disagree.
 GH_PR_CMD_PREFIX='gh[^\n;&|]*\bpr[[:space:]]+(?:create|edit)\b[^\n;&|]*?[[:space:]]'
-# One shell word as a --body-file / -F path (`\x27` is the single quote in PCRE).
+# One shell word as a --body-file / -F path (`\x27` is the single quote in PCRE
+# and in Python's re, which find_body_file_flag compiles it with).
 # A word that STARTS with a quote may run on through more quoted and bare
 # pieces; a word that starts bare stops at its first quote, so a wrapper's
 # closing quote (`bash -c "gh pr create --body-file x.md" ; echo "done"`) is
@@ -323,49 +337,101 @@ PYEOF
   BODY_PATH_UNRESOLVED=1
 }
 
-# split_flag_word MATCH FLAG: MATCH is one matched "FLAG<sep>WORD" text, and
-# sets the caller's body_file to WORD. BODY_TILDE_OK becomes 1 only for a
-# whitespace separator: the shell expands a leading `~/` after whitespace, never
-# after `=`, and a word with no separator is not tilde-expanded either.
-split_flag_word() {
-  local rest="${1#"$2"}"
-  case "$rest" in
-    =*) BODY_TILDE_OK=0; body_file="${rest#=}" ;;
-    [[:space:]]*) BODY_TILDE_OK=1; body_file="${rest#"${rest%%[![:space:]]*}"}" ;;
-    *) BODY_TILDE_OK=0; body_file="$rest" ;;
+# find_body_file_flag: sets the caller's body_file to the raw word of the body
+# file gh reads, and BODY_TILDE_OK. `--body-file` and `-F` are ONE flag to gh
+# (`gh pr create --help`: "-F, --body-file file"), so the LAST occurrence in
+# command order wins across both spellings. Each spelling keeps its own scope:
+# `--body-file` anywhere in the command (registered extra command families
+# use it too), `-F` only after `pr create|edit` in a gh simple command (the
+# GH_PR_CMD_PREFIX span) and only when IS_GH_PR_WRITE is 1. The search runs on
+# shell_quotes.masked_view of the command: quoted spans, `#` comments and
+# heredoc bodies are filled, so no flag is found in data, and the view is
+# length-preserving, so the word is sliced from the command at the matched
+# offset with its raw quoting intact for resolve_body_word. Command-text
+# backslash-newlines read as a blank (CMD_JOINED's reading); one inside a
+# heredoc body stays data. When the outer command has no flag at all, each
+# `bash -c` / `eval` string (wrapped_command_strings, recursively) is searched
+# the same way and the first with a flag wins. BODY_TILDE_OK becomes 1 only
+# for a whitespace separator: the shell expands a leading `~/` after
+# whitespace, never after `=`, and a word with no separator is not
+# tilde-expanded either. When python3 is missing or fails, the search yields
+# no body file, never a block.
+find_body_file_flag() {
+  local found
+  case "$CMD" in
+    *--body-file*) ;;
+    *-F*) [ "${IS_GH_PR_WRITE:-0}" -eq 1 ] || return 0 ;;
+    *) return 0 ;;
   esac
+  found=$(HOOK_LIB="$(dirname "${BASH_SOURCE[0]}")/lib" BODY_WORD_RE="$BODY_WORD_RE" \
+    PYTHONDONTWRITEBYTECODE=1 python3 - "${IS_GH_PR_WRITE:-0}" 3<<<"$CMD" <<'PYEOF' 2>/dev/null
+import os
+import re
+import sys
+
+sys.path.insert(0, os.environ["HOOK_LIB"])
+from shell_quotes import MASK_FILL, MAX_WRAPPER_DEPTH, masked_view, wrapped_command_strings
+
+gh_write = sys.argv[1] == "1"
+cmd = os.fsdecode(open(3, "rb").read()).removesuffix("\n")
+# re.ASCII throughout: the grep -P searches this replaced were ASCII, so a
+# Unicode blank (U+00A0) inside a path does not end the word here either.
+word_re = re.compile(os.environ["BODY_WORD_RE"], re.ASCII)
+# Line-bound separators, as the grep -oP line scans were; a command-text
+# continuation is already two blanks in the view.
+long_flag = re.compile(r"--body-file(=|[^\S\n]+)", re.ASCII)
+# GH_PR_CMD_PREFIX's span, split so every -F after `pr create|edit` is found
+# rather than the first.
+gh_span = re.compile(r"gh[^\n;&|]*\bpr[^\S\n]+(?:create|edit)\b([^\n;&|]*)", re.ASCII)
+short_flag = re.compile(r"(?<=\s)-F(=|[^\S\n]*)", re.ASCII)
+
+
+def search(text):
+    view = masked_view(text, join_continuations=True)
+    joined = "".join(t if v == MASK_FILL else v for v, t in zip(view, text))
+    hits = [(m.start(), m.end(), m.group(1)) for m in long_flag.finditer(view)]
+    if gh_write:
+        for span in gh_span.finditer(view):
+            hits.extend(
+                (m.start(), m.end(), m.group(1))
+                for m in short_flag.finditer(view, span.start(1), span.end(1))
+            )
+    best = None
+    for start, end, sep in hits:
+        word = word_re.match(joined, end)
+        if word and (best is None or start > best[0]):
+            best = (start, "1" if sep[:1] not in ("", "=") else "0", word.group(0))
+    return best
+
+
+def find(text, depth):
+    best = search(text)
+    if best is None and depth < MAX_WRAPPER_DEPTH:
+        for inner in wrapped_command_strings(text):
+            best = find(inner, depth + 1)
+            if best is not None:
+                break
+    return best
+
+
+best = find(cmd, 0)
+if best is not None:
+    sys.stdout.write(best[1] + best[2])
+PYEOF
+  ) || return 0
+  [ -n "$found" ] || return 0
+  BODY_TILDE_OK="${found:0:1}"
+  body_file="${found:1}"
 }
 
 extract_pr_body() {
   BODY_TEXT=""
   BODY_FROM_FILE=0
   BODY_PATH_UNRESOLVED=0
-  local body_file rc body sub_file body_all
-
-  # --body-file <path> / --body-file=<path>: every match is listed in command
-  # order and the LAST one is read (gh's last flag wins). split_flag_word reads
-  # the separator, which sets BODY_TILDE_OK.
+  local body_file rc body sub_file
   BODY_TILDE_OK=0
-  body_all=$(printf '%s' "$CMD" | grep -oP -- "--body-file(?:=|[[:space:]]+)${BODY_WORD_RE}")
-  rc=$?
-  if [ "$rc" -gt 1 ]; then
-    return 3
-  fi
   body_file=""
-  if [ -n "$body_all" ]; then
-    split_flag_word "$(printf '%s\n' "$body_all" | tail -n 1)" --body-file
-  fi
-  # -F <path> on gh pr create|edit, the same last-match rule.
-  if [ -z "$body_file" ] && [ "${IS_GH_PR_WRITE:-0}" -eq 1 ]; then
-    body_all=$(printf '%s' "$CMD_JOINED" | grep -oP -- "${GH_PR_CMD_PREFIX}"'\K-F(?:=|[[:space:]]*)'"${BODY_WORD_RE}")
-    rc=$?
-    if [ "$rc" -gt 1 ]; then
-      return 3
-    fi
-    if [ -n "$body_all" ]; then
-      split_flag_word "$(printf '%s\n' "$body_all" | tail -n 1)" -F
-    fi
-  fi
+  find_body_file_flag
   # The matched word names a file through its quotes and $NAMEs. An
   # unresolvable word keeps its raw text (so the fallbacks below stay skipped,
   # as an unreadable path always has) and sets BODY_PATH_UNRESOLVED, which
