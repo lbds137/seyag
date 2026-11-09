@@ -1,7 +1,7 @@
 #!/bin/bash
 # Fixture check for bin/branch-sweep against a throwaway git repo.
 # Usage: tests/branch-sweep.probe.sh   (from anywhere)
-# Keep this probe under ~175 lines; grow it only to pin a behavior nothing else pins.
+# Keep this probe under ~215 lines; grow it only to pin a behavior nothing else pins.
 
 set -uo pipefail
 BS="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/plugins/seyag/bin/branch-sweep"
@@ -153,6 +153,37 @@ git -C "$R3" commit -qm gl2 && git -C "$R3" checkout -q main
 outg=$( (cd "$R3" && "$BS" --no-fetch) 2>&1 )
 grep -q "DIFFERS gl" <<< "$outg" && ! grep -q "ELIGIBLE gl" <<< "$outg" \
   && ok "gitlink-only difference under diff.ignoreSubmodules=all: DIFFERS" || bad "gitlink tree identity (out: $(head -c 400 <<< "$outg"))"
+
+outo=$( (cd "$R" && "$BS" --no-fetch --only feat-a) 2>&1 ); rc=$?
+[ $rc = 0 ] && grep -qF "ELIGIBLE feat-a (tree identical to $SQ)" <<< "$outo" \
+  && ! grep -qE 'wip-b|rework-c|SKIP' <<< "$outo" \
+  && ok "--only feat-a: reports only feat-a ELIGIBLE line" || bad "--only feat-a (rc $rc; out: $(head -c 400 <<< "$outo"))"
+outoe=$( (cd "$R" && "$BS" --no-fetch --only=feat-a) 2>&1 ); rc=$?; [ $rc = 0 ] && ! grep -qE 'wip-b|rework-c|SKIP' <<< "$outoe" \
+  && grep -qF "ELIGIBLE feat-a (tree identical to $SQ)" <<< "$outoe" && ok "--only=feat-a: reports only feat-a ELIGIBLE line" || bad "--only=feat-a (rc $rc)"
+outwt=$( (cd "$R" && "$BS" --no-fetch --only wt-branch) 2>&1 ); rc=$?; [ $rc = 0 ] \
+  && grep -qF "SKIP wt-branch (checked out in a worktree)" <<< "$outwt" && ! grep -q '^ELIGIBLE ' <<< "$outwt" \
+  && ok "--only wt-branch: SKIP (checked out in a worktree), no ELIGIBLE line" || bad "--only wt-branch (rc $rc)"
+outwta=$( (cd "$R" && "$BS" --no-fetch --only wt-branch --apply) 2>&1 ); rc=$?; [ $rc = 0 ] \
+  && grep -qF "apply: 0 deleted" <<< "$outwta" && git -C "$R" rev-parse --verify -q refs/heads/wt-branch >/dev/null \
+  && ok "--only wt-branch --apply: apply: 0 deleted, wt-branch kept" || bad "--only wt-branch --apply (rc $rc)"
+outa=$( (cd "$R" && "$BS" --no-fetch --only nope) 2>&1 ); rc=$?
+[ $rc = 0 ] && grep -qF "ABSENT nope (no such local branch)" <<< "$outa" \
+  && ! grep -qE '^(ELIGIBLE|DIFFERS|SKIP) ' <<< "$outa" \
+  && ok "--only nope: prints ABSENT nope (no such local branch), exit 0" || bad "--only nope (rc $rc; out: $(head -c 400 <<< "$outa"))"
+outp=$( (cd "$R" && "$BS" --no-fetch --prefix wip) 2>&1 ); rc=$?
+[ $rc = 0 ] && grep -q "^DIFFERS wip-b$" <<< "$outp" \
+  && ! grep -qE 'feat-a|rework-c|SKIP' <<< "$outp" \
+  && ok "--prefix wip: reports only wip-b" || bad "--prefix wip (rc $rc; out: $(head -c 400 <<< "$outp"))"
+FEAT_A=$(git -C "$R" rev-parse refs/heads/feat-a)
+outoa=$( (cd "$R" && "$BS" --no-fetch --only feat-a --apply) 2>&1 ); rc=$?
+refs_after=$(git -C "$R" show-ref)
+[ $rc = 0 ] && ! grep -q "refs/heads/feat-a$" <<< "$refs_after" \
+  && grep -q "refs/heads/wip-b$" <<< "$refs_after" \
+  && grep -q "refs/heads/rework-c$" <<< "$refs_after" \
+  && grep -q "refs/heads/-tmp$" <<< "$refs_after" \
+  && ok "--only feat-a --apply: deletes feat-a and leaves other branches" \
+  || bad "--only feat-a --apply (rc $rc; out: $(head -c 400 <<< "$outoa"))"
+git -C "$R" branch -f feat-a "$FEAT_A"
 
 out2=$( (cd "$R" && "$BS" --apply) 2>&1 ); rc=$?
 [ $rc = 0 ] && ok "apply exits 0" || bad "apply exit $rc"

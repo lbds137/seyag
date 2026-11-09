@@ -14,13 +14,20 @@ branch-sweep: report local branches whose content is provably merged into the
 base branch, and optionally delete those.
 
 Usage:
-  branch-sweep [--apply] [--no-fetch] [--base <branch>]   (run inside a git repo)
+  branch-sweep [--apply] [--no-fetch] [--base <branch>] [--only <branch>]... [--prefix <prefix>]...   (run inside a git repo)
   branch-sweep -h|--help
 
 Dry run by default: full report, deletes nothing. --apply deletes each
 ELIGIBLE branch with `git branch -D` after the report, printing its matching
 SHA. Deletions are sequential, not atomic: a mid-loop git failure stops the
 run leaving already-deleted branches deleted; nothing is rolled back.
+
+Scope filters (repeatable): --only <branch> considers only that exact local
+branch name (printing `ABSENT <name> (no such local branch)` after the loop
+when it does not exist locally); --prefix <prefix> considers only local
+branches starting with <prefix>. When either is given, all other branches are
+silently skipped, every SKIP rule still applies to the filtered candidates,
+and `--only <branch> --apply` deletes at most that branch.
 
 Eligibility is tree identity only: a branch is ELIGIBLE when its tree exactly
 matches a commit on the base (exact tree-hash equality; fast path: the base
@@ -51,6 +58,9 @@ die() { echo "branch-sweep: $*" >&2; exit 1; }
 APPLY=false
 FETCH=true
 BASE=""
+ONLY=()
+ONLY_FOUND=()
+PREFIX=()
 while [ $# -gt 0 ]; do
   case $1 in
     --apply) APPLY=true ;;
@@ -61,6 +71,18 @@ while [ $# -gt 0 ]; do
     --base=*)
       BASE=${1#--base=}
       [ -n "$BASE" ] || { usage >&2; die "--base needs a branch name"; } ;;
+    --only)
+      [ $# -ge 2 ] && [ -n "$2" ] || { usage >&2; die "--only needs a branch name"; }
+      ONLY+=("$2"); ONLY_FOUND+=(0); shift ;;
+    --only=*)
+      [ -n "${1#--only=}" ] || { usage >&2; die "--only needs a branch name"; }
+      ONLY+=("${1#--only=}"); ONLY_FOUND+=(0) ;;
+    --prefix)
+      [ $# -ge 2 ] && [ -n "$2" ] || { usage >&2; die "--prefix needs a prefix"; }
+      PREFIX+=("$2"); shift ;;
+    --prefix=*)
+      [ -n "${1#--prefix=}" ] || { usage >&2; die "--prefix needs a prefix"; }
+      PREFIX+=("${1#--prefix=}") ;;
     -h|--help|help) usage; exit 0 ;;
     *) usage >&2; die "unknown argument: $1" ;;
   esac
@@ -151,6 +173,23 @@ BASE_TREE=$(git rev-parse --verify -q "$BASE_REF^{tree}" 2>/dev/null || true)
 while IFS= read -r full; do
   b=${full#refs/heads/}
   [ -n "$b" ] || continue
+  if [ ${#ONLY[@]} -gt 0 ] || [ ${#PREFIX[@]} -gt 0 ]; then
+    matched=false
+    for k in "${!ONLY[@]}"; do
+      if [ "$b" = "${ONLY[$k]}" ]; then
+        matched=true
+        ONLY_FOUND[$k]=1
+      fi
+    done
+    if [ "$matched" = false ]; then
+      for p in "${PREFIX[@]}"; do
+        case $b in
+          "$p"*) matched=true; break ;;
+        esac
+      done
+    fi
+    [ "$matched" = true ] || continue
+  fi
   if [ -n "$CURRENT" ] && [ "$b" = "$CURRENT" ]; then
     printf 'SKIP %s (current branch)\n' "$b"
     continue
@@ -205,6 +244,12 @@ while IFS= read -r full; do
     fi
   fi
 done < <(git for-each-ref refs/heads --format='%(refname)')
+
+for k in "${!ONLY[@]}"; do
+  if [ "${ONLY_FOUND[$k]}" -eq 0 ]; then
+    printf 'ABSENT %s (no such local branch)\n' "${ONLY[$k]}"
+  fi
+done
 
 if [ "$APPLY" = true ]; then
   for i in "${!ELIGIBLE_NAMES[@]}"; do

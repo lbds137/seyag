@@ -811,6 +811,76 @@ got_fsmi=$(verdict "$J_FSMI" fsmsyminnerbad)
 case "$got_fsmi" in *gitfile*) ok "fsmsyminnerbad: gitlink at a symlink to an in-tree directory holds as gitfile ('$got_fsmi')" ;;
   *) bad "fsmsyminnerbad: got '$got_fsmi', want gitfile among its reasons" ;; esac
 
+# --- --only: per-tree scope filter. ---
+mk_repo onlyrepo
+O="$T/onlyrepo"
+add_tree onlyrepo tree1
+add_tree onlyrepo tree2
+out=$("$TOOL" --repo "$O" --only "$O/.claude/worktrees/tree1"); rc=$?
+if [ "$rc" -eq 0 ] && grep -q '^SAFE  \.claude/worktrees/tree1  \[worktree-agent-tree1\]$' <<<"$out" \
+  && ! grep -q 'tree2' <<<"$out"; then
+  ok "--only <tree1> dry run lists only tree1"
+else
+  bad "--only <tree1> dry run (rc $rc)"; printf '%s\n' "$out"
+fi
+out=$(cd "$O" && "$TOOL" --only .claude/worktrees/tree1); rc=$?
+if [ "$rc" -eq 0 ] && grep -q '^SAFE  \.claude/worktrees/tree1  \[worktree-agent-tree1\]$' <<<"$out" \
+  && ! grep -q 'tree2' <<<"$out"; then
+  ok "--only relative path from repo root works"
+else
+  bad "--only relative path (rc $rc)"; printf '%s\n' "$out"
+fi
+out=$("$TOOL" --repo "$O" --only="$O/.claude/worktrees/tree2"); rc=$?
+if [ "$rc" -eq 0 ] && grep -q '^SAFE  \.claude/worktrees/tree2  \[worktree-agent-tree2\]$' <<<"$out" \
+  && ! grep -q 'tree1' <<<"$out"; then
+  ok "--only=<tree2> dry run lists only tree2"
+else
+  bad "--only=<tree2> dry run (rc $rc)"; printf '%s\n' "$out"
+fi
+err=$("$TOOL" --repo "$O" --only "$O/.claude/worktrees/nosuch" --apply 2>&1 >/dev/null); rc=$?
+if [ "$rc" -eq 2 ] \
+  && grep -qF "safe-worktree-clean: --only $O/.claude/worktrees/nosuch: not a worktree this run judges in $O (agent trees under .claude/worktrees/; --all widens)" <<<"$err" \
+  && [ -d "$O/.claude/worktrees/tree1" ] && [ -d "$O/.claude/worktrees/tree2" ]; then
+  ok "--only <nonexistent path> exits 2 with message and removes nothing"
+else
+  bad "--only <nonexistent path> (rc $rc, err '$err')"
+fi
+out=$("$TOOL" --repo "$O" --only "$O/.claude/worktrees/tree1" --apply); rc=$?
+if [ "$rc" -eq 0 ] && [ ! -e "$O/.claude/worktrees/tree1" ] \
+  && ! git -C "$O" rev-parse -q --verify refs/heads/worktree-agent-tree1 >/dev/null \
+  && [ -d "$O/.claude/worktrees/tree2" ] \
+  && git -C "$O" rev-parse -q --verify refs/heads/worktree-agent-tree2 >/dev/null; then
+  ok "--only <tree1> --apply removes tree1 and its branch, tree2 and its branch still exist"
+else
+  bad "--only <tree1> --apply (rc $rc)"; printf '%s\n' "$out"
+fi
+add_tree onlyrepo tree3
+git -C "$O" worktree lock --reason "no pid here" "$O/.claude/worktrees/tree3"
+out=$("$TOOL" --repo "$O" --only "$O/.claude/worktrees/tree3" --apply); rc=$?
+if [ "$rc" -eq 1 ] && [ -d "$O/.claude/worktrees/tree3" ] \
+  && git -C "$O" rev-parse -q --verify refs/heads/worktree-agent-tree3 >/dev/null \
+  && grep -q 'HOLD:lock-unparsable' <<<"$out"; then
+  ok "--only <tree3> --apply on HOLD tree exits 1, keeps tree3 and branch, reports HOLD:lock-unparsable"
+else
+  bad "--only <tree3> --apply HOLD (rc $rc)"; printf '%s\n' "$out"
+fi
+git -C "$O" worktree unlock "$O/.claude/worktrees/tree3"
+git -C "$O" worktree add -q -b worktree-agent-outside "$T/outside-tree"
+err=$("$TOOL" --repo "$O" --only "$T/outside-tree" 2>&1 >/dev/null); rc=$?
+if [ "$rc" -eq 2 ] \
+  && grep -qF "safe-worktree-clean: --only $T/outside-tree: not a worktree this run judges in $O (agent trees under .claude/worktrees/; --all widens)" <<<"$err"; then
+  ok "--only <outside-tree> without --all exits 2 with not-judged message"
+else
+  bad "--only <outside-tree> without --all (rc $rc, err '$err')"
+fi
+out=$("$TOOL" --repo "$O" --all --only "$T/outside-tree"); rc=$?
+if { [ "$rc" -eq 0 ] || [ "$rc" -eq 1 ]; } && grep -q 'outside-tree' <<<"$out" \
+  && ! grep -qE 'tree1|tree2|tree3' <<<"$out"; then
+  ok "--all --only <outside-tree> dry run names outside-tree and no other tree"
+else
+  bad "--all --only <outside-tree> dry run (rc $rc)"; printf '%s\n' "$out"
+fi
+
 # --- The rm guards pass the tool's own invocation untouched (exit 0, no output). ---
 for cmd in 'safe-worktree-clean --repo /srv/team/myrepo --apply' \
   'safe-worktree-clean --repo ~/src/node_modules-demo --apply' \
