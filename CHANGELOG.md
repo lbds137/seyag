@@ -10,11 +10,11 @@ All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY
 
 ### Bug Fixes
 
-- **security-sweep:** `--cap` now bounds wall time when the cap expires mid-write: the write gets 1 s more, then the run exits even mid-write (it may leave a `.tmp` file); the `_cap_exit` comment notes the group gets SIGTERM twice per capped exit (#TBD).
+- **security-sweep:** `--cap` now bounds wall time when the cap expires mid-write: the write gets 1 s more, then the run exits even mid-write (it may leave a `.tmp` file); the `_cap_exit` comment notes the group gets SIGTERM twice per capped exit (#270).
 
 ### Tests
 
-- **security-sweep probes:** row 9w (cap grace past a stalled write) with canary r7-1; 9v waits for the first SIGTERM to be handled before sending the second; the purpose canary names the FAIL it stopped on (#TBD).
+- **security-sweep probes:** row 9w (cap grace past a stalled write) with canary r7-1; 9v waits for the first SIGTERM to be handled before sending the second; the purpose canary names the FAIL it stopped on (#270).
 
 ## 0.3.144 - 2026-11-08
 
