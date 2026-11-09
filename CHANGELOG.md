@@ -6,7 +6,7 @@ All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY
 
 ### Bug Fixes
 
-- **security-sweep:** an external SIGTERM to a capped run now waits for an in-flight cache write like the cap itself does, so the 0.3.142 claim of no partial `.tmp` file now also holds for SIGTERM (0.3.142 still exited mid-write on one); a capped run ignores SIGTTIN/SIGTTOU, so under `stty tostop` its terminal output no longer stops it.
+- **security-sweep:** an external SIGTERM to a capped run now waits for an in-flight cache write like the cap itself does, so the 0.3.142 claim of no partial `.tmp` file now also holds for SIGTERM (0.3.142 still exited mid-write on one); a capped run ignores SIGTTIN/SIGTTOU, so under `stty tostop` its terminal output no longer stops it (#265).
 
 ### Improvements
 
@@ -15,7 +15,7 @@ All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY
 
 ### Tests
 
-- **security-sweep probes:** the cap rows install handlers through the bin's own `_install_cap` instead of hand-copied wiring, and the worker-thread rows wait for the handler instead of sleeping, so canary r4-4 no longer flakes under load; new rows for an external SIGTERM mid-write (main and worker thread) and for `stty tostop`, each with a canary; canary re-runs stop at their first FAIL and run four at a time (the full probe went from ~450 s under load to ~120 s).
+- **security-sweep probes:** the cap rows install handlers through the bin's own `_install_cap` instead of hand-copied wiring, and the worker-thread rows wait for the handler instead of sleeping, so canary r4-4 no longer flakes under load; new rows for an external SIGTERM mid-write (main and worker thread) and for `stty tostop`, each with a canary; canary re-runs stop at their first FAIL and run four at a time (the full probe went from ~450 s under load to ~120 s) (#265).
 
 ## 0.3.142 - 2026-11-08
 
