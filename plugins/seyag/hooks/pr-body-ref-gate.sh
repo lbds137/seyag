@@ -30,12 +30,13 @@
 #
 # Known false positive: rule 1 (only) scans the WHOLE Bash command string
 # rather than a precisely-parsed body argument (see the KNOWN GAPS note
-# below on why). A heredoc that merely CONTAINS the text for creating a PR
-# therefore fires rule 1 too — deliberate, not widened. Rule 2 scans only
-# the parsed PR body text (see extract_pr_body), never the command string,
-# so a claim-shaped word sitting in --title or elsewhere in the command does
-# not reach it, though heredoc prose that writes out `gh pr create -b "…"`
-# (like `--body "…"` prose today) still matches extract_pr_body and blocks.
+# below on why). A heredoc that merely CONTAINS `gh pr create --body "…"`
+# prose therefore fires rule 1 too — deliberate, not widened. Rule 2 scans
+# only the parsed PR body text (see extract_pr_body), never the command
+# string, so a claim-shaped word sitting in --title or elsewhere in the
+# command does not reach it; heredoc prose that writes out `gh pr create -b
+# "…"` with no `--body` exits at the required-flag pre-check (data), while
+# with `--body` in the prose it still matches extract_pr_body and blocks.
 #
 # Scope: `gh pr create`, `gh pr edit`, a command family registered via
 # `SYG_PR_BODY_EXTRA_COMMANDS`, and a
@@ -88,11 +89,17 @@
 #     and the session's value, if any, is used instead. A word that starts
 #     bare stops at its first quote (`$D/"sub"/x.md` reads `$D/`), so a
 #     wrapper's closing quote is never taken into the path; that word degrades.
-#   - When `python3` is missing or fails, the
-#     `--body-file` / `-F` search yields no body file, so no body FILE is read
+#   - When `python3` is missing or fails, the hook itself still runs — only its
+#     `python3` spawns degrade. `find_body_file_flag` falls back to a
+#     `grep -obP` byte-offset scan across `--body-file` and `-F`, but ONLY
+#     when the command contains none of `'`, `"`, `#`, `\`, `<<` or `$(`
+#     (nothing `masked_view` would mask), and `resolve_body_word` still needs
+#     `python3` for any `$`, quote or `~/`. Outside that plain bare-word
+#     domain, a `python3` failure yields no `--body-file` / `-F` body file
 #     (`--body-file -` stdin bodies included); the `-F body=@path` form, the
 #     substitution and inline-value ladders and rule 1's command-text scan
-#     still run (fail-open direction, never a block).
+#     still run (fail-open direction, never a block), and the required-flag
+#     pre-check falls back to its raw `CMD_JOINED` grep.
 #   - The `--body-file` / `-F` search masks quoted spans, `#` comments and
 #     heredoc bodies through shell_quotes.py, so a heredoc delimiter that lib
 #     does not recognize leaves its body as command text, and a flag spelled
@@ -178,7 +185,10 @@
 #     is not read as a file by rule 2 and stays as literal text.
 #   - A `;`, `&`, or `|` in a quoted URL, an earlier field value, or an
 #     earlier argument (e.g. `--title "a | b"`) ends the simple command for
-#     the `IS_POST_PR_API` check and the `-b`/`-F` short-flag paths.
+#     the `IS_POST_PR_API` check and for `extract_pr_body`'s `-b` patterns
+#     (rule 2; the required-flag pre-check and `find_body_file_flag` read
+#     `shell_quotes.masked_view`, so `-F` and rule 1 on `-b` are not cut off
+#     unless `python3` is missing or fails).
 #   - A backslash-newline line continuation before `-b` on the
 #     `-b "$(cat <<'EOF' … EOF)"` heredoc form is not matched by the
 #     TAG-aware heredoc capture (which reads `CMD` rather than `CMD_JOINED`
@@ -186,6 +196,15 @@
 #     terminator, and keeps `GH_PR_CMD_PREFIX` free of nested
 #     quantifiers); a heredoc body there that also carries an inner `"` falls
 #     through to the `[^"]*` arm and truncates at that quote.
+#   - A short-flag `gh pr create|edit -b/-F` inside a command string handed to
+#     a program `shell_quotes.py` does not treat as a wrapper (`ssh` — e.g.
+#     `ssh host "gh pr create --title t -b '…'"` — `su -c`, `sg … -c`,
+#     `script -c`, `tmux new-session "…"`, `source <(echo …)`) is masked or
+#     left as a non-gh argument in `masked_view` and `simple_commands`, so
+#     `has_gh_pr_short_flag` rejects and each now exits 0 at the required-flag
+#     pre-check before either rule runs (the old raw grep caught them;
+#     fail-open direction; `--body` / `--body-file` in the same string still
+#     match the raw long-flag check).
 #
 #   The bullets above are misses. The bullets BELOW are deliberate
 #   under-blocking — choices not to over-block. Append a new miss above this
@@ -245,12 +264,12 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib/claim-shapes.sh" || exit 0
 # any non-tokenizing shell scan of --body text.
 # Simple-command prefix anchoring `-b` and `-F` to the `gh … pr create|edit`
 # simple command so an earlier command's `-F` (`git commit -F x && gh pr create --fill`)
-# is not read as a PR body. find_body_file_flag's python has its own copy of
-# this span for `-F` (`gh_span`), but it runs on the MASKED view, where a
-# quoted `;` no longer ends the simple command; the uses of this raw prefix,
-# among them the required-flag pre-check on raw CMD_JOINED in the main body,
-# still end the span at a quoted `;`/`&`/`|` (see the KNOWN GAPS bullet on a
-# `;`, `&` or `|` in a quoted argument), so the two can disagree.
+# is not read as a PR body. The required-flag pre-check runs this prefix on
+# `shell_quotes.masked_view` (matching `find_body_file_flag`'s `gh_span`, with
+# a raw `CMD_JOINED` fallback when `python3` fails); `extract_pr_body`'s `-b`
+# patterns still run it on raw `CMD` / `CMD_JOINED` and end the span at a
+# quoted `;`/`&`/`|` (see the KNOWN GAPS bullet on a `;`, `&` or `|` in a
+# quoted argument).
 GH_PR_CMD_PREFIX='gh[^\n;&|]*\bpr[[:space:]]+(?:create|edit)\b[^\n;&|]*?[[:space:]]'
 # One shell word as a --body-file / -F path (`\x27` is the single quote in PCRE
 # and in Python's re, which find_body_file_flag compiles it with).
@@ -311,6 +330,13 @@ for index, piece in enumerate(pieces):
         continue
     quoted = piece.startswith('"')
     text = piece[1:-1] if quoted else piece
+    if quoted:
+        # The \\ arm consumes the pair unchanged so a \\ before a newline is not read as a continuation (other double-quote escapes, \$ \" \`, are not handled; fail-open).
+        text = re.sub(
+            r"\\(\\|\n)",
+            lambda m: "\\\\" if m.group(1) == "\\" else "",
+            text,
+        )
     if index == 0 and not quoted and tilde_ok and text.startswith("~/"):
         text = "$HOME/" + text[2:]
 
@@ -354,10 +380,12 @@ PYEOF
 # the same way and the first with a flag wins. BODY_TILDE_OK becomes 1 only
 # for a whitespace separator: the shell expands a leading `~/` after
 # whitespace, never after `=`, and a word with no separator is not
-# tilde-expanded either. When python3 is missing or fails, the search yields
-# no body file, never a block.
+# tilde-expanded either. When python3 is missing or exits nonzero, a command
+# with none of `'`, `"`, `#`, `\`, `<<` or `$(` falls back to a `grep -obP`
+# byte-offset scan across both flags; anything else yields no body file, never
+# a block.
 find_body_file_flag() {
-  local found
+  local found rc hits hit offset best_offset best_match rest
   case "$CMD" in
     *--body-file*) ;;
     *-F*) [ "${IS_GH_PR_WRITE:-0}" -eq 1 ] || return 0 ;;
@@ -418,10 +446,118 @@ best = find(cmd, 0)
 if best is not None:
     sys.stdout.write(best[1] + best[2])
 PYEOF
-  ) || return 0
-  [ -n "$found" ] || return 0
-  BODY_TILDE_OK="${found:0:1}"
-  body_file="${found:1}"
+  )
+  rc=$?
+  if [ "$rc" -eq 0 ]; then
+    [ -n "$found" ] || return 0
+    BODY_TILDE_OK="${found:0:1}"
+    body_file="${found:1}"
+    return 0
+  fi
+  case "$CMD" in
+    *"'"* | *'"'* | *'#'* | *'\'* | *'<<'* | *"\$("* ) return 0 ;;
+  esac
+  hits=$(printf '%s' "$CMD" | grep -obP -- '--body-file(?:=|[[:blank:]]+)[^\s&|;()<>]+' 2>/dev/null || true)
+  if [ "${IS_GH_PR_WRITE:-0}" -eq 1 ]; then
+    # Greedy `(?:[^\n;&|]*[[:space:]])?` lands `\K` on the last `-F` in each
+    # GH_PR_CMD_PREFIX span, which has the greatest byte offset in that span.
+    hits="$hits
+$(printf '%s' "$CMD" | grep -obP -- "${GH_PR_CMD_PREFIX}(?:[^\n;&|]*[[:space:]])?\K-F(?:=|[[:blank:]]*)[^\s&|;()<>]+" 2>/dev/null || true)"
+  fi
+  best_offset=-1
+  best_match=""
+  while IFS= read -r hit; do
+    [ -z "$hit" ] && continue
+    offset="${hit%%:*}"
+    if [ "$offset" -gt "$best_offset" ]; then
+      best_offset="$offset"
+      best_match="${hit#*:}"
+    fi
+  done <<<"$hits"
+  [ -n "$best_match" ] || return 0
+  case "$best_match" in
+    --body-file*) rest="${best_match#--body-file}" ;;
+    -F*) rest="${best_match#-F}" ;;
+    *) return 0 ;;
+  esac
+  case "$rest" in
+    =*)
+      BODY_TILDE_OK=0
+      body_file="${rest#=}"
+      ;;
+    [[:blank:]]*)
+      BODY_TILDE_OK=1
+      body_file="${rest#"${rest%%[![:blank:]]*}"}"
+      ;;
+    *)
+      BODY_TILDE_OK=0
+      body_file="$rest"
+      ;;
+  esac
+}
+
+# has_gh_pr_short_flag: tests `${GH_PR_CMD_PREFIX}-(b|F)` on
+# shell_quotes.masked_view(..., join_continuations=True) of the command (and
+# any wrapped_command_strings, matching find_body_file_flag), or matches any
+# shell_quotes.simple_commands argv (after unwrap_runners strips runner and
+# VAR=val env prefixes) whose program word is `gh` / `*/gh` with `pr` and
+# `create|edit` (allowing gh global flags between) and a later `-b*` or `-F*`
+# word (so shell-fed heredoc bodies count while prose heredocs stay data),
+# falling back to raw CMD_JOINED when python3 is missing or exits nonzero.
+has_gh_pr_short_flag() {
+  local masked rc
+  case "$CMD" in
+    *[[:space:]]-b* | *[[:space:]]-F*) ;;
+    *) return 1 ;;
+  esac
+  masked=$(HOOK_LIB="$(dirname "${BASH_SOURCE[0]}")/lib" \
+    PYTHONDONTWRITEBYTECODE=1 python3 - 3<<<"$CMD" <<'PYEOF' 2>/dev/null
+import os
+import sys
+
+sys.path.insert(0, os.environ["HOOK_LIB"])
+from shell_quotes import (
+    MAX_WRAPPER_DEPTH,
+    masked_view,
+    simple_commands,
+    unwrap_runners,
+    wrapped_command_strings,
+)
+
+cmd = os.fsdecode(open(3, "rb").read()).removesuffix("\n")
+
+
+def emit(text, depth):
+    sys.stdout.write(masked_view(text, join_continuations=True) + "\n")
+    if depth < MAX_WRAPPER_DEPTH:
+        for inner in wrapped_command_strings(text):
+            emit(inner, depth + 1)
+
+
+def argv_has_short_flag(argv):
+    argv, _ = unwrap_runners(argv)
+    if not argv or not (argv[0] == "gh" or argv[0].endswith("/gh")):
+        return False
+    for i in range(1, len(argv) - 1):
+        if argv[i] == "pr" and argv[i + 1] in ("create", "edit"):
+            if any(
+                w.startswith(("-b", "-F")) and not w.startswith("--")
+                for w in argv[i + 2 :]
+            ):
+                return True
+    return False
+
+
+emit(cmd, 0)
+if any(argv_has_short_flag(argv) for argv in simple_commands(cmd)):
+    sys.stdout.write("gh pr create -b\n")
+PYEOF
+  )
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    masked="$CMD_JOINED"
+  fi
+  printf '%s' "$masked" | grep -P -- "${GH_PR_CMD_PREFIX}-(b|F)" >/dev/null 2>&1
 }
 
 extract_pr_body() {
@@ -649,7 +785,7 @@ else
   # -b/-F token in the same simple command after `pr create|edit`, on the
   # decoded command.
   if ! printf '%s' "$CMD" | grep -E -- '--body(-file)?\b|(-f|-F|--field|--raw-field)[[:space:]]+body=' >/dev/null &&
-    ! { [ "$IS_GH_PR_WRITE" -eq 1 ] && printf '%s' "$CMD_JOINED" | grep -P -- "${GH_PR_CMD_PREFIX}-(b|F)" >/dev/null 2>&1; }; then
+    ! { [ "$IS_GH_PR_WRITE" -eq 1 ] && has_gh_pr_short_flag; }; then
     exit 0
   fi
 

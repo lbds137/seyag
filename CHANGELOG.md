@@ -2,6 +2,24 @@
 
 All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY-MM-DD>` section per released version; under it, `###` categories in fixed order — Breaking Changes, Features, Bug Fixes, Improvements, Chores, Tests — empty ones omitted; items are `- **scope:** description (#PR)`, written from the version's merged commit subjects.
 
+## 0.3.149 - 2026-11-09
+
+### Bug Fixes
+
+- **pr-body-ref-gate:** the required-flag pre-check reads a masked view, so a quoted `;`, `&` or `|` before `-F` / `-b` (`--title "a;b" -F x.md`) no longer skips the body scan, and prose in a heredoc that mentions `gh pr create -b` is data, no longer an over-block, while a heredoc fed to a shell (`bash <<'EOF'`, `cat <<EOF | bash`) is still read as commands, runner and env prefixes (`sudo gh`, `env gh`, `VAR=1 gh`) included; a `-b` inside a command string handed to a non-wrapper (`ssh`, `su -c`, `sg -c`, `script -c`, `tmux`, `source <(…)`) is now a documented miss; without a working python3, a command free of quotes, comments, backslashes, heredocs and `$(` still reads a plain `--body-file` / `-F` word (last one wins) instead of no body file; a backslash-newline inside a double-quoted body-file path is removed as bash does (an escaped `\\` before the newline stays).
+
+### Improvements
+
+- **core rules:** the `claude-usage --posture` pointer moves onto the wind-down threshold it names (core.md 24 B smaller).
+
+### Chores
+
+- **shell_quotes:** two comment lines reflowed.
+
+### Tests
+
+- **pr-body-ref-gate probes:** rows for a quoted `;` before `-F` and `-b`, five no-python3 fallback rows (python3 shim: plain word, quoted decoy, last-wins both ways), the double-quoted backslash-newline path and its escaped-backslash twin, shell-fed heredocs (`bash <<'EOF'`, `cat <<EOF | bash`), the `ssh` documented miss; the heredoc-prose row now asserts pass.
+
 ## 0.3.148 - 2026-11-09
 
 ### Bug Fixes

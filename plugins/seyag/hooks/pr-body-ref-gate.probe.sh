@@ -403,6 +403,35 @@ run_hook "$REPO" 'gh pr create --base develop --body-file "$E8_BODY_DIR/e8-paren
 assert_blocks "cat <<'END-X': the body's --body-file is not a flag (blocks)" "task-99999"
 run_hook "$REPO" 'gh pr create --base develop --body-file "$E8_BODY_DIR/e8-paren.txt"; cat <<'\''EOF'\'' >/dev/null'$'\n''--body-file $E8_BODY_DIR/e8-clean.txt \'$'\n''EOF'
 assert_blocks "a heredoc body line ending in \\ does not join its terminator: the body's --body-file is not a flag (blocks)" "task-99999"
+# Follow-up 1: required-flag pre-check reads a masked view so a quoted ; in
+# --title does not end the simple command before -F or -b.
+run_hook "$REPO" "gh pr create --base develop --title \"a;b\" -F $E8_BODY_DIR/e8-paren.txt"
+assert_blocks "--title \"a;b\" before -F <dirty>: the quoted ; does not end the pre-check span (blocks)" "task-99999"
+run_hook "$REPO" 'gh pr create --base develop --title "a;b" -b "Closes TASK-99999"'
+assert_blocks '--title "a;b" before -b "<dirty>": the quoted ; does not end the pre-check span (blocks)' "task-99999"
+# Follow-up 2: bounded no-python3 fallback for a plain bare --body-file / -F word.
+PY_SHIM_DIR="$TMPDIR_PROBE/py-shim"
+mkdir -p "$PY_SHIM_DIR"
+printf '#!/bin/bash\nexit 1\n' >"$PY_SHIM_DIR/python3"
+chmod +x "$PY_SHIM_DIR/python3"
+run_hook_with_path "$PY_SHIM_DIR" "$REPO" "gh pr create --title x --body-file $E8_BODY_DIR/e8-paren.txt"
+assert_blocks "no-python3 fallback: plain --body-file <dirty> is read (blocks)" "task-99999"
+run_hook_with_path "$PY_SHIM_DIR" "$REPO" "gh pr create --title \"see --body-file $E8_BODY_DIR/e8-paren.txt\" --body-file $E8_BODY_DIR/e8-clean.txt"
+assert_pass "no-python3 fallback: quoted decoy is out of domain, fails open without reading decoy (passes)"
+run_hook_with_path "$PY_SHIM_DIR" "$REPO" "gh pr create --title x --body-file $E8_BODY_DIR/e8-paren.txt -F $E8_BODY_DIR/e8-clean.txt"
+assert_pass "no-python3 fallback: --body-file <dirty> then -F <clean> reads the last (passes)"
+run_hook_with_path "$PY_SHIM_DIR" "$REPO" "gh pr create --title x -F $E8_BODY_DIR/e8-clean.txt --body-file $E8_BODY_DIR/e8-paren.txt"
+assert_blocks "no-python3 fallback: -F <clean> then --body-file <dirty> reads the last (blocks)" "task-99999"
+run_hook_with_path "$PY_SHIM_DIR" "$REPO" "gh pr create --title x --body-file $E8_BODY_DIR/e8-clean.txt -F $E8_BODY_DIR/e8-paren.txt"
+assert_blocks "no-python3 fallback: --body-file <clean> then -F <dirty> reads the last (blocks)" "task-99999"
+# Follow-up 3: backslash-newline inside a double-quoted body-file word.
+mkdir -p "$REPO/dir"
+cp "$E8_BODY_DIR/e8-paren.txt" "$REPO/dir/x.md"
+run_hook "$REPO" 'gh pr create --base develop --body-file "dir/\'$'\n''x.md"'
+assert_blocks '--body-file "dir/\ + newline + x.md": double-quoted line continuation is removed (blocks)' "task-99999"
+cp "$E8_BODY_DIR/e8-paren.txt" "$REPO/dir/a\\b"
+run_hook "$REPO" 'gh pr create --base develop --body-file "dir/a\\'$'\n''b"'
+assert_pass '--body-file "dir/a\\ + newline + b": escaped backslash before newline is not a line continuation (passes)'
 unset E8_BODY_DIR
 
 # ---- Case 6: resolving doc ref → pass ----------------------------------------
@@ -1156,7 +1185,28 @@ run_hook "$REPO" $'gh pr create \\\n--title t \\\n-F '"$CLAIM_FILE_D10"
 assert_blocks 'line-continued gh pr create -F <claim file> blocks' "all 4 call sites"
 
 run_hook "$REPO" $'cat > x.txt <<\'E\'\ngh pr create -b "This fixes all 4 call sites."\nE'
-assert_blocks 'prose in a heredoc mentioning gh pr create -b "<claim>" blocks (documented over-block)' "all 4 call sites"
+assert_pass 'prose in a heredoc mentioning gh pr create -b "<claim>" passes (the masked pre-check reads heredoc text as data)'
+
+run_hook "$REPO" $'bash <<\'EOF\'\ngh pr create -t x -b "Closes TASK-99999"\nEOF'
+assert_blocks "bash <<'EOF' running gh pr create -b blocks" "task-99999"
+
+run_hook "$REPO" $'cat <<EOF | bash\ngh pr create -t x -b "Closes TASK-99999"\nEOF'
+assert_blocks "cat <<EOF | bash running gh pr create -b blocks" "task-99999"
+
+run_hook "$REPO" $'bash <<\'E\'\nsudo gh pr create -b "Closes TASK-99999"\nE'
+assert_blocks "bash <<'E' running sudo gh pr create -b blocks" "task-99999"
+
+run_hook "$REPO" $'cat <<EOF | bash\ncommand gh pr create -b "Closes TASK-99999"\nEOF'
+assert_blocks "cat <<EOF | bash running command gh pr create -b blocks" "task-99999"
+
+run_hook "$REPO" $'bash <<\'E\'\nGH_X=1 gh pr create -b "Closes TASK-99999"\nE'
+assert_blocks "bash <<'E' running GH_X=1 gh pr create -b blocks" "task-99999"
+
+run_hook "$REPO" 'ssh host "gh pr create --title t -b '\''Closes TASK-99999'\''"'
+assert_pass 'ssh host "gh pr create --title t -b '\''<claim>'\''" passes as a documented miss'
+
+run_hook "$REPO" 'su -c '\''gh pr create -b "Closes TASK-99999"'\'' someuser'
+assert_pass 'su -c '\''gh pr create -b "<claim>"'\'' someuser passes as a documented miss'
 
 run_hook "$REPO" 'gh pr create --title "a | b" -b "This fixes all 4 call sites."'
 assert_pass 'gh pr create --title "a | b" -b "<claim>" passes as a documented miss'
