@@ -15,7 +15,7 @@ Options:
   --session-line          Print nothing unless >=1 open alert exists; then print a single summary line.
                           Silent on errors and off surfaces; never writes to stderr.
   --warm-cache            Populate the cache like --session-line but print nothing; exits 0 at once if another warm run holds the repo-set flock.
-  --cap SECONDS           Exit 124 after SECONDS (positive float), no `timeout` binary needed; the run leads its own process group and sends SIGTERM to it (gh children included) on expiry, finishing an in-flight cache write first; a SIGTERM received during a capped run also exits 124; SessionStart passes --cap 2. Like GNU timeout, a capped run leaves the terminal's foreground group, so Ctrl-C does not reach it.
+  --cap SECONDS           Exit 124 after SECONDS (positive float), no `timeout` binary needed; the run leads its own process group (when setpgid succeeds) and sends SIGTERM to it (gh children included) on expiry, finishing an in-flight cache write first; a SIGTERM received during a capped run is handled the same way (group SIGTERM, any in-flight cache write finished first, exit 124); SessionStart passes --cap 2. Like GNU timeout, a capped run leaves the terminal's foreground group, so Ctrl-C does not reach it, and it ignores SIGTTIN/SIGTTOU so terminal output under `stty tostop` does not stop it.
   --no-cache              Bypass the 300s fresh cache and fetch live from GitHub.
   -h, --help              Show this help message and exit.
 
@@ -312,9 +312,14 @@ def read_cache(repo):
 _cap_lock = threading.Lock()
 _cap_writes = 0
 _cap_pending = False
+_cap_exiting = False
 
 
 def _cap_exit():
+    global _cap_exiting
+    if _cap_exiting:
+        os._exit(124)
+    _cap_exiting = True
     try:
         if os.getpgrp() == os.getpid():
             os.killpg(os.getpgrp(), signal.SIGTERM)
@@ -328,6 +333,20 @@ def _cap_fire(*_):
     _cap_pending = True
     if _cap_writes == 0:
         _cap_exit()
+
+
+def _install_cap(seconds):
+    try:
+        os.setpgid(0, 0)
+    except OSError:
+        pass
+    # The run left the terminal's foreground group; with `tostop` its own output would stop it.
+    # The ignore is inherited by gh children through exec, which is harmless because they run with stdin DEVNULL and captured output.
+    signal.signal(signal.SIGTTIN, signal.SIG_IGN)
+    signal.signal(signal.SIGTTOU, signal.SIG_IGN)
+    signal.signal(signal.SIGTERM, _cap_fire)
+    signal.signal(signal.SIGALRM, _cap_fire)
+    signal.setitimer(signal.ITIMER_REAL, seconds)
 
 
 def write_cache(repo, fetched_at, surfaces):
@@ -651,13 +670,7 @@ def main(argv):
     parser = build_parser(quiet=quiet)
     args = parser.parse_args(argv)
     if args.cap is not None:
-        try:
-            os.setpgid(0, 0)
-        except OSError:
-            pass
-        signal.signal(signal.SIGTERM, lambda *_: os._exit(124))
-        signal.signal(signal.SIGALRM, _cap_fire)
-        signal.setitimer(signal.ITIMER_REAL, args.cap)
+        _install_cap(args.cap)
     if args.warm_cache:
         args.session_line = True
 
