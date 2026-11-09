@@ -10,16 +10,16 @@ All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY
 
 ### Bug Fixes
 
-- **security-sweep:** the main thread waits on its repo futures in 0.1 s slices instead of a blocking `result()`, so a cap alarm or SIGTERM the kernel delivers to a worker thread is handled within about 0.1 s instead of after every repo finishes (under parallel load the blocking wait stalled 7 of 720 runs for the whole write, the sliced wait 0 of 480) (#PR).
+- **security-sweep:** the main thread waits on its repo futures in 0.1 s slices instead of a blocking `result()`, so a cap alarm or SIGTERM the kernel delivers to a worker thread is handled within about 0.1 s instead of after every repo finishes (under parallel load the blocking wait stalled 7 of 720 runs for the whole write, the sliced wait 0 of 480) (#275).
 
 ### Improvements
 
 - **delegation:** the spec template's red-first case: the red comes from the case's own assertion, not from an error on a name only the fix adds; reach the behavior through pre-fix names where possible, and where the new name is itself the fix, its absence is the only red (#271, #272, #274).
-- **security-sweep:** `--help`, the README and the session-start comment say the mid-write grace is about 1 s; the `_CAP_GRACE_S` comment says the bound holds only for writes off the main thread (#PR).
+- **security-sweep:** `--help`, the README and the session-start comment say the mid-write grace is about 1 s; the `_CAP_GRACE_S` comment says the bound holds only for writes off the main thread (#275).
 
 ### Tests
 
-- **security-sweep probes:** 9w drives `main()` with SIGALRM masked on the main thread, so the cap alarm always lands on the writing worker (it flaked when delivery was left to the kernel); new row 9x pins the grace after a SIGTERM then the cap alarm; canary r8-1 (blocking wait) fails 9w; r7-1 now launches between r1-3 and r3-2 and the scheduling comment names it (#PR).
+- **security-sweep probes:** 9w drives `main()` with SIGALRM masked on the main thread, so the cap alarm always lands on the writing worker (it flaked when delivery was left to the kernel); new row 9x pins the grace after a SIGTERM then the cap alarm; canary r8-1 (blocking wait) fails 9w; r7-1 now launches between r1-3 and r3-2 and the scheduling comment names it (#275).
 - **safe-worktree-clean / branch-sweep probes:** `branch-sweep --prefix --apply` asserts its deletion line; `--only` narrowing and the `--only`/`--locks` header sentence are pinned (#273).
 
 ## 0.3.145 - 2026-11-08
