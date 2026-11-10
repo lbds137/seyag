@@ -42,7 +42,7 @@ run() {
 silent() { [ "$RC" = 0 ] && [ -z "$OUT" ]; }
 banner() { # $1 reason substring
   [ "$RC" = 0 ] && jq -e '.hookSpecificOutput.hookEventName == "SessionStart"' <<<"$OUT" >/dev/null 2>&1 \
-    && jq -r '.hookSpecificOutput.additionalContext' <<<"$OUT" | grep -qF -- "$1"
+    && grep -qF -- "$1" <<<"$(jq -r '.hookSpecificOutput.additionalContext' <<<"$OUT")"
 }
 expect_silent() { run "${@:2}"; silent && ok "$1" || bad "$1: expected silence" "$OUT"; }
 expect_banner() { # $1 label, $2 reason substring, $3.. env

@@ -37,7 +37,7 @@ fail() { printf 'FAIL  %s\n' "$1"; FAILURES=$((FAILURES + 1)); }
 
 pattern_case() {
   local want="$1" s="$2" got='ignore'
-  printf '%s\n' "$s" | grep -qEi "$TEMPORAL_PATTERN" && got='catch'
+  grep -qEi "$TEMPORAL_PATTERN" <<<"$s" && got='catch'
   if [ "$got" = "$want" ]; then pass "($got) pattern: $s"; else fail "($got, expected $want) pattern: $s"; fi
 }
 
@@ -281,7 +281,7 @@ esac
 d=$(new_repo)
 printf '// Added 2026-05-06\n' > "$d/dated.ts"
 expect block 'dated comment via git add && git commit' 'git add dated.ts && git commit -m x' "$d"
-if printf '%s\n' "$ERR" | grep -qF "A blocked 'git add && git commit' never ran its add: stage alone, check 'git diff --cached', then commit."; then
+if grep -qF "A blocked 'git add && git commit' never ran its add: stage alone, check 'git diff --cached', then commit." <<<"$ERR"; then
   pass 'stderr carries the staged-index line on git add && git commit block'
 else
   fail "stderr missing staged-index line: $ERR"
@@ -290,7 +290,7 @@ d=$(new_repo)
 printf '// Added 2026-05-06\n' > "$d/dated.ts"
 git -C "$d" add dated.ts
 expect block 'dated comment staged before git add && git commit' 'git add dated.ts && git commit -m x' "$d"
-if printf '%s\n' "$ERR" | grep -qF "A blocked 'git add && git commit' never ran its add: stage alone, check 'git diff --cached', then commit."; then
+if grep -qF "A blocked 'git add && git commit' never ran its add: stage alone, check 'git diff --cached', then commit." <<<"$ERR"; then
   pass 'stderr carries the staged-index line when already staged before git add && git commit'
 else
   fail "stderr missing staged-index line (staged-first): $ERR"
@@ -305,7 +305,7 @@ case "$ERR" in
 esac
 n=$(printf '%s\n' "$ERR" | grep -c '^    // PR #')
 [ "$n" -eq 10 ] && pass 'exactly 10 lines listed' || fail "listed $n lines, expected 10"
-if printf '%s\n' "$ERR" | grep -qF "A blocked 'git add && git commit' never ran its add: stage alone, check 'git diff --cached', then commit."; then
+if grep -qF "A blocked 'git add && git commit' never ran its add: stage alone, check 'git diff --cached', then commit." <<<"$ERR"; then
   fail "plain git commit stderr should not carry the git-add line: $ERR"
 else
   pass 'plain git commit stderr omits the git-add line'

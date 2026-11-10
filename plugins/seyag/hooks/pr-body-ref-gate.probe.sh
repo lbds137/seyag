@@ -416,6 +416,11 @@ run_hook "$REPO" 'git checkout -b br && gh pr create --title "-Fix: closes TASK-
 assert_pass 'gh pr create --title "-Fix: closes TASK-99999" --fill: -F prefix in --title value is not a short body flag (passes)'
 run_hook "$REPO" 'git checkout -b br && gh pr edit 5 -t "-b closes TASK-99999"'
 assert_pass 'gh pr edit 5 -t "-b closes TASK-99999": -b prefix in -t value is not a short body flag (passes)'
+# Pins: a value-taking flag as the LAST word has no value to skip and no body flag follows (passes); the attached --title=-F… long form is a `--` word, not a short body flag (passes).
+run_hook "$REPO" 'git checkout -b br && gh pr create --fill -t'
+assert_pass 'gh pr create --fill -t: value-taking flag as the last word, no body flag (passes)'
+run_hook "$REPO" 'git checkout -b br && gh pr create --title=-Fix: closes TASK-99999 --fill'
+assert_pass 'gh pr create --title=-Fix: closes TASK-99999 --fill: attached long form is not a short body flag (passes)'
 run_hook "$REPO" 'gh pr create --title t -b "Closes TASK-99999"'
 assert_blocks 'gh pr create --title t -b "Closes TASK-99999": real -b after --title value still blocks' "task-99999"
 run_hook "$REPO" "gh pr create -t x -F $E8_BODY_DIR/e8-paren.txt"
