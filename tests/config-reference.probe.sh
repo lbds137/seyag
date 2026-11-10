@@ -284,14 +284,31 @@ if ! python3 "$SCRIPT" --root "$TMP" --write 2>"$TMP/err.m.restore"; then
   fail "(m) restoring docs/config.md with --write failed: $(cat "$TMP/err.m.restore")"
 fi
 
-# (n) Non-UTF-8 file under plugins/seyag/bin containing SYG_LIMA is skipped.
+# (n) Non-UTF-8 file under plugins/seyag/bin containing SYG_LIMA is scanned with replacement
+# characters: SYG_LIMA is found (a missing row fails) and a warning names the file; a row passes.
 printf 'SYG_LIMA\xff\n' >"$TMP/plugins/seyag/bin/non-utf8-bin"
-if python3 "$SCRIPT" --root "$TMP" --check 2>"$TMP/err.n"; then
-  ok "(n) non-UTF-8 file under plugins/seyag/bin containing SYG_LIMA is skipped"
+if python3 "$SCRIPT" --root "$TMP" --check 2>"$TMP/err.n1"; then
+  fail "(n) --check passed with SYG_LIMA in a non-UTF-8 file and no knobs row"
+elif grep -q 'SYG_LIMA read by' "$TMP/err.n1" && grep -q 'bin/non-utf8-bin is not valid UTF-8' "$TMP/err.n1"; then
+  ok "(n) SYG_LIMA in a non-UTF-8 file is found (no row fails) and the file is warned about"
 else
-  fail "(n) non-UTF-8 file was not skipped: $(cat "$TMP/err.n")"
+  fail "(n) stderr did not name SYG_LIMA with its warning: $(cat "$TMP/err.n1")"
+fi
+printf 'SYG_LIMA\tuser\tmisc\tunset\tFixture row for a name in a non-UTF-8 file.\n' >>"$TMP/plugins/seyag/config/knobs.tsv"
+if python3 "$SCRIPT" --root "$TMP" --write 2>"$TMP/err.n2" && python3 "$SCRIPT" --root "$TMP" --check 2>"$TMP/err.n3"; then
+  if grep -q 'bin/non-utf8-bin is not valid UTF-8' "$TMP/err.n3"; then
+    ok "(n) with a knobs row for SYG_LIMA the check passes and the warning still prints"
+  else
+    fail "(n) warning missing on the passing run: $(cat "$TMP/err.n3")"
+  fi
+else
+  fail "(n) check failed with a knobs row for SYG_LIMA: $(cat "$TMP/err.n2" "$TMP/err.n3" 2>/dev/null)"
 fi
 rm -f "$TMP/plugins/seyag/bin/non-utf8-bin"
+write_valid_tsv
+if ! python3 "$SCRIPT" --root "$TMP" --write 2>"$TMP/err.n.restore"; then
+  fail "(n) restoring docs/config.md with --write failed: $(cat "$TMP/err.n.restore")"
+fi
 
 # (o) CRLF-converted docs/config.md -> --check fails.
 sed -i 's/$/\r/' "$TMP/docs/config.md"
@@ -304,6 +321,32 @@ else
 fi
 if ! python3 "$SCRIPT" --root "$TMP" --write 2>"$TMP/err.o.restore"; then
   fail "(o) restoring docs/config.md with --write failed: $(cat "$TMP/err.o.restore")"
+fi
+
+# (p) A prose: default renders as plain text: no backticks, no prefix, its | escaped.
+sed -i $'s/^SYG_ALPHA\t.*/SYG_ALPHA\tuser\tguards\tprose:Plain a|b words\tControls alpha guard mode (0|1)./' "$TMP/plugins/seyag/config/knobs.tsv"
+if python3 "$SCRIPT" --root "$TMP" --write 2>"$TMP/err.p" && grep -qF '| `SYG_ALPHA` | Plain a\|b words |' "$TMP/docs/config.md" && ! grep -qF '`Plain a' "$TMP/docs/config.md"; then
+  ok "(p) prose: default renders as plain text without backticks or the prefix, | escaped"
+else
+  fail "(p) prose: default did not render as plain text: $(cat "$TMP/err.p")"
+fi
+write_valid_tsv
+if ! python3 "$SCRIPT" --root "$TMP" --write 2>"$TMP/err.p.restore"; then
+  fail "(p) restoring docs/config.md with --write failed: $(cat "$TMP/err.p.restore")"
+fi
+
+# (q) A bare prose: default (empty remainder after the prefix) fails validation.
+sed -i $'s/^SYG_ALPHA\t.*/SYG_ALPHA\tuser\tguards\tprose:\tControls alpha guard mode (0|1)./' "$TMP/plugins/seyag/config/knobs.tsv"
+if python3 "$SCRIPT" --root "$TMP" --check 2>"$TMP/err.q"; then
+  fail "(q) --check passed with a bare prose: default"
+elif grep -q 'SYG_ALPHA in knobs.tsv' "$TMP/err.q" && grep -q 'has empty prose default' "$TMP/err.q"; then
+  ok "(q) bare prose: default fails validation naming SYG_ALPHA"
+else
+  fail "(q) stderr did not name SYG_ALPHA's empty prose default: $(cat "$TMP/err.q")"
+fi
+write_valid_tsv
+if ! python3 "$SCRIPT" --root "$TMP" --write 2>"$TMP/err.q.restore"; then
+  fail "(q) restoring docs/config.md with --write failed: $(cat "$TMP/err.q.restore")"
 fi
 
 # Live check against the repository root.

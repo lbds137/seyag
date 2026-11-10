@@ -2,6 +2,7 @@
 # Rule: every env name the scan finds has exactly one row; regenerate docs/config.md after any edit.
 # scope: user | internal
 # group: guards | stop-gates | session | statusline | usage | credit | pr | worktrees | release | routing | misc
+# default: a value (rendered in backticks), unset, or prose:<text> (rendered as plain escaped text with the prefix dropped; use it for a sentence, not a value; only | is escaped, so keep <, backticks, * and _ out of it).
 ANTHROPIC_ADMIN_API_KEY	user	credit	unset	Organization Admin API key enabling provider cost_report balance queries in api-credit and statusline (takes precedence over SYG_CREDIT_ADMIN_KEY_CMD).
 CC_ROUTE_KEYS	user	routing	~/.claude/lane-keys.env	Path to the lane key file where zai-usage looks up ZAI_AUTH_TOKEN first.
 CC_ROUTE_PRESET	user	routing	unset	Route preset name; set to anthropic-api so claude-usage treats a first-party endpoint as the Console API-key lane.
@@ -61,7 +62,7 @@ SYG_ALLOW_TEMPORAL	user	guards	unset	Set to 1 in the git commit command's own pr
 SYG_BQ_NO_RC_LANES	user	stop-gates	unset	Extended regex matched against ANTHROPIC_BASE_URL for lanes without Remote Control, routing asks to SendMessage.
 SYG_BQ_PENDING_MARKERS	user	stop-gates	say the word\b|waiting on you\b|needs? your (yes|go|call|input)\b|for you to (decide|test|check)\b	Case-insensitive Python regex matching pending-ask phrases in the final paragraph; empty disables the pass.
 SYG_CI_ANCHOR	user	pr	unset	Workflow name whose completion (with nothing pending) settles pr-ci-wait; unset uses the quiet-window rule.
-SYG_CI_REVIEW	user	pr	auto-detected: the workflow named Claude Code Review if one exists, otherwise no review check	Review workflow name that must complete before pr-ci-wait releases; set empty to disable.
+SYG_CI_REVIEW	user	pr	prose:auto-detected: the workflow named Claude Code Review if one exists, otherwise no review check	Review workflow name that must complete before pr-ci-wait releases; set empty to disable.
 SYG_CLASSIFIER_LEDGER	user	session	unset	JSONL file path opting in classifier-ledger to record PostToolUseFailure events.
 SYG_CLOCK_STAMP_HINT	user	guards	unset	Optional line appended to clock-stamp-guard block messages (for example naming a project stamping tool).
 SYG_CLOCK_STAMP_NOW	internal	guards	unset	Test clock (integer epoch seconds) overriding current time in clock-stamp-guard.
@@ -125,7 +126,7 @@ SYG_LOSSY_PIPE_GH_WRAPPERS	user	guards	unset	Whitespace-separated read-wrapper c
 SYG_LOSSY_PIPE_SUITES	user	guards	1	Set to 0 to disable lossy-pipe-guard on test and probe suite commands piped into head/tail/sed.
 SYG_MEM_GATE_CMD	user	session	unset	Single-line command advertised at SessionStart to check free memory before launching workers or test suites.
 SYG_MERGE_REVIEW_LOGIN	user	pr	claude[bot]	GitHub login whose latest PR comment must be surfaced before pr-merge-review-check allows gh pr merge.
-SYG_MERGE_REVIEW_RELEASE_REMINDER	user	pr	This PR merges into the repository's default branch — run this project's post-merge steps (version bump, release, deploy) before starting other work.	Custom reminder text shown once when merging a PR into the repository's default branch.
+SYG_MERGE_REVIEW_RELEASE_REMINDER	user	pr	prose:This PR merges into the repository's default branch — run this project's post-merge steps (version bump, release, deploy) before starting other work.	Custom reminder text shown once when merging a PR into the repository's default branch.
 SYG_MERGE_REVIEW_WORKFLOW	user	pr	.github/workflows/claude-code-review.yml	Review workflow file path whose self-edit in a PR explains a missing review comment in pr-merge-review-check.
 SYG_OWN_OWNERS	user	guards	unset	Whitespace- or comma-separated GitHub owner names unioned with hosts.yml user: as own repos in upstream-submission-guard.
 SYG_PLUGIN_MANIFEST	internal	statusline	<script_dir>/../.claude-plugin/plugin.json	Test seam overriding the plugin.json path read by statusline for the SYG version segment.
@@ -175,6 +176,8 @@ SYG_WORKTREE_REGENERABLE	user	worktrees	unset	Whitespace-separated path globs tr
 SYG_WORKTREE_RUN_STAMP	internal	worktrees	<YYYY-MM-DDTHHMMSS>	Internal timestamp directory name exported from a multi-repo safe-worktree-clean --apply-hold parent to child runs; a value that is empty or not a plain name ([0-9A-Za-z][0-9A-Za-z._-]*) exits 2.
 SYG_WORKTREE_SWEEP_CHILD	internal	worktrees	unset	Internal marker set to 1 when safe-worktree-clean invokes itself per repo in a multi-repo sweep.
 SYG_WSDIFF_LENIENT_NAMES	user	worktrees	unset	Whitespace-separated basenames or .ext suffixes treated as whitespace-lenient by whitespace-only-diff.
+TZUROT_ALLOW_GREP_DOLLAR	user	guards	unset	Legacy alias of SYG_ALLOW_GREP_DOLLAR; set to 1 in the command text the same way.
+TZUROT_ALLOW_HEREDOC_EDIT	user	guards	unset	Legacy alias of SYG_ALLOW_HEREDOC_EDIT; set to 1 in the command text the same way.
 ZAI_AUTH_TOKEN	user	usage	unset	z.ai API bearer token for zai-usage. Lookup order: lane key file, then keys get (which prefers this env var over the store), then session env or settings.json when routed to z.ai.
 ZAI_SPEND_MODELS_URL	internal	usage	https://api.z.ai/api/monitor/usage/model-usage	Test seam overriding the z.ai model-usage API URL in zai-usage.
 ZAI_SPEND_PEAK_UTC	internal	usage	14-18	Test seam overriding peak hours (interpreted in UTC+8) for local transcript weighting in zai-usage.

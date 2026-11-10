@@ -5,6 +5,8 @@
 # Usage: tests/security-sweep.probe.sh
 
 set -uo pipefail
+# The probe loads bin/security-sweep in-process; keep its bytecode out of the plugin tree.
+export PYTHONDONTWRITEBYTECODE=1
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SS="${SECURITY_SWEEP_BIN:-$REPO/plugins/seyag/bin/security-sweep}"
 fail=0

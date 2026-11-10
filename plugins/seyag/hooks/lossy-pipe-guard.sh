@@ -192,8 +192,9 @@ mentions_target "$GUARD_CMD" || exit 0
 # before any cd) so the import cannot depend on the caller's cwd.
 HOOK_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib"
 
-# Bytecode: run.sh points PYTHONPYCACHEPREFIX at a per-user cache, so this
-# import writes nothing into hooks/lib (cache caveats: see run.sh).
+# Bytecode: run.sh points PYTHONPYCACHEPREFIX at a per-user cache, so when
+# dispatched via run.sh this import writes nothing into hooks/lib (a direct
+# manual run still does; cache caveats: see run.sh).
 # The command goes to python on fd 3, never through the environment: Linux caps
 # one env string at 128 KiB (MAX_ARG_STRLEN), and python failing to exec would
 # fail open.

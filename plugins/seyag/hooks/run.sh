@@ -66,7 +66,8 @@ syg_hook_ready() {
   # (no HOME, a relative XDG_CACHE_HOME) bytecode is not written at all.
   # python3 -I ignores both variables: a hook that passes -I must also pass -B.
   # Hooks run whatever bytecode the prefix holds, so it must be private to the
-  # user (the default is under the user's own cache dir).
+  # user (the default is under the user's own cache dir). The cache is never pruned
+  # and is safe to delete at any time.
   if [ -z "${PYTHONPYCACHEPREFIX:-}" ]; then
     local cache=${XDG_CACHE_HOME:-}
     [[ $cache == /* ]] || cache=${HOME:+$HOME/.cache}

@@ -13,6 +13,7 @@ from pathlib import Path
 # seyag only reads (CLAUDE_PROJECT_DIR, CLAUDE_PLUGIN_ROOT, CLAUDE_JOB_DIR, CLAUDE_CODE_*,
 # ANTHROPIC_BASE_URL, ANTHROPIC_AUTH_TOKEN, ANTHROPIC_API_KEY, GH_*, XDG_*, HOME). The exact
 # names above that come from those systems are listed because seyag honours them as overrides.
+# A name must appear literally somewhere in a scanned file; a name built at runtime ("SYG_ALLOW_$x", prefix + k) needs a literal mention (a comment is enough) or it escapes the parity check.
 SCAN_PREFIXES = (
     "SYG_",
     "CLAUDE_USAGE_",
@@ -26,6 +27,7 @@ SCAN_PREFIXES = (
     "OPENROUTER_",
     "CC_ROUTE_",
     "PR_CI_WAIT_",
+    "TZUROT_ALLOW_",
 )
 SCAN_EXACT_NAMES = (
     "CLAUDE_PROJECTS_DIR",
@@ -53,6 +55,8 @@ GROUPS = (
 )
 SCOPES = ("user", "internal")
 MAX_DESCRIPTION_LEN = 220
+# A knobs.tsv default with this prefix is plain prose: rendered unbackticked, prefix dropped.
+PROSE_PREFIX = "prose:"
 
 NAME_RE = re.compile(
     r"\b(?:"
@@ -86,9 +90,7 @@ def scan_plugins(root: Path) -> dict[str, set[str]]:
             if fpath.resolve() == knobs_path:
                 continue
             try:
-                text = fpath.read_bytes().decode("utf-8")
-            except UnicodeDecodeError:
-                continue
+                raw = fpath.read_bytes()
             except OSError:
                 continue
 
@@ -96,6 +98,16 @@ def scan_plugins(root: Path) -> dict[str, set[str]]:
                 rel = fpath.relative_to(seyag_dir).as_posix()
             except ValueError:
                 rel = fpath.relative_to(plugins_dir).as_posix()
+
+            try:
+                text = raw.decode("utf-8")
+            except UnicodeDecodeError:
+                # Names are ASCII, so replacement characters still leave every name findable.
+                print(
+                    f"config-reference: warning: {rel} is not valid UTF-8; scanned with replacement characters",
+                    file=sys.stderr,
+                )
+                text = raw.decode("utf-8", errors="replace")
 
             for match in NAME_RE.finditer(text):
                 name = match.group(0)
@@ -148,6 +160,8 @@ def load_and_validate_knobs(
             )
         if not default:
             errors.append(f"config-reference: {name} in knobs.tsv:{lineno} has empty default")
+        if default.startswith(PROSE_PREFIX) and not default[len(PROSE_PREFIX):].strip():
+            errors.append(f"config-reference: {name} in knobs.tsv:{lineno} has empty prose default")
         if not description:
             errors.append(f"config-reference: {name} in knobs.tsv:{lineno} has empty description")
         elif len(description) > MAX_DESCRIPTION_LEN:
@@ -184,6 +198,8 @@ def escape_cell(text: str) -> str:
 def format_default(default: str) -> str:
     if default == "unset":
         return "unset"
+    if default.startswith(PROSE_PREFIX):
+        return escape_cell(default[len(PROSE_PREFIX):].strip())
     return f"`{escape_cell(default)}`"
 
 
@@ -216,7 +232,7 @@ def render_doc(rows: dict[str, dict[str, str]], scanned: dict[str, set[str]]) ->
         "}",
         "```",
         "",
-        "Exception: the per-command `SYG_ALLOW_*` bypasses of the shell guards are written into the command itself (for example `SYG_ALLOW_RM=1 rm -r build`), not into settings; each row says so. `SYG_ALLOW_LIVE_CHECKOUT` is the one also read from the environment. Two guards also accept their legacy aliases `TZUROT_ALLOW_HEREDOC_EDIT=1` and `TZUROT_ALLOW_GREP_DOLLAR=1` the same way.",
+        "Exception: the per-command `SYG_ALLOW_*` bypasses of the shell guards are written into the command itself (for example `SYG_ALLOW_RM=1 rm -r build`), not into settings; each row says so. `SYG_ALLOW_LIVE_CHECKOUT` is the one also read from the environment.",
     ]
 
     for group in GROUPS:
