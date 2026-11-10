@@ -6,11 +6,11 @@ All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY
 
 ### Improvements
 
-- **CI:** each probe-shard job runs shard `strategy.job-index`+1 of `strategy.job-total`, so the shard spec comes from the matrix itself: any matrix edit (fewer or more entries, another axis, `include:`, a duplicate value) still gives every job its own slice and every probe one run.
+- **CI:** each probe-shard job runs shard `strategy.job-index`+1 of `strategy.job-total`, so the shard spec comes from the matrix itself: any matrix edit (fewer or more entries, another axis, `include:`, a duplicate value) still gives every job its own slice and every probe one run (#294).
 
 ### Tests
 
-- **probes:** run-probes-runner pins the duration-table parser: a CRLF row, a leading zero, the 9-digit cap, rounding on the second decimal only, and malformed, signed, empty or over-long values counting as 10 s.
+- **probes:** run-probes-runner pins the duration-table parser: a CRLF row, a leading zero, the 9-digit cap, rounding on the second decimal only, and malformed, signed, empty or over-long values counting as 10 s (#294).
 
 ## 0.3.155 - 2026-11-10
 
