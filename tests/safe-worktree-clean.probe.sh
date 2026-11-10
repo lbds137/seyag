@@ -7,6 +7,8 @@
 # Usage: tests/safe-worktree-clean.probe.sh   (from anywhere)
 
 set -uo pipefail
+# Hooks run here directly, not via run.sh: keep bytecode out of hooks/lib.
+export PYTHONDONTWRITEBYTECODE=1
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TOOL="$ROOT/plugins/seyag/bin/safe-worktree-clean"
 HOOKS="$ROOT/plugins/seyag/hooks"
