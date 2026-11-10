@@ -6,6 +6,8 @@
 # exercises the purpose canary.
 
 set -uo pipefail
+# Hooks run here directly, not via run.sh: keep bytecode out of hooks/lib.
+export PYTHONDONTWRITEBYTECODE=1
 
 HOOK="$(cd "$(dirname "$0")" && pwd)/clock-stamp-guard.sh"
 TMP=$(mktemp -d) || exit 1

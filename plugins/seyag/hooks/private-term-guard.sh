@@ -169,7 +169,7 @@ fi
 CWD=$(jq -r '.cwd // empty' <<<"$INPUT" 2>/dev/null) || CWD=""
 
 HOOK_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib"
-RESULT=$(CWD="$CWD" HOOK_LIB="$HOOK_LIB" TERMS_FILE="$TERMS_FILE" PYTHONDONTWRITEBYTECODE=1 \
+RESULT=$(CWD="$CWD" HOOK_LIB="$HOOK_LIB" TERMS_FILE="$TERMS_FILE" \
   python3 - 3<<<"$CMD" <<'PYEOF' 2>/dev/null
 import os
 import signal

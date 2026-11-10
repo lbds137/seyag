@@ -20,7 +20,7 @@ payload_for() {
 expect_allow() {
   local label="$1" cmd="$2" out err rc tmp_err
   tmp_err=$(mktemp)
-  out=$(payload_for "$cmd" | env -i PATH="$PATH" HOME="$HOME" SYG_EPG_TRUSTED_VARS="${SYG_EPG_TRUSTED_VARS:-}" bash "$HOOK" 2>"$tmp_err")
+  out=$(payload_for "$cmd" | env -i PATH="$PATH" HOME="$HOME" PYTHONDONTWRITEBYTECODE=1 SYG_EPG_TRUSTED_VARS="${SYG_EPG_TRUSTED_VARS:-}" bash "$HOOK" 2>"$tmp_err")
   rc=$?
   err=$(cat "$tmp_err")
   rm -f "$tmp_err"
@@ -35,7 +35,7 @@ expect_allow() {
 expect_deny() {
   local label="$1" cmd="$2" reason_sub="$3" out err rc tmp_err
   tmp_err=$(mktemp)
-  out=$(payload_for "$cmd" | env -i PATH="$PATH" HOME="$HOME" SYG_EPG_TRUSTED_VARS="${SYG_EPG_TRUSTED_VARS:-}" bash "$HOOK" 2>"$tmp_err")
+  out=$(payload_for "$cmd" | env -i PATH="$PATH" HOME="$HOME" PYTHONDONTWRITEBYTECODE=1 SYG_EPG_TRUSTED_VARS="${SYG_EPG_TRUSTED_VARS:-}" bash "$HOOK" 2>"$tmp_err")
   rc=$?
   err=$(cat "$tmp_err")
   rm -f "$tmp_err"
@@ -50,7 +50,7 @@ expect_deny() {
 expect_deny_payload() {
   local label="$1" payload="$2" reason_sub="$3" out err rc tmp_err
   tmp_err=$(mktemp)
-  out=$(printf '%s' "$payload" | env -i PATH="$PATH" HOME="$HOME" bash "$HOOK" 2>"$tmp_err")
+  out=$(printf '%s' "$payload" | env -i PATH="$PATH" HOME="$HOME" PYTHONDONTWRITEBYTECODE=1 bash "$HOOK" 2>"$tmp_err")
   rc=$?
   err=$(cat "$tmp_err")
   rm -f "$tmp_err"
@@ -470,7 +470,7 @@ expect_deny "jq . .env > /dev/null (fd 2 on transcript)" "jq . .env > /dev/null"
 # a stderr-builtin filter — those deny even with both fds sunk. Pin that the
 # clause is absent there (expect_deny cannot assert absence itself).
 tmp_err=$(mktemp)
-out=$(payload_for "jq 'stderr' .env > /dev/null" | env -i PATH="$PATH" HOME="$HOME" bash "$HOOK" 2>"$tmp_err")
+out=$(payload_for "jq 'stderr' .env > /dev/null" | env -i PATH="$PATH" HOME="$HOME" PYTHONDONTWRITEBYTECODE=1 bash "$HOOK" 2>"$tmp_err")
 rc=$?
 err=$(cat "$tmp_err")
 rm -f "$tmp_err"
@@ -808,7 +808,7 @@ expect_deny 'S4e: sudo bash -c with the span as its script' $'sudo bash -c "$(ca
 expect_allow 'cross-talk: a dead frame body is collected at the next physical newline' $'echo $(cat <<A) $(\nenv\nA\n)\nx\nA'
 
 # --- Fail-open on malformed JSON ---
-out=$(printf 'not json {' | env -i PATH="$PATH" HOME="$HOME" bash "$HOOK" 2>&1)
+out=$(printf 'not json {' | env -i PATH="$PATH" HOME="$HOME" PYTHONDONTWRITEBYTECODE=1 bash "$HOOK" 2>&1)
 rc=$?
 if [ "$rc" -eq 0 ] && [ -z "$out" ]; then
   pass=$((pass + 1))

@@ -29,7 +29,7 @@ command -v python3 >/dev/null 2>&1 || exit 0
 
 INPUT=$(cat)
 
-HOOK_PPID="$PPID" PYTHONDONTWRITEBYTECODE=1 python3 - 3<<<"$INPUT" << 'PYEOF' || exit 0
+HOOK_PPID="$PPID" python3 - 3<<<"$INPUT" << 'PYEOF' || exit 0
 import json
 import os
 import re

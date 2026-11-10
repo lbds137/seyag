@@ -57,7 +57,23 @@ syg_hook_ready() {
     return 1
   fi
 
-  export PYTHONDONTWRITEBYTECODE=1
+  # A hook's python keeps its bytecode in a per-user cache, never in the plugin
+  # tree: recompiling hooks/lib on every call costs tens of ms. The prefix holds
+  # every module the hook imports, stdlib included, so the first call after a
+  # cold cache (or a Python update) compiles them once. CPython checks a cached
+  # pyc against its source's mtime and size, which suffices for a checkout that
+  # changes by git pull. A caller's own prefix wins; with no absolute cache dir
+  # (no HOME, a relative XDG_CACHE_HOME) bytecode is not written at all.
+  # python3 -I ignores both variables: a hook that passes -I must also pass -B.
+  if [ -z "${PYTHONPYCACHEPREFIX:-}" ]; then
+    local cache=${XDG_CACHE_HOME:-}
+    [[ $cache == /* ]] || cache=${HOME:+$HOME/.cache}
+    if [[ $cache == /* ]]; then
+      export PYTHONPYCACHEPREFIX="$cache/seyag/pycache"
+    else
+      export PYTHONDONTWRITEBYTECODE=1
+    fi
+  fi
   # Hooks only read git; a hook killed mid-index-refresh, or one racing the
   # session's own git command, would leave or collide with index.lock.
   export GIT_OPTIONAL_LOCKS=0

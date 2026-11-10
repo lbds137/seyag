@@ -266,7 +266,7 @@ if [ "$TOOL_NAME" != "Bash" ]; then
   exit 0
 fi
 
-RESULT=$(CWD="$CWD" LIVE_ROOTS="$LIVE_ROOTS" HOOK_LIB="$HOOK_LIB" PYTHONDONTWRITEBYTECODE=1 python3 - 3<<<"$CMD" <<'PYEOF' 2>/dev/null
+RESULT=$(CWD="$CWD" LIVE_ROOTS="$LIVE_ROOTS" HOOK_LIB="$HOOK_LIB" python3 - 3<<<"$CMD" <<'PYEOF' 2>/dev/null
 import os
 import posixpath
 import re

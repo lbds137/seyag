@@ -127,7 +127,7 @@ DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 LIB="$DIR/lib/clock_stamp.py"
 [ -r "$LIB" ] || { IFS= read -r -d '' _ || true; exit 0; }
 
-SYG_CLOCK_STAMP_PATHS_FILE="$CFG" PYTHONDONTWRITEBYTECODE=1 python3 "$LIB"
+SYG_CLOCK_STAMP_PATHS_FILE="$CFG" python3 "$LIB"
 RC=$?
 [ "$RC" = 2 ] && exit 2
 exit 0

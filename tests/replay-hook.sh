@@ -173,7 +173,7 @@ while IFS= read -r f; do
     [ -z "$payload" ] && continue
     TOTAL=$((TOTAL + 1))
 
-    out=$(printf '%s' "$payload" | env -u CLAUDE_PROJECT_DIR -u SYG_PR_MONITOR_SEEN_FILE -u SYG_PR_BODY_ACK_FILE SYG_STATE_DIR="$REPLAY_STATE/state" XDG_STATE_HOME="$REPLAY_STATE/state" XDG_RUNTIME_DIR="$REPLAY_STATE/runtime" bash "$HOOKS_DIR/$HOOK_NAME.sh" 2>&1)
+    out=$(printf '%s' "$payload" | env -u CLAUDE_PROJECT_DIR -u SYG_PR_MONITOR_SEEN_FILE -u SYG_PR_BODY_ACK_FILE SYG_STATE_DIR="$REPLAY_STATE/state" XDG_STATE_HOME="$REPLAY_STATE/state" XDG_RUNTIME_DIR="$REPLAY_STATE/runtime" PYTHONDONTWRITEBYTECODE=1 bash "$HOOKS_DIR/$HOOK_NAME.sh" 2>&1)
     rc=$?
 
     if [ "$rc" -ne 0 ]; then
