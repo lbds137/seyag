@@ -223,6 +223,47 @@ else
   bad "longest-first: rc=$rc start order=[$order] out=[$out]"
 fi
 
+# Duration parser edge cases, one probe per row: p abc (not a number) 100; q 010.1
+# with a CRLF ending (CR stripped, leading zero read as decimal) 101; r 9.96
+# (second decimal rounds up) 100; s 9.949 (rounds on the second decimal only) 99;
+# t -5 (sign not accepted) 100; u 1234567890 (over 9 integer digits) 100; v 0.04
+# (rounds down to 0) 0; w 0.05 (rounds up to 1) 1; x 1.2.3 (malformed) 100; y
+# empty value 100; z 123456789 (9 integer digits, accepted) 1234567890. Tenths
+# parsed; the default is 100.
+PP="$T/parserepo"
+mkdir -p "$PP/tests" "$PP/plugins/seyag/hooks"
+cp "$REPO/tests/run-probes.sh" "$PP/tests/run-probes.sh"
+for n in p q r s t u v w x y z; do
+  cat >"$PP/tests/$n.probe.sh" <<EOF
+#!/bin/bash
+echo $n >>"\$(dirname "\${BASH_SOURCE[0]}")/../start.log"
+exit 0
+EOF
+done
+printf '%s\n' \
+  '# fixture durations' \
+  '' \
+  $'tests/p.probe.sh\tabc' \
+  $'tests/q.probe.sh\t010.1\r' \
+  $'tests/r.probe.sh\t9.96' \
+  $'tests/s.probe.sh\t9.949' \
+  $'tests/t.probe.sh\t-5' \
+  $'tests/u.probe.sh\t1234567890' \
+  $'tests/v.probe.sh\t0.04' \
+  $'tests/w.probe.sh\t0.05' \
+  $'tests/x.probe.sh\t1.2.3' \
+  $'tests/y.probe.sh\t' \
+  $'tests/z.probe.sh\t123456789' >"$PP/tests/probe-durations.tsv"
+rm -f "$PP/start.log"
+out=$(bash "$PP/tests/run-probes.sh" -j 1)
+rc=$?
+order=$(tr '\n' ' ' <"$PP/start.log")
+if [ "$rc" -eq 0 ] && [ "$order" = "z q p r t u x y s w v " ]; then
+  ok "duration parser: CRLF, leading zero, the 9-digit cap, second-decimal rounding and malformed values (default 10 s) give start order z q p r t u x y s w v"
+else
+  bad "duration parser: rc=$rc start order=[$order] (want [z q p r t u x y s w v ]) out=[$out]"
+fi
+
 # No table: every probe counts as 10 s, so the split is by path: 1={a c e} 2={b d f}.
 mv "$RP/tests/probe-durations.tsv" "$RP/probe-durations.saved"
 n1=$(shard_names --shard 1/2)
