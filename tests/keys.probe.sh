@@ -210,7 +210,9 @@ marker_path = Path(sys.argv[2])
 
 marker_path.unlink(missing_ok=True)
 
-# Load plugins/seyag/bin/keys as a module
+# Load plugins/seyag/bin/keys as a module; run()'s env -i drops
+# PYTHONDONTWRITEBYTECODE, so keep the loader from writing bin/__pycache__.
+sys.dont_write_bytecode = True
 loader = importlib.machinery.SourceFileLoader("keys_mod", keys_path)
 spec = importlib.util.spec_from_loader(loader.name, loader)
 keys_mod = importlib.util.module_from_spec(spec)
