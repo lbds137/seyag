@@ -3777,7 +3777,7 @@ leak_check() {
   [ -n "$new_lines" ] || return 0
   for f in "$@"; do
     [ -s "$f" ] || continue
-    if printf '%s\n' "$new_lines" | grep -qxFf "$f" 2>/dev/null; then
+    if grep -qxFf "$f" <<<"$new_lines" 2>/dev/null; then
       return 1
     fi
   done

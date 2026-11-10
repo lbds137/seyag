@@ -386,7 +386,7 @@ run_sized 2 "cumulative 3+3: first 3-line Edit blocks once (ack path)" "$P_C1" "
 run_sized 0 "cumulative 3+3: first 3-line Edit retry passes (cum=3)" "$P_C1" "$ACK_C1"
 run_sized 2 "cumulative 3+3: second 3-line Edit on same file hard-blocks (cum 6 > 5)" "$P_C1" "$ACK_C1"
 run_sized 2 "cumulative 3+3: retry of second 3-line Edit still hard-blocks" "$P_C1" "$ACK_C1"
-if printf '%s\n' "$ERR" | grep -qF "cumulative inline source edit of 6 lines in services/x/a.ts since the last commit (limit 5)"; then
+if grep -qF "cumulative inline source edit of 6 lines in services/x/a.ts since the last commit (limit 5)" <<<"$ERR"; then
   printf 'PASS  (stderr)  cumulative block message states per-file cumulative count\n'
 else
   printf 'FAIL  (stderr)  missing cumulative count line: %s\n' "$ERR"

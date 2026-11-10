@@ -39,7 +39,7 @@ expect_deny() {
   rc=$?
   err=$(cat "$tmp_err")
   rm -f "$tmp_err"
-  if [ "$rc" -eq 2 ] && printf '%s' "$err" | grep -q "ENV-PRINT BLOCKED" && printf '%s' "$err" | grep -qF -- "$reason_sub" && ! printf '%s' "$out" | grep -q "permissionDecision"; then
+  if [ "$rc" -eq 2 ] && grep -q "ENV-PRINT BLOCKED" <<<"$err" && grep -qF -- "$reason_sub" <<<"$err" && ! grep -q "permissionDecision" <<<"$out"; then
     pass=$((pass + 1))
   else
     echo "FAIL [$label]: expected deny (rc=2, ENV-PRINT BLOCKED + '$reason_sub' on stderr, no permissionDecision in stdout), got rc=$rc stdout=$out stderr=$err" >&2
@@ -54,7 +54,7 @@ expect_deny_payload() {
   rc=$?
   err=$(cat "$tmp_err")
   rm -f "$tmp_err"
-  if [ "$rc" -eq 2 ] && printf '%s' "$err" | grep -q "ENV-PRINT BLOCKED" && printf '%s' "$err" | grep -qF -- "$reason_sub" && ! printf '%s' "$out" | grep -q "permissionDecision"; then
+  if [ "$rc" -eq 2 ] && grep -q "ENV-PRINT BLOCKED" <<<"$err" && grep -qF -- "$reason_sub" <<<"$err" && ! grep -q "permissionDecision" <<<"$out"; then
     pass=$((pass + 1))
   else
     echo "FAIL [$label]: expected deny (rc=2, ENV-PRINT BLOCKED + '$reason_sub' on stderr, no permissionDecision in stdout), got rc=$rc stdout=$out stderr=$err" >&2
@@ -474,7 +474,7 @@ out=$(payload_for "jq 'stderr' .env > /dev/null" | env -i PATH="$PATH" HOME="$HO
 rc=$?
 err=$(cat "$tmp_err")
 rm -f "$tmp_err"
-if [ "$rc" -eq 2 ] && printf '%s' "$err" | grep -q "ENV-PRINT BLOCKED" && ! printf '%s' "$err" | grep -qF 'sink both fds'; then
+if [ "$rc" -eq 2 ] && grep -q "ENV-PRINT BLOCKED" <<<"$err" && ! grep -qF 'sink both fds' <<<"$err"; then
   pass=$((pass + 1))
 else
   echo "FAIL [jq stderr-builtin deny without the sink-both-fds clause]: expected rc=2 + ENV-PRINT BLOCKED + no 'sink both fds' on stderr, got rc=$rc stdout=$out stderr=$err" >&2

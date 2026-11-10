@@ -47,8 +47,8 @@ block_has() {
   local label=$1 phrase=$2
   shift 2
   run_hook "$@"
-  if [ "$RC" = 2 ] && printf '%s' "$OUT" | grep -qF -- "$BANNER_READ" \
-    && printf '%s' "$OUT" | grep -qF -- "$phrase"; then
+  if [ "$RC" = 2 ] && grep -qF -- "$BANNER_READ" <<<"$OUT" \
+    && grep -qF -- "$phrase" <<<"$OUT"; then
     ok
   else
     bad "$label" "expected block (exit 2) with '$phrase', got rc=$RC out=$OUT"
@@ -60,7 +60,7 @@ block_case() {
   local label=$1
   shift
   run_hook "$@"
-  if [ "$RC" = 2 ] && printf '%s' "$OUT" | grep -qF -- "$BANNER_READ"; then
+  if [ "$RC" = 2 ] && grep -qF -- "$BANNER_READ" <<<"$OUT"; then
     ok
   else
     bad "$label" "expected block (exit 2), got rc=$RC out=$OUT"

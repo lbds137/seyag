@@ -49,7 +49,7 @@ for src in startup clear; do
   # rules linked, that version line is the only output.
   [ "$RC" = 0 ] && valid && [ "$(ctx)" = "seyag plugin unknown" ] && ok "$src with rules linked: version line only" || bad "$src linked: expected version-only output" "$OUT"
   run "$src" "$TMP/rules-empty"
-  if [ "$RC" = 0 ] && valid && [ "$(ctx | head -1)" = "seyag plugin unknown" ] && ctx | grep -q 'core rules are not loaded'; then
+  if [ "$RC" = 0 ] && valid && [ "$(ctx | head -1)" = "seyag plugin unknown" ] && grep -q 'core rules are not loaded' <<<"$(ctx)"; then
     ok "$src without the link: version line then warning"
   else
     bad "$src without link: expected version line + warning JSON" "$OUT"
@@ -79,7 +79,7 @@ printf '%s\n' "$TMP/old-version" >"$D/plugin-root"
 OUT=$(jq -nc '{session_id: "probe", source: "startup"}' \
   | CLAUDE_PLUGIN_ROOT="$REAL_ROOT" SYG_USER_RULES_DIR="$TMP/rules-empty" SYG_STATE_DIR="$TMP/state" bash "$HOOK" 2>/dev/null)
 if [ "$(cat "$D/plugin-root")" = "$(cd "$REAL_ROOT" && pwd -P)" ] && [ -x "$D/pre-push" ] \
-  && [ "$(ctx | head -1)" = "seyag plugin $REAL_VERSION" ] && ctx | grep -q '^seyag git hooks: relinked'; then
+  && [ "$(ctx | head -1)" = "seyag plugin $REAL_VERSION" ] && grep -q '^seyag git hooks: relinked' <<<"$(ctx)"; then
   ok "startup relinks a stale dispatcher dir; the version line stays first"
 else
   bad "startup relink of a stale dispatcher dir" "$OUT"
@@ -96,14 +96,14 @@ OUT=$(jq -nc '{session_id: "probe", source: "startup"}' \
 RC=$?
 chmod 755 "$D"
 if [ "$RC" = 0 ] && [ "$(ctx | head -1)" = "seyag plugin $REAL_VERSION" ] \
-  && ctx | grep -qx 'seyag git hooks: relink failed (run seyag-git-hooks status)'; then
+  && grep -qx 'seyag git hooks: relink failed (run seyag-git-hooks status)' <<<"$(ctx)"; then
   ok "a failed relink adds one line naming status, and the hook still exits 0"
 else
   bad "failed relink line" "$OUT"
 fi
 
 run compact "$TMP/rules-linked"
-if [ "$RC" = 0 ] && valid && ctx | grep -q 'POST-COMPACTION RECOVERY' && ! ctx | grep -q '# Core'; then
+if [ "$RC" = 0 ] && valid && grep -q 'POST-COMPACTION RECOVERY' <<<"$(ctx)" && ! grep -q '# Core' <<<"$(ctx)"; then
   ok "compact: checklist only, core.md not injected"
 else
   bad "compact: expected checklist without core.md" "$OUT"
@@ -130,7 +130,7 @@ runenv compact "$TMP/rules-linked" SYG_DISABLE=rules
 runenv compact "$TMP/rules-linked" SYG_PROFILE=none
 [ "$RC" = 0 ] && [ -z "$OUT" ] && ok "SYG_PROFILE=none, compact: no checklist" || bad "profile none compact: expected empty output" "$OUT"
 runenv compact "$TMP/rules-linked" SYG_PROFILE=none SYG_ENABLE=rules
-[ "$RC" = 0 ] && valid && ctx | grep -q 'POST-COMPACTION RECOVERY' && ok "SYG_PROFILE=none SYG_ENABLE=rules, compact: checklist back" || bad "enable rules compact: expected the checklist" "$OUT"
+[ "$RC" = 0 ] && valid && grep -q 'POST-COMPACTION RECOVERY' <<<"$(ctx)" && ok "SYG_PROFILE=none SYG_ENABLE=rules, compact: checklist back" || bad "enable rules compact: expected the checklist" "$OUT"
 runenv startup "$TMP/rules-empty" SYG_DISABLE=rules
 if [ "$RC" = 0 ] && valid && [ "$(ctx)" = "seyag plugin unknown" ]; then
   ok "SYG_DISABLE=rules, startup, link missing: version line present, warning absent"
@@ -142,7 +142,7 @@ runenv startup "$TMP/rules-empty" SYG_PROFILE=guards
 runenv startup "$TMP/rules-empty" SYG_PROFILE=none SYG_DISABLE=session
 [ "$RC" = 0 ] && valid && [ "$(ctx)" = "seyag plugin unknown" ] && ok "SYG_DISABLE=session is ignored: version line stays" || bad "disable session: version line must stay" "$OUT"
 runenv startup "$TMP/rules-empty" SYG_PROFILE=bogus
-[ "$RC" = 0 ] && valid && ctx | grep -q 'core rules are not loaded' && ok "SYG_PROFILE=bogus behaves as full: warning present" || bad "bogus profile: expected the warning" "$OUT"
+[ "$RC" = 0 ] && valid && grep -q 'core rules are not loaded' <<<"$(ctx)" && ok "SYG_PROFILE=bogus behaves as full: warning present" || bad "bogus profile: expected the warning" "$OUT"
 
 # Machine gates: SYG_MEM_GATE_CMD and SYG_LONG_JOB_CMD append on startup/clear/compact,
 # stay off when empty or multiline, and are not gated by the `rules` component.
@@ -155,8 +155,8 @@ else
   bad "startup with both gate vars set: expected version line + two gate lines" "$OUT"
 fi
 runenv compact "$TMP/rules-linked" SYG_MEM_GATE_CMD="mem-gate --ok"
-if [ "$RC" = 0 ] && valid && ctx | grep -q '^POST-COMPACTION RECOVERY' \
-  && [ "$(ctx | tail -1)" = "$MEM_LINE" ] && ! ctx | grep -q 'Long jobs'; then
+if [ "$RC" = 0 ] && valid && grep -q '^POST-COMPACTION RECOVERY' <<<"$(ctx)" \
+  && [ "$(ctx | tail -1)" = "$MEM_LINE" ] && ! grep -q 'Long jobs' <<<"$(ctx)"; then
   ok "compact with SYG_MEM_GATE_CMD set: checklist then the gate line"
 else
   bad "compact with SYG_MEM_GATE_CMD set: expected checklist + gate line" "$OUT"
@@ -276,7 +276,7 @@ runsec() { # $1 source, rest = env assignments
 
 WANT_SEC="security: example-org/widget: 1 code-scanning (1 critical) — dispositions per skill seyag:security-sweep"
 runsec startup SYG_SECURITY_SWEEP=1
-if [ "$RC" = 0 ] && valid && [[ "$(ctx | head -1)" == "seyag plugin "* ]] && ctx | grep -qxF "$WANT_SEC"; then
+if [ "$RC" = 0 ] && valid && [[ "$(ctx | head -1)" == "seyag plugin "* ]] && grep -qxF "$WANT_SEC" <<<"$(ctx)"; then
   ok "security-sweep startup with SYG_SECURITY_SWEEP=1: version line first, then security line"
 else
   bad "security-sweep startup with SYG_SECURITY_SWEEP=1" "$OUT"
@@ -284,14 +284,14 @@ fi
 
 WANT_SEC_REPOS="security: example-org/widget: 1 code-scanning (1 critical); example-org/gadget: 1 dependabot — dispositions per skill seyag:security-sweep"
 runsec clear SYG_SECURITY_SWEEP_REPOS="example-org/widget example-org/gadget"
-if [ "$RC" = 0 ] && valid && [[ "$(ctx | head -1)" == "seyag plugin "* ]] && ctx | grep -qxF "$WANT_SEC_REPOS"; then
+if [ "$RC" = 0 ] && valid && [[ "$(ctx | head -1)" == "seyag plugin "* ]] && grep -qxF "$WANT_SEC_REPOS" <<<"$(ctx)"; then
   ok "security-sweep clear with SYG_SECURITY_SWEEP_REPOS: sweeps listed repos with version line first"
 else
   bad "security-sweep clear with SYG_SECURITY_SWEEP_REPOS" "$OUT"
 fi
 
 runsec startup SYG_SECURITY_SWEEP_REPOS="-bad/x example-org/widget"
-if [ "$RC" = 0 ] && valid && [[ "$(ctx | head -1)" == "seyag plugin "* ]] && ctx | grep -qxF "$WANT_SEC"; then
+if [ "$RC" = 0 ] && valid && [[ "$(ctx | head -1)" == "seyag plugin "* ]] && grep -qxF "$WANT_SEC" <<<"$(ctx)"; then
   ok "security-sweep startup with leading-dash token in SYG_SECURITY_SWEEP_REPOS: sweeps valid widget repo"
 else
   bad "security-sweep startup with leading-dash token in SYG_SECURITY_SWEEP_REPOS" "$OUT"
@@ -347,14 +347,14 @@ OUT=$(cd "$TMP/sec-repo" && jq -nc '{session_id: "probe", source: "startup"}' \
     XDG_STATE_HOME="$TMP/sec-state" SECURITY_SWEEP_GH="$TMP/sec-bin/gh" \
     SYG_SECURITY_SWEEP=1 STUB_GH_HOLD="$TMP/gh-never-released" bash "$HOOK" 2>/dev/null)
 RC=$?
-if [ "$RC" = 0 ] && valid && [[ "$(ctx | head -1)" == "seyag plugin "* ]] && ctx | grep -qxF "$WANT_SEC"; then
+if [ "$RC" = 0 ] && valid && [[ "$(ctx | head -1)" == "seyag plugin "* ]] && grep -qxF "$WANT_SEC" <<<"$(ctx)"; then
   ok "security-sweep second startup after timeout warm run reads warm cache and emits security line"
 else
   bad "security-sweep second startup after timeout warm run" "$OUT"
 fi
 
 runsec compact SYG_SECURITY_SWEEP=1
-if [ "$RC" = 0 ] && valid && ctx | grep -q 'POST-COMPACTION RECOVERY' && ! ctx | grep -q '^security:'; then
+if [ "$RC" = 0 ] && valid && grep -q 'POST-COMPACTION RECOVERY' <<<"$(ctx)" && ! grep -q '^security:' <<<"$(ctx)"; then
   ok "security-sweep compact: no security line"
 else
   bad "security-sweep compact: unexpected security line" "$OUT"
@@ -369,7 +369,7 @@ else
   HOOK="$TMP/hook-no-sec-gate.sh"
   runsec startup SYG_SECURITY_SWEEP=1 SYG_DISABLE=security
   HOOK="$SAVED_HOOK"
-  if [ "$(ctx)" != "seyag plugin unknown" ] && ctx | grep -qxF "$WANT_SEC"; then
+  if [ "$(ctx)" != "seyag plugin unknown" ] && grep -qxF "$WANT_SEC" <<<"$(ctx)"; then
     ok "canary 10: dropping syg_enabled security makes SYG_DISABLE=security row fail as expected"
   else
     bad "canary 10: dropping syg_enabled security did not fail SYG_DISABLE=security check" "$OUT"
@@ -394,7 +394,7 @@ else
       SYG_SECURITY_SWEEP=1 STUB_GH_HOLD="$TMP/gh-release-c11-2" bash "$HOOK" 2>/dev/null)
   : > "$TMP/gh-release-c11-2"
   HOOK="$SAVED_HOOK"
-  if [ ! -s "$SEC_CACHE" ] && ! ctx | grep -qxF "$WANT_SEC"; then
+  if [ ! -s "$SEC_CACHE" ] && ! grep -qxF "$WANT_SEC" <<<"$(ctx)"; then
     ok "canary 11: removing warm launch makes second-start assertion fail as expected"
   else
     bad "canary 11: removing warm launch did not fail second-start assertion" "$OUT"
@@ -410,7 +410,7 @@ else
   HOOK="$TMP/hook-dash-repo.sh"
   runsec startup SYG_SECURITY_SWEEP_REPOS="-bad/x example-org/widget"
   HOOK="$SAVED_HOOK"
-  if [ "$RC" = 0 ] && [ "$(ctx)" = "seyag plugin unknown" ] && ! ctx | grep -qxF "$WANT_SEC"; then
+  if [ "$RC" = 0 ] && [ "$(ctx)" = "seyag plugin unknown" ] && ! grep -qxF "$WANT_SEC" <<<"$(ctx)"; then
     ok "canary 12: reverting --repo=\$_syg_r to -R \"\$_syg_r\" makes leading-dash repo row fail as expected"
   else
     bad "canary 12: reverting --repo=\$_syg_r did not fail leading-dash repo assertion" "$OUT"
