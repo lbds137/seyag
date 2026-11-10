@@ -13,6 +13,13 @@
 
 DIR=""
 SYG_LIB=""
+# syg_dir: sets DIR to this script's directory, absolute, from builtins only (a
+# command substitution would fork on every hook call).
+syg_dir() {
+  case ${BASH_SOURCE[0]} in */*) DIR=${BASH_SOURCE[0]%/*} ;; *) DIR=. ;; esac
+  DIR=${DIR:-/}
+  [[ $DIR == /* ]] || DIR=$PWD/$DIR
+}
 # syg_hook_ready NAME: the per-hook checks both modes share, in this order: name,
 # project copy, existence, components, syntax; then the exports every hook gets.
 # Returns 0 with SYG_HOOK set when the hook should run, 1 when it is skipped.
@@ -22,7 +29,7 @@ syg_hook_ready() {
     '' | */* | .*) echo "run.sh: invalid hook name '$name'" >&2; return 1 ;;
   esac
   [ -f "${CLAUDE_PROJECT_DIR:-$PWD}/.claude/hooks/$name.sh" ] && return 1
-  [ -n "$DIR" ] || DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+  [ -n "$DIR" ] || syg_dir
   SYG_HOOK="$DIR/$name.sh"
   [ -f "$SYG_HOOK" ] || { echo "run.sh: no such seyag hook '$name'" >&2; return 1; }
 
@@ -50,9 +57,33 @@ syg_hook_ready() {
     syg_enabled "$name" || return 1
   fi
 
+  # Cache dir: XDG_CACHE_HOME if absolute, else $HOME/.cache, else none.
+  local cache=${XDG_CACHE_HOME:-}
+  [[ $cache == /* ]] || cache=${HOME:+$HOME/.cache}
+
   # A hook with a syntax error would exit 2, and for PreToolUse that blocks the tool:
   # one half-saved edit would stop every Bash call in every session. Fail open instead.
-  if ! bash -n "$SYG_HOOK" 2>/dev/null; then
+  # bash -n costs a fork per call, so a passing hook gets a stamp at its mirrored path
+  # under the cache dir, and the check is skipped while the stamp is newer than the
+  # hook. The stamp is created before the check, so an edit landing during it stays
+  # newer and is re-checked. Stamp writes are silent and best-effort. Limit: the check
+  # is skipped for a hook whose mtime ends up older than its stamp with broken content:
+  # mtime set back (cp -p, tar, rsync -t, touch -d), the clock set back, or a symlink
+  # re-pointed at older files. git writes fresh mtimes on checkout. A run killed
+  # mid-check can leave a `<stamp>.<pid>` file; the cache is safe to delete.
+  if [[ $cache == /* && $SYG_HOOK != */../* ]]; then
+    local stamp=$cache/seyag/syntax-ok$SYG_HOOK
+    if ! [ "$stamp" -nt "$SYG_HOOK" ]; then
+      { { [ -d "${stamp%/*}" ] || mkdir -p "${stamp%/*}"; } && : >"$stamp.$$"; } 2>/dev/null
+      if bash -n "$SYG_HOOK" 2>/dev/null; then
+        mv -f "$stamp.$$" "$stamp" 2>/dev/null
+      else
+        rm -f "$stamp.$$" 2>/dev/null
+        echo "run.sh: seyag hook '$name' has a syntax error; skipped" >&2
+        return 1
+      fi
+    fi
+  elif ! bash -n "$SYG_HOOK" 2>/dev/null; then
     echo "run.sh: seyag hook '$name' has a syntax error; skipped" >&2
     return 1
   fi
@@ -67,10 +98,8 @@ syg_hook_ready() {
   # python3 -I ignores both variables: a hook that passes -I must also pass -B.
   # Hooks run whatever bytecode the prefix holds, so it must be private to the
   # user (the default is under the user's own cache dir). The cache is never pruned
-  # and is safe to delete at any time.
+  # and is safe to delete at any time, syntax-ok stamps included.
   if [ -z "${PYTHONPYCACHEPREFIX:-}" ]; then
-    local cache=${XDG_CACHE_HOME:-}
-    [[ $cache == /* ]] || cache=${HOME:+$HOME/.cache}
     if [[ $cache == /* ]]; then
       export PYTHONPYCACHEPREFIX="$cache/seyag/pycache"
     else
@@ -118,7 +147,7 @@ fi
 #   unparsable hooks.json says so on stderr.
 EVENT=${2:-}
 command -v jq >/dev/null 2>&1 || { syg_drain_stdin; exit 0; }
-DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+syg_dir
 [ -r "$DIR/hooks.json" ] || { syg_drain_stdin; exit 0; }
 PAYLOAD=$(cat)
 

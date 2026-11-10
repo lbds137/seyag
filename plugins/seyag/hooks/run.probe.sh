@@ -24,6 +24,9 @@ set -uo pipefail
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
+# run.sh's syntax-ok stamps go under the cache dir: fixture runs write to this
+# probe's own cache, never the real ~/.cache/seyag (runsh unsets it per call).
+export XDG_CACHE_HOME="$TMP/xdg-cache"
 
 mkdir -p "$TMP/plugin/hooks" "$TMP/proj-with/.claude/hooks" "$TMP/proj-without"
 cp "$SCRIPT_DIR/run.sh" "$TMP/plugin/hooks/run.sh"
@@ -40,7 +43,7 @@ runsh() {
   while [[ "${1:-}" == *=* ]]; do set+=("$1"); shift; done
   env -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_SESSION_ATTENDED -u SYG_PROFILE -u SYG_ENABLE -u SYG_DISABLE \
     -u PYTHONPYCACHEPREFIX -u PYTHONDONTWRITEBYTECODE -u XDG_CACHE_HOME \
-    "${set[@]+"${set[@]}"}" bash "$RUN" "$@"
+    HOME="$TMP/home" "${set[@]+"${set[@]}"}" bash "$RUN" "$@"
 }
 
 cat > "$TMP/plugin/hooks/fake-guard.sh" <<'EOF'

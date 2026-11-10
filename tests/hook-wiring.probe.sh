@@ -29,6 +29,9 @@ exempt() {
 
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
+# run.sh's syntax-ok stamps go under the cache dir: every run.sh call here writes
+# to the probe's own cache, never the real ~/.cache/seyag.
+export XDG_CACHE_HOME="$TMP/xdg-cache"
 
 # The hook name in a hooks.json command: the word after `hooks/run.sh"`. run.sh
 # --event parses it the same way; check_root's dispatch check pins the agreement.
@@ -282,5 +285,120 @@ else
     && ok "event mode: no timeout binary -> one stderr note, the event still runs" \
     || bad "event mode no-timeout: stderr [$err] stdout [$(cat "$TMP/no-timeout.out")]"
 fi
+
+# --- Syntax-ok stamp: run.sh skips bash -n while a stamp under the cache dir is newer
+# than the hook. Each row gets its own tree and cache. Stubs exit 0, except the hook
+# named SY, which each row rewrites.
+SY=recursive-rm-guard
+sy_tree() { # sy_tree DIR: run.sh, its registry, and an exit-0 stub for every hook
+  local t=$1 f n
+  mkdir -p "$t/hooks/lib" "$t/proj"
+  cp "$hooks/run.sh" "$hooks/hooks.json" "$t/hooks/"
+  cp "$hooks/lib/components.sh" "$t/hooks/lib/" 2>/dev/null
+  cp "$hooks/components.tsv" "$t/hooks/" 2>/dev/null
+  for f in "$hooks"/*.sh; do
+    n=$(basename "$f" .sh)
+    case "$n" in run | *.probe) continue ;; esac
+    printf '#!/bin/bash\nexit 0\n' > "$t/hooks/$n.sh"
+  done
+}
+sy_run() { # sy_run DIR CACHE [ARG...]: a single-hook run, payload {} on stdin
+  local t=$1 c=$2
+  shift 2
+  env -u SYG_PROFILE -u SYG_ENABLE -u SYG_DISABLE -u CLAUDE_CODE_ENTRYPOINT \
+    XDG_CACHE_HOME="$c" CLAUDE_PROJECT_DIR="$t/proj" bash "$t/hooks/run.sh" "$@" <<<'{}'
+}
+sy_nocache() { # sy_nocache DIR: no HOME and no XDG_CACHE_HOME, so no cache dir
+  env -u HOME -u XDG_CACHE_HOME -u SYG_PROFILE -u SYG_ENABLE -u SYG_DISABLE -u CLAUDE_CODE_ENTRYPOINT \
+    CLAUDE_PROJECT_DIR="$1/proj" bash "$1/hooks/run.sh" "$SY" <<<'{}'
+}
+sy_stamp() { echo "$2/seyag/syntax-ok$1/hooks/$SY.sh"; } # sy_stamp DIR CACHE
+sy_pending() { # sy_pending DIR CACHE: 0 when a `<stamp>.<pid>` write is left behind
+  local f
+  for f in "$(dirname "$(sy_stamp "$1" "$2")")"/*.[0-9]*; do [ -e "$f" ] && return 0; done
+  return 1
+}
+
+# a. a broken hook is skipped with the message and gets no stamp
+t="$TMP/sy-a"; c="$TMP/cache-a"; sy_tree "$t"; printf 'if then\n' > "$t/hooks/$SY.sh"
+err=$(sy_run "$t" "$c" "$SY" 2>&1 >/dev/null); rc=$?
+[ "$rc" -eq 0 ] && [ "$err" = "run.sh: seyag hook '$SY' has a syntax error; skipped" ] \
+  && [ ! -e "$(sy_stamp "$t" "$c")" ] && ! sy_pending "$t" "$c" \
+  && ok "syntax-ok stamp: a broken hook is skipped with the message and gets no stamp" \
+  || bad "syntax-ok stamp: broken hook rc=$rc err=[$err]"
+
+# b. a valid hook runs, its stamp lands at the mirrored path, and no pending write is left
+t="$TMP/sy-b"; c="$TMP/cache-b"; sy_tree "$t"; printf 'echo ran >&2\nexit 0\n' > "$t/hooks/$SY.sh"
+err=$(sy_run "$t" "$c" "$SY" 2>&1 >/dev/null); rc=$?
+[ "$rc" -eq 0 ] && [ "$err" = ran ] && [ -f "$(sy_stamp "$t" "$c")" ] && ! sy_pending "$t" "$c" \
+  && ok "syntax-ok stamp: a valid hook runs, its stamp is written, no pending write is left" \
+  || bad "syntax-ok stamp: valid hook rc=$rc err=[$err]"
+
+# c. the stamp is honoured: a broken hook whose mtime is older than its stamp skips
+# bash -n, so bash itself runs it and fails. This pins the documented limit: an mtime
+# set backwards past the stamp (cp -p, tar, rsync -t, touch -d) skips the check.
+t="$TMP/sy-c"; c="$TMP/cache-c"; sy_tree "$t"; printf 'echo ran >&2\nexit 0\n' > "$t/hooks/$SY.sh"
+sy_run "$t" "$c" "$SY" >/dev/null 2>&1
+printf 'if then\n' > "$t/hooks/$SY.sh"; touch -d '-1 hour' "$t/hooks/$SY.sh"
+err=$(sy_run "$t" "$c" "$SY" 2>&1 >/dev/null); rc=$?
+[ "$rc" -ne 0 ] && ! grep -qF 'has a syntax error; skipped' <<<"$err" \
+  && ok "syntax-ok stamp: a stamp newer than the hook skips bash -n (mtime set backwards)" \
+  || bad "syntax-ok stamp: stamp not honoured rc=$rc err=[$err]"
+
+# d. a hook edited after its stamp (mtime newer) is checked again and skipped
+t="$TMP/sy-d"; c="$TMP/cache-d"; sy_tree "$t"; printf 'echo ran >&2\nexit 0\n' > "$t/hooks/$SY.sh"
+sy_run "$t" "$c" "$SY" >/dev/null 2>&1
+printf 'if then\n' > "$t/hooks/$SY.sh"; touch -d '+1 minute' "$t/hooks/$SY.sh"
+err=$(sy_run "$t" "$c" "$SY" 2>&1 >/dev/null); rc=$?
+[ "$rc" -eq 0 ] && grep -qF "run.sh: seyag hook '$SY' has a syntax error; skipped" <<<"$err" \
+  && ok "syntax-ok stamp: a hook newer than its stamp is re-checked and skipped" \
+  || bad "syntax-ok stamp: newer broken hook rc=$rc err=[$err]"
+
+# e. no cache dir: nothing to stamp, so bash -n runs on every call (broken skipped, valid runs)
+t="$TMP/sy-e"; sy_tree "$t"; printf 'if then\n' > "$t/hooks/$SY.sh"
+err=$(sy_nocache "$t" 2>&1 >/dev/null); rc=$?
+printf 'echo ran >&2\nexit 0\n' > "$t/hooks/$SY.sh"
+err2=$(sy_nocache "$t" 2>&1 >/dev/null); rc2=$?
+[ "$rc" -eq 0 ] && grep -qF 'has a syntax error; skipped' <<<"$err" && [ "$rc2" -eq 0 ] && grep -qxF ran <<<"$err2" \
+  && ok "syntax-ok stamp: no cache dir -> bash -n runs each call (broken skipped, valid runs)" \
+  || bad "syntax-ok stamp: no cache dir rc=$rc err=[$err] rc2=$rc2 err2=[$err2]"
+
+# f. a relative invocation (cd into hooks/) still runs a valid hook
+t="$TMP/sy-f"; c="$TMP/cache-f"; sy_tree "$t"; printf 'echo ran >&2\nexit 0\n' > "$t/hooks/$SY.sh"
+err=$(cd "$t/hooks" && env -u SYG_PROFILE -u SYG_ENABLE -u SYG_DISABLE -u CLAUDE_CODE_ENTRYPOINT \
+  XDG_CACHE_HOME="$c" CLAUDE_PROJECT_DIR="$t/proj" bash run.sh "$SY" <<<'{}' 2>&1 >/dev/null); rc=$?
+# A relative invocation keys the stamp by `$PWD/./hooks/NAME.sh`. Without the
+# `[[ $DIR == /* ]]` line it would key by the relative `./NAME.sh`, so this row goes red.
+[ "$rc" -eq 0 ] && grep -qxF ran <<<"$err" \
+  && [ -f "$c/seyag/syntax-ok$t/hooks/./$SY.sh" ] \
+  && ok "relative invocation: a valid hook runs" \
+  || bad "relative invocation: rc=$rc err=[$err]"
+
+# g. event mode from a relative invocation still runs its hooks ($SY is a PreToolUse hook)
+t="$TMP/sy-g"; c="$TMP/cache-g"; sy_tree "$t"; printf 'echo ran >&2\nexit 0\n' > "$t/hooks/$SY.sh"
+err=$(cd "$t/hooks" && env -u SYG_PROFILE -u SYG_ENABLE -u SYG_DISABLE -u CLAUDE_CODE_ENTRYPOINT \
+  XDG_CACHE_HOME="$c" CLAUDE_PROJECT_DIR="$t/proj" bash run.sh --event PreToolUse <<<'{}' 2>&1 >/dev/null); rc=$?
+[ "$rc" -eq 0 ] && grep -qxF ran <<<"$err" \
+  && ok "event mode from a relative invocation runs its hooks" \
+  || bad "event mode relative: rc=$rc err=[$err]"
+
+# h. a cache dir that is a regular file: no stamp can be written, so the syntax check
+# runs on every call and the messages stay exact.
+t="$TMP/sy-h"; c="$TMP/cache-file-h"; sy_tree "$t"; : > "$c"; printf 'if then\n' > "$t/hooks/$SY.sh"
+err=$(sy_run "$t" "$c" "$SY" 2>&1 >/dev/null); rc=$?
+printf 'echo ran >&2\nexit 0\n' > "$t/hooks/$SY.sh"
+err2=$(sy_run "$t" "$c" "$SY" 2>&1 >/dev/null); rc2=$?
+[ "$rc" -eq 0 ] && [ "$err" = "run.sh: seyag hook '$SY' has a syntax error; skipped" ] \
+  && [ "$rc2" -eq 0 ] && [ "$err2" = ran ] \
+  && ok "syntax-ok stamp: a cache dir that is a file -> broken skipped, valid runs, exact messages" \
+  || bad "syntax-ok stamp: file cache dir rc=$rc err=[$err] rc2=$rc2 err2=[$err2]"
+
+# i. a hook path with a `..` component takes the plain bash -n branch: no stamp dir.
+t="$TMP/sy-i"; c="$TMP/cache-i"; sy_tree "$t"; printf 'echo ran >&2\nexit 0\n' > "$t/hooks/$SY.sh"
+err=$(env -u SYG_PROFILE -u SYG_ENABLE -u SYG_DISABLE -u CLAUDE_CODE_ENTRYPOINT \
+  XDG_CACHE_HOME="$c" CLAUDE_PROJECT_DIR="$t/proj" bash "$t/hooks/../hooks/run.sh" "$SY" <<<'{}' 2>&1 >/dev/null); rc=$?
+[ "$rc" -eq 0 ] && [ "$err" = ran ] && [ ! -e "$c/seyag/syntax-ok" ] \
+  && ok "syntax-ok stamp: a .. hook path runs and writes no stamp dir" \
+  || bad "syntax-ok stamp: .. path rc=$rc err=[$err]"
 
 [ "$fail" -eq 0 ]
