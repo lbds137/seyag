@@ -65,6 +65,8 @@ syg_hook_ready() {
   # changes by git pull. A caller's own prefix wins; with no absolute cache dir
   # (no HOME, a relative XDG_CACHE_HOME) bytecode is not written at all.
   # python3 -I ignores both variables: a hook that passes -I must also pass -B.
+  # Hooks run whatever bytecode the prefix holds, so it must be private to the
+  # user (the default is under the user's own cache dir).
   if [ -z "${PYTHONPYCACHEPREFIX:-}" ]; then
     local cache=${XDG_CACHE_HOME:-}
     [[ $cache == /* ]] || cache=${HOME:+$HOME/.cache}
