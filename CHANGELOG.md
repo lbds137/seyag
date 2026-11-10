@@ -7,10 +7,12 @@ All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY
 ### Improvements
 
 - **hooks:** a hook's python keeps its bytecode (the shared lib and the stdlib modules it imports) in a per-user directory (`PYTHONPYCACHEPREFIX`, default `$XDG_CACHE_HOME/seyag/pycache` or `~/.cache/seyag/pycache`) instead of recompiling the lib on every call; nothing is written into the plugin tree, and a prefix the caller already set wins. Hook probes and the replay harnesses still run without bytecode, env-print-guard's `env -i` rows included (#PR).
+- **pr-ci-wait:** the heartbeat names a held job-count lookup (`release held: job-count lookup failing`) (#288).
 
 ### Tests
 
 - **run.sh probe:** run.probe.sh pins the cache prefix: HOME default, XDG_CACHE_HOME, a relative XDG falling back, a caller's prefix, and no cache dir (#PR).
+- **probes:** checks under `tests/` that piped into `grep -q` under pipefail now capture the producer's output first, fixing a SIGPIPE flake (43-53 failures in 2000 runs under load before, 0 after, per #288); a new `tests/pipe-early-exit.probe.sh` lints `tests/*.sh` for the pattern, and keys.probe no longer writes `bin/__pycache__` (#288).
 
 ## 0.3.152 - 2026-11-09
 
