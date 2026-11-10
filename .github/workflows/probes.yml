@@ -1,8 +1,23 @@
 name: Probes
 
-# The probe suite is this repo's whole gate (tests/run-probes.sh -j 0: every
-# plugins/seyag/hooks/*.probe.sh and tests/*.probe.sh, in parallel across CPUs).
-# Runtime deps are bash, jq, python3 and GNU grep, all on ubuntu-latest.
+# The probe suite is this repo's whole gate (tests/run-probes.sh: every
+# plugins/seyag/hooks/*.probe.sh and tests/*.probe.sh). Runtime deps are bash,
+# jq, python3 and GNU grep, all on ubuntu-latest.
+#
+# The suite is split so the slowest part sets the critical path, not their sum:
+# - shellcheck: its own job, in parallel with the probes;
+# - probe-shard: 3 parallel jobs, each running one `--shard I/3` of the suite
+#   with -j 0 (parallel across that runner's CPUs). The runner splits the probes
+#   by the per-probe seconds in tests/probe-durations.tsv (greedy, longest
+#   first, so the shards finish at about the same time) and starts each shard's
+#   probes longest-first;
+# - probes: the aggregator. It needs shellcheck and every shard and passes only
+#   when all of them succeeded. It keeps the name `probes` because the
+#   repository ruleset requires a status check with that exact context; the job
+#   and shard names above are not required checks, and a fixed-name aggregator
+#   keeps reporting on every PR even if the shard count changes. `if: always()`
+#   makes it report (as a failure) when a needed job fails or is cancelled,
+#   instead of being skipped, which would leave the required check pending.
 #
 # Hygiene gates on top of the probes:
 # - shellcheck -S warning over the file set tests/shell-files.sh enumerates (the
@@ -21,9 +36,9 @@ permissions:
   contents: read
 
 jobs:
-  probes:
+  shellcheck:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install shellcheck if missing
@@ -33,8 +48,38 @@ jobs:
           shellcheck --version
           # shellcheck disable=SC2046 # the file list has no spaces and must split
           shellcheck -S warning $(bash tests/shell-files.sh)
-      - name: Run every probe
-        run: bash tests/run-probes.sh -j 0
+
+  probe-shard:
+    name: probe-shard (${{ matrix.shard }}/${{ matrix.total }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        # The shard list must be exactly 1..total.
+        shard: [1, 2, 3]
+        total: [3]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Run probe shard ${{ matrix.shard }}/${{ matrix.total }}
+        run: bash tests/run-probes.sh -j 0 --shard ${{ matrix.shard }}/${{ matrix.total }}
+
+  probes:
+    needs: [shellcheck, probe-shard]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require shellcheck and every probe shard
+        env:
+          SC: ${{ needs.shellcheck.result }}
+          PS: ${{ needs.probe-shard.result }}
+        run: |
+          echo "shellcheck: $SC"
+          echo "probe-shard: $PS"
+          if [ "$SC" != "success" ] || [ "$PS" != "success" ]; then
+            exit 1
+          fi
 
   fixup-check:
     if: github.event_name == 'pull_request'
