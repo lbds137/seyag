@@ -1,7 +1,7 @@
 #!/bin/bash
 # Hermetic fixture check for plugins/seyag/bin/plugin-release-check:
-# purpose canary first, then the 11 claim canaries (with mutation red-tail
-# controls for the 8 branch/filter claims), the inclusive >= boundary,
+# purpose canary first, then claim canaries 1-15 (with mutation red-tail
+# controls for the branch/filter claims), the inclusive >= boundary,
 # multi-file transcript aggregation, malformed session rows, and exit-2 errors.
 # Usage: tests/plugin-release-check.probe.sh   (from anywhere; never touches real claude or ~/.claude)
 
@@ -99,8 +99,8 @@ cat > "$TF_PURPOSE" <<'EOF'
 EOF
 out=$(run_prc "printf '%s' '$AGENTS_PURPOSE'" "$T/projects" --plugin-json "$PJSON" 2>&1); rc=$?
 if [ "$rc" -eq 1 ] \
-  && grep -qxF "plugin-release-check: demo-plugin 0.4.1 (release 2026-10-26T12:00Z)" <<<"$out" \
-  && grep -qxF "sess-purpose stale started 2026-10-26T11:00Z, last refresh 2026-10-26T11:59Z < release 2026-10-26T12:00Z" <<<"$out"; then
+  && grep -qxF "plugin-release-check: demo-plugin 0.4.1 (release 2026-10-26T12:00Z, commit time)" <<<"$out" \
+  && grep -qxF "sess-purpose stale started 2026-10-26T11:00Z, last refresh 2026-10-26T11:59Z by /reload-plugins < release 2026-10-26T12:00Z" <<<"$out"; then
   ok "purpose canary (1m before release): reports stale and exits 1"
 else
   bad "purpose canary (1m before release): rc=$rc out=[$(tr '\n' '|' <<<"$out")]"
@@ -111,7 +111,7 @@ cat > "$TF_PURPOSE" <<'EOF'
 EOF
 out=$(run_prc "printf '%s' '$AGENTS_PURPOSE'" "$T/projects" --plugin-json "$PJSON" 2>&1); rc=$?
 if [ "$rc" -eq 0 ] \
-  && grep -qxF "sess-purpose current started 2026-10-26T11:00Z, refreshed 2026-10-26T12:01Z >= release 2026-10-26T12:00Z" <<<"$out"; then
+  && grep -qxF "sess-purpose current started 2026-10-26T11:00Z, refreshed 2026-10-26T12:01Z by /reload-plugins >= release 2026-10-26T12:00Z" <<<"$out"; then
   ok "purpose canary (1m after release): flips row to current and exits 0"
 else
   bad "purpose canary (1m after release): rc=$rc out=[$(tr '\n' '|' <<<"$out")]"
@@ -137,7 +137,7 @@ EOF
   local out rc
   out=$(run_prc "$acmd" "$T/projects" --plugin-json "$PJSON" 2>&1); rc=$?
   rm -f "$tf"
-  if [ "$rc" -eq 0 ] && grep -qxF "c1-reloaded current started 2026-10-26T11:00Z, refreshed 2026-10-26T12:15Z >= release 2026-10-26T12:00Z" <<<"$out"; then
+  if [ "$rc" -eq 0 ] && grep -qxF "c1-reloaded current started 2026-10-26T11:00Z, refreshed 2026-10-26T12:15Z by /reload-plugins >= release 2026-10-26T12:00Z" <<<"$out"; then
     ok "canary 1: reload after release makes pre-release session current"
   else
     bad "canary 1: reload after release makes pre-release session current (rc=$rc out=$(tr '\n' '|' <<<"$out"))"
@@ -169,7 +169,7 @@ EOF
   local out rc
   out=$(run_prc "$acmd" "$T/projects" --plugin-json "$PJSON" 2>&1); rc=$?
   rm -f "$tf"
-  if [ "$rc" -eq 1 ] && grep -qxF "c3-stale stale started 2026-10-26T11:00Z, last refresh 2026-10-26T11:30Z < release 2026-10-26T12:00Z" <<<"$out"; then
+  if [ "$rc" -eq 1 ] && grep -qxF "c3-stale stale started 2026-10-26T11:00Z, last refresh 2026-10-26T11:30Z by /reload-plugins < release 2026-10-26T12:00Z" <<<"$out"; then
     ok "canary 3: any stale row forces exit 1"
   else
     bad "canary 3: any stale row forces exit 1 (rc=$rc out=$(tr '\n' '|' <<<"$out"))"
@@ -201,7 +201,7 @@ EOF
   local out rc
   out=$(run_prc "$acmd" "$alt" --plugin-json "$PJSON" 2>&1); rc=$?
   rm -rf "$alt"
-  if [ "$rc" -eq 0 ] && grep -qxF "c5-altproj current started 2026-10-26T11:00Z, refreshed 2026-10-26T12:18Z >= release 2026-10-26T12:00Z" <<<"$out"; then
+  if [ "$rc" -eq 0 ] && grep -qxF "c5-altproj current started 2026-10-26T11:00Z, refreshed 2026-10-26T12:18Z by /reload-plugins >= release 2026-10-26T12:00Z" <<<"$out"; then
     ok "canary 5: PLUGIN_RELEASE_PROJECTS is honored"
   else
     bad "canary 5: PLUGIN_RELEASE_PROJECTS is honored (rc=$rc out=$(tr '\n' '|' <<<"$out"))"
@@ -214,7 +214,7 @@ canary_6() {
   local acmd="printf '%s' '[{\"pid\":106,\"name\":\"c6-autover\",\"sessionId\":\"$sid\",\"startedAt\":$POST_MS}]'"
   local out rc
   out=$(run_prc "$acmd" "$T/projects" --plugin-json "$PJSON" 2>&1); rc=$?
-  if [ "$rc" -eq 0 ] && grep -qxF "plugin-release-check: demo-plugin 0.4.1 (release 2026-10-26T12:00Z)" <<<"$out"; then
+  if [ "$rc" -eq 0 ] && grep -qxF "plugin-release-check: demo-plugin 0.4.1 (release 2026-10-26T12:00Z, commit time)" <<<"$out"; then
     ok "canary 6: version is read from plugin.json when --version is absent"
   else
     bad "canary 6: version is read from plugin.json when --version is absent (rc=$rc out=$(tr '\n' '|' <<<"$out"))"
@@ -277,7 +277,7 @@ EOF
   local out rc
   out=$(run_prc "$acmd" "$T/projects" --plugin-json "$PJSON" 2>&1); rc=$?
   rm -f "$tf"
-  if [ "$rc" -eq 0 ] && grep -qxF "c10-cleared current started 2026-10-26T11:00Z, refreshed 2026-10-26T12:25Z >= release 2026-10-26T12:00Z" <<<"$out"; then
+  if [ "$rc" -eq 0 ] && grep -qxF "c10-cleared current started 2026-10-26T11:00Z, refreshed 2026-10-26T12:25Z by /clear >= release 2026-10-26T12:00Z" <<<"$out"; then
     ok "canary 10: real /clear after release makes pre-release session current"
   else
     bad "canary 10: real /clear after release makes pre-release session current (rc=$rc out=$(tr '\n' '|' <<<"$out"))"
@@ -310,8 +310,9 @@ canary_12() {
   printf '{"type":"user","timestamp":"2026-10-26T12:50:00Z","message":{"content":"<command-name>/reload-plugins</command-name>"}}\n' > "$tf"; out2=$(run_prc "$acmd" "$T/projects" --plugin-json "$PJSON" 2>&1); rc2=$?
   printf '{"type":"user","timestamp":"2026-10-26T12:20:00Z","message":{"content":"<command-name>/reload-plugins</command-name>"}}\n' > "$tf"; out3=$(run_prc "$acmd" "$T/projects" --plugin-json "$PJSON" 2>&1); rc3=$?
   rm -f "$tf"; git -C "$R" reflog expire --expire=all --all; GIT_AUTHOR_DATE="2026-10-26T12:00:00Z" GIT_COMMITTER_DATE="2026-10-26T12:00:00Z" git -C "$R" reset --hard "$SHA_DOCS" >/dev/null
-  [ "$rc1" -eq 1 ] && [ "$rc2" -eq 0 ] && [ "$rc3" -eq 1 ] && grep -qxF "c12-gap stale started 2026-10-26T11:00Z, last refresh 2026-10-26T12:20Z < release 2026-10-26T12:40Z" <<<"$out1" \
-    && grep -qxF "c12-gap current started 2026-10-26T11:00Z, refreshed 2026-10-26T12:50Z >= release 2026-10-26T12:40Z" <<<"$out2" && grep -qxF "c12-gap stale started 2026-10-26T11:00Z, last refresh 2026-10-26T12:20Z < release 2026-10-26T12:40Z" <<<"$out3" \
+  [ "$rc1" -eq 1 ] && [ "$rc2" -eq 0 ] && [ "$rc3" -eq 1 ] && grep -qxF "c12-gap stale started 2026-10-26T11:00Z, last refresh 2026-10-26T12:20Z by /reload-plugins < release 2026-10-26T12:40Z" <<<"$out1" \
+    && grep -qxF "plugin-release-check: demo-plugin 0.4.1 (release 2026-10-26T12:40Z, checkout received)" <<<"$out1" \
+    && grep -qxF "c12-gap current started 2026-10-26T11:00Z, refreshed 2026-10-26T12:50Z by /reload-plugins >= release 2026-10-26T12:40Z" <<<"$out2" && grep -qxF "c12-gap stale started 2026-10-26T11:00Z, last refresh 2026-10-26T12:20Z by /reload-plugins < release 2026-10-26T12:40Z" <<<"$out3" \
     && ok "canary 12: reload at 12:20Z before 12:40Z checkout pull is stale (12:50Z flips current, 12:20Z reverts stale)" || bad "canary 12: merge->pull gap (rc1=$rc1 rc2=$rc2 rc3=$rc3 out1=$(tr '\n' '|' <<<"$out1"))"
 }
 canary_13() {
@@ -322,7 +323,25 @@ canary_14() {
   local sid="00000000-0000-4000-8000-000000000014" tf="$T/projects/proj-a/00000000-0000-4000-8000-000000000014.jsonl" out rc
   printf '{"type":"user","timestamp":"2026-10-26T12:22:00Z","message":{"content":"<command-message>reload-plugins</command-message>\\n<command-name>/reload-plugins</command-name>"}}\n' > "$tf"
   out=$(run_prc "printf '%s' '[{\"pid\":114,\"name\":\"c14-msgfirst\",\"sessionId\":\"$sid\",\"startedAt\":$PRE_MS}]'" "$T/projects" --plugin-json "$PJSON" 2>&1); rc=$?; rm -f "$tf"
-  [ "$rc" -eq 0 ] && grep -qxF "c14-msgfirst current started 2026-10-26T11:00Z, refreshed 2026-10-26T12:22Z >= release 2026-10-26T12:00Z" <<<"$out" && ok "canary 14: command-message-first /reload-plugins line makes pre-release session current" || bad "canary 14: command-message-first /reload-plugins (rc=$rc out=$(tr '\n' '|' <<<"$out"))"
+  [ "$rc" -eq 0 ] && grep -qxF "c14-msgfirst current started 2026-10-26T11:00Z, refreshed 2026-10-26T12:22Z by /reload-plugins >= release 2026-10-26T12:00Z" <<<"$out" && ok "canary 14: command-message-first /reload-plugins line makes pre-release session current" || bad "canary 14: command-message-first /reload-plugins (rc=$rc out=$(tr '\n' '|' <<<"$out"))"
+}
+# Canary 15: one transcript holding both commands: the latest refresh line names its command (/clear here).
+canary_15() {
+  local sid="00000000-0000-4000-8000-000000000015"
+  local tf="$T/projects/proj-a/$sid.jsonl"
+  cat > "$tf" <<'EOF'
+{"type":"user","timestamp":"2026-10-26T12:05:00Z","message":{"content":"<command-name>/reload-plugins</command-name>\n<command-message>reload-plugins</command-message>"}}
+{"type":"user","timestamp":"2026-10-26T12:30:00Z","message":{"content":"<command-name>/clear</command-name>\n<command-message>clear</command-message>"}}
+EOF
+  local acmd="printf '%s' '[{\"pid\":115,\"name\":\"c15-both\",\"sessionId\":\"$sid\",\"startedAt\":$PRE_MS}]'"
+  local out rc
+  out=$(run_prc "$acmd" "$T/projects" --plugin-json "$PJSON" 2>&1); rc=$?
+  rm -f "$tf"
+  if [ "$rc" -eq 0 ] && grep -qxF "c15-both current started 2026-10-26T11:00Z, refreshed 2026-10-26T12:30Z by /clear >= release 2026-10-26T12:00Z" <<<"$out"; then
+    ok "canary 15: transcript with both commands names the later one (/clear)"
+  else
+    bad "canary 15: transcript with both commands names the later one (rc=$rc out=$(tr '\n' '|' <<<"$out"))"
+  fi
 }
 
 canary_1
@@ -336,7 +355,7 @@ canary_8
 canary_9
 canary_10
 canary_11
-canary_12; canary_13; canary_14
+canary_12; canary_13; canary_14; canary_15
 
 # ==============================================================================
 # BOUNDARY, MULTI-FILE, MALFORMED ROW, AND ERROR CASES
@@ -354,7 +373,7 @@ out=$(run_prc "$ACMD_B" "$T/projects" --plugin-json "$PJSON" 2>&1); rc=$?
 rm -f "$TF_B2"
 if [ "$rc" -eq 0 ] \
   && grep -qxF "bound-start current started 2026-10-26T12:00Z >= release 2026-10-26T12:00Z" <<<"$out" \
-  && grep -qxF "bound-reload current started 2026-10-26T11:00Z, refreshed 2026-10-26T12:00Z >= release 2026-10-26T12:00Z" <<<"$out"; then
+  && grep -qxF "bound-reload current started 2026-10-26T11:00Z, refreshed 2026-10-26T12:00Z by /reload-plugins >= release 2026-10-26T12:00Z" <<<"$out"; then
   ok "boundary >=: exact release-second startedAt and reload both report current"
 else
   bad "boundary >=: rc=$rc out=[$(tr '\n' '|' <<<"$out")]"
@@ -371,7 +390,7 @@ EOF
 ACMD_M="printf '%s' '[{\"pid\":123,\"name\":\"multi-file\",\"sessionId\":\"$SID_M\",\"startedAt\":$PRE_MS}]'"
 out=$(run_prc "$ACMD_M" "$T/projects" --plugin-json "$PJSON" 2>&1); rc=$?
 rm -f "$T/projects/proj-a/$SID_M.jsonl" "$T/projects/proj-b/$SID_M.jsonl"
-if [ "$rc" -eq 0 ] && grep -qxF "multi-file current started 2026-10-26T11:00Z, refreshed 2026-10-26T12:40Z >= release 2026-10-26T12:00Z" <<<"$out"; then
+if [ "$rc" -eq 0 ] && grep -qxF "multi-file current started 2026-10-26T11:00Z, refreshed 2026-10-26T12:40Z by /clear >= release 2026-10-26T12:00Z" <<<"$out"; then
   ok "multiple transcripts: takes maximum refresh timestamp across project folders"
 else
   bad "multiple transcripts: rc=$rc out=[$(tr '\n' '|' <<<"$out")]"
@@ -391,7 +410,7 @@ fi
 
 # Exit-2 usage and data errors; --plugin-json= and --version= forms also work.
 out=$(run_prc "echo '[]'" "$T/projects" "--plugin-json=$PJSON" "--version=0.4.1" 2>&1); rc=$?
-[ "$rc" -eq 0 ] && grep -qxF "plugin-release-check: demo-plugin 0.4.1 (release 2026-10-26T12:00Z)" <<<"$out" \
+[ "$rc" -eq 0 ] && grep -qxF "plugin-release-check: demo-plugin 0.4.1 (release 2026-10-26T12:00Z, commit time)" <<<"$out" \
   && ok "--plugin-json= and --version= forms select the 0.4.1 release time" \
   || bad "= flag forms: rc=$rc out=[$out]"
 
@@ -569,5 +588,7 @@ check_mutant 10 's/(reload-plugins|clear)/(reload-plugins)/'
 check_mutant 12 's/release_sec=\$received_sec/release_sec=\$commit_sec/'
 check_mutant 13 's/\[ "\$commit_ver" = "\$version" \]/true/'
 check_mutant 14 's/test(".*")/startswith("<command-name>\/reload-plugins<\/command-name>")/'
+# 15. Hard-code reload-plugins as the refresh command: the transcript whose latest line is /clear must name /clear.
+check_mutant 15 's/max_refresh_cmd=\$cmd/max_refresh_cmd=reload-plugins/'
 
 exit "$fail"

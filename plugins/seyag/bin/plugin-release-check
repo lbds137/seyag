@@ -24,6 +24,11 @@
 # The version comparison is GNU sort -V (version sort), not semver: suffixes
 # order by version-sort, so `1.0.0-rc1` sorts AFTER `1.0.0` and build
 # metadata orders strictly where semver calls it equal.
+#
+# Output: the header names the release time's evidence kind: `checkout received`
+# when the reflog's receive time is the release time, `commit time` otherwise.
+# A session's startedAt comes from one source only, the agents list row. Refresh
+# rows name the command of the latest refresh line (/reload-plugins or /clear).
 
 set -uo pipefail
 shopt -s nullglob
@@ -145,11 +150,13 @@ for (( idx=${#reflog_lines[@]} - 1; idx >= 0; idx-- )); do
     break
   fi
 done
+release_kind="commit time"
 if [ -z "$received_sec" ]; then
   echo "plugin-release-check: reflog gave no checkout-received time; using the commit time" >&2
   release_sec=$commit_sec
 elif [ "$received_sec" -gt "$commit_sec" ]; then
   release_sec=$received_sec
+  release_kind="checkout received"
 else
   release_sec=$commit_sec
 fi
@@ -162,7 +169,7 @@ jq -e 'type == "array"' <<<"$agents_raw" >/dev/null 2>&1 \
 
 projects_dir=${PLUGIN_RELEASE_PROJECTS:-$HOME/.claude/projects}
 
-printf 'plugin-release-check: %s %s (release %s)\n' "$plugin_name" "$version" "$release_min"
+printf 'plugin-release-check: %s %s (release %s, %s)\n' "$plugin_name" "$version" "$release_min" "$release_kind"
 
 any_stale=0
 while IFS= read -r row; do
@@ -205,11 +212,13 @@ while IFS= read -r row; do
   fi
 
   max_refresh_sec=""
-  while IFS= read -r ts; do
+  max_refresh_cmd=""
+  while IFS=$'\t' read -r ts cmd; do
     [ -n "$ts" ] || continue
     ts_sec=$(date -u -d "$ts" +%s 2>/dev/null) || continue
     if [ -z "$max_refresh_sec" ] || [ "$ts_sec" -gt "$max_refresh_sec" ]; then
       max_refresh_sec=$ts_sec
+      max_refresh_cmd=$cmd
     fi
   done < <(jq -R -r '
     fromjson?
@@ -222,7 +231,8 @@ while IFS= read -r row; do
         and (.timestamp | type) == "string"
         and (.timestamp | length) > 0
       )
-    | .timestamp
+    | ((.message.content | strings | capture("^\\s*(<command-message>[^<]*</command-message>\\s*)?<command-name>/(?<cmd>reload-plugins|clear)</command-name>") | .cmd) // "unlabelled") as $cmd
+    | "\(.timestamp)\t\($cmd)"
   ' "${files[@]}" 2>/dev/null)
 
   if [ -z "$max_refresh_sec" ]; then
@@ -230,10 +240,10 @@ while IFS= read -r row; do
     any_stale=1
   elif [ "$max_refresh_sec" -ge "$release_sec" ]; then
     refresh_min=$(date -u -d "@$max_refresh_sec" '+%Y-%m-%dT%H:%MZ')
-    printf '%s current started %s, refreshed %s >= release %s\n' "$row_name" "$started_min" "$refresh_min" "$release_min"
+    printf '%s current started %s, refreshed %s by /%s >= release %s\n' "$row_name" "$started_min" "$refresh_min" "$max_refresh_cmd" "$release_min"
   else
     refresh_min=$(date -u -d "@$max_refresh_sec" '+%Y-%m-%dT%H:%MZ')
-    printf '%s stale started %s, last refresh %s < release %s\n' "$row_name" "$started_min" "$refresh_min" "$release_min"
+    printf '%s stale started %s, last refresh %s by /%s < release %s\n' "$row_name" "$started_min" "$refresh_min" "$max_refresh_cmd" "$release_min"
     any_stale=1
   fi
 done < <(jq -c '.[] | select(type == "object" and .pid != null)' <<<"$agents_raw")

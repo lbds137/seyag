@@ -7,7 +7,7 @@
 # differs on purpose: CC_ROUTE_PRESET here, a non-empty ANTHROPIC_API_KEY there), and that
 # usage-sweep --points consumes the readings log it writes. Also: the caller's model read from its
 # session transcript, and --json's scoped string escaping. Also: --all's three lane lines and their
-# degrades, --json's lane fields, OpenRouter dollars read-only from the statusline's credits cache,
+# degrades, --json's lane fields and as_of/source, OpenRouter dollars read-only from the statusline's credits cache,
 # per-deployment z.ai week reserve overrides (CLAUDE_USAGE_ZAI_WEEK_RESERVE_CMD / _WEEK_RESERVE)
 # and the plan-week ones (CLAUDE_USAGE_WEEK_RESERVE_CMD / _WEEK_RESERVE, integer 1-99),
 # the extra-usage budget stop (SYG_EXTRA_USAGE_BUDGET_CMD / SYG_EXTRA_USAGE_BUDGET_USD), and the
@@ -790,10 +790,11 @@ mv "$tmp/usage.json.keep" "$tmp/claude-statusline/usage.json"
 
 # --json: the original fields byte-for-byte, then the calling lane and its numbers.
 fixture 10 50 0
+E_fix=$(stat -c %Y "$tmp/claude-statusline/usage.json")
 old_prefix='{"five_hour_pct":10,"five_hour_resets_at":4070908800,"seconds_to_reset":'
 j=$(run --json)
-[[ $j == "$old_prefix"* ]] && [[ $j == *',"routed":0,"lane":"anthropic"}' ]] \
-    && ok "--json anthropic: original fields unchanged, then lane, no extra numbers" || bad "--json anthropic: $j"
+[[ $j == "$old_prefix"* ]] && [[ $j == *',"routed":0,"lane":"anthropic","as_of":'"$E_fix"',"source":"api"}' ]] \
+    && ok "--json anthropic: original fields unchanged, then lane, then as_of and source, no extra numbers" || bad "--json anthropic: $j"
 route_zai
 zai_stub api 42 17
 j=$(run --json)
@@ -816,14 +817,15 @@ credit_stub fail
 j=$(CC_ROUTE_PRESET=anthropic-api run --json)
 jq -e '.api_credit_remaining_usd == null' <<< "$j" >/dev/null && ok "--json Console lane, api-credit fails: null" || bad "--json console fail: $j"
 j=$(ANTHROPIC_BASE_URL=https://weird.example.org/v1 run --json)
-jq -e '.lane == "unknown" and (keys | length) == 8' <<< "$j" >/dev/null && ok "--json unknown lane: lane only" || bad "--json unknown: $j"
+jq -e '.lane == "unknown" and (keys | length) == 10 and has("as_of") and has("source")' <<< "$j" >/dev/null && ok "--json unknown lane: lane plus as_of and source (10 keys)" || bad "--json unknown: $j"
 fixture 10 50 0
 j=$(run --json)
 jq -e 'has("extra_usage") == false' <<< "$j" >/dev/null \
     && ok "--json no extra_usage key in cache: has(\"extra_usage\") is false" || bad "--json no extra_usage key: $j"
 fixture_extra 10 50 0 true false null '{"amount_minor":1234,"currency":"USD","exponent":2}'
+E_x=$(stat -c %Y "$tmp/claude-statusline/usage.json")
 j=$(run --json)
-[[ $j == "$old_prefix"* ]] && [[ $j == *',"routed":0,"lane":"anthropic","extra_usage":{"enabled":true,"spend_limit_reached":false,"disabled_reason":null,"used_usd":12.34}}' ]] \
+[[ $j == "$old_prefix"* ]] && [[ $j == *',"routed":0,"lane":"anthropic","extra_usage":{"enabled":true,"spend_limit_reached":false,"disabled_reason":null,"used_usd":12.34},"as_of":'"$E_x"',"source":"api"}' ]] \
     && jq -e '.extra_usage == {"enabled":true,"spend_limit_reached":false,"disabled_reason":null,"used_usd":12.34}' <<< "$j" >/dev/null \
     && ok "--json extra_usage: enabled + spend.used 12.34 USD, old_prefix first, extra_usage after lane" || bad "--json extra_usage on: $j"
 route_zai
@@ -889,10 +891,11 @@ j=$(run --json); rc=$?
 [ $rc = 0 ] && jq -e 'type == "object" and has("extra_usage") == false' <<< "$j" >/dev/null \
     && ok "--json extra_usage: string extra_usage omitted, exits 0 with valid JSON" || bad "--json string extra_usage (rc $rc): $j"
 printf '{not json\n' > "$tmp/claude-statusline/usage.json"
-# Pins the stdout from before extra_usage: zeroed plan fields, no extra_usage key. The exit code is
+E_mal=$(stat -c %Y "$tmp/claude-statusline/usage.json")
+# Pins the stdout from before extra_usage: zeroed plan fields, no extra_usage key, then as_of and source (none: no weekly figure). The exit code is
 # left unpinned: printf's "invalid number" on the empty fields is rc 1 under bash 5.3 and rc 0 on CI.
 j=$(run --json 2>/dev/null); rc=$?
-[ "$j" = '{"five_hour_pct":0,"five_hour_resets_at":0,"seconds_to_reset":0,"weekly_pct":0,"weekly_resets_at":0,"scoped":"","routed":0,"lane":"anthropic"}' ] \
+[ "$j" = '{"five_hour_pct":0,"five_hour_resets_at":0,"seconds_to_reset":0,"weekly_pct":0,"weekly_resets_at":0,"scoped":"","routed":0,"lane":"anthropic","as_of":'"$E_mal"',"source":"none"}' ] \
     && ok "--json malformed cache ({not json): zeroed plan fields, no extra_usage key" || bad "--json malformed cache (rc $rc): $j"
 fixture 10 50 0
 
@@ -1437,8 +1440,9 @@ out=$(CLAUDE_USAGE_EXTRA_OK=1 SYG_EXTRA_USAGE_BUDGET_USD=100 run --ok 90 2>"$tmp
     || bad "no 5h extra-usage pass: rc=$rc out=[$out] err=[$err]"
 
 fixture_no5h 50 0
+E_n5=$(stat -c %Y "$tmp/claude-statusline/usage.json")
 j=$(run --json)
-[ "$j" = '{"five_hour_pct":0,"five_hour_resets_at":0,"seconds_to_reset":0,"weekly_pct":50,"weekly_resets_at":4071427200,"scoped":"Fable 0%","routed":0,"lane":"anthropic","five_hour_absent":true}' ] \
+[ "$j" = '{"five_hour_pct":0,"five_hour_resets_at":0,"seconds_to_reset":0,"weekly_pct":50,"weekly_resets_at":4071427200,"scoped":"Fable 0%","routed":0,"lane":"anthropic","five_hour_absent":true,"as_of":'"$E_n5"',"source":"api"}' ] \
     && jq -e '(.five_hour_pct | type) == "number" and .five_hour_pct == 0 and .five_hour_absent == true' <<< "$j" >/dev/null \
     && ok "no 5h window: --json has numeric five_hour_pct 0 and five_hour_absent:true" \
     || bad "no 5h --json: $j"
@@ -1679,5 +1683,27 @@ out=$(run --posture 2>/dev/null); rc=$?
 [ $rc = 0 ] && [ "$out" = "$(posture_line "z.ai " 75 80 '?')" ] \
     && ok "--posture (z.ai, no live quota): now ?" || bad "--posture z.ai unavailable: rc=$rc out=[$out]"
 route_anthropic
+
+# --json as_of and source (plan cache): as_of is the cache's mtime, source is --ok's verdict on it.
+# The cache is only touched, never refreshed: no credentials under this HOME, so refresh is a no-op.
+fixture 10 50 0
+now_j=$(date +%s)
+E_in=$((now_j - 600)) # past the 120 s TTL, inside the 6 h gate max age
+touch -d "@$E_in" "$tmp/claude-statusline/usage.json"
+j=$(run --json)
+jq -e --argjson e "$E_in" '.as_of == $e and .source == "api" and .weekly_pct == 50 and .lane == "anthropic" and .routed == 0 and .five_hour_pct == 10' <<< "$j" >/dev/null \
+    && ok "--json as_of/source: cache past the TTL inside the gate max age -> as_of is its mtime, source api, plan keys unchanged" \
+    || bad "--json as_of/source past TTL: $j"
+E_old=$((now_j - 3600))
+touch -d "@$E_old" "$tmp/claude-statusline/usage.json"
+j=$(CLAUDE_USAGE_GATE_MAX_AGE=1800 run --json)
+jq -e --argjson e "$E_old" '.as_of == $e and .source == "none" and .weekly_pct == 50' <<< "$j" >/dev/null \
+    && ok "--json as_of/source: cache older than CLAUDE_USAGE_GATE_MAX_AGE -> as_of is its mtime, source none" \
+    || bad "--json as_of/source past gate max age: $j"
+printf '{"five_hour":{"utilization":10,"resets_at":"2099-01-01T00:00:00.000000+00:00"}}\n' > "$tmp/claude-statusline/usage.json"
+j=$(run --json)
+jq -e '.source == "none" and (.as_of | type) == "number"' <<< "$j" >/dev/null \
+    && ok "--json as_of/source: fresh cache with no weekly figure -> source none" \
+    || bad "--json source no weekly figure: $j"
 
 exit $fail
