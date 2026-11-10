@@ -2,6 +2,18 @@
 
 All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY-MM-DD>` section per released version; under it, `###` categories in fixed order — Breaking Changes, Features, Bug Fixes, Improvements, Chores, Tests — empty ones omitted; items are `- **scope:** description (#PR)`, written from the version's merged commit subjects.
 
+## 0.3.151 - 2026-11-09
+
+### Bug Fixes
+
+- **pr-body-ref-gate:** the short-flag pre-check skips the value of a value-taking flag, so a QUOTED title value that starts with `-F` / `-b` (`--title "-Fix: closes TASK-N" --fill`) no longer triggers a whole-command scan; a body-file word de-escapes in one pass as bash does (`"a\\b"` reads `a\b`, bare `\l` reads `l`, an escaped `\$NAME` stays literal and unread); the no-python3 fallback also refuses commands with a backtick; a combined short-flag cluster (`-db`) is a documented miss, and so are an escaped `\"` and an escaped space in a body-file word and a body file named inside a heredoc fed to a shell (#PR).
+- **safe-worktree-clean:** refs/worktree/* commits are held (HOLD:worktree-refs, approvable, backed up in reflog.pack; non-commit refs HOLD:worktree-refs-object), quoted README restore refspec, batched plan-id hashing, no sweep id after a failed child dry run, plain-name run stamp, per-tree-path backup leaf names (#284).
+- **pr-ci-wait:** a failed run that created zero jobs (attempt-pinned job count) takes CI_GATE_STARTUP_FAILURE instead of releasing; cancelled runs unchecked; a failed lookup holds release; pr-monitoring skill wording follow-ups from #262 (#285).
+
+### Tests
+
+- **pr-body-ref-gate probe:** no-python3 fallback rows for `$(`, backslash and backtick commands and for an earlier non-gh `-F`; red-first rows for the value skip, the de-escape and the escaped-`$` single pass (#PR).
+
 ## 0.3.150 - 2026-11-09
 
 ### Features

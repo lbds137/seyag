@@ -77,7 +77,8 @@
 #     sees the command text at all, only extract_pr_body's parsed output.
 #   - A --body-file path that names no readable file without a shell is not
 #     read: a `$(...)` or backtick in it, an unset or empty `$NAME` / `${NAME}`,
-#     or a `$` kept literal by single quotes (`--body-file '$F'`). Its FILE's
+#     or a `$` kept literal by single quotes or backslash (`--body-file '$F'`,
+#     `--body-file "\$F"`). Its FILE's
 #     content goes unscanned (fail-open direction, same family as the
 #     short-flag gap). Rule 1's command-text scan still covers the rest of the
 #     command; an inline `--body` in the same command is separately picked up
@@ -92,9 +93,9 @@
 #   - When `python3` is missing or fails, the hook itself still runs — only its
 #     `python3` spawns degrade. `find_body_file_flag` falls back to a
 #     `grep -obP` byte-offset scan across `--body-file` and `-F`, but ONLY
-#     when the command contains none of `'`, `"`, `#`, `\`, `<<` or `$(`
+#     when the command contains none of `'`, `"`, `` ` ``, `#`, `\`, `<<` or `$(`
 #     (nothing `masked_view` would mask), and `resolve_body_word` still needs
-#     `python3` for any `$`, quote or `~/`. Outside that plain bare-word
+#     `python3` for any `$`, `\`, quote or `~/`. Outside that plain bare-word
 #     domain, a `python3` failure yields no `--body-file` / `-F` body file
 #     (`--body-file -` stdin bodies included); the `-F body=@path` form, the
 #     substitution and inline-value ladders and rule 1's command-text scan
@@ -205,6 +206,18 @@
 #     pre-check before either rule runs (the old raw grep caught them;
 #     fail-open direction; `--body` / `--body-file` in the same string still
 #     match the raw long-flag check).
+#   - A combined short-flag cluster (`-db "…"`, cobra's `-d -b`) is not
+#     recognized as `-b` by the pre-check (fail-open).
+#   - resolve_body_word reads two escapes differently from bash. Its tokenizer
+#     splits a double-quoted piece at an escaped `\"` (`"d/a\"b\"c"` resolves
+#     to `d/a\b\c`, bash reads `d/a"b"c`), and BODY_WORD_RE ends a bare word at
+#     an escaped space (`dir/my\ file.md` reads as `dir/my\`). Both name a
+#     nonexistent file in practice, so the body file goes unread (fail-open).
+#   - A body FILE named inside a heredoc fed to a shell (`bash <<'E'` with
+#     `gh pr create -F x.md` or `--body-file x.md` inside) is not read:
+#     wrapped_command_strings does not yield shell-fed heredoc bodies, so
+#     find_body_file_flag never searches them (an inline `-b "…"` there is
+#     still caught by the pre-check's argv arm and the inline ladder).
 #
 #   The bullets above are misses. The bullets BELOW are deliberate
 #   under-blocking — choices not to over-block. Append a new miss above this
@@ -300,17 +313,20 @@ read_body_path() {
 # resolve_body_word RAW: sets BODY_PATH to the path the shell word RAW names,
 # or BODY_PATH_UNRESOLVED=1 when it names none this hook can read: an unset or
 # empty $NAME / ${NAME}, a $(...) or backtick, or any `$` left after expansion
-# (a single-quoted $ is literal, so it is left too). Bare and double-quoted
-# text expands $NAME from THIS hook's environment (the session's, as the hook
-# was started), never the live shell's; a leading bare `~/` is $HOME/, and only
-# when $2 is 1 (a space, not `=`, came before the word, as the shell does it).
-# Nothing is run through a shell. A word with no `$`, quote or leading `~/` is
-# its own path, so the common case never starts python.
+# (a single-quoted or backslash-escaped $ is literal, so it is left too). Bare
+# and double-quoted text de-escapes backslash sequences and expands $NAME from
+# THIS hook's environment (the session's, as the hook was started), never the
+# live shell's; a leading bare `~/` is $HOME/, and only when $2 is 1 (a space,
+# not `=`, came before the word, as the shell does it). Nothing is run through
+# a shell. Not full bash fidelity: an escaped `\"` inside a double-quoted word
+# and an escaped space in a bare word are misread (see the KNOWN GAPS bullet on
+# resolve_body_word). A word with no `$`, `\`, quote or leading `~/` is its own
+# path, so the common case never starts python.
 resolve_body_word() {
   BODY_PATH="$1"
   BODY_PATH_UNRESOLVED=0
   case "$1" in
-    *'$'* | *'"'* | *"'"* | \~/*) ;;
+    *'$'* | *'\'* | *'"'* | *"'"* | \~/*) ;;
     *) return 0 ;;
   esac
   if BODY_PATH=$(python3 - "$1" "$2" <<'PYEOF' 2>/dev/null
@@ -330,24 +346,28 @@ for index, piece in enumerate(pieces):
         continue
     quoted = piece.startswith('"')
     text = piece[1:-1] if quoted else piece
-    if quoted:
-        # The \\ arm consumes the pair unchanged so a \\ before a newline is not read as a continuation (other double-quote escapes, \$ \" \`, are not handled; fail-open).
-        text = re.sub(
-            r"\\(\\|\n)",
-            lambda m: "\\\\" if m.group(1) == "\\" else "",
-            text,
-        )
     if index == 0 and not quoted and tilde_ok and text.startswith("~/"):
         text = "$HOME/" + text[2:]
 
     def value(match):
-        found = os.environ.get(match.group(1) or match.group(2), "")
+        if match.group(1) is not None:
+            return match.group(1)
+        name = match.group(2) or match.group(3)
+        if name is None:
+            return ""
+        found = os.environ.get(name, "")
         if not found:
             raise LookupError
         return found
 
+    # Single pass de-escapes \X (\ $ " ` in "", any char bare), drops \+newline, and expands $NAME/${NAME} so \$NAME stays literal.
+    pattern = (
+        r'\\([\\$"`])|\\\n|\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))'
+        if quoted
+        else r"\\([^\n])|\\\n|\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))"
+    )
     try:
-        text = re.sub(r"\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))", value, text)
+        text = re.sub(pattern, value, text)
     except LookupError:
         sys.exit(1)
     out.append(text)
@@ -381,7 +401,7 @@ PYEOF
 # for a whitespace separator: the shell expands a leading `~/` after
 # whitespace, never after `=`, and a word with no separator is not
 # tilde-expanded either. When python3 is missing or exits nonzero, a command
-# with none of `'`, `"`, `#`, `\`, `<<` or `$(` falls back to a `grep -obP`
+# with none of `'`, `"`, `` ` ``, `#`, `\`, `<<` or `$(` falls back to a `grep -obP`
 # byte-offset scan across both flags; anything else yields no body file, never
 # a block.
 find_body_file_flag() {
@@ -455,7 +475,7 @@ PYEOF
     return 0
   fi
   case "$CMD" in
-    *"'"* | *'"'* | *'#'* | *'\'* | *'<<'* | *"\$("* ) return 0 ;;
+    *"'"* | *'"'* | *"\`"* | *'#'* | *'\'* | *'<<'* | *"\$("* ) return 0 ;;
   esac
   hits=$(printf '%s' "$CMD" | grep -obP -- '--body-file(?:=|[[:blank:]]+)[^\s&|;()<>]+' 2>/dev/null || true)
   if [ "${IS_GH_PR_WRITE:-0}" -eq 1 ]; then
@@ -502,8 +522,10 @@ $(printf '%s' "$CMD" | grep -obP -- "${GH_PR_CMD_PREFIX}(?:[^\n;&|]*[[:space:]])
 # shell_quotes.simple_commands argv (after unwrap_runners strips runner and
 # VAR=val env prefixes) whose program word is `gh` / `*/gh` with `pr` and
 # `create|edit` (allowing gh global flags between) and a later `-b*` or `-F*`
-# word (so shell-fed heredoc bodies count while prose heredocs stay data),
-# falling back to raw CMD_JOINED when python3 is missing or exits nonzero.
+# word (skipping a value-taking flag's value, so a QUOTED title value that
+# starts with `-F` / `-b` is not a flag; a bare one still reaches the masked
+# grep; shell-fed heredoc bodies count while prose heredocs stay data), falling
+# back to raw CMD_JOINED when python3 is missing or exits nonzero.
 has_gh_pr_short_flag() {
   local masked rc
   case "$CMD" in
@@ -526,6 +548,14 @@ from shell_quotes import (
 
 cmd = os.fsdecode(open(3, "rb").read()).removesuffix("\n")
 
+VALUE_FLAGS = frozenset((
+    "-a", "--assignee", "--attach", "-B", "--base", "-H", "--head",
+    "-l", "--label", "-m", "--milestone", "-p", "--project", "--recover",
+    "-r", "--reviewer", "-T", "--template", "-t", "--title", "-R", "--repo",
+    "--add-assignee", "--add-label", "--add-project", "--add-reviewer",
+    "--remove-assignee", "--remove-label", "--remove-project", "--remove-reviewer",
+))
+
 
 def emit(text, depth):
     sys.stdout.write(masked_view(text, join_continuations=True) + "\n")
@@ -540,11 +570,15 @@ def argv_has_short_flag(argv):
         return False
     for i in range(1, len(argv) - 1):
         if argv[i] == "pr" and argv[i + 1] in ("create", "edit"):
-            if any(
-                w.startswith(("-b", "-F")) and not w.startswith("--")
-                for w in argv[i + 2 :]
-            ):
-                return True
+            j = i + 2
+            while j < len(argv):
+                w = argv[j]
+                if w in VALUE_FLAGS:
+                    j += 2
+                    continue
+                if w.startswith(("-b", "-F")) and not w.startswith("--"):
+                    return True
+                j += 1
     return False
 
 

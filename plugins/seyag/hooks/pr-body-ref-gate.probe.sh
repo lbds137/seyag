@@ -404,11 +404,22 @@ assert_blocks "cat <<'END-X': the body's --body-file is not a flag (blocks)" "ta
 run_hook "$REPO" 'gh pr create --base develop --body-file "$E8_BODY_DIR/e8-paren.txt"; cat <<'\''EOF'\'' >/dev/null'$'\n''--body-file $E8_BODY_DIR/e8-clean.txt \'$'\n''EOF'
 assert_blocks "a heredoc body line ending in \\ does not join its terminator: the body's --body-file is not a flag (blocks)" "task-99999"
 # Follow-up 1: required-flag pre-check reads a masked view so a quoted ; in
-# --title does not end the simple command before -F or -b.
+# --title does not end the simple command before -F or -b, and skips values of
+# value-taking flags when scanning simple_commands argv for -b/-F.
 run_hook "$REPO" "gh pr create --base develop --title \"a;b\" -F $E8_BODY_DIR/e8-paren.txt"
 assert_blocks "--title \"a;b\" before -F <dirty>: the quoted ; does not end the pre-check span (blocks)" "task-99999"
 run_hook "$REPO" 'gh pr create --base develop --title "a;b" -b "Closes TASK-99999"'
 assert_blocks '--title "a;b" before -b "<dirty>": the quoted ; does not end the pre-check span (blocks)' "task-99999"
+# The leading `git checkout -b br &&` puts a whitespace-preceded -b in the raw
+# command, so the cheap case pre-filter admits it and argv_has_short_flag runs.
+run_hook "$REPO" 'git checkout -b br && gh pr create --title "-Fix: closes TASK-99999" --fill'
+assert_pass 'gh pr create --title "-Fix: closes TASK-99999" --fill: -F prefix in --title value is not a short body flag (passes)'
+run_hook "$REPO" 'git checkout -b br && gh pr edit 5 -t "-b closes TASK-99999"'
+assert_pass 'gh pr edit 5 -t "-b closes TASK-99999": -b prefix in -t value is not a short body flag (passes)'
+run_hook "$REPO" 'gh pr create --title t -b "Closes TASK-99999"'
+assert_blocks 'gh pr create --title t -b "Closes TASK-99999": real -b after --title value still blocks' "task-99999"
+run_hook "$REPO" "gh pr create -t x -F $E8_BODY_DIR/e8-paren.txt"
+assert_blocks "gh pr create -t x -F <dirty>: real -F after -t value still blocks" "task-99999"
 # Follow-up 2: bounded no-python3 fallback for a plain bare --body-file / -F word.
 PY_SHIM_DIR="$TMPDIR_PROBE/py-shim"
 mkdir -p "$PY_SHIM_DIR"
@@ -424,7 +435,15 @@ run_hook_with_path "$PY_SHIM_DIR" "$REPO" "gh pr create --title x -F $E8_BODY_DI
 assert_blocks "no-python3 fallback: -F <clean> then --body-file <dirty> reads the last (blocks)" "task-99999"
 run_hook_with_path "$PY_SHIM_DIR" "$REPO" "gh pr create --title x --body-file $E8_BODY_DIR/e8-clean.txt -F $E8_BODY_DIR/e8-paren.txt"
 assert_blocks "no-python3 fallback: --body-file <clean> then -F <dirty> reads the last (blocks)" "task-99999"
-# Follow-up 3: backslash-newline inside a double-quoted body-file word.
+run_hook_with_path "$PY_SHIM_DIR" "$REPO" "gh pr create --title \$(echo x) --body-file $E8_BODY_DIR/e8-paren.txt"
+assert_pass "no-python3 fallback: \$(...) in command is out of domain, fails open without reading body file (passes)"
+run_hook_with_path "$PY_SHIM_DIR" "$REPO" "gh pr create --title a\\ b --body-file $E8_BODY_DIR/e8-paren.txt"
+assert_pass "no-python3 fallback: backslash in command is out of domain, fails open without reading body file (passes)"
+run_hook_with_path "$PY_SHIM_DIR" "$REPO" "gh pr create --title \`echo x\` --body-file $E8_BODY_DIR/e8-paren.txt"
+assert_pass "no-python3 fallback: backtick in command is out of domain, fails open without reading body file (passes)"
+run_hook_with_path "$PY_SHIM_DIR" "$REPO" "git commit -F $E8_BODY_DIR/e8-paren.txt && gh pr create --title x -F $E8_BODY_DIR/e8-clean.txt"
+assert_pass "no-python3 fallback: git commit -F <dirty> && gh pr create -F <clean> ignores earlier non-gh -F (passes)"
+# Follow-up 3: backslash-newline and escapes inside a body-file word.
 mkdir -p "$REPO/dir"
 cp "$E8_BODY_DIR/e8-paren.txt" "$REPO/dir/x.md"
 run_hook "$REPO" 'gh pr create --base develop --body-file "dir/\'$'\n''x.md"'
@@ -432,6 +451,27 @@ assert_blocks '--body-file "dir/\ + newline + x.md": double-quoted line continua
 cp "$E8_BODY_DIR/e8-paren.txt" "$REPO/dir/a\\b"
 run_hook "$REPO" 'gh pr create --base develop --body-file "dir/a\\'$'\n''b"'
 assert_pass '--body-file "dir/a\\ + newline + b": escaped backslash before newline is not a line continuation (passes)'
+run_hook "$REPO" 'gh pr create --base develop --body-file "dir/a\\b"'
+assert_blocks '--body-file "dir/a\\b": double-quoted \\ de-escapes to \ and reads dir/a\b (blocks)' "task-99999"
+cp "$E8_BODY_DIR/e8-paren.txt" "$REPO/dir/lit"
+run_hook "$REPO" 'gh pr create --base develop --body-file "dir/\lit"'
+assert_pass '--body-file "dir/\lit": non-special double-quoted \l stays literal (passes)'
+run_hook "$REPO" 'gh pr create --base develop --body-file dir/\lit'
+assert_blocks '--body-file dir/\lit: bare \l de-escapes to l and reads dir/lit (blocks)' "task-99999"
+# Single pass: an escaped `$` stays literal. run_hook inherits the environment,
+# so E8_VAR names the dirty file for these rows only. The first row is the
+# positive control (the expansion works); the next three would block if a
+# de-escape ran before, or twice around, the expansion.
+export E8_VAR="$REPO/dir/lit"
+run_hook "$REPO" 'gh pr create --base develop --body-file "$E8_VAR"'
+assert_blocks '--body-file "$E8_VAR": the variable expands to the dirty file (blocks)' "task-99999"
+run_hook "$REPO" 'gh pr create --base develop --body-file "\$E8_VAR"'
+assert_pass '--body-file "\$E8_VAR": escaped $ stays literal, unresolved (passes)'
+run_hook "$REPO" 'gh pr create --base develop --body-file \$E8_VAR'
+assert_pass '--body-file \$E8_VAR: bare escaped $ stays literal, unresolved (passes)'
+run_hook "$REPO" 'gh pr create --base develop --body-file "\\$E8_VAR"'
+assert_pass '--body-file "\\$E8_VAR": \\ de-escapes to \ then the variable expands to \<path>, which does not exist (passes)'
+unset E8_VAR
 unset E8_BODY_DIR
 
 # ---- Case 6: resolving doc ref → pass ----------------------------------------
@@ -1201,6 +1241,14 @@ assert_blocks "cat <<EOF | bash running command gh pr create -b blocks" "task-99
 
 run_hook "$REPO" $'bash <<\'E\'\nGH_X=1 gh pr create -b "Closes TASK-99999"\nE'
 assert_blocks "bash <<'E' running GH_X=1 gh pr create -b blocks" "task-99999"
+
+# Discriminating rows: the masked view and the raw grep cannot see a flag inside
+# this heredoc, so only argv_has_short_flag lets the pre-check through.
+run_hook "$REPO" $'bash <<\'E\'\ngh pr create --title t -b "Closes TASK-99999"\nE'
+assert_blocks "bash <<'E' running gh pr create --title t -b blocks (argv scan decides)" "task-99999"
+
+run_hook "$REPO" $'bash <<\'E\'\ngh pr create -t t -b "Closes TASK-99999"\nE'
+assert_blocks "bash <<'E' running gh pr create -t t -b blocks (argv scan decides)" "task-99999"
 
 run_hook "$REPO" 'ssh host "gh pr create --title t -b '\''Closes TASK-99999'\''"'
 assert_pass 'ssh host "gh pr create --title t -b '\''<claim>'\''" passes as a documented miss'
