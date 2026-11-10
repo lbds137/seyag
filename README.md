@@ -193,6 +193,8 @@ The prompt hooks keep one small state file per session in `/tmp/claude-<uid>/` (
 tests/run-probes.sh -j 4
 ```
 
+`--shard I/N` runs one slice of the suite (CI splits it this way, balanced by `tests/probe-durations.tsv`), and `--durations-out FILE` refreshes that table from a full passing run, e.g. with `-j 1`.
+
 `tests/replay-hook.sh <hook-name> [--since N]` replays one Bash-matching hook against the Bash commands recorded in local Claude Code session logs and reports what it would have blocked, without changing anything. `tests/replay-stop-hook.sh <hook-name> [--since N]` does the same for a Stop hook: it rebuilds the transcript as it stood at every turn end and reports which turn ends the hook would have blocked, next to the blocks the logs actually record.
 
 Runtime dependencies for the hooks: bash, `jq`, `python3` and GNU grep.
