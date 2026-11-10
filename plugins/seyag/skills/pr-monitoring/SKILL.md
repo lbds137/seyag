@@ -49,9 +49,10 @@ cd '<toplevel>' && pr-ci-wait <N> --sha $(git rev-parse 'refs/heads/<branch>')
 - **Wait on `pr-ci-wait`, never on a `sleep` or a hand-written poll loop** —
   both were measured emitting a premature `CI_COMPLETE`.
   This purpose-built watcher is for PR CI only; any other long wait the
-  harness does not report back on (a headless worker, a long-job runner
-  job, a test suite) follows the scheduled-tick bullet in `seyag:delegation`
-  § Concurrency and economy, which bans hand-written `Monitor` loops.
+  harness does not report back on (a headless worker, a cloud session, a
+  job under `$SYG_LONG_JOB_CMD`, a test suite) follows the scheduled-tick
+  bullet in `seyag:delegation` § Concurrency and economy, which bans
+  hand-written `Monitor` loops.
 
 ## When the Monitor fires
 
@@ -74,15 +75,16 @@ stop after step 1 even if every check is green:
 |---|---|---|
 | `CI_COMPLETE` | CI settled with nothing in flight and the review run completed. | Proceed to the steps below. |
 | `CI_GATE_TIMEOUT` | `pr-ci-wait` hit its give-up ceiling (25 min default). | Re-arm; do **not** assume CI passed. |
-| `CI_GATE_STARTUP_FAILURE` | A workflow died before dispatch (`startup_failure`, invisible in `gh pr checks`). | Run `gh run rerun <run-id>`, then re-arm. |
+| `CI_GATE_STARTUP_FAILURE` | A workflow died before dispatch (`startup_failure`) or failed with zero jobs; either is invisible in `gh pr checks`. | Run `gh run rerun <run-id>`, then re-arm; a zero-job failure that repeats points at the workflow file (check the run page). |
 | `CI_GATE_REVIEW_MISSING` | CI settled, but no review workflow run appeared within the 5-min grace window. | Re-query the run list; if still absent, the workflow never dispatched (`gh run rerun` has nothing to rerun and re-pushing is not a reliable lever) — check its `on:` filter against the PR event. |
 | _(none printed)_ | The Monitor's own 30-min `timeout_ms` killed the process first. | Re-arm. |
 
 2. **Confirm CI state and the SHA-pinned workflow run list.** Note the final
    CI state from `gh pr checks <N>`, **and** run the SHA-pinned run-list
    query. **A green `gh pr checks` list is not proof CI ran**: a workflow run
-   that dies before dispatch (`startup_failure`) creates zero check-runs, so
-   it is absent from `gh pr checks` while surviving workflows print green:
+   that dies before dispatch (`startup_failure`) creates zero check-runs, as
+   does a run that fails with zero jobs, so it is absent from `gh pr checks`
+   while surviving workflows print green:
 
 ```bash
 gh api "repos/{owner}/{repo}/actions/runs?head_sha=$(gh pr view <N> --json headRefOid -q .headRefOid)" \

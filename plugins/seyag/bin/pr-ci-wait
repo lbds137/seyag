@@ -22,6 +22,13 @@ Sentinels (printed on their own line, exactly, once): CI_COMPLETE,
 CI_GATE_TIMEOUT, CI_GATE_STARTUP_FAILURE, CI_GATE_REVIEW_MISSING. A
 `gh pr checks N` report always prints last, on every outcome.
 
+A completed run with conclusion `failure` and zero jobs on its attempt (a run
+that never started, e.g. during a GitHub outage) takes the same
+CI_GATE_STARTUP_FAILURE sentinel as a `startup_failure` run; `cancelled` runs
+are not checked. A failed job-count lookup holds release until it succeeds (it
+counts as a failed gh call for logging, and a `startup_failure` run in the same
+poll is still reported).
+
 Exit codes: 0 only on CI_COMPLETE; 1 for every other gate outcome (timeout,
 startup failure, review missing); 2 for a usage/argument error (bad --sha,
 --sha naming no local commit, or a PR head that persistently disagrees with
@@ -80,6 +87,7 @@ ERROR_REPEAT_EVERY = 10
 COMMIT_CHECK_TIMEOUT_S = 15
 HEAD_FETCH_TIMEOUT_S = 15
 RUNS_FETCH_TIMEOUT_S = 15
+JOBS_FETCH_TIMEOUT_S = 15
 CHECKS_REPORT_TIMEOUT_S = 60
 # Floor on the `gh pr checks --watch` bound, which is otherwise whatever is left
 # of PR_CI_WAIT_MAX_S once the gate releases.
@@ -320,6 +328,44 @@ def fetch_runs(sha):
     return runs
 
 
+def fetch_job_count(run):
+    """Number of jobs on the run's own attempt. The attempt is pinned because the
+    plain `runs/ID/jobs` endpoint reads the LATEST attempt, which can have jobs
+    when the attempt this run object describes created none."""
+    base = f"repos/{REPO_SPEC}/actions/runs/{run.get('id')}"
+    attempt = run.get("run_attempt")
+    path = f"{base}/attempts/{attempt}/jobs" if attempt is not None else f"{base}/jobs"
+    raw = gh(["api", f"{path}?per_page=1", "--jq", ".total_count"], JOBS_FETCH_TIMEOUT_S)
+    try:
+        return int(raw.strip())
+    except ValueError:
+        raise GhApiError(f"unparseable job count: {raw.strip()[:120]}")
+
+
+def find_zero_job_failures(runs, job_counts):
+    """Completed runs with conclusion `failure` and zero jobs on their attempt.
+    `job_counts` caches (id, run_attempt) -> count across polls. Returns
+    (found, lookup_errors): a GhApiError from one run's lookup is collected as
+    (run, exc) and nothing is cached for that run, so the other runs are still
+    checked. Only `failure` is checked: a concurrency-`cancelled` run can
+    legitimately have zero jobs."""
+    found = []
+    lookup_errors = []
+    for r in runs:
+        if r.get("status") != "completed" or r.get("conclusion") != "failure":
+            continue
+        key = (r.get("id"), r.get("run_attempt"))
+        if key not in job_counts:
+            try:
+                job_counts[key] = fetch_job_count(r)
+            except GhApiError as exc:
+                lookup_errors.append((r, exc))
+                continue
+        if job_counts[key] == 0:
+            found.append({"name": r.get("name"), "id": r.get("id")})
+    return found, lookup_errors
+
+
 def parse_gate_state(runs, anchor, review_workflow):
     pending = [f"{r.get('name')}({r.get('status')})" for r in runs if r.get("status") != "completed"]
     anchor_complete = anchor is not None and any(
@@ -384,41 +430,71 @@ def run_wait(sha, anchor, review_workflow):
     review_settled_at = None
     quiet = QuietTracker(QUIET_S)
     polls_done = 0
+    job_counts = {}
 
     while True:
+        state = None
+        error_msg = None
         try:
-            state = parse_gate_state(fetch_runs(sha), anchor, review_workflow)
-            if consecutive_errors > 0:
-                log(f"✓ gh api recovered after {consecutive_errors} failure(s)")
-                consecutive_errors = 0
+            runs = fetch_runs(sha)
+            zero_job_failures, lookup_errors = find_zero_job_failures(runs, job_counts)
+            state = parse_gate_state(runs, anchor, review_workflow)
+            state["zero_job_failures"] = zero_job_failures
+            state["lookup_pending"] = bool(lookup_errors)
+            if lookup_errors:
+                error_msg = "; ".join(
+                    f"job count for {r.get('name')} (run {r.get('id')}): {exc}" for r, exc in lookup_errors
+                )
         except GhApiError as exc:
+            error_msg = str(exc)
+
+        if error_msg is not None:
             consecutive_errors += 1
             if consecutive_errors == 1 or consecutive_errors % ERROR_REPEAT_EVERY == 0:
-                log(f"⚠️  gh api failed ({consecutive_errors}x): {exc}")
-            state = None
+                log(f"⚠️  gh api failed ({consecutive_errors}x): {error_msg}")
+        elif consecutive_errors > 0:
+            log(f"✓ gh api recovered after {consecutive_errors} failure(s)")
+            consecutive_errors = 0
 
-        if state is not None and state["startup_failures"]:
-            failed = ", ".join(f"{f['name']} (run {f['id']})" for f in state["startup_failures"])
-            rerun = " && ".join(f"gh run rerun {f['id']}" for f in state["startup_failures"])
-            log(
-                f"❌ workflow run died before dispatch (startup_failure): {failed}. It created "
-                f"zero jobs, so it is absent from `gh pr checks` entirely. Rerun with: {rerun}"
-            )
+        # A poll with a failed job-count lookup still feeds the startup/zero-job
+        # exit below, but is treated like a failed poll for release and the
+        # review grace clock (`usable` False).
+        usable = state is not None and not state["lookup_pending"]
+
+        if state is not None and (state["startup_failures"] or state["zero_job_failures"]):
+            startup = state["startup_failures"]
+            zero = state["zero_job_failures"]
+            if startup:
+                failed = ", ".join(f"{f['name']} (run {f['id']})" for f in startup)
+                rerun = " && ".join(f"gh run rerun {f['id']}" for f in startup)
+                log(
+                    f"❌ workflow run died before dispatch (startup_failure): {failed}. It created "
+                    f"zero jobs, so it is absent from `gh pr checks` entirely. Rerun with: {rerun}"
+                )
+            if zero:
+                failed = ", ".join(f"{f['name']} (run {f['id']})" for f in zero)
+                rerun = " && ".join(f"gh run rerun {f['id']}" for f in startup + zero)
+                label = "Rerun all with" if startup else "Rerun with"
+                log(
+                    f"❌ workflow run failed with zero jobs: {failed}. It is absent from "
+                    "`gh pr checks` entirely. Rerun once; if it fails again with zero jobs, "
+                    f"check the workflow file on the run page. {label}: {rerun}"
+                )
             return "startup-failure"
 
         settled_now = False
-        if state is not None:
+        if usable:
             if anchor is not None:
                 settled_now = state["total"] > 0 and state["anchor_complete"] and not state["pending"]
             else:
                 clock = polls_done * FAKE_TICK_S if FAKE_TICK_S > 0 else time.monotonic()
                 settled_now = quiet.update(state, clock)
 
-        if state is not None and settled_now and (review_workflow is None or state["review_complete"]):
+        if usable and settled_now and (review_workflow is None or state["review_complete"]):
             return "releasable"
 
         if review_workflow is not None:
-            if state is not None:
+            if usable:
                 if not settled_now:
                     review_settled_at = None
                 else:
@@ -432,7 +508,8 @@ def run_wait(sha, anchor, review_workflow):
                             "did not dispatch — check its on: filter against the PR event."
                         )
                         return "review-missing"
-            # a failed poll (state is None) leaves review_settled_at untouched
+            # a failed poll (state is None, or a failed job-count lookup) leaves
+            # review_settled_at untouched
 
         elapsed = time.monotonic() - start
         if elapsed >= MAX_WAIT_S:
