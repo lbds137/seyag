@@ -148,8 +148,9 @@ fi
 # hook exists to catch. Not the environment either: Linux caps one env string
 # at 128 KiB (MAX_ARG_STRLEN), and python would fail to exec.
 #
-# Bytecode: run.sh points PYTHONPYCACHEPREFIX at a per-user cache, so this
-# import writes nothing into hooks/lib (cache caveats: see run.sh).
+# Bytecode: run.sh points PYTHONPYCACHEPREFIX at a per-user cache, so when
+# dispatched via run.sh this import writes nothing into hooks/lib (a direct
+# manual run still does; cache caveats: see run.sh).
 #
 # On ANY python failure — python3 absent, the import failing, a non-zero exit —
 # the RAW command text is kept. That is the conservative direction rather than

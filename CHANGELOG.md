@@ -2,6 +2,18 @@
 
 All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY-MM-DD>` section per released version; under it, `###` categories in fixed order — Breaking Changes, Features, Bug Fixes, Improvements, Chores, Tests — empty ones omitted; items are `- **scope:** description (#PR)`, written from the version's merged commit subjects.
 
+## 0.3.154 - 2026-11-10
+
+### Improvements
+
+- **config reference:** the legacy `TZUROT_ALLOW_*` aliases are scanned and listed; a non-UTF-8 file is scanned with a warning instead of skipped; prose defaults render as plain text; README's hook rows and hook prose no longer restate knob defaults (docs/config.md holds them), and README's hooks row escapes its `|` (#PRNUM).
+- **claude-usage / plugin-release-check:** `claude-usage --json` adds `as_of` (the plan cache's fetch time, epoch seconds) and `source` (`api`, or `none` past the gate's max age or with no weekly figure, as `--ok`). `plugin-release-check`'s header names the release time's kind (`checkout received` or `commit time`), and refresh rows name the command that counted (`by /reload-plugins` or `by /clear`) (#290).
+- **worktree-transfer:** when main is behind and the worktree's (or `--base`'s) commits ahead change no paths, the refusal now says "rerun with --rebase-base" (in `--base` mode adding that --base must be the worktree HEAD) instead of "land them on main first" (#291).
+
+### Tests
+
+- **probes:** security-sweep.probe and safe-worktree-clean.probe no longer write bytecode into the plugin tree (#290, #PRNUM); pr-body-ref-gate's attached `--title=` row quotes its value (#PRNUM).
+
 ## 0.3.153 - 2026-11-10
 
 ### Improvements
@@ -11,7 +23,7 @@ All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY
 
 ### Tests
 
-- **run.sh probe:** run.probe.sh pins the cache prefix: HOME default, XDG_CACHE_HOME, a relative XDG falling back, a caller's prefix, and no cache dir (#289).
+- **run.sh probe:** run.probe.sh pins the cache prefix: HOME default, XDG_CACHE_HOME, a relative XDG falling back, a caller's prefix, a caller's PYTHONDONTWRITEBYTECODE kept, and no cache dir (#289).
 - **probes:** checks under `tests/` that piped into `grep -q` under pipefail now capture the producer's output first, fixing a SIGPIPE flake (43-53 failures in 2000 runs under load before, 0 after, per #288); a new `tests/pipe-early-exit.probe.sh` lints `tests/*.sh` for the pattern, and keys.probe no longer writes `bin/__pycache__` (#288).
 
 ## 0.3.152 - 2026-11-09
