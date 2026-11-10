@@ -87,6 +87,8 @@ FIXTURE_HEAD_SHA=$(git -C "$FIXTURE_REPO" rev-parse HEAD)
 #   FAKE_GH_JOBS_TOTAL  bare integer the jobs endpoint prints (default 1)
 #   FAKE_GH_JOBS_ERR_ONCE a file path: while it exists, the next jobs call
 #                       deletes it and fails with `gh: HTTP 502`
+#   FAKE_GH_JOBS_EXIT   non-empty: every jobs call fails with `gh: HTTP 502` and
+#                       this exit code (the lookup error never clears)
 cat > "$FAKE_BIN/gh" <<'SHIM'
 #!/bin/bash
 set -uo pipefail
@@ -105,6 +107,10 @@ case "$CMD" in
           rm -f "$FAKE_GH_JOBS_ERR_ONCE"
           echo "gh: HTTP 502" >&2
           exit 1
+        fi
+        if [ -n "${FAKE_GH_JOBS_EXIT:-}" ]; then
+          echo "gh: HTTP 502" >&2
+          exit "$FAKE_GH_JOBS_EXIT"
         fi
         echo "${FAKE_GH_JOBS_TOTAL:-1}"
         exit 0
@@ -311,7 +317,7 @@ run "failed run with jobs releases" 0 \
 [ "$(cat "$D/.count" 2>/dev/null)" = "2" ] \
   && pass "failed run with jobs: two polls, so the cache was exercised" \
   || fail "failed run with jobs: two polls, so the cache was exercised (count=$(cat "$D/.count" 2>/dev/null))"
-JOBS_LINES_7B=$(wc -l < "$JOBS_LOG_7B" 2>/dev/null || echo 0)
+JOBS_LINES_7B=$({ wc -l < "$JOBS_LOG_7B"; } 2>/dev/null || echo 0)
 [ "$JOBS_LINES_7B" -eq 1 ] && grep -q 'runs/5/attempts/1/jobs' "$JOBS_LOG_7B" \
   && pass "failed run with jobs: one lookup across all polls, on the pinned attempt" \
   || fail "failed run with jobs: one lookup across all polls, on the pinned attempt (lines=$JOBS_LINES_7B)"
@@ -406,7 +412,7 @@ D=$(seq_dir lookup-error-startup "[$STARTUP_FAIL,$FAIL_ZERO]")
 run "lookup error beside a startup_failure run" 1 \
   FAKE_GH_SEQ_DIR="$D" SYG_CI_ANCHOR=CI SYG_CI_REVIEW= PR_CI_WAIT_MAX_S=5 \
   FAKE_GH_JOBS_TOTAL=0 FAKE_GH_JOBS_ERR_ONCE="$ERR_ONCE_7K" FAKE_GH_JOBS_LOG="$JOBS_LOG_7K"
-JOBS_LINES_7K=$(wc -l < "$JOBS_LOG_7K" 2>/dev/null || echo 0)
+JOBS_LINES_7K=$({ wc -l < "$JOBS_LOG_7K"; } 2>/dev/null || echo 0)
 [[ "$OUT" == *"CI_GATE_STARTUP_FAILURE"* && "$OUT" == *"died before dispatch"* \
    && "$OUT" == *"gh run rerun 9"* && "$OUT" == *"gh api failed (1x)"* \
    && "$OUT" == *"job count for CI (run 7)"* ]] \
@@ -424,7 +430,7 @@ D=$(seq_dir lookup-error-holds '[{"id":5,"name":"CI","status":"completed","concl
 run "lookup error holds release, then releases once it succeeds" 0 \
   FAKE_GH_SEQ_DIR="$D" SYG_CI_ANCHOR=CI SYG_CI_REVIEW= PR_CI_WAIT_MAX_S=5 \
   FAKE_GH_JOBS_TOTAL=3 FAKE_GH_JOBS_ERR_ONCE="$ERR_ONCE_7L" FAKE_GH_JOBS_LOG="$JOBS_LOG_7L"
-JOBS_LINES_7L=$(wc -l < "$JOBS_LOG_7L" 2>/dev/null || echo 0)
+JOBS_LINES_7L=$({ wc -l < "$JOBS_LOG_7L"; } 2>/dev/null || echo 0)
 POLLS_7L=$(cat "$D/.count" 2>/dev/null || echo 0)
 [[ "$OUT" == *"CI_COMPLETE"* && "$OUT" == *"gh api failed (1x)"* && "$OUT" == *"recovered after 1"* ]] \
   && pass "lookup error hold: error logged, recovery logged, CI_COMPLETE" \
@@ -432,6 +438,20 @@ POLLS_7L=$(cat "$D/.count" 2>/dev/null || echo 0)
 [ "$POLLS_7L" -ge 2 ] && [ "$JOBS_LINES_7L" -eq 2 ] \
   && pass "lookup error hold: not released on the errored poll (polls=$POLLS_7L, lookups=$JOBS_LINES_7L)" \
   || fail "lookup error hold: not released on the errored poll (polls=$POLLS_7L, lookups=$JOBS_LINES_7L)"
+
+# --- 7m. a lookup error that never clears: the heartbeat names the held release
+JOBS_LOG_7M="$WORK/jobs-7m.log"
+D=$(seq_dir lookup-error-persistent '[{"id":5,"name":"CI","status":"completed","conclusion":"failure","run_attempt":1}]')
+run "persistent lookup error holds release until the gate gives up" 1 \
+  FAKE_GH_SEQ_DIR="$D" SYG_CI_ANCHOR=CI SYG_CI_REVIEW= PR_CI_WAIT_MAX_S=0.5 PR_CI_WAIT_HEARTBEAT_S=0 \
+  FAKE_GH_JOBS_TOTAL=3 FAKE_GH_JOBS_EXIT=1 FAKE_GH_JOBS_LOG="$JOBS_LOG_7M"
+JOBS_LINES_7M=$({ wc -l < "$JOBS_LOG_7M"; } 2>/dev/null || echo 0)
+[[ "$OUT" == *"CI_GATE_TIMEOUT"* && "$OUT" == *"release held: job-count lookup failing"* && "$OUT" != *"CI_COMPLETE"* ]] \
+  && pass "persistent lookup error: CI_GATE_TIMEOUT, heartbeat says release is held, never CI_COMPLETE" \
+  || fail "persistent lookup error: CI_GATE_TIMEOUT, heartbeat says release is held, never CI_COMPLETE"
+[ "$JOBS_LINES_7M" -ge 2 ] \
+  && pass "persistent lookup error: the lookup was retried, nothing cached (lookups=$JOBS_LINES_7M)" \
+  || fail "persistent lookup error: the lookup was retried, nothing cached (lookups=$JOBS_LINES_7M)"
 
 # --- 8. gh api errors reported after threshold, recovery logged ------------
 mkdir -p "$WORK/errors"

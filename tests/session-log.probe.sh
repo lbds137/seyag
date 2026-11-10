@@ -72,11 +72,11 @@ EOF
 # 1. list
 run list && ok "list exits 0" || bad "list exit $rc: $(cat "$T/err")"
 # The header names the zone in force NOW, so the expected abbreviation follows today's DST state.
-head -1 "$T/out" | grep -qxF "# times local ($(date +%Z))" && ok "list header names the local zone" || bad "list header: $(head -1 "$T/out")"
+_pipe_out=$(head -1 "$T/out") && grep -qxF "# times local ($(date +%Z))" <<<"$_pipe_out" && ok "list header names the local zone" || bad "list header: $(head -1 "$T/out")"
 [ "$(tail -1 "$T/out")" = "3 transcripts (1 app sessions, 1 local-only); archive: none ($T/archive)" ] && ok "list summary groups A+B by bridge id; archive dir absent is never silent" || bad "list summary: $(tail -1 "$T/out")"
 grep -q "aaaaaaaa  cse_01AAAAAAAA .*Custom Title A *early bird$" "$T/out" \
   && ok "A: later custom-title beats ai-title; first prompt" || bad "A row: $(grep aaaaaaaa "$T/out" | head -1)"
-grep "^2026-09-23 23:30  09-24 00:36" "$T/out" | grep -q "aaaaaaaa" && ok "A first/last in local time" || bad "A times: $(grep -m1 aaaaaaaa "$T/out")"
+_pipe_out=$(grep "^2026-09-23 23:30  09-24 00:36" "$T/out") && grep -q "aaaaaaaa" <<<"$_pipe_out" && ok "A first/last in local time" || bad "A times: $(grep -m1 aaaaaaaa "$T/out")"
 grep -q "cccccccc  local " "$T/out" && ok "C shows app=local" || bad "C row"
 grep -q "aaaaaaaa  cse_01AAAAAAAA      6 " "$T/out" && ok "A turn count ignores the nested \"type\":\"user\" inside a tool input" || bad "A turns: $(grep -m1 aaaaaaaa "$T/out")"
 grep -q "cccccccc.*Session cccccccc… wrap-up" "$T/out" && ok "list title masks a full uuid embedded in message-derived text" || bad "title mask: $(grep -m1 cccccccc "$T/out")"
@@ -84,7 +84,7 @@ grep -q "eeeeeeee" "$T/out" && bad "a transcript with only non-mineable entries 
 grep -q "aaaaaaaa: 1 unparseable lines skipped" "$T/err" && ok "malformed line warned once, not fatal" || bad "malformed warning: $(cat "$T/err")"
 
 # 2. --since is local midnight; --project
-run list --since 2026-09-24 && grep "aaaaaaaa" "$T/out" | grep -q "^2026-09-24 00:30 .* please fix the parser" \
+run list --since 2026-09-24 && _pipe_out=$(grep "aaaaaaaa" "$T/out") && grep -q "^2026-09-24 00:30 .* please fix the parser" <<<"$_pipe_out" \
   && ok "--since 2026-09-24 is local midnight (03:30Z out, 04:30Z in)" || bad "--since local: $(grep -m1 aaaaaaaa "$T/out")"
 run list --since 2026-09-24T00:31 && grep -q "^2026-09-24 00:31 .*aaaaaaaa" "$T/out" && ! grep -q "please fix" "$T/out" \
   && ok "--since minute precision" || bad "--since minute: $(grep -m1 aaaaaaaa "$T/out")"
@@ -209,17 +209,17 @@ run mark --lens owner aaaaaaaa 2026-09-24T00:00 2026-09-24T01:00; [ $rc = 2 ] &&
 [ -e "$SESSION_LEDGER" ] && bad "ambiguous mark wrote the ledger" || ok "ambiguous mark wrote nothing"
 run mark --lens owner cccccccc start end && grep -q "^marked  owner  cccccccc  local  Projects-beta  2026-09-24T06:00Z → 2026-09-24T06:01Z$" "$T/out" \
   && ok "8-char prefix resolves; start/end are the first/last entries" || bad "mark start/end: $(cat "$T/out" "$T/err")"
-head -1 "$SESSION_LEDGER" | grep -q "^# marked_at_utc	lens	transcript_id	app_id	slug	from_utc	to_utc	note$" && ok "ledger created with its header" || bad "ledger header: $(head -1 "$SESSION_LEDGER")"
-cut -f2-7 "$SESSION_LEDGER" | grep -q "^owner	$C_ID	-	-home-deck-Projects-beta	2026-09-24T06:00:00Z	2026-09-24T06:01:00Z$" && ok "ledger row has full ids and ISO UTC" || bad "ledger row: $(tail -1 "$SESSION_LEDGER")"
+_pipe_out=$(head -1 "$SESSION_LEDGER") && grep -q "^# marked_at_utc	lens	transcript_id	app_id	slug	from_utc	to_utc	note$" <<<"$_pipe_out" && ok "ledger created with its header" || bad "ledger header: $(head -1 "$SESSION_LEDGER")"
+_pipe_out=$(cut -f2-7 "$SESSION_LEDGER") && grep -q "^owner	$C_ID	-	-home-deck-Projects-beta	2026-09-24T06:00:00Z	2026-09-24T06:01:00Z$" <<<"$_pipe_out" && ok "ledger row has full ids and ISO UTC" || bad "ledger row: $(tail -1 "$SESSION_LEDGER")"
 run mark --lens owner --note "tab	and
 newline" aaaaaaaa-1111 2026-09-24T00:35 2026-09-24T00:35 && ok "minute-precision mark accepted" || bad "minute mark: $(cat "$T/err")"
-tail -1 "$SESSION_LEDGER" | grep -q "	tab and newline$" && ok "note tabs/newlines become spaces" || bad "note: $(tail -1 "$SESSION_LEDGER")"
+_pipe_out=$(tail -1 "$SESSION_LEDGER") && grep -q "	tab and newline$" <<<"$_pipe_out" && ok "note tabs/newlines become spaces" || bad "note: $(tail -1 "$SESSION_LEDGER")"
 run ledger --lens owner --project alpha && grep -q "^  aaaaaaaa  2026-09-24T03:30Z → 2026-09-24T04:36Z  [0-9]*K  owner: gaps 2026-09-24T03:30Z→2026-09-24T04:34Z, 2026-09-24T04:36Z→2026-09-24T04:36Z$" "$T/out" \
   && ok "minute-precision TO covers the entry at HH:MM:30" || bad "TO round-up: $(grep aaaaaaaa "$T/out")"
 grep -q "no local transcript" "$T/out" && bad "C's mark shown as an orphan although C is on disk (filtered by --project): $(grep 'no local' "$T/out")" || ok "a filtered-out on-disk transcript's mark is not an orphan"
 run mark --lens owner "$UNKNOWN" start end; [ $rc = 2 ] && grep -q "no transcript matches ffffffff…" "$T/err" && ok "unknown full id exits 2 with id8 only" || bad "unknown full id: rc=$rc $(cat "$T/err")"
 run mark --lens owner cse_short 2026-09-24T02:00Z 2026-09-24T03:00Z; [ $rc = 2 ] && grep -q "24 letters or digits" "$T/err" && ok "malformed cse_ id exits 2 naming the shape" || bad "cse_ shape: rc=$rc $(cat "$T/err")"
-run mark --lens owner --note "$(printf 'form\ffeed')" cccccccc start end && tail -1 "$SESSION_LEDGER" | grep -q "	form feed$" && ok "note form feed becomes a space" || bad "note \\\\f: $(tail -1 "$SESSION_LEDGER" | od -c | tail -2)"
+run mark --lens owner --note "$(printf 'form\ffeed')" cccccccc start end && _pipe_out=$(tail -1 "$SESSION_LEDGER") && grep -q "	form feed$" <<<"$_pipe_out" && ok "note form feed becomes a space" || bad "note \\\\f: $(tail -1 "$SESSION_LEDGER" | od -c | tail -2)"
 run mark --lens owner aaaaaaaa-1111 2026-09-24T01:00 2026-09-24T00:00; [ $rc = 2 ] && ok "FROM > TO exits 2" || bad "FROM>TO rc=$rc"
 run mark --lens bogus aaaaaaaa-1111 start end; [ $rc = 2 ] && ok "unknown lens exits 2" || bad "bogus lens rc=$rc"
 run mark --lens owner aaaaaaaa-1111 start 2026-09-24T00:30Z; [ $rc = 2 ] && ok "mark FROM > TO catches start vs an early TO" || bad "start>TO rc=$rc"
@@ -228,7 +228,7 @@ run mark --lens owner zzzzzzzz-0000 start end; [ $rc = 2 ] && ok "unknown transc
 n0=$(grep -vc '^#' "$SESSION_LEDGER")
 run mark --lens owner,agent aaaaaaaa-2222 2026-09-24T05:00Z 2026-09-24T05:01Z && [ "$(grep -vc '^#' "$SESSION_LEDGER")" = $((n0 + 2)) ] \
   && [ "$(grep -c '^marked  ' "$T/out")" = 2 ] && ok "--lens owner,agent writes and echoes two rows" || bad "two lenses: $(cat "$T/out")"
-run mark --lens procedure "$CLOUD" 2026-09-24T02:00Z 2026-09-24T03:00Z && tail -1 "$SESSION_LEDGER" | cut -f3-5 | grep -q "^-	$CLOUD	-$" \
+run mark --lens procedure "$CLOUD" 2026-09-24T02:00Z 2026-09-24T03:00Z && _pipe_out=$(tail -1 "$SESSION_LEDGER" | cut -f3-5) && grep -q "^-	$CLOUD	-$" <<<"$_pipe_out" \
   && grep -q "^marked  procedure  -  cse_01ZZZZZZZZ  -  2026-09-24T02:00Z → 2026-09-24T03:00Z$" "$T/out" && ok "cse_ target records transcript -" || bad "cse mark: $(tail -1 "$SESSION_LEDGER") / $(cat "$T/out")"
 
 # 5. ledger (fresh ledger: A fully mined for owner, B partially, an aged-out transcript, a cloud mark, a malformed line)
@@ -426,7 +426,7 @@ run ledger --extract-due && [ "$(cat "$T/out")" = "# extract-due  window 45d (se
   && ok "extract-due reads cleanupPeriodDays from settings.json (25d < 45-7 exits 0)" \
   || bad "extract-due settings 25d: rc=$rc $(cat "$T/out")"
 touch -d "-40 days" "$BETA/$C_ID.jsonl"
-run ledger --extract-due; [ $rc = 1 ] && head -1 "$T/out" | grep -q "window 45d (settings)" \
+run ledger --extract-due; [ $rc = 1 ] && _pipe_out=$(head -1 "$T/out") && grep -q "window 45d (settings)" <<<"$_pipe_out" \
   && grep -q "^Projects-beta  cccccccc  40d  due-in 5d  owner  missing$" "$T/out" \
   && ok "extract-due with settings window 45d prints row at 40d" || bad "extract-due settings 40d: rc=$rc $(cat "$T/out")"
 mkdir -p "$T/cfg" && printf '{"cleanupPeriodDays": 50}\n' > "$T/cfg/settings.json"

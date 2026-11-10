@@ -44,7 +44,7 @@ d=$(run --since 2026-09-24T01:15Z --json --slug -dash-slug | jq .total_weighted)
 [ "$d" = 7 ] && ok "--slug takes a dash-leading slug as a separate argument" || bad "dash slug $d"
 run --since 2026-09-24T01:15Z --slug nope >/dev/null 2>&1; [ $? != 0 ] && ok "rejects an unknown slug" || bad "unknown slug"
 run >/dev/null 2>&1; [ $? != 0 ] && ok "refuses to guess a window with no meter and no --since" || bad "no-window"
-run --since 2026-09-24T01:15Z | grep -q "TOTAL weighted 0.0M" && ok "text output renders" || bad "text output"
+_pipe_out=$(run --since 2026-09-24T01:15Z) && grep -q "TOTAL weighted 0.0M" <<<"$_pipe_out" && ok "text output renders" || bad "text output"
 
 # --- meter points (--points, --until, --by-session) ---
 # Fixture extension (after every assertion above has run: m7 shifts the totals).
@@ -87,7 +87,7 @@ j=$(run --since 2026-09-23T00:00Z --until 2026-09-24T02:30Z --points --json)
 [ "$(jq -r '.points.edge_left | [.epoch, .distance_s, .extrapolated] | @tsv' <<<"$j")" = "$(printf '1790208000\t86400\ttrue')" ] \
   && ok "no reading at/before the start: first reading stands in, extrapolated, 86400s away" || bad "edge fallback $(jq -c .points.edge_left <<<"$j")"
 [ "$(jq .points.readings_used <<<"$j")" = 3 ] && ok "the points window clips to the readings inside it (3)" || bad "clipped readings"
-run --since 2026-09-23T00:00Z --until 2026-09-24T02:30Z --points | grep -q "points are approximate" && ok "warns when the nearest reading sits far from the window edge" || bad "approximate warning"
+_pipe_out=$(run --since 2026-09-23T00:00Z --until 2026-09-24T02:30Z --points) && grep -q "points are approximate" <<<"$_pipe_out" && ok "warns when the nearest reading sits far from the window edge" || bad "approximate warning"
 j=$(run --since 2026-09-24T01:15Z --until 2026-09-24T05:30Z --points --by-session --json)
 # m1 (s1.jsonl, 50) and every slugA subagent file (5 or 10 with m2) land on a parent
 # session key, never their own. m2 exists identically in s0/ and s1/ subagents and the
@@ -99,7 +99,7 @@ j=$(run --since 2026-09-24T01:15Z --until 2026-09-24T05:30Z --points --by-sessio
   && ok "--by-session: subagent files attach to their parent session's key, never their own" || bad "by-session $(jq -c .points.by_session <<<"$j")"
 u=$(run --since 2026-09-24T01:15Z --until 2026-09-24T02:03Z --json | jq .total_weighted)
 [ "$u" = 50 ] && ok "--until bounds the sweep without --points: usage after the cutoff excluded (50)" || bad "until $u"
-run --since 2026-09-24T01:15Z --until 2026-09-24T05:30Z --points | grep -q "meter points: weekly +60.0 pts" && ok "text output renders the meter-points block" || bad "text points"
+_pipe_out=$(run --since 2026-09-24T01:15Z --until 2026-09-24T05:30Z --points) && grep -q "meter points: weekly +60.0 pts" <<<"$_pipe_out" && ok "text output renders the meter-points block" || bad "text points"
 mv "$RLOG" "$T/readings.saved"
 run --since 2026-09-24T01:15Z --points >/dev/null 2>"$T/err"
 [ $? != 0 ] && grep -q "no usable readings in $RLOG" "$T/err" \

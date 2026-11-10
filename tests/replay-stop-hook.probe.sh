@@ -83,38 +83,38 @@ jq -n --arg tp "$T/two-line.jsonl" '{session_id:"x",transcript_path:$tp,cwd:"/tm
 # trip bq, B trips tesg, none trip promise-ledger-check; the injection at
 # line 9 is skipped, not a 6th turn end).
 out=$("$RSH" blocking-question-channel-check --since 1 --slug proj-slug --projects-dir "$T")
-echo "$out" | tail -1 | grep -qxF "replay-stop-hook: blocking-question-channel-check: 2/5 turn ends tripped across 1 files (0/0 inferred in 0 files without Stop records); 1 live blocks in the logs" \
+_pipe_out=$(tail -1 <<<"$out") && grep -qxF "replay-stop-hook: blocking-question-channel-check: 2/5 turn ends tripped across 1 files (0/0 inferred in 0 files without Stop records); 1 live blocks in the logs" <<<"$_pipe_out" \
   && ok "bq summary: 2/5 tripped across 1 files, 0 inferred; 1 live block" || bad "bq summary: $(echo "$out" | tail -1)"
-echo "$out" | grep -qF "text: Should I proceed with the rename?" \
+grep -qF "text: Should I proceed with the rename?" <<<"$out" \
   && ok "bq tripped section carries the closing question text" || bad "bq tripped text missing"
-echo "$out" | grep -qxF "entry: proj-slug/session1.jsonl:5" \
+grep -qxF "entry: proj-slug/session1.jsonl:5" <<<"$out" \
   && ok "bq tripped section carries the cut entry's slug/file:line" || bad "bq tripped entry line missing"
-echo "$out" | grep -qF "mode: recorded" \
+grep -qF "mode: recorded" <<<"$out" \
   && ok "bq tripped section names its mode" || bad "bq tripped section missing mode: line"
 # E's closing text now ends on "?" too (a stop_hook_active mirroring check: E
 # is silenced because D's ending entry was a "Stop hook feedback:" entry) —
 # still 2/5, and no tripped section at EOF.
-echo "$out" | tail -1 | grep -qxF "replay-stop-hook: blocking-question-channel-check: 2/5 turn ends tripped across 1 files (0/0 inferred in 0 files without Stop records); 1 live blocks in the logs" \
+_pipe_out=$(tail -1 <<<"$out") && grep -qxF "replay-stop-hook: blocking-question-channel-check: 2/5 turn ends tripped across 1 files (0/0 inferred in 0 files without Stop records); 1 live blocks in the logs" <<<"$_pipe_out" \
   && ok "bq stays 2/5 with E's closing text also ending in '?'" || bad "bq summary changed: $(echo "$out" | tail -1)"
-echo "$out" | grep -qxF "entry: proj-slug/session1.jsonl:EOF" \
+grep -qxF "entry: proj-slug/session1.jsonl:EOF" <<<"$out" \
   && bad "bq tripped at EOF — stop_hook_active mirroring is not suppressing E" \
   || ok "no EOF tripped section — stop_hook_active mirroring silences E"
 
 out=$("$RSH" turn-end-shape-gate --since 1 --slug proj-slug --projects-dir "$T")
-echo "$out" | tail -1 | grep -qxF "replay-stop-hook: turn-end-shape-gate: 1/5 turn ends tripped across 1 files (0/0 inferred in 0 files without Stop records); 0 live blocks in the logs" \
+_pipe_out=$(tail -1 <<<"$out") && grep -qxF "replay-stop-hook: turn-end-shape-gate: 1/5 turn ends tripped across 1 files (0/0 inferred in 0 files without Stop records); 0 live blocks in the logs" <<<"$_pipe_out" \
   && ok "tesg summary: 1/5 tripped across 1 files, 0 inferred; 0 live blocks" || bad "tesg summary: $(echo "$out" | tail -1)"
-echo "$out" | grep -qxF "entry: proj-slug/session1.jsonl:11" \
+grep -qxF "entry: proj-slug/session1.jsonl:11" <<<"$out" \
   && ok "tesg trip's entry: line is the cross-session entry, not the injection" || bad "tesg tripped entry line missing/wrong"
 
 out=$("$RSH" promise-ledger-check --since 1 --slug proj-slug --projects-dir "$T")
-echo "$out" | tail -1 | grep -qxF "replay-stop-hook: promise-ledger-check: 0/5 turn ends tripped across 1 files (0/0 inferred in 0 files without Stop records); 0 live blocks in the logs" \
+_pipe_out=$(tail -1 <<<"$out") && grep -qxF "replay-stop-hook: promise-ledger-check: 0/5 turn ends tripped across 1 files (0/0 inferred in 0 files without Stop records); 0 live blocks in the logs" <<<"$_pipe_out" \
   && ok "promise-ledger-check summary: 0/5 tripped across 1 files, 0 inferred; 0 live blocks" || bad "promise-ledger-check summary: $(echo "$out" | tail -1)"
 
 # Purpose canary: other-slug is INFERRED (no stop_hook_summary anywhere) — the
 # injection now IS a turn end, the cross-session entry right after it is not
 # (no assistant entry between them), and no feedback entry means 0 live blocks.
 out=$("$RSH" blocking-question-channel-check --since 1 --slug other-slug --projects-dir "$T")
-echo "$out" | tail -1 | grep -qxF "replay-stop-hook: blocking-question-channel-check: 2/4 turn ends tripped across 1 files (2/4 inferred in 1 files without Stop records); 0 live blocks in the logs" \
+_pipe_out=$(tail -1 <<<"$out") && grep -qxF "replay-stop-hook: blocking-question-channel-check: 2/4 turn ends tripped across 1 files (2/4 inferred in 1 files without Stop records); 0 live blocks in the logs" <<<"$_pipe_out" \
   && ok "purpose canary: other-slug (INFERRED, no summaries) — 2/4 tripped across 1 files, all 4 inferred; 0 live blocks" \
   || bad "purpose canary: $(echo "$out" | tail -1)"
 
@@ -126,7 +126,7 @@ echo "$out" | tail -1 | grep -qxF "replay-stop-hook: blocking-question-channel-c
 [ "$rc" -eq 2 ] && ok "unknown hook name exits 2" || bad "unknown hook name exit=$rc"
 
 out0=$("$RSH" blocking-question-channel-check --since 0 --slug proj-slug --projects-dir "$T")
-echo "$out0" | tail -1 | grep -qxF "replay-stop-hook: blocking-question-channel-check: 0/0 turn ends tripped across 0 files (0/0 inferred in 0 files without Stop records); 0 live blocks in the logs" \
+_pipe_out=$(tail -1 <<<"$out0") && grep -qxF "replay-stop-hook: blocking-question-channel-check: 0/0 turn ends tripped across 0 files (0/0 inferred in 0 files without Stop records); 0 live blocks in the logs" <<<"$_pipe_out" \
   && ok "--since 0 (impossible window) yields 0/0 across 0 files; 0 live blocks" || bad "--since 0: $(echo "$out0" | tail -1)"
 
 "$RSH" blocking-question-channel-check --slug nope --projects-dir "$T" >/dev/null 2>&1; rc=$?
@@ -144,7 +144,7 @@ crash_out=$("$RSH" blocking-question-channel-check --since 1 --slug crash-slug -
 crash_rc=$?
 chmod 644 "$BLOCKED"
 [ "$crash_rc" -eq 1 ] && ok "crash safety: exit 1 on a permission-denied file" || bad "crash safety exit=$crash_rc"
-echo "$crash_out" | grep -q "turn ends tripped" \
+grep -q "turn ends tripped" <<<"$crash_out" \
   && bad "crash safety: a summary line printed on stdout despite the crash" \
   || ok "crash safety: no summary line printed on stdout"
 grep -qE '^replay-stop-hook: replay failed on .*/crash-slug/blocked\.jsonl \(python exit [0-9]+\)$' "$CRASH_ERR" \
@@ -169,17 +169,17 @@ EOF
 ARM_RSH="$ARM/tests/replay-stop-hook.sh"
 
 stop_unset=$(env -u FIXTURE_ARM_VAR "$ARM_RSH" fixture-armed --since 1 --slug proj-slug --projects-dir "$T" 2>&1)
-echo "$stop_unset" | head -1 | grep -qxF "replay-stop-hook: warning: fixture-armed is inert without FIXTURE_ARM_VAR (unset or empty here); export it for this run" \
+_pipe_out=$(head -1 <<<"$stop_unset") && grep -qxF "replay-stop-hook: warning: fixture-armed is inert without FIXTURE_ARM_VAR (unset or empty here); export it for this run" <<<"$_pipe_out" \
   && ok "unarmed stop replay: warning printed before the replay" || bad "unarmed stop replay: first line is $(echo "$stop_unset" | head -1)"
-echo "$stop_unset" | tail -1 | grep -qF " (INERT: FIXTURE_ARM_VAR unset or empty)" \
+_pipe_out=$(tail -1 <<<"$stop_unset") && grep -qF " (INERT: FIXTURE_ARM_VAR unset or empty)" <<<"$_pipe_out" \
   && ok "unarmed stop replay: summary line carries (INERT: FIXTURE_ARM_VAR unset or empty)" || bad "unarmed stop replay: summary $(echo "$stop_unset" | tail -1)"
 
 stop_set=$(FIXTURE_ARM_VAR=1 "$ARM_RSH" fixture-armed --since 1 --slug proj-slug --projects-dir "$T" 2>&1)
-echo "$stop_set" | grep -qF "replay-stop-hook: warning:" \
+grep -qF "replay-stop-hook: warning:" <<<"$stop_set" \
   && bad "armed stop replay: warning printed although the variable is set" || ok "armed stop replay: no warning"
-echo "$stop_set" | grep -qF "(INERT:" \
+grep -qF "(INERT:" <<<"$stop_set" \
   && bad "armed stop replay: summary marked INERT although the variable is set" || ok "armed stop replay: summary not marked INERT"
-echo "$stop_set" | tail -1 | grep -qE ': [1-9][0-9]*/[0-9]+ turn ends tripped across ' \
+_pipe_out=$(tail -1 <<<"$stop_set") && grep -qE ': [1-9][0-9]*/[0-9]+ turn ends tripped across ' <<<"$_pipe_out" \
   && ok "armed stop replay: the fixture hook trips turn ends" || bad "armed stop replay: $(echo "$stop_set" | tail -1)"
 rm -rf "$ARM"
 
@@ -197,7 +197,7 @@ cp "$RSH" "$ARM0/tests/replay-stop-hook.sh"
 printf '#!/bin/bash\n# REPLAY-ARMED-BY:\nexit 0\n' > "$ARM0/plugins/seyag/hooks/fixture-empty.sh"
 printf '%s\n' '{"hooks":{"Stop":[{"matcher":"","hooks":[{"type":"command","command":"bash run.sh fixture-empty"}]}]}}' > "$ARM0/plugins/seyag/hooks/hooks.json"
 out_e=$("$ARM0/tests/replay-stop-hook.sh" fixture-empty --since 1 --slug proj-slug --projects-dir "$T" 2>&1); rc=$?
-[ "$rc" -eq 0 ] && echo "$out_e" | tail -1 | grep -qF "replay-stop-hook: fixture-empty: " \
+[ "$rc" -eq 0 ] && _pipe_out=$(tail -1 <<<"$out_e") && grep -qF "replay-stop-hook: fixture-empty: " <<<"$_pipe_out" \
   && ok "empty REPLAY-ARMED-BY line (stop): runs clean, no crash" || bad "empty REPLAY-ARMED-BY line (stop): rc=$rc $(echo "$out_e" | tail -1)"
 rm -rf "$ARM0"
 
@@ -227,7 +227,7 @@ out_st1=$(XDG_STATE_HOME="$T/stop-caller-state" "$ST_RSH" fixture-state --since 
 [ -z "$(ls -A "$T/stop-caller-state" 2>/dev/null)" ] \
   && ok "stop state fixture: the caller's XDG_STATE_HOME is untouched" \
   || bad "stop state fixture wrote the caller's XDG_STATE_HOME: $(ls -A "$T/stop-caller-state")"
-echo "$out_st1" | tail -1 | grep -qF "replay-stop-hook: fixture-state: 4/5 turn ends tripped across 1 files " \
+_pipe_out=$(tail -1 <<<"$out_st1") && grep -qF "replay-stop-hook: fixture-state: 4/5 turn ends tripped across 1 files " <<<"$_pipe_out" \
   && ok "stop state fixture: state persists within a file (4/5 tripped)" \
   || bad "stop state fixture within-file count: $(echo "$out_st1" | tail -1)"
 out_st2=$(XDG_STATE_HOME="$T/stop-caller-state" "$ST_RSH" fixture-state --since 1 --slug proj-slug --projects-dir "$T" 2>&1)

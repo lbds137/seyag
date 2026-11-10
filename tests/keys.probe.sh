@@ -291,17 +291,17 @@ grep -qF '[--with-key=host]' "$CLOG" && grep -qF '[--name=fixture-cred]' "$CLOG"
 sum=$(md5sum "$S")
 e=$(printf 'fixture-key-value-baz\n' | run "$K" set $'BAZ\n' 2>&1); rc=$?
 [ $rc = 2 ] && grep -qF 'NAME must match ^[A-Z][A-Z0-9_]*$' <<<"$e" && [ "$(md5sum "$S")" = "$sum" ] \
-  && ! run "$K" names | grep -qxF BAZ \
+  && ! { _pipe_out=$(run "$K" names) && grep -qxF BAZ <<<"$_pipe_out"; } \
   && ok "set \$'BAZ\\n' is a usage error and stores nothing" || bad "set BAZ\\n rc $rc: $e"
 sum=$(md5sum "$S")
 e=$(printf 'abc\xe2\x80\xa8QUX=x\n' | run "$K" set SEP_KEY 2>&1); rc=$?
 [ $rc = 1 ] && [ "$e" = "keys: the value for SEP_KEY holds a line-separator character; nothing stored" ] \
-  && [ "$(md5sum "$S")" = "$sum" ] && ! run "$K" names | grep -qxF QUX \
+  && [ "$(md5sum "$S")" = "$sum" ] && ! { _pipe_out=$(run "$K" names) && grep -qxF QUX <<<"$_pipe_out"; } \
   && ok "a value with U+2028 refuses, stores nothing, and injects no QUX in names" || bad "U+2028 value rc $rc: $e"
 sum=$(md5sum "$S")
 e=$(printf 'abc\x0bdef\n' | run "$K" set SEP_KEY 2>&1); rc=$?
 [ $rc = 1 ] && [ "$e" = "keys: the value for SEP_KEY holds a line-separator character; nothing stored" ] \
-  && [ "$(md5sum "$S")" = "$sum" ] && ! run "$K" names | grep -qxF SEP_KEY \
+  && [ "$(md5sum "$S")" = "$sum" ] && ! { _pipe_out=$(run "$K" names) && grep -qxF SEP_KEY <<<"$_pipe_out"; } \
   && ok "a value with VT (0x0b) refuses and stores nothing" || bad "VT value rc $rc: $e"
 CRLF_S="$T/crlf/keys.cred"; mkdir -m 700 "$T/crlf"
 printf 'mock-cred:keys\nALPHA_KEY=fixture-crlf-alpha\r\nBETA_KEY=fixture-crlf-beta\r\n' > "$CRLF_S"
