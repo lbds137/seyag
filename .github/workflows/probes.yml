@@ -6,7 +6,7 @@ name: Probes
 #
 # The suite is split so the slowest part sets the critical path, not their sum:
 # - shellcheck: its own job, in parallel with the probes;
-# - probe-shard: 3 parallel jobs, each running one `--shard I/3` of the suite
+# - probe-shard: 3 parallel jobs, each running one `--shard I/N` of the suite
 #   with -j 0 (parallel across that runner's CPUs). The runner splits the probes
 #   by the per-probe seconds in tests/probe-durations.tsv (greedy, longest
 #   first, so the shards finish at about the same time) and starts each shard's
@@ -50,19 +50,26 @@ jobs:
           shellcheck -S warning $(bash tests/shell-files.sh)
 
   probe-shard:
-    name: probe-shard (${{ matrix.shard }}/${{ matrix.total }})
+    name: probe-shard (${{ matrix.shard }}/${{ strategy.job-total }})
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
-        # The shard list must be exactly 1..total.
+        # Only the number of jobs matters: each job runs shard job-index+1 of
+        # job-total, so any matrix shape (another axis, include:, a duplicate
+        # value) still gives every job its own slice and every probe one run.
+        # `shard` only labels the job; the run's stderr line
+        # "run-probes: shard I/N: ..." names the slice that actually ran.
         shard: [1, 2, 3]
-        total: [3]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Run probe shard ${{ matrix.shard }}/${{ matrix.total }}
-        run: bash tests/run-probes.sh -j 0 --shard ${{ matrix.shard }}/${{ matrix.total }}
+      - name: Run probe shard
+        env:
+          JOB_INDEX: ${{ strategy.job-index }}
+          JOB_TOTAL: ${{ strategy.job-total }}
+        # An empty index would make every job run shard 1, so fail on it instead.
+        run: bash tests/run-probes.sh -j 0 --shard "$((${JOB_INDEX:?} + 1))/${JOB_TOTAL:?}"
 
   probes:
     needs: [shellcheck, probe-shard]
