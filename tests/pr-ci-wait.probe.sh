@@ -82,6 +82,11 @@ FIXTURE_HEAD_SHA=$(git -C "$FIXTURE_REPO" rev-parse HEAD)
 #                       ignored either way per the real command's contract)
 #   FAKE_GH_WATCH_SLEEP seconds `pr checks --watch` hangs before returning
 #                       (default: returns at once)
+#   FAKE_GH_JOBS_LOG    file the per-run jobs endpoints are appended to, one
+#                       line per call (unset: not logged)
+#   FAKE_GH_JOBS_TOTAL  bare integer the jobs endpoint prints (default 1)
+#   FAKE_GH_JOBS_ERR_ONCE a file path: while it exists, the next jobs call
+#                       deletes it and fails with `gh: HTTP 502`
 cat > "$FAKE_BIN/gh" <<'SHIM'
 #!/bin/bash
 set -uo pipefail
@@ -93,6 +98,16 @@ case "$CMD" in
       */pulls/*)
         echo "${FAKE_GH_HEAD_SHA:-}"
         exit "${FAKE_GH_HEAD_EXIT:-0}"
+        ;;
+      */actions/runs/*/jobs*)
+        [ -n "${FAKE_GH_JOBS_LOG:-}" ] && echo "$ENDPOINT" >> "$FAKE_GH_JOBS_LOG"
+        if [ -n "${FAKE_GH_JOBS_ERR_ONCE:-}" ] && [ -e "$FAKE_GH_JOBS_ERR_ONCE" ]; then
+          rm -f "$FAKE_GH_JOBS_ERR_ONCE"
+          echo "gh: HTTP 502" >&2
+          exit 1
+        fi
+        echo "${FAKE_GH_JOBS_TOTAL:-1}"
+        exit 0
         ;;
       */actions/runs\?*)
         SEQ_DIR="${FAKE_GH_SEQ_DIR:?FAKE_GH_SEQ_DIR unset}"
@@ -279,6 +294,144 @@ run "startup_failure -> CI_GATE_STARTUP_FAILURE with rerun cmd" 1 \
 [[ "$OUT" == *"CI_GATE_STARTUP_FAILURE"* && "$OUT" == *"gh run rerun 9"* ]] \
   && pass "startup_failure names the rerun command" \
   || fail "startup_failure names the rerun command"
+
+# --- 7b. positive control: a failed run WITH jobs releases, and the job-count
+#          lookup is cached across polls and pins the attempt. Step 1 holds a
+#          second run in flight so the failed run is seen on two polls. ------
+FAIL_WITH_JOBS='{"id":5,"name":"CI","status":"completed","conclusion":"failure","run_attempt":1}'
+LINT_PENDING='{"id":6,"name":"Lint","status":"in_progress","conclusion":null,"run_attempt":1}'
+JOBS_LOG_7B="$WORK/jobs-7b.log"
+D=$(seq_dir failed-with-jobs "[$FAIL_WITH_JOBS,$LINT_PENDING]" "[$FAIL_WITH_JOBS]")
+run "failed run with jobs releases" 0 \
+  FAKE_GH_SEQ_DIR="$D" SYG_CI_ANCHOR=CI SYG_CI_REVIEW= PR_CI_WAIT_MAX_S=5 \
+  FAKE_GH_JOBS_LOG="$JOBS_LOG_7B" FAKE_GH_JOBS_TOTAL=3
+[[ "$OUT" == *"CI_COMPLETE"* && "$OUT" != *"CI_GATE_STARTUP_FAILURE"* ]] \
+  && pass "failed run with jobs: CI_COMPLETE, no startup sentinel" \
+  || fail "failed run with jobs: CI_COMPLETE, no startup sentinel"
+[ "$(cat "$D/.count" 2>/dev/null)" = "2" ] \
+  && pass "failed run with jobs: two polls, so the cache was exercised" \
+  || fail "failed run with jobs: two polls, so the cache was exercised (count=$(cat "$D/.count" 2>/dev/null))"
+JOBS_LINES_7B=$(wc -l < "$JOBS_LOG_7B" 2>/dev/null || echo 0)
+[ "$JOBS_LINES_7B" -eq 1 ] && grep -q 'runs/5/attempts/1/jobs' "$JOBS_LOG_7B" \
+  && pass "failed run with jobs: one lookup across all polls, on the pinned attempt" \
+  || fail "failed run with jobs: one lookup across all polls, on the pinned attempt (lines=$JOBS_LINES_7B)"
+
+# --- 7c. a failed run that created zero jobs -> startup-failure sentinel ----
+FAIL_ZERO='{"id":7,"name":"CI","status":"completed","conclusion":"failure","run_attempt":1}'
+D=$(seq_dir zero-job "[$FAIL_ZERO]")
+run "zero-job failure -> CI_GATE_STARTUP_FAILURE" 1 \
+  FAKE_GH_SEQ_DIR="$D" SYG_CI_ANCHOR=CI SYG_CI_REVIEW= PR_CI_WAIT_MAX_S=5 \
+  FAKE_GH_JOBS_TOTAL=0
+[[ "$OUT" == *"CI_GATE_STARTUP_FAILURE"* && "$OUT" == *"gh run rerun 7"* \
+   && "$OUT" == *"zero jobs"* && "$OUT" == *"failed with zero jobs"* && "$OUT" != *"CI_COMPLETE"* ]] \
+  && pass "zero-job failure: sentinel, rerun command, never CI_COMPLETE" \
+  || fail "zero-job failure: sentinel, rerun command, never CI_COMPLETE"
+
+# --- 7d. no lookup for a run that is not a failure ---------------------------
+JOBS_LOG_7D="$WORK/jobs-7d.log"
+D=$(seq_dir success-only "[$DONE_CI]")
+run "success run releases without a job lookup" 0 \
+  FAKE_GH_SEQ_DIR="$D" SYG_CI_ANCHOR=CI SYG_CI_REVIEW= PR_CI_WAIT_MAX_S=5 \
+  FAKE_GH_JOBS_LOG="$JOBS_LOG_7D" FAKE_GH_JOBS_TOTAL=0
+[ ! -e "$JOBS_LOG_7D" ] \
+  && pass "success run: the jobs endpoint was never called" \
+  || fail "success run: the jobs endpoint was never called"
+
+# --- 7e. startup_failure AND a zero-job failure: both reported, one exit ----
+D=$(seq_dir startup-and-zero "[$STARTUP_FAIL,$FAIL_ZERO]")
+run "startup_failure plus zero-job failure" 1 \
+  FAKE_GH_SEQ_DIR="$D" SYG_CI_ANCHOR=CI SYG_CI_REVIEW= PR_CI_WAIT_MAX_S=5 \
+  FAKE_GH_JOBS_TOTAL=0
+[[ "$OUT" == *"CI_GATE_STARTUP_FAILURE"* && "$OUT" == *"died before dispatch"* \
+   && "$OUT" == *"zero jobs"* && "$OUT" == *"failed with zero jobs"* \
+   && "$OUT" == *"Rerun all with: gh run rerun 9 && gh run rerun 7"* ]] \
+  && pass "both kinds: the startup line is kept and the zero-job line names both reruns" \
+  || fail "both kinds: the startup line is kept and the zero-job line names both reruns"
+
+# --- 7f. a failed job-count lookup is a failed poll, retried, never cached --
+ERR_ONCE_7F="$WORK/jobs-err-once"
+: > "$ERR_ONCE_7F"
+D=$(seq_dir lookup-error "[$FAIL_ZERO]")
+run "failed jobs lookup is retried, then flags the zero-job run" 1 \
+  FAKE_GH_SEQ_DIR="$D" SYG_CI_ANCHOR=CI SYG_CI_REVIEW= PR_CI_WAIT_MAX_S=5 \
+  FAKE_GH_JOBS_TOTAL=0 FAKE_GH_JOBS_ERR_ONCE="$ERR_ONCE_7F"
+[[ "$OUT" == *"gh api failed (1x)"* && "$OUT" == *"CI_GATE_STARTUP_FAILURE"* ]] \
+  && pass "jobs lookup error: counted as a failed poll, retried, then flagged" \
+  || fail "jobs lookup error: counted as a failed poll, retried, then flagged"
+
+# --- 7g. run_attempt >= 2: the lookup pins that attempt ----------------------
+JOBS_LOG_7G="$WORK/jobs-7g.log"
+D=$(seq_dir attempt-two '[{"id":12,"name":"CI","status":"completed","conclusion":"failure","run_attempt":2}]')
+run "zero-job failure on attempt 2 -> CI_GATE_STARTUP_FAILURE" 1 \
+  FAKE_GH_SEQ_DIR="$D" SYG_CI_ANCHOR=CI SYG_CI_REVIEW= PR_CI_WAIT_MAX_S=5 \
+  FAKE_GH_JOBS_LOG="$JOBS_LOG_7G" FAKE_GH_JOBS_TOTAL=0
+[[ "$OUT" == *"CI_GATE_STARTUP_FAILURE"* ]] && grep -q 'runs/12/attempts/2/jobs' "$JOBS_LOG_7G" \
+  && pass "attempt 2: sentinel, and the lookup hit runs/12/attempts/2/jobs" \
+  || fail "attempt 2: sentinel, and the lookup hit runs/12/attempts/2/jobs"
+
+# --- 7h. no run_attempt on the run object: the plain jobs endpoint -----------
+JOBS_LOG_7H="$WORK/jobs-7h.log"
+D=$(seq_dir attempt-missing '[{"id":13,"name":"CI","status":"completed","conclusion":"failure"}]')
+run "zero-job failure without run_attempt -> CI_GATE_STARTUP_FAILURE" 1 \
+  FAKE_GH_SEQ_DIR="$D" SYG_CI_ANCHOR=CI SYG_CI_REVIEW= PR_CI_WAIT_MAX_S=5 \
+  FAKE_GH_JOBS_LOG="$JOBS_LOG_7H" FAKE_GH_JOBS_TOTAL=0
+[[ "$OUT" == *"CI_GATE_STARTUP_FAILURE"* ]] && grep -q 'runs/13/jobs' "$JOBS_LOG_7H" \
+  && ! grep -q 'attempts' "$JOBS_LOG_7H" \
+  && pass "no run_attempt: sentinel, and the lookup hit runs/13/jobs without attempts" \
+  || fail "no run_attempt: sentinel, and the lookup hit runs/13/jobs without attempts"
+
+# --- 7i. a cancelled zero-job run is not checked ----------------------------
+JOBS_LOG_7I="$WORK/jobs-7i.log"
+D=$(seq_dir cancelled-zero '[{"id":14,"name":"CI","status":"completed","conclusion":"cancelled","run_attempt":1}]')
+run "cancelled zero-job run releases" 0 \
+  FAKE_GH_SEQ_DIR="$D" SYG_CI_ANCHOR=CI SYG_CI_REVIEW= PR_CI_WAIT_MAX_S=5 \
+  FAKE_GH_JOBS_LOG="$JOBS_LOG_7I" FAKE_GH_JOBS_TOTAL=0
+[[ "$OUT" == *"CI_COMPLETE"* ]] && [ ! -e "$JOBS_LOG_7I" ] \
+  && pass "cancelled run: CI_COMPLETE, the jobs endpoint was never called" \
+  || fail "cancelled run: CI_COMPLETE, the jobs endpoint was never called"
+
+# --- 7j. quiet-window mode (no anchor) still flags a zero-job failure --------
+D=$(seq_dir quiet-zero "[$FAIL_ZERO]")
+run "quiet-window mode: zero-job failure -> CI_GATE_STARTUP_FAILURE" 1 \
+  FAKE_GH_SEQ_DIR="$D" SYG_CI_REVIEW= PR_CI_WAIT_MAX_S=5 FAKE_GH_JOBS_TOTAL=0
+[[ "$OUT" == *"CI_GATE_STARTUP_FAILURE"* && "$OUT" == *"quiet-window rule"* ]] \
+  && pass "quiet-window mode: the zero-job failure takes the startup sentinel" \
+  || fail "quiet-window mode: the zero-job failure takes the startup sentinel"
+
+# --- 7k. a lookup error on one run does not hide a startup_failure run -------
+JOBS_LOG_7K="$WORK/jobs-7k.log"
+ERR_ONCE_7K="$WORK/jobs-err-once-7k"
+: > "$ERR_ONCE_7K"
+D=$(seq_dir lookup-error-startup "[$STARTUP_FAIL,$FAIL_ZERO]")
+run "lookup error beside a startup_failure run" 1 \
+  FAKE_GH_SEQ_DIR="$D" SYG_CI_ANCHOR=CI SYG_CI_REVIEW= PR_CI_WAIT_MAX_S=5 \
+  FAKE_GH_JOBS_TOTAL=0 FAKE_GH_JOBS_ERR_ONCE="$ERR_ONCE_7K" FAKE_GH_JOBS_LOG="$JOBS_LOG_7K"
+JOBS_LINES_7K=$(wc -l < "$JOBS_LOG_7K" 2>/dev/null || echo 0)
+[[ "$OUT" == *"CI_GATE_STARTUP_FAILURE"* && "$OUT" == *"died before dispatch"* \
+   && "$OUT" == *"gh run rerun 9"* && "$OUT" == *"gh api failed (1x)"* \
+   && "$OUT" == *"job count for CI (run 7)"* ]] \
+  && pass "lookup error: the startup run is reported and the error names the run" \
+  || fail "lookup error: the startup run is reported and the error names the run"
+[ "$JOBS_LINES_7K" -eq 1 ] \
+  && pass "lookup error: the gate exited on the first poll (one lookup)" \
+  || fail "lookup error: the gate exited on the first poll (lines=$JOBS_LINES_7K)"
+
+# --- 7l. a lookup error holds release until the lookup succeeds --------------
+JOBS_LOG_7L="$WORK/jobs-7l.log"
+ERR_ONCE_7L="$WORK/jobs-err-once-7l"
+: > "$ERR_ONCE_7L"
+D=$(seq_dir lookup-error-holds '[{"id":5,"name":"CI","status":"completed","conclusion":"failure","run_attempt":1}]')
+run "lookup error holds release, then releases once it succeeds" 0 \
+  FAKE_GH_SEQ_DIR="$D" SYG_CI_ANCHOR=CI SYG_CI_REVIEW= PR_CI_WAIT_MAX_S=5 \
+  FAKE_GH_JOBS_TOTAL=3 FAKE_GH_JOBS_ERR_ONCE="$ERR_ONCE_7L" FAKE_GH_JOBS_LOG="$JOBS_LOG_7L"
+JOBS_LINES_7L=$(wc -l < "$JOBS_LOG_7L" 2>/dev/null || echo 0)
+POLLS_7L=$(cat "$D/.count" 2>/dev/null || echo 0)
+[[ "$OUT" == *"CI_COMPLETE"* && "$OUT" == *"gh api failed (1x)"* && "$OUT" == *"recovered after 1"* ]] \
+  && pass "lookup error hold: error logged, recovery logged, CI_COMPLETE" \
+  || fail "lookup error hold: error logged, recovery logged, CI_COMPLETE"
+[ "$POLLS_7L" -ge 2 ] && [ "$JOBS_LINES_7L" -eq 2 ] \
+  && pass "lookup error hold: not released on the errored poll (polls=$POLLS_7L, lookups=$JOBS_LINES_7L)" \
+  || fail "lookup error hold: not released on the errored poll (polls=$POLLS_7L, lookups=$JOBS_LINES_7L)"
 
 # --- 8. gh api errors reported after threshold, recovery logged ------------
 mkdir -p "$WORK/errors"
