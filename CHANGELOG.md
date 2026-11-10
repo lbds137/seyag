@@ -6,8 +6,8 @@ All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY
 
 ### Tests
 
-- **hook probes:** 29 `producer | grep -q` assertions across 7 hook probes read a here-string instead, so grep -q's early exit can no longer SIGPIPE the producer and fail the row under pipefail (#PR).
-- **pr-body-ref-gate probe:** rows pin a value-taking flag as the last word (`--fill -t`) and the attached `--title=-Fix…` form; the 0.3.151 note now calls the escaped-`$` rows mutation guards, since the old code passed them too (#PR).
+- **hook probes:** 29 `producer | grep -q` assertions across 7 hook probes read a here-string instead, so grep -q's early exit can no longer SIGPIPE the producer and fail the row under pipefail (#287).
+- **pr-body-ref-gate probe:** rows pin a value-taking flag as the last word (`--fill -t`) and the attached `--title=-Fix…` form; the 0.3.151 note now calls the escaped-`$` rows mutation guards, since the old code passed them too (#287).
 
 ## 0.3.151 - 2026-11-09
 
