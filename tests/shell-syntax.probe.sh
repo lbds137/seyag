@@ -42,9 +42,9 @@ if check_python "$TMP/broken.py" >/dev/null; then bad "control: broken python fi
 mkdir -p "$TMP/root/plugins/seyag/bin" "$TMP/root/plugins/seyag/hooks" "$TMP/root/tests"
 printf '#!/bin/bash\nfi\n' > "$TMP/root/plugins/seyag/bin/shtool"
 printf '#!/usr/bin/env python3\ndef f(:\n' > "$TMP/root/plugins/seyag/bin/pytool"
-ROOT="$TMP/root" bash "$REPO/tests/shell-files.sh" | grep -qx 'plugins/seyag/bin/shtool' \
+_pipe_out=$(ROOT="$TMP/root" bash "$REPO/tests/shell-files.sh") && grep -qx 'plugins/seyag/bin/shtool' <<<"$_pipe_out" \
   && ok "control: shell-shebang bin file enumerated" || bad "control: shell-shebang bin file not enumerated"
-ROOT="$TMP/root" bash "$REPO/tests/shell-files.sh" --python | grep -qx 'plugins/seyag/bin/pytool' \
+_pipe_out=$(ROOT="$TMP/root" bash "$REPO/tests/shell-files.sh" --python) && grep -qx 'plugins/seyag/bin/pytool' <<<"$_pipe_out" \
   && ok "control: python-shebang bin file enumerated" || bad "control: python-shebang bin file not enumerated"
 
 [ "$fail" -eq 0 ]

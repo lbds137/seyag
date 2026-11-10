@@ -40,36 +40,36 @@ jq -n '{tool_name:"Bash",tool_input:{command:"gh pr view 1 --json title | head -
   || bad "positive control: lossy-pipe-guard did not block the fixture command"
 
 out=$("$RH" lossy-pipe-guard --since 1 --slug proj-slug --projects-dir "$T")
-echo "$out" | grep -qF "gh pr view 1 --json title | head -5" \
+grep -qF "gh pr view 1 --json title | head -5" <<<"$out" \
   && ok "blocked command text appears in output" || bad "blocked command text missing"
 # 3 original commands + the extra Bash block in the two-tool_use entry = 4,
 # plus 2 commands in the subagent transcript = 6; the malformed line, the
 # non-Bash (Read) block, and the mined-corpus report entry do not count.
 # Of the 6, the top-level "gh pr view 1" and the subagent "gh pr view 2" are
 # blocked = 2/6.
-echo "$out" | tail -1 | grep -qxF "replay-hook: lossy-pipe-guard: 2/6 commands blocked across 2 files" \
+_pipe_out=$(tail -1 <<<"$out") && grep -qxF "replay-hook: lossy-pipe-guard: 2/6 commands blocked across 2 files" <<<"$_pipe_out" \
   && ok "summary line: 2/6 blocked across 2 files (subagent transcript replayed, mined-corpus report excluded)" \
   || bad "summary line: $(echo "$out" | tail -1)"
-echo "$out" | grep -qF "gh pr view 2 --json title | head -5" \
+grep -qF "gh pr view 2 --json title | head -5" <<<"$out" \
   && ok "subagent blocked command text appears in output" || bad "subagent blocked command text missing"
-echo "$out" | grep -A1 -xF "command: gh pr view 2 --json title | head -5" | grep -qxF "slug: proj-slug (subagent)" \
+_pipe_out=$(grep -A1 -xF "command: gh pr view 2 --json title | head -5" <<<"$out") && grep -qxF "slug: proj-slug (subagent)" <<<"$_pipe_out" \
   && ok "subagent block is labelled slug: proj-slug (subagent)" || bad "subagent (subagent) label missing"
-echo "$out" | grep -A1 -xF "command: gh pr view 1 --json title | head -5" | grep -qxF "slug: proj-slug" \
+_pipe_out=$(grep -A1 -xF "command: gh pr view 1 --json title | head -5" <<<"$out") && grep -qxF "slug: proj-slug" <<<"$_pipe_out" \
   && ok "top-level block still shows exact slug: proj-slug (no suffix)" || bad "top-level exact slug line missing"
-echo "$out" | grep -qF "gh pr view 3" \
+grep -qF "gh pr view 3" <<<"$out" \
   && bad "mined-corpus command leaked into output" || ok "mined-corpus command (gh pr view 3) not replayed"
 
 outall=$("$RH" lossy-pipe-guard --since 1 --projects-dir "$T")
-echo "$outall" | tail -1 | grep -qxF "replay-hook: lossy-pipe-guard: 2/6 commands blocked across 2 files" \
+_pipe_out=$(tail -1 <<<"$outall") && grep -qxF "replay-hook: lossy-pipe-guard: 2/6 commands blocked across 2 files" <<<"$_pipe_out" \
   && ok "all-slugs run: 2/6 blocked across 2 files (depth arithmetic holds without --slug)" \
   || bad "all-slugs summary line: $(echo "$outall" | tail -1)"
 
 # Trailing slash on --projects-dir must not break the slug strip.
 outslash=$("$RH" lossy-pipe-guard --since 1 --slug proj-slug --projects-dir "$T/")
-echo "$outslash" | tail -1 | grep -qxF "replay-hook: lossy-pipe-guard: 2/6 commands blocked across 2 files" \
+_pipe_out=$(tail -1 <<<"$outslash") && grep -qxF "replay-hook: lossy-pipe-guard: 2/6 commands blocked across 2 files" <<<"$_pipe_out" \
   && ok "trailing-slash --projects-dir: 2/6 blocked across 2 files" \
   || bad "trailing-slash --projects-dir summary line: $(echo "$outslash" | tail -1)"
-echo "$outslash" | grep -A1 -xF "command: gh pr view 2 --json title | head -5" | grep -qxF "slug: proj-slug (subagent)" \
+_pipe_out=$(grep -A1 -xF "command: gh pr view 2 --json title | head -5" <<<"$outslash") && grep -qxF "slug: proj-slug (subagent)" <<<"$_pipe_out" \
   && ok "trailing-slash --projects-dir: subagent block still labelled slug: proj-slug (subagent)" \
   || bad "trailing-slash --projects-dir: subagent (subagent) label missing"
 
@@ -78,10 +78,10 @@ echo "$outslash" | grep -A1 -xF "command: gh pr view 2 --json title | head -5" |
 # normalization. All-slugs mode uses SEARCH_ROOT=$PROJECTS_DIR directly, so
 # it is the case that actually exercises PROJECTS_DIR=${PROJECTS_DIR%/}.
 outallslash=$("$RH" lossy-pipe-guard --since 1 --projects-dir "$T/")
-echo "$outallslash" | tail -1 | grep -qxF "replay-hook: lossy-pipe-guard: 2/6 commands blocked across 2 files" \
+_pipe_out=$(tail -1 <<<"$outallslash") && grep -qxF "replay-hook: lossy-pipe-guard: 2/6 commands blocked across 2 files" <<<"$_pipe_out" \
   && ok "all-slugs trailing-slash --projects-dir: 2/6 blocked across 2 files" \
   || bad "all-slugs trailing-slash --projects-dir summary line: $(echo "$outallslash" | tail -1)"
-echo "$outallslash" | grep -A1 -xF "command: gh pr view 1 --json title | head -5" | grep -qxF "slug: proj-slug" \
+_pipe_out=$(grep -A1 -xF "command: gh pr view 1 --json title | head -5" <<<"$outallslash") && grep -qxF "slug: proj-slug" <<<"$_pipe_out" \
   && ok "all-slugs trailing-slash --projects-dir: top-level block still labelled slug: proj-slug" \
   || bad "all-slugs trailing-slash --projects-dir: top-level slug label missing/empty"
 
@@ -89,7 +89,7 @@ echo "$outallslash" | grep -A1 -xF "command: gh pr view 1 --json title | head -5
 [ "$rc" -eq 2 ] && ok "unknown hook name exits 2" || bad "unknown hook name exit=$rc"
 
 out0=$("$RH" lossy-pipe-guard --since 0 --slug proj-slug --projects-dir "$T")
-echo "$out0" | tail -1 | grep -qxF "replay-hook: lossy-pipe-guard: 0/0 commands blocked across 0 files" \
+_pipe_out=$(tail -1 <<<"$out0") && grep -qxF "replay-hook: lossy-pipe-guard: 0/0 commands blocked across 0 files" <<<"$_pipe_out" \
   && ok "--since 0 (impossible window) yields 0/0 across 0 files" || bad "--since 0: $(echo "$out0" | tail -1)"
 
 "$RH" lossy-pipe-guard --slug nope --projects-dir "$T" >/dev/null 2>&1; rc=$?
@@ -110,17 +110,17 @@ EOF
 ARM_RH="$ARM/tests/replay-hook.sh"
 
 out_unset=$(env -u FIXTURE_ARM_VAR "$ARM_RH" fixture-armed --since 1 --slug proj-slug --projects-dir "$T" 2>&1)
-echo "$out_unset" | head -1 | grep -qxF "replay-hook: warning: fixture-armed is inert without FIXTURE_ARM_VAR (unset or empty here); export it for this run" \
+_pipe_out=$(head -1 <<<"$out_unset") && grep -qxF "replay-hook: warning: fixture-armed is inert without FIXTURE_ARM_VAR (unset or empty here); export it for this run" <<<"$_pipe_out" \
   && ok "unarmed run: warning printed before the replay" || bad "unarmed run: first line is $(echo "$out_unset" | head -1)"
-echo "$out_unset" | tail -1 | grep -qF " (INERT: FIXTURE_ARM_VAR unset or empty)" \
+_pipe_out=$(tail -1 <<<"$out_unset") && grep -qF " (INERT: FIXTURE_ARM_VAR unset or empty)" <<<"$_pipe_out" \
   && ok "unarmed run: summary line carries (INERT: FIXTURE_ARM_VAR unset or empty)" || bad "unarmed run: summary $(echo "$out_unset" | tail -1)"
 
 out_set=$(FIXTURE_ARM_VAR=1 "$ARM_RH" fixture-armed --since 1 --slug proj-slug --projects-dir "$T" 2>&1)
-echo "$out_set" | grep -qF "replay-hook: warning:" \
+grep -qF "replay-hook: warning:" <<<"$out_set" \
   && bad "armed run: warning printed although the variable is set" || ok "armed run: no warning"
-echo "$out_set" | grep -qF "(INERT:" \
+grep -qF "(INERT:" <<<"$out_set" \
   && bad "armed run: summary marked INERT although the variable is set" || ok "armed run: summary not marked INERT"
-echo "$out_set" | tail -1 | grep -qxF "replay-hook: fixture-armed: 6/6 commands blocked across 2 files" \
+_pipe_out=$(tail -1 <<<"$out_set") && grep -qxF "replay-hook: fixture-armed: 6/6 commands blocked across 2 files" <<<"$_pipe_out" \
   && ok "armed run: the fixture hook blocks every replayed command (6/6)" || bad "armed run: $(echo "$out_set" | tail -1)"
 # Two named variables, one set and one unset: only the unset one is named, and
 # a token that is not a shell identifier is skipped.
@@ -132,13 +132,13 @@ cat > "$ARM/plugins/seyag/hooks/fixture-two.sh" <<'EOF'
 exit 2
 EOF
 out_two=$(FIXTURE_SET_VAR=1 env -u FIXTURE_ARM_VAR "$ARM_RH" fixture-two --since 1 --slug proj-slug --projects-dir "$T" 2>&1)
-echo "$out_two" | grep -qxF "replay-hook: warning: fixture-two is inert without FIXTURE_ARM_VAR (unset or empty here); export it for this run" \
+grep -qxF "replay-hook: warning: fixture-two is inert without FIXTURE_ARM_VAR (unset or empty here); export it for this run" <<<"$out_two" \
   && ok "two-var field: the unset variable is named" || bad "two-var field: $(echo "$out_two" | head -1)"
-echo "$out_two" | grep -qF "FIXTURE_SET_VAR" \
+grep -qF "FIXTURE_SET_VAR" <<<"$out_two" \
   && bad "two-var field: the set variable was named" || ok "two-var field: the set variable is not named"
-echo "$out_two" | grep -qF "9-not-a-name" \
+grep -qF "9-not-a-name" <<<"$out_two" \
   && bad "non-identifier token was named" || ok "non-identifier token is skipped"
-echo "$out_two" | tail -1 | grep -qxF "replay-hook: fixture-two: 0/6 commands blocked across 2 files (INERT: FIXTURE_ARM_VAR unset or empty)" \
+_pipe_out=$(tail -1 <<<"$out_two") && grep -qxF "replay-hook: fixture-two: 0/6 commands blocked across 2 files (INERT: FIXTURE_ARM_VAR unset or empty)" <<<"$_pipe_out" \
   && ok "two-var field: summary carries exactly one INERT suffix" || bad "two-var field summary: $(echo "$out_two" | tail -1)"
 # An empty REPLAY-ARMED-BY line names nothing: no crash under set -u, no warning.
 cat > "$ARM/plugins/seyag/hooks/fixture-empty.sh" <<'EOF'
@@ -147,7 +147,7 @@ cat > "$ARM/plugins/seyag/hooks/fixture-empty.sh" <<'EOF'
 exit 0
 EOF
 out_empty=$("$ARM_RH" fixture-empty --since 1 --slug proj-slug --projects-dir "$T" 2>&1); rc=$?
-[ "$rc" -eq 0 ] && echo "$out_empty" | tail -1 | grep -qxF "replay-hook: fixture-empty: 0/6 commands blocked across 2 files" \
+[ "$rc" -eq 0 ] && _pipe_out=$(tail -1 <<<"$out_empty") && grep -qxF "replay-hook: fixture-empty: 0/6 commands blocked across 2 files" <<<"$_pipe_out" \
   && ok "empty REPLAY-ARMED-BY line: runs clean, no warning" || bad "empty REPLAY-ARMED-BY line: rc=$rc $(echo "$out_empty" | tail -1)"
 rm -rf "$ARM"
 
@@ -155,7 +155,7 @@ rm -rf "$ARM"
 /usr/bin/grep -qxF '# REPLAY-ARMED-BY: SYG_PRIVATE_TERMS_FILE' "$REPO/plugins/seyag/hooks/private-term-guard.sh" \
   && ok "private-term-guard.sh carries the REPLAY-ARMED-BY field" || bad "private-term-guard.sh lacks the REPLAY-ARMED-BY field"
 out_ptg=$(env -u SYG_PRIVATE_TERMS_FILE "$RH" private-term-guard --since 1 --slug proj-slug --projects-dir "$T" 2>&1)
-echo "$out_ptg" | grep -qxF "replay-hook: warning: private-term-guard is inert without SYG_PRIVATE_TERMS_FILE (unset or empty here); export it for this run" \
+grep -qxF "replay-hook: warning: private-term-guard is inert without SYG_PRIVATE_TERMS_FILE (unset or empty here); export it for this run" <<<"$out_ptg" \
   && ok "real private-term-guard replay with the switch unset: warning printed" || bad "real private-term-guard replay: no warning"
 
 # Replay state isolation: a hook that keeps state under XDG_STATE_HOME or
@@ -192,7 +192,7 @@ out_st1=$(XDG_STATE_HOME="$T/caller-state" "$ST_RH" fixture-state --since 1 --sl
 [ -z "$(ls -A "$T/caller-state" 2>/dev/null)" ] \
   && ok "state fixture: the caller's XDG_STATE_HOME is untouched" \
   || bad "state fixture wrote the caller's XDG_STATE_HOME: $(ls -A "$T/caller-state")"
-echo "$out_st1" | tail -1 | grep -qxF "replay-hook: fixture-state: 4/6 commands blocked across 2 files" \
+_pipe_out=$(tail -1 <<<"$out_st1") && grep -qxF "replay-hook: fixture-state: 4/6 commands blocked across 2 files" <<<"$_pipe_out" \
   && ok "state fixture: state persists within a file (each file's first command passes, the other commands block)" \
   || bad "state fixture within-file count: $(echo "$out_st1" | tail -1)"
 out_st2=$(XDG_STATE_HOME="$T/caller-state" "$ST_RH" fixture-state --since 1 --slug proj-slug --projects-dir "$T" 2>&1)
@@ -230,7 +230,7 @@ printf '%s\n' '{"type":"assistant","cwd":"/tmp/fixture-project","message":{"cont
   > "$AK/proj-slug/sess-a.jsonl"
 cp "$AK/proj-slug/sess-a.jsonl" "$AK/proj-slug/sess-b.jsonl"
 out_ak=$(XDG_STATE_HOME="$T/caller-state" "$AK_RH" fixture-ack --since 1 --slug proj-slug --projects-dir "$AK" 2>&1)
-echo "$out_ak" | tail -1 | grep -qxF "replay-hook: fixture-ack: 2/2 commands blocked across 2 files" \
+_pipe_out=$(tail -1 <<<"$out_ak") && grep -qxF "replay-hook: fixture-ack: 2/2 commands blocked across 2 files" <<<"$_pipe_out" \
   && ok "ack fixture: both sessions block (session 2 does not see session 1's ack)" \
   || bad "ack fixture masking summary: $(echo "$out_ak" | tail -1)"
 [ -z "$(ls -A "$T/caller-state" 2>/dev/null)" ] \

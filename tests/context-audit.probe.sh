@@ -58,7 +58,7 @@ grep -q 'missing path .*other_thing.md: ~/nope/file.txt' <<<"$R" && ok "reports 
 grep -q 'missing path .*MEMORY.md: ~/index-missing/x' <<<"$R" && ok "scans MEMORY.md itself for paths" || bad "MEMORY.md paths" "$R"
 # shellcheck disable=SC2088 # the tilde is literal text in the output under test
 grep -q '~/exists' <<<"$R" && bad "reported an existing path" "$R" || ok "passes an existing path"
-grep -v 'memory files,' <<<"$R" | grep -q 'gdrive\|linked\|fakemount' && bad "looked into a mount (a stat there would fail and be reported)" "$R" \
+_pipe_out=$(grep -v 'memory files,' <<<"$R") && grep -q 'gdrive\|linked\|fakemount' <<<"$_pipe_out" && bad "looked into a mount (a stat there would fail and be reported)" "$R" \
   || ok "never stats into ~/gdrive, a mount-table rclone mount, or a symlink into one"
 grep -q 'dangling link .*\[\[no-such-memory\]\]' <<<"$R" && ok "reports a dangling link" || bad "dangling link" "$R"
 grep -q '\[\[\^' <<<"$R" && bad "treated a regex as a link" "$R" || ok "ignores regex text in brackets"

@@ -307,7 +307,7 @@ reset; run --config "$T/c.json" redeploy live api --yes
 cfg '{"envs": {"dev": "development", "prod": "production"}, "protected": []}'
 reset; run --config "$T/c.json" redeploy prod api --yes
 [ $rc = 0 ] && [ "$(reqs '[r["op"] for r in rows]')" = "['ServiceInstanceRedeploy']" ] \
-  && "$RO" --help | grep -q '\[\] UNPROTECTS EVERY env' && grep -qF '`"protected": []` unprotects every env' "$REPO/plugins/seyag/skills/railway-ops/SKILL.md" \
+  && _pipe_out=$("$RO" --help) && grep -q '\[\] UNPROTECTS EVERY env' <<<"$_pipe_out" && grep -qF '`"protected": []` unprotects every env' "$REPO/plugins/seyag/skills/railway-ops/SKILL.md" \
   && ok "12c \"protected\": [] is allowed and unprotects everything, and --help and the skill both say so" || bad "12c: rc=$rc $(cat "$T/err")"
 cfg '{"envs": {"dev": "development", "prod": "production"}, "token_env": {"dev": "SHARED_TOK", "prod": "SHARED_TOK"}}'
 reset; run --config "$T/c.json" ids dev

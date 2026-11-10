@@ -283,7 +283,7 @@ if [ $rc = 0 ] && [ ! -e "$A/.claude/worktrees/gone" ] && [ ! -e "$A/.claude/wor
   && ! git -C "$A" rev-parse -q --verify refs/heads/worktree-agent-gone >/dev/null \
   && ! git -C "$A" rev-parse -q --verify refs/heads/worktree-agent-gonelocked >/dev/null \
   && [ ! -e "$common/worktrees/gone" ] && [ ! -e "$common/worktrees/gonelocked" ] \
-  && ! git -C "$A" worktree list --porcelain | grep -q prunable \
+  && ! { _pipe_out=$(git -C "$A" worktree list --porcelain) && grep -q prunable <<<"$_pipe_out"; } \
   && [ -f "$A/.claude/worktrees/keep/new.txt" ] && git -C "$A" rev-parse -q --verify refs/heads/worktree-agent-keep >/dev/null \
   && grep -q 'removed, branch worktree-agent-gone deleted' <<<"$out"; then
   ok "--apply removes SAFE trees (locked one unlocked), deletes branches, prunes; the HOLD tree stays"
@@ -547,8 +547,8 @@ mkdir -p "$B1W/pytestcache/.pytest_cache/v"
 printf '*\n' > "$B1W/pytestcache/.pytest_cache/.gitignore"
 printf 'pytest cache dir\n' > "$B1W/pytestcache/.pytest_cache/README.md"
 printf '{}\n' > "$B1W/pytestcache/.pytest_cache/v/cache"
-git -C "$B1W/pytestcache" status --porcelain=v1 --ignored=matching --untracked-files=all \
-  | grep -qx '!! \.pytest_cache/README\.md' \
+_pipe_out=$(git -C "$B1W/pytestcache" status --porcelain=v1 --ignored=matching --untracked-files=all) \
+  && grep -qx '!! \.pytest_cache/README\.md' <<<"$_pipe_out" \
   && ok "pytestcache: git status --ignored=matching lists .pytest_cache/README.md individually" \
   || bad "pytestcache: .pytest_cache/README.md not listed individually"
 add_tree batch1 cleanlinked
@@ -934,7 +934,7 @@ for cmd in 'safe-worktree-clean --repo /srv/team/myrepo --apply' \
 done
 
 # --- Usage and JSON shape. ---
-"$TOOL" --help | grep -q 'safe-worktree-clean \[--apply\] \[--repo DIR\]' && ok "--help prints usage" || bad "--help"
+_pipe_out=$("$TOOL" --help) && grep -q 'safe-worktree-clean \[--apply\] \[--repo DIR\]' <<<"$_pipe_out" && ok "--help prints usage" || bad "--help"
 "$TOOL" --bogus >/dev/null 2>&1; [ $? = 2 ] && ok "unknown argument exits 2" || bad "unknown argument"
 "$TOOL" --repo "$T" >/dev/null 2>&1; [ $? = 2 ] && ok "a non-repo --repo exits 2" || bad "non-repo"
 python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["base"]=="origin/main" and "locks" in d' \
@@ -1379,7 +1379,7 @@ add_tree sweep15 mm && [ -d "$SW15W/mm" ] || bad "P15 setup: add_tree mm"
 echo secret > "$SW15W/mm/a.txt" \
   && git -C "$SW15W/mm" add a.txt \
   && echo hi > "$SW15W/mm/a.txt" \
-  && git -C "$SW15W/mm" status --porcelain=v1 | grep -qx 'MM a\.txt' \
+  && _pipe_out=$(git -C "$SW15W/mm" status --porcelain=v1) && grep -qx 'MM a\.txt' <<<"$_pipe_out" \
   || bad "P15 setup: status MM a.txt"
 PLAN_P15=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["hold_plan"] or "")' < <("$TOOL" --repo "$SW15" --json))
 [ -n "$PLAN_P15" ] || bad "P15 setup: PLAN_P15"
@@ -1496,8 +1496,8 @@ fi
 
 # P20 cache record: P4's held backup changes.txt lists __pycache__ under the excluded section.
 if [ -f "$BK_HELD/changes.txt" ] \
-  && sed -n '/^=== Excluded as cache\/regenerable (not in tree\.tgz) ===$/,$p' "$BK_HELD/changes.txt" | grep -qx '__pycache__' \
-  && sed -n '/^=== Excluded as cache\/regenerable (not in tree\.tgz) ===$/,$p' "$BK5/changes.txt" | grep -qx 'none'; then
+  && _pipe_out=$(sed -n '/^=== Excluded as cache\/regenerable (not in tree\.tgz) ===$/,$p' "$BK_HELD/changes.txt") && grep -qx '__pycache__' <<<"$_pipe_out" \
+  && _pipe_out=$(sed -n '/^=== Excluded as cache\/regenerable (not in tree\.tgz) ===$/,$p' "$BK5/changes.txt") && grep -qx 'none' <<<"$_pipe_out"; then
   ok "P20: changes.txt lists __pycache__ under excluded section for P4 held and none when none excluded"
 else
   bad "P20: changes.txt excluded section"; cat "$BK_HELD/changes.txt" 2>/dev/null
@@ -1646,7 +1646,7 @@ C1_P24=$(git -C "$SW24W/wt24" rev-parse HEAD 2>/dev/null)
 [ -n "$C1_P24" ] || bad "P24 setup: C1_P24"
 git -C "$SW24W/wt24" reset -q --hard HEAD~1 || bad "P24 setup: reset --hard HEAD~1"
 ! git -C "$SW24W/wt24" merge-base --is-ancestor "$C1_P24" refs/heads/worktree-agent-wt24 2>/dev/null \
-  && git -C "$SW24W/wt24" rev-list --walk-reflogs HEAD 2>/dev/null | grep -qx "$C1_P24" \
+  && _pipe_out=$(git -C "$SW24W/wt24" rev-list --walk-reflogs HEAD 2>/dev/null) && grep -qx "$C1_P24" <<<"$_pipe_out" \
   || bad "P24 setup: C1_P24 unreachable from branch and present in HEAD reflog"
 echo u > "$SW24W/wt24/u.txt" && [ -f "$SW24W/wt24/u.txt" ] || bad "P24 setup: u.txt"
 PLAN_P24=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["hold_plan"] or "")' < <("$TOOL" --repo "$SW24" --json))
@@ -1663,7 +1663,7 @@ if [ "$rc_p24" -eq 0 ] && [ ! -e "$SW24W/wt24" ] && [ -f "$BK24/reflog.pack" ] \
   && [ -f "$BK24/reflog.idx" ] \
   && [ "$(stat -c %a "$BK24/reflog.idx" 2>/dev/null)" = 600 ] \
   && { [ ! -e "$BK24/reflog.rev" ] || [ "$(stat -c %a "$BK24/reflog.rev" 2>/dev/null)" = 600 ]; } \
-  && sed -n '/^=== Commits only in reflogs or refs\/worktree\/\* (in reflog\.pack) ===$/,/^===/p' "$BK24/changes.txt" | grep -q "^$C1_P24 " \
+  && _pipe_out=$(sed -n '/^=== Commits only in reflogs or refs\/worktree\/\* (in reflog\.pack) ===$/,/^===/p' "$BK24/changes.txt") && grep -q "^$C1_P24 " <<<"$_pipe_out" \
   && grep -q 'index-pack --stdin --fix-thin < .*reflog\.pack' "$BK24/README.txt" \
   && git -C "$T/p24-clone" index-pack --stdin --fix-thin < "$BK24/reflog.pack" >/dev/null 2>&1 \
   && git -C "$T/p24-clone" cat-file -e "$C1_P24^{commit}" 2>/dev/null \
@@ -1801,7 +1801,7 @@ BK28=${bk28_dirs[0]:-}
 if [ "$rc_p28" -eq 0 ] && [ ! -e "$SW28W/wt28" ] \
   && ! git -C "$SW28" rev-parse -q --verify refs/heads/feature/x >/dev/null \
   && [ -f "$BK28/branch.bundle" ] \
-  && git -C "$SW28" bundle list-heads "$BK28/branch.bundle" 2>/dev/null | grep -q 'refs/heads/feature/x$' \
+  && _pipe_out=$(git -C "$SW28" bundle list-heads "$BK28/branch.bundle" 2>/dev/null) && grep -q 'refs/heads/feature/x$' <<<"$_pipe_out" \
   && grep -qx 'branch: feature/x' "$BK28/README.txt" \
   && grep -q 'feature/x:feature/x$' "$BK28/README.txt"; then
   ok "P28: branch feature/x tree is approvable, removed on apply with branch deleted, and bundle/README name feature/x"
@@ -1875,8 +1875,8 @@ add_tree sweep31 wt31s && [ -d "$SW31W/wt31s" ] || bad "P31 setup: add_tree wt31
 tree_31=$(git -C "$SW31W/wt31k" rev-parse 'HEAD^{tree}' 2>/dev/null)
 C_P31=$(git -C "$SW31W/wt31k" commit-tree "$tree_31" -p HEAD -m keep 2>/dev/null)
 [ -n "$C_P31" ] && git -C "$SW31W/wt31k" update-ref refs/worktree/keep "$C_P31" || bad "P31 setup: commit-tree + update-ref keep"
-! git -C "$SW31W/wt31k" rev-list --walk-reflogs HEAD 2>/dev/null | grep -qx "$C_P31" \
-  && ! git -C "$SW31W/wt31k" rev-list --walk-reflogs refs/heads/worktree-agent-wt31k 2>/dev/null | grep -qx "$C_P31" \
+! { _pipe_out=$(git -C "$SW31W/wt31k" rev-list --walk-reflogs HEAD 2>/dev/null) && grep -qx "$C_P31" <<<"$_pipe_out"; } \
+  && ! { _pipe_out=$(git -C "$SW31W/wt31k" rev-list --walk-reflogs refs/heads/worktree-agent-wt31k 2>/dev/null) && grep -qx "$C_P31" <<<"$_pipe_out"; } \
   || bad "P31 setup: C_P31 absent from HEAD and branch reflogs"
 git -C "$SW31W/wt31s" update-ref refs/worktree/x "$C1" || bad "P31 setup: update-ref refs/worktree/x on base"
 J_P31=$("$TOOL" --repo "$SW31" --json); rc_p31d=$?
@@ -1900,8 +1900,8 @@ shopt -u nullglob
 BK31=${bk31_dirs[0]:-}
 git clone -q "$T/sweep31-origin.git" "$T/p31-clone" 2>/dev/null && [ -d "$T/p31-clone" ] || bad "P31 setup: clone p31-clone"
 if [ "$rc_p31a" -eq 0 ] && [ ! -e "$SW31W/wt31k" ] && [ ! -e "$SW31W/wt31s" ] && [ -f "$BK31/reflog.pack" ] \
-  && sed -n '/^=== Commits only in reflogs or refs\/worktree\/\* (in reflog\.pack) ===$/,/^===/p' "$BK31/changes.txt" | grep -q "^$C_P31 " \
-  && sed -n '/^=== refs\/worktree\/\* ===$/,/^===/p' "$BK31/changes.txt" | grep -qx "$C_P31 refs/worktree/keep" \
+  && _pipe_out=$(sed -n '/^=== Commits only in reflogs or refs\/worktree\/\* (in reflog\.pack) ===$/,/^===/p' "$BK31/changes.txt") && grep -q "^$C_P31 " <<<"$_pipe_out" \
+  && _pipe_out=$(sed -n '/^=== refs\/worktree\/\* ===$/,/^===/p' "$BK31/changes.txt") && grep -qx "$C_P31 refs/worktree/keep" <<<"$_pipe_out" \
   && grep -q 'update-ref <refname> <sha from changes\.txt>' "$BK31/README.txt" \
   && git -C "$T/p31-clone" index-pack --stdin --fix-thin < "$BK31/reflog.pack" >/dev/null 2>&1 \
   && git -C "$T/p31-clone" cat-file -e "$C_P31^{commit}" 2>/dev/null; then

@@ -377,7 +377,7 @@ FAKE_SETTINGS_FILE="$SETTINGS_MATCHING" FAKE_PROTECTION_ERROR_TEXT="$FREE_PLAN_4
 FAKE_SETTINGS_FILE="$SETTINGS_MATCHING" FAKE_PROTECTION_ERROR_TEXT="$FREE_PLAN_403" \
   run "show on the free-plan wall: exits 0" 0 show o/r
 [[ "$OUT" == *"$SKIPPED"* && "$OUT" != *"unknown (api error)"* && "$OUT" != *"protection."* \
-   && "$(printf '%s\n' "$OUT" | grep -cF "$SKIPPED")" -eq 1 ]] \
+   && "$(grep -cF "$SKIPPED" <<<"$OUT")" -eq 1 ]] \
   && pass "free-plan show: one skipped line, no unknown rows, no protection rows" \
   || { fail "free-plan show: one skipped line, no unknown rows, no protection rows"; printf '%s\n' "$OUT" | sed 's/^/      /'; }
 [[ "$(show_line allow_rebase_merge)" == *" ok "* ]] \

@@ -86,7 +86,7 @@ done
 ok "server-side stubs: pre-receive, update, post-receive, post-update, proc-receive"
 for f in "$STABLE"/*; do
   [ "${f##*/}" = plugin-root ] && continue
-  head -1 "$f" | grep -qx '#!/bin/sh' && sh -n "$f" || bad "stub ${f##*/}: not a parseable /bin/sh script"
+  _pipe_out=$(head -1 "$f") && grep -qx '#!/bin/sh' <<<"$_pipe_out" && sh -n "$f" || bad "stub ${f##*/}: not a parseable /bin/sh script"
 done
 ok "every stub is #!/bin/sh and passes sh -n"
 [ -f "$STABLE/.stamp" ] && ok "install writes the stamp" || bad "no stamp"

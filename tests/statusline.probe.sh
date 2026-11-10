@@ -111,7 +111,7 @@ route_zai
 warm() { [ -z "${ZAI_SPEND_BIN:-}" ] || "$SYG_STATUSLINE_ZAI_USAGE" --sweep; }
 warm
 out=$(render '{"context_window":{"current_usage":{"input_tokens":1000}},"model":{"display_name":"GLM-5.3-Flash"},"cwd":"/tmp"}')
-strip <<< "$out" | grep -Eq 'z\.ai 5h: 95% \(→[0-9:]+\) wk: 59% \(→[A-Za-z0-9 :]+\)' \
+_pipe_out=$(strip <<< "$out") && grep -Eq 'z\.ai 5h: 95% \(→[0-9:]+\) wk: 59% \(→[A-Za-z0-9 :]+\)' <<<"$_pipe_out" \
     && ok "routed: z.ai segment renders api pcts + reset arrows" || bad "routed text: $(strip <<< "$out" | grep -o 'z.ai.*')"
 grep -q $'\x1b\\[31m95%' <<< "$out" && ok "routed: 5h pct is red at 95" || bad "routed red: $out"
 grep -q $'\x1b\\[33m59%' <<< "$out" && ok "routed: wk pct is yellow at 59" || bad "routed yellow: $out"
@@ -123,8 +123,8 @@ grep -qF $'\x1b[38;2;11;127;255mz.ai' <<< "$out" \
 export ZAI_SPEND_QUOTA_URL="file://$h/missing.json"
 rm -f "$h/cache/claude-statusline/zai-usage.json"
 warm
-strip <<< "$(render '{"context_window":{"current_usage":{"input_tokens":1000}},"model":{"display_name":"X"},"cwd":"/tmp"}')" \
-    | grep -q 'local est' && ok "routed, api dead: local-est fallback renders" || bad "fallback: $out"
+_pipe_out=$(strip <<< "$(render '{"context_window":{"current_usage":{"input_tokens":1000}},"model":{"display_name":"X"},"cwd":"/tmp"}')") \
+    && grep -q 'local est' <<<"$_pipe_out" && ok "routed, api dead: local-est fallback renders" || bad "fallback: $out"
 export ZAI_SPEND_QUOTA_URL="file://$h/quota.json"
 # Drop the cache again: the real zai-usage's failed poll cached its local-estimate zeros (120s TTL),
 # which a later z.ai-lane render would otherwise be served. A no-op with the stub.
@@ -138,19 +138,19 @@ printf '{"limits":[{"kind":"weekly_scoped","percent":89,"scope":{"model":{"displ
     > "$h/cache/claude-statusline/usage.json"
 touch "$h/cache/claude-statusline/usage.json" # fresh mtime: the background curl stays asleep
 out=$(render '{"rate_limits":{"five_hour":{"used_percentage":83,"resets_at":1790790548},"seven_day":{"used_percentage":56,"resets_at":1791093600}},"context_window":{"current_usage":{"input_tokens":1000}},"model":{"display_name":"X"},"cwd":"/tmp"}')
-strip <<< "$out" | grep -Eq '5h: 83% \(→[0-9:]+\) wk: 56% \(→[A-Za-z0-9 :]+\)' \
+_pipe_out=$(strip <<< "$out") && grep -Eq '5h: 83% \(→[0-9:]+\) wk: 56% \(→[A-Za-z0-9 :]+\)' <<<"$_pipe_out" \
     && ok "unrouted: same template, both reset arrows" || bad "unrouted text: $(strip <<< "$out" | grep -o '5h:.*')"
 grep -q $'\x1b\\[31m83%' <<< "$out" && grep -q $'\x1b\\[33m56%' <<< "$out" \
     && ok "unrouted: same traffic lights (red 83, yellow 56)" || bad "unrouted colors: $out"
-strip <<< "$out" | grep -q 'fable: 89%' && ok "unrouted: fable cap from the oauth cache" || bad "fable: $out"
+_pipe_out=$(strip <<< "$out") && grep -q 'fable: 89%' <<<"$_pipe_out" && ok "unrouted: fable cap from the oauth cache" || bad "fable: $out"
 
 # 6. Unrouted with no rate_limits in the input: no window segment at all (and no crash).
 out=$(strip <<< "$(render '{"context_window":{"current_usage":{"input_tokens":1000}},"model":{"display_name":"X"},"cwd":"/tmp"}')")
 grep -q '5h:' <<< "$out" && bad "no rate_limits: segment should be absent: $out" || ok "no rate_limits: no window segment"
 
 # 7. Sanity: the model name still renders on both paths (the rest of the line is untouched).
-render '{"context_window":{"current_usage":{"input_tokens":1000}},"model":{"display_name":"GLM-5.3-Flash"},"cwd":"/tmp"}' \
-    | strip | grep -q 'GLM-5.3-Flash' && ok "sanity: model name renders" || bad "model name"
+_pipe_out=$(render '{"context_window":{"current_usage":{"input_tokens":1000}},"model":{"display_name":"GLM-5.3-Flash"},"cwd":"/tmp"}' | strip) \
+    && grep -q 'GLM-5.3-Flash' <<<"$_pipe_out" && ok "sanity: model name renders" || bad "model name"
 
 # 10-13. Effort: the level is color-coded; "intended" comes from settings.json
 # modelSettings (data-driven), red+hint only for drift vs the stored per-model
@@ -185,10 +185,10 @@ grep -q 'session \$3\.00' <<< "$strip" && ! grep -q $'\x1b\\[1m\$3' <<< "$out" \
 
 # 16-17. Model gradients: GLM models get their own fades (gold strong lane,
 # lime→teal flash), pinned by each fade's opening color.
-render '{"context_window":{"current_usage":{"input_tokens":1000}},"model":{"display_name":"GLM-5.3"},"cwd":"/tmp"}' \
-    | grep -q $'\x1b\\[38;2;255;210;100mG' && ok "gradient: glm-5.3 opens gold" || bad "glm gradient: missing"
-render '{"context_window":{"current_usage":{"input_tokens":1000}},"model":{"display_name":"GLM-5.3-Flash"},"cwd":"/tmp"}' \
-    | grep -q $'\x1b\\[38;2;215;255;130mG' && ok "gradient: glm flash opens lime" || bad "flash gradient: missing"
+_pipe_out=$(render '{"context_window":{"current_usage":{"input_tokens":1000}},"model":{"display_name":"GLM-5.3"},"cwd":"/tmp"}') \
+    && grep -q $'\x1b\\[38;2;255;210;100mG' <<<"$_pipe_out" && ok "gradient: glm-5.3 opens gold" || bad "glm gradient: missing"
+_pipe_out=$(render '{"context_window":{"current_usage":{"input_tokens":1000}},"model":{"display_name":"GLM-5.3-Flash"},"cwd":"/tmp"}') \
+    && grep -q $'\x1b\\[38;2;215;255;130mG' <<<"$_pipe_out" && ok "gradient: glm flash opens lime" || bad "flash gradient: missing"
 
 # 17b. Other lanes' model families each open their own fade (matched on the
 # lowercased display name); an unlisted name keeps the silver fade.
@@ -196,8 +196,8 @@ for fam in 'Sonnet 5.5|223;120;90|S' 'Mistral Large|255;112;0|M' 'gemini-2.5-pro
     'GPT-5|16;163;127|G' 'deepseek-v3|77;107;254|d' 'kimi-k2|120;100;250|k' 'qwen-3|120;100;250|q' \
     'SomeModel|255;255;255|S'; do
     IFS='|' read -r fname frgb fch <<< "$fam"
-    render "{\"context_window\":{\"current_usage\":{\"input_tokens\":1000}},\"model\":{\"display_name\":\"$fname\"},\"cwd\":\"/tmp\"}" \
-        | grep -q $'\x1b\\[38;2;'"${frgb}m${fch}" && ok "gradient: $fname opens $frgb" || bad "gradient $fname: missing $frgb"
+    _pipe_out=$(render "{\"context_window\":{\"current_usage\":{\"input_tokens\":1000}},\"model\":{\"display_name\":\"$fname\"},\"cwd\":\"/tmp\"}") \
+        && grep -q $'\x1b\\[38;2;'"${frgb}m${fch}" <<<"$_pipe_out" && ok "gradient: $fname opens $frgb" || bad "gradient $fname: missing $frgb"
 done
 
 # 18-20. Seyag-plugin segment: reads the installed registry + the repo

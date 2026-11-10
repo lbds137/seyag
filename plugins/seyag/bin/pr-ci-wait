@@ -398,6 +398,8 @@ def describe_wait_state(state, anchor_configured, review_configured):
         parts.append(f"anchor {'done' if state['anchor_complete'] else 'not done'}")
     if review_configured:
         parts.append(f"review {'done' if state['review_complete'] else 'not done'}")
+    if state.get("lookup_pending"):
+        parts.append("release held: job-count lookup failing")
     return "; ".join(parts)
 
 

@@ -17,7 +17,7 @@ git -C "$R" add -f tracked/__pycache__/keep.pyc && git -C "$R" -c user.email=t@t
 ln -s "$R/a/__pycache__" "$R/linked__pycache__"; ln -s "$R/b" "$R/c"
 mkdir -p "$T/outside/__pycache__"
 
-"$SC" --dry-run "$R/node_modules" | grep -q "would remove" && [ -d "$R/node_modules" ] && ok "dry-run lists and keeps" || bad "dry-run"
+_pipe_out=$("$SC" --dry-run "$R/node_modules") && grep -q "would remove" <<<"$_pipe_out" && [ -d "$R/node_modules" ] && ok "dry-run lists and keeps" || bad "dry-run"
 "$SC" "$R/node_modules" >/dev/null && [ ! -e "$R/node_modules" ] && ok "removes node_modules" || bad "remove node_modules"
 "$SC" "$R/.coverage" >/dev/null && [ ! -e "$R/.coverage" ] && ok "removes the .coverage file" || bad ".coverage"
 "$SC" "$R/secrets" 2>/dev/null; [ $? = 1 ] && [ -f "$R/secrets/.env" ] && ok "refuses a non-cache name" || bad "non-cache name"

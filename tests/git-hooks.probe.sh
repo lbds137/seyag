@@ -155,7 +155,7 @@ fresh public
 printf '* -diff\n' >"$R/.gitattributes"
 printf 'see zorbleflux\n' >"$R/data.txt"
 git -C "$R" add -A && git -C "$R" commit -q -m ok
-git -C "$R" show HEAD -- data.txt | grep -q "^Binary files" || bad "-diff control: git does not call the file binary"
+_pipe_out=$(git -C "$R" show HEAD -- data.txt) && grep -q "^Binary files" <<<"$_pipe_out" || bad "-diff control: git does not call the file binary"
 git -C "$R" push -q origin main >"$TMP/out" 2>&1
 [ $? -ne 0 ] && grep -qF "added line of" "$TMP/out" \
   && ok "a file marked -diff (binary) is still read as text" || bad "-diff attribute: $(cat "$TMP/out")"
@@ -462,7 +462,7 @@ git -C "$R" push -q origin main >"$TMP/out" 2>&1
 # An extra commit header (encoding) holding the term.
 fresh public
 git -C "$R" -c i18n.commitEncoding=zorbleflux commit -q --allow-empty -m ok
-git -C "$R" cat-file -p HEAD | grep -qx "encoding zorbleflux" || bad "encoding control: no encoding header"
+_pipe_out=$(git -C "$R" cat-file -p HEAD) && grep -qx "encoding zorbleflux" <<<"$_pipe_out" || bad "encoding control: no encoding header"
 git -C "$R" push -q origin main >"$TMP/out" 2>&1
 [ $? -ne 0 ] && grep -qF "  message of" "$TMP/out" && ! grep -qF zorbleflux "$TMP/out" \
   && ok "an encoding header holding the term is refused (scanned with the message)" \
