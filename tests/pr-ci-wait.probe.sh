@@ -443,7 +443,7 @@ POLLS_7L=$(cat "$D/.count" 2>/dev/null || echo 0)
 JOBS_LOG_7M="$WORK/jobs-7m.log"
 D=$(seq_dir lookup-error-persistent '[{"id":5,"name":"CI","status":"completed","conclusion":"failure","run_attempt":1}]')
 run "persistent lookup error holds release until the gate gives up" 1 \
-  FAKE_GH_SEQ_DIR="$D" SYG_CI_ANCHOR=CI SYG_CI_REVIEW= PR_CI_WAIT_MAX_S=0.5 PR_CI_WAIT_HEARTBEAT_S=0 \
+  FAKE_GH_SEQ_DIR="$D" SYG_CI_ANCHOR=CI SYG_CI_REVIEW= PR_CI_WAIT_MAX_S=2 PR_CI_WAIT_HEARTBEAT_S=0 \
   FAKE_GH_JOBS_TOTAL=3 FAKE_GH_JOBS_EXIT=1 FAKE_GH_JOBS_LOG="$JOBS_LOG_7M"
 JOBS_LINES_7M=$({ wc -l < "$JOBS_LOG_7M"; } 2>/dev/null || echo 0)
 [[ "$OUT" == *"CI_GATE_TIMEOUT"* && "$OUT" == *"release held: job-count lookup failing"* && "$OUT" != *"CI_COMPLETE"* ]] \
