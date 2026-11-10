@@ -6,12 +6,12 @@ All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY
 
 ### Improvements
 
-- **CI:** the Probes workflow runs shellcheck as its own job and the probe suite as 3 parallel shards; an aggregator job keeps the required `probes` check name and passes only when shellcheck and every shard passed.
-- **run-probes:** `--shard I/N` runs one duration-balanced slice of the suite (greedy over `tests/probe-durations.tsv`, a probe without a row counts as 10 s); every run starts probes longest-first while output stays in suite order; `--durations-out FILE` refreshes the table from a full passing run (refused with `--shard`, skipped when a probe fails).
+- **CI:** the Probes workflow runs shellcheck as its own job and the probe suite as 3 parallel shards; an aggregator job keeps the required `probes` check name and passes only when shellcheck and every shard passed (#293).
+- **run-probes:** `--shard I/N` runs one duration-balanced slice of the suite (greedy over `tests/probe-durations.tsv`, a probe without a row counts as 10 s); every run starts probes longest-first while output stays in suite order; `--durations-out FILE` refreshes the table from a full passing run (refused with `--shard`, skipped when a probe fails) (#293).
 
 ### Tests
 
-- **probes:** run-probes-runner covers the shard partition and balance, longest-first launch, a missing table, bad `--shard` specs, an empty shard, and `--durations-out`.
+- **probes:** run-probes-runner covers the shard partition and balance, longest-first launch, a missing table, bad `--shard` specs, an empty shard, and `--durations-out` (#293).
 
 ## 0.3.154 - 2026-11-10
 
