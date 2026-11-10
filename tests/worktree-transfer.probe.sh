@@ -68,6 +68,8 @@
 #  54. --rebase-base patch rename vs main edit on README.md -> STOP: rebase-proof naming changed on main: README.md
 #  55. orphan worktree (unborn HEAD) -> STOP: base-unchanged naming rev-parse HEAD failed in worktree
 #  56. --rebase-base empty worker commit -> transfer succeeds with rebase-proof line
+#  57. worker commit changing README.md, no upstream -> default STOP: no-unpushed-base and --base STOP: base-unchanged, both with land-on-main hint
+#  58. --allow-empty worker commit -> default and --base STOP name rerun with --rebase-base; --rebase-base then transfers
 #
 # Stated non-goal: the two removal-failure wordings (`git worktree remove --force`
 # vs `git branch -D` in check 11) are not constructible without root tricks; the
@@ -1429,6 +1431,80 @@ else
       record_case 0 "case 56: --rebase-base with empty worker commit transfers and prints rebase-proof line"
     else
       record_case 1 "case 56: empty worker commit transfers" "rc=$rc out=$out err=$err56"
+    fi
+  fi
+fi
+
+# Case 57: worker commit changing README.md, main has no upstream (main is a strict
+# ancestor of worktree HEAD and the commit changes a path) ->
+# (a) default -> exit 1, STOP: no-unpushed-base: with 'land them on main first' and
+#     '(a worker commit?)', no 'rerun with --rebase-base'
+# (b) --base <worktree HEAD> -> exit 1, STOP: base-unchanged: with 'main HEAD is behind
+#     the --base commit' and 'land them on main first', no 'rerun with --rebase-base'
+mk_fixture r57
+R57="$T/r57"
+if ! printf 'worker committed README line\n' >>"$R57/.wt/README.md" \
+  || ! git -C "$R57/.wt" add README.md >/dev/null 2>&1 \
+  || ! git -C "$R57/.wt" commit -q --no-verify -m 'worker commit on README' >/dev/null 2>&1 \
+  || git -C "$R57" rev-parse --verify -q '@{upstream}^{commit}' >/dev/null 2>&1; then
+  record_case 1 "case 57: worker commit ahead of main" "setup: failed to commit README.md in .wt with no main upstream"
+else
+  WT57=$(git -C "$R57/.wt" rev-parse HEAD 2>/dev/null || true)
+  err_a=$(cd "$R57" && bash "$TOOL" .wt 2>&1 >/dev/null)
+  rc_a=$?
+  err_b=$(cd "$R57" && bash "$TOOL" --base "$WT57" .wt 2>&1 >/dev/null)
+  rc_b=$?
+  if [ "$rc_a" -eq 1 ] && [[ $err_a == "STOP: no-unpushed-base:"* ]] \
+    && grep -qF 'land them on main first' <<<"$err_a" \
+    && grep -qF '(a worker commit?)' <<<"$err_a" \
+    && ! grep -qF 'rerun with --rebase-base' <<<"$err_a" \
+    && [ "$rc_b" -eq 1 ] && [[ $err_b == "STOP: base-unchanged:"* ]] \
+    && grep -qF 'main HEAD is behind the --base commit' <<<"$err_b" \
+    && grep -qF 'land them on main first' <<<"$err_b" \
+    && ! grep -qF 'rerun with --rebase-base' <<<"$err_b" \
+    && [ -d "$R57/.wt" ] \
+    && git -C "$R57" rev-parse --verify -q refs/heads/worktree-agent-t1 >/dev/null \
+    && [ -z "$(git -C "$R57" status --porcelain)" ]; then
+    record_case 0 "case 57: worker commit ahead of main refuses with land-on-main hint in default and --base modes"
+  else
+    record_case 1 "case 57: worker commit ahead of main" "rc_a=$rc_a err_a=$err_a rc_b=$rc_b err_b=$err_b"
+  fi
+fi
+
+# Case 58: worker makes one --allow-empty commit (main is a strict ancestor, no path
+# changed) -> (a) default and (b) --base refuse naming 'rerun with --rebase-base' and not
+# the land-on-main hint; (c) --rebase-base then transfers and src/new.js lands in main.
+mk_fixture r58
+R58="$T/r58"
+if ! git -C "$R58/.wt" commit -q --allow-empty --no-verify -m empty >/dev/null 2>&1; then
+  record_case 1 "case 58: empty worker commit" "setup: commit --allow-empty failed"
+else
+  MAIN58=$(git -C "$R58" rev-parse HEAD 2>/dev/null || true)
+  WT58=$(git -C "$R58/.wt" rev-parse HEAD 2>/dev/null || true)
+  if [ -z "$MAIN58" ] || [ -z "$WT58" ] || [ "$MAIN58" = "$WT58" ] \
+    || ! git -C "$R58" merge-base --is-ancestor "$MAIN58" "$WT58" 2>/dev/null; then
+    record_case 1 "case 58: empty worker commit" "setup: main HEAD ($MAIN58) is not a strict ancestor of worktree HEAD ($WT58)"
+  else
+    err_a=$(cd "$R58" && bash "$TOOL" .wt 2>&1 >/dev/null)
+    rc_a=$?
+    err_b=$(cd "$R58" && bash "$TOOL" --base "$WT58" .wt 2>&1 >/dev/null)
+    rc_b=$?
+    err_c=$(cd "$R58" && bash "$TOOL" --rebase-base .wt 2>&1 >/dev/null)
+    rc_c=$?
+    if [ "$rc_a" -eq 1 ] && [[ $err_a == "STOP: no-unpushed-base:"* ]] \
+      && grep -qF 'change no paths: rerun with --rebase-base' <<<"$err_a" \
+      && ! grep -qF 'land them on main first' <<<"$err_a" \
+      && [ "$rc_b" -eq 1 ] && [[ $err_b == "STOP: base-unchanged:"* ]] \
+      && grep -qF 'main HEAD is behind the --base commit, whose commit(s) change no paths: rerun with --rebase-base' <<<"$err_b" \
+      && ! grep -qF 'land them on main first' <<<"$err_b" \
+      && grep -qF '(--base must be the worktree HEAD)' <<<"$err_b" \
+      && ! grep -qF '(--base must be the worktree HEAD)' <<<"$err_a" \
+      && [ "$rc_c" -eq 0 ] && [ -f "$R58/src/new.js" ] \
+      && [ ! -e "$R58/.wt" ] \
+      && ! git -C "$R58" rev-parse --verify -q refs/heads/worktree-agent-t1 >/dev/null; then
+      record_case 0 "case 58: empty worker commit names rerun with --rebase-base, and --rebase-base transfers"
+    else
+      record_case 1 "case 58: empty worker commit hint" "rc_a=$rc_a err_a=$err_a rc_b=$rc_b err_b=$err_b rc_c=$rc_c err_c=$err_c"
     fi
   fi
 fi
