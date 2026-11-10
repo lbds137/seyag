@@ -37,11 +37,14 @@
 #   5 base-unchanged        when --base SHA is given, `<sha>^{commit}` resolves and
 #                           equals the main tree's HEAD, or under --rebase-base the
 #                           worktree's HEAD (the dispatch base; skipped when
-#                           omitted); a worktree HEAD that does not resolve also refuses base-unchanged
+#                           omitted); a worktree HEAD that does not resolve also refuses
+#                           base-unchanged; when main is an ancestor of --base, the
+#                           refusal carries check 6's behind-main hint
 #   6 no-unpushed-base      worktree HEAD equals the main tree's HEAD (ahead is as
-#                           wrong as behind; runs before the patch is built; when
-#                           main is an ancestor of worktree HEAD, the behind-main
-#                           hint replaces the --rebase-base suggestion); under
+#                           wrong as behind; runs before the patch is built; when main
+#                           is an ancestor of worktree HEAD the behind-main hint names
+#                           pull (upstream has the commits), land-on-main (they change
+#                           paths) or rerun with --rebase-base (they change none); under
 #                           --rebase-base, deferred to check 9 `rebase-proof`
 #   7 empty-patch           `git -C <wt> add -A` then `git -C <wt> diff --cached --binary`
 #                           written to a temp file is non-empty
@@ -62,8 +65,9 @@
 #                           remains the backstop, so rebase-proof is an early
 #                           refusal with a readable proof, not the only guard. A
 #                           main HEAD that is an ancestor of worktree HEAD refuses
-#                           first with a pull-or-land hint; conflict refusals
-#                           attribute each path to main or the worktree's branch
+#                           first with a pull-or-land hint when the worktree's commits
+#                           change paths; conflict refusals attribute each path to main
+#                           or the worktree's branch
 #  10 apply                 `git apply --index <patchfile>` in the main root succeeds
 #  11 byte-identical        `git diff --cached --binary` in the main root matches
 #                           `<patchfile>` via `cmp`; `--binary` must appear on BOTH
@@ -286,6 +290,10 @@ behind_hint() {
     && up_name=$(git -C "$MAIN_ROOT" rev-parse --abbrev-ref '@{upstream}' 2>/dev/null) \
     && [ -n "$up_name" ]; then
     printf 'main HEAD is behind %s and its upstream %s already has %s: run git pull --ff-only in the main tree, then rerun' "$label" "$up_name" "$label"
+  elif git -C "$MAIN_ROOT" diff --quiet --no-renames --ignore-submodules=none "$MAIN_HEAD" "$ahead" 2>/dev/null; then
+    local base_note=""
+    [ "$label" = "the --base commit" ] && base_note=" (--base must be the worktree HEAD)"
+    printf 'main HEAD is behind %s, whose commit(s) change no paths: rerun with --rebase-base%s' "$label" "$base_note"
   else
     local wc_note=""
     [ "$label" = "worktree HEAD" ] && wc_note=" (a worker commit?)"
