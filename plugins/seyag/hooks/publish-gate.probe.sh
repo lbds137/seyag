@@ -12,6 +12,8 @@
 # Usage: hooks/publish-gate.probe.sh   (from anywhere)
 
 set -uo pipefail
+# Hooks run here directly, not via run.sh: keep bytecode out of hooks/lib.
+export PYTHONDONTWRITEBYTECODE=1
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 HOOK="$SCRIPT_DIR/publish-gate.sh"

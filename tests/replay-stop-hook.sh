@@ -336,7 +336,7 @@ def run_turn_end(cut_offset, cut_line_display, window_start, stop_hook_active):
     proc = subprocess.run(
         ["env", "-u", "CLAUDE_PROJECT_DIR", "-u", "SYG_LEDGER_PATH_RE", "-u", "SYG_PR_MONITOR_SEEN_FILE",
          "-u", "SYG_PR_BODY_ACK_FILE", f"SYG_STATE_DIR={hook_state}", f"XDG_STATE_HOME={hook_state}",
-         f"XDG_RUNTIME_DIR={hook_runtime}", "bash", hook_script],
+         f"XDG_RUNTIME_DIR={hook_runtime}", "PYTHONDONTWRITEBYTECODE=1", "bash", hook_script],
         input=json.dumps(stdin_obj).encode("utf-8"),
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
     )

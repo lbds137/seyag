@@ -74,7 +74,7 @@ HOOK_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib"
 # at 128 KiB (MAX_ARG_STRLEN), and python failing to exec would fail open.
 # Exit 10 (not 0) means "allow, with the worktree-removal nudge"; 11 means "block, and an rm target
 # or find root is in a .claude/worktrees path".
-HITS=$(CWD="$CWD" HOOK_LIB="$HOOK_LIB" PYTHONDONTWRITEBYTECODE=1 python3 - 3<<<"$CMD" <<'PYEOF'
+HITS=$(CWD="$CWD" HOOK_LIB="$HOOK_LIB" python3 - 3<<<"$CMD" <<'PYEOF'
 import os, re, sys
 
 # An import failure exits non-zero, which the caller treats as allow (fail-open).

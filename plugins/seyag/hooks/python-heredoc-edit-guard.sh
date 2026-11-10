@@ -82,7 +82,7 @@ fi
 # The command goes to python on fd 3, never through the environment: Linux
 # caps one env string at 128 KiB (MAX_ARG_STRLEN), and python failing to
 # exec would fail open.
-EDITED=$(PYTHONDONTWRITEBYTECODE=1 python3 - 3<<<"$GUARD_CMD" 2>/dev/null <<'PYEOF'
+EDITED=$(python3 - 3<<<"$GUARD_CMD" 2>/dev/null <<'PYEOF'
 import os, re
 
 cmd = os.fsdecode(open(3, "rb").read()).removesuffix("\n")

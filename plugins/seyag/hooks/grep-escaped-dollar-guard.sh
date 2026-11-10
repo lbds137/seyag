@@ -148,9 +148,8 @@ fi
 # hook exists to catch. Not the environment either: Linux caps one env string
 # at 128 KiB (MAX_ARG_STRLEN), and python would fail to exec.
 #
-# PYTHONDONTWRITEBYTECODE: the import otherwise drops a __pycache__ into
-# hooks/lib on every guarded command, and a stale .pyc can mask a
-# broken edit to the module by importing yesterday's bytecode.
+# Bytecode: run.sh points PYTHONPYCACHEPREFIX at a per-user cache, so this
+# import writes nothing into hooks/lib.
 #
 # On ANY python failure — python3 absent, the import failing, a non-zero exit —
 # the RAW command text is kept. That is the conservative direction rather than
@@ -173,7 +172,7 @@ STRIPPED_CMD="$GUARD_CMD"
 case "$GUARD_CMD" in
   *'<<'*)
     HOOK_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib"
-    STRIP_OUT=$(HOOK_LIB="$HOOK_LIB" PYTHONDONTWRITEBYTECODE=1 python3 -c '
+    STRIP_OUT=$(HOOK_LIB="$HOOK_LIB" python3 -c '
 import os
 import sys
 

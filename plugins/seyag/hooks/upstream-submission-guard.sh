@@ -233,7 +233,7 @@ fi
 CWD=$(jq -r '.cwd // empty' <<<"$INPUT" 2>/dev/null) || CWD=""
 
 HOOK_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib"
-RESULT=$(CWD="$CWD" HOOK_LIB="$HOOK_LIB" PYTHONDONTWRITEBYTECODE=1 python3 - 3<<<"$CMD" <<'PYEOF' 2>/dev/null
+RESULT=$(CWD="$CWD" HOOK_LIB="$HOOK_LIB" python3 - 3<<<"$CMD" <<'PYEOF' 2>/dev/null
 import os
 import re
 import subprocess

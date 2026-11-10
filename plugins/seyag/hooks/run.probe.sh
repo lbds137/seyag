@@ -3,7 +3,8 @@
 #   1. a project-local .claude/hooks/<name>.sh exists → silent exit 0 (yield)
 #   2. no project copy → the plugin hook runs; exit 2 + stderr pass through
 #   3. stdin reaches the hook; stdout passes through
-#   4. PYTHONDONTWRITEBYTECODE is exported to the hook
+#   4. PYTHONPYCACHEPREFIX points hooks at a per-user bytecode cache (a caller's
+#      prefix wins; no absolute cache dir → PYTHONDONTWRITEBYTECODE=1)
 #   5. sdk-* entrypoints skip the turn-shape hooks; a background session a person
 #      drives (entrypoint cli, SESSION_ATTENDED=0) keeps them
 #   6. GIT_OPTIONAL_LOCKS=0 reaches every git call a hook makes
@@ -38,13 +39,14 @@ runsh() {
   local -a set=()
   while [[ "${1:-}" == *=* ]]; do set+=("$1"); shift; done
   env -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_SESSION_ATTENDED -u SYG_PROFILE -u SYG_ENABLE -u SYG_DISABLE \
+    -u PYTHONPYCACHEPREFIX -u PYTHONDONTWRITEBYTECODE -u XDG_CACHE_HOME \
     "${set[@]+"${set[@]}"}" bash "$RUN" "$@"
 }
 
 cat > "$TMP/plugin/hooks/fake-guard.sh" <<'EOF'
 #!/bin/bash
 IN=$(cat)
-echo "stdout:$IN:${PYTHONDONTWRITEBYTECODE:-unset}"
+echo "stdout:$IN:${PYTHONPYCACHEPREFIX:-unset}:${PYTHONDONTWRITEBYTECODE:-unset}"
 echo "BLOCKED by fake-guard" >&2
 exit 2
 EOF
@@ -71,10 +73,36 @@ RC=$?
 check "no CLAUDE_PROJECT_DIR, project copy in PWD → yield" 0 "$RC" "" "$OUT" "" "$(cat "$TMP/err")"
 
 # --- 2. no project copy → passthrough of rc 2, stdout, stderr ------------------
-OUT=$(printf 'payload' | CLAUDE_PROJECT_DIR="$TMP/proj-without" PYTHONDONTWRITEBYTECODE='' runsh fake-guard 2>"$TMP/err")
+OUT=$(printf 'payload' | CLAUDE_PROJECT_DIR="$TMP/proj-without" runsh HOME="$TMP/home" fake-guard 2>"$TMP/err")
 RC=$?
-check "no project copy → exit 2, stdin/stdout/stderr pass through, PYTHONDONTWRITEBYTECODE=1" \
-  2 "$RC" "stdout:payload:1" "$OUT" "BLOCKED by fake-guard" "$(cat "$TMP/err")"
+check "no project copy → exit 2, stdin/stdout/stderr pass through, PYTHONPYCACHEPREFIX under HOME/.cache" \
+  2 "$RC" "stdout:payload:$TMP/home/.cache/seyag/pycache:unset" "$OUT" "BLOCKED by fake-guard" "$(cat "$TMP/err")"
+
+# --- 2a-2e. the bytecode cache prefix: XDG, a relative XDG, a caller's prefix, no cache dir
+OUT=$(printf 'payload' | CLAUDE_PROJECT_DIR="$TMP/proj-without" runsh XDG_CACHE_HOME="$TMP/xdg" fake-guard 2>"$TMP/err")
+RC=$?
+check "XDG_CACHE_HOME absolute → PYTHONPYCACHEPREFIX under it" \
+  2 "$RC" "stdout:payload:$TMP/xdg/seyag/pycache:unset" "$OUT" "BLOCKED by fake-guard" "$(cat "$TMP/err")"
+
+OUT=$(printf 'payload' | CLAUDE_PROJECT_DIR="$TMP/proj-without" runsh XDG_CACHE_HOME=rel/xdg HOME="$TMP/home" fake-guard 2>"$TMP/err")
+RC=$?
+check "relative XDG_CACHE_HOME → falls back to HOME/.cache" \
+  2 "$RC" "stdout:payload:$TMP/home/.cache/seyag/pycache:unset" "$OUT" "BLOCKED by fake-guard" "$(cat "$TMP/err")"
+
+OUT=$(printf 'payload' | CLAUDE_PROJECT_DIR="$TMP/proj-without" runsh PYTHONPYCACHEPREFIX="$TMP/mine" HOME="$TMP/home" fake-guard 2>"$TMP/err")
+RC=$?
+check "caller's PYTHONPYCACHEPREFIX wins" \
+  2 "$RC" "stdout:payload:$TMP/mine:unset" "$OUT" "BLOCKED by fake-guard" "$(cat "$TMP/err")"
+
+OUT=$(printf 'payload' | CLAUDE_PROJECT_DIR="$TMP/proj-without" runsh HOME= fake-guard 2>"$TMP/err")
+RC=$?
+check "no cache dir (HOME empty, XDG unset) → no prefix, PYTHONDONTWRITEBYTECODE=1" \
+  2 "$RC" "stdout:payload:unset:1" "$OUT" "BLOCKED by fake-guard" "$(cat "$TMP/err")"
+
+OUT=$(printf 'payload' | CLAUDE_PROJECT_DIR="$TMP/proj-without" runsh PYTHONDONTWRITEBYTECODE=1 HOME="$TMP/home" fake-guard 2>"$TMP/err")
+RC=$?
+check "caller's PYTHONDONTWRITEBYTECODE=1 is kept alongside the cache prefix" \
+  2 "$RC" "stdout:payload:$TMP/home/.cache/seyag/pycache:1" "$OUT" "BLOCKED by fake-guard" "$(cat "$TMP/err")"
 
 # --- 3. unknown / unsafe hook names fail open ----------------------------------
 printf '' | CLAUDE_PROJECT_DIR="$TMP/proj-without" runsh no-such-hook >/dev/null 2>&1

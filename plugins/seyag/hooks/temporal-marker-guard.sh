@@ -89,7 +89,7 @@ TEMPORAL_PATTERN='PR #[0-9]+|\bPR [0-9]+\b|PR-[0-9]+(\.[0-9a-z]+)*|GH-[0-9]+|[Bb
 # The command goes to python on fd 3, never through the environment (one env
 # string is capped at 128 KiB and a failed exec would fail open).
 RESULT=$(CWD="$CWD" HOOK_LIB="$HOOK_LIB" TEMPORAL_PATTERN="$TEMPORAL_PATTERN" \
-  PYTHONDONTWRITEBYTECODE=1 python3 - 3<<<"$CMD" <<'PYEOF' 2>/dev/null
+  python3 - 3<<<"$CMD" <<'PYEOF' 2>/dev/null
 import os
 import re
 import subprocess

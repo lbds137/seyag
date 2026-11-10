@@ -192,14 +192,12 @@ mentions_target "$GUARD_CMD" || exit 0
 # before any cd) so the import cannot depend on the caller's cwd.
 HOOK_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib"
 
-# PYTHONDONTWRITEBYTECODE: importing the shared lib otherwise drops a
-# __pycache__ into hooks/lib on every guarded command. It is gitignored,
-# but a stale .pyc can also mask a broken edit to the module — the import
-# succeeds against yesterday's bytecode. Cheaper to never write it.
+# Bytecode: run.sh points PYTHONPYCACHEPREFIX at a per-user cache, so this
+# import writes nothing into hooks/lib.
 # The command goes to python on fd 3, never through the environment: Linux caps
 # one env string at 128 KiB (MAX_ARG_STRLEN), and python failing to exec would
 # fail open.
-VERDICT=$(HOOK_LIB="$HOOK_LIB" PYTHONDONTWRITEBYTECODE=1 python3 3<<<"$GUARD_CMD" << 'PYEOF'
+VERDICT=$(HOOK_LIB="$HOOK_LIB" python3 3<<<"$GUARD_CMD" << 'PYEOF'
 import os
 import re
 import sys

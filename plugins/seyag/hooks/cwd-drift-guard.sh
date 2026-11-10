@@ -236,7 +236,7 @@ HOOK_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib"
 BLOCKED=$(HOOK_LIB="$HOOK_LIB" EFF="$EFFECTIVE_CWD" ROOT="$ROOT" \
   LEADING_CD="$LEADING_CD" HAS_PREFIX="${PREFIX:+1}" LINKED_WT="$LINKED_WT" \
   SESSION_ID="$SESSION_ID" STATE_DIR="$STATE_DIR" \
-  PYTHONDONTWRITEBYTECODE=1 python3 3<<<"$CMD" << 'PYEOF'
+  python3 3<<<"$CMD" << 'PYEOF'
 import os
 import re
 import subprocess

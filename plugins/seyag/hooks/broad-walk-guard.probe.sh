@@ -3,6 +3,8 @@
 # Usage: hooks/broad-walk-guard.probe.sh   (from anywhere)
 
 set -uo pipefail
+# Hooks run here directly, not via run.sh: keep bytecode out of hooks/lib.
+export PYTHONDONTWRITEBYTECODE=1
 HOOK="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/broad-walk-guard.sh"
 fail=0
 run() { # $1 want-rc, $2 command, $3 cwd (default: a project folder)

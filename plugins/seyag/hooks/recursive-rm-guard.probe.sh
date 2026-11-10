@@ -4,6 +4,8 @@
 # Usage: hooks/recursive-rm-guard.probe.sh   (from anywhere)
 
 set -uo pipefail
+# Hooks run here directly, not via run.sh: keep bytecode out of hooks/lib.
+export PYTHONDONTWRITEBYTECODE=1
 HOOK="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/recursive-rm-guard.sh"
 fail=0
 # The session running the probe may itself be a job: every case sets CLAUDE_JOB_DIR explicitly
