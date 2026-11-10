@@ -28,6 +28,9 @@ HOOK="$SCRIPT_DIR/pr-monitor-reminder.sh"
 
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
+# run.sh's syntax-ok stamps go under the cache dir: this probe's own cache, never
+# the real ~/.cache/seyag.
+export XDG_CACHE_HOME="$WORK/xdg-cache"
 # Hermetic: an ambient SYG_PR_MONITOR_SEEN_FILE would beat every per-case
 # seen-file fixture below.
 unset SYG_PR_MONITOR_SEEN_FILE

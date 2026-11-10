@@ -2,6 +2,16 @@
 
 All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY-MM-DD>` section per released version; under it, `###` categories in fixed order — Breaking Changes, Features, Bug Fixes, Improvements, Chores, Tests — empty ones omitted; items are `- **scope:** description (#PR)`, written from the version's merged commit subjects.
 
+## 0.3.157 - 2026-11-10
+
+### Improvements
+
+- **hooks:** run.sh skips the per-call `bash -n` syntax check while a syntax-ok stamp (under the cache dir, at the hook's mirrored absolute path) is newer than the hook, and finds its own directory without a subshell; a hook edited after its stamp is checked again, and with no cache dir every call is checked as before.
+
+### Tests
+
+- **probes:** hook-wiring pins the stamp (broken hook skipped and unstamped, stamp written and honoured, re-check after an edit, no cache dir or a cache path that is a file, relative and `..` invocations); the probes that run fixture copies of run.sh (hook-wiring, run.probe, pr-monitor-reminder) keep their stamps and bytecode out of the real cache.
+
 ## 0.3.156 - 2026-11-10
 
 ### Improvements
