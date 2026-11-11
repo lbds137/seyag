@@ -20,10 +20,12 @@
 #               merge-base with <base> differs between <base> and the branch tip (net tip content:
 #               a commit the branch itself reverted is not kept); squash/rebase-merged work passes
 #               until <base> changes a file it touched, then HOLD (the owner's call), and a commit
-#               subject alone never passes; no per-worktree ref (`refs/worktree/*`) holds a commit
-#               on neither <base> nor another branch (HOLD:worktree-refs), and none points at a
-#               non-commit object, a blob, tree or tag, which the backup cannot carry
-#               (HOLD:worktree-refs-object, never approvable)
+#               subject alone never passes; no per-worktree ref (`refs/worktree/*`, `refs/bisect/*`,
+#               `refs/rewritten/*` — the namespaces that die with the tree) holds a commit on
+#               neither <base> nor another branch (HOLD:worktree-refs, HOLD:bisect-refs,
+#               HOLD:rewritten-refs), and none points at a non-commit object, a blob, tree or
+#               tag, which the backup cannot carry (HOLD:<namespace>-refs-object, never
+#               approvable)
 #   4 files     every dirty, staged or untracked file has <base>'s mode for that path (both
 #               absent counts), and its content equals <base>'s or <base> subsumes it. Tracked:
 #               `git merge-file <base> <tree HEAD's blob> <tree content>` is clean and yields
@@ -57,7 +59,8 @@
 #               (judge_submodules, before git -C in that path) -> HOLD:gitfile
 # Approvable HOLD trees and plan id: a HOLD tree under <repo>/.claude/worktrees/ whose reason
 # codes are all in {unmerged, dirty, untracked-new, untracked-differs, ignored, branch-name,
-# detached-unreferenced, worktree-refs} and that has no unmerged index entries
+# detached-unreferenced, worktree-refs, bisect-refs, rewritten-refs} and that has no unmerged
+# index entries
 # (`git ls-files -u`) is approvable ("approvable": true in --json; listed after the HOLD report as
 # `  approvable with --apply-hold: <rel path>`); any other code or an unmerged index entry keeps
 # the tree held under every mode. A repo's plan id (`hold plan: <id>`, JSON `"hold_plan"`, null
@@ -66,8 +69,11 @@
 # (sha256 over `git status --porcelain=v1 -z --ignored --untracked-files=all`, `git diff --binary
 # HEAD`, `git diff --binary --cached HEAD` for the index, the file contents via `git
 # hash-object --no-filters` or symlink target via `readlink` of each untracked and
-# non-cache/non-regenerable ignored file, and `git for-each-ref refs/worktree/`),
-# NUL-separated. Across several repos, `sweep plan: <id>` (JSON `"sweep_plan"`) is the first 12
+# non-cache/non-regenerable ignored file, and `git for-each-ref refs/worktree/ refs/bisect/
+# refs/rewritten/`), NUL-separated, with every child's exit status folded in after its output
+# as a `\001<name>=<rc>\0` line so a failed child changes the sha (SYG_WORKTREE_STATE_BATCH_FAIL=1
+# is a test seam, internal, that fails the hash-object batch child). Across several repos,
+# `sweep plan: <id>` (JSON `"sweep_plan"`) is the first 12
 # hex of sha256 over the repos' `<repo path>\0<plan id or empty>` lines in the given order when
 # any repo has an approvable tree and no child dry run failed.
 # --apply-hold ID (also --apply-hold=ID; implies --apply; refuses with --all, exit 2): removing a
@@ -85,10 +91,11 @@
 # value is refused too) with `tree.tgz` (every file except .git and ignored entries accepted by
 # is_cache_path or regen_verdict), `branch.bundle` (`git bundle create` of the branch or HEAD
 # excluding <base>, omitted when there are no commits beyond <base>), `reflog.pack` (commits in
-# the HEAD, branch, or `refs/worktree/*` reflogs or tips not in the bundle or on <base>, omitted
-# when none), `uncommitted.patch` (`git diff --binary HEAD`), `staged.patch` (`git diff --binary
-# --cached HEAD`), `changes.txt` (including reflog/`refs/worktree/*`-only commits, the
-# `refs/worktree/*` refs, and ignored entries excluded as cache/regenerable), and `README.txt`,
+# the HEAD, branch, or per-worktree-ref (`refs/worktree/*`, `refs/bisect/*`, `refs/rewritten/*`)
+# reflogs or tips not in the bundle or on <base>, omitted when none), `uncommitted.patch`
+# (`git diff --binary HEAD`), `staged.patch` (`git diff --binary --cached HEAD`), `changes.txt`
+# (including reflog/per-worktree-ref-only commits, the per-worktree refs, and ignored entries
+# excluded as cache/regenerable), and `README.txt`,
 # verified with `tar --quoting-style=literal -tzf`, `git bundle verify`, and `git index-pack` and
 # re-checked for cwd, state, and lock changes before unlock / `git worktree remove --force` /
 # `git branch -D`.
@@ -752,31 +759,48 @@ judge_git() {
       hold detached-unreferenced "detached HEAD ${head:0:12} has commits on neither $BASE nor any branch"
     fi
   fi
-  local wt_refs wt_sha wt_type wt_ref first_wt_ref=""
-  local -a wt_tips=() wt_excl=()
-  [ -n "$b" ] && wt_excl=("--exclude=refs/heads/$b")
-  if ! wt_refs=$(git -C "$t" for-each-ref --format='%(objectname) %(objecttype) %(refname)' refs/worktree/ 2>&1); then
-    hold git-error "git for-each-ref refs/worktree/ failed: ${wt_refs//$'\n'/ }"
-  elif [ -n "$wt_refs" ]; then
+  # The per-worktree ref namespaces (refs/worktree/, refs/bisect/, refs/rewritten/) die with
+  # the tree, so a tip holding commits on neither BASE nor another branch holds, and a
+  # non-commit tip (the backup packs commits only) holds under every mode.
+  local ns wt_refs wt_sha wt_type wt_ref first_ns_ref
+  local -a ns_tips=() wt_excl=()
+  if [ -n "$b" ]; then
+    # --exclude takes a glob: escape the wildmatch metacharacters so the branch name is
+    # matched literally and cannot widen the exclude to other refs (git refuses ?*[ in
+    # refnames today; the escape is defense in depth).
+    local b_excl=$b
+    b_excl=${b_excl//\\/\\\\}
+    b_excl=${b_excl//\*/\\*}
+    b_excl=${b_excl//\?/\\?}
+    b_excl=${b_excl//\[/\\[}
+    wt_excl=("--exclude=refs/heads/$b_excl")
+  fi
+  for ns in worktree bisect rewritten; do
+    if ! wt_refs=$(git -C "$t" for-each-ref --format='%(objectname) %(objecttype) %(refname)' "refs/$ns/" 2>&1); then
+      hold git-error "git for-each-ref refs/$ns/ failed: ${wt_refs//$'\n'/ }"
+      continue
+    fi
+    ns_tips=()
+    first_ns_ref=""
     while IFS=' ' read -r wt_sha wt_type wt_ref; do
       [ -n "$wt_sha" ] || continue
       # rev-list prints nothing for a blob/tree tip and the backup packs commits only, so a
       # ref at any other object type is held under every mode (not approvable).
       if [ "$wt_type" != commit ]; then
-        hold worktree-refs-object "$wt_ref points at a $wt_type; back it up by hand before removing the tree"
+        hold "$ns-refs-object" "$wt_ref points at a $wt_type; back it up by hand before removing the tree"
         continue
       fi
-      wt_tips+=("$wt_sha")
-      [ -n "$first_wt_ref" ] || first_wt_ref=$wt_ref
+      ns_tips+=("$wt_sha")
+      [ -n "$first_ns_ref" ] || first_ns_ref=$wt_ref
     done <<<"$wt_refs"
-    if [ ${#wt_tips[@]} -gt 0 ]; then
-      if ! out=$(git -C "$t" rev-list -n 1 "${wt_tips[@]}" --not "$BASE" "${wt_excl[@]}" --branches 2>&1); then
-        hold git-error "git rev-list for refs/worktree/ failed: ${out//$'\n'/ }"
+    if [ ${#ns_tips[@]} -gt 0 ]; then
+      if ! out=$(git -C "$t" rev-list -n 1 "${ns_tips[@]}" --not "$BASE" "${wt_excl[@]}" --branches 2>&1); then
+        hold git-error "git rev-list for refs/$ns/ failed: ${out//$'\n'/ }"
       elif [ -n "$out" ]; then
-        hold worktree-refs "${#wt_tips[@]} refs/worktree/* ref(s) hold commits on neither $BASE nor another branch, first: $first_wt_ref"
+        hold "$ns-refs" "${#ns_tips[@]} refs/$ns/* ref(s) hold commits on neither $BASE nor another branch, first: $first_ns_ref"
       fi
     fi
-  fi
+  done
   # 4: tracked files whose worktree content differs from HEAD, and staged files whose index
   # content differs from HEAD: that content must equal the base's (absent on both counts), or
   # the base must subsume the change (subsumed_by_base).
@@ -1009,7 +1033,7 @@ for i in "${TREES[@]}"; do
         approvable=true
         for r_entry in "${REASONS[@]}"; do
           case "${r_entry%%$'\t'*}" in
-            unmerged | dirty | untracked-new | untracked-differs | ignored | branch-name | detached-unreferenced | worktree-refs) ;;
+            unmerged | dirty | untracked-new | untracked-differs | ignored | branch-name | detached-unreferenced | worktree-refs | bisect-refs | rewritten-refs) ;;
             *) approvable=false; break ;;
           esac
         done
@@ -1071,45 +1095,77 @@ at_risk_files() {
 
 # True when path $2 of tree $1 may go to one `git hash-object --stdin-paths` batch: not a
 # symlink, and no newline or CR in it (git strips a trailing CR) and no leading " (git
-# C-unquotes such a line, so it would hash a different file). tree_state_sha uses it for both
-# the batch filter and the lookup, so the two cannot drift apart.
+# C-unquotes such a line, so it would hash a different file). tree_state_sha asks it exactly
+# once per path while building the per-path read plan, and both the batch filter and the
+# lookup read that plan, so the two cannot drift apart.
 batchable_path() {
   [ ! -L "$1/$2" ] && [[ $2 != *$'\n'* ]] && [[ $2 != *$'\r'* ]] && [[ $2 != \"* ]]
 }
 
+# sha256 over the tree's restorable state (see the header's plan-id contract). Two invariants:
+# one read plan per path (L symlink / B batchable / F per-file hash-object), decided once, so
+# a path batched at build time can never be re-judged at lookup time; and every child's exit
+# status folded into the hashed stream after its output as a \001<name>=<rc>\0 line (the batch:
+# \001batch=<git rc>:<0|1>\0), so a failed child changes the sha — the same inputs with one
+# failed child hash differently from a successful read, while an unchanged healthy tree hashes
+# identically across runs and a hold-plan re-verify can never match state that was never read.
+# SYG_WORKTREE_STATE_BATCH_FAIL=1 is a test seam (internal, ignored unless set to exactly 1):
+# it fails the hash-object batch child so probes exercise the per-file fallback.
 tree_state_sha() {
-  local t=$1 p f_hash batch_out batch_ok=true bi=0
-  local -a risk_files=() batch_paths=() batch_shas=()
-  at_risk_files risk_files "$t" 2>/dev/null || true
+  local t=$1 p f_hash batch_out batch_ok=true bi=0 n=0 rc rc_ar=0 rc_batch=0
+  local -a risk_files=() batch_paths=() batch_shas=() plan=()
+  at_risk_files risk_files "$t" 2>/dev/null || rc_ar=$?
   for p in "${risk_files[@]}"; do
-    if batchable_path "$t" "$p"; then
+    if [ -L "$t/$p" ]; then
+      plan+=(L)
+    elif batchable_path "$t" "$p"; then
+      plan+=(B)
       batch_paths+=("$p")
+    else
+      plan+=(F)
     fi
   done
   if [ ${#batch_paths[@]} -gt 0 ]; then
-    if batch_out=$(printf '%s\n' "${batch_paths[@]}" | git -C "$t" hash-object --no-filters --stdin-paths 2>/dev/null) && [ -n "$batch_out" ]; then
+    if [ "${SYG_WORKTREE_STATE_BATCH_FAIL:-}" = 1 ]; then
+      batch_ok=false
+      rc_batch=1
+    elif batch_out=$(printf '%s\n' "${batch_paths[@]}" | git -C "$t" hash-object --no-filters --stdin-paths 2>/dev/null) && [ -n "$batch_out" ]; then
       mapfile -t batch_shas <<<"$batch_out"
       [ ${#batch_shas[@]} -eq ${#batch_paths[@]} ] || batch_ok=false
     else
+      rc_batch=$?
       batch_ok=false
     fi
   fi
   {
-    git -C "$t" status --porcelain=v1 -z --ignored --untracked-files=all 2>/dev/null
-    git -C "$t" diff --binary HEAD 2>/dev/null
-    git -C "$t" diff --binary --cached HEAD 2>/dev/null
+    printf '\001atrisk=%s\0' "$rc_ar"
+    rc=0
+    git -C "$t" status --porcelain=v1 -z --ignored --untracked-files=all 2>/dev/null || rc=$?
+    printf '\001status=%s\0' "$rc"
+    rc=0
+    git -C "$t" diff --binary HEAD 2>/dev/null || rc=$?
+    printf '\001diff=%s\0' "$rc"
+    rc=0
+    git -C "$t" diff --binary --cached HEAD 2>/dev/null || rc=$?
+    printf '\001diffcached=%s\0' "$rc"
+    printf '\001batch=%s:%s\0' "$rc_batch" "$($batch_ok && echo 0 || echo 1)"
     for p in "${risk_files[@]}"; do
-      if [ -L "$t/$p" ]; then
-        f_hash=$(readlink -- "$t/$p" 2>/dev/null)
-      elif $batch_ok && batchable_path "$t" "$p"; then
+      rc=0
+      if [ "${plan[n]}" = L ]; then
+        f_hash=$(readlink -- "$t/$p" 2>/dev/null) || { rc=$?; f_hash=""; }
+      elif [ "${plan[n]}" = B ] && $batch_ok; then
         f_hash=${batch_shas[$bi]}
         bi=$((bi + 1))
       else
-        f_hash=$(git -C "$t" hash-object --no-filters -- "$p" 2>/dev/null)
+        f_hash=$(git -C "$t" hash-object --no-filters -- "$p" 2>/dev/null) || { rc=$?; f_hash=""; }
       fi
       printf '%s\0%s\0' "$p" "$f_hash"
+      printf '\001hash=%s\0' "$rc"
+      n=$((n + 1))
     done
-    git -C "$t" for-each-ref --format='%(objectname) %(refname)' refs/worktree/ 2>/dev/null
+    rc=0
+    git -C "$t" for-each-ref --format='%(objectname) %(refname)' refs/worktree/ refs/bisect/ refs/rewritten/ 2>/dev/null || rc=$?
+    printf '\001foreachref=%s\0' "$rc"
   } | sha256sum | cut -d' ' -f1
 }
 
@@ -1245,8 +1301,8 @@ backup_tree() {
     chmod 0600 "$BK_DIR/branch.bundle" 2>/dev/null || true
   fi
 
-  if ! wt_refs=$(git -C "$t" for-each-ref --format='%(objectname) %(refname)' refs/worktree/ 2>&1); then
-    BACKUP_ERR="git for-each-ref refs/worktree/ failed: $wt_refs"
+  if ! wt_refs=$(git -C "$t" for-each-ref --format='%(objectname) %(refname)' refs/worktree/ refs/bisect/ refs/rewritten/ 2>&1); then
+    BACKUP_ERR="git for-each-ref for per-worktree refs failed: $wt_refs"
     return 1
   fi
   reflog_tips=$(
@@ -1321,13 +1377,13 @@ backup_tree() {
       else
         printf 'no commits beyond %s\n' "$BASE"
       fi
-      printf '\n=== Commits only in reflogs or refs/worktree/* (in reflog.pack) ===\n'
+      printf '\n=== Commits only in reflogs or per-worktree refs (in reflog.pack) ===\n'
       if [ -n "$reflog_lines" ]; then
         printf '%s\n' "$reflog_lines"
       else
         printf 'none\n'
       fi
-      printf '\n=== refs/worktree/* ===\n'
+      printf '\n=== Per-worktree refs (refs/worktree/*, refs/bisect/*, refs/rewritten/*) ===\n'
       if [ -n "$wt_refs" ]; then
         printf '%s\n' "$wt_refs"
       else
@@ -1396,9 +1452,11 @@ backup_tree() {
   fi
   if [ -f "$BK_DIR/reflog.pack" ]; then
     restore_git+=$'\n'"  git -C $q_main index-pack --stdin --fix-thin < $q_reflog  # then: git -C $q_main branch <name> <sha from changes.txt>"
-    if [ -n "$wt_refs" ]; then
-      restore_git+="  # then: git -C $q_main update-ref <refname> <sha from changes.txt>"
-    fi
+  fi
+  # The per-worktree ref namespaces die with the tree; the hint stands alone (reflog.pack is
+  # omitted when every tip sits on <base>, yet the refs still need recreating).
+  if [ -n "$wt_refs" ]; then
+    restore_git+=$'\n'"  # refs/worktree/*, refs/bisect/* and refs/rewritten/* die with the tree; recreate each: git -C $q_main update-ref <refname> <sha from changes.txt>"
   fi
   if ! (
     umask 077
