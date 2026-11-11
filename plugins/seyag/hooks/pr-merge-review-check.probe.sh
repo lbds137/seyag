@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 # Probe for pr-merge-review-check.sh — run after ANY edit to the hook.
+# Sections 4-11 (review surface, scans, ack anomalies, delete-branch, toggle,
+# audit holes, self-check) live in pr-merge-review-check-review.probe.sh:
+# run BOTH files after any edit to the hook.
 #
 # This is a high-stakes hook: it is the structural backstop behind "read the
 # review before merging", and its silent failure mode is a merge proceeding
@@ -2173,6 +2176,63 @@ assert_ack_has "release key acked for the longer PR number" 'RELEASE:acme-widget
 invoke 'gh pr merge 2010 --rebase'
 assert_exit "release PR whose key is a prefix of an acked one: still BLOCKS" 2
 assert_stderr_has "…and still gets the reminder" 'DEFAULT-BRANCH MERGE'
+
+check_assert_helpers() {
+  local src="${1:-$0}" fn missing=0 count=0
+  if [ ! -r "$src" ]; then
+    bad "unreadable assertion source: $src"
+    return 1
+  fi
+  for fn in $(sed -E '/^[[:space:]]*#/d; s/[;|&({]+/\n/g' "$src" \
+    | sed -nE ':a; s/^[[:space:]]+//; s/^(if|while|until|then|elif|else|do|!)[[:space:]]+//; ta; s/^(assert_[A-Za-z0-9_]+)([[:space:])};|&].*|$)/\1/p' | sort -u); do
+    count=$((count + 1))
+    if ! declare -F "$fn" >/dev/null; then
+      bad "undefined assertion helper in $(basename "$src"): $fn"
+      missing=1
+    fi
+  done
+  # Non-empty check: a broken sed pipeline yielding fewer than 10 helpers fails
+  # rather than vacuously passing with missing=0.
+  if [ "$count" -lt 10 ]; then
+    bad "fewer than 10 assertion helpers found in $(basename "$src"): $count"
+    return 1
+  fi
+  if [ "$missing" -ne 0 ]; then
+    return 1
+  fi
+  ok "all assert_* helpers in $(basename "$src") are defined"
+}
+check_assert_helpers "$0"
+
+# A2: new live lines are those in the live file and not in live-before;
+# leak_check catches a new live line equal to a fixture ack line. A leaking
+# case writes nothing to its own fixture file, so the rows asserting an ack in
+# the fixture HOME are what prove the redirect held.
+leak_check() {
+  local before="$1" after="$2"
+  shift 2
+  [ -s "$after" ] || return 0
+  local new_lines f
+  if [ -s "$before" ]; then
+    new_lines=$(grep -vxFf "$before" "$after" 2>/dev/null || true)
+  else
+    new_lines=$(cat "$after")
+  fi
+  [ -n "$new_lines" ] || return 0
+  for f in "$@"; do
+    [ -s "$f" ] || continue
+    if grep -qxFf "$f" <<<"$new_lines" 2>/dev/null; then
+      return 1
+    fi
+  done
+  return 0
+}
+
+if leak_check "$WORK/live-before" "$REAL_STATE" "$WORK"/home.*/.local/state/seyag/pr-merge-review-check/ack; then
+  ok "the live ack state holds no leaked fixture lines"
+else
+  bad "the live ack state gained a fixture line — the HOME redirect did not hold"
+fi
 
 # ===========================================================================
 if [ "$FAILURES" -gt 0 ]; then
