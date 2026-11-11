@@ -6,7 +6,11 @@
 # rule in both forms, the settable set (knobs.tsv user rows minus the
 # harness-owned names), the _CMD project-scope refusal, SYG_CONFIG=0, the
 # accepted TOML subset (one warning per offending line, fail-open), the
-# skip-list parity with tests/config-reference.py, and both integrations.
+# skip-list parity with tests/config-reference.py, and both integrations. The
+# (o1)-(o6) battery pins the round-2 behaviours: a config-set event timeout,
+# config-set profile through run.sh, the duplicate-section message, the
+# top-level dotted key form, the project-exec refusal list and its knobs.tsv
+# coverage.
 
 set -uo pipefail
 
@@ -45,7 +49,7 @@ CFG_ENV=(env
   -u CLAUDE_PROJECT_DIR -u XDG_CONFIG_HOME -u SYG_CONFIG
   -u SYG_CLOCK_STAMP_HINT -u CLAUDE_USAGE_WEEK_RESERVE -u SYG_MEM_GATE_CMD -u CLAUDE_CONFIG_DIR
   -u SYG_PROFILE -u SYG_EVENT_HOOK_TIMEOUT -u SYG_PRIVATE_TERMS_FILE -u SYG_ROUTE_MARKER_FIELD
-  -u SYG_STATUS_CLAIM_MARKERS -u SYG_BQ_PENDING_MARKERS
+  -u SYG_STATUS_CLAIM_MARKERS -u SYG_BQ_PENDING_MARKERS -u SYG_STATUSLINE_ZAI_USAGE
   -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_ENTRYPOINT -u ANTHROPIC_BASE_URL -u ANTHROPIC_AUTH_TOKEN
   -u ANTHROPIC_API_KEY -u CC_ROUTE_PRESET -u CLAUDE_USAGE_MODEL -u CLAUDE_USAGE_TTL -u CLAUDE_USAGE_WEEK_STOP
   -u CLAUDE_USAGE_WEEK_RESERVE_CMD -u CLAUDE_USAGE_EXTRA_OK
@@ -323,6 +327,140 @@ if [ "$OUT" = "SYG_CLOCK_STAMP_HINT=UNSET" ] && [ "$(cat "$TMP/err")" = "$WANT_E
   ok "(n2) an unreadable knobs.tsv warns once and the load is skipped"
 else
   fail "(n2) unreadable knobs: out '$OUT', err '$(cat "$TMP/err")' (want '$WANT_ERR')"
+fi
+
+# (o1) event mode honours a config-set SYG_EVENT_HOOK_TIMEOUT: a stub that
+# sleeps past a 1-second config timeout is killed before it can touch its
+# marker file. Event mode ignores a timed-out hook's exit code, so the kill is
+# observed by the marker staying absent, not by run.sh's exit code (run.probe.sh's
+# event harness has no cheaper observable either); the control config with a
+# 10-second timeout lets the same stub finish and block.
+EVFIX="$TMP/evplug"
+mkdir -p "$EVFIX/hooks/lib" "$EVFIX/config"
+cp "$REPO_ROOT/plugins/seyag/hooks/run.sh" "$EVFIX/hooks/"
+cp "$REPO_ROOT/plugins/seyag/hooks/components.tsv" "$EVFIX/hooks/"
+cp "$REPO_ROOT/plugins/seyag/hooks/lib/components.sh" "$EVFIX/hooks/lib/"
+cp "$LIB" "$EVFIX/hooks/lib/"
+cp "$KNOBS" "$EVFIX/config/"
+cat >"$EVFIX/hooks/slow-guard.sh" <<EOF
+#!/bin/bash
+cat >/dev/null
+sleep 5
+: > "$TMP/o1-done"
+echo SLOW-BLOCK >&2
+exit 2
+EOF
+cat >"$EVFIX/hooks/hooks.json" <<'EOF'
+{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"bash \"${CLAUDE_PLUGIN_ROOT}/hooks/run.sh\" slow-guard"}]}]}}
+EOF
+printf '{"tool_name":"Bash","tool_input":{"command":"x"},"cwd":"/tmp"}' >"$TMP/o1-payload"
+EVO1="$TMP/xdg-o1"
+mkdir -p "$EVO1/seyag"
+printf 'syg_event_hook_timeout = 1\n' >"$EVO1/seyag/config.toml"
+EVO1C="$TMP/xdg-o1c"
+mkdir -p "$EVO1C/seyag"
+printf 'syg_event_hook_timeout = 10\n' >"$EVO1C/seyag/config.toml"
+runev() { # $1 XDG dir
+  env -u CLAUDE_PROJECT_DIR -u XDG_CONFIG_HOME -u XDG_CACHE_HOME -u SYG_CONFIG -u SYG_EVENT_HOOK_TIMEOUT \
+    -u SYG_PROFILE -u SYG_ENABLE -u SYG_DISABLE -u CLAUDE_CODE_ENTRYPOINT \
+    XDG_CONFIG_HOME="$1" CLAUDE_PROJECT_DIR="$TMP/proj-none" XDG_CACHE_HOME="$TMP/xdg-cache" HOME="$TMP/home" \
+    bash "$EVFIX/hooks/run.sh" --event PreToolUse <"$TMP/o1-payload" 2>"$TMP/err"
+}
+rm -f "$TMP/o1-done"
+OUT=$(runev "$EVO1")
+RC=$?
+if [ "$RC" = 0 ] && [ -z "$OUT" ] && [ ! -s "$TMP/err" ] && [ ! -e "$TMP/o1-done" ]; then
+  ok "(o1a) event mode kills a hook past the config-set SYG_EVENT_HOOK_TIMEOUT (marker absent, fail-open exit 0)"
+else
+  fail "(o1a) event timeout: rc $RC, out '$OUT', err '$(cat "$TMP/err")', marker $([ -e "$TMP/o1-done" ] && echo present || echo absent)"
+fi
+OUT=$(runev "$EVO1C")
+RC=$?
+if [ "$RC" = 2 ] && [ -z "$OUT" ] && [ "$(cat "$TMP/err")" = "SLOW-BLOCK" ] && [ -e "$TMP/o1-done" ]; then
+  ok "(o1b) control: a generous config timeout lets the hook finish and block"
+else
+  fail "(o1b) control: rc $RC, out '$OUT', err '$(cat "$TMP/err")', marker $([ -e "$TMP/o1-done" ] && echo present || echo absent)"
+fi
+
+# (o2) a config-set SYG_PROFILE reaches the component resolver through run.sh:
+# the fixture registry (overwriting the (k) copy in $FIX) maps fake-guard to a
+# component only the full profile includes.
+O2="$TMP/xdg-o2"
+mkdir -p "$O2/seyag"
+printf 'fake-guard\tfake-comp\n@profile\tfull\tfake-comp\n@profile\tbare\t\n' >"$FIX/hooks/components.tsv"
+printf 'syg_profile = "bare"\n' >"$O2/seyag/config.toml"
+OUT=$(runfix "$O2")
+RC=$?
+if [ "$RC" = 0 ] && [ -z "$OUT" ] && [ ! -s "$TMP/err" ]; then
+  ok "(o2a) config-set SYG_PROFILE=bare skips the hook (component outside the profile)"
+else
+  fail "(o2a) profile skip: rc $RC, out '$OUT', err '$(cat "$TMP/err")'"
+fi
+printf 'syg_profile = "full"\n' >"$O2/seyag/config.toml"
+OUT=$(runfix "$O2")
+RC=$?
+if [ "$RC" = 2 ] && [ "$OUT" = "hint=UNSET" ] && [ ! -s "$TMP/err" ]; then
+  ok "(o2b) control: a config profile including the component runs the hook"
+else
+  fail "(o2b) profile control: rc $RC, out '$OUT', err '$(cat "$TMP/err")'"
+fi
+
+# (o3) the duplicate-section warning says what the parser does: keys merge.
+U9="$TMP/xdg9"
+mkdir -p "$U9/seyag"
+printf '[claude_usage]\nweek_reserve = 55\n[claude_usage]\nweek_reserve = 66\n' >"$U9/seyag/config.toml"
+OUT=$("${CFG_ENV[@]}" XDG_CONFIG_HOME="$U9" CLAUDE_PROJECT_DIR="$TMP/proj-none" \
+  bash "$TMP/report" "$LIB" CLAUDE_USAGE_WEEK_RESERVE 2>"$TMP/err")
+WANT_ERR="seyag config: $U9/seyag/config.toml: line 3: [claude_usage]: duplicate section: keys merge, first value per key wins
+seyag config: $U9/seyag/config.toml: line 4: week_reserve: duplicate key: first value wins"
+if [ "$OUT" = "CLAUDE_USAGE_WEEK_RESERVE=[55]" ] && [ "$(cat "$TMP/err")" = "$WANT_ERR" ]; then
+  ok "(o3) duplicate section: new message byte-exact, keys merge, first value per key wins"
+else
+  fail "(o3) duplicate section: out '$OUT', err '$(cat "$TMP/err")' (want '$WANT_ERR')"
+fi
+
+# (o4) the third key form: a top-level dotted key applies like a section.
+U10="$TMP/xdg10"
+mkdir -p "$U10/seyag"
+printf 'claude_usage.week_reserve = 61\n' >"$U10/seyag/config.toml"
+OUT=$("${CFG_ENV[@]}" XDG_CONFIG_HOME="$U10" CLAUDE_PROJECT_DIR="$TMP/proj-none" \
+  bash "$TMP/report" "$LIB" CLAUDE_USAGE_WEEK_RESERVE 2>"$TMP/err")
+if [ "$OUT" = "CLAUDE_USAGE_WEEK_RESERVE=[61]" ] && [ ! -s "$TMP/err" ]; then
+  ok "(o4) a top-level dotted key applies (claude_usage.week_reserve = 61)"
+else
+  fail "(o4) dotted key: out '$OUT', err '$(cat "$TMP/err")'"
+fi
+
+# (o5) the exec-list pin: every user-scope knobs.tsv row whose description
+# names a binary "invoked by" (the exec-knob description signature) is covered
+# by the loader's project-scope refusal — _SYG_CFG_PROJECT_EXEC, the _CMD
+# suffix, or _SYG_CFG_HARNESS — and the set is non-empty with the known gap in it.
+INVOKED=$(awk -F'\t' '$2=="user" && $5 ~ /invoked by/ {print $1}' "$KNOBS")
+MISSING=""
+while IFS= read -r r; do
+  [ -n "$r" ] || continue
+  case $r in *_CMD) continue ;; esac
+  bash -c 'source "$1"; for n in "${_SYG_CFG_PROJECT_EXEC[@]}" "${_SYG_CFG_HARNESS[@]}"; do [ "$n" = "$2" ] && exit 0; done; exit 1' _ "$LIB" "$r" || MISSING="$MISSING $r"
+done <<EOF
+$INVOKED
+EOF
+if [ -n "$INVOKED" ] && [ -z "$MISSING" ] && grep -qx 'SYG_STATUSLINE_ZAI_USAGE' <<<"$INVOKED"; then
+  ok "(o5) every 'invoked by' user knob is project-refused (positive control: $(printf '%s ' $INVOKED))"
+else
+  fail "(o5) exec-list pin: invoked ($(printf '%s ' $INVOKED)), uncovered:${MISSING:- none}"
+fi
+
+# (o6) a project file cannot set a binary-path knob that lacks the _CMD suffix.
+P6="$TMP/proj6"
+mkdir -p "$P6/.claude"
+printf 'syg_statusline_zai_usage = "./evil"\n' >"$P6/.claude/seyag.toml"
+OUT=$("${CFG_ENV[@]}" XDG_CONFIG_HOME="$TMP/no-xdg" CLAUDE_PROJECT_DIR="$P6" \
+  bash "$TMP/report" "$LIB" SYG_STATUSLINE_ZAI_USAGE 2>"$TMP/err")
+WANT_ERR="seyag config: $P6/.claude/seyag.toml: line 1: 'SYG_STATUSLINE_ZAI_USAGE' cannot be set from project scope (command-execution knob)"
+if [ "$OUT" = "SYG_STATUSLINE_ZAI_USAGE=UNSET" ] && [ "$(cat "$TMP/err")" = "$WANT_ERR" ]; then
+  ok "(o6) SYG_STATUSLINE_ZAI_USAGE refused from project scope with the exact warning"
+else
+  fail "(o6) project exec refusal: out '$OUT', err '$(cat "$TMP/err")' (want '$WANT_ERR')"
 fi
 
 echo ""

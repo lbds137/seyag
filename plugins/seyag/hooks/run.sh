@@ -20,6 +20,23 @@ syg_dir() {
   DIR=${DIR:-/}
   [[ $DIR == /* ]] || DIR=$PWD/$DIR
 }
+# syg_cfg_load: source lib/config-env.sh (fail-open, like the component
+# resolver) and load the config files once per run.sh process, before the
+# first knob read — the component resolver in syg_hook_ready, or event mode's
+# SYG_EVENT_HOOK_TIMEOUT below — so config-set SYG_PROFILE/SYG_ENABLE/
+# SYG_DISABLE and the timeout apply to this call. A missing or broken lib
+# changes nothing and never blocks; _SYG_CFG_LOADED (a shell variable, never
+# exported) makes later calls no-ops.
+syg_cfg_load() {
+  [ -n "$DIR" ] || syg_dir
+  if [ -z "${_SYG_CFG_LOADED:-}" ]; then
+    if [ -r "$DIR/lib/config-env.sh" ] && source "$DIR/lib/config-env.sh" 2>/dev/null \
+      && declare -F syg_config_env >/dev/null; then
+      syg_config_env "$DIR/.."
+    fi
+    _SYG_CFG_LOADED=1
+  fi
+}
 # syg_hook_ready NAME: the per-hook checks both modes share, in this order: name,
 # project copy, existence, components, syntax; then the exports every hook gets.
 # Returns 0 with SYG_HOOK set when the hook should run, 1 when it is skipped.
@@ -54,19 +71,11 @@ syg_hook_ready() {
     fi
   fi
   # Config files (lib/config-env.sh) fill in env knobs the environment left
-  # unset; they load before the component resolver below, so config-set
-  # SYG_PROFILE/SYG_ENABLE/SYG_DISABLE apply to this call. Fail-open like
-  # components: a missing or broken lib changes nothing and never blocks.
-  # _SYG_CFG_LOADED (a shell variable, never exported) makes each run.sh
-  # process load once at the first need; event mode loads earlier, before
-  # its SYG_EVENT_HOOK_TIMEOUT read, so a config-set timeout is honoured.
-  if [ -z "${_SYG_CFG_LOADED:-}" ]; then
-    if [ -r "$DIR/lib/config-env.sh" ] && source "$DIR/lib/config-env.sh" 2>/dev/null \
-      && declare -F syg_config_env >/dev/null; then
-      syg_config_env "$DIR/.."
-    fi
-    _SYG_CFG_LOADED=1
-  fi
+  # unset, before the component resolver below, so config-set
+  # SYG_PROFILE/SYG_ENABLE/SYG_DISABLE apply to this call. syg_cfg_load (top
+  # of file) is a per-process no-op after its first call — event mode's
+  # earlier load included.
+  syg_cfg_load
 
   if [ "$SYG_LIB" = 1 ]; then
     syg_enabled "$name" || return 1
@@ -219,14 +228,7 @@ printf '%s' "$PAYLOAD" >"$WORK/payload"
 : >"$WORK/notes"
 # Config files load before the first knob read of event mode (the per-hook
 # timeout below); syg_hook_ready's own load is then a no-op for this process.
-if [ -z "${_SYG_CFG_LOADED:-}" ]; then
-  [ -n "$DIR" ] || syg_dir
-  if [ -r "$DIR/lib/config-env.sh" ] && source "$DIR/lib/config-env.sh" 2>/dev/null \
-    && declare -F syg_config_env >/dev/null; then
-    syg_config_env "$DIR/.."
-  fi
-  _SYG_CFG_LOADED=1
-fi
+syg_cfg_load
 # One hung hook must not stall the event and lose the other hooks' blocks.
 T=${SYG_EVENT_HOOK_TIMEOUT:-45}
 case "$T" in '' | *[!0-9]*) T=45 ;; esac
