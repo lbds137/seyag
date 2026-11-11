@@ -4,9 +4,13 @@ All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY
 
 ## 0.3.161 - 2026-11-11
 
+### Breaking Changes
+
+- **bin:** safe-worktree-clean's hashed state-sha stream changed format; pre-upgrade `hold plan:` ids stop validating and re-verify exits 2 (fails safe, nothing removed) — re-run a fresh dry run for open plans after upgrading (#300).
+
 ### Tests
 
-- **probes:** the pr-merge-review-check probe splits into two balanced files (command-match and merge-form sections vs the review surface and scans) so the CI shards stop carrying one 100 s probe; hook-wiring gains the probe-hook exemption kind for the second half (#301).
+- **probes:** the pr-merge-review-check probe splits into two balanced files (command-match and merge-form sections vs the review surface and scans) so the CI shards stop carrying one 100 s probe; hook-wiring gains the probe-hook exemption kind for the second half, with a staleness check on those entries (#301).
 
 ## 0.3.160 - 2026-11-11
 
