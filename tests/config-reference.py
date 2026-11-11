@@ -233,6 +233,10 @@ def render_doc(rows: dict[str, dict[str, str]], scanned: dict[str, set[str]]) ->
         "```",
         "",
         "Exception: the per-command `SYG_ALLOW_*` bypasses of the shell guards are written into the command itself (for example `SYG_ALLOW_RM=1 rm -r build`), not into settings; each row says so. `SYG_ALLOW_LIVE_CHECKOUT` is the one also read from the environment.",
+        "",
+        "## Config files (config.toml)",
+        "",
+        "An optional TOML file fills in knobs the environment left unset: user `${XDG_CONFIG_HOME:-$HOME/.config}/seyag/config.toml`, then project `${CLAUDE_PROJECT_DIR:-$PWD}/.claude/seyag.toml` (project keys overwrite user keys). The environment wins over both, even when set to the empty string. Keys map mechanically to env names, the key path uppercased with the separators turned into underscores: `claude_usage_week_reserve = 61` and `[claude_usage]` + `week_reserve = 61` both set `CLAUDE_USAGE_WEEK_RESERVE`. A key applies iff its env name is a user-scope row of this registry and not harness-owned; names ending `_CMD` cannot be set from the project file. Subset per line: blank, full-line comment, `[section]` header, or `key = value` with a quoted string (basic `\"`, escapes `\\\\` `\\\"` `\\t` `\\n` only, or literal `'`), an integer, a float, or `true`/`false` (exported as `1`/`0`); strings and paths must be quoted, and arrays, inline tables, multiline strings and trailing content are unsupported; a comment may follow a value but not a section header. `SYG_CONFIG=0` disables the loader. A bad file warns on stderr and is skipped, never blocks a hook — and warns again on every hook call.",
     ]
 
     for group in GROUPS:
