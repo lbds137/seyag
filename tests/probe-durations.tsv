@@ -20,9 +20,9 @@ plugins/seyag/hooks/live-checkout-guard.probe.sh	37.0
 plugins/seyag/hooks/lossy-pipe-guard.probe.sh	14.9
 plugins/seyag/hooks/pr-body-ref-gate.probe.sh	38.7
 plugins/seyag/hooks/private-term-guard.probe.sh	49.4
-plugins/seyag/hooks/pr-merge-review-check.probe.sh	162.0
-plugins/seyag/hooks/pr-merge-review-check-review.probe.sh	169.0
-# the two pr-merge-review-check rows were measured under load (split-run, -j 1, busy machine); relative balance is what matters
+plugins/seyag/hooks/pr-merge-review-check.probe.sh	50.3
+plugins/seyag/hooks/pr-merge-review-check-review.probe.sh	52.4
+# the two pr-merge-review-check rows are the original 102.7 rescaled by the measured split ratio (162/169 under load, 2026-11-11); re-measure with -j 1 --durations-out on an idle machine
 plugins/seyag/hooks/pr-monitor-reminder.probe.sh	24.3
 plugins/seyag/hooks/promise-ledger-check.probe.sh	7.1
 plugins/seyag/hooks/publish-gate.probe.sh	29.6

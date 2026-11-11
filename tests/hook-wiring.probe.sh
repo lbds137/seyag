@@ -162,6 +162,46 @@ else
   while IFS= read -r l; do bad "$l"; done <<<"$out"
 fi
 
+# Staleness check for probe-hook exemptions: an EXEMPT entry of kind probe-hook
+# must still name a probe file that exists, backed by a hook whose name prefixes
+# the probe's — else the exemption excuses a probe that is gone or renamed.
+# Only probe-hook entries are validated here; the other kinds are consulted
+# above but not validated.
+check_exempts() { # check_exempts ROOT: print report lines; 1 when any is stale
+  local root=$1 hooks e kind name base found stale=0 good="" bad_s=""
+  hooks="$root/plugins/seyag/hooks"
+  for e in "${EXEMPT[@]+"${EXEMPT[@]}"}"; do
+    kind=${e%%:*}
+    [ "$kind" = probe-hook ] || continue
+    name=${e#probe-hook:}; name=${name%% *}
+    if [ ! -e "$hooks/$name.probe.sh" ]; then
+      bad_s+="probe-hook exemption $name: no hooks/$name.probe.sh (stale entry)"$'\n'
+      stale=1
+      continue
+    fi
+    found=0
+    for base in "$hooks"/*.sh; do
+      [ -e "$base" ] || continue
+      base=$(basename "$base" .sh)
+      case "$name" in "$base" | "$base"-*) found=1; break ;; esac
+    done
+    if [ "$found" -eq 1 ]; then
+      good+="probe-hook exemption $name: probe file and prefix hook both present"$'\n'
+    else
+      bad_s+="probe-hook exemption $name: no hook file name prefixes it (stale entry)"$'\n'
+      stale=1
+    fi
+  done
+  if [ "$stale" -eq 1 ]; then printf '%s' "$bad_s"; return 1; fi
+  printf '%s' "$good"
+}
+out=$(check_exempts "$REPO")
+if [ $? -eq 0 ]; then
+  while IFS= read -r l; do ok "$l"; done <<<"$out"
+else
+  while IFS= read -r l; do bad "$l"; done <<<"$out"
+fi
+
 # Positive controls: each mutation of a temp copy must be reported.
 mutant() { # mutant NAME -> fresh copy at $TMP/NAME
   mkdir -p "$TMP/$1/plugins/seyag" "$TMP/$1/tests"
@@ -205,6 +245,16 @@ expect no-hook-probe "hook publish-gate has no publish-gate.probe.sh"
 
 mutant orphan-probe;   echo : > "$TMP/orphan-probe/plugins/seyag/hooks/ghost.probe.sh"
 expect orphan-probe "probe ghost.probe.sh has no ghost.sh"
+
+# A stale probe-hook exemption is reported: the probe file the entry excuses
+# no longer exists (the exempt() helper above would have let this pass silently).
+mutant stale-probe-hook; rm "$TMP/stale-probe-hook/plugins/seyag/hooks/pr-merge-review-check-review.probe.sh"
+o=$(check_exempts "$TMP/stale-probe-hook"); rc=$?
+if [ "$rc" -ne 0 ] && grep -qF 'probe-hook exemption pr-merge-review-check-review: no hooks/pr-merge-review-check-review.probe.sh (stale entry)' <<<"$o"; then
+  ok "control stale-probe-hook: reported (stale probe-hook exemption)"
+else
+  bad "control stale-probe-hook: not reported (rc=$rc): $o"
+fi
 
 mutant unwired
 jq 'del(.. | select(type == "object" and ((.command? // "") | tostring | endswith("run.sh\" publish-gate"))))' \
