@@ -242,14 +242,16 @@ if [ "$TOOL_NAME" != "Bash" ]; then
           walk_dir=$(dirname "$walk_dir")
         done
         wt_info=$(git -C "$walk_dir" rev-parse --show-toplevel --git-dir --git-common-dir 2>/dev/null) || continue
-        wt_top=$(printf '%s\n' "$wt_info" | sed -n '1p')
-        wt_gd=$(printf '%s\n' "$wt_info" | sed -n '2p')
-        wt_cd=$(printf '%s\n' "$wt_info" | sed -n '3p')
+        wt_top='' wt_gd='' wt_cd=''
+        { IFS= read -r wt_top; IFS= read -r wt_gd; IFS= read -r wt_cd; } <<<"$wt_info"
         case "$wt_gd" in /*) ;; *) wt_gd="$walk_dir/$wt_gd" ;; esac
         case "$wt_cd" in /*) ;; *) wt_cd="$walk_dir/$wt_cd" ;; esac
-        wt_gd_real=$(realpath "$wt_gd" 2>/dev/null || echo "")
-        wt_cd_real=$(realpath "$wt_cd" 2>/dev/null || echo "")
-        wt_top_real=$(realpath "$wt_top" 2>/dev/null || printf '%s' "$wt_top")
+        # One realpath fork for all three. Any failure (top included, which used
+        # to fall back to the unresolved top) drops that argument's line, so the
+        # third stays empty: allow.
+        wt_gd_real='' wt_cd_real='' wt_top_real=''
+        { IFS= read -r wt_gd_real; IFS= read -r wt_cd_real; IFS= read -r wt_top_real; } < <(realpath -- "$wt_gd" "$wt_cd" "$wt_top" 2>/dev/null)
+        [ -n "$wt_gd_real" ] && [ -n "$wt_cd_real" ] && [ -n "$wt_top_real" ] || continue
         if [ "$wt_top_real" != "$root" ] || [ -z "$wt_gd_real" ] || [ "$wt_gd_real" != "$wt_cd_real" ]; then
           continue
         fi
@@ -279,15 +281,16 @@ if [ "$TOOL_NAME" != "Bash" ]; then
 fi
 
 # The judge is hooks/lib/live_checkout.py, imported so CPython caches its
-# bytecode. PYTHONSAFEPATH=1 keeps the cwd off sys.path; the lib dir is added
-# first. Any failure -> exit 0 (fail open).
-RESULT=$(CWD="$CWD" LIVE_ROOTS="$LIVE_ROOTS" PYTHONSAFEPATH=1 python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import live_checkout' "$HOOK_LIB" 3<<<"$CMD" 2>/dev/null) || exit 0
+# bytecode. The -c string drops '' and '.' from sys.path: Python before 3.11
+# ignores PYTHONSAFEPATH and puts the cwd first for -c, so the strip is what
+# keeps the cwd off sys.path there. PYTHONSAFEPATH=1 is kept for 3.11+. Then the
+# lib dir goes first. Any failure -> exit 0 (fail open).
+RESULT=$(CWD="$CWD" LIVE_ROOTS="$LIVE_ROOTS" PYTHONSAFEPATH=1 python3 -c 'import sys; sys.path[:] = [p for p in sys.path if p not in ("", ".")]; sys.path.insert(0, sys.argv[1]); import live_checkout' "$HOOK_LIB" 3<<<"$CMD" 2>/dev/null) || exit 0
 
 [ -n "$RESULT" ] || exit 0
 
-BLOCK_ROOT=$(printf '%s\n' "$RESULT" | sed -n '1p')
-BLOCK_DEF=$(printf '%s\n' "$RESULT" | sed -n '2p')
-BLOCK_REASON=$(printf '%s\n' "$RESULT" | sed -n '3p')
+BLOCK_ROOT='' BLOCK_DEF='' BLOCK_REASON=''
+{ IFS= read -r BLOCK_ROOT; IFS= read -r BLOCK_DEF; IFS= read -r BLOCK_REASON; } <<<"$RESULT"
 [ -n "$BLOCK_ROOT" ] && [ -n "$BLOCK_REASON" ] || exit 0
 
 emit_block "$BLOCK_ROOT" "${BLOCK_DEF:-main}" "$BLOCK_REASON"

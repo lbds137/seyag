@@ -2,6 +2,21 @@
 
 All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY-MM-DD>` section per released version; under it, `###` categories in fixed order — Breaking Changes, Features, Bug Fixes, Improvements, Chores, Tests — empty ones omitted; items are `- **scope:** description (#PR)`, written from the version's merged commit subjects.
 
+## 0.3.159 - 2026-11-11
+
+### Bug Fixes
+
+- **hooks:** live-checkout-guard strips the cwd from the judge's sys.path itself; 0.3.158's PYTHONSAFEPATH=1 alone did nothing before Python 3.11, so the planted-module protection it described held only on 3.11+ (#PR).
+
+### Improvements
+
+- **hooks:** cwd-drift-guard's raw prefilter ignores the `cwd` and `transcript_path` values, so a path spelling `git` no longer costs the fast path (#PR).
+- **hooks:** the live-checkout-guard Edit/Write nested-worktree check, the judge-result split (live-checkout-guard) and the repo-info split and session/agent id read (cwd-drift-guard) drop their per-line sed, realpath and jq forks (#PR).
+
+### Tests
+
+- **probes:** a pre-3.11 emulation row for the planted module; cwd-drift fast-path rows for git-spelling paths (#PR).
+
 ## 0.3.158 - 2026-11-10
 
 ### Improvements
