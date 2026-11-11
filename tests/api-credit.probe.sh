@@ -503,7 +503,7 @@ req=$(head -n 1 "$T/cr/hits.log")
 cf="$T/cache-ok/claude-statusline/api-credit-live.json"
 if [ "$(hits)" = 1 ] && ! grep -q fixture-admin-key "$T/cr/argv.log" && ! grep -q fixture-admin-key "$cf" \
   && [ "$(jq -r 'keys[0]' "$cf" | cut -d' ' -f1)" = "$(printf '%s' fixture-admin-key | sha256sum | cut -d' ' -f1)" ] \
-  && ! { _pipe_out=$(grep -v "http://127.0.0.1:" "$T/cr/argv.log") && grep -q . <<<"$_pipe_out"; }; then
+  && { _pipe_out=$(grep -v "http://127.0.0.1:" "$T/cr/argv.log"); [ $? -le 1 ] && ! grep -q . <<<"$_pipe_out"; }; then
   ok "provider: one request (the statusline call reused the cache); key absent from curl argv and from the cache (cache key holds its SHA-256); every URL loopback"
 else bad "provider key hygiene: hits $(hits) / argv $(cat "$T/cr/argv.log") / cache $(cat "$cf")"; fi
 b=$(lv ok balance)
