@@ -6,11 +6,11 @@ All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY
 
 ### Improvements
 
-- **hooks:** cwd-drift-guard resolves the linked-worktree git dirs with one realpath call instead of two (#PR).
+- **hooks:** cwd-drift-guard resolves the linked-worktree git dirs with one realpath call instead of two (#299).
 
 ### Tests
 
-- **probes:** live-checkout-guard pins that a realpath failure on the worktree toplevel alone allows the edit (the pre-0.3.159 code compared the unresolved top and blocked) (#PR).
+- **probes:** live-checkout-guard pins that a realpath failure on the worktree toplevel alone allows the edit (the pre-0.3.159 code compared the unresolved top and blocked) (#299).
 
 ## 0.3.159 - 2026-11-11
 
