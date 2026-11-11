@@ -410,6 +410,63 @@ BIG=$(printf '%*s' 214000 '' | tr ' ' x)
 check 2 "drift behind a heredoc past 128 KiB still blocks" \
   "cat > notes.md <<'EOF'"$'\n'"$BIG"$'\nEOF\n'"git add docs/x.md" "$SUB"
 
+# --- The raw-JSON prefilter (before any jq) and the one-jq read ---------------
+# In raw JSON a newline or tab is the two characters \n or \t, so git after one
+# has no space before it in the raw text. The raw prefilter must still let it through.
+check 2 "git after a newline (raw \\n) still blocks" $'true\ngit add docs/x.md' "$SUB"
+check 2 "git after a tab (raw \\t) still blocks" $'ls;\tgit add docs/x.md' "$SUB"
+# A JSON \u escape for a letter of git: the raw text has no literal git, so only
+# the \u alternative of the raw prefilter admits it.
+BS=$(python3 -c 'import sys; sys.stdout.write(chr(92))')
+g_raw=$(printf '{"tool_name":"Bash","tool_input":{"command":"%su0067it add docs/x.md"},"cwd":"%s"}' "$BS" "$SUB")
+printf '%s' "$g_raw" | env -u SYG_CWD_DRIFT_WORKTREE bash "$HOOK" >/dev/null 2>&1
+g_rc=$?
+count=$((count + 1))
+if [ "$g_rc" = 2 ]; then
+  echo "ok   [2]: git spelled with a JSON \\u escape still blocks"
+else
+  echo "FAIL [$g_rc≠2]: git spelled with a JSON \\u escape still blocks"
+  fail=1
+fi
+
+# A JSON NUL escape inside git (git<NUL> add): jq drops the NUL, as bash $() did,
+# so the command is still judged as git add from a drifted subdir.
+nul_raw=$(printf '{"tool_name":"Bash","tool_input":{"command":"git%su0000 add docs/x.md"},"cwd":"%s"}' "$BS" "$SUB")
+printf '%s' "$nul_raw" | env -u SYG_CWD_DRIFT_WORKTREE bash "$HOOK" >/dev/null 2>&1
+nul_rc=$?
+count=$((count + 1))
+if [ "$nul_rc" = 2 ]; then
+  echo "ok   [2]: git with a JSON NUL escape inside (git<NUL> add) still blocks"
+else
+  echo "FAIL [$nul_rc≠2]: git with a JSON NUL escape inside (git<NUL> add) still blocks"
+  fail=1
+fi
+
+# The jq shim counts each fork of jq, then runs the real one. It goes on PATH
+# for the hook process only: payloads are built before, with the real jq.
+JQ_REAL=$(command -v jq)
+JQ_SHIM="$TMP/jq-shim"
+JQ_COUNT="$TMP/jq-count"
+mkdir -p "$JQ_SHIM"
+cat >"$JQ_SHIM/jq" <<EOF
+#!/bin/bash
+echo x >>"$JQ_COUNT"
+exec "$JQ_REAL" "\$@"
+EOF
+chmod +x "$JQ_SHIM/jq"
+: >"$JQ_COUNT"
+h_payload=$(jq -nc --arg d "$SUB" '{tool_name:"Bash",tool_input:{command:"ls"},cwd:$d}')
+printf '%s' "$h_payload" | env -u SYG_CWD_DRIFT_WORKTREE PATH="$JQ_SHIM:$PATH" bash "$HOOK" >/dev/null 2>&1
+h_rc=$?
+h_forks=$(wc -l <"$JQ_COUNT" | tr -d ' ')
+count=$((count + 1))
+if [ "$h_rc" = 0 ] && [ "$h_forks" = 0 ]; then
+  echo "ok   [0]: a non-git Bash command takes the raw fast path (0 jq forks)"
+else
+  echo "FAIL [rc=$h_rc, jq forks=$h_forks]: a non-git Bash command takes the raw fast path (0 jq forks)"
+  fail=1
+fi
+
 echo "---"
 echo "$count cases"
 [ "$fail" = 0 ] && echo "ALL PASS" || { echo "FAILURES"; exit 1; }

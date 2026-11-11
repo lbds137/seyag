@@ -499,6 +499,98 @@ run_hook 0 "empty JSON fails open" "{}"
 run_hook 0 "non-guarded tool (Read) fails open" \
   "$(jq -nc --arg p "$LIVE/tracked.txt" '{tool_name:"Read",tool_input:{file_path:$p}}')"
 
+# --- 9. Judge module (hooks/lib/live_checkout.py): cwd-safe, one jq, cached ---
+# a. The hook process runs in a directory holding a planted subprocess.py. The
+#    judge must not import it: the guard sets PYTHONSAFEPATH=1 for that. This
+#    row deliberately does not set PYTHONSAFEPATH itself.
+PLANT="$TMP/planted-cwd"
+MARKER="$TMP/planted-marker"
+mkdir -p "$PLANT"
+printf 'open("%s", "w").close()\n' "$MARKER" >"$PLANT/subprocess.py"
+PLANT_PAYLOAD=$(jq -nc --arg d "$LIVE" '{tool_name:"Bash",tool_input:{command:"git switch other"},cwd:$d}')
+rm -f "$MARKER"
+(cd "$PLANT" && printf '%s' "$PLANT_PAYLOAD" | env \
+  -u CLAUDE_PLUGIN_ROOT -u SYG_LIVE_CHECKOUT_AUTO -u SYG_LIVE_CHECKOUTS -u SYG_ALLOW_LIVE_CHECKOUT \
+  CLAUDE_PLUGIN_ROOT="$PLUGIN_SUB" bash "$HOOK" >/dev/null 2>"$TMP/planted.err")
+planted_rc=$?
+count=$((count + 1))
+if [ "$planted_rc" = 2 ] && [ ! -e "$MARKER" ]; then
+  echo "ok   [2]: planted subprocess.py in the process cwd is not imported; still blocks"
+else
+  echo "FAIL [rc=$planted_rc, marker $([ -e "$MARKER" ] && echo present || echo absent)]: planted subprocess.py in the process cwd is not imported"
+  fail=1
+fi
+
+# b. One jq per call. The shim counts each jq fork, then runs the real jq. It
+#    goes on PATH for the hook process only (run_hook's env), so the payloads
+#    built by check_bash/check_file use the real jq and are not counted.
+JQ_REAL=$(command -v jq)
+JQ_SHIM="$TMP/jq-shim"
+JQ_COUNT="$TMP/jq-count"
+mkdir -p "$JQ_SHIM"
+cat >"$JQ_SHIM/jq" <<EOF
+#!/bin/bash
+echo x >>"$JQ_COUNT"
+exec "$JQ_REAL" "\$@"
+EOF
+chmod +x "$JQ_SHIM/jq"
+# assert_jq_forks <expected> <label>: counts the forks since the last reset.
+assert_jq_forks() {
+  local got
+  got=$(wc -l <"$JQ_COUNT" | tr -d ' ')
+  count=$((count + 1))
+  if [ "$got" = "$1" ]; then
+    echo "ok   [jq=$got]: $2"
+  else
+    echo "FAIL [jq=$got≠$1]: $2"
+    fail=1
+  fi
+  : >"$JQ_COUNT"
+}
+: >"$JQ_COUNT"
+check_bash 2 "one jq: blocking Bash case" "git switch other" "$LIVE" PATH="$JQ_SHIM:$PATH"
+assert_jq_forks 1 "one jq: blocking Bash case forks jq once"
+check_file 2 "one jq: blocking Edit on a tracked file" Edit "$LIVE/tracked.txt" "$LIVE" PATH="$JQ_SHIM:$PATH"
+assert_jq_forks 1 "one jq: blocking Edit case forks jq once"
+
+# c. An object-valued command: the tostring path. Fails open with no stderr.
+OBJ_PAYLOAD=$(jq -nc --arg d "$LIVE" '{tool_name:"Bash",tool_input:{command:{a:1}},cwd:$d}')
+run_hook 0 "object-valued command fails open" "$OBJ_PAYLOAD"
+if [ -n "$LAST_ERR" ]; then
+  echo "FAIL [c-stderr]: object-valued command wrote stderr: $LAST_ERR"
+  fail=1
+fi
+
+# d. run.sh's per-user bytecode cache holds the judge module's .pyc. The env -u
+#    list drops the probe's own no-bytecode settings so run.sh sets its prefix.
+CACHE_HOME="$TMP/xdg"
+D_PAYLOAD=$(jq -nc --arg d "$LIVE" '{tool_name:"Bash",tool_input:{command:"git switch other"},cwd:$d}')
+(cd "$LIVE" && printf '%s' "$D_PAYLOAD" | env \
+  -u PYTHONDONTWRITEBYTECODE -u PYTHONPYCACHEPREFIX \
+  -u SYG_PROFILE -u SYG_ENABLE -u SYG_DISABLE -u CLAUDE_CODE_ENTRYPOINT \
+  -u CLAUDE_PLUGIN_ROOT -u SYG_LIVE_CHECKOUT_AUTO -u SYG_LIVE_CHECKOUTS -u SYG_ALLOW_LIVE_CHECKOUT \
+  XDG_CACHE_HOME="$CACHE_HOME" CLAUDE_PLUGIN_ROOT="$PLUGIN_SUB" \
+  bash "$SCRIPT_DIR/run.sh" live-checkout-guard >/dev/null 2>"$TMP/d.err")
+d_rc=$?
+d_pyc=$(find "$CACHE_HOME/seyag/pycache" -name 'live_checkout*.pyc' 2>/dev/null | head -n 1)
+count=$((count + 1))
+if [ "$d_rc" = 2 ] && [ -n "$d_pyc" ]; then
+  echo "ok   [2]: run.sh caches the judge module's bytecode under the seyag pycache prefix"
+else
+  echo "FAIL [rc=$d_rc, pyc=${d_pyc:-none}]: run.sh caches the judge module's bytecode under the seyag pycache prefix"
+  fail=1
+fi
+
+# e. A JSON NUL escape splitting the stash word (git sta<NUL>sh): jq drops the NUL,
+#    as bash $() did, so the command is still judged as git stash.
+# f. A trailing JSON newline in the cwd: stripped, as $() did, so the live root is
+#    still judged (the cwd is the live root plus one newline).
+BS=$(python3 -c 'import sys; sys.stdout.write(chr(92))')
+NUL_PAYLOAD=$(printf '{"tool_name":"Bash","tool_input":{"command":"git sta%su0000sh"},"cwd":"%s"}' "$BS" "$LIVE")
+run_hook 2 "a JSON NUL splitting git stash (git sta<NUL>sh) still blocks" "$NUL_PAYLOAD"
+NL_PAYLOAD=$(printf '{"tool_name":"Bash","tool_input":{"command":"git checkout -b x"},"cwd":"%s%sn"}' "$LIVE" "$BS")
+run_hook 2 "a trailing JSON newline in cwd still judges the live root (blocks)" "$NL_PAYLOAD"
+
 echo "---"
 echo "$count cases"
 [ "$fail" = 0 ] && echo "ALL PASS" || { echo "FAILURES"; exit 1; }

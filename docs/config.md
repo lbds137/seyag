@@ -29,7 +29,7 @@ Exception: the per-command `SYG_ALLOW_*` bypasses of the shell guards are writte
 | `SYG_ALLOW_ENV_PRINT` | unset | Set to 1 in a pipeline segment's words in the command text to bypass env-print-guard for an owner-approved dump. | `hooks/env-print-guard.sh` |
 | `SYG_ALLOW_GREP_DOLLAR` | unset | Set to 1 in the command text to bypass grep-escaped-dollar-guard. | `hooks/grep-escaped-dollar-guard.sh` |
 | `SYG_ALLOW_HEREDOC_EDIT` | unset | Set to 1 in the command text to bypass python-heredoc-edit-guard. | `hooks/python-heredoc-edit-guard.sh` |
-| `SYG_ALLOW_LIVE_CHECKOUT` | unset | Set to 1 in the command text (git prefix or export) or in the environment to bypass live-checkout-guard. | `hooks/live-checkout-guard.sh` |
+| `SYG_ALLOW_LIVE_CHECKOUT` | unset | Set to 1 in the command text (git prefix or export) or in the environment to bypass live-checkout-guard. | `hooks/lib/live_checkout.py`, `hooks/live-checkout-guard.sh` |
 | `SYG_ALLOW_PRIVATE_TERM` | unset | Set to 1 in the command's own prefix in the command text to bypass private-term-guard on the owner's word. | `hooks/lib/outbound.py`, `hooks/private-term-guard.sh` |
 | `SYG_ALLOW_RM` | unset | Set to 1 in the command text to bypass recursive-rm-guard for an owner-approved deletion. | `hooks/recursive-rm-guard.sh` |
 | `SYG_ALLOW_SESSION_URL` | unset | Set to 1 in the command's own prefix in the command text to bypass session-url-gate on the owner's word. | `hooks/lib/outbound.py`, `hooks/session-url-gate.sh` |
