@@ -2,6 +2,16 @@
 
 All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY-MM-DD>` section per released version; under it, `###` categories in fixed order — Breaking Changes, Features, Bug Fixes, Improvements, Chores, Tests — empty ones omitted; items are `- **scope:** description (#PR)`, written from the version's merged commit subjects.
 
+## 0.3.158 - 2026-11-10
+
+### Improvements
+
+- **hooks:** live-checkout-guard's judge moves from a `python3 -` heredoc into `hooks/lib/live_checkout.py`, imported so its bytecode is cached instead of recompiled on every call; the import runs with `PYTHONSAFEPATH=1`, so a module planted in the session's cwd is no longer imported. The guard reads its payload with one jq fork instead of four and resolves live roots without per-line forks; cwd-drift-guard skips any payload that cannot spell `git` before its first jq fork and reads its fields with one jq fork. Both keep the old field handling (NUL bytes dropped, trailing newlines stripped).
+
+### Tests
+
+- **probes:** live-checkout-guard pins the planted-module case, one jq fork per call, an object-valued command failing open, bytecode cached through run.sh, a NUL inside `git stash` and a trailing newline in cwd; cwd-drift-guard pins `git` after a JSON newline or tab, spelled with a `\u` escape or split by a NUL, and the zero-jq fast path.
+
 ## 0.3.157 - 2026-11-10
 
 ### Improvements

@@ -90,14 +90,32 @@ command -v python3 >/dev/null 2>&1 || exit 0
 command -v git >/dev/null 2>&1 || exit 0
 
 INPUT=$(cat)
-TOOL_NAME=$(jq -r '.tool_name // empty' <<<"$INPUT" 2>/dev/null || echo "")
+# Raw-JSON prefilter before any jq fork: a call that never spells git (in any
+# case) or a JSON \u escape cannot block. It must be a SUPERSET of the decoded
+# check below. In raw JSON a newline or tab in the command is the two characters
+# \n or \t, so a `git` after one has no space or other class character before
+# it, and no preceding class can be required here. `\u` admits an escaped
+# spelling of a letter of git, such as an escaped g followed by it.
+grep -qE '[Gg][Ii][Tt]|\\u' <<<"$INPUT" || exit 0
+
+# One jq fork reads the three fields, as @sh assignments that are eval'd. Parity
+# with the old $(jq -r ...) reads, which bash $() applied to each field: NUL bytes
+# are dropped and every trailing newline is stripped (both in s). Missing or null
+# -> empty; a non-string scalar or an object -> its JSON text (tostring).
+TOOL_NAME='' CMD='' SHELL_CWD=''
+PAYLOAD_FIELDS=$(jq -r '
+  def s: if . == null then "" elif type == "string" then . else tostring end
+    | split(([0]|implode)) | join("")
+    | ([10]|implode) as $nl | until((endswith($nl)|not); .[:-1]);
+  "TOOL_NAME=\(.tool_name | s | @sh) CMD=\(.tool_input.command | s | @sh) SHELL_CWD=\(.cwd | s | @sh)"
+' <<<"$INPUT" 2>/dev/null) || exit 0
+eval "$PAYLOAD_FIELDS" || exit 0
 [ "$TOOL_NAME" != "Bash" ] && exit 0
 
-CMD=$(jq -r '.tool_input.command // empty' <<<"$INPUT" 2>/dev/null || echo "")
 [ -z "$CMD" ] && exit 0
 
-# The shell's persistent cwd, as reported in the hook payload. Absent → allow.
-SHELL_CWD=$(jq -r '.cwd // empty' <<<"$INPUT" 2>/dev/null || echo "")
+# The shell's persistent cwd, as reported in the hook payload (SHELL_CWD, set
+# above). Absent → allow.
 [ -z "$SHELL_CWD" ] && exit 0
 
 # Cheap short-circuit before any git or python spawn: only a command with a
