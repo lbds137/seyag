@@ -111,6 +111,12 @@ def scan_plugins(root: Path) -> dict[str, set[str]]:
 
             for match in NAME_RE.finditer(text):
                 name = match.group(0)
+                # config-env.sh mentions the SCAN_EXACT_NAMES (harness-owned
+                # names) only to refuse them — its skip list is pinned against
+                # this exact list by tests/config-env.probe.sh case (j) — so it
+                # is not a reader and must not appear under "Found in".
+                if rel == "hooks/lib/config-env.sh" and name in SCAN_EXACT_NAMES:
+                    continue
                 readers.setdefault(name, set()).add(rel)
 
     return readers
@@ -218,7 +224,7 @@ def render_doc(rows: dict[str, dict[str, str]], scanned: dict[str, set[str]]) ->
         "",
         "## Scope",
         "",
-        f"Every environment variable with prefix {prefixes_list}, plus {exact_list}, found in files under `plugins/` other than `*.md` and `*.probe.sh`. Not listed: variables that the Claude Code harness, `gh`, the shell or XDG define and seyag only reads (for example `CLAUDE_PROJECT_DIR`, `CLAUDE_PLUGIN_ROOT`, `CLAUDE_JOB_DIR`, `CLAUDE_CODE_*`, `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY`, `GH_*`, `XDG_*`, `HOME`); the listed names from those systems are ones seyag honours as overrides. `Found in` lists every such file that mentions the name, comments included.",
+        f"Every environment variable with prefix {prefixes_list}, plus {exact_list}, found in files under `plugins/` other than `*.md` and `*.probe.sh`. Not listed: variables that the Claude Code harness, `gh`, the shell or XDG define and seyag only reads (for example `CLAUDE_PROJECT_DIR`, `CLAUDE_PLUGIN_ROOT`, `CLAUDE_JOB_DIR`, `CLAUDE_CODE_*`, `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY`, `GH_*`, `XDG_*`, `HOME`); the listed names from those systems are ones seyag honours as overrides. `Found in` lists every such file that mentions the name, comments included, except `hooks/lib/config-env.sh` for the harness-owned names, which it mentions only to refuse them.",
         "",
         "## How to set a value",
         "",
@@ -236,7 +242,7 @@ def render_doc(rows: dict[str, dict[str, str]], scanned: dict[str, set[str]]) ->
         "",
         "## Config files (config.toml)",
         "",
-        "An optional TOML file fills in knobs the environment left unset: user `${XDG_CONFIG_HOME:-$HOME/.config}/seyag/config.toml`, then project `${CLAUDE_PROJECT_DIR:-$PWD}/.claude/seyag.toml` (project keys overwrite user keys). The environment wins over both, even when set to the empty string. Keys map mechanically to env names, the key path uppercased with the separators turned into underscores: `claude_usage_week_reserve = 61` and `[claude_usage]` + `week_reserve = 61` both set `CLAUDE_USAGE_WEEK_RESERVE`. A key applies iff its env name is a user-scope row of this registry and not harness-owned; names ending `_CMD` cannot be set from the project file. Subset per line: blank, full-line comment, `[section]` header, or `key = value` with a quoted string (basic `\"`, escapes `\\\\` `\\\"` `\\t` `\\n` only, or literal `'`), an integer, a float, or `true`/`false` (exported as `1`/`0`); strings and paths must be quoted, and arrays, inline tables, multiline strings and trailing content are unsupported; a comment may follow a value but not a section header. `SYG_CONFIG=0` disables the loader. A bad file warns on stderr and is skipped, never blocks a hook — and warns again on every hook call.",
+        "An optional TOML file fills in knobs the environment left unset: user `${XDG_CONFIG_HOME:-$HOME/.config}/seyag/config.toml`, then project `${CLAUDE_PROJECT_DIR:-$PWD}/.claude/seyag.toml` (project keys overwrite user keys). The environment wins over both, even when set to the empty string. Keys map mechanically to env names, the key path uppercased with the separators turned into underscores: `claude_usage_week_reserve = 61` and `[claude_usage]` + `week_reserve = 61` both set `CLAUDE_USAGE_WEEK_RESERVE`. A key applies iff its env name is a user-scope row of this registry and not harness-owned; command-execution knobs — names ending `_CMD` and the binary-path knobs the loader lists beside them — cannot be set from the project file. Subset per line: blank, full-line comment, `[section]` header, or `key = value` with a quoted string (basic `\"`, escapes `\\\\` `\\\"` `\\t` `\\n` only, or literal `'`), an integer, a float, or `true`/`false` (exported as `1`/`0`); strings and paths must be quoted, and arrays, inline tables, multiline strings and trailing content are unsupported; a comment may follow a value but not a section header. `SYG_CONFIG=0` disables the loader. A bad file warns on stderr and is skipped, never blocks a hook — and warns again on every hook call. The project file has the same trust level as the project's `settings.json` `env` block: a cloned repo can set any knob it names, guard bypasses included, so trust a repo before letting its `.claude/seyag.toml` load.",
     ]
 
     for group in GROUPS:

@@ -26,9 +26,11 @@
 # strings and trailing content after the value are unsupported. Each offending
 # line warns once on stderr and is skipped: a bad file never blocks a hook or a
 # bin, and because the loader runs per call, a bad file warns on every call (loud
-# beats silent). Duplicate keys and sections warn; the first wins. Names ending
-# _CMD cannot be set from the project file: a repo must not choose the commands
-# this machine runs. SYG_CONFIG=0 disables the loader entirely.
+# beats silent). Duplicate keys warn (first value wins); duplicate sections
+# warn too, and their keys merge (again first value per key). Names ending
+# _CMD, and the binary-path knobs in _SYG_CFG_PROJECT_EXEC below, cannot be
+# set from the project file: a repo must not choose the executables this
+# machine runs. SYG_CONFIG=0 disables the loader entirely.
 
 # Harness-owned names (see the header): never settable from a config file. Kept
 # equal to the user-scope rows of SCAN_EXACT_NAMES in tests/config-reference.py
@@ -48,6 +50,25 @@ _SYG_CFG_HARNESS=(
 _syg_cfg_is_harness() {
   local n
   for n in "${_SYG_CFG_HARNESS[@]}"; do
+    [ "$n" = "$1" ] && return 0
+  done
+  return 1
+}
+
+# Knobs whose value is a binary seyag invokes, without carrying the _CMD
+# suffix: refused from project scope like _CMD (same reason — a repo must not
+# choose the executables this machine runs). tests/config-env.probe.sh (o5)
+# pins that this list plus the _CMD suffix covers every knobs.tsv user row
+# whose description names a binary "invoked by" seyag.
+_SYG_CFG_PROJECT_EXEC=(
+  SYG_STATUSLINE_ZAI_USAGE
+)
+
+# _syg_cfg_in_project_exec <NAME>: is NAME a binary-path knob without the _CMD
+# suffix (refused from project scope, settable from user scope)?
+_syg_cfg_in_project_exec() {
+  local n
+  for n in "${_SYG_CFG_PROJECT_EXEC[@]}"; do
     [ "$n" = "$1" ] && return 0
   done
   return 1
@@ -196,7 +217,7 @@ _syg_cfg_parse_file() {
   fi
   local -A seen=()
   local -i n=0
-  local raw line key val name path comp secpath="" sep
+  local raw line key val name path comp secpath="" sep disp execknob
   for raw in "${lines[@]}"; do
     n+=1
     line=${raw%$'\r'}
@@ -212,7 +233,7 @@ _syg_cfg_parse_file() {
           continue
         fi
         if [ -n "${seen["s:$key"]+x}" ]; then
-          echo "seyag config: $file: line $n: [$key]: duplicate section: first wins" >&2
+          echo "seyag config: $file: line $n: [$key]: duplicate section: keys merge, first value per key wins" >&2
         fi
         seen["s:$key"]=1
         secpath=$key
@@ -248,14 +269,15 @@ _syg_cfg_parse_file() {
       echo "seyag config: $file: line $n: unknown key '$disp' (not a settable seyag knob; see docs/config.md)" >&2
       continue
     fi
-    case $name in
-      *_CMD)
-        if [ "$scope" = project ]; then
-          echo "seyag config: $file: line $n: '$name' cannot be set from project scope (command-execution knob)" >&2
-          continue
-        fi
-        ;;
-    esac
+    # Project scope refuses every knob that picks a binary to run: the _CMD
+    # suffix class plus the explicit list at the top of this file.
+    execknob=0
+    case $name in *_CMD) execknob=1 ;; esac
+    [ "$execknob" = 0 ] && _syg_cfg_in_project_exec "$name" && execknob=1
+    if [ "$scope" = project ] && [ "$execknob" = 1 ]; then
+      echo "seyag config: $file: line $n: '$name' cannot be set from project scope (command-execution knob)" >&2
+      continue
+    fi
     if [ -n "${seen["n:$name"]+x}" ]; then
       echo "seyag config: $file: line $n: $key: duplicate key: first value wins" >&2
       continue
@@ -291,10 +313,16 @@ syg_config_env() {
     return 0
   fi
   declare -gA _SYG_CFG_SETTABLE=()
-  local row name scope
+  local row name scope rest
   for row in "${rows[@]}"; do
     row=${row%$'\r'}
-    IFS=$'\t' read -r name scope _ <<<"$row"
+    # Split by expansion, not a here-string read: one per row, per hook call.
+    # A tab-less row keeps its whole text as the scope (never "user" alone,
+    # guarded below), so it stays skipped exactly as before.
+    case $row in *$'\t'*) ;; *) continue ;; esac
+    name=${row%%$'\t'*}
+    rest=${row#*$'\t'}
+    scope=${rest%%$'\t'*}
     [ "$scope" = user ] || continue
     case $name in '' | '#'*) continue ;; esac
     _SYG_CFG_SETTABLE[$name]=1
