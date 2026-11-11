@@ -215,8 +215,9 @@ if [ -n "$WT_GIT_DIR" ] && [ -n "$WT_COMMON_DIR" ] && [ "$WT_GIT_DIR" != "$WT_CO
     /*) ;;
     *) WT_COMMON_DIR="$EFFECTIVE_CWD/$WT_COMMON_DIR" ;;
   esac
-  WT_GIT_DIR_REAL=$(realpath "$WT_GIT_DIR" 2>/dev/null || echo "")
-  WT_COMMON_DIR_REAL=$(realpath "$WT_COMMON_DIR" 2>/dev/null || echo "")
+  # One realpath call; a failed argument drops its line, so any failure leaves the pair unequal-or-empty and the tree is treated as not linked (same fail-toward-allow direction as before).
+  WT_GIT_DIR_REAL='' WT_COMMON_DIR_REAL=''
+  { IFS= read -r WT_GIT_DIR_REAL; IFS= read -r WT_COMMON_DIR_REAL; } < <(realpath -- "$WT_GIT_DIR" "$WT_COMMON_DIR" 2>/dev/null)
   if [ -n "$WT_GIT_DIR_REAL" ] && [ -n "$WT_COMMON_DIR_REAL" ] && [ "$WT_GIT_DIR_REAL" != "$WT_COMMON_DIR_REAL" ]; then
     LINKED_WT=1
     # Assumes the standard <repo>/.git layout; exotic layouts (bare-adjacent,

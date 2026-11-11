@@ -545,6 +545,24 @@ else
   fail=1
 fi
 
+# a3. Top-only realpath failure: the Edit branch allows (pre-#297 compared the unresolved
+#     top and blocked). The two multi-path realpath calls in one hook run have the SAME
+#     arguments (add_live_root's and the Edit branch's: -- <root>/.git <root>/.git <root>),
+#     so the shim drops the toplevel argument on the SECOND such call only: add_live_root
+#     keeps its top and registers the root; the Edit branch loses it and must allow.
+RT_REAL=$(command -v realpath)
+RT_SHIM="$TMP/rt-shim"
+mkdir -p "$RT_SHIM"
+RT_COUNT="$TMP/rt-count"
+: >"$RT_COUNT"
+printf '#!/bin/bash\nif [ "$#" -eq 4 ] && [ "$1" = "--" ] && [ "$4" = "%s" ]; then n=$(cat "%s" 2>/dev/null); echo "$(( ${n:-0} + 1 ))" >"%s"; if [ "${n:-0}" -ge 1 ]; then exec "%s" "$1" "$2" "$3"; fi; fi\nexec "%s" "$@"\n' \
+  "$LIVE_REAL" "$RT_COUNT" "$RT_COUNT" "$RT_REAL" "$RT_REAL" >"$RT_SHIM/realpath"
+chmod +x "$RT_SHIM/realpath"
+check_file 2 "control: Edit of a non-ignored file in the live root blocks (same payload as a3)" \
+  Edit "$PLUGIN_SUB/CHANGELOG.md" "$PLUGIN_SUB"
+check_file 0 "realpath failure on the toplevel alone: Edit of a non-ignored file in the live root allows" \
+  Edit "$PLUGIN_SUB/CHANGELOG.md" "$PLUGIN_SUB" PATH="$RT_SHIM:$PATH"
+
 # b. One jq per call. The shim counts each jq fork, then runs the real jq. It
 #    goes on PATH for the hook process only (run_hook's env), so the payloads
 #    built by check_bash/check_file use the real jq and are not counted.

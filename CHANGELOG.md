@@ -2,6 +2,16 @@
 
 All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY-MM-DD>` section per released version; under it, `###` categories in fixed order — Breaking Changes, Features, Bug Fixes, Improvements, Chores, Tests — empty ones omitted; items are `- **scope:** description (#PR)`, written from the version's merged commit subjects.
 
+## 0.3.160 - 2026-11-11
+
+### Improvements
+
+- **hooks:** cwd-drift-guard resolves the linked-worktree git dirs with one realpath call instead of two (#PR).
+
+### Tests
+
+- **probes:** live-checkout-guard pins that a realpath failure on the worktree toplevel alone allows the edit (the pre-0.3.159 code compared the unresolved top and blocked) (#PR).
+
 ## 0.3.159 - 2026-11-11
 
 ### Bug Fixes
