@@ -281,11 +281,12 @@ add_tree apply gonelocked; git -C "$A" worktree lock --reason "claude agent agen
 add_tree apply keep; echo n > "$A/.claude/worktrees/keep/new.txt"
 out=$("$TOOL" --repo "$A" --apply); rc=$?
 common=$(git -C "$A" rev-parse --path-format=absolute --git-common-dir)
+_pipe_out=$(git -C "$A" worktree list --porcelain 2>/dev/null) || bad "--apply setup: git worktree list failed"
 if [ $rc = 0 ] && [ ! -e "$A/.claude/worktrees/gone" ] && [ ! -e "$A/.claude/worktrees/gonelocked" ] \
   && ! git -C "$A" rev-parse -q --verify refs/heads/worktree-agent-gone >/dev/null \
   && ! git -C "$A" rev-parse -q --verify refs/heads/worktree-agent-gonelocked >/dev/null \
   && [ ! -e "$common/worktrees/gone" ] && [ ! -e "$common/worktrees/gonelocked" ] \
-  && ! { _pipe_out=$(git -C "$A" worktree list --porcelain) && grep -q prunable <<<"$_pipe_out"; } \
+  && ! grep -q prunable <<<"$_pipe_out" \
   && [ -f "$A/.claude/worktrees/keep/new.txt" ] && git -C "$A" rev-parse -q --verify refs/heads/worktree-agent-keep >/dev/null \
   && grep -q 'removed, branch worktree-agent-gone deleted' <<<"$out"; then
   ok "--apply removes SAFE trees (locked one unlocked), deletes branches, prunes; the HOLD tree stays"
@@ -987,7 +988,7 @@ if [ "$(approvable_of "$J_P1" fine)" = "False" ] && [ "$(approvable_of "$J_P1" h
 else
   bad "P1: fine/held approvable flags (fine=$(approvable_of "$J_P1" fine), held=$(approvable_of "$J_P1" held))"
 fi
-if [ "$(approvable_of "$J_P1" busy)" = "False" ] && ! grep -q 'approvable with --apply-hold: .*busy' <<<"$out_p1"; then
+if [ "$rc_p1t" -eq 0 ] && [ "$(approvable_of "$J_P1" busy)" = "False" ] && ! grep -q 'approvable with --apply-hold: .*busy' <<<"$out_p1"; then
   ok "P1: busy is not approvable"
 else
   bad "P1: busy should not be approvable (got $(approvable_of "$J_P1" busy))"
@@ -1057,7 +1058,7 @@ for bf in tree.tgz branch.bundle uncommitted.patch changes.txt README.txt; do
   fi
 done
 $modes_ok && ok "P4: tree.tgz, branch.bundle, uncommitted.patch, changes.txt, README.txt all mode 600"
-tar_list=$(tar -tzf "$BK_HELD/tree.tgz" 2>/dev/null)
+tar_list=$(tar -tzf "$BK_HELD/tree.tgz" 2>/dev/null) || bad "P4: tar -tzf on the backup tree.tgz failed"
 if grep -qx 'extra\.txt' <<<"$tar_list" && grep -qx 'notes\.log' <<<"$tar_list" && ! grep -qE '(^|/)\.git(/|$)' <<<"$tar_list"; then
   ok "P4: tree.tgz lists extra.txt and notes.log and omits .git"
 else
@@ -1665,7 +1666,7 @@ if [ "$rc_p24" -eq 0 ] && [ ! -e "$SW24W/wt24" ] && [ -f "$BK24/reflog.pack" ] \
   && [ -f "$BK24/reflog.idx" ] \
   && [ "$(stat -c %a "$BK24/reflog.idx" 2>/dev/null)" = 600 ] \
   && { [ ! -e "$BK24/reflog.rev" ] || [ "$(stat -c %a "$BK24/reflog.rev" 2>/dev/null)" = 600 ]; } \
-  && _pipe_out=$(sed -n '/^=== Commits only in reflogs or refs\/worktree\/\* (in reflog\.pack) ===$/,/^===/p' "$BK24/changes.txt") && grep -q "^$C1_P24 " <<<"$_pipe_out" \
+  && _pipe_out=$(sed -n '/^=== Commits only in reflogs or per-worktree refs (in reflog\.pack) ===$/,/^===/p' "$BK24/changes.txt") && grep -q "^$C1_P24 " <<<"$_pipe_out" \
   && grep -q 'index-pack --stdin --fix-thin < .*reflog\.pack' "$BK24/README.txt" \
   && git -C "$T/p24-clone" index-pack --stdin --fix-thin < "$BK24/reflog.pack" >/dev/null 2>&1 \
   && git -C "$T/p24-clone" cat-file -e "$C1_P24^{commit}" 2>/dev/null \
@@ -1877,9 +1878,10 @@ add_tree sweep31 wt31s && [ -d "$SW31W/wt31s" ] || bad "P31 setup: add_tree wt31
 tree_31=$(git -C "$SW31W/wt31k" rev-parse 'HEAD^{tree}' 2>/dev/null)
 C_P31=$(git -C "$SW31W/wt31k" commit-tree "$tree_31" -p HEAD -m keep 2>/dev/null)
 [ -n "$C_P31" ] && git -C "$SW31W/wt31k" update-ref refs/worktree/keep "$C_P31" || bad "P31 setup: commit-tree + update-ref keep"
-! { _pipe_out=$(git -C "$SW31W/wt31k" rev-list --walk-reflogs HEAD 2>/dev/null) && grep -qx "$C_P31" <<<"$_pipe_out"; } \
-  && ! { _pipe_out=$(git -C "$SW31W/wt31k" rev-list --walk-reflogs refs/heads/worktree-agent-wt31k 2>/dev/null) && grep -qx "$C_P31" <<<"$_pipe_out"; } \
-  || bad "P31 setup: C_P31 absent from HEAD and branch reflogs"
+_pipe_out=$(git -C "$SW31W/wt31k" rev-list --walk-reflogs HEAD 2>/dev/null) || bad "P31 setup: walking the HEAD reflog"
+! grep -qx "$C_P31" <<<"$_pipe_out" || bad "P31 setup: C_P31 is in the HEAD reflog"
+_pipe_out=$(git -C "$SW31W/wt31k" rev-list --walk-reflogs refs/heads/worktree-agent-wt31k 2>/dev/null) || bad "P31 setup: walking the branch reflog"
+! grep -qx "$C_P31" <<<"$_pipe_out" || bad "P31 setup: C_P31 is in the branch reflog"
 git -C "$SW31W/wt31s" update-ref refs/worktree/x "$C1" || bad "P31 setup: update-ref refs/worktree/x on base"
 J_P31=$("$TOOL" --repo "$SW31" --json); rc_p31d=$?
 PLAN_P31=$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["hold_plan"] or "")' "$J_P31")
@@ -1902,8 +1904,8 @@ shopt -u nullglob
 BK31=${bk31_dirs[0]:-}
 git clone -q "$T/sweep31-origin.git" "$T/p31-clone" 2>/dev/null && [ -d "$T/p31-clone" ] || bad "P31 setup: clone p31-clone"
 if [ "$rc_p31a" -eq 0 ] && [ ! -e "$SW31W/wt31k" ] && [ ! -e "$SW31W/wt31s" ] && [ -f "$BK31/reflog.pack" ] \
-  && _pipe_out=$(sed -n '/^=== Commits only in reflogs or refs\/worktree\/\* (in reflog\.pack) ===$/,/^===/p' "$BK31/changes.txt") && grep -q "^$C_P31 " <<<"$_pipe_out" \
-  && _pipe_out=$(sed -n '/^=== refs\/worktree\/\* ===$/,/^===/p' "$BK31/changes.txt") && grep -qx "$C_P31 refs/worktree/keep" <<<"$_pipe_out" \
+  && _pipe_out=$(sed -n '/^=== Commits only in reflogs or per-worktree refs (in reflog\.pack) ===$/,/^===/p' "$BK31/changes.txt") && grep -q "^$C_P31 " <<<"$_pipe_out" \
+  && _pipe_out=$(sed -n '/^=== Per-worktree refs (refs\/worktree\/\*, refs\/bisect\/\*, refs\/rewritten\/\*) ===$/,/^===/p' "$BK31/changes.txt") && grep -qx "$C_P31 refs/worktree/keep" <<<"$_pipe_out" \
   && grep -q 'update-ref <refname> <sha from changes\.txt>' "$BK31/README.txt" \
   && git -C "$T/p31-clone" index-pack --stdin --fix-thin < "$BK31/reflog.pack" >/dev/null 2>&1 \
   && git -C "$T/p31-clone" cat-file -e "$C_P31^{commit}" 2>/dev/null; then
@@ -1976,19 +1978,30 @@ echo one > "$WT33/u1.txt" \
   && echo three > "$WT33/extra.log" \
   && [ -f "$WT33/u1.txt" ] && [ -L "$WT33/ulink" ] && [ -f "$WT33/"$'u\nnl.txt' ] && [ -f "$WT33/extra.log" ] \
   || bad "P33 setup: create files"
+# The reference mirrors tree_state_sha's stream exactly, rc sentinels included (all children
+# succeed on a healthy tree, the batch covers u1.txt and extra.log: batch=0:0).
 ref_state_p33=$(
   {
-    git -C "$WT33" status --porcelain=v1 -z --ignored --untracked-files=all
-    git -C "$WT33" diff --binary HEAD
-    git -C "$WT33" diff --binary --cached HEAD
+    printf '\001atrisk=%s\0' 0
+    git -C "$WT33" status --porcelain=v1 -z --ignored --untracked-files=all; rc33=$?
+    printf '\001status=%s\0' "$rc33"
+    git -C "$WT33" diff --binary HEAD; rc33=$?
+    printf '\001diff=%s\0' "$rc33"
+    git -C "$WT33" diff --binary --cached HEAD; rc33=$?
+    printf '\001diffcached=%s\0' "$rc33"
+    printf '\001batch=%s\0' "0:0"
     for p33 in $'u\nnl.txt' u1.txt ulink extra.log; do
+      rc33=0
       if [ -L "$WT33/$p33" ]; then
-        h33=$(readlink -- "$WT33/$p33")
+        h33=$(readlink -- "$WT33/$p33") || rc33=$?
       else
-        h33=$(git -C "$WT33" hash-object --no-filters -- "$p33")
+        h33=$(git -C "$WT33" hash-object --no-filters -- "$p33") || rc33=$?
       fi
-      printf '%s\0%s\0' "$p33" "$h33"
+      printf '%s\0%s\0' "$p33" "${h33:-}"
+      printf '\001hash=%s\0' "$rc33"
     done
+    git -C "$WT33" for-each-ref --format='%(objectname) %(refname)' refs/worktree/ refs/bisect/ refs/rewritten/; rc33=$?
+    printf '\001foreachref=%s\0' "$rc33"
   } | sha256sum | cut -d' ' -f1
 )
 head_p33=$(git -C "$WT33" rev-parse HEAD)
@@ -2016,16 +2029,25 @@ printf 'one\n' > "$WT33B/a" \
   && [ -f "$WT33B/a" ] && [ -f "$WT33B/"'"a"' ] \
   || bad "P33b setup: create a and quoted-name files"
 ref_plan_p33b() {
-  local p h state head reasons
+  local p h rc_b state head reasons
   state=$(
     {
-      git -C "$WT33B" status --porcelain=v1 -z --ignored --untracked-files=all
-      git -C "$WT33B" diff --binary HEAD
-      git -C "$WT33B" diff --binary --cached HEAD
+      printf '\001atrisk=%s\0' 0
+      git -C "$WT33B" status --porcelain=v1 -z --ignored --untracked-files=all; rc_b=$?
+      printf '\001status=%s\0' "$rc_b"
+      git -C "$WT33B" diff --binary HEAD; rc_b=$?
+      printf '\001diff=%s\0' "$rc_b"
+      git -C "$WT33B" diff --binary --cached HEAD; rc_b=$?
+      printf '\001diffcached=%s\0' "$rc_b"
+      printf '\001batch=%s\0' "0:0"   # the batch holds only `a`; the quoted name is hashed per file
       for p in '"a"' a; do
-        h=$(git -C "$WT33B" hash-object --no-filters -- "$p")
-        printf '%s\0%s\0' "$p" "$h"
+        rc_b=0
+        h=$(git -C "$WT33B" hash-object --no-filters -- "$p") || rc_b=$?
+        printf '%s\0%s\0' "$p" "${h:-}"
+        printf '\001hash=%s\0' "$rc_b"
       done
+      git -C "$WT33B" for-each-ref --format='%(objectname) %(refname)' refs/worktree/ refs/bisect/ refs/rewritten/; rc_b=$?
+      printf '\001foreachref=%s\0' "$rc_b"
     } | sha256sum | cut -d' ' -f1
   )
   head=$(git -C "$WT33B" rev-parse HEAD)
@@ -2099,6 +2121,154 @@ if [ "$rc_p36t" -eq 0 ] && [ "$rc_p36j" -eq 0 ] && [ -n "$SWEEP_P36_TXT" ] && [ 
   ok "P36: text and JSON dry runs produce identical non-empty sweep plan id ($SWEEP_P36_TXT)"
 else
   bad "P36: text vs JSON sweep plan (rc_t=$rc_p36t, rc_j=$rc_p36j, txt='$SWEEP_P36_TXT', json='$SWEEP_P36_JSON')"
+fi
+
+# P37 per-worktree ref namespaces beyond refs/worktree/: refs/bisect/* (organic git bisect) and
+# refs/rewritten/* (a --rebase-merges label stopped mid-rebase). wt37live keeps BISECT_LOG, so it
+# also holds as in-progress and is never approvable; wt37done is back on its branch with BISECT_LOG
+# gone, holds as bisect-refs only, and its --apply-hold backup lists the refs and restores the
+# commit; wt37rew stops an authored todo (label + break) after the pick, so refs/rewritten/mid-rew
+# points at a rebased commit on no branch.
+mk_repo sweep37 && [ -d "$T/sweep37" ] || bad "P37 setup: mk_repo sweep37"
+SW37="$T/sweep37"
+SW37W="$SW37/.claude/worktrees"
+add_tree sweep37 wt37live && [ -d "$SW37W/wt37live" ] || bad "P37 setup: add_tree wt37live"
+echo live > "$SW37W/wt37live/live.txt" && git -C "$SW37W/wt37live" add live.txt \
+  && git -C "$SW37W/wt37live" commit -qm "live era" || bad "P37 setup: wt37live commit"
+LIVE37=$(git -C "$SW37W/wt37live" rev-parse HEAD)
+git -C "$SW37W/wt37live" reset -q --hard origin/main || bad "P37 setup: wt37live reset"
+git -C "$SW37W/wt37live" bisect start >/dev/null 2>&1 \
+  && git -C "$SW37W/wt37live" bisect bad "$LIVE37" >/dev/null 2>&1 \
+  && git -C "$SW37W/wt37live" bisect good origin/main >/dev/null 2>&1 || bad "P37 setup: wt37live bisect"
+[ -n "$(git -C "$SW37W/wt37live" for-each-ref refs/bisect/ 2>/dev/null)" ] \
+  && [ -e "$(git -C "$SW37W/wt37live" rev-parse --git-path BISECT_LOG)" ] || bad "P37 setup: wt37live refs/bisect + BISECT_LOG"
+add_tree sweep37 wt37done && [ -d "$SW37W/wt37done" ] || bad "P37 setup: add_tree wt37done"
+echo bisect-done > "$SW37W/wt37done/done.txt" && git -C "$SW37W/wt37done" add done.txt \
+  && git -C "$SW37W/wt37done" commit -qm "done era" || bad "P37 setup: wt37done commit"
+DONE37=$(git -C "$SW37W/wt37done" rev-parse HEAD)
+git -C "$SW37W/wt37done" reset -q --hard origin/main || bad "P37 setup: wt37done reset"
+git -C "$SW37W/wt37done" bisect start >/dev/null 2>&1 \
+  && git -C "$SW37W/wt37done" bisect bad "$DONE37" >/dev/null 2>&1 \
+  && git -C "$SW37W/wt37done" bisect good origin/main >/dev/null 2>&1 || bad "P37 setup: wt37done bisect"
+git -C "$SW37W/wt37done" checkout -q worktree-agent-wt37done >/dev/null 2>&1 \
+  && rm -f "$(git -C "$SW37W/wt37done" rev-parse --git-path BISECT_LOG)" \
+  && [ -n "$(git -C "$SW37W/wt37done" for-each-ref refs/bisect/ 2>/dev/null)" ] \
+  && [ ! -e "$(git -C "$SW37W/wt37done" rev-parse --git-path BISECT_LOG)" ] || bad "P37 setup: wt37done refs/bisect without BISECT_LOG"
+add_tree sweep37 wt37rew && [ -d "$SW37W/wt37rew" ] || bad "P37 setup: add_tree wt37rew"
+echo rew > "$SW37W/wt37rew/rew.txt" && git -C "$SW37W/wt37rew" add rew.txt \
+  && git -C "$SW37W/wt37rew" commit -qm "rew one" || bad "P37 setup: wt37rew commit"
+echo m37 > "$SW37/m37.txt" && git -C "$SW37" add m37.txt && git -C "$SW37" commit -qm "main ahead" \
+  || bad "P37 setup: main ahead commit"
+printf '#!/bin/sh\nawk \x27{print} /^pick /{print "label mid-rew"; print "break"; exit}\x27 "$1" > "$1.new" && mv "$1.new" "$1"\n' > "$T/seqed_p37.sh"
+chmod +x "$T/seqed_p37.sh"
+GIT_SEQUENCE_EDITOR="$T/seqed_p37.sh" git -C "$SW37W/wt37rew" rebase -i --rebase-merges main >/dev/null 2>&1 \
+  && [ -n "$(git -C "$SW37W/wt37rew" for-each-ref refs/rewritten/ 2>/dev/null)" ] \
+  || bad "P37 setup: wt37rew rebase stopped with refs/rewritten"
+J_P37=$("$TOOL" --repo "$SW37" --json); rc_p37=$?
+if [ "$rc_p37" -eq 0 ] && [ "$(verdict "$J_P37" wt37live)" = "HOLD:bisect-refs,in-progress" ] \
+  && [ "$(approvable_of "$J_P37" wt37live)" = "False" ]; then
+  ok "P37(i): a mid-bisect tree with refs/bisect/bad at an orphan commit is HOLD:bisect-refs,in-progress and not approvable"
+else
+  bad "P37(i): wt37live (rc=$rc_p37, verdict='$(verdict "$J_P37" wt37live)', approvable=$(approvable_of "$J_P37" wt37live))"
+fi
+if [ "$(verdict "$J_P37" wt37done)" = "HOLD:bisect-refs" ] && [ "$(approvable_of "$J_P37" wt37done)" = "True" ]; then
+  ok "P37(ii): refs/bisect/* with no bisect in progress is HOLD:bisect-refs alone and approvable"
+else
+  bad "P37(ii): wt37done (verdict='$(verdict "$J_P37" wt37done)', approvable=$(approvable_of "$J_P37" wt37done))"
+fi
+want_p37d="2 refs/bisect/* ref(s) hold commits on neither origin/main nor another branch, first: refs/bisect/bad"
+got_p37d=$(reason_msg "$J_P37" wt37done)
+[ "$got_p37d" = "$want_p37d" ] && ok "P37(ii): bisect-refs reason line: $want_p37d" \
+  || bad "P37(ii): bisect-refs reason line: got '$got_p37d', want '$want_p37d'"
+v_p37r=$(verdict "$J_P37" wt37rew)
+if [ "$v_p37r" = "HOLD:detached-unreferenced,rewritten-refs,in-progress" ] \
+  && [ "$(approvable_of "$J_P37" wt37rew)" = "False" ]; then
+  ok "P37(iii): a --rebase-merges label at a rebased commit is HOLD with rewritten-refs (shared scan) and not approvable"
+else
+  bad "P37(iii): wt37rew (verdict='$v_p37r', approvable=$(approvable_of "$J_P37" wt37rew))"
+fi
+want_p37r="2 refs/rewritten/* ref(s) hold commits on neither origin/main nor another branch, first: refs/rewritten/mid-rew"
+got_p37r=$(python3 -c '
+import json, sys
+d = json.loads(sys.argv[1])
+for t in d["worktrees"]:
+    if t["path"].endswith("/" + sys.argv[2]):
+        for r in t["reasons"]:
+            if r["code"] == sys.argv[3]:
+                print(r["detail"])
+                break
+' "$J_P37" wt37rew rewritten-refs)
+[ "$got_p37r" = "$want_p37r" ] && ok "P37(iii): rewritten-refs reason line: $want_p37r" \
+  || bad "P37(iii): rewritten-refs reason line: got '$got_p37r', want '$want_p37r'"
+PLAN_P37=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["hold_plan"] or "")' <<<"$J_P37")
+[ -n "$PLAN_P37" ] || bad "P37 setup: PLAN_P37"
+SYG_WORKTREE_BACKUP_DIR="$T/bk37" "$TOOL" --repo "$SW37" --apply-hold "$PLAN_P37" >/dev/null 2>&1; rc_p37a=$?
+sha_sw37=$(printf '%s\0%s' "$SW37" "$SW37W/wt37done" | sha256sum | cut -c1-8)
+shopt -s nullglob
+bk37_dirs=("$T/bk37"/*/"sweep37--wt37done--$sha_sw37")
+shopt -u nullglob
+BK37=${bk37_dirs[0]:-}
+GOOD37=$(sed -n 's/^\([0-9a-f]*\) refs\/bisect\/good-.*$/\1/p' "$BK37/changes.txt" 2>/dev/null)
+git clone -q "$T/sweep37-origin.git" "$T/p37-clone" 2>/dev/null && [ -d "$T/p37-clone" ] || bad "P37 setup: clone p37-clone"
+if [ "$rc_p37a" -eq 0 ] && [ ! -e "$SW37W/wt37done" ] && [ -f "$BK37/reflog.pack" ] \
+  && _pipe_out=$(sed -n '/^=== Per-worktree refs (refs\/worktree\/\*, refs\/bisect\/\*, refs\/rewritten\/\*) ===$/,/^===/p' "$BK37/changes.txt") \
+  && grep -qx "$DONE37 refs/bisect/bad" <<<"$_pipe_out" \
+  && grep -q "^$GOOD37 refs/bisect/good-" <<<"$_pipe_out" \
+  && grep -q '^  # refs/worktree/\*, refs/bisect/\* and refs/rewritten/\* die with the tree; recreate each: git -C .* update-ref <refname> <sha from changes.txt>$' "$BK37/README.txt" \
+  && git -C "$T/p37-clone" index-pack --stdin --fix-thin < "$BK37/reflog.pack" >/dev/null 2>&1 \
+  && git -C "$T/p37-clone" cat-file -e "$DONE37^{commit}" 2>/dev/null; then
+  ok "P37(iv): --apply-hold backs up wt37done, lists both refs/bisect refs in changes.txt, hints update-ref in README.txt, and the bad tip restores into a scratch clone"
+else
+  bad "P37(iv): bisect backup (rc=$rc_p37a, dir='$BK37', good='$GOOD37')"
+fi
+
+# P38 batch-fallback seam: SYG_WORKTREE_STATE_BATCH_FAIL=1 fails tree_state_sha's hash-object
+# batch, so each at-risk file is hashed per file; the plan id must equal the per-file reference
+# formula (true content, not a vacuous batch) with the batch sentinel flipped, and differ from
+# the healthy-batch id of the same tree.
+mk_repo sweep38 && [ -d "$T/sweep38" ] || bad "P38 setup: mk_repo sweep38"
+SW38="$T/sweep38"
+WT38="$SW38/.claude/worktrees/wt38"
+add_tree sweep38 wt38 && [ -d "$WT38" ] || bad "P38 setup: add_tree wt38"
+echo f1 > "$WT38/u1.txt" && echo f2 > "$WT38/u2.txt" \
+  && [ -f "$WT38/u1.txt" ] && [ -f "$WT38/u2.txt" ] || bad "P38 setup: u1.txt u2.txt"
+ref_plan_p38() { # $1 = the batch sentinel the tool must fold in ("0:0" healthy, "1:1" seam)
+  local p h rc38 state head reasons
+  state=$(
+    {
+      printf '\001atrisk=%s\0' 0
+      git -C "$WT38" status --porcelain=v1 -z --ignored --untracked-files=all; rc38=$?
+      printf '\001status=%s\0' "$rc38"
+      git -C "$WT38" diff --binary HEAD; rc38=$?
+      printf '\001diff=%s\0' "$rc38"
+      git -C "$WT38" diff --binary --cached HEAD; rc38=$?
+      printf '\001diffcached=%s\0' "$rc38"
+      printf '\001batch=%s\0' "$1"
+      for p in u1.txt u2.txt; do
+        rc38=0
+        h=$(git -C "$WT38" hash-object --no-filters -- "$p") || rc38=$?
+        printf '%s\0%s\0' "$p" "${h:-}"
+        printf '\001hash=%s\0' "$rc38"
+      done
+      git -C "$WT38" for-each-ref --format='%(objectname) %(refname)' refs/worktree/ refs/bisect/ refs/rewritten/; rc38=$?
+      printf '\001foreachref=%s\0' "$rc38"
+    } | sha256sum | cut -d' ' -f1
+  )
+  head=$(git -C "$WT38" rev-parse HEAD)
+  reasons=$(printf '%s\n' \
+    $'untracked-new\tu1.txt is untracked and not on origin/main' \
+    $'untracked-new\tu2.txt is untracked and not on origin/main' \
+    | LC_ALL=C sort)
+  printf '%s\0%s\0%s\0%s\0%s\0' "$WT38" "worktree-agent-wt38" "$head" "$reasons" "$state" | sha256sum | cut -c1-12
+}
+PLAN_P38_SEAM=$(SYG_WORKTREE_STATE_BATCH_FAIL=1 "$TOOL" --repo "$SW38" --json 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)["hold_plan"] or "")')
+PLAN_P38_NORM=$("$TOOL" --repo "$SW38" --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["hold_plan"] or "")')
+if [ -n "$PLAN_P38_SEAM" ] && [ "$PLAN_P38_SEAM" = "$(ref_plan_p38 '1:1')" ] \
+  && [ -n "$PLAN_P38_NORM" ] && [ "$PLAN_P38_NORM" = "$(ref_plan_p38 '0:0')" ] \
+  && [ "$PLAN_P38_SEAM" != "$PLAN_P38_NORM" ]; then
+  ok "P38: with the batch failed, the hold plan still matches the per-file formula (batch=1:1) and differs from the healthy-batch id ($PLAN_P38_NORM)"
+else
+  bad "P38: batch fallback (seam='$PLAN_P38_SEAM' want '$(ref_plan_p38 '1:1')', norm='$PLAN_P38_NORM' want '$(ref_plan_p38 '0:0')')"
 fi
 
 exit $fail
