@@ -249,6 +249,9 @@ if [ "$TOOL_NAME" != "Bash" ]; then
         # One realpath fork for all three. Any failure (top included, which used
         # to fall back to the unresolved top) drops that argument's line, so the
         # third stays empty: allow.
+        # A newline inside one of the three paths would shift this line-for-line mapping; the
+        # shifted top then misses the $root match below and allows, like the empty read a
+        # failed resolution leaves.
         wt_gd_real='' wt_cd_real='' wt_top_real=''
         { IFS= read -r wt_gd_real; IFS= read -r wt_cd_real; IFS= read -r wt_top_real; } < <(realpath -- "$wt_gd" "$wt_cd" "$wt_top" 2>/dev/null)
         [ -n "$wt_gd_real" ] && [ -n "$wt_cd_real" ] && [ -n "$wt_top_real" ] || continue
