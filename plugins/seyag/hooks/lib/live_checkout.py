@@ -9,8 +9,9 @@ Only live-checkout-guard.sh imports this module, and only through
 `python3 -c 'import live_checkout'` with hooks/lib first on sys.path. Being
 imported (not run as a script or piped through a heredoc) is what lets
 CPython cache its bytecode under run.sh's PYTHONPYCACHEPREFIX; the caller also
-sets PYTHONSAFEPATH=1 so the process cwd (a session's repo) is never searched
-for modules.
+strips the cwd entries ('' and '.') from sys.path on every Python version
+(PYTHONSAFEPATH alone only works from 3.11), so the process cwd (a session's
+repo) is never searched for modules.
 
 Contract:
   - input: the command text on fd 3; env CWD (the payload cwd) and LIVE_ROOTS

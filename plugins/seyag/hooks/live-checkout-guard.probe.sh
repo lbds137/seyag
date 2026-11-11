@@ -521,6 +521,30 @@ else
   fail=1
 fi
 
+# a2. Pre-3.11 emulation: Python before 3.11 ignores PYTHONSAFEPATH. A python3
+#     shim on PATH (hook process only) unsets that variable before the real
+#     interpreter runs, so only the guard's sys.path strip keeps the cwd out.
+REAL_PY3=$(command -v python3)
+PY_SHIM="$TMP/py-shim"
+mkdir -p "$PY_SHIM"
+# The shim records that it ran, so a row cannot pass because the shim was never
+# on the hook's PATH.
+PY3_RAN="$TMP/py3-shim-ran"
+printf '#!/bin/bash\necho ran >>"%s"\nexec env -u PYTHONSAFEPATH "%s" "$@"\n' "$PY3_RAN" "$REAL_PY3" >"$PY_SHIM/python3"
+chmod +x "$PY_SHIM/python3"
+rm -f "$PY3_RAN" "$MARKER"
+(cd "$PLANT" && printf '%s' "$PLANT_PAYLOAD" | env \
+  -u CLAUDE_PLUGIN_ROOT -u SYG_LIVE_CHECKOUT_AUTO -u SYG_LIVE_CHECKOUTS -u SYG_ALLOW_LIVE_CHECKOUT \
+  CLAUDE_PLUGIN_ROOT="$PLUGIN_SUB" PATH="$PY_SHIM:$PATH" bash "$HOOK" >/dev/null 2>"$TMP/planted-py3.err")
+py3_rc=$?
+count=$((count + 1))
+if [ "$py3_rc" = 2 ] && [ ! -e "$MARKER" ] && [ -s "$PY3_RAN" ]; then
+  echo "ok   [2]: pre-3.11 emulation (PYTHONSAFEPATH ignored): planted subprocess.py in the process cwd is not imported; still blocks"
+else
+  echo "FAIL [rc=$py3_rc, marker $([ -e "$MARKER" ] && echo present || echo absent), shim $([ -s "$PY3_RAN" ] && echo ran || echo did-not-run)]: pre-3.11 emulation (PYTHONSAFEPATH ignored): planted subprocess.py in the process cwd is not imported; still blocks"
+  fail=1
+fi
+
 # b. One jq per call. The shim counts each jq fork, then runs the real jq. It
 #    goes on PATH for the hook process only (run_hook's env), so the payloads
 #    built by check_bash/check_file use the real jq and are not counted.

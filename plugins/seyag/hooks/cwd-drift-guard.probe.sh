@@ -467,6 +467,61 @@ else
   fail=1
 fi
 
+# b-c. The cwd and transcript_path values are stripped before the raw prefilter,
+#      so a path that spells git cannot cost the fast path. The git-spelling
+#      payload in c is the positive control: the same payload with a git command
+#      must fork jq, which proves the shim counts and the prefilter lets git through.
+PATH_PAYLOAD=$(jq -nc '{tool_name:"Bash",tool_input:{command:"ls"},cwd:"/nonexistent/git/digit",transcript_path:"/x/github/t.jsonl"}')
+: >"$JQ_COUNT"
+printf '%s' "$PATH_PAYLOAD" | env -u SYG_CWD_DRIFT_WORKTREE PATH="$JQ_SHIM:$PATH" bash "$HOOK" >/dev/null 2>&1
+b_rc=$?
+b_forks=$(wc -l <"$JQ_COUNT" | tr -d ' ')
+count=$((count + 1))
+if [ "$b_rc" = 0 ] && [ "$b_forks" = 0 ]; then
+  echo "ok   [0]: a non-git command whose cwd and transcript_path spell git takes the raw fast path (0 jq forks)"
+else
+  echo "FAIL [rc=$b_rc, jq forks=$b_forks]: a non-git command whose cwd and transcript_path spell git takes the raw fast path (0 jq forks)"
+  fail=1
+fi
+
+GIT_PATH_PAYLOAD=$(jq -nc '{tool_name:"Bash",tool_input:{command:"git status"},cwd:"/nonexistent/git/digit",transcript_path:"/x/github/t.jsonl"}')
+: >"$JQ_COUNT"
+printf '%s' "$GIT_PATH_PAYLOAD" | env -u SYG_CWD_DRIFT_WORKTREE PATH="$JQ_SHIM:$PATH" bash "$HOOK" >/dev/null 2>&1
+c_rc=$?
+c_forks=$(wc -l <"$JQ_COUNT" | tr -d ' ')
+count=$((count + 1))
+if [ "$c_rc" = 0 ] && [ "$c_forks" -ge 1 ]; then
+  echo "ok   [0]: positive control: git in the same payload forks jq ($c_forks)"
+else
+  echo "FAIL [rc=$c_rc, jq forks=$c_forks]: positive control: git in the same payload forks jq"
+  fail=1
+fi
+
+# d. Escaped-quote key spoof: in raw JSON every quote in the command is escaped,
+#    so command text can never form a real `"cwd":` key. This row pins that a
+#    command spelling the key still blocks: the git step after it is judged and
+#    blocks (pathspec docs/x.md from the drifted subdir).
+check 2 "escaped-quote key spoof in the command text: the git step after it still blocks" 'echo \"cwd\":\"x\" ; git add docs/x.md' "$SUB"
+
+# e. The strip ends each cwd value at its real closing quote: a value that ends
+#    in a backslash (JSON \\) or holds an escaped quote must not run on into the
+#    command, so the git in the command survives the strip (>=1 jq fork). cwd is
+#    keyed before tool_input, so an overrunning match would reach the command.
+for E_CWD in '/nonexistent/a\' '/nonexistent/a"b'; do
+  E_PAYLOAD=$(jq -nc --arg c "$E_CWD" '{tool_name:"Bash",cwd:$c,transcript_path:"/x/t.jsonl",tool_input:{command:"git status"}}')
+  : >"$JQ_COUNT"
+  printf '%s' "$E_PAYLOAD" | env -u SYG_CWD_DRIFT_WORKTREE PATH="$JQ_SHIM:$PATH" bash "$HOOK" >/dev/null 2>&1
+  e_rc=$?
+  e_forks=$(wc -l <"$JQ_COUNT" | tr -d ' ')
+  count=$((count + 1))
+  if [ "$e_forks" -ge 1 ]; then
+    echo "ok   [$e_rc]: cwd value $E_CWD: the strip ends at its closing quote, git in the command survives ($e_forks jq forks)"
+  else
+    echo "FAIL [rc=$e_rc, jq forks=$e_forks]: cwd value $E_CWD: the strip ends at its closing quote, git in the command survives"
+    fail=1
+  fi
+done
+
 echo "---"
 echo "$count cases"
 [ "$fail" = 0 ] && echo "ALL PASS" || { echo "FAILURES"; exit 1; }

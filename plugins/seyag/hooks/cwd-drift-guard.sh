@@ -96,18 +96,32 @@ INPUT=$(cat)
 # \n or \t, so a `git` after one has no space or other class character before
 # it, and no preceding class can be required here. `\u` admits an escaped
 # spelling of a letter of git, such as an escaped g followed by it.
+# Fork order: the raw grep of INPUT is the one fork for a payload with no git
+# anywhere. Only when it matches, the `cwd` and `transcript_path` values are
+# stripped and the stripped copy is grepped again. Those are paths, so a `git`
+# in them (~/git/..., github, a digit) cannot make a command block; the strip
+# keeps them from costing the fast path. Why the strip is sound: inside a JSON
+# string every `"` is escaped, so the pattern `"cwd":"` (real quotes around the
+# key) can only match at an actual object key, never inside the command value;
+# the payload keys are Claude Code's fixed ones. Stripping those two values
+# therefore never removes command text. A sed failure skips the second grep and
+# goes on to jq: the prefilter must stay a superset, so it never exits 0 here.
 grep -qE '[Gg][Ii][Tt]|\\u' <<<"$INPUT" || exit 0
+if PREFILTER_INPUT=$(sed -E 's/"(cwd|transcript_path)"[[:space:]]*:[[:space:]]*"([^"\\]|\\.)*"//g' <<<"$INPUT"); then
+  grep -qE '[Gg][Ii][Tt]|\\u' <<<"$PREFILTER_INPUT" || exit 0
+fi
 
-# One jq fork reads the three fields, as @sh assignments that are eval'd. Parity
+# One jq fork reads the fields, as @sh assignments that are eval'd. Parity
 # with the old $(jq -r ...) reads, which bash $() applied to each field: NUL bytes
 # are dropped and every trailing newline is stripped (both in s). Missing or null
-# -> empty; a non-string scalar or an object -> its JSON text (tostring).
-TOOL_NAME='' CMD='' SHELL_CWD=''
+# -> empty; a non-string scalar or an object -> its JSON text (tostring). The
+# session and agent ids keep the old `// empty` read (a false value is empty).
+TOOL_NAME='' CMD='' SHELL_CWD='' RAW_SESSION_ID='' RAW_AGENT_ID='' SESSION_ID='' AGENT_ID=''
 PAYLOAD_FIELDS=$(jq -r '
   def s: if . == null then "" elif type == "string" then . else tostring end
     | split(([0]|implode)) | join("")
     | ([10]|implode) as $nl | until((endswith($nl)|not); .[:-1]);
-  "TOOL_NAME=\(.tool_name | s | @sh) CMD=\(.tool_input.command | s | @sh) SHELL_CWD=\(.cwd | s | @sh)"
+  "TOOL_NAME=\(.tool_name | s | @sh) CMD=\(.tool_input.command | s | @sh) SHELL_CWD=\(.cwd | s | @sh) RAW_SESSION_ID=\((.session_id // "") | s | @sh) RAW_AGENT_ID=\((.agent_id // "") | s | @sh)"
 ' <<<"$INPUT" 2>/dev/null) || exit 0
 eval "$PAYLOAD_FIELDS" || exit 0
 [ "$TOOL_NAME" != "Bash" ] && exit 0
@@ -181,12 +195,13 @@ fi
 # main working tree. Not a repo, a missing directory, or the inside of `.git`
 # → git fails → allow.
 REPO_INFO=$(git -C "$EFFECTIVE_CWD" rev-parse --show-toplevel --show-prefix --git-dir --git-common-dir 2>/dev/null) || exit 0
-ROOT=$(printf '%s\n' "$REPO_INFO" | sed -n '1p')
-PREFIX=$(printf '%s\n' "$REPO_INFO" | sed -n '2p')
+# Grouped reads keep the empty line --show-prefix prints at the repo root (read
+# -a with IFS=newline would collapse it and shift the rest). No bash-4 array
+# builtin: macOS /bin/bash is 3.2.
 # WT_-prefixed so the names can never collide with git's own GIT_DIR /
 # COMMON_DIR environment variables (a child git reads those).
-WT_GIT_DIR=$(printf '%s\n' "$REPO_INFO" | sed -n '3p')
-WT_COMMON_DIR=$(printf '%s\n' "$REPO_INFO" | sed -n '4p')
+ROOT='' PREFIX='' WT_GIT_DIR='' WT_COMMON_DIR=''
+{ IFS= read -r ROOT; IFS= read -r PREFIX; IFS= read -r WT_GIT_DIR; IFS= read -r WT_COMMON_DIR; } <<<"$REPO_INFO"
 [ -n "$ROOT" ] || exit 0
 
 LINKED_WT=0
@@ -220,8 +235,8 @@ fi
 SESSION_ID=""
 STATE_DIR=""
 if [ "$LINKED_WT" -eq 1 ]; then
-  SESSION_ID=$(jq -r '.session_id // empty' <<<"$INPUT" 2>/dev/null || echo "")
-  AGENT_ID=$(jq -r '.agent_id // empty' <<<"$INPUT" 2>/dev/null || echo "")
+  SESSION_ID=$RAW_SESSION_ID
+  AGENT_ID=$RAW_AGENT_ID
   if [[ ! "$SESSION_ID" =~ ^[A-Za-z0-9._-]+$ ]] || [ "$SESSION_ID" = "." ] || [ "$SESSION_ID" = ".." ]; then
     SESSION_ID=""
   elif [ -n "$AGENT_ID" ]; then
