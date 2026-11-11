@@ -20,6 +20,10 @@ Set user variables in the `env` block of a Claude Code `settings.json` (`~/.clau
 
 Exception: the per-command `SYG_ALLOW_*` bypasses of the shell guards are written into the command itself (for example `SYG_ALLOW_RM=1 rm -r build`), not into settings; each row says so. `SYG_ALLOW_LIVE_CHECKOUT` is the one also read from the environment.
 
+## Config files (config.toml)
+
+An optional TOML file fills in knobs the environment left unset: user `${XDG_CONFIG_HOME:-$HOME/.config}/seyag/config.toml`, then project `${CLAUDE_PROJECT_DIR:-$PWD}/.claude/seyag.toml` (project keys overwrite user keys). The environment wins over both, even when set to the empty string. Keys map mechanically to env names, the key path uppercased with the separators turned into underscores: `claude_usage_week_reserve = 61` and `[claude_usage]` + `week_reserve = 61` both set `CLAUDE_USAGE_WEEK_RESERVE`. A key applies iff its env name is a user-scope row of this registry and not harness-owned; names ending `_CMD` cannot be set from the project file. Subset per line: blank, full-line comment, `[section]` header, or `key = value` with a quoted string (basic `"`, escapes `\\` `\"` `\t` `\n` only, or literal `'`), an integer, a float, or `true`/`false` (exported as `1`/`0`); strings and paths must be quoted, and arrays, inline tables, multiline strings and trailing content are unsupported; a comment may follow a value but not a section header. `SYG_CONFIG=0` disables the loader. A bad file warns on stderr and is skipped, never blocks a hook — and warns again on every hook call.
+
 ## guards
 
 | Name | Default | What it does | Found in |
@@ -71,10 +75,10 @@ Exception: the per-command `SYG_ALLOW_*` bypasses of the shell guards are writte
 
 | Name | Default | What it does | Found in |
 | --- | --- | --- | --- |
-| `CLAUDE_CONFIG_DIR` | `~/.claude` | Claude Code user config directory, used by context-audit (CLAUDE.md, rules, settings, memory, skills, installed_plugins.json) and session-log (settings.json cleanupPeriodDays); statusline does not follow it. | `bin/context-audit`, `bin/session-log` |
-| `CLAUDE_PROJECTS_DIR` | `~/.claude/projects` | Directory of per-project Claude Code session transcript folders read by session-log, usage-sweep, and price-table. | `bin/price-table`, `bin/session-log`, `bin/usage-sweep` |
-| `CLAUDE_SESSION_ARCHIVE` | `~/Documents/claude-session-archive` | Directory holding exported cse_*.jsonl claude.ai session archives read by session-log. | `bin/session-log` |
-| `SESSION_LEDGER` | `~/.claude/mined-corpus/ledger.tsv` | Path to the TSV ledger where session-log ledger and session-log mark read and record mined transcript spans. | `bin/session-log` |
+| `CLAUDE_CONFIG_DIR` | `~/.claude` | Claude Code user config directory, used by context-audit (CLAUDE.md, rules, settings, memory, skills, installed_plugins.json) and session-log (settings.json cleanupPeriodDays); statusline does not follow it. | `bin/context-audit`, `bin/session-log`, `hooks/lib/config-env.sh` |
+| `CLAUDE_PROJECTS_DIR` | `~/.claude/projects` | Directory of per-project Claude Code session transcript folders read by session-log, usage-sweep, and price-table. | `bin/price-table`, `bin/session-log`, `bin/usage-sweep`, `hooks/lib/config-env.sh` |
+| `CLAUDE_SESSION_ARCHIVE` | `~/Documents/claude-session-archive` | Directory holding exported cse_*.jsonl claude.ai session archives read by session-log. | `bin/session-log`, `hooks/lib/config-env.sh` |
+| `SESSION_LEDGER` | `~/.claude/mined-corpus/ledger.tsv` | Path to the TSV ledger where session-log ledger and session-log mark read and record mined transcript spans. | `bin/session-log`, `hooks/lib/config-env.sh` |
 | `SYG_AGY_CONVERSATIONS_DIR` | `~/.gemini/antigravity-cli/conversations` | Directory of *.db conversation databases read by agy-extract when no database paths are passed. | `bin/agy-extract` |
 | `SYG_CLASSIFIER_LEDGER` | unset | JSONL file path opting in classifier-ledger to record PostToolUseFailure events. | `hooks/classifier-ledger.sh` |
 | `SYG_CONTEXT_COOLDOWN_MIN` | `30` | Cooldown in minutes between context-size-reminder banners in a session. | `hooks/context-size-reminder.sh` |
@@ -97,8 +101,8 @@ Exception: the per-command `SYG_ALLOW_*` bypasses of the shell guards are writte
 
 | Name | Default | What it does | Found in |
 | --- | --- | --- | --- |
-| `CLAUDE_PLUGIN_REGISTRY` | `$HOME/.claude/plugins/installed_plugins.json` | Path to installed_plugins.json read by statusline to compare the installed seyag version against the checkout manifest. | `bin/statusline` |
-| `CLAUDE_VERSIONS_DIR` | `$HOME/.local/share/claude/versions` | Directory of staged native Claude Code version downloads checked by statusline for the CC update nudge. | `bin/statusline` |
+| `CLAUDE_PLUGIN_REGISTRY` | `$HOME/.claude/plugins/installed_plugins.json` | Path to installed_plugins.json read by statusline to compare the installed seyag version against the checkout manifest. | `bin/statusline`, `hooks/lib/config-env.sh` |
+| `CLAUDE_VERSIONS_DIR` | `$HOME/.local/share/claude/versions` | Directory of staged native Claude Code version downloads checked by statusline for the CC update nudge. | `bin/statusline`, `hooks/lib/config-env.sh` |
 | `SYG_EXTRA_USAGE_TOML` | unset | Path to a TOML file with bought_usd and optional used_usd_at_anchor read on each statusline render. | `bin/statusline` |
 | `SYG_STATUSLINE_DEBUG` | unset | Set to 1 to append terminal column, fit budget, and wrap diagnostics to the statusline. | `bin/statusline` |
 | `SYG_STATUSLINE_EXTRA_USAGE` | unset | Set to 0 to hide the plan extra-usage segment on the statusline. | `bin/statusline` |
@@ -114,13 +118,13 @@ Exception: the per-command `SYG_ALLOW_*` bypasses of the shell guards are writte
 | `CLAUDE_USAGE_GATE_MAX_AGE` | `21600` | Maximum age in seconds (integer >= TTL) of the OAuth usage cache before claude-usage --ok fails with meter=cache. | `bin/claude-usage` |
 | `CLAUDE_USAGE_MODEL` | unset | Model name override for claude-usage --ok per-model weekly cap checks when not reading a session transcript. | `bin/claude-usage` |
 | `CLAUDE_USAGE_TTL` | `120` | Refresh TTL in seconds (integer >= 30) for the OAuth usage cache in claude-usage. | `bin/claude-usage`, `bin/usage-sweep` |
-| `CLAUDE_USAGE_WEEK_RESERVE` | `75` | Weekly usage percentage threshold (integer 1-99) at which claude-usage --ok blocks new work; week-burn-window also uses it as its hold threshold. | `bin/claude-usage`, `bin/week-burn-window` |
+| `CLAUDE_USAGE_WEEK_RESERVE` | `75` | Weekly usage percentage threshold (integer 1-99) at which claude-usage --ok blocks new work; week-burn-window also uses it as its hold threshold. | `bin/claude-usage`, `bin/week-burn-window`, `hooks/lib/config-env.sh` |
 | `CLAUDE_USAGE_WEEK_RESERVE_CMD` | unset | Shell command (5s timeout) printing a dynamic weekly reserve integer 1-99 for claude-usage --ok and --posture. | `bin/claude-usage`, `bin/week-burn-window` |
 | `CLAUDE_USAGE_WEEK_STOP` | `80` | Hard-stop weekly usage percentage (integer 1-99) reported by claude-usage --posture. | `bin/claude-usage` |
 | `CLAUDE_USAGE_ZAI_FIVE_CAP` | `80` | Maximum 5-hour quota threshold percentage (non-negative integer) allowed by claude-usage --ok on the z.ai lane. | `bin/claude-usage` |
 | `CLAUDE_USAGE_ZAI_WEEK_RESERVE` | `<CLAUDE_USAGE_WEEK_RESERVE>` | Static weekly quota reserve percentage (integer 1-99) for claude-usage --ok and --posture on the z.ai lane. | `bin/claude-usage` |
 | `CLAUDE_USAGE_ZAI_WEEK_RESERVE_CMD` | unset | Shell command (5s timeout) printing a dynamic weekly reserve integer 1-99 for the z.ai lane in claude-usage. | `bin/claude-usage` |
-| `SEYAG_KEYS_BIN` | `<script_dir>/keys` | Override path to the keys binary invoked by zai-usage to read ZAI_AUTH_TOKEN from the encrypted credential store. | `bin/zai-usage` |
+| `SEYAG_KEYS_BIN` | `<script_dir>/keys` | Override path to the keys binary invoked by zai-usage to read ZAI_AUTH_TOKEN from the encrypted credential store. | `bin/zai-usage`, `hooks/lib/config-env.sh` |
 | `SYG_EXTRA_USAGE_BUDGET_CMD` | unset | Shell command printing the extra-usage USD budget as a non-negative decimal for claude-usage. | `bin/claude-usage`, `bin/statusline` |
 | `SYG_EXTRA_USAGE_BUDGET_CMD_TIMEOUT` | `10` | Timeout in seconds (positive integer) for SYG_EXTRA_USAGE_BUDGET_CMD in claude-usage. | `bin/claude-usage` |
 | `SYG_EXTRA_USAGE_BUDGET_USD` | unset | Static extra-usage budget in USD (non-negative decimal) for claude-usage and statusline. | `bin/claude-usage`, `bin/statusline` |
@@ -133,7 +137,7 @@ Exception: the per-command `SYG_ALLOW_*` bypasses of the shell guards are writte
 
 | Name | Default | What it does | Found in |
 | --- | --- | --- | --- |
-| `ANTHROPIC_ADMIN_API_KEY` | unset | Organization Admin API key enabling provider cost_report balance queries in api-credit and statusline (takes precedence over SYG_CREDIT_ADMIN_KEY_CMD). | `bin/api-credit`, `bin/statusline` |
+| `ANTHROPIC_ADMIN_API_KEY` | unset | Organization Admin API key enabling provider cost_report balance queries in api-credit and statusline (takes precedence over SYG_CREDIT_ADMIN_KEY_CMD). | `bin/api-credit`, `bin/statusline`, `hooks/lib/config-env.sh` |
 | `SYG_CREDIT_ADMIN_KEY_CMD` | unset | Command run on a cache miss (when ANTHROPIC_ADMIN_API_KEY is unset, empty or contains a newline) to print the organization Admin API key on stdout. | `bin/api-credit`, `bin/statusline` |
 | `SYG_CREDIT_ANCHOR` | `<SYG_CREDIT_LEDGER>.anchor.json` | Path to the JSON file storing api-credit calibrate balance anchors. | `bin/api-credit`, `bin/statusline` |
 | `SYG_CREDIT_DUST_FLOOR_USD` | `0.15` | Minimum USD balance shown by the statusline fleet credit display on non-API lanes, which shows only when SYG_CREDIT_LEDGER and SYG_CREDIT_GRANTS are both set and the week is urgent (week >= 75% or <= 7 days left). | `bin/statusline` |
@@ -203,6 +207,7 @@ Exception: the per-command `SYG_ALLOW_*` bypasses of the shell guards are writte
 
 | Name | Default | What it does | Found in |
 | --- | --- | --- | --- |
+| `SYG_CONFIG` | unset | Set to 0 to disable the config.toml loader entirely (hooks and wired bins ignore config files; any other value or unset: enabled). | `hooks/lib/config-env.sh` |
 | `SYG_KEYS_LEGACY_FILE` | unset | Optional read-only plaintext NAME=value fallback file consulted by keys get after the encrypted store. | `bin/keys` |
 | `SYG_KEYS_LOCK_WAIT_S` | `15` | Seconds keys waits for the store lock or the TPM lock before failing (finite number >= 0). | `bin/keys`, `bin/zai-usage` |
 | `SYG_KEYS_NAME` | `keys` | Credential --name passed to systemd-creds when encrypting and decrypting the key store. | `bin/keys` |

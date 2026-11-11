@@ -2,6 +2,16 @@
 
 All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY-MM-DD>` section per released version; under it, `###` categories in fixed order — Breaking Changes, Features, Bug Fixes, Improvements, Chores, Tests — empty ones omitted; items are `- **scope:** description (#PR)`, written from the version's merged commit subjects.
 
+## 0.3.162 - 2026-11-11
+
+### Features
+
+- **config:** optional config files fill in unset env knobs — user `${XDG_CONFIG_HOME:-$HOME/.config}/seyag/config.toml`, project `.claude/seyag.toml`; the environment wins over both, even set empty. Keys map mechanically to env names (the key path uppercased, separators to underscores); the settable set is the config/knobs.tsv user rows minus the harness-owned names; `_CMD` keys are refused from project scope; `SYG_CONFIG=0` disables. Wired into `hooks/run.sh` (before component resolution, and before event mode's timeout read) and `bin/claude-usage` (the wiring pattern example; other bins adopt later). docs/config.md gains the generated "Config files" section.
+
+### Tests
+
+- **probes:** config-env probe pins the loader: scope and precedence, both key forms, the settable-set parity with the doc generator's SCAN_EXACT_NAMES, the `_CMD` refusal, the malformed/unsupported battery byte-exact, the fail-open unreadable-file cases, and both integrations (a fixture plugin tree through run.sh, and claude-usage --posture).
+
 ## 0.3.161 - 2026-11-11
 
 ### Breaking Changes

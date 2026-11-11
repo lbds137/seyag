@@ -53,6 +53,16 @@
 
 set -uo pipefail
 
+# Optional config files (the config.toml loader) fill in knobs the environment
+# left unset before any knob below is read; the environment still wins. This bin
+# is the wiring pattern example; the other bins adopt it later.
+bin_dir=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")
+if [ -r "$bin_dir/../hooks/lib/config-env.sh" ] \
+    && source "$bin_dir/../hooks/lib/config-env.sh" 2>/dev/null \
+    && declare -F syg_config_env >/dev/null; then
+    syg_config_env "$(readlink -f "$bin_dir/..")"
+fi
+
 cache="${XDG_CACHE_HOME:-$HOME/.cache}/claude-statusline/usage.json"
 ttl=120
 if [[ ${CLAUDE_USAGE_TTL:-} =~ ^[0-9]+$ ]] && [ "$((10#$CLAUDE_USAGE_TTL))" -ge 30 ]; then
@@ -258,8 +268,8 @@ esac
 [ "$vendor_lane" = anthropic ] && [ "${CC_ROUTE_PRESET:-}" = anthropic-api ] && vendor_lane=console
 routed=1
 [ "$vendor_lane" = anthropic ] && routed=0
-zai_usage=${CLAUDE_USAGE_ZAI_USAGE:-$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/zai-usage}
-api_credit=${CLAUDE_USAGE_API_CREDIT:-$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/api-credit}
+zai_usage=${CLAUDE_USAGE_ZAI_USAGE:-$bin_dir/zai-usage}
+api_credit=${CLAUDE_USAGE_API_CREDIT:-$bin_dir/api-credit}
 
 # zai-usage's --json when it holds z.ai's live quota (source "api"), else nothing.
 zai_api_json() {

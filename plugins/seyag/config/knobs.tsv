@@ -68,6 +68,7 @@ SYG_CLOCK_STAMP_HINT	user	guards	unset	Optional line appended to clock-stamp-gua
 SYG_CLOCK_STAMP_NOW	internal	guards	unset	Test clock (integer epoch seconds) overriding current time in clock-stamp-guard.
 SYG_CLOCK_STAMP_PATHS_FILE	user	guards	${XDG_CONFIG_HOME:-$HOME/.config}/seyag/clock-stamp-paths	Config file of path globs and section: lines arming clock-stamp-guard.
 SYG_COMPONENTS_TSV	internal	session	<hooks_dir>/components.tsv	Internal variable holding the resolved path to hooks/components.tsv in lib/components.sh.
+SYG_CONFIG	user	misc	unset	Set to 0 to disable the config.toml loader entirely (hooks and wired bins ignore config files; any other value or unset: enabled).
 SYG_CONTEXT_COOLDOWN_MIN	user	session	30	Cooldown in minutes between context-size-reminder banners in a session.
 SYG_CONTEXT_THRESHOLD	user	session	500000	Context token threshold at which context-size-reminder fires on non-Fable models.
 SYG_CONTEXT_THRESHOLD_FABLE	user	session	200000	Context token threshold at which context-size-reminder fires when the model starts with claude-fable.
