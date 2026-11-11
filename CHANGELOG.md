@@ -2,6 +2,12 @@
 
 All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY-MM-DD>` section per released version; under it, `###` categories in fixed order — Breaking Changes, Features, Bug Fixes, Improvements, Chores, Tests — empty ones omitted; items are `- **scope:** description (#PR)`, written from the version's merged commit subjects.
 
+## 0.3.161 - 2026-11-11
+
+### Tests
+
+- **probes:** the pr-merge-review-check probe splits into two balanced files (command-match and merge-form sections vs the review surface and scans) so the CI shards stop carrying one 100 s probe; hook-wiring gains the probe-hook exemption kind for the second half (#PR).
+
 ## 0.3.160 - 2026-11-11
 
 ### Improvements

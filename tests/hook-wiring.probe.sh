@@ -10,9 +10,10 @@ set -uo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # Exemptions: "<kind>:<name>  reason", one per entry. Kinds: hook-probe,
-# hook-wired, bin-probe. An entry needs a reason.
+# hook-wired, bin-probe, probe-hook. An entry needs a reason.
 EXEMPT=(
   "bin-probe:zai-spend  alias symlink to zai-usage, kept for PATH callers; tests/zai-usage.probe.sh pins both"
+  "probe-hook:pr-merge-review-check-review  second half of the pr-merge-review-check probe split (perf13a): one hook, two probe files, balanced probe shards"
 )
 
 fail=0
@@ -86,7 +87,8 @@ check_root() {
   for f in "$hooks"/*.probe.sh; do
     [ -e "$f" ] || continue
     name=$(basename "$f" .probe.sh)
-    [ -e "$hooks/$name.sh" ] || report "probe $name.probe.sh has no $name.sh"
+    [ -e "$hooks/$name.sh" ] || exempt "probe-hook:$name" \
+      || report "probe $name.probe.sh has no $name.sh"
   done
   while IFS= read -r name; do
     [ -n "$name" ] || continue
