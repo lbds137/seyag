@@ -214,6 +214,31 @@ ${FENCE}
 All set."
 check 0 "pending marker inside fenced code block does not fire" "$TMP/m9c.jsonl"
 
+mktx "$TMP/m11.jsonl" "Next for me is still the fix for fleet's false \"waiting on you\" alerts."
+check 0 "quoted mention of a marker (straight quotes) does not fire" "$TMP/m11.jsonl"
+
+CQO=$(printf '“'); CQC=$(printf '”')  # curly double quotes (SC1111: no literals)
+mktx "$TMP/m11b.jsonl" "Next for me is still the fix for fleet's false ${CQO}waiting on you${CQC} alerts."
+check 0 "quoted mention of a marker (curly quotes) does not fire" "$TMP/m11b.jsonl"
+
+mktx "$TMP/m11c.jsonl" "Deploy is still waiting on you to go."
+check 2 "true positive: unquoted marker still fires after the quote strip" "$TMP/m11c.jsonl"
+
+mktx "$TMP/m11d.jsonl" "Nothing is currently waiting on you."
+check 0 "negated marker stays silent after the quote strip" "$TMP/m11d.jsonl"
+
+mktx "$TMP/m11e.jsonl" "the fix for fleet's false \"waiting on you alerts."
+check 2 "unbalanced quote is not stripped — marker still fires (accepted residual)" "$TMP/m11e.jsonl"
+
+mktx "$TMP/m11f.jsonl" "\"a ${CQO}b\" c${CQC} and the deploy is waiting on you."
+check 2 "interleaved quotes: the straight span cannot hide a marker outside it" "$TMP/m11f.jsonl"
+
+mktx "$TMP/m11g.jsonl" "The pipe is 12\" waiting on you 24\" wide."
+check 0 "stray quotes pairing as a mention (inch marks) — accepted fail-open residual" "$TMP/m11g.jsonl"
+
+mktx "$TMP/m11h.jsonl" "This one is genuinely \"waiting on you\" now."
+check 0 "fully-quoted marker in a genuine ask — accepted-silent per the header contract" "$TMP/m11h.jsonl"
+
 mktx "$TMP/m10a.jsonl" "There's nothing waiting on you either."
 check 0 "negated pending marker: 'nothing waiting on you' does not fire" "$TMP/m10a.jsonl"
 

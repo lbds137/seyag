@@ -21,8 +21,11 @@
 # rule in the seyag rules (rules/core.md) is the primary mechanism; this is a
 # backstop): a question followed by a trailing fenced code block, a closing
 # "?" wrapped in quotes/parentheses, and a "?"-less option list ("Pick one:").
-# Known false-positive shape, accepted the same way (costs one acknowledged
-# turn): a closing inline code span whose content ends in "?" ("Run `foo?`").
+# Known false-positive shapes, accepted the same way (costs one acknowledged
+# turn): a closing inline code span whose content ends in "?" ("Run `foo?`"),
+# and a quoted mention of a pending marker with one quote of its pair missing,
+# or two stray quotes pairing as a false "mention" (inch marks silence a real
+# ask) — the marker pass strips only balanced quoted spans.
 #
 # With the Stop envelope's last_assistant_message as the closing text: the
 # harness truncates long values (they end "… [+N chars]"), and a closing
@@ -39,7 +42,8 @@
 #
 # Pending-marker pass: when the closing line does not end in "?", the final
 # paragraph of the final assistant text (after stripping fenced ```...``` code
-# blocks and inline `...` code spans) is scanned case-insensitively against
+# blocks, inline `...` code spans and balanced quoted spans ("..." and “...”;
+# an unbalanced quote changes nothing) is scanned case-insensitively against
 # SYG_BQ_PENDING_MARKERS (a Python regex; unset uses the built-in default
 # `say the word\b|waiting on you\b|needs? your (yes|go|call|input)\b|for you to (decide|test|check)\b`;
 # set to empty disables the pass; a broken regex fails open). A match directly
@@ -206,6 +210,11 @@ if raw_markers:
 
         cleaned = re.sub(r"```.*?```", "", final_text, flags=re.S)
         cleaned = re.sub(r"`[^`]*`", "", cleaned)
+        # A quoted mention of a marker ("waiting on you") is the agent quoting
+        # alert text, not leaving an ask — strip balanced pairs, straight and
+        # curly; an unbalanced quote changes nothing (accepted FP residual).
+        cleaned = re.sub(r'"[^"]*"', "", cleaned)
+        cleaned = re.sub(r"“[^”]*”", "", cleaned)
         paras = [p for p in re.split(r"\n\s*\n", cleaned) if p.strip()]
         scope = paras[-1] if paras else ""
         if live_match(scope):

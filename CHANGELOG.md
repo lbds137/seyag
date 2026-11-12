@@ -2,6 +2,17 @@
 
 All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY-MM-DD>` section per released version; under it, `###` categories in fixed order — Breaking Changes, Features, Bug Fixes, Improvements, Chores, Tests — empty ones omitted; items are `- **scope:** description (#310)`, written from the version's merged commit subjects.
 
+## 0.3.166 - 2026-11-12
+
+### Bug Fixes
+
+- **hooks:** `blocking-question-channel-check`'s pending-marker pass (the non-`?`-closing scan of the final paragraph) strips balanced quoted spans before matching, straight `"` pairs and curly `“ ”` pairs alike, so a closing that only MENTIONS a pending-marker phrase — a quoted `"waiting on you"` naming alert text — ends its turn normally; the closing-`?` pass still reads the raw text (a quoted closing `?` stays the accepted FP shape), and an unbalanced quote changes nothing, still firing (accepted residual, now in the hook header's known-FP list) (#PR).
+- **rules:** core.md's blocking-questions bullet drops the stale ?-only promise ("the hook backstop fires only on a closing `?`", superseded by the pending-marker pass): the backstop contract is now stated as a closing `?` or a non-`?` closing whose final paragraph matches a pending-marker — quoted mentions, code spans and fenced blocks do not count — on its own bullet, so the always-loaded line stays within its prior byte length (#PR).
+
+### Tests
+
+- **probes:** `hooks/blocking-question-channel-check.probe.sh` gains 8 cases: the verbatim quoted-mention fixture silent (straight and curly pairs), an unquoted true positive still firing after the strip, a negated marker still silent, the unbalanced-quote residual still firing, an interleaved-quotes shape where the straight span cannot hide a marker outside it, stray quotes pairing as a false mention (inch marks — accepted fail-open residual), and a fully-quoted marker in a genuine ask accepted-silent (#PR).
+
 ## 0.3.165 - 2026-11-12
 
 ### Features
