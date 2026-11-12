@@ -147,6 +147,18 @@
 # only when every non-own target of THAT gh command is covered (case-
 # insensitive).
 #
+# --check PREFLIGHT: `upstream-submission-guard.sh --check [<owner/repo>]`
+# judges a target with no hook payload and exits — for wrapper bins, whose
+# command text carries no `gh` token, so the PreToolUse path never sees their
+# publish. Stdout is ONE machine-greppable line: `PASS` (exit 0; every
+# target's owner is an own owner), `BLOCK <owner/repo>[,…]` (exit 1; stderr
+# carries the stance guidance and a `Preflight:` hint, and NO bypass
+# guidance — `SYG_UPSTREAM_CHECKED` does not apply; the verdict is raw) or
+# `UNKNOWN <reason>` (exit 1; no own-owner basis, an unparsable target, or
+# nothing resolvable — fail-closed on purpose, where the hook below fails
+# open). Unlike hook mode it honors the caller's inherited `GH_REPO` env
+# (else cwd remotes): that env is what the later `gh` publish runs in.
+#
 # KNOWN GAPS (accepted, not fixed here):
 #   - `gh api graphql` mutations are not inspected (its writes are inside the
 #     GraphQL query body, not the HTTP method).
@@ -210,6 +222,129 @@
 # to this hook.
 
 set -uo pipefail
+
+# --check preflight mode (see the header's --check paragraph): judged with no
+# hook payload, BEFORE the jq/python3 checks and INPUT=$(cat) — a wrapper's
+# stdin is not the hook payload and must be left unread. Exit codes: 0 PASS,
+# 1 BLOCK/UNKNOWN/usage.
+if [ "${1:-}" = "--check" ]; then
+  if [ "$#" -gt 2 ]; then
+    printf 'Usage: upstream-submission-guard.sh --check [<owner/repo>]\n' >&2
+    exit 1
+  fi
+  HOOK_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib"
+  CK_VERDICT=$(SYG_CHECK_TARGET="${2:-}" SYG_CHECK_LIB="$HOOK_LIB" \
+    python3 - 2>/dev/null <<'PYEOF'
+import os
+import re
+import sys
+
+sys.path.insert(0, os.environ["SYG_CHECK_LIB"])
+from upstream_guard_lib import git_remotes_targets, load_own_owners, parse_repo_value
+
+target_arg = os.environ.get("SYG_CHECK_TARGET", "")
+
+# A control character in an owner/repo would break the stdout contract (ONE
+# machine-greppable line): newline/CR split the line, the rest corrupts it.
+# Such a target fails CLOSED — never a silent skip, which would fail open.
+_CTRL_RE = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def fail_controls():
+    print("UNKNOWN target holds a control character")
+    sys.exit(1)
+
+# Fail-closed, unlike the hook's fail-open below: --check is a deliberate ask
+# for a judgment, and a missing basis is not a pass.
+own_owners = load_own_owners()
+if not own_owners:
+    print("UNKNOWN no own-owner basis (hosts.yml user or SYG_OWN_OWNERS unset)")
+    sys.exit(1)
+
+if target_arg:
+    if _CTRL_RE.search(target_arg):
+        fail_controls()
+    parsed = parse_repo_value(target_arg)
+    if not parsed:
+        print(f"UNKNOWN target does not parse as owner/repo: {target_arg}")
+        sys.exit(1)
+    targets = [parsed]
+else:
+    gh_repo = os.environ.get("GH_REPO", "").strip()
+    if gh_repo:
+        parsed = parse_repo_value(gh_repo)
+        if not parsed:
+            print("UNKNOWN GH_REPO is set but does not parse as owner/repo")
+            sys.exit(1)
+        targets = [parsed]
+    else:
+        # The same candidate/gh-resolved resolution the hook uses: every
+        # GitHub candidate judged, gh-resolved priority included. A failed
+        # git read lands here too, as UNKNOWN (fail-closed).
+        targets = git_remotes_targets(os.getcwd())
+        if not targets:
+            print("UNKNOWN no GH_REPO and no parsable GitHub remote in the cwd")
+            sys.exit(1)
+
+# Uniform control-char gate on every judged target, remote-derived included:
+# a hostile target fails the whole preflight, it is never skipped.
+if any(_CTRL_RE.search(o) or _CTRL_RE.search(r) for o, r in targets):
+    fail_controls()
+
+non_own = sorted(
+    {f"{o.lower()}/{r.lower()}" for o, r in targets
+     if o and r and o.lower() not in own_owners}
+)
+if non_own:
+    print("BLOCK " + ", ".join(non_own))
+else:
+    print("PASS")
+sys.exit(1 if non_own else 0)
+PYEOF
+  )
+  # Defense in depth: the stdout contract is ONE control-char-free line.
+  # A verdict carrying any control character (NUL cannot survive command
+  # substitution; CR/LF/tab/0x01-0x1f/0x7f checked here) is blanked so the
+  # internal-error path below emits the only stdout, whatever python did.
+  if [[ "$CK_VERDICT" = *[$'\x01'-$'\x1f\x7f']* ]]; then
+    CK_VERDICT=""
+  fi
+  # Any rc with an unrecognized or empty verdict is an internal error:
+  # fail-closed, and never leak a python traceback (stderr was discarded).
+  case "$CK_VERDICT" in
+    PASS)
+      printf '%s\n' "$CK_VERDICT"
+      exit 0
+      ;;
+    BLOCK\ *)
+      printf '%s\n' "$CK_VERDICT"
+      {
+        cat <<EOF
+UPSTREAM SUBMISSION GUARD --check — $CK_VERDICT
+Before anything goes upstream, check the project's stance on AI-assisted work:
+  grep CONTRIBUTING*, README*, CODE_OF_CONDUCT* (and .github/ copies) for
+  AI|LLM|machine-generated|Copilot|ChatGPT, and search its issues and
+  discussions for "AI".
+- Hostile to AI contributions: don't submit. Tell the owner it was skipped
+  and why. Never suggest she reword or re-file it as her own work.
+- A security vulnerability is the exception: draft a PRIVATE report, openly
+  labelled as AI-found, and bring it to the owner; she decides and files it.
+EOF
+        printf 'Preflight: bash %s --check [<owner/repo>] before composing the publish command.\n' "${BASH_SOURCE[0]}"
+      } >&2
+      exit 1
+      ;;
+    UNKNOWN\ *)
+      printf '%s\n' "$CK_VERDICT"
+      exit 1
+      ;;
+    *)
+      echo "UNKNOWN internal error: the preflight could not run"
+      exit 1
+      ;;
+  esac
+fi
+
 command -v jq >/dev/null 2>&1 || exit 0
 command -v python3 >/dev/null 2>&1 || exit 0
 
@@ -236,13 +371,15 @@ HOOK_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib"
 RESULT=$(CWD="$CWD" HOOK_LIB="$HOOK_LIB" python3 - 3<<<"$CMD" <<'PYEOF' 2>/dev/null
 import os
 import re
-import subprocess
 import sys
 
 # An import failure exits non-zero, which the caller treats as allow (fail-open).
 sys.path.insert(0, os.environ["HOOK_LIB"])
 from shell_quotes import strip_redirections, unwrap_runners
 from shell_state import State, TRACKED_ENV, apply_dir_builtin, expand_home, walk
+# Target/owner resolution is lib/upstream_guard_lib.py, shared with this
+# hook's own --check preflight (one definition of each moved function).
+from upstream_guard_lib import git_remotes_targets, load_own_owners, parse_repo_value
 
 cmd = os.fsdecode(open(3, "rb").read()).removesuffix("\n")
 payload_cwd = os.environ.get("CWD") or "."
@@ -486,26 +623,6 @@ def gh_submission(unwrapped_argv):
     return None
 
 
-def parse_repo_value(value):
-    """(owner, repo) from a -R/--repo/GH_REPO value in any form gh 2.101.0
-    accepts — `OWNER/REPO`, `HOST/OWNER/REPO`, a `scheme://[user@]host/o/r`
-    URL (https, ssh, …; `.git` optional) or scp `[user@]host:o/r(.git)` —
-    else None."""
-    if "://" in value:
-        m = re.match(
-            r"^[A-Za-z][\w+.-]*://(?:[^@/]+@)?[^/:]+(?::\d+)?/([^/]+)/([^/]+?)(?:\.git)?/?$",
-            value,
-        )
-        return (m.group(1), m.group(2)) if m else None
-    m = re.match(r"^(?:[^@/:]+@)?[^/:]+:([^/]+)/([^/]+?)(?:\.git)?/?$", value)
-    if m:
-        return (m.group(1), m.group(2))
-    parts = value.split("/")
-    if len(parts) in (2, 3) and all(parts):
-        return (parts[-2], parts[-1])
-    return None
-
-
 # A -R/--repo/GH_REPO value the hook cannot read: it holds `$` or a backtick
 # (a variable or substitution, resolved only at run time), or it doesn't
 # parse. gh never consults the remotes once such a value is given, so it is
@@ -523,145 +640,6 @@ def explicit_target(value):
     if "$" in value or "`" in value:
         return UNVERIFIABLE
     return parse_repo_value(value) or UNVERIFIABLE
-
-
-def parse_github_remote_url(url):
-    """Parse a git remote URL into (owner, repo) if its host is a GitHub
-    candidate (contains "github", case-insensitive, after stripping a
-    leading www./ssh.), else None. Userinfo (a token) is discarded, never
-    returned or logged."""
-    try:
-        if "://" in url:
-            m = re.match(r"^\w+://(?:[^@/]+@)?([^/:]+)(?::\d+)?/(.+)$", url)
-            if not m:
-                return None
-            host, path = m.group(1), m.group(2)
-        else:
-            m = re.match(r"^(?:[^@/]+@)?([^:/]+):(.+)$", url)
-            if not m:
-                return None
-            host, path = m.group(1), m.group(2)
-        host = host.lower()
-        host = re.sub(r"^(www\.|ssh\.)", "", host)
-        if "github" not in host:
-            return None
-        path = path.rstrip("/")
-        if path.endswith(".git"):
-            path = path[: -len(".git")]
-        parts = path.split("/")
-        if len(parts) != 2 or not parts[0] or not parts[1]:
-            return None
-        return (parts[0], parts[1])
-    except Exception:
-        return None
-
-
-def git_argv(dir_, git_dir, work_tree):
-    """`git -C DIR [--git-dir=…] [--work-tree=…]`: a GIT_DIR/GIT_WORK_TREE
-    the gh command would inherit points the remote reading at that repo; a
-    relative value resolves against DIR, as git's own `-C` then `--git-dir`
-    order does."""
-    argv = ["git", "-C", dir_]
-    if git_dir:
-        argv.append(f"--git-dir={git_dir}")
-    if work_tree:
-        argv.append(f"--work-tree={work_tree}")
-    return argv
-
-
-def git_run(base, *args):
-    try:
-        r = subprocess.run(
-            base + list(args),
-            capture_output=True, text=True, errors="replace", timeout=5,
-        )
-    except Exception:
-        return None
-    return r.stdout if r.returncode == 0 else None
-
-
-def git_config(base, key):
-    out = git_run(base, "config", "--get", key)
-    return out.strip() if out is not None else None
-
-
-def git_remote_get_url(base, name):
-    out = git_run(base, "remote", "get-url", name)
-    return out.strip() if out is not None else None
-
-
-# The remote reading per (directory, GIT_DIR, GIT_WORK_TREE), kept for the
-# hook process: a walk with many worlds in one directory asks git once. A
-# failed `git remote` is cached as [] for the run too (upstream reads [] as no
-# non-own target, so it passes; not fail-closed like publish-gate).
-_REMOTES_MEMO = {}
-
-
-def git_remotes_targets(effective_dir, git_dir=None, work_tree=None):
-    key = (effective_dir, git_dir, work_tree)
-    if key not in _REMOTES_MEMO:
-        _REMOTES_MEMO[key] = _read_git_remotes_targets(effective_dir, git_dir, work_tree)
-    return list(_REMOTES_MEMO[key])
-
-
-def _read_git_remotes_targets(effective_dir, git_dir=None, work_tree=None):
-    base = git_argv(effective_dir, git_dir, work_tree)
-    out = git_run(base, "remote")
-    if out is None:
-        return []
-    names = [line.strip() for line in out.splitlines() if line.strip()]
-    candidates = []
-    resolved = []
-    for name in names:
-        url = git_remote_get_url(base, name)
-        parsed = parse_github_remote_url(url) if url else None
-        if parsed:
-            candidates.append(parsed)
-        gh_resolved = git_config(base, f"remote.{name}.gh-resolved")
-        if gh_resolved == "base":
-            if parsed:
-                resolved.append(parsed)
-        elif gh_resolved:
-            m = re.match(r"^([^/\s]+)/([^/\s]+)$", gh_resolved)
-            if m:
-                resolved.append((m.group(1), m.group(2)))
-    if resolved:
-        seen = []
-        for t in resolved:
-            if t not in seen:
-                seen.append(t)
-        return seen
-    return candidates
-
-
-def load_own_owners():
-    owners = set()
-    gh_config_dir = os.environ.get("GH_CONFIG_DIR") or os.path.join(
-        os.environ.get("HOME", ""), ".config", "gh"
-    )
-    hosts_path = os.path.join(gh_config_dir, "hosts.yml")
-    try:
-        with open(hosts_path, "r", encoding="utf-8", errors="replace") as fh:
-            in_github_host = False
-            for line in fh:
-                line = line.rstrip("\n")
-                if re.match(r"^github\.com:\s*$", line):
-                    in_github_host = True
-                    continue
-                if not in_github_host:
-                    continue
-                if re.match(r"^\S", line):
-                    break  # dedented back out of the github.com: block
-                m = re.match(r"^\s+user:\s*(\S+)", line)
-                if m:
-                    owners.add(m.group(1).strip().lower())
-                    break
-    except OSError:
-        pass
-    raw = os.environ.get("SYG_OWN_OWNERS", "").strip()
-    if raw:
-        owners |= {p.lower() for p in re.split(r"[\s,]+", raw) if p}
-    return owners
 
 
 own_owners = load_own_owners()

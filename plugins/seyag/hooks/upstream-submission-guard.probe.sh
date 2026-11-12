@@ -620,4 +620,125 @@ else
   echo "PASS  non-UTF-8 byte case: no traceback in output"
 fi
 
+# =============================================================================
+# --check preflight mode: the script invoked DIRECTLY with argv, no payload
+# JSON. A wrapper bin calls it this way before composing its publish command.
+# Every case pipes marker text on stdin: the preflight must branch before the
+# hook's INPUT=$(cat) and leave the caller's stdin unread (the verdict is
+# unaffected by what is piped in).
+# =============================================================================
+CK_OUT="$TMP/ck-out"
+CK_ERR="$TMP/ck-err"
+
+# check_run <expected-exit> <label> <cwd> <expected-stdout-first-line>
+#   [VAR=val...] -- <argv...>, i.e. it runs the hook with --check argv in cwd, same
+#   env seam as run() (SYG_OWN_OWNERS unset, fixture hosts.yml; a later
+#   VAR=val in envs overrides the seam's assignment).
+check_run() {
+  local expected="$1" label="$2" cwd="$3" want="$4"
+  shift 4
+  local envs=()
+  while [ "$1" != "--" ]; do
+    envs+=("$1")
+    shift
+  done
+  shift
+  (
+    cd "$cwd" || exit 99
+    printf 'wrapper stdin the preflight must not consume\n' |
+      env -u SYG_OWN_OWNERS GH_CONFIG_DIR="$HOSTS_DIR" "${envs[@]}" \
+        timeout 20 "$HOOK" "$@" >"$CK_OUT" 2>"$CK_ERR"
+  )
+  local actual=$? first
+  first=$(head -n 1 "$CK_OUT")
+  if [ "$actual" -eq "$expected" ] && [ "$first" = "$want" ]; then
+    printf 'PASS  (exit %d, "%s")  %s\n' "$actual" "$first" "$label"
+  else
+    printf 'FAIL  (exit %d, expected %d; stdout "%s", expected "%s")  %s\n' \
+      "$actual" "$expected" "$first" "$want" "$label"
+    sed 's/^/      /' "$CK_OUT" "$CK_ERR"
+    FAILURES=$((FAILURES + 1))
+  fi
+}
+
+# --- explicit target argument --------------------------------------------------
+check_run 0 "check: explicit own target passes" "$OWN" "PASS" -- \
+  --check me-owner/x
+check_run 1 "check: explicit non-own target blocks" "$OWN" "BLOCK other/x" -- \
+  --check other/x
+
+# --- BLOCK stderr: stance guidance present, bypass prefix absent ---------------
+if grep -qF "Hostile to AI contributions" "$CK_ERR" \
+  && grep -qF "Preflight: bash" "$CK_ERR" \
+  && ! grep -qF "SYG_UPSTREAM_CHECKED" "$CK_ERR"; then
+  echo "PASS  (stderr)  check: BLOCK stderr has stance guidance, no bypass prefix"
+else
+  echo "FAIL  (stderr)  check: BLOCK stderr has stance guidance, no bypass prefix"
+  sed 's/^/      /' "$CK_ERR"
+  FAILURES=$((FAILURES + 1))
+fi
+
+# --- bare form: cwd remotes resolve ----------------------------------------------
+check_run 0 "check: bare form resolves the cwd origin (own)" "$OWN" "PASS" -- \
+  --check
+check_run 1 "check: bare form resolves the cwd origin (non-own)" "$OTHERORG" \
+  "BLOCK someorg/theirrepo" -- --check
+check_run 1 "check: bare form judges every GitHub candidate (fork)" "$FORK" \
+  "BLOCK other/x" -- --check
+
+# --- GH_REPO env beats cwd remotes ------------------------------------------------
+check_run 1 "check: GH_REPO env beats own cwd remotes" "$FOREIGN" \
+  "BLOCK other/x" GH_REPO=other/x -- --check
+check_run 0 "check: GH_REPO env beats non-own cwd remotes" "$OTHERORG" "PASS" \
+  GH_REPO=me-owner/x -- --check
+
+# --- UNKNOWN: fail-closed pins -----------------------------------------------------
+check_run 1 "check: bare, no GH_REPO, not a repo" "$NOTGIT" \
+  "UNKNOWN no GH_REPO and no parsable GitHub remote in the cwd" -- --check
+check_run 1 "check: unparsable target" "$OWN" \
+  "UNKNOWN target does not parse as owner/repo: a/b/c/d" -- \
+  --check a/b/c/d
+check_run 1 "check: no own-owner basis fails closed" "$OWN" \
+  "UNKNOWN no own-owner basis (hosts.yml user or SYG_OWN_OWNERS unset)" \
+  GH_CONFIG_DIR="$TMP/no-such-dir" -- --check me-owner/x
+check_run 1 "check: GH_REPO set but unparsable" "$OWN" \
+  "UNKNOWN GH_REPO is set but does not parse as owner/repo" \
+  GH_REPO=not-a-target -- --check
+
+# --- control characters fail closed (stdout stays ONE line) --------------------
+# git DOES store a remote URL with an embedded newline (verified: `git remote
+# add` accepts it and `remote get-url` returns it intact), but
+# parse_github_remote_url rejects such a URL (its path regex is not DOTALL),
+# so the bare-form fixture fails closed through the no-parsable-remote route,
+# BEFORE the control-char gate could see it. The uniform control-char gate in
+# the preflight is still code-handled for any remote-derived target a future
+# parser could resolve.
+NEWLINE_REMOTE="$TMP/newline-remote"
+mk_repo "$NEWLINE_REMOTE"
+git -C "$NEWLINE_REMOTE" remote add origin "$(printf 'https://github.com/a\nb/c.git')"
+check_run 1 "check: control char in the target arg fails closed" "$OWN" \
+  "UNKNOWN target holds a control character" -- \
+  --check "$(printf 'a/b\nc/d')"
+if [ "$(wc -l <"$CK_OUT")" -eq 1 ] && [ "$(cat "$CK_OUT")" = "UNKNOWN target holds a control character" ]; then
+  echo "PASS  (stdout)  check: control-char arg yields exactly one UNKNOWN line"
+else
+  echo "FAIL  (stdout)  check: control-char arg yields exactly one UNKNOWN line"
+  sed 's/^/      /' "$CK_OUT" "$CK_ERR"
+  FAILURES=$((FAILURES + 1))
+fi
+check_run 1 "check: newline in a bare-form remote URL fails closed (parser rejects it)" \
+  "$NEWLINE_REMOTE" \
+  "UNKNOWN no GH_REPO and no parsable GitHub remote in the cwd" -- --check
+
+# --- usage error: three argv words ---------------------------------------------------
+check_run 1 "check: --check with 2 args is a usage error" "$OWN" "" -- \
+  --check me-owner/x extra
+if [ "$(wc -l <"$CK_ERR")" -eq 1 ] && grep -qF "Usage: upstream-submission-guard.sh --check [<owner/repo>]" "$CK_ERR"; then
+  echo "PASS  (stderr)  check: usage error prints one Usage line to stderr"
+else
+  echo "FAIL  (stderr)  check: usage error prints one Usage line to stderr"
+  sed 's/^/      /' "$CK_ERR"
+  FAILURES=$((FAILURES + 1))
+fi
+
 [ "$FAILURES" -eq 0 ]

@@ -50,7 +50,7 @@ An optional TOML file fills in knobs the environment left unset: user `${XDG_CON
 | `SYG_LIVE_CHECKOUT_AUTO` | `1` | Set to 0 to disable auto-detecting the plugin's own marketplace checkout as a protected live root. | `hooks/live-checkout-guard.sh` |
 | `SYG_LOSSY_PIPE_GH_WRAPPERS` | unset | Whitespace-separated read-wrapper command tokens guarded against head/tail/sed truncation in lossy-pipe-guard. | `hooks/lossy-pipe-guard.sh` |
 | `SYG_LOSSY_PIPE_SUITES` | `1` | Set to 0 to disable lossy-pipe-guard on test and probe suite commands piped into head/tail/sed. | `hooks/lossy-pipe-guard.sh` |
-| `SYG_OWN_OWNERS` | unset | Whitespace- or comma-separated GitHub owner names unioned with hosts.yml user: as own repos in upstream-submission-guard. | `hooks/upstream-submission-guard.sh` |
+| `SYG_OWN_OWNERS` | unset | Whitespace- or comma-separated GitHub owner names unioned with hosts.yml user: as own repos in upstream-submission-guard. | `hooks/lib/upstream_guard_lib.py`, `hooks/upstream-submission-guard.sh` |
 | `SYG_PRIVATE_TERMS_FILE` | unset | Path to a local file of Python regexes, one per line, blocked from public repos by private-term-guard and pre-push; pre-push also falls back to global git config seyag.privateTermsFile. | `bin/pr-open`, `bin/seyag-git-hooks`, `git-hooks/pre-push`, `hooks/lib/prepush_scan.py`, `hooks/lib/private_terms.py`, `hooks/private-term-guard.sh` |
 | `SYG_PUBLISH_CHECKED` | unset | Colon-separated <owner/repo> list (or any non-empty value for a gist) in the session env unblocking publish-gate. | `hooks/publish-gate.sh` |
 | `SYG_STATUS_CLAIM_MARKERS` | unset | Pipe-separated (\|) regex alternatives appended to status-claim-cite's default completion and causality markers. | `hooks/status-claim-cite.sh` |
@@ -237,6 +237,8 @@ An optional TOML file fills in knobs the environment left unset: user `${XDG_CON
 | `SECURITY_SWEEP_GH` | `bin/security-sweep` | Test seam overriding the gh binary path in security-sweep. |
 | `SECURITY_SWEEP_GH_TIMEOUT` | `bin/security-sweep` | Test seam overriding the per-call gh timeout in seconds (positive integer) in security-sweep. |
 | `SYG_ALLOW_COMMIT_BRANCH` | `hooks/lib/branch_switch.py` | Example per-command bypass assignment in the command text mentioned in lib/branch_switch.py docstring; not read by a hook. |
+| `SYG_CHECK_LIB` | `hooks/upstream-submission-guard.sh` | The hooks/lib directory the hook passes to its python child for shared target/owner resolution in the --check preflight. |
+| `SYG_CHECK_TARGET` | `hooks/upstream-submission-guard.sh` | The target argument the hook passes to its python child in the --check preflight. |
 | `SYG_CLOCK_STAMP_NOW` | `hooks/clock-stamp-guard.sh`, `hooks/lib/clock_stamp.py` | Test clock (integer epoch seconds) overriding current time in clock-stamp-guard. |
 | `SYG_COMPONENTS_TSV` | `hooks/lib/components.sh` | Internal variable holding the resolved path to hooks/components.tsv in lib/components.sh. |
 | `SYG_CREDIT_ADMIN_URL` | `bin/api-credit`, `bin/statusline` | Test seam overriding the Anthropic Admin API origin URL in api-credit and statusline. |
