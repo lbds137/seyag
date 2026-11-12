@@ -160,8 +160,8 @@ An optional TOML file fills in knobs the environment left unset: user `${XDG_CON
 | `PR_CI_WAIT_POLL_S` | `30` | Interval in seconds between workflow-run polls in pr-ci-wait. | `bin/pr-ci-wait` |
 | `PR_CI_WAIT_QUIET_S` | `90` | Quiet-window duration in seconds with an unchanged, all-completed run set required to settle pr-ci-wait when SYG_CI_ANCHOR is unset. | `bin/pr-ci-wait` |
 | `PR_CI_WAIT_SETTLE_S` | `5` | Pause in seconds after gh pr checks --watch finishes and before pr-ci-wait prints CI_COMPLETE (only when CI is releasable). | `bin/pr-ci-wait` |
-| `SYG_CI_ANCHOR` | unset | Workflow name whose completion (with nothing pending) settles pr-ci-wait; unset uses the quiet-window rule. | `bin/pr-ci-wait`, `bin/pr-open` |
-| `SYG_CI_REVIEW` | auto-detected: the workflow named Claude Code Review if one exists, otherwise no review check | Review workflow name that must complete before pr-ci-wait releases; set empty to disable. | `bin/pr-ci-wait`, `bin/pr-open` |
+| `SYG_CI_ANCHOR` | unset | Workflow name whose completion (with nothing pending) settles pr-ci-wait; unset uses the quiet-window rule. | `bin/pr-ci-wait` |
+| `SYG_CI_REVIEW` | auto-detected: the workflow named Claude Code Review if one exists, otherwise no review check | Review workflow name that must complete before pr-ci-wait releases; set empty to disable. | `bin/pr-ci-wait` |
 | `SYG_MERGE_REVIEW_LOGIN` | `claude[bot]` | GitHub login whose latest PR comment must be surfaced before pr-merge-review-check allows gh pr merge. | `hooks/pr-merge-review-check.sh` |
 | `SYG_MERGE_REVIEW_RELEASE_REMINDER` | This PR merges into the repository's default branch — run this project's post-merge steps (version bump, release, deploy) before starting other work. | Custom reminder text shown once when merging a PR into the repository's default branch. | `hooks/pr-merge-review-check.sh` |
 | `SYG_MERGE_REVIEW_WORKFLOW` | `.github/workflows/claude-code-review.yml` | Review workflow file path whose self-edit in a PR explains a missing review comment in pr-merge-review-check. | `hooks/pr-merge-review-check.sh` |

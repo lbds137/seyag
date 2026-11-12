@@ -18,10 +18,12 @@
 #                            public, the pre-push fallback to global git
 #                            config seyag.privateTermsFile applies
 #   SYG_PR_BODY_BASE_REF     the ref the body's tracker references must
-#                            resolve on (the gate's own default: origin/main)
-#   SYG_CI_ANCHOR, SYG_CI_REVIEW — pr-ci-wait's knobs, named here only
-#                            because the arm line arms it; pr-open does
-#                            not read them
+#                            resolve on (the gate's own default: origin/main);
+#                            resolved even when --base names another base
+#                            (the hook has no --base)
+#   pr-ci-wait's own CI anchor and review env knobs (its SYG_* env) —
+#                            named here only because the arm line arms it;
+#                            pr-open does not read them
 #
 # Order (every failed preflight exits before gh is called once):
 #   1. session-link scan — always, both --title and the body file
@@ -291,9 +293,17 @@ pr_num=${pr_url##*/}
 # substitution left as literal text — it resolves when the watcher runs.
 # The toplevel and the ref are single-quoted with embedded quotes escaped
 # the reminder's way, so the printed command pastes cleanly for any path
-# or branch-name shape.
+# or branch-name shape. When the branch came from --head and no local
+# ref backs it, the pasted rev-parse would resolve to nothing — omit
+# --sha instead (pr-ci-wait then resolves and watches the PR's current
+# head) and say so on stderr; stdout stays the parseable arm line.
 Q_TOP="'$(printf '%s' "$TOP" | sed "s/'/'\\\\''/g")'"
-Q_BRANCH="'$(printf '%s' "refs/heads/$BRANCH" | sed "s/'/'\\\\''/g")'"
 printf 'PR #%s: %s\n' "$pr_num" "$pr_url"
-printf 'cd %s && pr-ci-wait %s --sha $(git rev-parse %s)\n' \
-  "$Q_TOP" "$pr_num" "$Q_BRANCH"
+if git show-ref --verify --quiet "refs/heads/$BRANCH"; then
+  Q_BRANCH="'$(printf '%s' "refs/heads/$BRANCH" | sed "s/'/'\\\\''/g")'"
+  printf 'cd %s && pr-ci-wait %s --sha $(git rev-parse %s)\n' \
+    "$Q_TOP" "$pr_num" "$Q_BRANCH"
+else
+  echo "pr-open: refs/heads/$BRANCH not found locally; arming without --sha (pr-ci-wait watches the PR head)" >&2
+  printf 'cd %s && pr-ci-wait %s\n' "$Q_TOP" "$pr_num"
+fi
