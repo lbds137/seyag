@@ -43,19 +43,19 @@
 # Pending-marker pass: when the closing line does not end in "?", the final
 # paragraph of the final assistant text (after stripping fenced ```...``` code
 # blocks, line-local inline `...` code spans and line-local balanced quoted
-# spans ("..." and “...” — each stripped span becomes a clause boundary; an
-# unbalanced quote changes nothing, across lines too) is scanned
-# case-insensitively against. A paragraph left holding only whitespace, dots
-# and stripped-span placeholders does not become the scan scope (the previous
-# paragraph is scanned, as before); a tripped line quotes the cleaned text
-# with those placeholders where stripped spans sat.
-# SYG_BQ_PENDING_MARKERS (a Python regex; unset uses the built-in default
+# spans ("..." and “...” — a stripped span becomes " . " only when its text
+# holds clause-punctuation characters, else a plain space; an unbalanced
+# quote changes nothing, across lines too) is scanned case-insensitively against SYG_BQ_PENDING_MARKERS
+# (a Python regex; unset uses the built-in default
 # `say the word\b|waiting on you\b|needs? your (yes|go|call|input)\b|for you to (decide|test|check)\b`;
 # set to empty disables the pass; a broken regex fails open). A match directly
 # preceded in its own clause by a negator (nothing, no, not, none, nobody,
 # never, …n't, with only filler words like "is" between, up to three words
 # back) is ignored, so "nothing is waiting on you" does not fire. The first
-# matching line is quoted in the banner.
+# matching line is quoted in the banner. A paragraph left holding only
+# whitespace, dots and stripped-span placeholders does not become the scan
+# scope (the previous paragraph is scanned, as before); a tripped line quotes
+# the cleaned text, with ` . ` where a stripped span held clause-punctuation characters.
 
 set -uo pipefail
 
@@ -214,17 +214,22 @@ if raw_markers:
             return None
 
         cleaned = re.sub(r"```.*?```", "", final_text, flags=re.S)
-        cleaned = re.sub(r"`[^`\n]*`", " . ", cleaned)
+
+        def span_repl(m):  # " . " only for a span whose text holds clause-punctuation characters
+            return " . " if re.search(r"[.;:!?,—–]", m.group(0)[1:-1]) else " "
+
+        cleaned = re.sub(r"`[^`\n]*`", span_repl, cleaned)
         # A quoted mention of a marker ("waiting on you") is the agent quoting
         # alert text, not leaving an ask — strip balanced pairs, straight and
         # curly, each pair line-local (a pair cannot cross a newline, merge
         # paragraphs or reach across the scanned scope); an unbalanced quote
         # changes nothing, in a line or across paragraphs (accepted FP residual).
-        # Each stripped span becomes a clause boundary (" . "), so its clause
-        # punctuation survives and a negator in an earlier clause cannot reach
-        # across the span to the marker.
-        cleaned = re.sub(r'"[^"\n]*"', " . ", cleaned)
-        cleaned = re.sub(r"“[^”\n]*”", " . ", cleaned)
+        # A stripped span whose text holds clause-punctuation characters
+        # becomes a clause boundary (" . "), so those characters survive and a
+        # negator in an earlier clause cannot reach across the span; a
+        # punctuation-free span becomes a plain space (no manufactured boundary).
+        cleaned = re.sub(r'"[^"\n]*"', span_repl, cleaned)
+        cleaned = re.sub(r"“[^”\n]*”", span_repl, cleaned)
         # A paragraph left holding only stripped-span placeholders (or bare
         # punctuation) does not become the scan scope: filter it, so the scope
         # falls back to the previous paragraph as base did when a span emptied.

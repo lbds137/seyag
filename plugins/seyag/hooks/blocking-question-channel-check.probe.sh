@@ -265,6 +265,19 @@ mktx "$TMP/m11n.jsonl" "Deploy is waiting on you.
 \"Ship it\""
 check 2 "quoted-only final paragraph does not become the scan scope — scope falls back" "$TMP/m11n.jsonl"
 
+ED=$(printf '—')  # em-dash, codepoint-built (SC1111 concerns the curly quotes)
+mktx "$TMP/m11o.jsonl" "No ${TICK}x${TICK} is waiting on you."
+check 0 "punctuation-free code span between a negator and the marker makes no clause boundary — stays silent" "$TMP/m11o.jsonl"
+
+mktx "$TMP/m11p.jsonl" "No \"x\" is waiting on you."
+check 0 "punctuation-free quoted span between a negator and the marker makes no clause boundary — stays silent" "$TMP/m11p.jsonl"
+
+mktx "$TMP/m11q.jsonl" "Not ${CQO}held ${ED} done${CQC} waiting on you."
+check 2 "clause punctuation (em-dash) inside a stripped span still makes the boundary" "$TMP/m11q.jsonl"
+
+mktx "$TMP/m11r.jsonl" "If ${TICK}x${TICK} not waiting on you."
+check 2 "STOP word before a punctuation-free span keeps 'not' conditional — still fires" "$TMP/m11r.jsonl"
+
 mktx "$TMP/m10a.jsonl" "There's nothing waiting on you either."
 check 0 "negated pending marker: 'nothing waiting on you' does not fire" "$TMP/m10a.jsonl"
 
