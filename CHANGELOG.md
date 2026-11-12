@@ -11,19 +11,19 @@ All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY
 ### Bug Fixes
 
 - **bin:** the `safe-worktree-clean --apply-hold` naming-refusal hint now names the approval it waits on — "only on the owner's yes for that tree: re-run the dry run and apply with `--only <tree>`" — instead of the bare "name it with --only"; a commit-carrying tree whose only carrying reasons are `worktree-refs` / `bisect-refs` / `rewritten-refs` now says its count is the branch's beyond-base commits and per-worktree refs hold more, and a failed or vacuous commit count prints `?` instead of a real-looking `0` (#313).
-- **hooks:** `blocking-question-channel-check`'s stripped-span placeholder is punctuation-conditional — a stripped span becomes ` . ` only when its text holds clause punctuation, else a plain space — so a punctuation-free span between a negator and the marker no longer manufactures a clause boundary (base silence restored; the pass fails open) (#PR).
+- **hooks:** `blocking-question-channel-check`'s stripped-span placeholder is punctuation-conditional — a stripped span becomes ` . ` only when its text holds clause punctuation, else a plain space — so a punctuation-free span between a negator and the marker no longer manufactures a clause boundary (base silence restored; the pass fails open) (#314).
 
 ### Chores
 
 - **bin:** `safe-worktree-clean` re-wraps the ragged header/`--help` lines the holdscope batch left behind and comments the display-only `", "` split that builds the sweep tree names (`--json`'s `sweep_plan_trees` is unaffected) (#313).
 - **docs:** restores the `(#PR)` placeholder on the format line, which a cite-fill replace_all had clobbered to `(#310)` (#313).
-- **hooks:** the pending-marker-pass header re-flowed: the scan sentence runs to `SYG_BQ_PENDING_MARKERS (...)`, the paragraph-filter and banner notes sit after the negator paragraph, and the banner note names the conditional placeholder (#PR).
-- **docs:** the 0.3.166 bq-fp bullets shortened to commit-subject length; details stay in the hook header (authoritative) (#PR).
+- **hooks:** the pending-marker-pass header re-flowed: the scan sentence runs to `SYG_BQ_PENDING_MARKERS (...)`, the paragraph-filter and banner notes sit after the negator paragraph, and the banner note names the conditional placeholder (#314).
+- **docs:** the 0.3.166 bq-fp bullets shortened to commit-subject length; details stay in the hook header (authoritative) (#314).
 
 ### Tests
 
 - **probes:** `tests/safe-worktree-clean.probe.sh` pins the reworded refusal (P31 with the reason-aware count, P40(ii), P42(ii)), adds the naming refusal under `--json` (stderr carries the line, stdout stays clean, P44), a detached-unreferenced bare-id refusal asserting the printed count (P25), a `rev-list --count`-failure case printing `?` via a git shim (P45), and the sweep parent pinning the same reason-aware count form at the sweep refusal (P46) (#313).
-- **probes:** `hooks/blocking-question-channel-check.probe.sh` gains 4 cases: a punctuation-free code span and quoted span between a negator and the marker stay silent (red-first against the unfixed hook), a STOP word + "not" shape keeps firing after a punctuation-free span (base semantics restored, red-first against HEAD), and an em-dash inside a stripped span still makes the boundary (pins the widened punctuation class) (#PR).
+- **probes:** `hooks/blocking-question-channel-check.probe.sh` gains 4 cases: a punctuation-free code span and quoted span between a negator and the marker stay silent (red-first against the unfixed hook), a STOP word + "not" shape keeps firing after a punctuation-free span (base semantics restored, red-first against HEAD), and an em-dash inside a stripped span still makes the boundary (pins the widened punctuation class) (#314).
 
 ## 0.3.166 - 2026-11-12
 
