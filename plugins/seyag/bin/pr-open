@@ -1,0 +1,276 @@
+#!/bin/bash
+# pr-open: one command for the PR-open preflight chain. A PR open used to
+# cost four separate driver calls (the ref-gate --check, the private-term
+# and session-link scans, the create, the pr-ci-wait arm line); this runs
+# the chain in order and prints the ready-to-arm line. It also closes a
+# wrapper gap: a wrapper script's command text holds no `gh` token, so
+# private-term-guard and session-url-gate never fire on
+# `pr-open --title ... --body-file F` — the scans below ARE the hook scans
+# (the same libs and rules), run by the script itself.
+#
+# Env it reads (existing knobs only, no new name):
+#   SYG_PRIVATE_TERMS_FILE   the terms list; when unset and the repo is
+#                            public, the pre-push fallback to global git
+#                            config seyag.privateTermsFile applies
+#   SYG_PR_BODY_BASE_REF     the ref the body's tracker references must
+#                            resolve on (the gate's own default: origin/main)
+#   SYG_CI_ANCHOR, SYG_CI_REVIEW — pr-ci-wait's knobs, named here only
+#                            because the arm line arms it; pr-open does
+#                            not read them
+#
+# Order (every failed preflight exits before gh is called once):
+#   1. session-link scan — always, both --title and the body file
+#      (session-url-gate's rule: a session link must not enter a PR in any
+#      project, not gated on the public flag)
+#   2. private-term scan — title + body, ONLY under a public
+#      seyag.publicRepo (hook parity); set-but-not-boolean fails closed
+#   3. pr-body-ref-gate --check
+#   4. `gh pr create` (gh via PATH)
+#   5. the canonical pr-ci-wait arm line, substitution left unresolved
+#
+# The python scans fail open, like the hooks they mirror: no python3 or a
+# lib import failure never blocks. Two documented exceptions to the parity
+# claim: (1) a body with a UTF-8 BOM is scanned with the BOM stripped
+# (utf-8-sig), so a start-anchored term can block here where the hook passes
+# — over-blocking only, never under; (2) matching is time-boxed at 5 s like
+# private-term-guard's: a pathological terms pattern blocks with a
+# "took over 5 s" message instead of hanging.
+#
+# No SYG_ALLOW_* waiver support on purpose: pr-open IS the preflight, and a
+# waiver inside it would defeat the chain — publish-worthy terms get edited
+# out of the body, not waived past it.
+
+set -uo pipefail
+
+usage() {
+  cat >&2 <<'EOF'
+usage: pr-open --title TITLE --body-file FILE [--base BRANCH] [--head BRANCH]
+               [--draft] [--repo REPO]
+
+Runs the PR-open preflight chain (session-link scan, private-term scan,
+pr-body-ref-gate --check), then creates the PR with `gh pr create` and
+prints the pr-ci-wait arm line. A failed preflight exits before gh runs.
+EOF
+}
+
+PLUGIN_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+LIB="$PLUGIN_ROOT/hooks/lib"
+
+TITLE="" BODY_FILE="" BASE="" HEAD_ARG="" REPO="" DRAFT=0
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --title)
+      [ "$#" -ge 2 ] || { usage; exit 2; }
+      TITLE=$2
+      shift 2
+      ;;
+    --body-file)
+      [ "$#" -ge 2 ] || { usage; exit 2; }
+      BODY_FILE=$2
+      shift 2
+      ;;
+    --base)
+      [ "$#" -ge 2 ] || { usage; exit 2; }
+      BASE=$2
+      shift 2
+      ;;
+    --head)
+      [ "$#" -ge 2 ] || { usage; exit 2; }
+      HEAD_ARG=$2
+      shift 2
+      ;;
+    --repo)
+      [ "$#" -ge 2 ] || { usage; exit 2; }
+      REPO=$2
+      shift 2
+      ;;
+    --draft)
+      DRAFT=1
+      shift
+      ;;
+    *)
+      usage
+      exit 2
+      ;;
+  esac
+done
+[ -n "$TITLE" ] || { usage; exit 2; }
+[ -n "$BODY_FILE" ] || { usage; exit 2; }
+[ -f "$BODY_FILE" ] && [ -r "$BODY_FILE" ] || {
+  echo "pr-open: cannot read body file: $BODY_FILE" >&2
+  usage
+  exit 2
+}
+
+TOP=$(git rev-parse --show-toplevel 2>/dev/null) || {
+  echo "pr-open: not inside a git work tree" >&2
+  usage
+  exit 2
+}
+
+if [ -n "$HEAD_ARG" ]; then
+  BRANCH=$HEAD_ARG
+else
+  BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null) || {
+    echo "pr-open: not inside a git work tree" >&2
+    usage
+    exit 2
+  }
+  if [ "$BRANCH" = "HEAD" ]; then
+    echo "pr-open: detached HEAD; pass --head BRANCH" >&2
+    usage
+    exit 2
+  fi
+fi
+
+if command -v python3 >/dev/null 2>&1; then
+  # 1. Session-link scan: the same SECRET/mask pair session-url-gate uses.
+  # rc 0 = a hit was printed, 1 = clean (a scan failure also reads clean —
+  # fail open, hook parity).
+  # stderr discarded, hook parity: a scan crash fails open quietly.
+  scan_hit=$(python3 -I -B - "$LIB" "$BODY_FILE" 2>/dev/null 3<<<"$TITLE" <<'PYEOF'
+import os
+import sys
+
+sys.path.insert(0, sys.argv[1])
+from session_link import SECRET, mask
+
+title = os.fsdecode(open(3, "rb").read()).removesuffix("\n")
+with open(sys.argv[2], "rb") as fh:
+    body = fh.read().decode("utf-8-sig", "replace")
+
+for label, text in (("title", title), ("body", body)):
+    for n, line in enumerate(text.split("\n"), 1):
+        if SECRET.search(line):
+            print(f"pr-open: BLOCK: session link in {label} line {n}: "
+                  f"{mask(line)}")
+            sys.exit(0)
+sys.exit(1)
+PYEOF
+)
+  scan_rc=$?
+  if [ "$scan_rc" -eq 0 ]; then
+    printf '%s\n' "$scan_hit" >&2
+    exit 1
+  fi
+
+  # 2. Private-term scan: only in a repo seyag.publicRepo marks public.
+  # `git config --type=bool --get` exits 1 with no output when unset; a
+  # bad value fails the call with a higher rc — fail closed on it.
+  pub=$(git -C "$TOP" config --type=bool --get seyag.publicRepo 2>/dev/null)
+  pub_rc=$?
+  if [ "$pub_rc" -gt 1 ]; then
+    echo "pr-open: BLOCK: seyag.publicRepo is set but not a boolean" >&2
+    exit 1
+  fi
+  if [ "$pub_rc" -eq 0 ] && [ "$pub" = "true" ]; then
+    TERMS=${SYG_PRIVATE_TERMS_FILE:-}
+    # The global value only, pre-push's fallback: a repo's own config must
+    # not point the check at an empty list.
+    [ -n "$TERMS" ] || TERMS=$(git config --global --type=path --get seyag.privateTermsFile 2>/dev/null)
+    if [ -n "$TERMS" ] && [ -f "$TERMS" ] && [ -r "$TERMS" ]; then
+      # rc 0 = a block was printed; 1 = clean (no term lines, no hit, or a
+      # scan failure — fail open, hook parity).
+      term_hit=$(python3 -I -B - "$LIB" "$TERMS" "$BODY_FILE" 2>/dev/null 3<<<"$TITLE" <<'PYEOF'
+import os
+import sys
+import signal
+
+sys.path.insert(0, sys.argv[1])
+from private_terms import compile_terms, masked, read_terms, spans
+
+# The hook's time box (private-term-guard's MATCH_SECONDS): a pathological
+# pattern blocks with a message instead of hanging the preflight.
+MATCH_SECONDS = 5
+
+
+class MatchTimeout(Exception):
+    pass
+
+
+def on_alarm(_signum, _frame):
+    raise MatchTimeout()
+
+
+terms = read_terms(sys.argv[2])
+if not terms:
+    sys.exit(1)
+title = os.fsdecode(open(3, "rb").read()).removesuffix("\n")
+with open(sys.argv[3], "rb") as fh:
+    body = fh.read().decode("utf-8-sig", "replace")
+
+compiled, bad_line = compile_terms(terms)
+if compiled is None:
+    print(f"pr-open: BLOCK: terms file line {bad_line} does not compile")
+    sys.exit(0)
+
+signal.signal(signal.SIGALRM, on_alarm)
+signal.alarm(MATCH_SECONDS)
+try:
+    for label, text in (("title", title), ("body", body)):
+        for n, line in enumerate(text.split("\n"), 1):
+            found = spans(compiled, line)
+            if found:
+                print(f"pr-open: BLOCK: private term in {label} line {n}: "
+                      f"{masked(line, found)}")
+                sys.exit(0)
+except MatchTimeout:
+    print(f"pr-open: BLOCK: matching the terms took over {MATCH_SECONDS} s; "
+          f"simplify the patterns in {sys.argv[2]}")
+    sys.exit(0)
+finally:
+    signal.alarm(0)
+sys.exit(1)
+PYEOF
+)
+      term_rc=$?
+      if [ "$term_rc" -eq 0 ]; then
+        printf '%s\n' "$term_hit" >&2
+        exit 1
+      fi
+    fi
+  fi
+fi
+
+# 3. Ref-gate preflight: its own output (a block banner on stderr) passes
+# through, then pr-open names the failure and exits with the gate's rc.
+# The gate blocks with rc 2, which shares the usage-error class above —
+# distinguishable only by this BLOCK line being on stderr (spec-mandated
+# passthrough).
+bash "$PLUGIN_ROOT/hooks/pr-body-ref-gate.sh" --check "$BODY_FILE"
+gate_rc=$?
+if [ "$gate_rc" -ne 0 ]; then
+  echo "pr-open: BLOCK: pr-body-ref-gate failed (rc $gate_rc)" >&2
+  exit "$gate_rc"
+fi
+
+# 4. Create. gh comes from PATH.
+create_cmd=(gh pr create --title "$TITLE" --body-file "$BODY_FILE")
+[ -n "$BASE" ] && create_cmd+=(--base "$BASE")
+[ -n "$HEAD_ARG" ] && create_cmd+=(--head "$HEAD_ARG")
+[ "$DRAFT" -eq 1 ] && create_cmd+=(--draft)
+[ -n "$REPO" ] && create_cmd+=(--repo "$REPO")
+create_out=$("${create_cmd[@]}")
+gh_rc=$?
+if [ "$gh_rc" -ne 0 ]; then
+  printf '%s\n' "$create_out" >&2
+  exit "$gh_rc"
+fi
+
+# The last pull URL wins (gh can print progress lines around it).
+pr_url=$(printf '%s\n' "$create_out" | grep -oE 'https://github\.com/[^[:space:]]+/pull/[0-9]+' | tail -n 1)
+if [ -z "$pr_url" ]; then
+  printf '%s\n' "$create_out" >&2
+  echo "pr-open: no PR URL in gh's output; arm the watcher by hand" >&2
+  exit 1
+fi
+pr_num=${pr_url##*/}
+
+# 5. The arm line, pr-monitor-reminder's canonical template with the
+# substitution left as literal text — it resolves when the watcher runs.
+# The toplevel is single-quoted with embedded quotes escaped the reminder's
+# way, so the printed command pastes cleanly for any path shape.
+Q_TOP="'$(printf '%s' "$TOP" | sed "s/'/'\\\\''/g")'"
+printf 'PR #%s: %s\n' "$pr_num" "$pr_url"
+printf 'cd %s && pr-ci-wait %s --sha $(git rev-parse %s)\n' \
+  "$Q_TOP" "$pr_num" "'refs/heads/$BRANCH'"

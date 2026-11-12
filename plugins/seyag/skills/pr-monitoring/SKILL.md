@@ -15,6 +15,9 @@ findings).
 
 - **Arm immediately on every `gh pr create` and every `git push` to an open
   PR.** Never wait to be asked whether CI passed or whether a review landed.
+- **Opening a PR:** `pr-open` (plugin bin) runs the preflight chain — the
+  session-link and private-term scans plus the body ref gate — creates the
+  PR, and prints the arm line.
 - **Verify the push landed first** (the `-> <branch>` ref-update line, or
   `git status -sb` showing the branch in sync with its upstream) — a watcher
   armed on a push that never landed reports a stale run as fresh.
@@ -34,6 +37,8 @@ findings).
 cd '<toplevel>' && pr-ci-wait <N> --sha $(git rev-parse 'refs/heads/<branch>')
 ```
 
+  On success `pr-open` prints this same template, substitution unresolved —
+  arm straight from its output.
   Outside the push-triggered template, omit `--sha` so `pr-ci-wait` resolves
   and watches the PR's current head rather than pasting a SHA by hand.
   The cd anchor matches the hook template: pr-ci-wait has no -C, so its gh and git calls resolve against the Monitor's working directory.
