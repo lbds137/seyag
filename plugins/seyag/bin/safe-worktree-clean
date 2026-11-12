@@ -63,7 +63,15 @@
 # index entries
 # (`git ls-files -u`) is approvable ("approvable": true in --json; listed after the HOLD report as
 # `  approvable with --apply-hold: <rel path>`); any other code or an unmerged index entry keeps
-# the tree held under every mode. A repo's plan id (`hold plan: <id>`, JSON `"hold_plan"`, null
+# the tree held under every mode. Every dry run with approvable trees also prints one summary line
+# per plan — `hold plan <id> would remove <N> tree(s): <path1>, <path2>` (the sweep id gets the
+# same shape after `sweep plan:`), listing the exact trees that id removes, truncated at three
+# paths with `… +<k> more` in text; --json carries the full lists as `hold_plan_trees` per repo
+# and `sweep_plan_trees` on the sweep object, plus `hold_plan_commit_carrying` /
+# `sweep_plan_commit_carrying`: the plan's commit-carrying trees (reason `unmerged`,
+# `detached-unreferenced`, `worktree-refs`, `bisect-refs` or `rewritten-refs` — any code that can
+# carry commits not provably on <base> or another branch) with their commit counts beyond <base>.
+# A repo's plan id (`hold plan: <id>`, JSON `"hold_plan"`, null
 # when no tree is approvable) is the first 12 hex of sha256 over each approvable tree in path
 # order: path, branch (or empty), `git rev-parse HEAD`, sorted reason lines, and `tree_state_sha`
 # (sha256 over `git status --porcelain=v1 -z --ignored --untracked-files=all`, `git diff --binary
@@ -77,11 +85,21 @@
 # hex of sha256 over the repos' `<repo path>\0<plan id or empty>` lines in the given order when
 # any repo has an approvable tree and no child dry run failed.
 # --apply-hold ID (also --apply-hold=ID; implies --apply; refuses with --all, exit 2): removing a
-# HOLD tree is the owner's call; pass the id from the dry run they approved. Recomputes the plan
+# HOLD tree is the owner's call; pass the id from the dry run they approved — the printed summary
+# line names the exact tree list that id removes, and the yes binds to that list. Recomputes the
+# plan
 # id (the sweep id across several repos) and verifies the resolved backup dir lies outside the
 # repo and all its listed worktrees and is not on tmpfs/ramfs (unless
-# SYG_WORKTREE_BACKUP_ALLOW_VOLATILE=1) before removing anything; a plan mismatch or a rejected
-# backup dir exits 2 and removes nothing (SAFE trees included). Across several repos, each repo's
+# SYG_WORKTREE_BACKUP_ALLOW_VOLATILE=1) before removing anything; a plan mismatch, a rejected
+# backup dir, or a refused commit-carrying plan exits 2 and removes nothing (SAFE trees included).
+# A plan containing a commit-carrying tree refuses with one line per offending tree (naming the
+# tree and its commit count beyond <base>) unless the same invocation names that tree with
+# --only; with --only, the plan is recomputed over exactly the named trees and must equal the
+# approved id, so a change to an unrelated tree does not invalidate the approval — the flow for
+# such trees is a scoped dry run (--only <tree>...), then --apply-hold <id> with the same --only.
+# Across several repos, --only is refused outright, so a sweep plan containing a commit-carrying
+# tree refuses at the parent (nothing removed anywhere); approve those trees per repo with the
+# scoped flow. Across several repos, each repo's
 # run re-verifies its own plan before removing, so a repo that changed after an earlier repo was
 # applied exits 2 and keeps its trees (the sweep can end partly applied; the exit code says so).
 # On a match, SAFE trees go as --apply, and each approvable HOLD tree is backed up under
@@ -114,7 +132,8 @@
 # 10), and no live git process works in the repo. --locks-apply deletes exactly the stale ones.
 # --json prints one JSON object instead of text (`{"repos": [...], "sweep_plan": ...}` when
 # sweeping several repos).
-# Exit: 0 done; 1 --apply found no removable tree (nothing removed); 2 usage, plan mismatch, or
+# Exit: 0 done; 1 --apply found no removable tree (nothing removed); 2 usage, plan mismatch, a
+# refused commit-carrying plan, or
 # not a git repo; 3 a backup, removal, or lock deletion failed. With several repos: 3 if any
 # child exits 3, else 2 if any exits 2, else 1 only if every child exits 1, else 0.
 
@@ -122,6 +141,21 @@ set -uo pipefail
 
 usage() { sed -n '2,/^[^#]/s/^# \{0,1\}//p' "$0"; }
 trim() { local s=$1; s=${s#"${s%%[![:space:]]*}"}; printf '%s' "${s%"${s##*[![:space:]]}"}"; }
+
+# One summary line per plan id (see the header): the exact tree list the id would remove,
+# display names passed in ready-to-print form, truncated at three with "… +<k> more".
+plan_summary_line() { # $1 "hold plan <id>" | "sweep plan <id>", $2... display tree names
+  local prefix=$1 out="" p n
+  shift
+  n=$#
+  if [ "$n" -gt 3 ]; then
+    for p in "${@:1:3}"; do out+="${out:+, }$p"; done
+    out+=", … +$((n - 3)) more"
+  else
+    for p in "$@"; do out+="${out:+, }$p"; done
+  fi
+  printf '%s would remove %d tree(s): %s\n' "$prefix" "$n" "$out"
+}
 
 APPLY=false APPLY_HOLD="" ALL=false LOCKS=false LOCKS_APPLY=false JSON=false BASE_ARG="" BASE_SRC=""
 REPOS=() ONLY_RAW=() ONLY_REAL=()
@@ -284,8 +318,10 @@ if [ ${#REPOS[@]} -gt 1 ]; then
     $ALL && DRY_ARGS+=(--all)
     $LOCKS && DRY_ARGS+=(--locks)
     [ "$BASE_SRC" = "--base" ] && DRY_ARGS+=(--base "$BASE_ARG")
+    CHILD_JSONS=()
     for r in "${REPOS[@]}"; do
       if d_out=$(bash "$SELF" --repo "$r" --json "${DRY_ARGS[@]}"); then
+        CHILD_JSONS+=("$d_out")
         IFS=$'\036' read -r r_main r_plan < <(parse_repo_plan "$d_out")
         R_MAINS+=("$r_main")
         R_PLANS+=("$r_plan")
@@ -314,11 +350,35 @@ if [ ${#REPOS[@]} -gt 1 ]; then
       echo "safe-worktree-clean: hold plan changed: approved $APPLY_HOLD, now ${SWEEP_PLAN:-none}; rerun the dry run and get a fresh yes" >&2
       exit 2
     fi
+    # Sweep ids are unscoped (--only is refused for several repos), so one commit-carrying tree
+    # anywhere in the sweep refuses the whole apply at the parent, before any child runs; the
+    # per-repo scoped flow (--only) is the approval path for those trees. The children's dry-run
+    # JSONs already name each repo's commit-carrying plan trees (hold_plan_commit_carrying).
+    {
+      printf '%s\0' "${CHILD_JSONS[@]}"
+    } | python3 -c '
+import json, sys
+plan_id = sys.argv[1]
+data = sys.stdin.buffer.read().decode("utf-8", "surrogateescape").split("\0")[:-1]
+refused = False
+for x in data:
+    d = json.loads(x)
+    for t in d.get("hold_plan_commit_carrying") or []:
+        refused = True
+        print("safe-worktree-clean: --apply-hold refused: plan %s includes commit-carrying tree %s (%d commit(s) not on %s) — name it with --only to approve its removal"
+              % (plan_id, t["path"], t["commits"], t["base"]), file=sys.stderr)
+if refused:
+    sys.exit(2)
+' "$APPLY_HOLD" || exit 2
     export SYG_WORKTREE_RUN_STAMP=$RUN_STAMP
   fi
 
   any_3=false any_2=false all_1=true
   JSON_OBJS=() FAILED_REPOS=()
+  # The text sweep's summary line aggregates each child's own summary line: total tree count
+  # plus the first display names, capped at three (JSON carries the full sweep_plan_trees).
+  SWEEP_TXT_N=0
+  SWEEP_TXT_NAMES=()
   for idx in "${!REPOS[@]}"; do
     r=${REPOS[$idx]}
     child_extra=()
@@ -365,6 +425,18 @@ if [ ${#REPOS[@]} -gt 1 ]; then
           r_main=${first_line#repo: }
           r_main=${r_main%%  base: *}
           r_plan=$(sed -n 's/^hold plan: \([0-9a-f]\{12\}\)$/\1/p' <<<"$c_out" | tail -n 1)
+          hp_line=$(sed -n 's/^hold plan [0-9a-f]\{12\} would remove \([0-9]\{1,\}\) tree(s): \(.*\)$/\1\t\2/p' <<<"$c_out" | tail -n 1)
+          if [ -n "$hp_line" ]; then
+            SWEEP_TXT_N=$((SWEEP_TXT_N + ${hp_line%%$'\t'*}))
+            hp_list=${hp_line#*$'\t'}
+            while [ ${#SWEEP_TXT_NAMES[@]} -lt 3 ] && [ -n "$hp_list" ]; do
+              case $hp_list in
+                *", "*) hp_seg=${hp_list%%", "*}; hp_list=${hp_list#*", "} ;;
+                *) hp_seg=$hp_list; hp_list="" ;;
+              esac
+              SWEEP_TXT_NAMES+=("$r_main/$hp_seg")
+            done
+          fi
         else
           r_main=$(realpath -m -- "$r")
           r_plan=""
@@ -394,7 +466,13 @@ import json, sys
 f = sys.stdin.buffer.read().decode("utf-8", "surrogateescape").split("\0")[:-1]
 sweep_plan = f[0] or None
 repos = [json.loads(x) for x in f[1:] if x]
-print(json.dumps({"repos": repos, "sweep_plan": sweep_plan}, indent=2))
+trees = []
+cc = []
+for d in repos:
+    trees += d.get("hold_plan_trees") or []
+    cc += d.get("hold_plan_commit_carrying") or []
+print(json.dumps({"repos": repos, "sweep_plan": sweep_plan,
+                  "sweep_plan_trees": trees, "sweep_plan_commit_carrying": cc}, indent=2))
 '
   else
     if [ -n "$APPLY_HOLD" ]; then
@@ -410,6 +488,21 @@ print(json.dumps({"repos": repos, "sweep_plan": sweep_plan}, indent=2))
       echo "sweep plan: none (dry run failed for $failed_list; fix it or drop it from the list)"
     elif [ -n "$SWEEP_PLAN" ]; then
       echo "sweep plan: $SWEEP_PLAN"
+      if [ "$SWEEP_TXT_N" -gt 0 ]; then
+        sw_out=""
+        sw_shown=0
+        for sw_p in "${SWEEP_TXT_NAMES[@]}"; do
+          [ "$sw_shown" -lt 3 ] || break
+          sw_out+="${sw_out:+, }$sw_p"
+          sw_shown=$((sw_shown + 1))
+        done
+        if [ "$sw_shown" -lt "$SWEEP_TXT_N" ]; then
+          printf 'sweep plan %s would remove %d tree(s): %s, … +%d more\n' \
+            "$SWEEP_PLAN" "$SWEEP_TXT_N" "$sw_out" "$((SWEEP_TXT_N - sw_shown))"
+        else
+          printf 'sweep plan %s would remove %d tree(s): %s\n' "$SWEEP_PLAN" "$SWEEP_TXT_N" "$sw_out"
+        fi
+      fi
     fi
   fi
 
@@ -1177,9 +1270,13 @@ tree_state_sha() {
   } | sha256sum | cut -d' ' -f1
 }
 
-# Plan id over approvable HOLD trees in path order.
+# Plan id over approvable HOLD trees in path order, plus the exact list that id removes
+# (PLAN_TREES, printed by the summary line and the JSON) and its commit-carrying trees
+# (PLAN_CC: path, commit count beyond BASE, BASE — the --apply-hold naming-refusal input).
+rel() { local p; p=$(realpath -m -- "$1"); printf '%s' "${p#"$MAIN"/}"; }
 HOLD_PLAN=""
 V_HEAD_SHA=() V_STATE_SHA=()
+PLAN_TREES=() PLAN_TREES_REL=() PLAN_CC=()
 app_lines=()
 for k in "${!V_IDX[@]}"; do
   ${V_APPROVABLE[$k]} || continue
@@ -1189,9 +1286,32 @@ if [ ${#app_lines[@]} -gt 0 ]; then
   mapfile -t sorted_app < <(printf '%s\n' "${app_lines[@]}" | LC_ALL=C sort -t $'\t' -k1,1)
   for entry in "${sorted_app[@]}"; do
     k=${entry##*$'\t'}
-    t=${WT_PATH[${V_IDX[$k]}]}
+    i=${V_IDX[$k]}
+    t=${WT_PATH[$i]}
     V_HEAD_SHA[k]=$(git -C "$t" rev-parse HEAD 2>/dev/null)
     V_STATE_SHA[k]=$(tree_state_sha "$t")
+    PLAN_TREES+=("$t")
+    PLAN_TREES_REL+=("$(rel "$t")")
+    cc=false
+    while IFS=$'\t' read -r cc_code _cc_detail; do
+      case $cc_code in
+        unmerged | worktree-refs | bisect-refs | rewritten-refs | detached-unreferenced) cc=true ;;
+      esac
+    done <<<"${V_REASONS[$k]}"
+    if $cc; then
+      # The refusal line's count: commits the tree's branch (or detached HEAD) holds beyond BASE.
+      if [ -n "${WT_BRANCH[$i]}" ]; then
+        cc_n=$(git -C "$MAIN" rev-list --count "$BASE..refs/heads/${WT_BRANCH[$i]}" 2>/dev/null)
+      else
+        cc_n=$(git -C "$MAIN" rev-list --count "$BASE..${V_HEAD_SHA[k]}" 2>/dev/null)
+      fi
+      [ -n "$cc_n" ] || cc_n=0
+      # The count is the branch/HEAD's beyond-base commits, so a tree whose only commit-carrying
+      # reason is worktree-refs/bisect-refs/rewritten-refs (orphan commits in per-worktree refs,
+      # branch even with BASE) prints "(0 commit(s) not on <base>)" and still refuses — deliberate
+      # (the spec pins the branch-count form); it names the tree either way.
+      PLAN_CC+=("$t"$'\t'"$cc_n"$'\t'"$BASE")
+    fi
   done
   HOLD_PLAN=$(
     for entry in "${sorted_app[@]}"; do
@@ -1216,6 +1336,19 @@ if [ -n "$APPLY_HOLD" ]; then
   check_backup_volatile
   if [ -z "$HOLD_PLAN" ] || [ "$APPLY_HOLD" != "$HOLD_PLAN" ]; then
     echo "safe-worktree-clean: hold plan changed: approved $APPLY_HOLD, now ${HOLD_PLAN:-none}; rerun the dry run and get a fresh yes" >&2
+    exit 2
+  fi
+  # Naming refusal (see the header): a matched plan may still carry a commit-carrying tree the
+  # invocation did not name. With --only the plan was recomputed over exactly the named trees,
+  # so reaching this point unnamed means no --only was given; one line per offending tree,
+  # exit 2, nothing removed (SAFE trees included).
+  if [ ${#ONLY_RAW[@]} -eq 0 ] && [ ${#PLAN_CC[@]} -gt 0 ]; then
+    for cc_entry in "${PLAN_CC[@]}"; do
+      cc_t=${cc_entry%%$'\t'*}
+      cc_rest=${cc_entry#*$'\t'}
+      printf 'safe-worktree-clean: --apply-hold refused: plan %s includes commit-carrying tree %s (%d commit(s) not on %s) — name it with --only to approve its removal\n' \
+        "$APPLY_HOLD" "$(rel "$cc_t")" "${cc_rest%%$'\t'*}" "${cc_rest#*$'\t'}" >&2
+    done
     exit 2
   fi
 fi
@@ -1623,11 +1756,18 @@ if $LOCKS; then
   fi
 fi
 
-rel() { local p; p=$(realpath -m -- "$1"); printf '%s' "${p#"$MAIN"/}"; }
-
 if $JSON; then
+  trees_wire=""
+  for p in "${PLAN_TREES[@]}"; do trees_wire+="$p"$'\x1e'; done
+  cc_wire=""
+  for cc_entry in "${PLAN_CC[@]}"; do
+    cc_t=${cc_entry%%$'\t'*}
+    cc_rest=${cc_entry#*$'\t'}
+    cc_wire+="$cc_t"$'\x1f'"${cc_rest%%$'\t'*}"$'\x1f'"${cc_rest#*$'\t'}"$'\x1e'
+  done
   {
-    printf '%s\0%s\0%s\0%s\0%s\0%s\0' "$MAIN" "$BASE" "$APPLY" "$LOCKS" "$HOLD_PLAN" "${#V_IDX[@]}"
+    printf '%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0' "$MAIN" "$BASE" "$APPLY" "$LOCKS" "$HOLD_PLAN" \
+      "$trees_wire" "$cc_wire" "${#V_IDX[@]}"
     for k in "${!V_IDX[@]}"; do
       i=${V_IDX[$k]}
       printf '%s\0%s\0%s\0%s\0%s\0%s\0' "${WT_PATH[$i]}" "${WT_BRANCH[$i]}" "${V_VERDICT[$k]}" \
@@ -1639,8 +1779,15 @@ if $JSON; then
   } | python3 -c '
 import json, sys
 f = sys.stdin.buffer.read().decode("utf-8", "surrogateescape").split("\0")[:-1]
-repo, base, apply_, locks, hold_plan, n = f[:6]
-f = f[6:]
+repo, base, apply_, locks, hold_plan, trees_raw, cc_raw, n = f[:8]
+f = f[8:]
+hold_plan_trees = [x for x in trees_raw.split("\x1e") if x]
+hold_plan_cc = []
+for e in cc_raw.split("\x1e"):
+    if not e:
+        continue
+    pth, cnt, bs = e.split("\x1f")
+    hold_plan_cc.append({"path": pth, "commits": int(cnt), "base": bs})
 trees = []
 for k in range(int(n)):
     path, branch, verdict, approvable, reasons, action = f[6 * k:6 * k + 6]
@@ -1653,7 +1800,8 @@ f = f[6 * int(n):]
 lks = [{"path": f[i], "verdict": f[i + 1], "detail": f[i + 2], "action": f[i + 3] or None}
        for i in range(0, len(f), 4)]
 out = {"repo": repo, "base": base or None, "apply": apply_ == "true",
-       "hold_plan": hold_plan or None, "worktrees": trees}
+       "hold_plan": hold_plan or None, "hold_plan_trees": hold_plan_trees,
+       "hold_plan_commit_carrying": hold_plan_cc, "worktrees": trees}
 if locks == "true":
     out["locks"] = lks
 print(json.dumps(out, indent=2))
@@ -1699,6 +1847,7 @@ if [ "$nhold" -gt 0 ]; then
       ${V_APPROVABLE[$k]} || continue
       printf '  approvable with --apply-hold: %s\n' "$(rel "${WT_PATH[${V_IDX[$k]}]}")"
     done
+    [ ${#PLAN_TREES_REL[@]} -eq 0 ] || plan_summary_line "hold plan $HOLD_PLAN" "${PLAN_TREES_REL[@]}"
     echo "hold plan: $HOLD_PLAN"
   fi
 fi
