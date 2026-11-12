@@ -181,11 +181,12 @@ run compact "$TMP/rules-linked"
 
 # State-file age-out: old prompt-hook state goes; fresh state, other files and symlinks stay.
 S="$TMP/state"; mkdir -m 700 "$S"
-for n in queued-receipt-state-old context-reminder-old queued-receipt-state-new cache-break-state-old.json; do echo x > "$S/$n"; done
-touch -d '10 days ago' "$S/queued-receipt-state-old" "$S/context-reminder-old" "$S/cache-break-state-old.json"
+for n in queued-receipt-state-old context-reminder-old context-block-old context-block-done-old context-block-note-old queued-receipt-state-new cache-break-state-old.json; do echo x > "$S/$n"; done
+touch -d '10 days ago' "$S/queued-receipt-state-old" "$S/context-reminder-old" "$S/context-block-old" "$S/context-block-done-old" "$S/context-block-note-old" "$S/cache-break-state-old.json"
 echo keep > "$TMP/target"; ln -s "$TMP/target" "$S/context-reminder-link"; touch -h -d '10 days ago' "$S/context-reminder-link"
 run resume "$TMP/rules-linked"
 [ ! -e "$S/queued-receipt-state-old" ] && [ ! -e "$S/context-reminder-old" ] && ok "ages out old state files" || bad "old state files survived"
+[ ! -e "$S/context-block-old" ] && [ ! -e "$S/context-block-done-old" ] && [ ! -e "$S/context-block-note-old" ] && ok "ages out old context-block markers (armed, done, note)" || bad "old context-block markers survived"
 [ -e "$S/queued-receipt-state-new" ] && ok "keeps a fresh state file" || bad "fresh state file deleted"
 [ -e "$S/cache-break-state-old.json" ] && ok "leaves other tools' files alone" || bad "deleted a foreign file"
 [ -L "$S/context-reminder-link" ] && [ -e "$TMP/target" ] && ok "leaves a symlink and its target alone" || bad "symlink touched"

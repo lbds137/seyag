@@ -5,6 +5,9 @@
 # the transcript tail, and a per-session throttle stamp. Each case builds a
 # fixture transcript, invokes the hook with a crafted UserPromptSubmit
 # envelope, and asserts fire/silent — plus the stamp where it is the subject.
+# The hard tier's arm branch (SYG_CONTEXT_BLOCK, and its contract with
+# context-block-gate) is pinned by tests/context-block.probe.sh; this file
+# pins the soft tier.
 #
 # Threshold boundary cases pin 499_999 (silent) vs 500_001 (fires) so a drift
 # in the constant or the summation reddens a specific assertion, not a vague
