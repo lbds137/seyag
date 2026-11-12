@@ -29,7 +29,10 @@
 # context-block-gate.sh (PreToolUse) blocking every tool call that is not the
 # handoff write itself or a read until ONE handoff write clears the session.
 # The tier must fire every prompt while over threshold (mining: the soft
-# reminder did not self-execute), so it ignores the cooldown below.
+# reminder did not self-execute), so it ignores the cooldown below. It also
+# re-sends on the first prompt after a compaction (a trailing compact_boundary
+# entry): no turn has measured the new context yet, but the gate blocks either
+# way, so the instruction is rendered from the armed marker's stored TOTAL.
 #
 # Fail-open everywhere: no jq, no transcript, unreadable tail, non-numeric
 # total — silent exit 0. A reminder hook must never block a prompt.
@@ -69,7 +72,9 @@ case "$BLOCK_THRESHOLD" in '' | *[!0-9]*) BLOCK_THRESHOLD='' ;; esac
 # folded to `_` rather than trusted (same set as queued-message-receipt.sh).
 SAFE_SESSION=$(printf '%s' "$SESSION" | tr -c 'A-Za-z0-9._-' '_')
 
-STATE_DIR="/tmp/claude-$(id -u)"
+# SYG_STATE_DIR relocates the state family — session-start prunes it there, so
+# the prompt hooks must write their markers into the same place.
+STATE_DIR="${SYG_STATE_DIR:-/tmp/claude-$(id -u)}"
 STAMP="$STATE_DIR/context-reminder-$SAFE_SESSION"
 BLOCK_ARMED="$STATE_DIR/context-block-$SAFE_SESSION"
 BLOCK_DONE="$STATE_DIR/context-block-done-$SAFE_SESSION"
@@ -112,6 +117,38 @@ block_join() {
     done
     printf '%s' "$out"
 }
+# block_lists_usable: 0 when at least one clear list has an entry — the same
+# condition the gate fails open under and the arm branch refuses to arm with.
+block_lists_usable() {
+    local cmds=${SYG_CONTEXT_BLOCK_CMDS:-} paths=${SYG_CONTEXT_BLOCK_PATHS:-}
+    if [ -z "${cmds//:/}" ] && [ -z "${paths//:/}" ]; then
+        return 1
+    fi
+    return 0
+}
+# block_emit TOTAL: print the hard-tier instruction as UserPromptSubmit JSON.
+# Used by the threshold arm path and by the compaction-boundary re-send (which
+# has no live TOTAL and passes the armed marker's stored one). Writes no state.
+block_emit() {
+    local ktok=$(($1 / 1000)) instruction="" live=""
+    local cmds=${SYG_CONTEXT_BLOCK_CMDS:-} paths=${SYG_CONTEXT_BLOCK_PATHS:-}
+    read -r -d '' instruction <<EOF || true
+CONTEXT BLOCK: this session is over the hard context limit (~${ktok}k tokens).
+Your next tool calls are blocked except the handoff write itself and read-only
+tools. Write the handoff now: update your role file's Handoff and Next (via
+your configured handoff command or a file write to a SYG_CONTEXT_BLOCK_PATHS path).
+After one handoff write, the block lifts for the rest of the session.
+EOF
+    # One machine-configured line naming the live clears, each list rendered
+    # with its entries joined by ", " — never the raw config syntax; a half
+    # with an empty list is omitted.
+    [ -z "${paths//:/}" ] || live="handoff file paths: $(block_join "$paths")"
+    [ -z "${cmds//:/}" ] || live="${live:+$live; }handoff commands: $(block_join "$cmds")"
+    [ -z "$live" ] || instruction="$instruction
+Machine config: $live"
+    jq -nc --arg ctx "$instruction" \
+        '{hookSpecificOutput: {hookEventName: "UserPromptSubmit", additionalContext: $ctx}}'
+}
 if [ -f "$STAMP" ] && [ -z "$(find "$STAMP" -mmin +"$COOLDOWN_MIN" 2>/dev/null)" ]; then
     block_armed_uncleared || exit 0
 fi
@@ -136,9 +173,24 @@ LAST_EVENT=$(tail -c 4000000 "$TRANSCRIPT" 2>/dev/null \
 
 # A compaction boundary LAST means no turn has yet measured the new context.
 # Reporting the pre-compaction total there is worse than saying nothing: it
-# nags for a compaction that just happened.
+# nags for a compaction that just happened — so the soft tier is silent. The
+# hard tier still re-sends while armed-uncleared (the gate blocks either way;
+# the instruction would otherwise be missing exactly when tools fail),
+# rendered from the armed marker's stored TOTAL.
 case "$LAST_EVENT" in
-    C) exit 0 ;;
+    C)
+        if [ -n "$BLOCK_THRESHOLD" ] && block_armed_uncleared && block_lists_usable; then
+            read -r MARKER_TOTAL _ <"$BLOCK_ARMED" 2>/dev/null || MARKER_TOTAL=""
+            case "$MARKER_TOTAL" in
+                '' | *[!0-9]*) ;; # unreadable marker: fail open, stay silent
+                *)
+                    block_emit "$MARKER_TOTAL"
+                    exit 0
+                    ;;
+            esac
+        fi
+        exit 0
+        ;;
     'A '*) REST=${LAST_EVENT#A } ;;
     *) exit 0 ;;
 esac
@@ -165,9 +217,7 @@ if [ -n "$BLOCK_THRESHOLD" ]; then
         BLOCK_CLEARED=1
     fi
     if [ "$BLOCK_CLEARED" = 0 ] && { [ "$TOTAL" -ge "$BLOCK_THRESHOLD" ] || [ -f "$BLOCK_ARMED" ]; }; then
-        BLOCK_CMDS=${SYG_CONTEXT_BLOCK_CMDS:-}
-        BLOCK_PATHS=${SYG_CONTEXT_BLOCK_PATHS:-}
-        if [ -z "${BLOCK_CMDS//:/}" ] && [ -z "${BLOCK_PATHS//:/}" ]; then
+        if ! block_lists_usable; then
             # Fail-open: with both clear lists empty a session could brick
             # with no legal clear, so the tier does not arm — one note (once
             # per session: the note marker joins the context-block state
@@ -181,24 +231,7 @@ if [ -n "$BLOCK_THRESHOLD" ]; then
             # decides on existence and mtimes; the rewrite refreshes TOTAL and
             # makes a stale done marker older than this re-arm.
             printf '%s %s\n' "$TOTAL" "$(date +%s)" >"$BLOCK_ARMED" 2>/dev/null || true
-            KTOK=$((TOTAL / 1000))
-            read -r -d '' INSTRUCTION <<EOF || true
-CONTEXT BLOCK: this session is over the hard context limit (~${KTOK}k tokens).
-Your next tool calls are blocked except the handoff write itself and read-only
-tools. Write the handoff now: update your role file's Handoff and Next (via
-your configured handoff command or a file write to a SYG_CONTEXT_BLOCK_PATHS path).
-After one handoff write, the block lifts for the rest of the session.
-EOF
-            # One machine-configured line naming the live clears, each list
-            # rendered with its entries joined by ", " — never the raw
-            # config syntax; a half with an empty list is omitted.
-            LIVE=""
-            [ -z "${BLOCK_PATHS//:/}" ] || LIVE="handoff file paths: $(block_join "$BLOCK_PATHS")"
-            [ -z "${BLOCK_CMDS//:/}" ] || LIVE="${LIVE:+$LIVE; }handoff commands: $(block_join "$BLOCK_CMDS")"
-            [ -z "$LIVE" ] || INSTRUCTION="$INSTRUCTION
-Machine config: $LIVE"
-            jq -nc --arg ctx "$INSTRUCTION" \
-                '{hookSpecificOutput: {hookEventName: "UserPromptSubmit", additionalContext: $ctx}}'
+            block_emit "$TOTAL"
             exit 0
         fi
     fi

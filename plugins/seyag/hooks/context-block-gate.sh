@@ -14,10 +14,14 @@
 # runs free for the rest of its length. The arm side lives in
 # context-size-reminder.sh; this hook only enforces what it armed.
 #
-# Hot path: this runs on every tool call of every session on the machine, so
-# the not-armed-anywhere case is one builtin glob over the state dir — no jq,
-# no forks — before anything else. Everything below it only runs while some
-# session has armed the tier since the machine last cleared /tmp.
+# Hot path: this runs on every tool call of every session on the machine, and
+# two early exits keep it cheap. Tier off (SYG_CONTEXT_BLOCK unset or
+# non-numeric, or both clear lists empty) exits before any fork — the whole
+# gate is one bash process, which is also the never-opted-in case. Tier on but
+# nobody armed: one builtin glob over the state dir, no jq, no forks. Note the
+# glob matches done and note markers too (same context-block-* prefix), so the
+# jq path stays live until session-start prunes the family even after every
+# session cleared; that documented steady state is the price of the prefix.
 #
 # Bash policy while armed is deliberately conservative (the friction window
 # ends at the first handoff write; there is no shell parser here):
@@ -62,7 +66,23 @@ set -uo pipefail
 # this stays fork-free on the every-tool-call path.
 IFS= read -r -d '' INPUT || true
 
-STATE_DIR="/tmp/claude-$UID"
+# Tier-off fails open BEFORE any marker work: an operator unsetting
+# SYG_CONTEXT_BLOCK — or emptying both clear lists, the same condition the
+# reminder refuses to arm under — must release an armed session at once; the
+# gate would otherwise keep blocking on stale markers until the prune, and rm
+# itself is blocked. Same non-numeric rule and empty-list idiom as the
+# reminder.
+BLOCK_THRESHOLD=${SYG_CONTEXT_BLOCK:-}
+case "$BLOCK_THRESHOLD" in '' | *[!0-9]*) exit 0 ;; esac
+BLOCK_CMDS=${SYG_CONTEXT_BLOCK_CMDS:-}
+BLOCK_PATHS=${SYG_CONTEXT_BLOCK_PATHS:-}
+if [ -z "${BLOCK_CMDS//:/}" ] && [ -z "${BLOCK_PATHS//:/}" ]; then
+    exit 0
+fi
+
+# SYG_STATE_DIR relocates the marker family (session-start prunes it there);
+# $UID instead of $(id -u) keeps even the armed path fork-free here.
+STATE_DIR="${SYG_STATE_DIR:-/tmp/claude-$UID}"
 
 # O(1) absent path: with nullglob off, an unmatched glob stays literal and the
 # -e test fails, so a machine where no session ever armed costs one builtin
@@ -72,13 +92,14 @@ set -- "$STATE_DIR"/context-block-*
 
 command -v jq >/dev/null 2>&1 || exit 0
 
-SESSION=$(jq -r '.session_id // empty' <<<"$INPUT" 2>/dev/null) || SESSION=""
-TOOL=$(jq -r '.tool_name // empty' <<<"$INPUT" 2>/dev/null) || TOOL=""
-[ -n "$SESSION" ] && [ -n "$TOOL" ] || exit 0
+# One jq for both fields (was two jq forks plus a tr): the session id is
+# folded to the safe set inside jq — it reaches a filesystem path, so anything
+# outside it becomes `_` (same fold as context-size-reminder.sh) — and the
+# tool name needs no folding.
+ROW=$(jq -r '[(.session_id // "" | gsub("[^A-Za-z0-9._-]"; "_")), (.tool_name // "")] | @tsv' <<<"$INPUT" 2>/dev/null) || ROW=""
+IFS=$'\t' read -r SAFE_SESSION TOOL <<<"$ROW"
+[ -n "$SAFE_SESSION" ] && [ -n "$TOOL" ] || exit 0
 
-# The session id reaches a filesystem path, so anything outside the safe set
-# is folded to `_` (same fold as context-size-reminder.sh).
-SAFE_SESSION=$(printf '%s' "$SESSION" | tr -c 'A-Za-z0-9._-' '_')
 ARMED="$STATE_DIR/context-block-$SAFE_SESSION"
 DONE="$STATE_DIR/context-block-done-$SAFE_SESSION"
 

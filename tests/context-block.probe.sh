@@ -20,7 +20,7 @@ GATE="$REPO/plugins/seyag/hooks/context-block-gate.sh"
 
 # The defaults are pinned below; an ambient override must not skew them.
 unset SYG_CONTEXT_THRESHOLD SYG_CONTEXT_THRESHOLD_FABLE SYG_CONTEXT_COOLDOWN_MIN
-unset SYG_CONTEXT_BLOCK SYG_CONTEXT_BLOCK_CMDS SYG_CONTEXT_BLOCK_PATHS
+unset SYG_CONTEXT_BLOCK SYG_CONTEXT_BLOCK_CMDS SYG_CONTEXT_BLOCK_PATHS SYG_STATE_DIR
 
 command -v jq >/dev/null 2>&1 || {
     echo "FATAL: jq is required — the hooks parse their stdin payloads with it" >&2
@@ -72,6 +72,12 @@ assistant_line() { # $1 cache_read
 
 user_line() {
     jq -nc '{type: "user", message: {content: "hello"}}'
+}
+
+# The entry Claude Code writes when a compaction lands (observed in real
+# session transcripts, same shape as the reminder probe's fixture).
+compact_line() {
+    jq -nc '{type: "system", subtype: "compact_boundary"}'
 }
 
 transcript_at() { # $1 = cache_read total → echoes the transcript path
@@ -199,6 +205,37 @@ SYG_CONTEXT_BLOCK=250000 SYG_CONTEXT_BLOCK_PATHS="$PATHS_LIST" SYG_CONTEXT_BLOCK
     run_reminder lowctl "$TLOW"
 assert_silent_stdout "never-armed session below the hard threshold stays silent (100k under soft too)"
 
+# ---- Case 2c: the first post-compaction prompt still gets the instruction ----
+# A trailing compact_boundary means no turn has measured the new context; the
+# soft tier stays silent there, but an armed-uncleared session still re-sends,
+# rendered from the armed marker's stored TOTAL (the gate blocks either way).
+T3C="$TMPDIR_PROBE/compact.jsonl"
+T3=$(transcript_at 300000)
+{ user_line; assistant_line 300000; compact_line; } >"$T3C"
+SYG_CONTEXT_BLOCK=250000 SYG_CONTEXT_BLOCK_PATHS="$PATHS_LIST" SYG_CONTEXT_BLOCK_CMDS="$CMDS_LIST" \
+    run_reminder compact1 "$T3"
+[ -f "$(armed_file compact1)" ] && echo "ok: compaction-case setup armed at 300k" || fail=1
+SYG_CONTEXT_BLOCK=250000 SYG_CONTEXT_BLOCK_PATHS="$PATHS_LIST" SYG_CONTEXT_BLOCK_CMDS="$CMDS_LIST" \
+    run_reminder compact1 "$T3C"
+assert_eq "$(context_of)" "$(expected_instruction 300 "$PATHS_LIST" "$CMDS_LIST")" \
+    "trailing compact_boundary + armed: instruction re-sent from the marker's TOTAL"
+SYG_CONTEXT_BLOCK=250000 SYG_CONTEXT_BLOCK_PATHS="$PATHS_LIST" SYG_CONTEXT_BLOCK_CMDS="$CMDS_LIST" \
+    run_reminder compact2 "$T3C"
+assert_silent_stdout "trailing compact_boundary without an armed marker stays silent (soft tier)"
+
+# ---- Case 2d: SYG_STATE_DIR relocates the reminder's marker family -----------
+SD="$TMPDIR_PROBE/statedir"
+mkdir -m 700 "$SD"
+SYG_STATE_DIR="$SD" SYG_CONTEXT_BLOCK=250000 SYG_CONTEXT_BLOCK_PATHS="$PATHS_LIST" SYG_CONTEXT_BLOCK_CMDS="$CMDS_LIST" \
+    run_reminder statedir "$T3"
+assert_eq "$(context_of)" "$(expected_instruction 300 "$PATHS_LIST" "$CMDS_LIST")" \
+    "reminder arms under SYG_STATE_DIR (instruction unchanged)"
+[ -f "$SD/context-block-$SESSION_PREFIX-statedir" ] && echo "ok: armed marker written into SYG_STATE_DIR" || {
+    echo "FAIL: no armed marker in SYG_STATE_DIR"
+    fail=1
+}
+[ -e "$(armed_file statedir)" ] && echo "FAIL: armed marker also written to the default state dir" && fail=1
+
 # ---- Case 3: the hard tier ignores the soft cooldown -------------------------
 touch "$(stamp_file arm)"
 SYG_CONTEXT_BLOCK=250000 SYG_CONTEXT_BLOCK_PATHS="$PATHS_LIST" SYG_CONTEXT_BLOCK_CMDS="$CMDS_LIST" \
@@ -293,7 +330,7 @@ run_gate() { # $1 = session suffix, $2 = tool_name, $3 = tool_input JSON
     local json
     json=$(jq -nc --arg s "$SESSION_PREFIX-$1" --arg t "$2" --argjson in "$3" \
         '{hook_event_name: "PreToolUse", session_id: $s, tool_name: $t, tool_input: $in}')
-    OUT=$(printf '%s' "$json" | SYG_CONTEXT_BLOCK_PATHS="$PATHS_LIST" SYG_CONTEXT_BLOCK_CMDS="$CMDS_LIST" \
+    OUT=$(printf '%s' "$json" | SYG_CONTEXT_BLOCK=250000 SYG_CONTEXT_BLOCK_PATHS="$PATHS_LIST" SYG_CONTEXT_BLOCK_CMDS="$CMDS_LIST" \
         "$GATE" 2>"$TMPDIR_PROBE/err")
     RC=$?
     ERR=$(cat "$TMPDIR_PROBE/err")

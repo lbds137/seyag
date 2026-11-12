@@ -40,8 +40,9 @@
 # session's identical block. Within one file the state persists across that
 # file's commands, as it did live; the next file starts empty. NOT isolated:
 # hooks that write a hardcoded /tmp/claude-$(id -u) path
-# (dispatch-posture-gate, queued-message-receipt, context-size-reminder) still
-# use the caller's /tmp state.
+# (dispatch-posture-gate) still use the caller's /tmp state;
+# queued-message-receipt, context-size-reminder and context-block-gate honor
+# SYG_STATE_DIR and are isolated by the wipe above.
 #
 # A "block" is a non-zero exit from the hook script. Output: one section per
 # blocked command (command, first 200 chars, one line; slug; the hook's

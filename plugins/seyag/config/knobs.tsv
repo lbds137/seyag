@@ -154,7 +154,7 @@ SYG_ROUTE_MARKER_FILE	user	routing	unset	Path template ({project} expanded) chec
 SYG_ROUTE_REQUIRED	user	routing	unset	Boolean (1/true/yes/on vs 0/false/no/off) requiring an approved model route in route-check.
 SYG_SECURITY_SWEEP	user	session	unset	Set to 1 to run security-sweep --session-line --cap 2 at SessionStart (startup and clear).
 SYG_SECURITY_SWEEP_REPOS	user	session	unset	Whitespace-separated owner/name repos opting in and scoping security-sweep at SessionStart and in security-sweep.
-SYG_STATE_DIR	internal	session	/tmp/claude-<uid>	Test seam overriding the directory where session-start prunes stale prompt-hook state files.
+SYG_STATE_DIR	internal	session	/tmp/claude-<uid>	Test seam overriding the directory session-start prunes and the prompt hooks (queued-message-receipt, context-size-reminder, context-block-gate) write their per-session state into.
 SYG_STATE_MAX_DAYS	user	session	7	Age in whole days after which session-start deletes stale prompt-hook state files in SYG_STATE_DIR.
 SYG_STATUSLINE_DEBUG	user	statusline	unset	Set to 1 to append terminal column, fit budget, and wrap diagnostics to the statusline.
 SYG_STATUSLINE_EXTRA_USAGE	user	statusline	unset	Set to 0 to hide the plan extra-usage segment on the statusline.

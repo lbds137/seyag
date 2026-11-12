@@ -257,7 +257,7 @@ An optional TOML file fills in knobs the environment left unset: user `${XDG_CON
 | `SYG_PR_MERGE_LIB_DIR` | `hooks/pr-merge-review-check.sh` | Test seam overriding the hooks/lib directory passed to pr-merge-review-check's Python parser. |
 | `SYG_PR_MONITOR_SEEN_FILE` | `hooks/pr-monitor-reminder.sh` | Test seam overriding the deduplication state file for pr-monitor-reminder. |
 | `SYG_ROUTE_CHECK_TIMEOUT` | `hooks/route-check.sh` | Test seam overriding the timeout in seconds (positive integer) for SYG_ROUTE_CHECK_CMD in route-check. |
-| `SYG_STATE_DIR` | `hooks/session-start.sh` | Test seam overriding the directory where session-start prunes stale prompt-hook state files. |
+| `SYG_STATE_DIR` | `hooks/context-block-gate.sh`, `hooks/context-size-reminder.sh`, `hooks/queued-message-receipt.sh`, `hooks/session-start.sh` | Test seam overriding the directory session-start prunes and the prompt hooks (queued-message-receipt, context-size-reminder, context-block-gate) write their per-session state into. |
 | `SYG_SWEEP_FRAG` | `bin/removed-identifier-sweep` | Internal env variable passing one fragment to awk for regex validation inside removed-identifier-sweep. |
 | `SYG_SWEEP_VALID_FRAGMENTS` | `bin/removed-identifier-sweep` | Internal env variable exporting validated SYG_SWEEP_EXCLUDE_PATHS fragments to awk in removed-identifier-sweep. |
 | `SYG_USER_RULES_DIR` | `hooks/session-start.sh` | Test seam overriding the user rules directory checked by session-start against rules/core.md. |

@@ -23,6 +23,7 @@ HOOK="$SCRIPT_DIR/context-size-reminder.sh"
 
 # The defaults are pinned below; an ambient override must not skew them.
 unset SYG_CONTEXT_THRESHOLD SYG_CONTEXT_THRESHOLD_FABLE SYG_CONTEXT_COOLDOWN_MIN
+unset SYG_CONTEXT_BLOCK SYG_CONTEXT_BLOCK_CMDS SYG_CONTEXT_BLOCK_PATHS SYG_STATE_DIR
 
 command -v jq >/dev/null 2>&1 || {
     echo "FATAL: jq is required — the hook parses its stdin envelope with it" >&2
