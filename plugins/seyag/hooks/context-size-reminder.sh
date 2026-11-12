@@ -23,6 +23,14 @@
 # transcripts; if Claude Code ever changes it, the hook simply stops muting
 # (fail-open).
 #
+# Hard tier (2026-11, Deck ask): when SYG_CONTEXT_BLOCK is set to a token
+# count and the last turn is at or above it, this hook arms the hard tier
+# instead of printing the soft banner — a mandatory handoff instruction, with
+# context-block-gate.sh (PreToolUse) blocking every tool call that is not the
+# handoff write itself or a read until ONE handoff write clears the session.
+# The tier must fire every prompt while over threshold (mining: the soft
+# reminder did not self-execute), so it ignores the cooldown below.
+#
 # Fail-open everywhere: no jq, no transcript, unreadable tail, non-numeric
 # total — silent exit 0. A reminder hook must never block a prompt.
 
@@ -52,12 +60,20 @@ case "$THRESHOLD_DEFAULT" in '' | *[!0-9]*) THRESHOLD_DEFAULT=500000 ;; esac
 case "$THRESHOLD_FABLE" in '' | *[!0-9]*) THRESHOLD_FABLE=200000 ;; esac
 case "$COOLDOWN_MIN" in '' | *[!0-9]*) COOLDOWN_MIN=30 ;; esac
 
+# Hard-tier threshold (env): SYG_CONTEXT_BLOCK (tokens). Unset or non-numeric
+# keeps the hard tier off entirely — no new behaviour for anyone not opting in.
+BLOCK_THRESHOLD=${SYG_CONTEXT_BLOCK:-}
+case "$BLOCK_THRESHOLD" in '' | *[!0-9]*) BLOCK_THRESHOLD='' ;; esac
+
 # The session id reaches a filesystem path, so anything outside the safe set is
 # folded to `_` rather than trusted (same set as queued-message-receipt.sh).
 SAFE_SESSION=$(printf '%s' "$SESSION" | tr -c 'A-Za-z0-9._-' '_')
 
 STATE_DIR="/tmp/claude-$(id -u)"
 STAMP="$STATE_DIR/context-reminder-$SAFE_SESSION"
+BLOCK_ARMED="$STATE_DIR/context-block-$SAFE_SESSION"
+BLOCK_DONE="$STATE_DIR/context-block-done-$SAFE_SESSION"
+BLOCK_NOTE="$STATE_DIR/context-block-note-$SAFE_SESSION"
 
 # Mode is set atomically at creation (-m), and a pre-existing directory is
 # trusted only if this user owns it: the path is predictable, so on a shared
@@ -73,9 +89,19 @@ chmod 700 "$STATE_DIR" 2>/dev/null || true
 
 # Throttle: if a reminder fired within the cooldown, stay silent. find prints
 # the stamp only when it is OLDER than the cooldown, so empty output while the
-# stamp exists means "recent" — skip.
+# stamp exists means "recent" — skip. One exception: the hard tier below
+# ignores the cooldown while armed and uncleared (it must fire every prompt
+# until the handoff lands), so the early exit is skipped in exactly that case.
+block_armed_uncleared() {
+    [ -n "$BLOCK_THRESHOLD" ] || return 1
+    [ -f "$BLOCK_ARMED" ] || return 1
+    if [ -f "$BLOCK_DONE" ] && [ "$BLOCK_DONE" -nt "$BLOCK_ARMED" ]; then
+        return 1
+    fi
+    return 0
+}
 if [ -f "$STAMP" ] && [ -z "$(find "$STAMP" -mmin +"$COOLDOWN_MIN" 2>/dev/null)" ]; then
-    exit 0
+    block_armed_uncleared || exit 0
 fi
 
 # The LAST relevant transcript event, tagged. `jq -R 'fromjson?'` parses
@@ -111,6 +137,53 @@ MODEL=${MODEL# }
 case "$TOTAL" in
     '' | *[!0-9]*) exit 0 ;;
 esac
+
+# --- Hard context tier --------------------------------------------------------
+# Replaces the soft banner (never stacks with it): while armed, every prompt at
+# or above SYG_CONTEXT_BLOCK re-emits the mandatory instruction until ONE
+# handoff write clears the session (the done marker growing newer than the
+# armed marker); context-block-gate.sh enforces it on the tool side. The
+# cooldown does not apply here; a cleared session falls through to the soft
+# tier exactly as before.
+if [ -n "$BLOCK_THRESHOLD" ] && [ "$TOTAL" -ge "$BLOCK_THRESHOLD" ]; then
+    if ! { [ -f "$BLOCK_DONE" ] && [ "$BLOCK_DONE" -nt "$BLOCK_ARMED" ]; }; then
+        BLOCK_CMDS=${SYG_CONTEXT_BLOCK_CMDS:-}
+        BLOCK_PATHS=${SYG_CONTEXT_BLOCK_PATHS:-}
+        if [ -z "${BLOCK_CMDS//:/}" ] && [ -z "${BLOCK_PATHS//:/}" ]; then
+            # Fail-open: with both clear lists empty a session could brick
+            # with no legal clear, so the tier does not arm — one note (once
+            # per session: the note marker joins the context-block state
+            # session-start prunes), then the soft tier only.
+            if [ ! -f "$BLOCK_NOTE" ]; then
+                echo "context-size-reminder: SYG_CONTEXT_BLOCK is set but SYG_CONTEXT_BLOCK_CMDS and SYG_CONTEXT_BLOCK_PATHS are both empty; hard tier not armed (soft reminder only)" >&2
+                : >"$BLOCK_NOTE" 2>/dev/null || true
+            fi
+        else
+            # (Re)write the armed marker — content is diagnostics, the gate
+            # decides on existence and mtimes; the rewrite refreshes TOTAL and
+            # makes a stale done marker older than this re-arm.
+            printf '%s %s\n' "$TOTAL" "$(date +%s)" >"$BLOCK_ARMED" 2>/dev/null || true
+            KTOK=$((TOTAL / 1000))
+            read -r -d '' INSTRUCTION <<EOF || true
+CONTEXT BLOCK: this session is over the hard context limit (~${KTOK}k tokens).
+Your next tool calls are blocked except the handoff write itself and read-only
+tools. Write the handoff now: update your role file's Handoff and Next (via
+your configured handoff command or a file write to a SYG_CONTEXT_BLOCK_PATHS path).
+After one handoff write, the block lifts for the rest of the session.
+EOF
+            # One machine-configured line naming the live clears (never the
+            # raw config syntax); a half with an empty list is omitted.
+            LIVE=""
+            [ -z "${BLOCK_PATHS//:/}" ] || LIVE="handoff file paths: $BLOCK_PATHS"
+            [ -z "${BLOCK_CMDS//:/}" ] || LIVE="${LIVE:+$LIVE; }handoff commands: $BLOCK_CMDS"
+            [ -z "$LIVE" ] || INSTRUCTION="$INSTRUCTION
+Machine config: $LIVE"
+            jq -nc --arg ctx "$INSTRUCTION" \
+                '{hookSpecificOutput: {hookEventName: "UserPromptSubmit", additionalContext: $ctx}}'
+            exit 0
+        fi
+    fi
+fi
 
 case "$MODEL" in
     claude-fable*) THRESHOLD_TOKENS=$THRESHOLD_FABLE ;;

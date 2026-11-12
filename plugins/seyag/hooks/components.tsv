@@ -14,6 +14,7 @@ promise-ledger-check	turn-shape
 queued-message-receipt	turn-shape
 bare-token-binding-reminder	turn-shape
 context-size-reminder	context
+context-block-gate	context-block
 self-matching-pattern-guard	guards-shell
 grep-escaped-dollar-guard	guards-shell
 cache-rm-redirect	guards-shell
@@ -41,6 +42,6 @@ status-claim-cite	status-claim-cite
 dispatch-spec-ledger-gate	dispatch-spec
 clock-stamp-guard	clock-stamp
 live-checkout-guard	live-checkout
-@profile	full	session rules route turn-shape context guards-shell guards-outbound guards-commit guards-pr pr-watch dispatch api-credit launch-record classifier-ledger handoff-pick-check status-claim-cite clock-stamp dispatch-spec live-checkout security
-@profile	guards	guards-shell guards-outbound guards-commit guards-pr context dispatch route session api-credit launch-record classifier-ledger live-checkout
+@profile	full	session rules route turn-shape context context-block guards-shell guards-outbound guards-commit guards-pr pr-watch dispatch api-credit launch-record classifier-ledger handoff-pick-check status-claim-cite clock-stamp dispatch-spec live-checkout security
+@profile	guards	guards-shell guards-outbound guards-commit guards-pr context context-block dispatch route session api-credit launch-record classifier-ledger live-checkout
 @profile	none	session api-credit launch-record classifier-ledger

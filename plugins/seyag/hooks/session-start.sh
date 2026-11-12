@@ -33,16 +33,19 @@ set -uo pipefail
 # dir (queued-message-receipt, context-size-reminder; Tzurot's copies use the same
 # names): nothing removes them when a session ends. A live session rewrites its
 # receipt state on every prompt; a context-reminder stamp older than the cutoff is
-# far past its cooldown anyway. Only this user's own, non-symlinked dir, only its
-# top level, only regular files with these prefixes. Runs before the jq check,
-# which it doesn't need.
+# far past its cooldown anyway. The context-block markers (armed/done/note) age
+# out with them: one stale armed marker would keep context-block-gate's
+# every-tool-call glob matching forever. Only this user's own, non-symlinked dir,
+# only its top level, only regular files with these prefixes. Runs before the jq
+# check, which it doesn't need.
 STATE_DIR="${SYG_STATE_DIR:-/tmp/claude-$(id -u)}"
 while [ "${STATE_DIR%/}" != "$STATE_DIR" ] && [ "$STATE_DIR" != / ]; do STATE_DIR=${STATE_DIR%/}; done
 MAX_DAYS="${SYG_STATE_MAX_DAYS:-7}"
 case "$MAX_DAYS" in '' | *[!0-9]*) MAX_DAYS=7 ;; esac
 if [ -d "$STATE_DIR" ] && [ ! -L "$STATE_DIR" ] && [ -O "$STATE_DIR" ]; then
   find "$STATE_DIR" -maxdepth 1 -type f \
-    \( -name 'queued-receipt-state-*' -o -name 'context-reminder-*' \) \
+    \( -name 'queued-receipt-state-*' -o -name 'context-reminder-*' \
+       -o -name 'context-block-*' \) \
     -mmin +$((MAX_DAYS * 1440)) -delete 2>/dev/null
 fi
 

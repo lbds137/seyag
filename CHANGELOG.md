@@ -2,6 +2,38 @@
 
 All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY-MM-DD>` section per released version; under it, `###` categories in fixed order — Breaking Changes, Features, Bug Fixes, Improvements, Chores, Tests — empty ones omitted; items are `- **scope:** description (#PR)`, written from the version's merged commit subjects.
 
+## 0.3.164 - 2026-11-11
+
+### Features
+
+- **hooks:** hard context tier: at or above `SYG_CONTEXT_BLOCK` (a new opt-in knob, unset or non-numeric keeps the tier off) `context-size-reminder` arms `context-block-gate` instead of printing the soft banner; one handoff write — a `SYG_CONTEXT_BLOCK_CMDS` Bash command prefix or a `SYG_CONTEXT_BLOCK_PATHS` path glob matched literally against a `Write`/`Edit`/`MultiEdit`/`NotebookEdit` file path — lifts it for the rest of the session. Both clear lists empty fails open to the soft banner (one note per session); re-arming is idempotent per prompt and ignores the soft cooldown; a cleared session keeps exactly the soft tier's behaviour. New `context-block` component, in the `full` and `guards` profiles.
+- **hooks:** `context-block-gate` (new, matcher-less PreToolUse, so its not-armed fast path is one fork-free glob plus a builtin stdin drain that keeps >64 KiB payloads from reading as blocks under a pipefail caller): while armed and uncleared it passes read-only tools — `Read`, `Grep`, `Glob`, and a conservative single-command Bash allowlist (readers, `find` without its acting flags, git read-only subcommands with `branch` bare or listing-flags-only, the same read-only forms `cwd-drift-guard` allows) — allows the handoff write itself, and blocks everything else with a pinned message, compound command shapes included; fail-open on anything it cannot decide.
+- **hooks:** `session-start` ages out the hard tier's `context-block-*` state markers (armed/done/note) with the other prompt-hook state files, so one stale armed marker cannot keep the gate's every-tool-call glob matching forever.
+
+### Improvements
+
+- **docs:** README covers the `context-block` component, the hard tier and its state markers; `docs/config.md` gains the three new knobs.
+
+### Tests
+
+- **probes:** `tests/context-block.probe.sh` pins the arm branch (fires at threshold, replaces the soft banner, idempotent re-arm, cooldown-immune, cleared equals today's soft semantics, empty-lists fail-open note once per session) and the end-to-end arm/block/clear flow; `hooks/context-block-gate.probe.sh` pins the gate (every compound shape and every find acting flag, git branch read-only vs writing forms, `notebook_path` and `MultiEdit` clears, done-marker lift, fail-open shapes); `session-start`'s probe pins the marker age-out.
+
+## 0.3.163 - 2026-11-11
+
+### Bug Fixes
+
+- **hooks:** the pipe-early-exit lint's reader and join fixes: an `xargs` prefix no longer counts as a reader word; `RE_B` command boundaries and `|&` pipeline handling; split-line pipeline joins; `-L` and `--files-without-match` count as reader forms; group (brace/subshell) forms; and a quoted `#` now cuts a comment in `strip_quotes` instead of joining into the word (#305, #306).
+
+- **bin:** api-credit guards its `argv.log` write and its jq exit status as a pair, so a jq failure no longer reads as success (#305).
+
+### Improvements
+
+- **bin:** safe-worktree-clean: comment accuracy and a reworded no-live-refs HOLD reason (the P37(ii)/(iii) probe pin wording follows; the pinned counts are unchanged); one existing knob row description reworded, docs/config.md regenerated (#305).
+
+### Tests
+
+- **probes:** safe-worktree-clean gains the P38b real-failure probe family and a P39 bisect-refs-object fixture (#305).
+
 ## 0.3.162 - 2026-11-11
 
 ### Features
