@@ -167,7 +167,8 @@ gh api "repos/{owner}/{repo}/actions/runs/<run-id>/jobs?per_page=100" \
   moved under a long-lived feature branch, re-derive diffstats and counts
   against `$(git merge-base <target> HEAD)`, not the target's current `HEAD`.
 - **After an automerge lands, close out by hand.** Each step follows the one
-  before it:
+  before it (`pr-closeout <N> [--apply]` mechanizes this block — dry run by
+  default; HOLD stays the owner's call):
   - Read the merge:
     `gh pr view <N> --json state,mergeCommit,closingIssuesReferences`.
     `state` must be `MERGED` before anything else.

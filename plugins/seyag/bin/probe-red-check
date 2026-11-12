@@ -1,0 +1,112 @@
+#!/bin/bash
+# probe-red-check: prove a NEW probe is red against a base ref's unfixed code.
+#
+# Usage:
+#   probe-red-check <probe-path> [base-ref]   (run inside the repo whose code the probe checks)
+#   probe-red-check -h|--help
+#
+# <probe-path> is an existing *.probe.sh in the CURRENT checkout — the uncommitted
+# new probe; resolved as given, then against the repo root. [base-ref] defaults to
+# origin/main and must resolve.
+#
+# Exit-code inversion, the pr-ci-wait precedent (plugins/seyag/bin/pr-ci-wait exits
+# 0 only on its good sentinel): here 0 means RED CONFIRMED — the probe failed at the
+# base with at least one FAIL: assertion line. 1 means NOT RED (the probe passed at
+# the base, so the red check failed to prove red). 2 means INCONCLUSIVE: the probe
+# died before any assertion, and an error from a name only the fix adds is not the
+# behavior's red (the delegation skill's red-first rule).
+#
+# Mechanics: registers a detached worktree at <base-ref> under a mktemp dir (removed
+# on every exit path, signals included), copies the probe to its repo-relative path
+# inside it, and runs it there — the probe resolves sibling code via its own dirname
+# BASH_SOURCE, i.e. the base's code. Limitations: only the probe FILE is copied (a
+# probe needing an uncommitted sibling cannot be red-checked this way), and a FAIL:
+# line from the probe's own fixture build reads as red like an assertion failure —
+# every FAIL line is echoed, so judge which kind ran.
+
+set -uo pipefail
+usage() { sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; }
+case "${1:-}" in -h | --help) usage; exit 0 ;; esac
+[ $# -ge 1 ] && [ $# -le 2 ] || { usage >&2; exit 2; }
+
+PROBE_ARG=$1
+BASE=${2:-origin/main}
+
+if ! ROOT=$(git rev-parse --show-toplevel 2>/dev/null); then
+  echo "probe-red-check: not inside a git repo" >&2
+  exit 2
+fi
+if ! git rev-parse --verify --quiet "$BASE" >/dev/null; then
+  echo "probe-red-check: base '$BASE' does not resolve" >&2
+  usage >&2
+  exit 2
+fi
+
+# Resolve, canonicalize, and require the probe to live inside this repo: a
+# path outside $ROOT would run from its own tree (its dirname BASH_SOURCE
+# resolves the CURRENT code, not the base's), fabricating the verdict.
+# realpath folds ./ and ../ forms, so a dotform resolving inside the tree is
+# accepted; both sides are canonicalized so a symlinked tmpdir (macOS
+# /tmp -> /private/tmp) cannot split the prefix match.
+ROOT_CANON=$(realpath -- "$ROOT" 2>/dev/null) || ROOT_CANON=$ROOT
+PROBE=""
+RAW=""
+if [[ $PROBE_ARG == *.probe.sh ]]; then
+  if [ -f "$PROBE_ARG" ]; then
+    RAW=$PROBE_ARG
+  elif [ -f "$ROOT/$PROBE_ARG" ]; then
+    RAW=$ROOT/$PROBE_ARG
+  fi
+fi
+if [ -n "$RAW" ]; then
+  CANON=$(realpath -- "$RAW" 2>/dev/null) && PROBE=$CANON
+fi
+case $PROBE in
+  "$ROOT_CANON"/*) ;;
+  *)
+    echo "probe-red-check: no such probe: $PROBE_ARG (an existing *.probe.sh inside $ROOT)" >&2
+    exit 2
+    ;;
+esac
+REL=${PROBE#"$ROOT_CANON"/}
+
+TMP=$(mktemp -d) || exit 2
+cleanup() {
+  git worktree remove --force "$TMP/wt" >/dev/null 2>&1
+  git worktree prune >/dev/null 2>&1
+  rm -rf "$TMP"
+}
+# TERM/HUP/INT must clean too (an EXIT-only trap leaks the registered
+# worktree when timeout(1) or a driver kill sends TERM mid-run); the
+# explicit exit makes the EXIT trap fire.
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM HUP
+
+if ! git worktree add --detach --quiet "$TMP/wt" "$BASE" >/dev/null 2>&1; then
+  echo "probe-red-check: worktree add at '$BASE' failed" >&2
+  exit 2
+fi
+mkdir -p -- "$TMP/wt/$(dirname -- "$REL")"
+cp -- "$PROBE" "$TMP/wt/$REL"
+
+OUT=$( (cd "$TMP/wt" && bash "$REL") 2>&1 )
+RC=$?
+
+FAIL_LINES=$(grep -c '^FAIL:' <<<"$OUT" || true)
+
+if [ "$RC" -ne 0 ] && [ "$FAIL_LINES" -ge 1 ]; then
+  echo "RED: $REL fails at $BASE (rc $RC, $FAIL_LINES FAIL lines)"
+  grep '^FAIL:' <<<"$OUT"
+  echo "probe-red-check: red confirmed"
+  exit 0
+elif [ "$RC" -eq 0 ]; then
+  echo "NOT RED: $REL passes at $BASE (rc 0) — the red check failed to prove red"
+  echo "probe-red-check: no red"
+  exit 1
+else
+  echo "INCONCLUSIVE: $REL died before any assertion (rc $RC)"
+  tail -n 15 <<<"$OUT"
+  echo "probe-red-check: inconclusive"
+  exit 2
+fi
