@@ -1,0 +1,176 @@
+#!/bin/bash
+# pr-closeout: mechanize pr-monitoring's post-automerge close-out for ONE PR.
+#
+# Usage:
+#   pr-closeout <N> [--apply]
+#   pr-closeout -h|--help
+#
+# Dry run by default: reads the merge state, the linked issues, and the head
+# branch's disposition, and prints one `plan:` line per destructive action.
+# --apply executes those steps in the order planned (issues first, then the
+# branch/worktree); each step's real output passes through — the issue-close
+# call's output is summarized by its done:/FAILED: lines instead; a failing
+# step is reported and the remaining steps still run.
+#
+# Every destructive call is --only-scoped (one PR's close-out never sweeps the
+# repo): issues by URL, the branch via `branch-sweep --only`, the unit's own
+# worktree via `safe-worktree-clean --only`. HOLD/SKIP/DIFFERS verdicts are
+# left in place and reported — a HOLD stays the owner's call (`--apply-hold`
+# needs the printed `hold plan:` id and the owner's yes). Requires state
+# MERGED; a PR whose head branch is main/master is a malformed PR.
+#
+# Exit 0 only when nothing is left over and no applied step failed.
+
+set -uo pipefail
+usage() { sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'; }
+case "${1:-}" in -h | --help) usage; exit 0 ;; esac
+
+APPLY=false
+N=""
+while [ $# -gt 0 ]; do
+  case $1 in
+    --apply) APPLY=true ;;
+    -*) echo "pr-closeout: unknown argument: $1" >&2; usage >&2; exit 2 ;;
+    *) if [ -n "$N" ]; then echo "pr-closeout: exactly one PR number" >&2; exit 2; fi; N=$1 ;;
+  esac
+  shift
+done
+[[ $N =~ ^[0-9]+$ ]] || { usage >&2; exit 2; }
+
+BIN_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+LEFTOVER=0
+
+# gh reads capture stdout and stderr SEPARATELY: a warning line merged into
+# a successful read would corrupt the parsed value (a stderr line on an
+# issue view once read as "already closed" instead of OPEN).
+GH_ERR=$(mktemp)
+trap 'rm -f "$GH_ERR"' EXIT
+
+PR_JSON=$(gh pr view "$N" --json state,mergeCommit,closingIssuesReferences,headRefName 2>"$GH_ERR") || {
+  echo "pr-closeout: cannot read PR $N: $(cat "$GH_ERR")" >&2
+  exit 1
+}
+STATE=$(jq -r '.state' <<<"$PR_JSON")
+SHA=$(jq -r '.mergeCommit.oid // ""' <<<"$PR_JSON")
+BRANCH=$(jq -r '.headRefName // ""' <<<"$PR_JSON")
+
+if [ "$STATE" != "MERGED" ]; then
+  echo "pr-closeout: PR $N is $STATE, not MERGED — nothing done"
+  exit 1
+fi
+case $BRANCH in
+  "") echo "pr-closeout: PR $N has an empty headRefName — malformed PR"; exit 2 ;;
+  main | master) echo "pr-closeout: PR $N head branch is $BRANCH — malformed PR"; exit 2 ;;
+esac
+
+echo "pr-closeout: PR $N merged as $SHA"
+
+# --- issues -----------------------------------------------------------------
+mapfile -t ISSUES < <(jq -r '.closingIssuesReferences[].url // empty' <<<"$PR_JSON")
+for url in "${ISSUES[@]}"; do
+  st=$(gh issue view "$url" --json state -q .state 2>"$GH_ERR")
+  if [ $? -ne 0 ]; then
+    err=$(cat "$GH_ERR")
+    echo "issue $url: FAILED: $err"
+    echo "pr-closeout: cannot read issue $url: $err" >&2
+    LEFTOVER=1
+  elif [ "$st" = "OPEN" ]; then
+    CMDLINE="gh issue close $url --comment \"Fixed by $SHA (#$N).\""
+    if $APPLY; then
+      if err=$(gh issue close "$url" --comment "Fixed by $SHA (#$N)." 2>&1); then
+        echo "done: $CMDLINE"
+        echo "issue $url: closed"
+      else
+        echo "FAILED: $CMDLINE"
+        echo "issue $url: FAILED: $err"
+        LEFTOVER=1
+      fi
+    else
+      echo "plan: $CMDLINE"
+    fi
+  else
+    echo "issue $url: already closed"
+  fi
+done
+
+# --- head branch ------------------------------------------------------------
+bs_out=$( "$BIN_DIR/branch-sweep" --only "$BRANCH" 2>&1 )
+verdict=$(grep -E '^(ELIGIBLE|SKIP|DIFFERS|ABSENT) ' <<<"$bs_out" | head -n 1)
+if [ -z "$verdict" ]; then
+  echo "pr-closeout: no branch-sweep verdict for $BRANCH — branch left in place"
+  LEFTOVER=1
+else
+  echo "$verdict"
+  case $verdict in
+    "ELIGIBLE $BRANCH "*)
+      CMDLINE="branch-sweep --only $BRANCH --apply"
+      if $APPLY; then
+        if "$BIN_DIR/branch-sweep" --only "$BRANCH" --apply 2>&1; then
+          echo "done: $CMDLINE"
+        else
+          echo "FAILED: $CMDLINE"
+          LEFTOVER=1
+        fi
+      else
+        echo "plan: $CMDLINE"
+      fi
+      ;;
+    "SKIP $BRANCH (checked out in a worktree)")
+      wtpath=""
+      cur=""
+      while IFS= read -r line; do
+        case $line in
+          worktree\ *) cur=${line#worktree } ;;
+          "branch refs/heads/$BRANCH") wtpath=$cur ;;
+        esac
+      done < <(git worktree list --porcelain)
+      if [ -z "$wtpath" ]; then
+        echo "pr-closeout: cannot resolve the worktree path for $BRANCH — tree left in place"
+        LEFTOVER=1
+      else
+        swc_out=$( "$BIN_DIR/safe-worktree-clean" --only "$wtpath" 2>&1 )
+        swc_rc=$?
+        safe_line=$(grep '^SAFE  ' <<<"$swc_out" | head -n 1)
+        hold_lines=$(grep 'HOLD:' <<<"$swc_out" || true)
+        if [ $swc_rc -ne 0 ]; then
+          echo "$swc_out"
+          echo "pr-closeout: safe-worktree-clean failed for $wtpath — tree left in place"
+          LEFTOVER=1
+        elif [ -n "$safe_line" ]; then
+          CMDLINE="safe-worktree-clean --only $wtpath --apply"
+          if $APPLY; then
+            if "$BIN_DIR/safe-worktree-clean" --only "$wtpath" --apply 2>&1; then
+              echo "done: $CMDLINE"
+            else
+              echo "FAILED: $CMDLINE"
+              LEFTOVER=1
+            fi
+          else
+            echo "$safe_line"
+            echo "plan: $CMDLINE"
+          fi
+        elif [ -n "$hold_lines" ]; then
+          grep 'HOLD:' <<<"$swc_out"
+          grep '^hold plan: ' <<<"$swc_out" || true
+          LEFTOVER=1
+        else
+          echo "pr-closeout: safe-worktree-clean gave no SAFE or HOLD verdict for $wtpath — tree left in place"
+          echo "$swc_out"
+          LEFTOVER=1
+        fi
+      fi
+      ;;
+    "ABSENT "*)
+      : # nothing to delete, not a leftover
+      ;;
+    *)
+      LEFTOVER=1 # DIFFERS and other SKIP: reported above, left in place
+      ;;
+  esac
+fi
+
+if [ "$LEFTOVER" -ne 0 ]; then
+  exit 1
+fi
+echo "pr-closeout: PR $N closed out"
+exit 0
