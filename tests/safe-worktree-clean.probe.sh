@@ -2,7 +2,7 @@
 # Fixture check for bin/safe-worktree-clean against throwaway repos (a bare origin, a clone, and
 # agent worktrees under its .claude/worktrees). Every HOLD reason fires alone: each tree breaks
 # exactly one criterion. Also covers multi-repo sweeps (--repo repeatable, --repos-file) and
-# --apply-hold plan verification, backup layout, and removal (P1-P43). The tool always runs with
+# --apply-hold plan verification, backup layout, and removal (P1-P46). The tool always runs with
 # --repo into the fixture, never the real repo.
 # Usage: tests/safe-worktree-clean.probe.sh   (from anywhere)
 
@@ -1703,6 +1703,17 @@ J_P25=$("$TOOL" --repo "$SW25" --json)
 expect "$J_P25" det25 HOLD:detached-unreferenced "P25: det25 held as detached-unreferenced"
 PLAN_P25=$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["hold_plan"] or "")' "$J_P25")
 [ "$(approvable_of "$J_P25" det25)" = "True" ] && [ -n "$PLAN_P25" ] || bad "P25 setup: det25 approvable and PLAN_P25 non-empty"
+# P25 refusal: the bare id refuses the unnamed detached-unreferenced tree and the line asserts
+# the printed count (det25's HEAD is 1 commit beyond origin/main); exit 2, tree kept, no backup.
+err_p25r=$(SYG_WORKTREE_BACKUP_DIR="$T/bk25r" "$TOOL" --repo "$SW25" --apply-hold "$PLAN_P25" 2>&1 >/dev/null); rc_p25r=$?
+want_p25r="safe-worktree-clean: --apply-hold refused: plan $PLAN_P25 includes commit-carrying tree .claude/worktrees/det25 (1 commit(s) not on origin/main) — only on the owner's yes for that tree: re-run the dry run and apply with --only <tree>"
+bk25r_left=$(ls "$T/bk25r" 2>/dev/null)
+if [ "$rc_p25r" -eq 2 ] && [ "$err_p25r" = "$want_p25r" ] \
+  && [ -d "$SW25W/det25" ] && [ -z "$bk25r_left" ]; then
+  ok "P25 refusal: bare id refuses the detached-unreferenced tree with its 1-commit count, removing nothing and writing no backup"
+else
+  bad "P25 refusal: bare-id count line (rc=$rc_p25r, det25=$([ -d "$SW25W/det25" ] && echo ok || echo gone), bk25r='$bk25r_left', err='$err_p25r')"
+fi
 # det25 is commit-carrying (detached-unreferenced): apply with the tree named via --only
 # (the approvable set is unchanged, so PLAN_P25 still matches).
 SYG_WORKTREE_BACKUP_DIR="$T/bk25" "$TOOL" --repo "$SW25" --apply-hold "$PLAN_P25" --only "$SW25W/det25" >/dev/null; rc_p25=$?
@@ -1912,11 +1923,11 @@ else
   bad "P31(iii): wt31s expected SAFE, got '$(verdict "$J_P31" wt31s)'"
 fi
 # P31 refusal pin: with wt31k unnamed, the bare id refuses even though wt31k's only commit-carrying
-# reason is worktree-refs and its branch is even with the base — the count form is the branch's
-# beyond-base commits, so the line prints (0 commit(s) not on origin/main) deliberately; exit 2,
-# nothing removed (SAFE wt31s included), no backup dir written.
+# reason is worktree-refs and its branch is even with the base — the count is the branch's
+# beyond-base commits, so the line says so ("0 branch commit(s) ... ; per-worktree refs hold
+# more"); exit 2, nothing removed (SAFE wt31s included), no backup dir written.
 err_p31r=$(SYG_WORKTREE_BACKUP_DIR="$T/bk31r" "$TOOL" --repo "$SW31" --apply-hold "$PLAN_P31" 2>&1 >/dev/null); rc_p31r=$?
-want_p31r="safe-worktree-clean: --apply-hold refused: plan $PLAN_P31 includes commit-carrying tree .claude/worktrees/wt31k (0 commit(s) not on origin/main) — name it with --only to approve its removal"
+want_p31r="safe-worktree-clean: --apply-hold refused: plan $PLAN_P31 includes commit-carrying tree .claude/worktrees/wt31k (0 branch commit(s) not on origin/main; per-worktree refs hold more) — only on the owner's yes for that tree: re-run the dry run and apply with --only <tree>"
 bk31r_left=$(ls "$T/bk31r" 2>/dev/null)
 if [ "$rc_p31r" -eq 2 ] && [ "$err_p31r" = "$want_p31r" ] \
   && [ -d "$SW31W/wt31k" ] && [ -d "$SW31W/wt31s" ] && [ -z "$bk31r_left" ]; then
@@ -2472,7 +2483,7 @@ else
   bad "P40(i): JSON plan tree fields"; printf '%s\n' "$J_P40"
 fi
 err_p40b=$(SYG_WORKTREE_BACKUP_DIR="$T/bk40" "$TOOL" --repo "$SW40" --apply-hold "$PLAN_P40" 2>&1 >/dev/null); rc_p40b=$?
-want_p40b="safe-worktree-clean: --apply-hold refused: plan $PLAN_P40 includes commit-carrying tree .claude/worktrees/um (1 commit(s) not on origin/main) — name it with --only to approve its removal"
+want_p40b="safe-worktree-clean: --apply-hold refused: plan $PLAN_P40 includes commit-carrying tree .claude/worktrees/um (1 commit(s) not on origin/main) — only on the owner's yes for that tree: re-run the dry run and apply with --only <tree>"
 bk40_left=$(ls "$T/bk40" 2>/dev/null)
 if [ "$rc_p40b" -eq 2 ] && [ "$err_p40b" = "$want_p40b" ] \
   && [ -d "$SW40W/um" ] && [ -d "$SW40W/dy" ] && [ -z "$bk40_left" ]; then
@@ -2583,7 +2594,7 @@ else
   bad "P42(i): JSON sweep tree fields"; printf '%s\n' "$J_P42"
 fi
 err_p42a=$(SYG_WORKTREE_BACKUP_DIR="$T/bk42" "$TOOL" --repo "$SW42A" --repo "$SW42B" --apply-hold "$SWEEP_P42" 2>&1 >/dev/null); rc_p42a=$?
-want_p42a="safe-worktree-clean: --apply-hold refused: plan $SWEEP_P42 includes commit-carrying tree $SW42A/.claude/worktrees/ua (1 commit(s) not on origin/main) — name it with --only to approve its removal"
+want_p42a="safe-worktree-clean: --apply-hold refused: plan $SWEEP_P42 includes commit-carrying tree $SW42A/.claude/worktrees/ua (1 commit(s) not on origin/main) — only on the owner's yes for that tree: re-run the dry run and apply with --only <tree>"
 bk42_left=$(ls "$T/bk42" 2>/dev/null)
 if [ "$rc_p42a" -eq 2 ] && [ "$err_p42a" = "$want_p42a" ] \
   && [ -d "$SW42AW/ua" ] && [ -d "$SW42BW/ub" ] && [ -z "$bk42_left" ]; then
@@ -2662,6 +2673,88 @@ if [ "$rc_p42v" -eq 0 ] && [ -n "$SWEEP_P42V" ] && grep -qxF "$SUM_P42V" <<<"$ou
   ok "P42(v): sweep summary aggregates the truncated child line and totals 5 with … +2 more"
 else
   bad "P42(v): sweep summary aggregation (rc=$rc_p42v, id='$SWEEP_P42V')"; printf '%s\n' "$out_p42v"
+fi
+
+# P44 --json refusal: the bare-id naming refusal under --json fires on stderr with exit 2 and
+# the stdout stays clean of the refusal text (empty here: the refusal precedes any JSON output).
+mk_repo sweep44 && [ -d "$T/sweep44" ] || bad "P44 setup: mk_repo sweep44"
+SW44="$T/sweep44"
+SW44W="$SW44/.claude/worktrees"
+add_tree sweep44 uj && [ -d "$SW44W/uj" ] || bad "P44 setup: add_tree uj"
+echo n44 > "$SW44W/uj/n.txt" && git -C "$SW44W/uj" add n.txt \
+  && git -C "$SW44W/uj" commit -qm "p44 work" && [ -d "$SW44W/uj" ] || bad "P44 setup: uj commit"
+PLAN_P44=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["hold_plan"] or "")' < <("$TOOL" --repo "$SW44" --json))
+[ -n "$PLAN_P44" ] || bad "P44 setup: PLAN_P44"
+out_p44r=$(SYG_WORKTREE_BACKUP_DIR="$T/bk44" "$TOOL" --repo "$SW44" --apply-hold "$PLAN_P44" --json 2>"$T/p44.err"); rc_p44r=$?
+err_p44r=$(cat "$T/p44.err")
+want_p44r="safe-worktree-clean: --apply-hold refused: plan $PLAN_P44 includes commit-carrying tree .claude/worktrees/uj (1 commit(s) not on origin/main) — only on the owner's yes for that tree: re-run the dry run and apply with --only <tree>"
+bk44_left=$(ls "$T/bk44" 2>/dev/null)
+if [ "$rc_p44r" -eq 2 ] && [ "$err_p44r" = "$want_p44r" ] \
+  && [ -z "$out_p44r" ] && ! grep -q 'refused' <<<"$out_p44r" \
+  && [ -d "$SW44W/uj" ] && [ -z "$bk44_left" ]; then
+  ok "P44: --json bare --apply-hold refusal fires on stderr with exit 2 and stdout stays clean"
+else
+  bad "P44: --json refusal (rc=$rc_p44r, uj=$([ -d "$SW44W/uj" ] && echo ok || echo gone), bk44='$bk44_left', out='${out_p44r:0:120}', err='$err_p44r')"
+fi
+
+# P45 count honesty: a git shim that fails `rev-list --count` must not print a real-looking 0 —
+# the refusal line's count is "?" (plan id, refusal set and exit codes unchanged).
+REAL_GIT=$(command -v git)
+mkdir -p "$T/shimcc" && [ -n "$REAL_GIT" ] || bad "P45 setup: shimcc dir"
+cat > "$T/shimcc/git" <<EOF
+#!/bin/bash
+case " \$* " in
+  *" rev-list --count "*) exit 1 ;;
+esac
+exec "$REAL_GIT" "\$@"
+EOF
+chmod +x "$T/shimcc/git" && [ -x "$T/shimcc/git" ] || bad "P45 setup: chmod git shim"
+mk_repo sweep45 && [ -d "$T/sweep45" ] || bad "P45 setup: mk_repo sweep45"
+SW45="$T/sweep45"
+SW45W="$SW45/.claude/worktrees"
+add_tree sweep45 uk && [ -d "$SW45W/uk" ] || bad "P45 setup: add_tree uk"
+echo n45 > "$SW45W/uk/n.txt" && git -C "$SW45W/uk" add n.txt \
+  && git -C "$SW45W/uk" commit -qm "p45 work" && [ -d "$SW45W/uk" ] || bad "P45 setup: uk commit"
+PLAN_P45=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["hold_plan"] or "")' < <("$TOOL" --repo "$SW45" --json))
+[ -n "$PLAN_P45" ] || bad "P45 setup: PLAN_P45"
+err_p45=$(PATH="$T/shimcc:$PATH" SYG_WORKTREE_BACKUP_DIR="$T/bk45" "$TOOL" --repo "$SW45" --apply-hold "$PLAN_P45" 2>&1 >/dev/null); rc_p45=$?
+want_p45="safe-worktree-clean: --apply-hold refused: plan $PLAN_P45 includes commit-carrying tree .claude/worktrees/uk (? commit(s) not on origin/main) — only on the owner's yes for that tree: re-run the dry run and apply with --only <tree>"
+bk45_left=$(ls "$T/bk45" 2>/dev/null)
+if [ "$rc_p45" -eq 2 ] && [ "$err_p45" = "$want_p45" ] \
+  && [ -d "$SW45W/uk" ] && [ -z "$bk45_left" ]; then
+  ok "P45: a failed rev-list --count prints ? in the refusal count, still refusing with exit 2"
+else
+  bad "P45: ? count on rev-list failure (rc=$rc_p45, uk=$([ -d "$SW45W/uk" ] && echo ok || echo gone), bk45='$bk45_left', err='$err_p45')"
+fi
+
+# P46 sweep-parent ref-only suffix: the sweep parent's python emitter must carry the same
+# reason-aware count form as the per-repo one — repo A holds a worktree-refs tree built like
+# P31's wt31k (branch even with the base, an orphan commit only in refs/worktree/keep), repo B
+# one sweep-legal tree; the bare sweep id refuses at the parent with the suffixed line.
+mk_repo sweep46a && mk_repo sweep46b \
+  && [ -d "$T/sweep46a" ] && [ -d "$T/sweep46b" ] || bad "P46 setup: mk_repo sweep46a/b"
+SW46A="$T/sweep46a"
+SW46AW="$SW46A/.claude/worktrees"
+SW46B="$T/sweep46b"
+SW46BW="$SW46B/.claude/worktrees"
+add_tree sweep46a wt46k && [ -d "$SW46AW/wt46k" ] || bad "P46 setup: add_tree wt46k"
+tree_46=$(git -C "$SW46AW/wt46k" rev-parse 'HEAD^{tree}' 2>/dev/null)
+C_P46=$(git -C "$SW46AW/wt46k" commit-tree "$tree_46" -p HEAD -m keep46 2>/dev/null)
+[ -n "$C_P46" ] && git -C "$SW46AW/wt46k" update-ref refs/worktree/keep "$C_P46" \
+  || bad "P46 setup: commit-tree + update-ref keep46"
+add_tree sweep46b ub46 && echo mine > "$SW46BW/ub46/a.txt" \
+  && [ -d "$SW46BW/ub46" ] || bad "P46 setup: add_tree ub46"
+out_p46=$("$TOOL" --repo "$SW46A" --repo "$SW46B"); rc_p46d=$?
+SWEEP_P46=$(sed -n 's/^sweep plan: \([0-9a-f]\{12\}\)$/\1/p' <<<"$out_p46")
+[ "$rc_p46d" -eq 0 ] && [ -n "$SWEEP_P46" ] || bad "P46 setup: sweep plan id (rc=$rc_p46d)"
+err_p46=$(SYG_WORKTREE_BACKUP_DIR="$T/bk46" "$TOOL" --repo "$SW46A" --repo "$SW46B" --apply-hold "$SWEEP_P46" 2>&1 >/dev/null); rc_p46r=$?
+want_p46="safe-worktree-clean: --apply-hold refused: plan $SWEEP_P46 includes commit-carrying tree $SW46A/.claude/worktrees/wt46k (0 branch commit(s) not on origin/main; per-worktree refs hold more) — only on the owner's yes for that tree: re-run the dry run and apply with --only <tree>"
+bk46_left=$(ls "$T/bk46" 2>/dev/null)
+if [ "$rc_p46r" -eq 2 ] && [ "$err_p46" = "$want_p46" ] \
+  && [ -d "$SW46AW/wt46k" ] && [ -d "$SW46BW/ub46" ] && [ -z "$bk46_left" ]; then
+  ok "P46: bare sweep id refuses the worktree-refs tree at the parent with the reason-aware 0-branch-count line; nothing removed anywhere"
+else
+  bad "P46: sweep-parent ref-only suffix line (rc=$rc_p46r, wt46k=$([ -d "$SW46AW/wt46k" ] && echo ok || echo gone), ub46=$([ -d "$SW46BW/ub46" ] && echo ok || echo gone), bk46='$bk46_left', err='$err_p46')"
 fi
 
 exit $fail

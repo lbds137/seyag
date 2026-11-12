@@ -1,6 +1,21 @@
 # Changelog
 
-All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY-MM-DD>` section per released version; under it, `###` categories in fixed order — Breaking Changes, Features, Bug Fixes, Improvements, Chores, Tests — empty ones omitted; items are `- **scope:** description (#310)`, written from the version's merged commit subjects.
+All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY-MM-DD>` section per released version; under it, `###` categories in fixed order — Breaking Changes, Features, Bug Fixes, Improvements, Chores, Tests — empty ones omitted; items are `- **scope:** description (#PR)`, written from the version's merged commit subjects.
+
+## 0.3.167 - 2026-11-12
+
+### Bug Fixes
+
+- **bin:** the `safe-worktree-clean --apply-hold` naming-refusal hint now names the approval it waits on — "only on the owner's yes for that tree: re-run the dry run and apply with `--only <tree>`" — instead of the bare "name it with --only"; a commit-carrying tree whose only carrying reasons are `worktree-refs` / `bisect-refs` / `rewritten-refs` now says its count is the branch's beyond-base commits and per-worktree refs hold more, and a failed or vacuous commit count prints `?` instead of a real-looking `0` (#PR).
+
+### Chores
+
+- **bin:** `safe-worktree-clean` re-wraps the ragged header/`--help` lines the holdscope batch left behind and comments the display-only `", "` split that builds the sweep tree names (`--json`'s `sweep_plan_trees` is unaffected) (#PR).
+- **docs:** restores the `(#PR)` placeholder on the format line, which a cite-fill replace_all had clobbered to `(#310)` (#PR).
+
+### Tests
+
+- **probes:** `tests/safe-worktree-clean.probe.sh` pins the reworded refusal (P31 with the reason-aware count, P40(ii), P42(ii)), adds the naming refusal under `--json` (stderr carries the line, stdout stays clean, P44), a detached-unreferenced bare-id refusal asserting the printed count (P25), a `rev-list --count`-failure case printing `?` via a git shim (P45), and the sweep parent pinning the same reason-aware count form at the sweep refusal (P46) (#PR).
 
 ## 0.3.166 - 2026-11-12
 
