@@ -249,6 +249,12 @@ mktx "$TMP/m11j.jsonl" "Used the ${TICK}quick path.
 Deploy is fine, still waiting on you${TICK} and more."
 check 2 "stray backtick in an earlier paragraph cannot swallow the final-paragraph marker (code-span pairs are line-local)" "$TMP/m11j.jsonl"
 
+mktx "$TMP/m11k.jsonl" "It's not \"done.\" Waiting on you to test."
+check 2 "clause punctuation inside a stripped span keeps the negator in its own clause" "$TMP/m11k.jsonl"
+
+mktx "$TMP/m11l.jsonl" "It's not ${TICK}done.${TICK} Waiting on you to test."
+check 2 "code-span variant: stripped span boundary keeps the negator in its own clause" "$TMP/m11l.jsonl"
+
 mktx "$TMP/m10a.jsonl" "There's nothing waiting on you either."
 check 0 "negated pending marker: 'nothing waiting on you' does not fire" "$TMP/m10a.jsonl"
 

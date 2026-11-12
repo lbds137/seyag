@@ -42,8 +42,9 @@
 #
 # Pending-marker pass: when the closing line does not end in "?", the final
 # paragraph of the final assistant text (after stripping fenced ```...``` code
-# blocks, inline `...` code spans and line-local balanced quoted spans ("..."
-# and “...”; an unbalanced quote changes nothing, across lines too) is scanned
+# blocks, line-local inline `...` code spans and line-local balanced quoted
+# spans ("..." and “...” — each stripped span becomes a clause boundary; an
+# unbalanced quote changes nothing, across lines too) is scanned
 # case-insensitively against
 # SYG_BQ_PENDING_MARKERS (a Python regex; unset uses the built-in default
 # `say the word\b|waiting on you\b|needs? your (yes|go|call|input)\b|for you to (decide|test|check)\b`;
@@ -210,14 +211,17 @@ if raw_markers:
             return None
 
         cleaned = re.sub(r"```.*?```", "", final_text, flags=re.S)
-        cleaned = re.sub(r"`[^`\n]*`", "", cleaned)
+        cleaned = re.sub(r"`[^`\n]*`", " . ", cleaned)
         # A quoted mention of a marker ("waiting on you") is the agent quoting
         # alert text, not leaving an ask — strip balanced pairs, straight and
         # curly, each pair line-local (a pair cannot cross a newline, merge
         # paragraphs or reach across the scanned scope); an unbalanced quote
         # changes nothing, in a line or across paragraphs (accepted FP residual).
-        cleaned = re.sub(r'"[^"\n]*"', "", cleaned)
-        cleaned = re.sub(r"“[^”\n]*”", "", cleaned)
+        # Each stripped span becomes a clause boundary (" . "), so its clause
+        # punctuation survives and a negator in an earlier clause cannot reach
+        # across the span to the marker.
+        cleaned = re.sub(r'"[^"\n]*"', " . ", cleaned)
+        cleaned = re.sub(r"“[^”\n]*”", " . ", cleaned)
         paras = [p for p in re.split(r"\n\s*\n", cleaned) if p.strip()]
         scope = paras[-1] if paras else ""
         if live_match(scope):
