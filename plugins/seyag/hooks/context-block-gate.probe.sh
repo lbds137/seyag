@@ -20,7 +20,7 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 GATE="$SCRIPT_DIR/context-block-gate.sh"
 
 # The defaults are pinned below; an ambient override must not skew them.
-unset SYG_CONTEXT_BLOCK SYG_CONTEXT_BLOCK_CMDS SYG_CONTEXT_BLOCK_PATHS
+unset SYG_CONTEXT_BLOCK SYG_CONTEXT_BLOCK_CMDS SYG_CONTEXT_BLOCK_PATHS SYG_STATE_DIR
 
 command -v jq >/dev/null 2>&1 || {
     echo "FATAL: jq is required — the hook parses its stdin payload with it" >&2
@@ -67,7 +67,8 @@ disarm() { # $1 = session suffix
 }
 
 # Run the gate. $1 = session suffix ("" omits session_id), $2 = tool_name,
-# $3 = tool_input JSON. Env for the run must be set by the caller as a prefix.
+# $3 = tool_input JSON. The tier knob and one clear list default ON for these
+# calls (the gate fails open without either); a caller prefix overrides.
 run_gate() {
     local session="$SESSION_PREFIX-$1" json
     if [ -z "$1" ]; then
@@ -77,7 +78,9 @@ run_gate() {
         json=$(jq -nc --arg s "$session" --arg t "$2" --argjson in "$3" \
             '{hook_event_name: "PreToolUse", session_id: $s, tool_name: $t, tool_input: $in}')
     fi
-    OUT=$(printf '%s' "$json" | "$GATE" 2>"$TMPDIR_PROBE/err")
+    OUT=$(printf '%s' "$json" | SYG_CONTEXT_BLOCK="${SYG_CONTEXT_BLOCK:-250000}" \
+        SYG_CONTEXT_BLOCK_PATHS="${SYG_CONTEXT_BLOCK_PATHS:-*/handoff-notes/*}" \
+        "$GATE" 2>"$TMPDIR_PROBE/err")
     RC=$?
     ERR=$(cat "$TMPDIR_PROBE/err")
 }
@@ -128,6 +131,24 @@ assert_allow "no armed marker anywhere for this session: rm passes untouched"
 arm idle
 run_gate idle Bash "$RMJSON"
 assert_blocked "armed, uncleared: rm blocked with the pinned text" "Bash"
+
+# ---- Case 2b: tier off or unclearable releases an armed session --------------
+# An operator switching the tier off (or emptying both clear lists) must not
+# leave an armed session blocked until the prune: the gate fails open before
+# it even looks for markers. The positive control is Case 2 (same fixture,
+# knob on, lists set → blocked).
+arm tiervo
+TIERJSON=$(jq -nc --arg s "$SESSION_PREFIX-tiervo" '{session_id: $s, tool_name: "Bash", tool_input: {command: "rm -rf /tmp/x"}}')
+OUT=$(printf '%s' "$TIERJSON" | env -u SYG_CONTEXT_BLOCK SYG_CONTEXT_BLOCK_PATHS='*/handoff-notes/*' "$GATE" 2>"$TMPDIR_PROBE/err")
+RC=$?
+ERR=$(cat "$TMPDIR_PROBE/err")
+assert_allow "tier off (SYG_CONTEXT_BLOCK unset) releases an armed session"
+arm tiervo2
+TIERJSON=$(jq -nc --arg s "$SESSION_PREFIX-tiervo2" '{session_id: $s, tool_name: "Bash", tool_input: {command: "rm -rf /tmp/x"}}')
+OUT=$(printf '%s' "$TIERJSON" | SYG_CONTEXT_BLOCK=250000 "$GATE" 2>"$TMPDIR_PROBE/err")
+RC=$?
+ERR=$(cat "$TMPDIR_PROBE/err")
+assert_allow "both clear lists empty releases an armed session"
 
 # ---- Case 3: Read, Grep, Glob pass ------------------------------------------
 run_gate idle Read '{"file_path": "/tmp/probe-fixture/x"}'
@@ -274,12 +295,22 @@ touch -d '1 hour ago' "$(done_file cleared2)" 2>/dev/null
 run_gate cleared2 Bash "$RMJSON"
 assert_blocked "stale done marker older than a re-armed marker blocks again" "Bash"
 
+# ---- Case 10b: SYG_STATE_DIR relocates the marker family ---------------------
+SD="$TMPDIR_PROBE/statedir"
+mkdir -m 700 "$SD"
+printf '999999 %s\n' "$(date +%s)" >"$SD/context-block-$SESSION_PREFIX-sd"
+json=$(jq -nc --arg s "$SESSION_PREFIX-sd" '{session_id: $s, tool_name: "Bash", tool_input: {command: "rm -rf /tmp/x"}}')
+OUT=$(printf '%s' "$json" | SYG_STATE_DIR="$SD" SYG_CONTEXT_BLOCK=250000 SYG_CONTEXT_BLOCK_PATHS='*/handoff-notes/*' "$GATE" 2>"$TMPDIR_PROBE/err")
+RC=$?
+ERR=$(cat "$TMPDIR_PROBE/err")
+assert_blocked "gate honors SYG_STATE_DIR (an armed marker in the overridden dir blocks)" "Bash"
+
 # ---- Case 11: fail-open shapes ------------------------------------------------
 arm fo1
 mkdir -p "$TMPDIR_PROBE/nobin"
 json=$(jq -nc --arg s "$SESSION_PREFIX-fo1" '{session_id: $s, tool_name: "Bash", tool_input: {command: "rm -rf /tmp/x"}}')
 # shellcheck disable=SC2034 # captured only to keep the assertion helpers' shape; fail-open asserts the exit code
-OUT=$(printf '%s' "$json" | PATH="$TMPDIR_PROBE/nobin" "$GATE" 2>"$TMPDIR_PROBE/err")
+OUT=$(printf '%s' "$json" | SYG_CONTEXT_BLOCK=250000 PATH="$TMPDIR_PROBE/nobin" "$GATE" 2>"$TMPDIR_PROBE/err")
 RC=$?
 assert_allow "no jq on PATH: fail open, exit 0"
 arm fo2

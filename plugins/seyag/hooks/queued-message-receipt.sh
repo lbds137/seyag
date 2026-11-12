@@ -76,7 +76,9 @@ SESSION=$(jq -r '.session_id // empty' <<<"$INPUT" 2>/dev/null || echo "")
 # a malformed envelope.
 SAFE_SESSION=$(printf '%s' "$SESSION" | tr -c 'A-Za-z0-9._-' '_')
 
-STATE_DIR="/tmp/claude-$(id -u)"
+# SYG_STATE_DIR relocates the state family — session-start prunes it there, so
+# the prompt hooks must write their state into the same place.
+STATE_DIR="${SYG_STATE_DIR:-/tmp/claude-$(id -u)}"
 STATE_FILE="$STATE_DIR/queued-receipt-state-$SAFE_SESSION"
 
 # Mode is set atomically at creation (-m), and a pre-existing directory is
