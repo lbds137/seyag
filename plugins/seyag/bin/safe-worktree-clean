@@ -1113,6 +1113,9 @@ batchable_path() {
 # successful read of the same content, though a DETERMINISTIC failure (e.g. an untracked
 # mode-000 file failing per-file hash-object with rc 128 every run) hashes the same on both
 # runs, and the judge/backup layers are what catch content hidden that way.
+# The stream's field order and sentinels are pinned byte-for-byte by the P38
+# and P38b per-file reference formulas (tests/safe-worktree-clean.probe.sh):
+# reordering the stream changes this function and both formulas together.
 # SYG_WORKTREE_STATE_BATCH_FAIL=1 is a test seam (internal, ignored unless set to exactly 1):
 # it skips the hash-object batch child (batch_ok=false, rc_batch=1), forcing the per-file
 # fallback.
