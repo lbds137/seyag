@@ -61,6 +61,8 @@ SYG_ALLOW_SESSION_URL	user	guards	unset	Set to 1 in the command's own prefix in 
 SYG_ALLOW_TEMPORAL	user	guards	unset	Set to 1 in the git commit command's own prefix in the command text to bypass temporal-marker-guard.
 SYG_BQ_NO_RC_LANES	user	stop-gates	unset	Extended regex matched against ANTHROPIC_BASE_URL for lanes without Remote Control, routing asks to SendMessage.
 SYG_BQ_PENDING_MARKERS	user	stop-gates	say the word\b|waiting on you\b|needs? your (yes|go|call|input)\b|for you to (decide|test|check)\b	Case-insensitive Python regex matching pending-ask phrases in the final paragraph; empty disables the pass.
+SYG_CHECK_LIB	internal	guards	unset	The hooks/lib directory the hook passes to its python child for shared target/owner resolution in the --check preflight.
+SYG_CHECK_TARGET	internal	guards	unset	The target argument the hook passes to its python child in the --check preflight.
 SYG_CI_ANCHOR	user	pr	unset	Workflow name whose completion (with nothing pending) settles pr-ci-wait; unset uses the quiet-window rule.
 SYG_CI_REVIEW	user	pr	prose:auto-detected: the workflow named Claude Code Review if one exists, otherwise no review check	Review workflow name that must complete before pr-ci-wait releases; set empty to disable.
 SYG_CLASSIFIER_LEDGER	user	session	unset	JSONL file path opting in classifier-ledger to record PostToolUseFailure events.

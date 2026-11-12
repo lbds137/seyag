@@ -7,11 +7,14 @@ All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY
 ### Features
 
 - **bin:** `probe-red-check <probe> [base]` proves a new probe red against a base ref (temp detached worktree, realpath-guarded against outside-tree fabrication, RED/NOT RED/INCONCLUSIVE) and `pr-closeout <N> [--apply]` mechanizes the post-automerge close-out (MERGED gate, linked-issue closes with the exact Fixed-by comment, branch disposition via the real branch-sweep/`safe-worktree-clean --only`, dry run by default, HOLD left for the owner) (#312).
+- **hooks:** `upstream-submission-guard.sh --check [<owner/repo>]` preflight: a wrapper bin stance-checks a target before composing the publish command (stdout is one `PASS`/`BLOCK <owner/repo>[,…]`/`UNKNOWN <reason>` line, PASS exits 0, BLOCK/UNKNOWN exit 1; bare form resolves `GH_REPO` env, else cwd remotes; no bypass env applies; fail-closed where the hook is fail-open), with target/owner resolution single-sourced into `lib/upstream_guard_lib.py` (#PR).
 
 ### Bug Fixes
 
 - **bin:** the `safe-worktree-clean --apply-hold` naming-refusal hint now names the approval it waits on — "only on the owner's yes for that tree: re-run the dry run and apply with `--only <tree>`" — instead of the bare "name it with --only"; a commit-carrying tree whose only carrying reasons are `worktree-refs` / `bisect-refs` / `rewritten-refs` now says its count is the branch's beyond-base commits and per-worktree refs hold more, and a failed or vacuous commit count prints `?` instead of a real-looking `0` (#313).
 - **hooks:** `blocking-question-channel-check`'s stripped-span placeholder is punctuation-conditional — a stripped span becomes ` . ` only when its text holds clause punctuation, else a plain space — so a punctuation-free span between a negator and the marker no longer manufactures a clause boundary (base silence restored; the pass fails open) (#314).
+- **bin:** `pr-open`'s watcher arm line omits `--sha` when `--head` named a branch no local ref backs — pasting a `rev-parse` that resolves to nothing — and prints the fallback note on stderr while stdout stays the parseable arm line; pr-ci-wait then watches the PR's current head (#315).
+- **docs:** the config table stops attributing pr-ci-wait's `SYG_CI_ANCHOR`/`SYG_CI_REVIEW` rows to `bin/pr-open` (it only arms the watcher; it never reads them), and `SYG_PR_BODY_BASE_REF`'s header note says the ref resolves even when `--base` names another base — the hook has no `--base` (#315).
 
 ### Chores
 
@@ -24,6 +27,8 @@ All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY
 
 - **probes:** `tests/safe-worktree-clean.probe.sh` pins the reworded refusal (P31 with the reason-aware count, P40(ii), P42(ii)), adds the naming refusal under `--json` (stderr carries the line, stdout stays clean, P44), a detached-unreferenced bare-id refusal asserting the printed count (P25), a `rev-list --count`-failure case printing `?` via a git shim (P45), and the sweep parent pinning the same reason-aware count form at the sweep refusal (P46) (#313).
 - **probes:** `hooks/blocking-question-channel-check.probe.sh` gains 4 cases: a punctuation-free code span and quoted span between a negator and the marker stay silent (red-first against the unfixed hook), a STOP word + "not" shape keeps firing after a punctuation-free span (base semantics restored, red-first against HEAD), and an em-dash inside a stripped span still makes the boundary (pins the widened punctuation class) (#314).
+- **probes:** `tests/pr-open.probe.sh` gains the missing-local-ref arm-fallback case (arm line without `--sha`, fallback note, one gh call, exact stdout) and term-scan coverage for title-only blocks and body hits reported by line number (#315).
+- **probes:** `hooks/upstream-submission-guard.probe.sh` gains 17 `--check` preflight cases (14 verdict runs and 3 output asserts): explicit own/non-own targets (stdout verdict line; BLOCK stderr carries the stance guidance and no bypass prefix), bare cwd resolution (own, non-own, all-candidates fork), `GH_REPO` env beating cwd remotes both ways, UNKNOWN pins (no own-owner basis fail-closed, unparsable target, no parsable GitHub remote in the cwd, unparsable `GH_REPO`), the two-arg usage error, control characters failing closed (a newline in the target arg yields exactly one UNKNOWN line; a newline in a bare-form remote URL fails closed through the parser's rejection), and a stdin pipe every case proves unread (red-first against the pre-extraction hook) (#PR).
 
 ## 0.3.166 - 2026-11-12
 
