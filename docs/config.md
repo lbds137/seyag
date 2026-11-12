@@ -260,7 +260,7 @@ An optional TOML file fills in knobs the environment left unset: user `${XDG_CON
 | `SYG_USER_RULES_DIR` | `hooks/session-start.sh` | Test seam overriding the user rules directory checked by session-start against rules/core.md. |
 | `SYG_WEEK_BURN_NOW` | `bin/week-burn-window` | Test clock (epoch seconds) overriding current time in week-burn-window. |
 | `SYG_WORKTREE_RUN_STAMP` | `bin/safe-worktree-clean` | Internal timestamp directory name exported from a multi-repo safe-worktree-clean --apply-hold parent to child runs; a value that is empty or not a plain name ([0-9A-Za-z][0-9A-Za-z._-]*) exits 2. |
-| `SYG_WORKTREE_STATE_BATCH_FAIL` | `bin/safe-worktree-clean` | Internal test seam in safe-worktree-clean: set to exactly 1 it fails tree_state_sha's hash-object batch child so probes exercise the per-file hash fallback; any other value is ignored. |
+| `SYG_WORKTREE_STATE_BATCH_FAIL` | `bin/safe-worktree-clean` | Internal test seam in safe-worktree-clean: set to exactly 1 it skips tree_state_sha's hash-object batch child (batch_ok=false, rc_batch=1) so probes exercise the per-file hash fallback; any other value is ignored. |
 | `SYG_WORKTREE_SWEEP_CHILD` | `bin/safe-worktree-clean` | Internal marker set to 1 when safe-worktree-clean invokes itself per repo in a multi-repo sweep. |
 | `ZAI_SPEND_MODELS_URL` | `bin/zai-usage` | Test seam overriding the z.ai model-usage API URL in zai-usage. |
 | `ZAI_SPEND_PEAK_UTC` | `bin/zai-usage` | Test seam overriding peak hours (interpreted in UTC+8) for local transcript weighting in zai-usage. |

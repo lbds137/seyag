@@ -797,7 +797,7 @@ judge_git() {
       if ! out=$(git -C "$t" rev-list -n 1 "${ns_tips[@]}" --not "$BASE" "${wt_excl[@]}" --branches 2>&1); then
         hold git-error "git rev-list for refs/$ns/ failed: ${out//$'\n'/ }"
       elif [ -n "$out" ]; then
-        hold "$ns-refs" "${#ns_tips[@]} refs/$ns/* ref(s) hold commits on neither $BASE nor another branch, first: $first_ns_ref"
+        hold "$ns-refs" "refs/$ns/* holds commits on neither $BASE nor another branch (${#ns_tips[@]} ref(s) in the namespace, first: $first_ns_ref)"
       fi
     fi
   done
@@ -1096,8 +1096,9 @@ at_risk_files() {
 # True when path $2 of tree $1 may go to one `git hash-object --stdin-paths` batch: not a
 # symlink, and no newline or CR in it (git strips a trailing CR) and no leading " (git
 # C-unquotes such a line, so it would hash a different file). tree_state_sha asks it exactly
-# once per path while building the per-path read plan, and both the batch filter and the
-# lookup read that plan, so the two cannot drift apart.
+# once per non-symlink path while building the per-path read plan (the symlink split happens
+# just before the call; the ! -L test below stays as defense for future callers), and both
+# the batch filter and the lookup read that plan, so the two cannot drift apart.
 batchable_path() {
   [ ! -L "$1/$2" ] && [[ $2 != *$'\n'* ]] && [[ $2 != *$'\r'* ]] && [[ $2 != \"* ]]
 }
@@ -1108,9 +1109,13 @@ batchable_path() {
 # status folded into the hashed stream after its output as a \001<name>=<rc>\0 line (the batch:
 # \001batch=<git rc>:<0|1>\0), so a failed child changes the sha — the same inputs with one
 # failed child hash differently from a successful read, while an unchanged healthy tree hashes
-# identically across runs and a hold-plan re-verify can never match state that was never read.
+# identically across runs; folding rcs means a failed child never hashes the same as a
+# successful read of the same content, though a DETERMINISTIC failure (e.g. an untracked
+# mode-000 file failing per-file hash-object with rc 128 every run) hashes the same on both
+# runs, and the judge/backup layers are what catch content hidden that way.
 # SYG_WORKTREE_STATE_BATCH_FAIL=1 is a test seam (internal, ignored unless set to exactly 1):
-# it fails the hash-object batch child so probes exercise the per-file fallback.
+# it skips the hash-object batch child (batch_ok=false, rc_batch=1), forcing the per-file
+# fallback.
 tree_state_sha() {
   local t=$1 p f_hash batch_out batch_ok=true bi=0 n=0 rc rc_ar=0 rc_batch=0
   local -a risk_files=() batch_paths=() batch_shas=() plan=()

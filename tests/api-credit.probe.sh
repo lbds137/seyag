@@ -622,9 +622,13 @@ echo '{"grants":[{"amount":100,"granted":"2026-10-01","expires":"2026-10-05"}]}'
 nd=$(lv nolive balance --json SYG_CREDIT_GRANTS="$T/g-dead.json")
 echo '{"grants":[{"amount":100,"granted":"2026-10-09T08:00:00Z"}]}' > "$T/g-today.json"
 nt=$(lv notclosed balance --json SYG_CREDIT_GRANTS="$T/g-today.json")
-[ "$(hits)" = 0 ] && [ -s "$T/hookx/l.jsonl" ] && ! jq -e 'has("source")' <<< "$nd" > /dev/null && ! jq -e 'has("source")' <<< "$nt" > /dev/null \
+# rc-guarded (the :506 pattern): jq -e exits 1 when the field is absent (the wanted state);
+# rc >= 2 (malformed or empty input) must FAIL the check, not pass it vacuously under !
+jq -e 'has("source")' <<< "$nd" > /dev/null; rc_nd=$?
+jq -e 'has("source")' <<< "$nt" > /dev/null; rc_nt=$?
+[ "$(hits)" = 0 ] && [ -s "$T/hookx/l.jsonl" ] && [ "$rc_nd" -eq 1 ] && [ "$rc_nt" -eq 1 ] \
   && ok "provider: hook, daily, no live grant and a grant from today make no request and add no fields" \
-  || bad "provider no-fetch: hits $(hits) / $nd / $nt"
+  || bad "provider no-fetch: hits $(hits) / nd rc=$rc_nd / nt rc=$rc_nt / $nd / $nt"
 
 # 20. calibrate: a mid-day anchor. K's requests at 10:00 ($1) and 14:00 ($2) are in the
 #     ledger; the anchor at 12:00 takes the 10:00 one as the same-day spend before it.
@@ -1039,7 +1043,7 @@ if [ "$(jq -c '[.remaining_usd, .source]' <<< "$b1")" = "$(jq -c '[.remaining_us
   && [ "$(jq -c '[.remaining_usd, .source]' <<< "$b2")" = "$(jq -c '[.remaining_usd, .source]' <<< "$ref_env")" ] \
   && [ "$(nlines "$T/key-calls")" = 1 ] && [ "$(hits)" = 1 ] \
   && [ "$(jq -r 'keys[0]' "$kcf" | cut -d' ' -f1)" = "$want_kid" ] \
-  && ! grep -q fixture-admin-key "$kcf" && ! grep -q fixture-admin-key "$T/cr/argv.log"; then
+  && ! grep -q fixture-admin-key "$kcf" && [ -s "$T/cr/argv.log" ] && ! grep -q fixture-admin-key "$T/cr/argv.log"; then
   ok "SYG_CREDIT_ADMIN_KEY_CMD: matches env-key provider balance, runs once across TTL cache hit (1 call), cache keyed by cmd hash"
 else bad "SYG_CREDIT_ADMIN_KEY_CMD ok/lazy: b1=$b1 / b2=$b2 / calls=$(nlines "$T/key-calls") / hits=$(hits)"; fi
 ba=$(lv karg balance --json ANTHROPIC_ADMIN_API_KEY= SYG_CREDIT_ADMIN_KEY_CMD="$T/key-arg.sh 'two words'" SYG_CREDIT_KEY_CMD_TIMEOUT=invalid)
