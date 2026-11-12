@@ -48,14 +48,18 @@ bad() { echo "FAIL: $1"; fail=1; }
 
 # (A) a pipe into a grep (egrep/fgrep included) that stops early (-q, -m, -l,
 # -L, --quiet/--silent/--max-count/--files-with-matches/--files-without-match),
-# with an optional opening group `(`, `[` or `{` right after the pipe, allowing
+# with an optional opening group `(` or `{` right after the pipe, allowing
 # /usr/bin/, command, env (bare, or with short options and their args), timeout
 # (-k N allowed, plain or unit-suffixed durations like 1m30s), nice, stdbuf and
 # VAR=value prefixes (stackable) before the reader — xargs is not a prefix
 # worth flagging: it drains stdin to EOF, so its grep cannot SIGPIPE the
 # writer; out of scope: timeout -s KILL / --foreground, env --, sudo, and the
 # zgrep/rg/ugrep readers; (B) a head that pipes onward (|& accepted before
-# it; the optional group form stays (A)-only).
+# it; the optional group form stays (A)-only). The head's argument class stops
+# at ; & and ), so `head -1 2>&1 |` (the & of 2>&1) and `head -n "$(n)" |` (a
+# kept-verbatim quoted span's )) end the head's match and go silently
+# unflagged — a known tradeoff of the command-boundary fix, which they flagged
+# loudly before.
 RE_A='(^|[^|])\|&?[[:space:]]*([({][[:space:]]*)?((/usr/bin/|command[[:space:]]+|env[[:space:]]+(-[A-Za-z0-9=]+([[:space:]]+[^-[:space:]][^[:space:]]*)?[[:space:]]+)*|timeout[[:space:]]+(-k[[:space:]]+[^[:space:]]+[[:space:]]+)*[0-9]+([.][0-9]+)?([a-z]+[0-9]+)*[a-z]*[[:space:]]+|nice[[:space:]]+(-[A-Za-z0-9]+([[:space:]]+[^[:space:]]+)?[[:space:]]+)*|stdbuf[[:space:]]+(-[A-Za-z0-9=]+([[:space:]]+[^[:space:]]+)?[[:space:]]+)*|([[:alpha:]_][[:alnum:]_]*=[^[:space:]\|;&]*[[:space:]]+))*)[ef]?grep[[:space:]]([^|;&]*[[:space:]])?(-[a-zA-Z0-9]*[qmlL][a-zA-Z0-9]*|--files-with-matches|--files-without-match|--quiet|--silent|--max-count(=|[[:space:]]))'
 RE_B='(^|[^|])\|&?[[:space:]]*head([[:space:]][^|;&)]*)?\|[^|]'
 seps='*[;|&]'
@@ -244,26 +248,28 @@ TMP=$(mktemp -d) || exit 1
 trap 'rm -rf "$TMP"' EXIT
 
 # Controls: units starting at fixture lines 1-17, 19-21, 23, 33, 35, 37, 38,
-# 40, 49-56, 59, 61, 63, 64, 70-72 must be flagged (the original reader forms
-# plus -l/-L/--files-with-matches/--files-without-match, egrep/fgrep, the env
-# (incl. -i/-u VAR), timeout (incl. -k N and 1m30s), nice, stdbuf and VAR=
-# prefixes incl. a stack, split-line pipes at 21-22 and 23-24, the
-# trailing-space pipe at 72-73, a trailing comment at 59-60, a split |& at
+# 40, 49-56, 59, 61, 63, 64, 70-76 and 78 must be flagged (the original reader
+# forms plus -l/-L/--files-with-matches/--files-without-match, egrep/fgrep,
+# the env (incl. -i/-u VAR), timeout (incl. -k N and 1m30s), nice, stdbuf and
+# VAR= prefixes incl. a stack, split-line pipes at 21-22 and 23-24, the
+# trailing-space pipe at 78-79, a trailing comment at 59-60, a split |& at
 # 61-62, a "$(...)" inside double quotes at 33, a non-printf head piping
 # onward at 35 and its |& form at 56, -El at 37, a '\'' idiom unit whose pipe
 # survives the strip at 38, a comment inside a pipe continuation at 40-42, an
-# unbounded writer before printf in a group at 49, and the post-pipe { / (
-# group forms at 70-71); lines 18, 22, 24, 25-32, 34, 36, 39, 43-48, 57-58,
-# 60, 62, 65-69 and 73 must not: the xargs reader at 18 (it drains stdin to
-# EOF, so its grep cannot SIGPIPE the writer), the joined second lines 22,
-# 24, 60, 62, 73 (a unit reports at its first line), ||, a here-string, a
-# trailing head in $(), grep -c, a comment, && grep, quoted spans stripped
-# (single at 31, double at 32), the printf display truncation at 34, a
-# trailing head at 36, the same idiom wholly inside quoted fixture text at
-# 39, a comment ending a backslash continuation at 43-45 and 67-69, the
-# escaped-backslash pair at 65-66, head args stopping at ; and ) at 57-58,
-# and printf as the head's writer in $()-context, with a } in kept args, and
-# wrapped in a single-command group at 46-48.
+# unbounded writer before printf in a group at 49, the post-pipe { / ( group
+# forms at 70-71, and the quoted-# shapes at 72-76 — a # inside a judged span
+# never cuts a unit, and an escaped space is not a word start); lines 18, 22,
+# 24, 25-32, 34, 36, 39, 43-48, 57-58, 60, 62, 65-69 and 77 must not: the
+# xargs reader at 18 (it drains stdin to EOF, so its grep cannot SIGPIPE the
+# writer), the joined second lines 22, 24, 60, 62, 79 (a unit reports at its
+# first line), a pipeless filler at 77, ||, a here-string, a trailing head in
+# $(), grep -c, a comment, && grep, quoted spans stripped (single at 31,
+# double at 32), the printf display truncation at 34, a trailing head at 36,
+# the same idiom wholly inside quoted fixture text at 39, a comment ending a
+# backslash continuation at 43-45 and 67-69, the escaped-backslash pair at
+# 65-66, head args stopping at ; and ) at 57-58, and printf as the head's
+# writer in $()-context, with a } in kept args, and wrapped in a
+# single-command group at 46-48.
 FX="$TMP/fixture.sh"
 cat >"$FX" <<'EOF'
 git rev-list --walk-reflogs HEAD 2>/dev/null | grep -qx "$C" \
