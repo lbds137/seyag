@@ -28,12 +28,13 @@ command -v jq >/dev/null 2>&1 || {
 }
 
 TMPDIR_PROBE=$(mktemp -d)
-STATE_DIR="/tmp/claude-$(id -u)"
-# A fresh CI runner has no state dir; unlike the reminder hooks, this probe
-# plants markers itself, before any hook would mkdir it (CI round 2: every
-# arm() redirect died with "No such file or directory" and all armed cases
-# ran unarmed). Create it the reminder's way.
-mkdir -m 700 "$STATE_DIR" 2>/dev/null || true
+# A temp state dir, exported for the whole run: planting markers in the real
+# /tmp/claude-<uid> makes live sessions pay the gate's jq path while the
+# suite runs, and a killed probe would leak markers there until the prune.
+# (Also the CI-fresh-runner fix: the temp dir is created here, not assumed.)
+STATE_DIR="$TMPDIR_PROBE/state"
+mkdir -m 700 "$STATE_DIR"
+export SYG_STATE_DIR="$STATE_DIR"
 SESSION_PREFIX="probe-cbg-$$"
 
 cleanup() {
@@ -310,14 +311,14 @@ arm fo1
 mkdir -p "$TMPDIR_PROBE/nobin"
 json=$(jq -nc --arg s "$SESSION_PREFIX-fo1" '{session_id: $s, tool_name: "Bash", tool_input: {command: "rm -rf /tmp/x"}}')
 # shellcheck disable=SC2034 # captured only to keep the assertion helpers' shape; fail-open asserts the exit code
-OUT=$(printf '%s' "$json" | SYG_CONTEXT_BLOCK=250000 PATH="$TMPDIR_PROBE/nobin" "$GATE" 2>"$TMPDIR_PROBE/err")
+OUT=$(printf '%s' "$json" | SYG_CONTEXT_BLOCK=250000 SYG_CONTEXT_BLOCK_PATHS='*/handoff-notes/*' PATH="$TMPDIR_PROBE/nobin" "$GATE" 2>"$TMPDIR_PROBE/err")
 RC=$?
 assert_allow "no jq on PATH: fail open, exit 0"
 arm fo2
 run_gate "" Bash "$RMJSON"
 assert_allow "payload without session_id: fail open"
 # shellcheck disable=SC2034 # as above: the exit code is the assertion
-OUT=$(printf 'this is not json' | "$GATE" 2>"$TMPDIR_PROBE/err")
+OUT=$(printf 'this is not json' | SYG_CONTEXT_BLOCK=250000 SYG_CONTEXT_BLOCK_PATHS='*/handoff-notes/*' "$GATE" 2>"$TMPDIR_PROBE/err")
 RC=$?
 ERR=$(cat "$TMPDIR_PROBE/err")
 assert_allow "unparseable payload: fail open"

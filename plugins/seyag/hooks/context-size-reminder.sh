@@ -23,7 +23,7 @@
 # transcripts; if Claude Code ever changes it, the hook simply stops muting
 # (fail-open).
 #
-# Hard tier (2026-11, Deck ask): when SYG_CONTEXT_BLOCK is set to a token
+# Hard tier: when SYG_CONTEXT_BLOCK is set to a token
 # count and the last turn is at or above it, this hook arms the hard tier
 # instead of printing the soft banner — a mandatory handoff instruction, with
 # context-block-gate.sh (PreToolUse) blocking every tool call that is not the
@@ -67,6 +67,22 @@ case "$COOLDOWN_MIN" in '' | *[!0-9]*) COOLDOWN_MIN=30 ;; esac
 # keeps the hard tier off entirely — no new behaviour for anyone not opting in.
 BLOCK_THRESHOLD=${SYG_CONTEXT_BLOCK:-}
 case "$BLOCK_THRESHOLD" in '' | *[!0-9]*) BLOCK_THRESHOLD='' ;; esac
+
+# The tier only makes sense with its gate able to run: when the context-block
+# component is switched off (SYG_PROFILE / SYG_ENABLE / SYG_DISABLE — the same
+# resolver run.sh applies to context-block-gate), the reminder treats the tier
+# as off too. Otherwise every prompt would carry "your next tool calls are
+# blocked" with no gate enforcing it, and the soft banner suppressed. A
+# resolver that will not load leaves the tier on (run.sh leaves every hook
+# enabled then too). Same pattern as session-start.sh.
+if [ -n "$BLOCK_THRESHOLD" ]; then
+    HOOK_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+    # shellcheck source=lib/components.sh
+    if [ -r "$HOOK_DIR/lib/components.sh" ] && source "$HOOK_DIR/lib/components.sh" 2>/dev/null \
+        && declare -F syg_enabled >/dev/null; then
+        syg_enabled context-block-gate || BLOCK_THRESHOLD=''
+    fi
+fi
 
 # The session id reaches a filesystem path, so anything outside the safe set is
 # folded to `_` rather than trusted (same set as queued-message-receipt.sh).
@@ -135,8 +151,8 @@ block_emit() {
     read -r -d '' instruction <<EOF || true
 CONTEXT BLOCK: this session is over the hard context limit (~${ktok}k tokens).
 Your next tool calls are blocked except the handoff write itself and read-only
-tools. Write the handoff now: update your role file's Handoff and Next (via
-your configured handoff command or a file write to a SYG_CONTEXT_BLOCK_PATHS path).
+tools. Write your session handoff now: update your handoff notes (via your
+configured handoff command or a file write to a SYG_CONTEXT_BLOCK_PATHS path).
 After one handoff write, the block lifts for the rest of the session.
 EOF
     # One machine-configured line naming the live clears, each list rendered
