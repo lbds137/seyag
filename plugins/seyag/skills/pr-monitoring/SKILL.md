@@ -193,7 +193,9 @@ gh api "repos/{owner}/{repo}/actions/runs/<run-id>/jobs?per_page=100" \
       removes the tree and deletes its branch). A HOLD line, or any other
       SKIP: leave it and report it. A HOLD on the unit's own tree is reported,
       and `--apply-hold <id>` only runs on the owner's yes for the printed
-      `hold plan:` id.
+      `hold plan:` id (refusing while a commit-carrying tree in the plan
+      is not named with `--only` — dry-run and apply with the same
+      `--only` for those).
     - DIFFERS after a rebase or squash merge onto a base that moved is
       expected (branch-sweep matches identical trees only); it does not mean
       unmerged work. Leave it and report it.

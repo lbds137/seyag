@@ -2,6 +2,24 @@
 
 All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY-MM-DD>` section per released version; under it, `###` categories in fixed order — Breaking Changes, Features, Bug Fixes, Improvements, Chores, Tests — empty ones omitted; items are `- **scope:** description (#PR)`, written from the version's merged commit subjects.
 
+## 0.3.165 - 2026-11-12
+
+### Features
+
+- **bin:** every `safe-worktree-clean` plan id now names the exact tree list it removes: each dry run with approvable trees prints `hold plan <id> would remove <N> tree(s): <paths>` (truncated at three paths with `… +<k> more`; `sweep plan <id> would remove …` for the sweep id), `--json` carries the full lists as `hold_plan_trees` per repo and `sweep_plan_trees` on the sweep object, and `hold_plan_commit_carrying` / `sweep_plan_commit_carrying` list the plan's commit-carrying trees with their commit counts beyond the base (#PR).
+
+### Bug Fixes
+
+- **bin:** `safe-worktree-clean --apply-hold` no longer lets an approved plan id remove a commit-carrying tree (reason `unmerged`, `detached-unreferenced`, `worktree-refs`, `bisect-refs` or `rewritten-refs` — any code that can carry commits not provably on the base or another branch) the invocation did not name: the apply refuses with one line per offending tree (its path and beyond-base commit count), exit 2, nothing removed, unless the invocation names that tree with `--only`; with `--only` the plan is recomputed over exactly the named trees, so a change to an unrelated tree no longer invalidates the approval. A sweep id is unscoped (`--only` is refused for several repos), so a sweep plan containing a commit-carrying tree refuses at the sweep parent before any child applies; the per-repo scoped flow (`--only` + `--apply-hold`) is the approval path for those trees (#PR).
+
+### Improvements
+
+- **docs:** the README safe-worktree-clean row and the delegation / pr-monitoring skills describe the naming rule and the scoped `--only` approval flow for commit-carrying trees (#PR).
+
+### Tests
+
+- **probes:** `tests/safe-worktree-clean.probe.sh` pins the naming refusal (bare id names the tree and its commit count, removes nothing, writes no backup), the summary and truncation lines, the sweep-level refusal at the parent with the repo-prefixed line, the new JSON fields, and scoped-id staleness (a named tree changing invalidates, an unrelated tree changing does not); the bare `--apply-hold` fixtures whose plans carry commits (P4, P9, P25, P28, P30, P31, P37) move to the scoped flow, and P40-P43 cover the new behavior end to end (#PR).
+
 ## 0.3.164 - 2026-11-11
 
 ### Features
