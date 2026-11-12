@@ -6,7 +6,12 @@
 # wrapper gap: a wrapper script's command text holds no `gh` token, so
 # private-term-guard and session-url-gate never fire on
 # `pr-open --title ... --body-file F` — the scans below ARE the hook scans
-# (the same libs and rules), run by the script itself.
+# (the same libs and rules), run by the script itself. One scan pr-open
+# does NOT run: upstream-submission-guard. --repo is refused outright (a
+# foreign repo cannot be stance-checked through this wrapper); a checkout
+# whose default base is a fork is not detectable without the guard's
+# ownership config, so that shape stays an accepted gap — open upstream
+# PRs with `gh pr create` directly.
 #
 # Env it reads (existing knobs only, no new name):
 #   SYG_PRIVATE_TERMS_FILE   the terms list; when unset and the repo is
@@ -24,6 +29,7 @@
 #      project, not gated on the public flag)
 #   2. private-term scan — title + body, ONLY under a public
 #      seyag.publicRepo (hook parity); set-but-not-boolean fails closed
+#      (stricter than the hook, which treats the value as public and scans)
 #   3. pr-body-ref-gate --check
 #   4. `gh pr create` (gh via PATH)
 #   5. the canonical pr-ci-wait arm line, substitution left unresolved
@@ -45,18 +51,21 @@ set -uo pipefail
 usage() {
   cat >&2 <<'EOF'
 usage: pr-open --title TITLE --body-file FILE [--base BRANCH] [--head BRANCH]
-               [--draft] [--repo REPO]
+               [--draft]
 
 Runs the PR-open preflight chain (session-link scan, private-term scan,
 pr-body-ref-gate --check), then creates the PR with `gh pr create` and
 prints the pr-ci-wait arm line. A failed preflight exits before gh runs.
+
+Push the branch first: on an unpushed branch gh pr create prompts interactively for where to push.
+For upstream PRs (forks, --repo), use gh pr create directly so upstream-submission-guard fires.
 EOF
 }
 
 PLUGIN_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LIB="$PLUGIN_ROOT/hooks/lib"
 
-TITLE="" BODY_FILE="" BASE="" HEAD_ARG="" REPO="" DRAFT=0
+TITLE="" BODY_FILE="" BASE="" HEAD_ARG="" DRAFT=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --title)
@@ -80,9 +89,9 @@ while [ "$#" -gt 0 ]; do
       shift 2
       ;;
     --repo)
-      [ "$#" -ge 2 ] || { usage; exit 2; }
-      REPO=$2
-      shift 2
+      echo "pr-open: --repo is not supported: upstream-submission-guard cannot check a foreign repo through this wrapper; open that PR with gh pr create directly" >&2
+      usage
+      exit 2
       ;;
     --draft)
       DRAFT=1
@@ -122,6 +131,17 @@ else
     exit 2
   fi
 fi
+
+# The arm line cannot watch a fork ref from this checkout; rejecting beats
+# emitting a broken watcher. Fork PRs stay openable with gh pr create
+# directly (where upstream-submission-guard fires).
+case $HEAD_ARG in
+  *:*)
+    echo "pr-open: --head owner:branch (fork form) is not supported; open fork PRs with gh pr create directly" >&2
+    usage
+    exit 2
+    ;;
+esac
 
 if command -v python3 >/dev/null 2>&1; then
   # 1. Session-link scan: the same SECRET/mask pair session-url-gate uses.
@@ -230,6 +250,8 @@ PYEOF
       fi
     fi
   fi
+else
+  echo "pr-open: python3 missing; the session-link and private-term scans were skipped" >&2
 fi
 
 # 3. Ref-gate preflight: its own output (a block banner on stderr) passes
@@ -249,7 +271,6 @@ create_cmd=(gh pr create --title "$TITLE" --body-file "$BODY_FILE")
 [ -n "$BASE" ] && create_cmd+=(--base "$BASE")
 [ -n "$HEAD_ARG" ] && create_cmd+=(--head "$HEAD_ARG")
 [ "$DRAFT" -eq 1 ] && create_cmd+=(--draft)
-[ -n "$REPO" ] && create_cmd+=(--repo "$REPO")
 create_out=$("${create_cmd[@]}")
 gh_rc=$?
 if [ "$gh_rc" -ne 0 ]; then
@@ -268,9 +289,11 @@ pr_num=${pr_url##*/}
 
 # 5. The arm line, pr-monitor-reminder's canonical template with the
 # substitution left as literal text — it resolves when the watcher runs.
-# The toplevel is single-quoted with embedded quotes escaped the reminder's
-# way, so the printed command pastes cleanly for any path shape.
+# The toplevel and the ref are single-quoted with embedded quotes escaped
+# the reminder's way, so the printed command pastes cleanly for any path
+# or branch-name shape.
 Q_TOP="'$(printf '%s' "$TOP" | sed "s/'/'\\\\''/g")'"
+Q_BRANCH="'$(printf '%s' "refs/heads/$BRANCH" | sed "s/'/'\\\\''/g")'"
 printf 'PR #%s: %s\n' "$pr_num" "$pr_url"
 printf 'cd %s && pr-ci-wait %s --sha $(git rev-parse %s)\n' \
-  "$Q_TOP" "$pr_num" "'refs/heads/$BRANCH'"
+  "$Q_TOP" "$pr_num" "$Q_BRANCH"

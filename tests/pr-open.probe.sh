@@ -31,6 +31,9 @@ cat > "$T/bin/gh" <<'SHIM'
 #!/bin/bash
 printf '%s\n' "$*" >> "$FAKE_GH_LOG"
 printf 'Creating pull request for example\n'
+if [ "${FAKE_GH_NO_URL:-0}" = 1 ]; then
+  exit "${FAKE_GH_EXIT:-0}"
+fi
 printf 'https://github.com/example/example/pull/42\n'
 exit "${FAKE_GH_EXIT:-0}"
 SHIM
@@ -62,8 +65,9 @@ run_open() {
   out=$(cd "${3:-$R}" && env -i \
     HOME="$T/home" PATH="$T/bin:$PATH" TERM=dumb \
     FAKE_GH_LOG="$GH_LOG" ${FAKE_GH_EXIT:+FAKE_GH_EXIT=$FAKE_GH_EXIT} \
+    ${FAKE_GH_NO_URL:+FAKE_GH_NO_URL=$FAKE_GH_NO_URL} \
     SYG_PRIVATE_TERMS_FILE="$TERMS" SYG_PR_BODY_BASE_REF=no-such-ref \
-    "${OPEN_ENV[@]}" "$BIN" --title "$1" --body-file "$2" \
+    "${OPEN_ENV[@]+"${OPEN_ENV[@]}"}" "$BIN" --title "$1" --body-file "$2" \
     "${OPEN_ARGS[@]+"${OPEN_ARGS[@]}"}" 2>&1)
   rc=$?
 }
@@ -225,17 +229,139 @@ OPEN_ENV=(SYG_PRIVATE_TERMS_FILE="$REDOS")
 git -C "$R" config seyag.publicRepo true
 run_open "Clean title" "$T/b13.md"
 OPEN_ENV=()
-[[ "$out" == *"pr-open: BLOCK: matching the terms took over 5 s; simplify the patterns in $REDOS"* ]] \
+[ "$rc" -eq 1 ] \
+  && [[ "$out" == *"pr-open: BLOCK: matching the terms took over 5 s; simplify the patterns in $REDOS"* ]] \
   && ok "case13: time-box message names the terms file" \
   || bad "case13: rc $rc, out: $out"
 [[ "$out" != *"(a+)+"* ]] && ok "case13: pattern text never printed" \
   || bad "case13: pattern leaked: $out"
 [ ! -s "$GH_LOG" ] && ok "case13: gh never called" || bad "case13: gh called"
 
+# Case 14 — every supported option forwards to gh in one call: the shim
+# logs the whole command line, so one positive control pins the five.
+printf 'Clean body.\n' > "$T/b14.md"
+git -C "$R" config seyag.publicRepo false
+OPEN_ARGS=(--base dev --head main --draft)
+run_open "Clean title" "$T/b14.md"
+OPEN_ARGS=()
+[ "$rc" -eq 0 ] && ok "case14: all-options run rc 0" || bad "case14: rc $rc: $out"
+logged=$(sed -n '1p' "$GH_LOG")
+[[ "$logged" == *"--title Clean title"* && "$logged" == *"--body-file $T/b14.md"* \
+  && "$logged" == *"--base dev"* && "$logged" == *"--head main"* \
+  && "$logged" == *"--draft"* ]] \
+  && ok "case14: the five supported options forwarded to gh" || bad "case14: gh line: $logged"
+
+# Case 15 — detached HEAD without --head: named error before any scan,
+# gh never called (the branch state is restored right after the run).
+printf 'Clean body.\n' > "$T/b15.md"
+git -C "$R" checkout -q --detach
+run_open "Clean title" "$T/b15.md"
+git -C "$R" checkout -q main
+first_line=$(printf '%s\n' "$out" | sed -n '1p')
+[ "$rc" -eq 2 ] && [ "$first_line" = "pr-open: detached HEAD; pass --head BRANCH" ] \
+  && ok "case15: detached HEAD named" || bad "case15: rc $rc, first: $first_line"
+[ ! -s "$GH_LOG" ] && ok "case15: gh never called" || bad "case15: gh called"
+
+# Case 16 — --head on a detached checkout: the arm line names the ref the
+# flag chose (the escaped-quote shape since the branch-escape fix; plain
+# main carries no quote, so the plain text asserts the same bytes).
+git -C "$R" checkout -q --detach
+OPEN_ARGS=(--head main)
+run_open "Clean title" "$T/b15.md"
+OPEN_ARGS=()
+git -C "$R" checkout -q main
+[ "$rc" -eq 0 ] && ok "case16: --head main accepted, rc 0" || bad "case16: rc $rc: $out"
+[[ "$out" == *"refs/heads/main"* ]] && ok "case16: arm line uses the --head ref" \
+  || bad "case16: arm line: $(printf '%s\n' "$out" | sed -n '2p')"
+
+# Case 17 — the fork form of --head: rejected before gh (the arm line
+# cannot watch a fork ref from this checkout).
+OPEN_ARGS=(--head someone:main)
+run_open "Clean title" "$T/b15.md"
+OPEN_ARGS=()
+first_line=$(printf '%s\n' "$out" | sed -n '1p')
+[ "$rc" -eq 2 ] && [[ "$first_line" == *"fork form"* ]] \
+  && ok "case17: fork-form --head rejected" || bad "case17: rc $rc, first: $first_line"
+[ ! -s "$GH_LOG" ] && ok "case17: gh never called" || bad "case17: gh called"
+
+# Case 18 — usage errors: an unknown flag, a flag missing its value, and an
+# unreadable body file each exit 2 with an empty gh log.
+OPEN_ARGS=(--bogus)
+run_open "Clean title" "$T/b15.md"
+OPEN_ARGS=()
+[ "$rc" -eq 2 ] && ok "case18a: unknown flag rc 2" || bad "case18a: rc $rc: $out"
+[ ! -s "$GH_LOG" ] && ok "case18a: gh never called" || bad "case18a: gh called"
+OPEN_ARGS=(--title)
+run_open "Clean title" "$T/b15.md"
+OPEN_ARGS=()
+[ "$rc" -eq 2 ] && ok "case18b: missing value rc 2" || bad "case18b: rc $rc: $out"
+[ ! -s "$GH_LOG" ] && ok "case18b: gh never called" || bad "case18b: gh called"
+printf 'Clean body.\n' > "$T/noread.md"
+chmod 000 "$T/noread.md"
+run_open "Clean title" "$T/noread.md"
+first_line=$(printf '%s\n' "$out" | sed -n '1p')
+[ "$rc" -eq 2 ] && [[ "$first_line" == "pr-open: cannot read body file: "* ]] \
+  && ok "case18c: unreadable body rc 2" || bad "case18c: rc $rc, first: $first_line"
+[ ! -s "$GH_LOG" ] && ok "case18c: gh never called" || bad "case18c: gh called"
+chmod 644 "$T/noread.md"
+
+# Case 19 — gh succeeds but prints no pull URL: rc 1, the missing URL
+# named on stderr, no arm line (FAKE_GH_NO_URL trims the shim's URL line).
+printf 'Clean body.\n' > "$T/b19.md"
+FAKE_GH_NO_URL=1
+run_open "Clean title" "$T/b19.md"
+FAKE_GH_NO_URL=
+[ "$rc" -eq 1 ] && ok "case19: missing URL rc 1" || bad "case19: rc $rc: $out"
+[[ "$out" == *"no PR URL in gh's output"* ]] && ok "case19: missing URL named" \
+  || bad "case19: no message: $out"
+[[ "$out" != *"PR #42"* ]] && ok "case19: no arm line" || bad "case19: arm line: $out"
+
+# Case 20 — python3 missing: the scans fail open but the skip is named on
+# stderr, and the PR still creates (a command the user runs explicitly, so
+# the skip must be visible). A python3-free PATH: a pruned mirror of the
+# system bin dirs (python*/pip*/idle*/pydoc* dropped), with the shim dir
+# first so gh still resolves to the fake.
+NOPY="$T/nopy"
+mkdir "$NOPY"
+for d in /usr/bin /bin; do
+  for f in "$d"/*; do
+    b=${f##*/}
+    case $b in python* | pip* | idle* | pydoc*) continue ;; esac
+    [ -e "$NOPY/$b" ] || ln -s "$f" "$NOPY/$b" 2>/dev/null
+  done
+done
+if [ -e "$NOPY/bash" ] && [ -e "$NOPY/git" ] && [ -e "$NOPY/sed" ] \
+  && ! env PATH="$T/bin:$NOPY" bash -c 'command -v python3' >/dev/null 2>&1; then
+  OPEN_ENV=(PATH="$T/bin:$NOPY")
+  run_open "Clean title" "$T/b15.md"
+  OPEN_ENV=()
+  [ "$rc" -eq 0 ] && ok "case20: no python3 -> scans skipped, rc 0" \
+    || bad "case20: rc $rc: $out"
+  [[ "$out" == *"pr-open: python3 missing; the session-link and private-term scans were skipped"* ]] \
+    && ok "case20: the skip named on stderr" || bad "case20: no skip note: $out"
+  [ -s "$GH_LOG" ] && ok "case20: PR created" || bad "case20: gh not called"
+else
+  bad "case20: could not build a python3-free PATH on this machine"
+fi
+
+# Case 21 — --repo refused outright (owner ruling): upstream-submission-guard
+# cannot check a foreign repo through this wrapper; gh log stays empty.
+printf 'Clean body.\n' > "$T/b21.md"
+git -C "$R" config seyag.publicRepo false
+OPEN_ARGS=(--repo example/other)
+run_open "Clean title" "$T/b21.md"
+OPEN_ARGS=()
+[ "$rc" -eq 2 ] && ok "case21: --repo refused, rc 2" || bad "case21: rc $rc: $out"
+first_line=$(printf '%s\n' "$out" | sed -n '1p')
+[[ "$first_line" == "pr-open: --repo is not supported"* ]] \
+  && ok "case21: refusal names upstream-submission-guard" \
+  || bad "case21: first line: $first_line"
+[ ! -s "$GH_LOG" ] && ok "case21: gh never called" || bad "case21: gh called"
+
 echo "---"
 if [ "$fail" -eq 0 ]; then
   echo "all ok"
 else
-  echo "$fail failing case groups"
+  echo "$fail failing case group(s)"
 fi
 exit "$fail"
