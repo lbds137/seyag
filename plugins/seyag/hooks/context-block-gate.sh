@@ -31,7 +31,17 @@
 #   blocked even when both halves are readers and even inside quotes.
 # - SYG_CONTEXT_BLOCK_PATHS globs are matched literally with bash [[ == ]],
 #   extglob off: one glob pattern per colon-separated entry, no ~ or $HOME
-#   expansion, so machine config writes absolute patterns.
+#   expansion, so machine config writes absolute patterns. A file_path
+#   containing /../ is refused before matching: a glob's * crosses /, so
+#   /x/handoffs/* would otherwise clear on a write to
+#   /x/handoffs/../../elsewhere.
+# - The SYG_CONTEXT_BLOCK_CMDS match is a literal prefix with no word
+#   boundary, and a matching compound command clears AND runs whole —
+#   operator-config trust, deliberate: the machine sets its own prefixes.
+# - The clear fires on the ATTEMPTED write: PreToolUse runs before the
+#   permission decision, so a handoff write that is itself denied still
+#   clears (accepted fail-open; a landed-write promotion would be a
+#   PostToolUse follow-up).
 # - Every other tool_name, including unknown ones, is blocked.
 #
 # Known bound: the armed/cleared decision compares marker mtimes, so on a
@@ -147,8 +157,13 @@ case "$TOOL" in
     Write | Edit | MultiEdit | NotebookEdit)
         # NotebookEdit carries its target as notebook_path, not file_path.
         FILE=$(jq -r '.tool_input.file_path // .tool_input.notebook_path // empty' <<<"$INPUT" 2>/dev/null) || FILE=""
-        if [ -n "$FILE" ] && match_paths "$FILE"; then
-            clear_and_allow
+        if [ -n "$FILE" ]; then
+            case "$FILE" in
+                *'/../'*) ;; # a dotdot walk must never clear, glob or no glob
+                *)
+                    match_paths "$FILE" && clear_and_allow
+                    ;;
+            esac
         fi
         block
         ;;
@@ -167,13 +182,29 @@ case "$TOOL" in
         esac
         read -r W1 W2 REST <<<"$CMD"
         case "$W1" in
-            cat | ls | pwd | date | wc | head | tail | grep | rg)
+            cat | ls | pwd | date | wc | head | tail | grep)
+                exit 0
+                ;;
+            rg)
+                # rg's --pre* flags run a pre-processor command; the reader
+                # is only a reader without them. W2 joins the scan: the
+                # first flag lands there, not in REST.
+                read -r -a RGWORDS <<<"$W2 $REST"
+                for W in "${RGWORDS[@]+"${RGWORDS[@]}"}"; do
+                    case "$W" in
+                        --pre*) block ;;
+                    esac
+                done
                 exit 0
                 ;;
             find)
                 # find is a reader except for its acting flags — the same
                 # "arguments must not change the verb" rule as git below.
-                for W in $CMD; do
+                # `read -a` splits without pathname expansion, so a `*`
+                # word stays a literal word (an unquoted for-split would
+                # glob it against the cwd).
+                read -r -a FWORDS <<<"$CMD"
+                for W in "${FWORDS[@]+"${FWORDS[@]}"}"; do
                     case "$W" in
                         -delete | -exec | -execdir | -ok | -okdir | -fls | -fprint | -fprint0 | -fprintf) block ;;
                     esac
@@ -182,7 +213,16 @@ case "$TOOL" in
                 ;;
             git)
                 case "$W2" in
-                    status | log | diff | show) exit 0 ;;
+                    status | log | diff | show)
+                        # --output* turns the reader into a writer.
+                        read -r -a GWORDS <<<"$REST"
+                        for W in "${GWORDS[@]+"${GWORDS[@]}"}"; do
+                            case "$W" in
+                                --output*) block ;;
+                            esac
+                        done
+                        exit 0
+                        ;;
                     # Read-only forms of a writing verb: bare or listing
                     # flags only (BRANCH_LIST_FLAGS above).
                     branch)

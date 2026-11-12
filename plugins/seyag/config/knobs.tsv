@@ -70,7 +70,7 @@ SYG_CLOCK_STAMP_PATHS_FILE	user	guards	${XDG_CONFIG_HOME:-$HOME/.config}/seyag/c
 SYG_COMPONENTS_TSV	internal	session	<hooks_dir>/components.tsv	Internal variable holding the resolved path to hooks/components.tsv in lib/components.sh.
 SYG_CONFIG	user	misc	unset	Set to 0 to disable the config.toml loader entirely (hooks and wired bins ignore config files; any other value or unset: enabled).
 SYG_CONTEXT_BLOCK	user	session	unset	Token count for the hard context tier: at or above it context-size-reminder arms context-block-gate (handoff-write-only tool use) instead of the soft banner; unset or non-numeric keeps the tier off.
-SYG_CONTEXT_BLOCK_CMDS	user	session	unset	Colon-separated Bash command prefixes that count as the handoff write and lift an armed context block; unset or empty means no Bash command can clear it.
+SYG_CONTEXT_BLOCK_CMDS	user	session	unset	Colon-separated Bash command prefixes that clear an armed context block; literal prefix, no word boundary — a matching compound command clears and runs whole (operator-config trust); unset or empty: no command can clear.
 SYG_CONTEXT_BLOCK_PATHS	user	session	unset	Colon-separated path globs matched literally (no tilde or variable expansion) against a Write, Edit, MultiEdit or NotebookEdit file path to lift an armed context block; unset or empty means no file write can clear it.
 SYG_CONTEXT_COOLDOWN_MIN	user	session	30	Cooldown in minutes between context-size-reminder banners in a session.
 SYG_CONTEXT_THRESHOLD	user	session	500000	Context token threshold at which context-size-reminder fires on non-Fable models.
