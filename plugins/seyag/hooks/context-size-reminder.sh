@@ -100,6 +100,18 @@ block_armed_uncleared() {
     fi
     return 0
 }
+# block_join LIST: a colon-separated list rendered with its entries joined
+# by ", " — the machine-config line never prints raw config syntax.
+block_join() {
+    local out="" e
+    local IFS=:
+    read -r -a JE <<<"$1"
+    for e in "${JE[@]+"${JE[@]}"}"; do
+        [ -n "$e" ] || continue
+        out="${out:+$out, }$e"
+    done
+    printf '%s' "$out"
+}
 if [ -f "$STAMP" ] && [ -z "$(find "$STAMP" -mmin +"$COOLDOWN_MIN" 2>/dev/null)" ]; then
     block_armed_uncleared || exit 0
 fi
@@ -139,14 +151,20 @@ case "$TOTAL" in
 esac
 
 # --- Hard context tier --------------------------------------------------------
-# Replaces the soft banner (never stacks with it): while armed, every prompt at
-# or above SYG_CONTEXT_BLOCK re-emits the mandatory instruction until ONE
-# handoff write clears the session (the done marker growing newer than the
-# armed marker); context-block-gate.sh enforces it on the tool side. The
-# cooldown does not apply here; a cleared session falls through to the soft
-# tier exactly as before.
-if [ -n "$BLOCK_THRESHOLD" ] && [ "$TOTAL" -ge "$BLOCK_THRESHOLD" ]; then
-    if ! { [ -f "$BLOCK_DONE" ] && [ "$BLOCK_DONE" -nt "$BLOCK_ARMED" ]; }; then
+# Replaces the soft banner (never stacks with it): the FIRST arm needs TOTAL at
+# or above SYG_CONTEXT_BLOCK; after that, an armed-uncleared session re-emits
+# the mandatory instruction on EVERY prompt, even below the threshold — a
+# post-compaction total drop must not leave the gate blocking with only its
+# stderr as explanation. ONE handoff write clears the session (the done marker
+# growing newer than the armed marker); context-block-gate.sh enforces the
+# block on the tool side. The cooldown does not apply here; a cleared session
+# falls through to the soft tier exactly as before.
+if [ -n "$BLOCK_THRESHOLD" ]; then
+    BLOCK_CLEARED=0
+    if [ -f "$BLOCK_DONE" ] && [ "$BLOCK_DONE" -nt "$BLOCK_ARMED" ] 2>/dev/null; then
+        BLOCK_CLEARED=1
+    fi
+    if [ "$BLOCK_CLEARED" = 0 ] && { [ "$TOTAL" -ge "$BLOCK_THRESHOLD" ] || [ -f "$BLOCK_ARMED" ]; }; then
         BLOCK_CMDS=${SYG_CONTEXT_BLOCK_CMDS:-}
         BLOCK_PATHS=${SYG_CONTEXT_BLOCK_PATHS:-}
         if [ -z "${BLOCK_CMDS//:/}" ] && [ -z "${BLOCK_PATHS//:/}" ]; then
@@ -171,11 +189,12 @@ tools. Write the handoff now: update your role file's Handoff and Next (via
 your configured handoff command or a file write to a SYG_CONTEXT_BLOCK_PATHS path).
 After one handoff write, the block lifts for the rest of the session.
 EOF
-            # One machine-configured line naming the live clears (never the
-            # raw config syntax); a half with an empty list is omitted.
+            # One machine-configured line naming the live clears, each list
+            # rendered with its entries joined by ", " — never the raw
+            # config syntax; a half with an empty list is omitted.
             LIVE=""
-            [ -z "${BLOCK_PATHS//:/}" ] || LIVE="handoff file paths: $BLOCK_PATHS"
-            [ -z "${BLOCK_CMDS//:/}" ] || LIVE="${LIVE:+$LIVE; }handoff commands: $BLOCK_CMDS"
+            [ -z "${BLOCK_PATHS//:/}" ] || LIVE="handoff file paths: $(block_join "$BLOCK_PATHS")"
+            [ -z "${BLOCK_CMDS//:/}" ] || LIVE="${LIVE:+$LIVE; }handoff commands: $(block_join "$BLOCK_CMDS")"
             [ -z "$LIVE" ] || INSTRUCTION="$INSTRUCTION
 Machine config: $LIVE"
             jq -nc --arg ctx "$INSTRUCTION" \

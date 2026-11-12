@@ -29,6 +29,11 @@ command -v jq >/dev/null 2>&1 || {
 
 TMPDIR_PROBE=$(mktemp -d)
 STATE_DIR="/tmp/claude-$(id -u)"
+# A fresh CI runner has no state dir; unlike the reminder hooks, this probe
+# plants markers itself, before any hook would mkdir it (CI round 2: every
+# arm() redirect died with "No such file or directory" and all armed cases
+# ran unarmed). Create it the reminder's way.
+mkdir -m 700 "$STATE_DIR" 2>/dev/null || true
 SESSION_PREFIX="probe-cbg-$$"
 
 cleanup() {
@@ -165,6 +170,10 @@ for cmd in 'git status' 'git log --oneline -5' 'git diff' 'git show HEAD' \
 done
 run_gate idle Bash '{"command": "git push"}'
 assert_blocked "git push blocked (arguments changed the verb)" "Bash"
+run_gate idle Bash '{"command": "git diff --output=/tmp/probe-fixture/x HEAD"}'
+assert_blocked "git diff --output blocked (a reader writing a file)" "Bash"
+run_gate idle Bash '{"command": "rg --pre foo pat"}'
+assert_blocked "rg --pre blocked (pre-processor runs a command)" "Bash"
 run_gate idle Bash '{"command": "git branch -D x"}'
 assert_blocked "git branch -D blocked (writing verb)" "Bash"
 run_gate idle Bash '{"command": "git branch -m old new"}'
@@ -185,6 +194,17 @@ for flag in -delete -exec -execdir -ok -okdir -fls -fprint -fprint0 -fprintf; do
 done
 run_gate idle Bash '{"command": "find . -name x -exec rm {} +"}'
 assert_blocked "find -exec blocked" "Bash"
+# A `*` word in the command must stay a literal word: pathname expansion
+# against the cwd could surface a file literally named like an acting flag
+# and false-block (review round 2, finding 4).
+FW="$TMPDIR_PROBE/fwcwd"
+mkdir "$FW"
+: >"$FW/-delete"
+json=$(jq -nc --arg s "$SESSION_PREFIX-idle" --arg c 'find . -name x *' '{session_id: $s, tool_name: "Bash", tool_input: {command: $c}}')
+OUT=$(cd "$FW" && printf '%s' "$json" | "$GATE" 2>"$TMPDIR_PROBE/err")
+RC=$?
+ERR=$(cat "$TMPDIR_PROBE/err")
+assert_allow "a * word in a find command is not pathname-expanded (file named -delete in cwd)"
 
 # ---- Case 7: clear-and-allow via SYG_CONTEXT_BLOCK_CMDS prefix ---------------
 arm cmds
@@ -231,6 +251,11 @@ SYG_CONTEXT_BLOCK_PATHS='*/handoff-notes/*' \
     run_gate me2 MultiEdit '{"file_path": "/tmp/probe-fixture/other/role.md"}'
 assert_blocked "MultiEdit to a non-matching path blocked" "MultiEdit"
 assert_no_done "non-matching MultiEdit" "me2"
+arm paths4
+SYG_CONTEXT_BLOCK_PATHS='/tmp/probe-fixture/handoff-notes/*' \
+    run_gate paths4 Edit '{"file_path": "/tmp/probe-fixture/handoff-notes/../../elsewhere/role.md"}'
+assert_blocked "a /../ path is blocked even when the glob would match" "Edit"
+assert_no_done "dotdot path" "paths4"
 arm paths3
 # shellcheck disable=SC2088 # the tilde must stay literal: this case pins that it is not expanded
 SYG_CONTEXT_BLOCK_PATHS='~/handoff-notes/*' \

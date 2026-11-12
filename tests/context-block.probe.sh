@@ -29,10 +29,13 @@ command -v jq >/dev/null 2>&1 || {
 
 TMPDIR_PROBE=$(mktemp -d)
 STATE_DIR="/tmp/claude-$(id -u)"
+# Same fresh-runner guard as the gate probe: the hook mkdirs the state dir on
+# its first run, but nothing here may depend on that ordering.
+mkdir -m 700 "$STATE_DIR" 2>/dev/null || true
 SESSION_PREFIX="probe-ctxblk-$$"
 
 PATHS_LIST='*/handoff-notes/*'
-CMDS_LIST='handoff-write --note'
+CMDS_LIST='handoff-write --note:handoff-write --set'
 
 cleanup() {
     rm -rf "$TMPDIR_PROBE"
@@ -117,11 +120,24 @@ assert_silent_stdout() { # $1 = label
     fi
 }
 
+# The rendered form of a colon-separated list: entries joined with ", " —
+# the raw config syntax is never printed.
+join_list() { # $1 = colon-separated list
+    local out="" e
+    local IFS=:
+    read -r -a JE <<<"$1"
+    for e in "${JE[@]+"${JE[@]}"}"; do
+        [ -n "$e" ] || continue
+        out="${out:+$out, }$e"
+    done
+    printf '%s' "$out"
+}
+
 # The pinned instruction, with <KTOK> and the machine-config line substituted.
 expected_instruction() { # $1 = ktok, $2 = paths list ("" omit), $3 = cmds list
     local live=""
-    [ -z "$2" ] || live="handoff file paths: $2"
-    [ -z "$3" ] || live="${live:+$live; }handoff commands: $3"
+    [ -z "$2" ] || live="handoff file paths: $(join_list "$2")"
+    [ -z "$3" ] || live="${live:+$live; }handoff commands: $(join_list "$3")"
     local txt
     read -r -d '' txt <<EOF || true
 CONTEXT BLOCK: this session is over the hard context limit (~$1k tokens).
@@ -169,6 +185,19 @@ M2=$(stat -c '%Y.%y' "$(armed_file arm)" 2>/dev/null)
     echo "FAIL: armed marker not refreshed on re-arm"
     fail=1
 }
+
+# ---- Case 2b: armed-uncleared re-emits BELOW the threshold (compaction) ------
+# After a /compact the total drops under SYG_CONTEXT_BLOCK; an armed session
+# must still get the instruction (the gate keeps blocking either way), while a
+# never-armed session below the threshold keeps today's soft behaviour.
+TLOW=$(transcript_at 100000)
+SYG_CONTEXT_BLOCK=250000 SYG_CONTEXT_BLOCK_PATHS="$PATHS_LIST" SYG_CONTEXT_BLOCK_CMDS="$CMDS_LIST" \
+    run_reminder arm "$TLOW"
+assert_eq "$(context_of)" "$(expected_instruction 100 "$PATHS_LIST" "$CMDS_LIST")" \
+    "armed session re-emits the instruction below the hard threshold (post-compaction)"
+SYG_CONTEXT_BLOCK=250000 SYG_CONTEXT_BLOCK_PATHS="$PATHS_LIST" SYG_CONTEXT_BLOCK_CMDS="$CMDS_LIST" \
+    run_reminder lowctl "$TLOW"
+assert_silent_stdout "never-armed session below the hard threshold stays silent (100k under soft too)"
 
 # ---- Case 3: the hard tier ignores the soft cooldown -------------------------
 touch "$(stamp_file arm)"
