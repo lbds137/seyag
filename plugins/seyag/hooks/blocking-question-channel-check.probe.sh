@@ -239,6 +239,16 @@ check 0 "stray quotes pairing as a mention (inch marks) — accepted fail-open r
 mktx "$TMP/m11h.jsonl" "This one is genuinely \"waiting on you\" now."
 check 0 "fully-quoted marker in a genuine ask — accepted-silent per the header contract" "$TMP/m11h.jsonl"
 
+mktx "$TMP/m11i.jsonl" "Used the 12\" pipe.
+
+Deploy is waiting on you; flip the \"go\" flag."
+check 2 "stray quote in an earlier paragraph cannot hide a final-paragraph marker (quote pairs are line-local)" "$TMP/m11i.jsonl"
+
+mktx "$TMP/m11j.jsonl" "Used the ${TICK}quick path.
+
+Deploy is fine, still waiting on you${TICK} and more."
+check 2 "stray backtick in an earlier paragraph cannot swallow the final-paragraph marker (code-span pairs are line-local)" "$TMP/m11j.jsonl"
+
 mktx "$TMP/m10a.jsonl" "There's nothing waiting on you either."
 check 0 "negated pending marker: 'nothing waiting on you' does not fire" "$TMP/m10a.jsonl"
 
