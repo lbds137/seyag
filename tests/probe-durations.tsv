@@ -57,6 +57,7 @@ tests/pipe-early-exit.probe.sh	0.2
 tests/plugin-release-check.probe.sh	7.6
 tests/pr-ci-wait.probe.sh	17.0
 tests/pr-closeout.probe.sh	5.2
+tests/pr-open.probe.sh	7.5
 tests/price-table.probe.sh	3.3
 tests/probe-red-check.probe.sh	4.5
 tests/probe-timeout.probe.sh	2.6
