@@ -8,7 +8,6 @@ On the Anthropic lane she drives from her phone, often by voice (Remote Control)
 
 ### Blocking questions go through a formal channel
 - A turn that ends blocked on user input asks through the `AskUserQuestion` tool — choices when the decision has them, else the open question as its prompt with your two likeliest answers as options, the rest via Other. `PushNotification` only accompanies it (or substitutes where the toolset lacks it). The formal channel is what reaches her — the transcript is not.
-- The hook backstop fires on a closing "?" or a pending-marker match in the closing's final paragraph — quoted, code-span and fenced text does not count.
 - The same applies to completions she must see: work she explicitly asked for finishing, a production-affecting finding (CI red, security alert, confirmed prod bug). Send a `PushNotification` alongside the prose report where the toolset has one.
 
 ### Answer her questions first
