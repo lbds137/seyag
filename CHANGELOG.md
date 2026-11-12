@@ -4,6 +4,10 @@ All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY
 
 ## 0.3.167 - 2026-11-12
 
+### Features
+
+- **bin:** `probe-red-check <probe> [base]` proves a new probe red against a base ref (temp detached worktree, realpath-guarded against outside-tree fabrication, RED/NOT RED/INCONCLUSIVE) and `pr-closeout <N> [--apply]` mechanizes the post-automerge close-out (MERGED gate, linked-issue closes with the exact Fixed-by comment, branch disposition via the real branch-sweep/`safe-worktree-clean --only`, dry run by default, HOLD left for the owner) (#312).
+
 ### Bug Fixes
 
 - **bin:** the `safe-worktree-clean --apply-hold` naming-refusal hint now names the approval it waits on — "only on the owner's yes for that tree: re-run the dry run and apply with `--only <tree>`" — instead of the bare "name it with --only"; a commit-carrying tree whose only carrying reasons are `worktree-refs` / `bisect-refs` / `rewritten-refs` now says its count is the branch's beyond-base commits and per-worktree refs hold more, and a failed or vacuous commit count prints `?` instead of a real-looking `0` (#313).
