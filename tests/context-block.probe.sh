@@ -28,10 +28,12 @@ command -v jq >/dev/null 2>&1 || {
 }
 
 TMPDIR_PROBE=$(mktemp -d)
-STATE_DIR="/tmp/claude-$(id -u)"
-# Same fresh-runner guard as the gate probe: the hook mkdirs the state dir on
-# its first run, but nothing here may depend on that ordering.
-mkdir -m 700 "$STATE_DIR" 2>/dev/null || true
+# A temp state dir, exported for the whole run: the real /tmp/claude-<uid>
+# would make live sessions pay the gate's jq path while the suite runs, and a
+# killed probe would leak markers there until the prune.
+STATE_DIR="$TMPDIR_PROBE/state"
+mkdir -m 700 "$STATE_DIR"
+export SYG_STATE_DIR="$STATE_DIR"
 SESSION_PREFIX="probe-ctxblk-$$"
 
 PATHS_LIST='*/handoff-notes/*'
@@ -148,8 +150,8 @@ expected_instruction() { # $1 = ktok, $2 = paths list ("" omit), $3 = cmds list
     read -r -d '' txt <<EOF || true
 CONTEXT BLOCK: this session is over the hard context limit (~$1k tokens).
 Your next tool calls are blocked except the handoff write itself and read-only
-tools. Write the handoff now: update your role file's Handoff and Next (via
-your configured handoff command or a file write to a SYG_CONTEXT_BLOCK_PATHS path).
+tools. Write your session handoff now: update your handoff notes (via your
+configured handoff command or a file write to a SYG_CONTEXT_BLOCK_PATHS path).
 After one handoff write, the block lifts for the rest of the session.
 EOF
     [ -z "$live" ] || txt="$txt
@@ -178,6 +180,21 @@ case "$(cat "$(armed_file arm)" 2>/dev/null)" in
     *) echo "FAIL: armed marker content is not 'TOTAL epoch'"; fail=1 ;;
 esac
 [ -e "$(done_file arm)" ] && echo "FAIL: arm created a done marker" && fail=1
+
+# ---- Case 1b: the tier respects the context-block component toggle ------------
+# With SYG_DISABLE=context-block (or a profile omitting it) the gate does not
+# run, so the reminder must not arm the tier either — every prompt would
+# otherwise carry "your next tool calls are blocked" with nothing enforcing
+# it, and the soft banner suppressed too. Control: Case 1 (enabled → arms).
+T1B=$(transcript_at 300000)
+SYG_DISABLE=context-block SYG_CONTEXT_BLOCK=250000 SYG_CONTEXT_BLOCK_PATHS="$PATHS_LIST" SYG_CONTEXT_BLOCK_CMDS="$CMDS_LIST" \
+    run_reminder disabled "$T1B"
+assert_silent_stdout "SYG_DISABLE=context-block: no hard-tier instruction (300k under soft, silent)"
+[ -e "$(armed_file disabled)" ] && echo "FAIL: armed with the context-block component disabled" && fail=1
+SYG_PROFILE=none SYG_CONTEXT_BLOCK=250000 SYG_CONTEXT_BLOCK_PATHS="$PATHS_LIST" SYG_CONTEXT_BLOCK_CMDS="$CMDS_LIST" \
+    run_reminder profnone "$T1B"
+assert_silent_stdout "SYG_PROFILE=none: no hard-tier instruction (component absent)"
+[ -e "$(armed_file profnone)" ] && echo "FAIL: armed under a profile without context-block" && fail=1
 
 # ---- Case 2: re-arm is idempotent and refreshes the marker --------------------
 M1=$(stat -c '%Y.%y' "$(armed_file arm)" 2>/dev/null)

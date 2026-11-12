@@ -87,15 +87,15 @@ An optional TOML file fills in knobs the environment left unset: user `${XDG_CON
 | `SYG_CONTEXT_COOLDOWN_MIN` | `30` | Cooldown in minutes between context-size-reminder banners in a session. | `hooks/context-size-reminder.sh` |
 | `SYG_CONTEXT_THRESHOLD` | `500000` | Context token threshold at which context-size-reminder fires on non-Fable models. | `hooks/context-size-reminder.sh` |
 | `SYG_CONTEXT_THRESHOLD_FABLE` | `200000` | Context token threshold at which context-size-reminder fires when the model starts with claude-fable. | `hooks/context-size-reminder.sh` |
-| `SYG_DISABLE` | unset | Whitespace- or comma-separated components or hook names to disable; wins over SYG_ENABLE. | `hooks/components.tsv`, `hooks/handoff-pick-check.sh`, `hooks/lib/components.sh`, `hooks/pr-merge-review-check.sh`, `hooks/run.sh`, `hooks/session-start.sh` |
-| `SYG_ENABLE` | unset | Whitespace- or comma-separated components or hook names to enable on top of SYG_PROFILE. | `hooks/components.tsv`, `hooks/lib/components.sh`, `hooks/run.sh` |
+| `SYG_DISABLE` | unset | Whitespace- or comma-separated components or hook names to disable; wins over SYG_ENABLE. | `hooks/components.tsv`, `hooks/context-size-reminder.sh`, `hooks/handoff-pick-check.sh`, `hooks/lib/components.sh`, `hooks/pr-merge-review-check.sh`, `hooks/run.sh`, `hooks/session-start.sh` |
+| `SYG_ENABLE` | unset | Whitespace- or comma-separated components or hook names to enable on top of SYG_PROFILE. | `hooks/components.tsv`, `hooks/context-size-reminder.sh`, `hooks/lib/components.sh`, `hooks/run.sh` |
 | `SYG_EVENT_HOOK_TIMEOUT` | `45` | Per-hook timeout in seconds when run.sh --event runs hooks in parallel. | `hooks/run.sh` |
 | `SYG_LAUNCH_RECORD_DIR` | unset | Directory path opting in launch-record to write <session_id>.json launch metadata at SessionStart. | `hooks/launch-record.sh` |
 | `SYG_LAUNCH_RECORD_ENV` | unset | Space-separated environment variable names recorded under extra in launch-record JSON files. | `hooks/launch-record.sh` |
 | `SYG_LAUNCH_RECORD_HYBRID_OK` | unset | Set to 1 to suppress launch-record's warning when model slots mix provider families. | `hooks/launch-record.sh` |
 | `SYG_LONG_JOB_CMD` | unset | Single-line runner prefix advertised at SessionStart for running >10-minute jobs outside the session tree. | `hooks/session-start.sh` |
 | `SYG_MEM_GATE_CMD` | unset | Single-line command advertised at SessionStart to check free memory before launching workers or test suites. | `hooks/session-start.sh` |
-| `SYG_PROFILE` | `full` | Base component profile (full, guards, or none) before SYG_ENABLE and SYG_DISABLE are applied. | `hooks/components.tsv`, `hooks/lib/components.sh`, `hooks/run.sh`, `hooks/session-start.sh` |
+| `SYG_PROFILE` | `full` | Base component profile (full, guards, or none) before SYG_ENABLE and SYG_DISABLE are applied. | `hooks/components.tsv`, `hooks/context-size-reminder.sh`, `hooks/lib/components.sh`, `hooks/run.sh`, `hooks/session-start.sh` |
 | `SYG_SECURITY_SWEEP` | unset | Set to 1 to run security-sweep --session-line --cap 2 at SessionStart (startup and clear). | `hooks/session-start.sh` |
 | `SYG_SECURITY_SWEEP_REPOS` | unset | Whitespace-separated owner/name repos opting in and scoping security-sweep at SessionStart and in security-sweep. | `hooks/session-start.sh` |
 | `SYG_STATE_MAX_DAYS` | `7` | Age in whole days after which session-start deletes stale prompt-hook state files in SYG_STATE_DIR. | `hooks/dispatch-posture-gate.sh`, `hooks/session-start.sh` |
