@@ -2176,7 +2176,7 @@ if [ "$(verdict "$J_P37" wt37done)" = "HOLD:bisect-refs" ] && [ "$(approvable_of
 else
   bad "P37(ii): wt37done (verdict='$(verdict "$J_P37" wt37done)', approvable=$(approvable_of "$J_P37" wt37done))"
 fi
-want_p37d="2 refs/bisect/* ref(s) hold commits on neither origin/main nor another branch, first: refs/bisect/bad"
+want_p37d="refs/bisect/* holds commits on neither origin/main nor another branch (2 ref(s) in the namespace, first: refs/bisect/bad)"
 got_p37d=$(reason_msg "$J_P37" wt37done)
 [ "$got_p37d" = "$want_p37d" ] && ok "P37(ii): bisect-refs reason line: $want_p37d" \
   || bad "P37(ii): bisect-refs reason line: got '$got_p37d', want '$want_p37d'"
@@ -2187,7 +2187,7 @@ if [ "$v_p37r" = "HOLD:detached-unreferenced,rewritten-refs,in-progress" ] \
 else
   bad "P37(iii): wt37rew (verdict='$v_p37r', approvable=$(approvable_of "$J_P37" wt37rew))"
 fi
-want_p37r="2 refs/rewritten/* ref(s) hold commits on neither origin/main nor another branch, first: refs/rewritten/mid-rew"
+want_p37r="refs/rewritten/* holds commits on neither origin/main nor another branch (2 ref(s) in the namespace, first: refs/rewritten/mid-rew)"
 got_p37r=$(python3 -c '
 import json, sys
 d = json.loads(sys.argv[1])
@@ -2222,10 +2222,10 @@ else
   bad "P37(iv): bisect backup (rc=$rc_p37a, dir='$BK37', good='$GOOD37')"
 fi
 
-# P38 batch-fallback seam: SYG_WORKTREE_STATE_BATCH_FAIL=1 fails tree_state_sha's hash-object
-# batch, so each at-risk file is hashed per file; the plan id must equal the per-file reference
-# formula (true content, not a vacuous batch) with the batch sentinel flipped, and differ from
-# the healthy-batch id of the same tree.
+# P38 batch-fallback seam: SYG_WORKTREE_STATE_BATCH_FAIL=1 skips tree_state_sha's hash-object
+# batch child (batch_ok=false, rc_batch=1), forcing each at-risk file to hash per file; the
+# plan id must equal the per-file reference formula (true content, not a vacuous batch) with
+# the batch sentinel flipped, and differ from the healthy-batch id of the same tree.
 mk_repo sweep38 && [ -d "$T/sweep38" ] || bad "P38 setup: mk_repo sweep38"
 SW38="$T/sweep38"
 WT38="$SW38/.claude/worktrees/wt38"
@@ -2269,6 +2269,136 @@ if [ -n "$PLAN_P38_SEAM" ] && [ "$PLAN_P38_SEAM" = "$(ref_plan_p38 '1:1')" ] \
   ok "P38: with the batch failed, the hold plan still matches the per-file formula (batch=1:1) and differs from the healthy-batch id ($PLAN_P38_NORM)"
 else
   bad "P38: batch fallback (seam='$PLAN_P38_SEAM' want '$(ref_plan_p38 '1:1')', norm='$PLAN_P38_NORM' want '$(ref_plan_p38 '0:0')')"
+fi
+
+# P38b real-failure family: a fake git first on PATH proxies every call to real git, but for
+# the one tree_state_sha call shape baked into SHIM38B_MATCH it emits the real output
+# byte-for-byte and exits 42 — so the poisoned run's stream differs from the healthy one ONLY
+# by the folded child rc (status / diff / diff --cached / for-each-ref / batch hash-object),
+# or, for the per-file hash-object shape, by the rc plus the emptied hash that rc forces.
+# Each variant's hold plan id must differ from the same tree's healthy id; the two hash-object
+# variants exercise the real `else rc_batch=$?` / per-file failure branches (P38 above pins
+# only the seam's skipping). Red-check: a tree_state_sha that dropped child rcs hashes the
+# poisoned streams identically for the status/diff/diff --cached/for-each-ref variants, so
+# their checks fail — the batch hash-object variant still differs on such a mutant, but via
+# the batch_ok flip (a failed batch child zeroes the \001batch=<rc>:<0|1> ok bit and forces
+# the per-file fallback), not via the rc in its own sentinel; the per-file variant is pinned
+# by its rc-faithful formula below, which the mutant also misses.
+mk_repo sweep38b && [ -d "$T/sweep38b" ] || bad "P38b setup: mk_repo sweep38b"
+SW38B="$T/sweep38b"
+WT38B="$SW38B/.claude/worktrees/wt38b"
+add_tree sweep38b wt38b && [ -d "$WT38B" ] || bad "P38b setup: add_tree wt38b"
+echo f1 > "$WT38B/u1.txt" && echo f2 > "$WT38B/u2.txt" \
+  && echo nl > "$WT38B/"$'u\nnl.txt' \
+  && [ -f "$WT38B/u1.txt" ] && [ -f "$WT38B/u2.txt" ] && [ -f "$WT38B/"$'u\nnl.txt' ] \
+  || bad "P38b setup: untracked files (2 batchable, 1 newline-named)"
+REAL_GIT=$(command -v git)
+[ -n "$REAL_GIT" ] || bad "P38b setup: command -v git"
+mkdir -p "$T/shim38b"
+cat > "$T/shim38b/git" <<EOF
+#!/bin/sh
+# P38b: proxy to real git; for the one tree_state_sha call shape matched by
+# SHIM38B_MATCH, emit the real output byte-for-byte and exit 42.
+real='$REAL_GIT'
+case " \$* " in
+  *"\$SHIM38B_MATCH"*) ;;
+  *) exec "\$real" "\$@" ;;
+esac
+tmp=\$(mktemp) || exit 1
+"\$real" "\$@" >"\$tmp" 2>/dev/null
+cat "\$tmp"
+rm -f "\$tmp"
+exit 42
+EOF
+chmod +x "$T/shim38b/git"
+fail_plan() { # $1 = match fragment -> that poisoned run's hold plan id
+  SHIM38B_MATCH=$1 PATH="$T/shim38b:$PATH" "$TOOL" --repo "$SW38B" --json 2>/dev/null \
+    | python3 -c 'import json,sys; print(json.load(sys.stdin)["hold_plan"] or "")'
+}
+PLAN_38B_OK=$("$TOOL" --repo "$SW38B" --json 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)["hold_plan"] or "")')
+[ -n "$PLAN_38B_OK" ] || bad "P38b setup: healthy hold plan id"
+check38b() { # $1 label, $2 match fragment: the poisoned plan must differ from the healthy id
+  local plan
+  plan=$(fail_plan "$2")
+  if [ -n "$plan" ] && [ "$plan" != "$PLAN_38B_OK" ]; then
+    ok "P38b: $1 child failing (rc 42, real output intact) changes the hold plan id"
+  else
+    bad "P38b: $1 (plan='$plan', healthy='$PLAN_38B_OK')"
+  fi
+}
+# the fragments match tree_state_sha's call shapes, never the judge's (status: --ignored
+# bare vs the judge's --no-renames --ignored=matching; diff: --binary vs --name-only;
+# for-each-ref: the two-field format vs the judge's three-field one). NOT unique by shape
+# alone, though: regen_verdict's `hash-object --no-filters --` call and backup_tree's
+# `diff --binary HEAD` / two-field for-each-ref are byte-identical to tree_state_sha's.
+# Uniqueness today rests on --json never invoking backup_tree (an apply-path function) and
+# sweep38b holding no regenerable or ignored entries (so regen_verdict never runs) — a
+# fixture edit adding either must re-check every fragment here.
+check38b 'git status'                     ' status --porcelain=v1 -z --ignored '
+check38b 'git diff'                       ' diff --binary HEAD '
+check38b 'git diff --cached'              ' diff --binary --cached HEAD '
+check38b 'git for-each-ref'               'for-each-ref --format=%(objectname) %(refname) refs/worktree/'
+check38b 'batch hash-object --stdin-paths' ' hash-object --no-filters --stdin-paths'
+
+# the per-file shape empties the hash on its nonzero rc, so this variant also pins the exact
+# rc-faithful stream: the newline-named file's hash is empty and its hash sentinel is 42
+plan_38b_pf=$(fail_plan ' hash-object --no-filters -- ')
+ref_state_38b_pf=$(
+  {
+    printf '\001atrisk=%s\0' 0
+    git -C "$WT38B" status --porcelain=v1 -z --ignored --untracked-files=all; rc38b=$?
+    printf '\001status=%s\0' "$rc38b"
+    git -C "$WT38B" diff --binary HEAD; rc38b=$?
+    printf '\001diff=%s\0' "$rc38b"
+    git -C "$WT38B" diff --binary --cached HEAD; rc38b=$?
+    printf '\001diffcached=%s\0' "$rc38b"
+    printf '\001batch=%s\0' "0:0"  # u1.txt and u2.txt still batch healthy
+    for p38b in $'u\nnl.txt' u1.txt u2.txt; do
+      rc38b=0
+      if [ "$p38b" = $'u\nnl.txt' ]; then
+        h38b=""; rc38b=42
+      else
+        h38b=$(git -C "$WT38B" hash-object --no-filters -- "$p38b") || rc38b=$?
+      fi
+      printf '%s\0%s\0' "$p38b" "${h38b:-}"
+      printf '\001hash=%s\0' "$rc38b"
+    done
+    git -C "$WT38B" for-each-ref --format='%(objectname) %(refname)' refs/worktree/ refs/bisect/ refs/rewritten/; rc38b=$?
+    printf '\001foreachref=%s\0' "$rc38b"
+  } | sha256sum | cut -d' ' -f1
+)
+head38b=$(git -C "$WT38B" rev-parse HEAD)
+reasons38b=$(printf '%s\n' \
+  $'untracked-new\tu\nnl.txt is untracked and not on origin/main' \
+  $'untracked-new\tu1.txt is untracked and not on origin/main' \
+  $'untracked-new\tu2.txt is untracked and not on origin/main' \
+  | LC_ALL=C sort)
+ref_plan_38b_pf=$(printf '%s\0%s\0%s\0%s\0%s\0' "$WT38B" "worktree-agent-wt38b" "$head38b" "$reasons38b" "$ref_state_38b_pf" | sha256sum | cut -c1-12)
+if [ -n "$plan_38b_pf" ] && [ "$plan_38b_pf" != "$PLAN_38B_OK" ] && [ "$plan_38b_pf" = "$ref_plan_38b_pf" ]; then
+  ok "P38b: per-file hash-object failing (rc 42, hash emptied) changes the plan id and matches the rc-faithful formula"
+else
+  bad "P38b: per-file hash-object (plan='$plan_38b_pf', formula='$ref_plan_38b_pf', healthy='$PLAN_38B_OK')"
+fi
+
+# P39 refs/bisect non-commit tip (shape follows P31(iv)/(v), for the bisect namespace): a ref
+# at a blob under refs/bisect/ HOLDs as bisect-refs-object — pinning the $ns-refs-object
+# interpolation — names the object type, and the tree is never approvable (the backup packs
+# commits only).
+mk_repo sweep39 && [ -d "$T/sweep39" ] || bad "P39 setup: mk_repo sweep39"
+SW39="$T/sweep39"
+WT39="$SW39/.claude/worktrees/wt39blob"
+add_tree sweep39 wt39blob && [ -d "$WT39" ] || bad "P39 setup: add_tree wt39blob"
+blob_39=$(printf 'bisect blob payload\n' | git -C "$WT39" hash-object -w --stdin 2>/dev/null)
+[ -n "$blob_39" ] && git -C "$WT39" update-ref refs/bisect/blobref "$blob_39" || bad "P39 setup: hash-object -w + update-ref refs/bisect/blobref"
+[ "$(git -C "$WT39" for-each-ref --format='%(objecttype)' refs/bisect/blobref 2>/dev/null)" = blob ] || bad "P39 setup: blobref is not a blob"
+J_P39=$("$TOOL" --repo "$SW39" --json); rc_p39=$?
+want_p39="refs/bisect/blobref points at a blob; back it up by hand before removing the tree"
+if [ "$rc_p39" -eq 0 ] && [ "$(verdict "$J_P39" wt39blob)" = "HOLD:bisect-refs-object" ] \
+  && [ "$(approvable_of "$J_P39" wt39blob)" = "False" ] \
+  && [ "$(reason_msg "$J_P39" wt39blob)" = "$want_p39" ]; then
+  ok "P39: refs/bisect/blobref at a blob is HOLD:bisect-refs-object, names the object type ('points at a blob'), not approvable"
+else
+  bad "P39: bisect blob ref (rc=$rc_p39, verdict='$(verdict "$J_P39" wt39blob)', approvable='$(approvable_of "$J_P39" wt39blob)', reason='$(reason_msg "$J_P39" wt39blob)')"
 fi
 
 exit $fail
