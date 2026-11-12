@@ -358,6 +358,64 @@ first_line=$(printf '%s\n' "$out" | sed -n '1p')
   || bad "case21: first line: $first_line"
 [ ! -s "$GH_LOG" ] && ok "case21: gh never called" || bad "case21: gh called"
 
+# Case 22 — private term in the TITLE only (the body clean): the block
+# names the title-side hit, same label shape as the session-link scan's
+# title case (case 3); gh never called.
+printf 'Clean body.\n' > "$T/b22.md"
+git -C "$R" config seyag.publicRepo true
+run_open "Mentions lumina-vault" "$T/b22.md"
+first_line=$(printf '%s\n' "$out" | sed -n '1p')
+[[ "$rc" -eq 1 && "$first_line" == "pr-open: BLOCK: private term in title line 1: "* ]] \
+  && ok "case22: private-term title block" || bad "case22: rc $rc, first: $first_line"
+[ ! -s "$GH_LOG" ] && ok "case22: gh never called" || bad "case22: gh called"
+
+# Case 23 — private term on line 2 of the body: the block reports line 2
+# (line 1 clean, title clean — only the line-2 hit).
+printf 'Line one is clean.\nShips the lumina-vault rename.\n' > "$T/b23.md"
+run_open "Clean title" "$T/b23.md"
+first_line=$(printf '%s\n' "$out" | sed -n '1p')
+[[ "$rc" -eq 1 && "$first_line" == "pr-open: BLOCK: private term in body line 2: "* ]] \
+  && ok "case23: body hit reported by its line number" \
+  || bad "case23: rc $rc, first: $first_line"
+[ ! -s "$GH_LOG" ] && ok "case23: gh never called" || bad "case23: gh called"
+
+# Case 24 — --head naming a branch with no local refs/heads entry: the
+# arm line omits --sha (pr-ci-wait then resolves the PR's current head,
+# the form skills/pr-monitoring documents) and a one-line note lands on
+# stderr; stdout stays the parseable PR line + arm line.
+printf 'Clean body.\n' > "$T/b24.md"
+git -C "$R" config seyag.publicRepo false
+OPEN_ARGS=(--head fixt-branch)
+run_open "Clean title" "$T/b24.md"
+OPEN_ARGS=()
+[ "$rc" -eq 0 ] && ok "case24: rc 0" || bad "case24: rc $rc: $out"
+first_line=$(printf '%s\n' "$out" | sed -n '1p')
+[ "$first_line" = "PR #42: https://github.com/example/example/pull/42" ] \
+  && ok "case24: PR line first" || bad "case24: first line: $first_line"
+arm_line=$(printf '%s\n' "$out" | grep -Fx "cd '$R' && pr-ci-wait 42")
+[ "$arm_line" = "cd '$R' && pr-ci-wait 42" ] \
+  && ok "case24: arm line omits --sha" || bad "case24: arm line: $arm_line"
+[[ "$out" == *"pr-open: refs/heads/fixt-branch not found locally; arming without --sha (pr-ci-wait watches the PR head)"* ]] \
+  && ok "case24: fallback note printed" || bad "case24: note missing: $out"
+[ "$(wc -l < "$GH_LOG")" -eq 1 ] && ok "case24: exactly one gh call" \
+  || bad "case24: gh calls: $(wc -l < "$GH_LOG")"
+# The note is on STDERR, not stdout: a second run captures the streams
+# apart and checks both sides (stdout = exactly the two parseable lines).
+: > "$GH_LOG"
+(cd "$R" && env -i \
+  HOME="$T/home" PATH="$T/bin:$PATH" TERM=dumb \
+  FAKE_GH_LOG="$GH_LOG" \
+  SYG_PRIVATE_TERMS_FILE="$TERMS" SYG_PR_BODY_BASE_REF=no-such-ref \
+  "$BIN" --title "Clean title" --body-file "$T/b24.md" --head fixt-branch \
+  > "$T/case24.out" 2> "$T/case24.err")
+printf '%s\n' "PR #42: https://github.com/example/example/pull/42" \
+  "cd '$R' && pr-ci-wait 42" > "$T/case24.want"
+cmp -s "$T/case24.out" "$T/case24.want" \
+  && ok "case24: stdout is exactly the PR + arm lines" \
+  || bad "case24: stdout: $(cat "$T/case24.out")"
+[ "$(cat "$T/case24.err")" = "pr-open: refs/heads/fixt-branch not found locally; arming without --sha (pr-ci-wait watches the PR head)" ] \
+  && ok "case24: note on stderr only" || bad "case24: stderr: $(cat "$T/case24.err")"
+
 echo "---"
 if [ "$fail" -eq 0 ]; then
   echo "all ok"
