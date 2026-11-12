@@ -45,7 +45,10 @@
 # blocks, line-local inline `...` code spans and line-local balanced quoted
 # spans ("..." and “...” — each stripped span becomes a clause boundary; an
 # unbalanced quote changes nothing, across lines too) is scanned
-# case-insensitively against
+# case-insensitively against. A paragraph left holding only whitespace, dots
+# and stripped-span placeholders does not become the scan scope (the previous
+# paragraph is scanned, as before); a tripped line quotes the cleaned text
+# with those placeholders where stripped spans sat.
 # SYG_BQ_PENDING_MARKERS (a Python regex; unset uses the built-in default
 # `say the word\b|waiting on you\b|needs? your (yes|go|call|input)\b|for you to (decide|test|check)\b`;
 # set to empty disables the pass; a broken regex fails open). A match directly
@@ -222,7 +225,10 @@ if raw_markers:
         # across the span to the marker.
         cleaned = re.sub(r'"[^"\n]*"', " . ", cleaned)
         cleaned = re.sub(r"“[^”\n]*”", " . ", cleaned)
-        paras = [p for p in re.split(r"\n\s*\n", cleaned) if p.strip()]
+        # A paragraph left holding only stripped-span placeholders (or bare
+        # punctuation) does not become the scan scope: filter it, so the scope
+        # falls back to the previous paragraph as base did when a span emptied.
+        paras = [p for p in re.split(r"\n\s*\n", cleaned) if re.sub(r"[\s.]", "", p)]
         scope = paras[-1] if paras else ""
         if live_match(scope):
             tripped = next(

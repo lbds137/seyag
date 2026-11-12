@@ -255,6 +255,16 @@ check 2 "clause punctuation inside a stripped span keeps the negator in its own 
 mktx "$TMP/m11l.jsonl" "It's not ${TICK}done.${TICK} Waiting on you to test."
 check 2 "code-span variant: stripped span boundary keeps the negator in its own clause" "$TMP/m11l.jsonl"
 
+mktx "$TMP/m11m.jsonl" "Deploy is waiting on you.
+
+${TICK}make deploy${TICK}"
+check 2 "a stripped-span-only final paragraph does not become the scan scope — scope falls back" "$TMP/m11m.jsonl"
+
+mktx "$TMP/m11n.jsonl" "Deploy is waiting on you.
+
+\"Ship it\""
+check 2 "quoted-only final paragraph does not become the scan scope — scope falls back" "$TMP/m11n.jsonl"
+
 mktx "$TMP/m10a.jsonl" "There's nothing waiting on you either."
 check 0 "negated pending marker: 'nothing waiting on you' does not fire" "$TMP/m10a.jsonl"
 
