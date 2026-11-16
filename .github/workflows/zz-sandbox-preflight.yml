@@ -9,21 +9,23 @@ jobs:
     steps:
       - name: as shipped
         run: |
-          set -x
+          set -x +e
           uname -r; head -3 /etc/os-release
           command -v bwrap pasta unshare || true
           sysctl kernel.apparmor_restrict_unprivileged_userns kernel.unprivileged_userns_clone user.max_user_namespaces 2>&1 || true
           ls -d /run/user/$(id -u)/systemd 2>&1 || true
           unshare --user --map-root-user true; echo "unshare rc=$?"
       - name: install
-        run: sudo apt-get update -q && sudo apt-get install -y -q bubblewrap passt
+        run: echo skip-install
       - name: bwrap default
         run: |
+          set +e
           bwrap --version
           bwrap --die-with-parent --unshare-all --new-session --ro-bind / / --dev /dev --proc /proc --tmpfs /tmp true; echo "bwrap rc=$?"
           pasta --config-net --quiet --no-map-gw -t none -u none -T none -U none -- bwrap --unshare-all --share-net --uid "$(id -u)" --gid "$(id -g)" --ro-bind / / --dev /dev --proc /proc true; echo "pasta+bwrap rc=$?"
       - name: bwrap after sysctl
         run: |
+          set +e
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
           bwrap --die-with-parent --unshare-all --new-session --ro-bind / / --dev /dev --proc /proc --tmpfs /tmp true; echo "bwrap rc=$?"
           pasta --config-net --quiet --no-map-gw -t none -u none -T none -U none -- bwrap --unshare-all --share-net --uid "$(id -u)" --gid "$(id -g)" --ro-bind / / --dev /dev --proc /proc true; echo "pasta+bwrap rc=$?"
