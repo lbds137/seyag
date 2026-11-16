@@ -15,9 +15,10 @@
 # - compact: adds the post-compaction recovery checklist (the failure class
 #   where re-suggested settings, dropped promises and lost work-stack pointers
 #   keep recurring; component `rules`). Adapted from Tzurot's session-start.sh.
-# - startup / clear / compact: appends the memory-gate (SYG_MEM_GATE_CMD) and
-#   long-job runner (SYG_LONG_JOB_CMD) lines when set (single-line values only;
-#   not gated by `rules`).
+# - startup / clear / compact: appends the memory-gate (SYG_MEM_GATE_CMD),
+#   long-job runner (SYG_LONG_JOB_CMD) and cross-family reviewer route
+#   (SYG_CROSS_REVIEW_CMD) lines when set (single-line values only; not gated
+#   by `rules`).
 # - resume: outputs nothing.
 # - every source: deletes prompt-hook state files older than 7 days (below),
 #   and runs `seyag-git-hooks relink` (adds one line only when it rewrote
@@ -169,6 +170,13 @@ case "$SOURCE" in
       *)
         TEXT="${TEXT:+$TEXT
 }Long jobs (over ~10 min): run them as \`$SYG_LONG_JOB_CMD NAME -- CMD\` so a low-memory reaper can't kill them."
+        ;;
+    esac
+    case "${SYG_CROSS_REVIEW_CMD:-}" in
+      '' | *$'\n'*) ;;
+      *)
+        TEXT="${TEXT:+$TEXT
+}Cross-family review: run \`$SYG_CROSS_REVIEW_CMD\` for the reviewer route when a review is due; same-family fresh context is a labelled fallback only when that route is closed."
         ;;
     esac
     ;;

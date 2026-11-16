@@ -2,6 +2,16 @@
 
 All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY-MM-DD>` section per released version; under it, `###` categories in fixed order — Breaking Changes, Features, Bug Fixes, Improvements, Chores, Tests — empty ones omitted; items are `- **scope:** description (#PR)`, written from the version's merged commit subjects.
 
+## 0.3.169 - 2026-11-16
+
+### Features
+
+- **rules:** core.md "Subagents by default": a review comes from another model family where one is reachable, same-family as a labelled fallback; new `SYG_CROSS_REVIEW_CMD` knob (user scope) advertised at SessionStart beside the memory and long-job gates (#320).
+
+### Tests
+
+- **probes:** session-start gains `SYG_CROSS_REVIEW_CMD` cases (line appended on startup/clear/compact, absent when unset, empty or multi-line, not gated by the rules component, the value printed and never evaluated); config-env gains user-scope apply and project-scope refusal cases (#320).
+
 ## 0.3.168 - 2026-11-16
 
 ### Features

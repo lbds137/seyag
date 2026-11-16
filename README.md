@@ -103,7 +103,7 @@ Every hook belongs to one component, and each component switches on its own, so 
 
 | Component | Hooks | What it is for |
 |---|---|---|
-| `session` | `session-start` | The version line other tools read, optional machine-gate lines (`SYG_MEM_GATE_CMD`, `SYG_LONG_JOB_CMD`), and aging out state files. Always runs; it cannot be disabled. |
+| `session` | `session-start` | The version line other tools read, optional machine-gate lines (`SYG_MEM_GATE_CMD`, `SYG_LONG_JOB_CMD`, `SYG_CROSS_REVIEW_CMD`), and aging out state files. Always runs; it cannot be disabled. |
 | `rules` | (none: gates parts of `session-start`) | The rules-link warning at startup/clear and the post-compaction checklist. |
 | `security` | (none: gates part of `session-start`) | Opt-in env (`SYG_SECURITY_SWEEP=1` or `SYG_SECURITY_SWEEP_REPOS`), headless-off: runs `security-sweep --session-line --cap 2` (a built-in 2 s cap; no `timeout` binary needed) at startup/clear and appends one line when open GitHub security alerts exist. |
 | `route` | `route-check` | Approved model route check at session start. |
@@ -165,7 +165,7 @@ A project that keeps the plugin disabled, so that its skills and agents do not l
 - Matchers, as read from Claude Code's code but not verified against it: empty or `*` matches every tool, a plain list such as `Edit|Write|MultiEdit` matches those exact names, and anything else is treated as an unanchored regex. A payload without a `tool_name` runs every entry of its event. Only plain matchers appear in `hooks.json` today.
 - Cost: every call of a wired event starts the dispatcher, including tool calls no hook matches. When nothing matches, it exits right after one `jq` call. One slow hook can delay the event by up to `SYG_EVENT_HOOK_TIMEOUT` seconds, after which it is stopped and ignored.
 
-**Machine gates:** `SYG_MEM_GATE_CMD` is a command that exits 0 when there is enough free memory to launch a worker, a test suite or a fan-out; `SYG_LONG_JOB_CMD` is a runner prefix, called as `$SYG_LONG_JOB_CMD NAME -- CMD [ARG...]`, that runs a job of over ~10 minutes outside the session's process tree, where a low-memory reaper that kills background shells cannot reach it. Each is off when empty or unset (a value with a newline is ignored); when set, `session-start` names it on `startup`, `clear` and `compact` (outside the `rules` component), and the `delegation` skill tells the agent to use it.
+**Machine gates:** `SYG_MEM_GATE_CMD` is a command that exits 0 when there is enough free memory to launch a worker, a test suite or a fan-out; `SYG_LONG_JOB_CMD` is a runner prefix, called as `$SYG_LONG_JOB_CMD NAME -- CMD [ARG...]`, that runs a job of over ~10 minutes outside the session's process tree, where a low-memory reaper that kills background shells cannot reach it. Each is off when empty or unset (a value with a newline is ignored); when set, `session-start` names it on `startup`, `clear` and `compact` (outside the `rules` component), and the `delegation` skill tells the agent to use it. `SYG_CROSS_REVIEW_CMD` is a command that, run, prints or names the route to a reviewer from a different model family than the author's (user scope only, like every `_CMD` knob); SessionStart advertises it the same way.
 
 ## Bypass tokens
 

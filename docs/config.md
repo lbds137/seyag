@@ -87,6 +87,7 @@ An optional TOML file fills in knobs the environment left unset: user `${XDG_CON
 | `SYG_CONTEXT_COOLDOWN_MIN` | `30` | Cooldown in minutes between context-size-reminder banners in a session. | `hooks/context-size-reminder.sh` |
 | `SYG_CONTEXT_THRESHOLD` | `500000` | Context token threshold at which context-size-reminder fires on non-Fable models. | `hooks/context-size-reminder.sh` |
 | `SYG_CONTEXT_THRESHOLD_FABLE` | `200000` | Context token threshold at which context-size-reminder fires when the model starts with claude-fable. | `hooks/context-size-reminder.sh` |
+| `SYG_CROSS_REVIEW_CMD` | unset | Single-line command advertised at SessionStart that names the route to a reviewer from a different model family than the author's. | `hooks/session-start.sh` |
 | `SYG_DISABLE` | unset | Whitespace- or comma-separated components or hook names to disable; wins over SYG_ENABLE. | `hooks/components.tsv`, `hooks/context-size-reminder.sh`, `hooks/handoff-pick-check.sh`, `hooks/lib/components.sh`, `hooks/pr-merge-review-check.sh`, `hooks/run.sh`, `hooks/session-start.sh` |
 | `SYG_ENABLE` | unset | Whitespace- or comma-separated components or hook names to enable on top of SYG_PROFILE. | `hooks/components.tsv`, `hooks/context-size-reminder.sh`, `hooks/lib/components.sh`, `hooks/run.sh` |
 | `SYG_EVENT_HOOK_TIMEOUT` | `45` | Per-hook timeout in seconds when run.sh --event runs hooks in parallel. | `hooks/run.sh` |

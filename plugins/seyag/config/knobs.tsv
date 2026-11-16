@@ -90,6 +90,7 @@ SYG_CREDIT_PRICE_TABLE_CMD	internal	credit	<script_dir>/price-table	Test seam ov
 SYG_CREDIT_ROUTE	user	credit	anthropic-api	Route label written into each ledger entry by api-credit hook.
 SYG_CREDIT_SETTLE_DAYS	user	credit	2	Number of recent closed UTC days (non-negative integer; 0 disables) taking max(provider, ledger) spend in api-credit.
 SYG_CREDIT_WHEN	user	credit	unset	Env match rule (NAME=value) deciding when a session is on the metered API-key route instead of ANTHROPIC_API_KEY.
+SYG_CROSS_REVIEW_CMD	user	session	unset	Single-line command advertised at SessionStart that names the route to a reviewer from a different model family than the author's.
 SYG_CWD_DRIFT_WORKTREE	user	guards	unset	Set to 0 to disable cwd-drift-guard's once-per-arrival warning for state-changing git commands in linked worktrees.
 SYG_DISABLE	user	session	unset	Whitespace- or comma-separated components or hook names to disable; wins over SYG_ENABLE.
 SYG_DISPATCH_ACK_FILE	internal	guards	/tmp/claude-<uid>/dispatch-posture-ack	Test seam overriding the path to dispatch-posture-gate's per-commit acknowledgement and cumulative line ledger file.
