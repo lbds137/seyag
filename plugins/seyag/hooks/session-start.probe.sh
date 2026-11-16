@@ -13,7 +13,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 # Hermetic: the fixtures below set the SYG_ knobs explicitly, so an ambient
 # SYG_ variable must not override them.
-unset SYG_STATE_DIR SYG_STATE_MAX_DAYS SYG_USER_RULES_DIR SYG_INSTALLED_PLUGINS SYG_PROFILE SYG_ENABLE SYG_DISABLE SYG_MEM_GATE_CMD SYG_LONG_JOB_CMD SYG_SECURITY_SWEEP SYG_SECURITY_SWEEP_REPOS SECURITY_SWEEP_GH CLAUDE_CODE_ENTRYPOINT
+unset SYG_STATE_DIR SYG_STATE_MAX_DAYS SYG_USER_RULES_DIR SYG_INSTALLED_PLUGINS SYG_PROFILE SYG_ENABLE SYG_DISABLE SYG_MEM_GATE_CMD SYG_LONG_JOB_CMD SYG_CROSS_REVIEW_CMD SYG_SECURITY_SWEEP SYG_SECURITY_SWEEP_REPOS SECURITY_SWEEP_GH CLAUDE_CODE_ENTRYPOINT
 # The git-hooks relink acts on ${XDG_DATA_HOME}/seyag/git-hooks: a scratch one,
 # so a run with the real plugin root never re-points a real install.
 export XDG_DATA_HOME="$TMP/xdg"
@@ -33,7 +33,7 @@ bad() { echo "FAIL: $1"; [ -n "${2:-}" ] && printf '      got: %s\n' "$2"; fail=
 
 run() { # $1 source, $2 user rules dir → sets OUT, RC
   OUT=$(jq -nc --arg s "$1" '{session_id: "probe", source: $s}' \
-    | env -u SYG_MEM_GATE_CMD -u SYG_LONG_JOB_CMD \
+    | env -u SYG_MEM_GATE_CMD -u SYG_LONG_JOB_CMD -u SYG_CROSS_REVIEW_CMD \
       CLAUDE_PLUGIN_ROOT="$TMP/root" SYG_USER_RULES_DIR="$2" SYG_STATE_DIR="$TMP/state" bash "$HOOK" 2>/dev/null)
   RC=$?
 }
@@ -121,7 +121,7 @@ runenv() { # $1 source, $2 user rules dir, rest = NAME=value env → sets OUT, R
   local src=$1 dir=$2
   shift 2
   OUT=$(jq -nc --arg s "$src" '{session_id: "probe", source: $s}' \
-    | env -u SYG_MEM_GATE_CMD -u SYG_LONG_JOB_CMD \
+    | env -u SYG_MEM_GATE_CMD -u SYG_LONG_JOB_CMD -u SYG_CROSS_REVIEW_CMD \
       CLAUDE_PLUGIN_ROOT="$TMP/root" SYG_USER_RULES_DIR="$dir" SYG_STATE_DIR="$TMP/state" "$@" bash "$HOOK" 2>/dev/null)
   RC=$?
 }
@@ -144,8 +144,9 @@ runenv startup "$TMP/rules-empty" SYG_PROFILE=none SYG_DISABLE=session
 runenv startup "$TMP/rules-empty" SYG_PROFILE=bogus
 [ "$RC" = 0 ] && valid && grep -q 'core rules are not loaded' <<<"$(ctx)" && ok "SYG_PROFILE=bogus behaves as full: warning present" || bad "bogus profile: expected the warning" "$OUT"
 
-# Machine gates: SYG_MEM_GATE_CMD and SYG_LONG_JOB_CMD append on startup/clear/compact,
-# stay off when empty or multiline, and are not gated by the `rules` component.
+# Machine gates: SYG_MEM_GATE_CMD, SYG_LONG_JOB_CMD and SYG_CROSS_REVIEW_CMD append on
+# startup/clear/compact, stay off when empty or multiline, and are not gated by the
+# `rules` component.
 MEM_LINE='Memory gate: run `mem-gate --ok` before launching a worker, a test suite or a fan-out (exit 0 = go).'
 JOB_LINE='Long jobs (over ~10 min): run them as `long-job-run NAME -- CMD` so a low-memory reaper can'\''t kill them.'
 runenv startup "$TMP/rules-linked" SYG_MEM_GATE_CMD="mem-gate --ok" SYG_LONG_JOB_CMD="long-job-run"
@@ -173,6 +174,50 @@ if [ "$RC" = 0 ] && valid && [ "$(ctx)" = "seyag plugin unknown" ]; then
   ok "gate values with an embedded newline: ignored (no gate line)"
 else
   bad "gate values with an embedded newline: expected no gate line" "$OUT"
+fi
+
+# SYG_CROSS_REVIEW_CMD (the cross-family reviewer route) appends after the other gate lines.
+XFAM_LINE='Cross-family review: run `xfam-route --for review` for the reviewer route when a review is due; same-family fresh context is a labelled fallback only when that route is closed.'
+runenv startup "$TMP/rules-linked" SYG_MEM_GATE_CMD="mem-gate --ok" SYG_LONG_JOB_CMD="long-job-run" SYG_CROSS_REVIEW_CMD="xfam-route --for review"
+if [ "$RC" = 0 ] && valid && [ "$(ctx)" = "$(printf 'seyag plugin unknown\n%s\n%s\n%s' "$MEM_LINE" "$JOB_LINE" "$XFAM_LINE")" ]; then
+  ok "startup with all three gate vars set: version line, then the MEM, JOB and XFAM lines in order"
+else
+  bad "startup with all three gate vars set: expected version line + three gate lines" "$OUT"
+fi
+runenv compact "$TMP/rules-linked" SYG_CROSS_REVIEW_CMD="xfam-route --for review"
+if [ "$RC" = 0 ] && valid && grep -q '^POST-COMPACTION RECOVERY' <<<"$(ctx)" \
+  && [ "$(ctx | tail -1)" = "$XFAM_LINE" ] && ! grep -q 'Memory gate\|Long jobs' <<<"$(ctx)"; then
+  ok "compact with SYG_CROSS_REVIEW_CMD only: checklist then the cross-family line last"
+else
+  bad "compact with SYG_CROSS_REVIEW_CMD only: expected checklist + cross-family line last" "$OUT"
+fi
+runenv startup "$TMP/rules-linked" SYG_CROSS_REVIEW_CMD="xfam-route${NL}evil"
+if [ "$RC" = 0 ] && valid && [ "$(ctx)" = "seyag plugin unknown" ]; then
+  ok "SYG_CROSS_REVIEW_CMD with an embedded newline: ignored (no cross-family line)"
+else
+  bad "SYG_CROSS_REVIEW_CMD with an embedded newline: expected no cross-family line" "$OUT"
+fi
+runenv compact "$TMP/rules-linked" SYG_DISABLE=rules SYG_CROSS_REVIEW_CMD="xfam-route --for review"
+if [ "$RC" = 0 ] && valid && [ "$(ctx)" = "$XFAM_LINE" ]; then
+  ok "compact with SYG_DISABLE=rules and SYG_CROSS_REVIEW_CMD set: only the cross-family line"
+else
+  bad "compact with SYG_DISABLE=rules and SYG_CROSS_REVIEW_CMD set: expected only the cross-family line" "$OUT"
+fi
+
+# The value is printed, never evaluated: command substitution, backticks, $VAR and quotes stay literal.
+TRICKY='x $(echo PWNED) `echo PWNED2` $HOME "q"'
+TRICKY_LINE='Cross-family review: run `'"$TRICKY"'` for the reviewer route when a review is due; same-family fresh context is a labelled fallback only when that route is closed.'
+runenv startup "$TMP/rules-linked" SYG_CROSS_REVIEW_CMD="$TRICKY"
+if [ "$RC" = 0 ] && valid && [ "$(ctx | tail -1)" = "$TRICKY_LINE" ] && ! grep -qxE 'PWNED|PWNED2' <<<"$(ctx)"; then
+  ok "SYG_CROSS_REVIEW_CMD with substitution, backticks, \$VAR and quotes: printed literally, never evaluated"
+else
+  bad "SYG_CROSS_REVIEW_CMD printed-literal case: expected the literal value in the line" "$OUT"
+fi
+runenv startup "$TMP/rules-linked" SYG_CROSS_REVIEW_CMD=""
+if [ "$RC" = 0 ] && valid && [ "$(ctx)" = "seyag plugin unknown" ]; then
+  ok "SYG_CROSS_REVIEW_CMD set to empty: no cross-family line"
+else
+  bad "SYG_CROSS_REVIEW_CMD empty: expected version line only" "$OUT"
 fi
 
 # Output must stay far below Claude Code's ~10 KB hook-output preview cliff.
@@ -269,7 +314,7 @@ runsec() { # $1 source, rest = env assignments
   shift
   rm -rf "$TMP/sec-state"
   OUT=$(cd "$TMP/sec-repo" && jq -nc --arg s "$src" '{session_id: "probe", source: $s}' \
-    | env -u SYG_MEM_GATE_CMD -u SYG_LONG_JOB_CMD \
+    | env -u SYG_MEM_GATE_CMD -u SYG_LONG_JOB_CMD -u SYG_CROSS_REVIEW_CMD \
       CLAUDE_PLUGIN_ROOT="$TMP/root" SYG_USER_RULES_DIR="$TMP/rules-linked" SYG_STATE_DIR="$TMP/state" \
       XDG_STATE_HOME="$TMP/sec-state" SECURITY_SWEEP_GH="$TMP/sec-bin/gh" "$@" bash "$HOOK" 2>/dev/null)
   RC=$?
@@ -343,7 +388,7 @@ else
 fi
 
 OUT=$(cd "$TMP/sec-repo" && jq -nc '{session_id: "probe", source: "startup"}' \
-  | env -u SYG_MEM_GATE_CMD -u SYG_LONG_JOB_CMD \
+  | env -u SYG_MEM_GATE_CMD -u SYG_LONG_JOB_CMD -u SYG_CROSS_REVIEW_CMD \
     CLAUDE_PLUGIN_ROOT="$TMP/root" SYG_USER_RULES_DIR="$TMP/rules-linked" SYG_STATE_DIR="$TMP/state" \
     XDG_STATE_HOME="$TMP/sec-state" SECURITY_SWEEP_GH="$TMP/sec-bin/gh" \
     SYG_SECURITY_SWEEP=1 STUB_GH_HOLD="$TMP/gh-never-released" bash "$HOOK" 2>/dev/null)
@@ -389,7 +434,7 @@ else
   : > "$TMP/gh-release-c11"
   sleep 3.5
   OUT=$(cd "$TMP/sec-repo" && jq -nc '{session_id: "probe", source: "startup"}' \
-    | env -u SYG_MEM_GATE_CMD -u SYG_LONG_JOB_CMD \
+    | env -u SYG_MEM_GATE_CMD -u SYG_LONG_JOB_CMD -u SYG_CROSS_REVIEW_CMD \
       CLAUDE_PLUGIN_ROOT="$TMP/root" SYG_USER_RULES_DIR="$TMP/rules-linked" SYG_STATE_DIR="$TMP/state" \
       XDG_STATE_HOME="$TMP/sec-state" SECURITY_SWEEP_GH="$TMP/sec-bin/gh" \
       SYG_SECURITY_SWEEP=1 STUB_GH_HOLD="$TMP/gh-release-c11-2" bash "$HOOK" 2>/dev/null)

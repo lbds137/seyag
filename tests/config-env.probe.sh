@@ -47,7 +47,7 @@ EOF
 # assignments come after (env lets the last one win).
 CFG_ENV=(env
   -u CLAUDE_PROJECT_DIR -u XDG_CONFIG_HOME -u SYG_CONFIG
-  -u SYG_CLOCK_STAMP_HINT -u CLAUDE_USAGE_WEEK_RESERVE -u SYG_MEM_GATE_CMD -u CLAUDE_CONFIG_DIR
+  -u SYG_CLOCK_STAMP_HINT -u CLAUDE_USAGE_WEEK_RESERVE -u SYG_MEM_GATE_CMD -u SYG_CROSS_REVIEW_CMD -u CLAUDE_CONFIG_DIR
   -u SYG_PROFILE -u SYG_EVENT_HOOK_TIMEOUT -u SYG_PRIVATE_TERMS_FILE -u SYG_ROUTE_MARKER_FIELD
   -u SYG_STATUS_CLAIM_MARKERS -u SYG_BQ_PENDING_MARKERS -u SYG_STATUSLINE_ZAI_USAGE
   -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_ENTRYPOINT -u ANTHROPIC_BASE_URL -u ANTHROPIC_AUTH_TOKEN
@@ -209,6 +209,28 @@ if [ "$OUT" = "SYG_MEM_GATE_CMD=UNSET" ] && [ "$(cat "$TMP/err")" = "$WANT_ERR" 
   ok "(i2) a _CMD key is refused from project scope with the exact warning"
 else
   fail "(i2) _CMD project scope: out '$OUT', err '$(cat "$TMP/err")' (want '$WANT_ERR')"
+fi
+# (i3) SYG_CROSS_REVIEW_CMD is a _CMD key: applies from user scope, refused from project scope.
+U5b="$TMP/xdg5b"
+mkdir -p "$U5b/seyag"
+printf 'syg_cross_review_cmd = "xfam-route --for review"\n' >"$U5b/seyag/config.toml"
+OUT=$("${CFG_ENV[@]}" XDG_CONFIG_HOME="$U5b" CLAUDE_PROJECT_DIR="$TMP/proj-none" \
+  bash "$TMP/report" "$LIB" SYG_CROSS_REVIEW_CMD 2>"$TMP/err")
+if [ "$OUT" = "SYG_CROSS_REVIEW_CMD=[xfam-route --for review]" ] && [ ! -s "$TMP/err" ]; then
+  ok "(i3a) SYG_CROSS_REVIEW_CMD applies from user scope"
+else
+  fail "(i3a) SYG_CROSS_REVIEW_CMD user scope: out '$OUT', err '$(cat "$TMP/err")'"
+fi
+P7="$TMP/proj7"
+mkdir -p "$P7/.claude"
+printf 'syg_cross_review_cmd = "xfam-route --for review"\n' >"$P7/.claude/seyag.toml"
+OUT=$("${CFG_ENV[@]}" XDG_CONFIG_HOME="$TMP/no-xdg" CLAUDE_PROJECT_DIR="$P7" \
+  bash "$TMP/report" "$LIB" SYG_CROSS_REVIEW_CMD 2>"$TMP/err")
+WANT_ERR="seyag config: $P7/.claude/seyag.toml: line 1: 'SYG_CROSS_REVIEW_CMD' cannot be set from project scope (command-execution knob)"
+if [ "$OUT" = "SYG_CROSS_REVIEW_CMD=UNSET" ] && [ "$(cat "$TMP/err")" = "$WANT_ERR" ]; then
+  ok "(i3b) SYG_CROSS_REVIEW_CMD is refused from project scope with the exact warning"
+else
+  fail "(i3b) SYG_CROSS_REVIEW_CMD project scope: out '$OUT', err '$(cat "$TMP/err")' (want '$WANT_ERR')"
 fi
 
 # (j) the loader's skip list equals the user-scope rows of SCAN_EXACT_NAMES in
