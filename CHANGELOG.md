@@ -2,6 +2,16 @@
 
 All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY-MM-DD>` section per released version; under it, `###` categories in fixed order — Breaking Changes, Features, Bug Fixes, Improvements, Chores, Tests — empty ones omitted; items are `- **scope:** description (#PR)`, written from the version's merged commit subjects.
 
+## 0.3.168 - 2026-11-16
+
+### Features
+
+- **bin:** `keys get NAME [NAME...]` and the new `keys env NAME [NAME...]` resolve several names with at most one store decrypt (one TPM call instead of one per key); `env` prints `export NAME=<shell-quoted>` lines for `eval`; all or nothing: any missing name exits 1 with nothing on stdout; a non-UTF-8 or line-breaking value is a clean error (#319).
+
+### Tests
+
+- **probes:** `tests/keys.probe.sh` gains multi-name cases: argument order, one decrypt per call (counted on the mock log), zero decrypts when env covers every name, all-or-nothing on a missing name, duplicate-name and line-break errors, `env` eval round-trip of a value with quotes and spaces, and CR or non-UTF-8 values as clean errors (#319).
+
 ## 0.3.167 - 2026-11-12
 
 ### Features

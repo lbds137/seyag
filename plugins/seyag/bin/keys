@@ -4,7 +4,8 @@
 Usage:
   <command that prints the key> | keys set NAME
   keys set NAME          prompts; input is hidden
-  keys get NAME          prints the value to stdout, nothing else
+  keys get NAME [NAME...]  prints the value(s) to stdout, nothing else
+  keys env NAME [NAME...]  prints export lines for eval
   keys names             one stored NAME per line (values never printed)
   keys delete NAME       removes NAME from the store
 
@@ -28,6 +29,16 @@ to decrypt, `get` does not fall back to the legacy file, so legacy-only keys
 are unavailable for that call: loud, by design, so a stale legacy value never
 shadows a newer stored one. The legacy file is only ever read, never written,
 and is read as bare NAME=value lines (no `export` prefix, unquoted values).
+
+`get` and `env` take several NAMEs and resolve them in argument order from one
+store decrypt at most (none when env covers every NAME). All or nothing: a NAME
+found nowhere exits 1 with nothing on stdout, and the message lists every
+missing NAME. `get` prints one value per line; with several NAMEs, a value that
+holds a line break (an env var, or a hand-built store) is an error; use `env` for that
+call. `env` prints one `export NAME=<value shell-quoted>` line per NAME, for
+eval. Capture the output before eval, so a failed call does not leave the
+variables silently unset (eval of empty output succeeds):
+`out=$(keys env OPENROUTER_API_KEY A_KEY) && eval "$out"`.
 
 Decrypts and encrypts take turns through a lock file in
 ${XDG_RUNTIME_DIR:-/tmp}/seyag-keys/ (a directory that must be this user's,
@@ -124,6 +135,16 @@ def creds_command():
 def check_name(name):
     if not NAME_PATTERN.fullmatch(name):
         raise UsageError(f"NAME must match ^[A-Z][A-Z0-9_]*$ (like OPENROUTER_API_KEY); got {len(name)} characters")
+
+
+def check_names(names):
+    for name in names:
+        check_name(name)
+    seen = set()
+    for name in names:
+        if name in seen:
+            raise UsageError(f"{name} given more than once")
+        seen.add(name)
 
 
 def parse_lines(text):
@@ -398,10 +419,12 @@ def cmd_set(args):
     return 0
 
 
-def legacy_value(name):
+def legacy_pairs():
+    """The legacy file's (name, value) pairs, read once per call; [] when there
+    is no legacy file."""
     path = os.environ.get("SYG_KEYS_LEGACY_FILE", "")
     if not path or not os.path.exists(path):
-        return None
+        return []
     try:
         with open(path, encoding="utf-8") as f:
             text = f.read()
@@ -409,26 +432,58 @@ def legacy_value(name):
         raise KeysError(f"cannot read the legacy file {path}: {e.strerror}")
     except UnicodeDecodeError:
         raise KeysError(f"the legacy file {path} is not UTF-8 text")
-    for n, v in parse_lines(text):
-        if n == name and v:
-            return v
-    return None
+    return parse_lines(text)
+
+
+def first_value(pairs, name):
+    """The first non-empty value for NAME in (name, value) pairs, or ""."""
+    return next((v for n, v in pairs if n == name and v), "")
+
+
+def resolve(names):
+    """The effective value of each NAME, in argument order: the env var (when
+    non-empty), then the store, then the legacy file. The store is decrypted at
+    most once, and only when a NAME is still unresolved after env; the legacy
+    file is read at most once, and only when one is unresolved after the store.
+    A store failure raises and never falls through to the legacy file. A NAME
+    found nowhere raises too, listing every such NAME: all or nothing."""
+    values = [os.environ.get(name, "").strip() for name in names]
+    if not all(values) and store_path().exists():
+        with TpmLock() as tpm:
+            pairs = parse_lines(read_store(tpm, store_path()))
+        values = [v or first_value(pairs, n) for n, v in zip(names, values)]
+    if not all(values):
+        pairs = legacy_pairs()
+        values = [v or first_value(pairs, n) for n, v in zip(names, values)]
+    missing = [n for n, v in zip(names, values) if not v]
+    if missing:
+        verb = "is" if len(missing) == 1 else "are"
+        raise KeysError(f"{', '.join(missing)} {verb} not set (no env var, no stored key, no legacy file)")
+    for name, value in zip(names, values):
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError:
+            raise KeysError(f"the value of {name} is not UTF-8 text")
+    return values
+
+
+def has_line_break(value):
+    return "\r" in value or "\n" in value or any(c in LINE_SEPARATORS for c in value)
 
 
 def cmd_get(args):
-    name = args.name
-    value = os.environ.get(name, "").strip()
-    if not value:
-        path = store_path()
-        if path.exists():
-            with TpmLock() as tpm:
-                text = read_store(tpm, path)
-            value = next((v for n, v in parse_lines(text) if n == name and v), "")
-    if not value:
-        value = legacy_value(name) or ""
-    if not value:
-        raise KeysError(f"{name} is not set (no env var, no stored key, no legacy file)")
-    sys.stdout.write(value + "\n")
+    values = resolve(args.names)
+    if len(args.names) > 1:
+        for name, value in zip(args.names, values):
+            if has_line_break(value):
+                raise KeysError(f"the value of {name} holds a line break; use keys env for this call")
+    sys.stdout.write("".join(value + "\n" for value in values))
+    return 0
+
+
+def cmd_env(args):
+    values = resolve(args.names)
+    sys.stdout.write("".join(f"export {name}={shlex.quote(value)}\n" for name, value in zip(args.names, values)))
     return 0
 
 
@@ -464,11 +519,15 @@ def build_parser():
     sub = top.add_subparsers(dest="verb", parser_class=Parser)
     for verb, fn, help_text in (
         ("set", cmd_set, "store NAME (value from stdin or a hidden prompt)"),
-        ("get", cmd_get, "print NAME's effective value"),
+        ("get", cmd_get, "print NAME's effective value (several NAMEs: one per line)"),
         ("delete", cmd_delete, "remove NAME from the store"),
+        ("env", cmd_env, "print export lines for eval (several NAMEs)"),
     ):
         p = sub.add_parser(verb, help=help_text)
-        p.add_argument("name", metavar="NAME")
+        if verb in ("get", "env"):
+            p.add_argument("names", metavar="NAME", nargs="+")
+        else:
+            p.add_argument("name", metavar="NAME")
         p.set_defaults(fn=fn)
     p = sub.add_parser("names", help="list the stored NAMEs")
     p.set_defaults(fn=cmd_names)
@@ -489,6 +548,8 @@ def main(argv):
             return 2
         if hasattr(args, "name"):
             check_name(args.name)
+        if hasattr(args, "names"):
+            check_names(args.names)
         return args.fn(args)
     except UsageError as e:
         print(f"keys: {e} (keys --help for usage)", file=sys.stderr)

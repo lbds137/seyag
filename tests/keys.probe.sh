@@ -318,6 +318,85 @@ printf 'mock-cred:keys\nU=abc\xe2\x80\xa8QUX=x\n' > "$U2028_S"
   && ok "a hand-built store holding U=abc<U+2028>QUX=x reads back whole, with no QUX in names" \
   || bad "U+2028 store read"
 
+# --- several names: get and env ---
+# One store decrypt per call, argument order, env per name, all or nothing.
+MS="$T/multi/keys.cred"
+printf 'fixture-key-zulu' | run SYG_KEYS_STORE="$MS" "$K" set ZULU_KEY >/dev/null || bad "set ZULU_KEY for the multi section"
+printf 'fixture-key-alpha' | run SYG_KEYS_STORE="$MS" "$K" set ALPHA_KEY >/dev/null || bad "set ALPHA_KEY for the multi section"
+printf 'fixture-key-mike' | run SYG_KEYS_STORE="$MS" "$K" set MIKE_KEY >/dev/null || bad "set MIKE_KEY for the multi section"
+decrypts() { grep -c '^\[decrypt\]' "$LOG"; }
+
+d=$(decrypts)
+run SYG_KEYS_STORE="$MS" "$K" get ZULU_KEY ALPHA_KEY MIKE_KEY >"$T/out" 2>"$T/err"; rc=$?
+cmp -s "$T/out" <(printf 'fixture-key-zulu\nfixture-key-alpha\nfixture-key-mike\n') && [ $rc = 0 ] \
+  && ok "get with several NAMEs prints one value per line, in argument order" || bad "multi get rc $rc: $(cat "$T/out") $(cat "$T/err")"
+[ $(( $(decrypts) - d )) = 1 ] && ok "several NAMEs from the store cost one decrypt" || bad "multi get decrypts: $(( $(decrypts) - d ))"
+
+d=$(decrypts)
+run MIKE_KEY=fixture-key-env-mike SYG_KEYS_STORE="$MS" "$K" get ZULU_KEY MIKE_KEY ALPHA_KEY >"$T/out" 2>"$T/err"; rc=$?
+cmp -s "$T/out" <(printf 'fixture-key-zulu\nfixture-key-env-mike\nfixture-key-alpha\n') && [ $rc = 0 ] \
+  && [ $(( $(decrypts) - d )) = 1 ] && ok "a multi get takes env per name, the store for the rest, with one decrypt" \
+  || bad "mixed get rc $rc decrypts $(( $(decrypts) - d )): $(cat "$T/out") $(cat "$T/err")"
+
+d=$(decrypts)
+run ZULU_KEY=fixture-key-env-zulu ALPHA_KEY=fixture-key-env-alpha SYG_KEYS_STORE="$MS" "$K" get ZULU_KEY ALPHA_KEY >"$T/out" 2>"$T/err"; rc=$?
+cmp -s "$T/out" <(printf 'fixture-key-env-zulu\nfixture-key-env-alpha\n') && [ $rc = 0 ] && [ "$(decrypts)" = "$d" ] \
+  && ok "get with env covering every NAME costs zero decrypts" || bad "env-only get rc $rc decrypts $(( $(decrypts) - d ))"
+run ZULU_KEY=fixture-key-env-zulu ALPHA_KEY=fixture-key-env-alpha SYG_KEYS_STORE="$MS" "$K" env ZULU_KEY ALPHA_KEY >"$T/out" 2>"$T/err"; rc=$?
+[ $rc = 0 ] && [ "$(decrypts)" = "$d" ] && ok "env with env covering every NAME costs zero decrypts" \
+  || bad "env-only env rc $rc decrypts $(( $(decrypts) - d ))"
+
+run SYG_KEYS_STORE="$MS" "$K" get ALPHA_KEY NOPE_KEY ZULU_KEY >"$T/out" 2>"$T/err"; rc=$?
+[ $rc = 1 ] && [ ! -s "$T/out" ] && [ "$(cat "$T/err")" = "keys: NOPE_KEY is not set (no env var, no stored key, no legacy file)" ] \
+  && ok "a missing NAME in a multi get -> exit 1, empty stdout, the not-set message" || bad "multi missing rc $rc out '$(cat "$T/out")': $(cat "$T/err")"
+run SYG_KEYS_STORE="$MS" "$K" env ZULU_KEY MISS_B_KEY MISS_A_KEY >"$T/out" 2>"$T/err"; rc=$?
+[ $rc = 1 ] && [ ! -s "$T/out" ] && [ "$(cat "$T/err")" = "keys: MISS_B_KEY, MISS_A_KEY are not set (no env var, no stored key, no legacy file)" ] \
+  && ok "several missing NAMEs in env -> exit 1, empty stdout, listed in argument order" || bad "env missing rc $rc out '$(cat "$T/out")': $(cat "$T/err")"
+
+run MOCK_MODE=fail SYG_KEYS_LEGACY_FILE="$L" SYG_KEYS_STORE="$MS" "$K" get DELTA_KEY ZULU_KEY >"$T/out" 2>"$T/err"; rc=$?
+[ $rc = 1 ] && [ ! -s "$T/out" ] && grep -qF 'systemd-creds decrypt of '"$MS"' failed (exit 1): TPM2 not available' "$T/err" \
+  && ok "a store failure in a multi get never falls back to the legacy file for any NAME" || bad "multi store fail rc $rc out '$(cat "$T/out")': $(cat "$T/err")"
+
+run SYG_KEYS_LEGACY_FILE="$L" SYG_KEYS_STORE="$T/none/keys.cred" SYG_KEYS_CREDS_CMD="$T/no-such-creds" "$K" get DELTA_KEY ALPHA_KEY >"$T/out" 2>"$T/err"; rc=$?
+cmp -s "$T/out" <(printf 'fixture-legacy-delta\nfixture-legacy-alpha\n') && [ $rc = 0 ] \
+  && ok "a multi get resolves legacy-only NAMEs with no store and no systemd-creds" || bad "multi legacy rc $rc: $(cat "$T/out") $(cat "$T/err")"
+
+d=$(decrypts)
+run SYG_KEYS_STORE="$MS" "$K" get ALPHA_KEY ZULU_KEY ALPHA_KEY >"$T/out" 2>"$T/err"; rc=$?
+[ $rc = 2 ] && [ ! -s "$T/out" ] && [ "$(cat "$T/err")" = "keys: ALPHA_KEY given more than once (keys --help for usage)" ] && [ "$(decrypts)" = "$d" ] \
+  && ok "a NAME given twice is a usage error before any decrypt" || bad "duplicate rc $rc: $(cat "$T/err")"
+d=$(decrypts)
+run SYG_KEYS_STORE="$MS" "$K" env ALPHA_KEY lower_name >"$T/out" 2>"$T/err"; rc=$?
+[ $rc = 2 ] && grep -qF 'NAME must match ^[A-Z][A-Z0-9_]*$ (like OPENROUTER_API_KEY); got 10 characters' "$T/err" && ! grep -qF lower_name "$T/err" && [ "$(decrypts)" = "$d" ] \
+  && ok "a bad NAME in a multi call is a usage error before any decrypt, reporting its length" || bad "bad multi name rc $rc: $(cat "$T/err")"
+
+run ZULU_KEY=$'fixture-key-line\nbreak' SYG_KEYS_STORE="$MS" "$K" get ZULU_KEY ALPHA_KEY >"$T/out" 2>"$T/err"; rc=$?
+[ $rc = 1 ] && [ ! -s "$T/out" ] && [ "$(cat "$T/err")" = "keys: the value of ZULU_KEY holds a line break; use keys env for this call" ] \
+  && ok "a multi get with a line-break env value -> exit 1, empty stdout" || bad "newline value rc $rc out '$(cat "$T/out")': $(cat "$T/err")"
+run ZULU_KEY=$'fixture-key-line\xe2\x80\xa8break' SYG_KEYS_STORE="$MS" "$K" get ZULU_KEY ALPHA_KEY >"$T/out" 2>"$T/err"; rc=$?
+[ $rc = 1 ] && [ ! -s "$T/out" ] && [ "$(cat "$T/err")" = "keys: the value of ZULU_KEY holds a line break; use keys env for this call" ] \
+  && ok "a multi get with a U+2028 env value -> exit 1, empty stdout" || bad "U+2028 value rc $rc out '$(cat "$T/out")': $(cat "$T/err")"
+run ZULU_KEY=$'fixture-key-line\nbreak' SYG_KEYS_STORE="$MS" "$K" get ZULU_KEY >"$T/out" 2>"$T/err"; rc=$?
+cmp -s "$T/out" <(printf 'fixture-key-line\nbreak\n') && [ $rc = 0 ] \
+  && ok "a single-name get still prints a line-break env value as today" || bad "single newline rc $rc: $(cat "$T/out") $(cat "$T/err")"
+
+run QUOTE_KEY="fixture-key-it's a value" ZULU_KEY=fixture-key-env-zulu SYG_KEYS_STORE="$MS" "$K" env QUOTE_KEY ALPHA_KEY ZULU_KEY >"$T/env.sh" 2>"$T/err"; rc=$?
+[ $rc = 0 ] && [ "$(cut -d= -f1 "$T/env.sh" | tr '\n' ' ')" = "export QUOTE_KEY export ALPHA_KEY export ZULU_KEY " ] \
+  && ok "env prints one export line per NAME, in argument order" || bad "env lines rc $rc: $(cut -d= -f1 "$T/env.sh")"
+got=$(unset QUOTE_KEY ALPHA_KEY ZULU_KEY; eval "$(cat "$T/env.sh")"; "$BASH" -c 'printf "%s\n%s\n%s" "$QUOTE_KEY" "$ALPHA_KEY" "$ZULU_KEY"')
+[ "$got" = "$(printf "fixture-key-it's a value\nfixture-key-alpha\nfixture-key-env-zulu")" ] \
+  && ok "eval of keys env exports a quoted value with a space and a quote to a child process" || bad "env eval round trip: '$got'"
+
+run ZULU_KEY=$'fixture-key-cr\rx' SYG_KEYS_STORE="$MS" "$K" get ZULU_KEY ALPHA_KEY >"$T/out" 2>"$T/err"; rc=$?
+[ $rc = 1 ] && [ ! -s "$T/out" ] && [ "$(cat "$T/err")" = "keys: the value of ZULU_KEY holds a line break; use keys env for this call" ] \
+  && ok "a multi get with a CR env value -> exit 1, empty stdout" || bad "CR value rc $rc out '$(cat "$T/out")': $(cat "$T/err")"
+run AB_KEY=$'ab\xffcd' SYG_KEYS_STORE="$MS" "$K" get AB_KEY >"$T/out" 2>"$T/err"; rc=$?
+[ $rc = 1 ] && [ ! -s "$T/out" ] && [ "$(cat "$T/err")" = "keys: the value of AB_KEY is not UTF-8 text" ] && ! grep -q Traceback "$T/err" \
+  && ok "a single get with a non-UTF-8 env value -> exit 1, empty stdout, no traceback" || bad "non-UTF-8 get rc $rc out '$(cat "$T/out")': $(cat "$T/err")"
+run AB_KEY=$'ab\xffcd' SYG_KEYS_STORE="$MS" "$K" env AB_KEY >"$T/out" 2>"$T/err"; rc=$?
+[ $rc = 1 ] && [ ! -s "$T/out" ] && [ "$(cat "$T/err")" = "keys: the value of AB_KEY is not UTF-8 text" ] && ! grep -q Traceback "$T/err" \
+  && ok "env with a non-UTF-8 env value -> exit 1, empty stdout, no traceback" || bad "non-UTF-8 env rc $rc out '$(cat "$T/out")': $(cat "$T/err")"
+
 # --- over every call above: set, get, names and delete alike ---
 grep -qE '[A-Z]+_KEY|fixture-(key|legacy|race|victim)' "$LOG" "$CLOG" && bad "a key NAME or value reached systemd-creds argv: $(grep -hE '[A-Z]+_KEY|fixture-(key|legacy|race|victim)' "$LOG" "$CLOG" | head -n 3)" \
   || ok "no key NAME or value in any systemd-creds argv, over the whole run"
