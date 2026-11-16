@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+# mem-pressure-log: append one JSON line of memory + PSI pressure readings per run, so a machine-wide
+# memory dip (Claude Code's low-memory reaper killing background work) can be diagnosed after the
+# fact. Meant to run from a timer (for example a systemd user timer every 60 s).
+# Probe: tests/mem-pressure-log.probe.sh.
+set -uo pipefail
+
+usage() {
+  cat <<'EOF'
+mem-pressure-log: append one JSON line of memory/pressure readings to the state log.
+
+Each run appends to $SYG_MEM_PRESSURE_STATE_DIR/log.jsonl (default ~/.local/state/mem-pressure):
+  {"epoch":1792097121,"ts":"2026-10-15T20:45:21Z","avail_mb":12056,"free_mb":2290,
+   "swap_total_mb":8191,"swap_free_mb":7168,"psi_some_avg10":1.25,"psi_some_avg60":0.42,
+   "psi_full_avg10":0,"psi_full_avg60":0.01}
+epoch/ts are now (UTC); *_mb are integers, meminfo kB / 1024; psi_* are the avg10/avg60
+percentages from the PSI memory file (null when that file is missing). Silent on success.
+
+Rotation: before appending, a log.jsonl larger than SYG_MEM_PRESSURE_MAX_BYTES (default 5242880 = 5 MiB)
+moves to log.jsonl.1 (replacing any old .1); one generation is kept.
+
+Usage: mem-pressure-log           append one reading
+       mem-pressure-log -h|--help this help (no side effects)
+
+Environment overrides (for tests):
+  SYG_MEM_PRESSURE_MEMINFO     meminfo source      (default /proc/meminfo)
+  SYG_MEM_PRESSURE_PSI         PSI memory source   (default /proc/pressure/memory)
+  SYG_MEM_PRESSURE_STATE_DIR   state directory     (default ~/.local/state/mem-pressure)
+  SYG_MEM_PRESSURE_MAX_BYTES   rotation threshold  (default 5242880)
+EOF
+}
+for a in "$@"; do case "$a" in -h|--help) usage; exit 0 ;; esac; done
+if [ $# -gt 0 ]; then
+  echo "mem-pressure-log: unknown argument: $1" >&2
+  usage >&2
+  exit 2
+fi
+
+meminfo="${SYG_MEM_PRESSURE_MEMINFO:-/proc/meminfo}"
+if [ ! -r "$meminfo" ]; then
+  echo "mem-pressure-log: cannot read meminfo: $meminfo" >&2
+  exit 1
+fi
+# One pass: seen=1 only when MemAvailable is present (the one field a reading cannot stand in
+# for); the other three default to 0 MB when the file lacks them.
+vals=$(awk '
+  $1 == "MemAvailable:" { avail = $2 + 0; seen = 1 }
+  $1 == "MemFree:"      { free = $2 + 0 }
+  $1 == "SwapTotal:"    { stot = $2 + 0 }
+  $1 == "SwapFree:"     { sfree = $2 + 0 }
+  END { printf "%d %d %d %d %d\n", seen, int(avail / 1024), int(free / 1024), int(stot / 1024), int(sfree / 1024) }
+' "$meminfo" 2>/dev/null) || { echo "mem-pressure-log: cannot read meminfo: $meminfo" >&2; exit 1; }
+read -r seen avail_mb free_mb swap_total_mb swap_free_mb <<<"$vals"
+if [ "$seen" != 1 ]; then
+  echo "mem-pressure-log: no MemAvailable in $meminfo" >&2
+  exit 1
+fi
+
+# PSI percentages as plain decimals; a missing file (or line, or field) leaves nulls, not a failure.
+psi_file="${SYG_MEM_PRESSURE_PSI:-/proc/pressure/memory}"
+psi_some_avg10=null psi_some_avg60=null psi_full_avg10=null psi_full_avg60=null
+if [ -r "$psi_file" ]; then
+  while read -r kind f10 f60 rest; do
+    case "$kind" in
+      some|full)
+        v10=${f10#avg10=}; v60=${f60#avg60=}
+        [[ $v10 =~ ^[0-9]+(\.[0-9]+)?$ ]] || v10=null
+        [[ $v60 =~ ^[0-9]+(\.[0-9]+)?$ ]] || v60=null
+        if [ "$kind" = some ]; then psi_some_avg10=$v10; psi_some_avg60=$v60
+        else psi_full_avg10=$v10; psi_full_avg60=$v60; fi
+        ;;
+    esac
+  done < "$psi_file"
+fi
+
+state_dir="${SYG_MEM_PRESSURE_STATE_DIR:-$HOME/.local/state/mem-pressure}"
+max_bytes="${SYG_MEM_PRESSURE_MAX_BYTES:-5242880}"
+log="$state_dir/log.jsonl"
+
+mkdir -p "$state_dir" || { echo "mem-pressure-log: cannot create $state_dir" >&2; exit 1; }
+if [ -f "$log" ] && [ "$(stat -c %s "$log" 2>/dev/null || echo 0)" -gt "$max_bytes" ]; then
+  mv -f "$log" "$log.1"
+fi
+
+# One clock read, so ts and epoch can't straddle a second boundary.
+read -r epoch ts <<<"$(date -u '+%s %Y-%m-%dT%H:%M:%SZ')"
+jq -cn \
+  --argjson epoch "$epoch" \
+  --arg ts "$ts" \
+  --argjson avail_mb "$avail_mb" \
+  --argjson free_mb "$free_mb" \
+  --argjson swap_total_mb "$swap_total_mb" \
+  --argjson swap_free_mb "$swap_free_mb" \
+  --argjson psi_some_avg10 "$psi_some_avg10" \
+  --argjson psi_some_avg60 "$psi_some_avg60" \
+  --argjson psi_full_avg10 "$psi_full_avg10" \
+  --argjson psi_full_avg60 "$psi_full_avg60" \
+  '{epoch:$epoch,ts:$ts,avail_mb:$avail_mb,free_mb:$free_mb,swap_total_mb:$swap_total_mb,swap_free_mb:$swap_free_mb,psi_some_avg10:$psi_some_avg10,psi_some_avg60:$psi_some_avg60,psi_full_avg10:$psi_full_avg10,psi_full_avg60:$psi_full_avg60}' \
+  >> "$log"

@@ -1,0 +1,72 @@
+#!/bin/bash
+# gate-run: run several gate steps in one directory, log each step to its own file, and exit
+# nonzero unless every step passed. Zero steps is a failure (exit 7), never a silent pass.
+# See usage() for the arguments.
+
+set -uo pipefail
+
+usage() {
+  cat <<'EOF'
+gate-run: run gate steps, one log per step, and report each step's exit code.
+
+  gate-run --out DIR [--cd DIR] STEP...
+      STEP is NAME:COMMAND. NAME is letters, digits, '.', '_' or '-'; COMMAND runs with bash -c
+      in --cd DIR (default: the current directory). Each step's stdout and stderr go to
+      DIR/NAME.log; its exit code is printed as "NAME exit N"; names must be unique, and stdin is
+      /dev/null. Every step runs, even after a failure. --out is resolved to an absolute path before anything changes directory.
+      The last line is "gate-run: N of M steps passed"; exit 0 only if M > 0 and all passed.
+  Exit codes: 0 all steps passed, 1 a step failed, 2 usage error, 7 no step ran,
+  8 --out could not be created, 9 --cd is not a directory.
+
+Example: gate-run --out "$HOME/gate-logs" --cd "$WT" 'lint:pnpm lint' 'test:pnpm test'
+EOF
+}
+
+die() { echo "gate-run: $2" >&2; exit "$1"; }
+
+out="" cd_dir="" steps=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help) usage; exit 0 ;;
+    --out) [ $# -ge 2 ] || die 2 "--out needs a directory"; out=$2; shift 2 ;;
+    --cd) [ $# -ge 2 ] || die 2 "--cd needs a directory"; cd_dir=$2; shift 2 ;;
+    --) shift; break ;;
+    -*) die 2 "unknown option $1 (see --help)" ;;
+    *) break ;;
+  esac
+done
+steps=("$@")
+
+[ -n "$out" ] || die 2 "needs --out DIR (see --help)"
+declare -A seen=()
+for s in "${steps[@]}"; do
+  [[ $s == *:* ]] || die 2 "step '$s' is not NAME:COMMAND"
+  name=${s%%:*} cmd=${s#*:}
+  [[ $name =~ ^[A-Za-z0-9._-]+$ ]] || die 2 "step name '$name' may hold only letters, digits, '.', '_' and '-'"
+  [ -n "$cmd" ] || die 2 "step '$name' has no command"
+  # Two steps with one name would write one log, the second hiding the first.
+  [ -z "${seen[$name]+x}" ] || die 2 "step name '$name' is used twice (each step needs its own log)"
+  seen[$name]=1
+done
+[ ${#steps[@]} -gt 0 ] || { echo "gate-run: no step ran" >&2; exit 7; }
+
+abs_out=$(realpath -m -- "$out") || die 8 "can't resolve --out $out"
+out=$abs_out
+mkdir -p -- "$out" || die 8 "can't create --out $out"
+if [ -n "$cd_dir" ] && [ ! -d "$cd_dir" ]; then die 9 "--cd $cd_dir is not a directory"; fi
+
+passed=0
+for s in "${steps[@]}"; do
+  name=${s%%:*} cmd=${s#*:}
+  (
+    if [ -n "$cd_dir" ]; then cd -- "$cd_dir" || exit 1; fi
+    bash -c "$cmd"
+  ) </dev/null >"$out/$name.log" 2>&1
+  st=$?
+  echo "$name exit $st"
+  [ "$st" = 0 ] && passed=$((passed + 1))
+done
+
+total=${#steps[@]}
+echo "gate-run: $passed of $total steps passed"
+[ "$passed" = "$total" ]

@@ -1,0 +1,110 @@
+#!/usr/bin/env python3
+"""pin-actions: pin every GitHub Actions `uses:` in the given workflow files to a commit SHA.
+
+  pin-actions FILE...          rewrite each `uses: owner/repo[/path]@REF` whose REF is not a
+                               40-character SHA to `owner/repo[/path]@SHA # TAG`, in place
+  pin-actions --check FILE...  list the unpinned uses (file:line ref), change nothing;
+                               exit 1 if there are any
+
+TAG in the comment is REF when REF is a full version (v1.2.3), else the most specific version
+tag on the same commit (v7 -> v7.0.1), else REF itself: Dependabot reads that comment to keep
+the pin current. Local actions (./...) and docker:// images are left alone; an unpinned line that already
+carries a comment is reported, not rewritten. SHAs come from
+`gh api repos/OWNER/REPO/commits/REF` (SYG_PIN_ACTIONS_GH names another gh, for tests).
+Exit 0 when done (or, with --check, nothing is unpinned), 1 on unpinned uses under --check
+or a REF that did not resolve (that line is left as it was), 2 on a usage error.
+"""
+import json
+import os
+import re
+import subprocess
+import sys
+
+USES = re.compile(r"^(\s*(?:-\s+)?uses:\s*)(['\"]?)([^\s#'\"]+)@([^\s#'\"]+)\2\s*(#.*)?$")
+SHA = re.compile(r"^[0-9a-f]{40}$")
+FULL = re.compile(r"^v?\d+\.\d+\.\d+$")
+GH = os.environ.get("SYG_PIN_ACTIONS_GH", "gh")
+
+
+def gh(path, paginate=False):
+    args = [GH, "api", path] + (["--paginate", "--slurp"] if paginate else [])
+    try:
+        out = subprocess.run(args, capture_output=True, text=True)
+    except OSError as e:
+        raise RuntimeError(f"cannot run {GH}: {e}")
+    if out.returncode != 0:
+        raise RuntimeError(out.stderr.strip() or f"gh api {path} failed")
+    data = json.loads(out.stdout)
+    return [item for page in data for item in page] if paginate else data
+
+
+cache = {}
+
+
+def resolve(repo, ref):
+    if (repo, ref) not in cache:
+        sha = gh(f"repos/{repo}/commits/{ref}")["sha"]
+        tag = ref
+        if not FULL.match(ref):
+            tags = [t["name"] for t in gh(f"repos/{repo}/tags?per_page=100", paginate=True)
+                    if t["commit"]["sha"] == sha and FULL.match(t["name"])]
+            if tags:
+                tag = max(tags, key=lambda n: [int(x) for x in n.lstrip("v").split(".")])
+        cache[(repo, ref)] = (sha, tag)
+    return cache[(repo, ref)]
+
+
+def main(argv):
+    if any(a in ("-h", "--help") for a in argv):
+        print(__doc__.strip())
+        return 0
+    check = bool(argv) and argv[0] == "--check"
+    files = argv[1:] if check else argv
+    if not files:
+        print(__doc__.strip(), file=sys.stderr)
+        return 2
+    rc = 0
+    for path in files:
+        try:
+            with open(path, newline="") as f:  # newline="": a CRLF file stays CRLF
+                lines = f.read().split("\n")
+        except OSError as e:
+            print(f"pin-actions: {e}", file=sys.stderr)
+            rc = 1
+            continue
+        changed = False
+        for i, line in enumerate(lines):
+            eol = "\r" if line.endswith("\r") else ""
+            m = USES.match(line[:len(line) - len(eol)])
+            if not m or SHA.match(m.group(4)):
+                continue
+            quote, action, ref = m.group(2), m.group(3), m.group(4)
+            if action.startswith(("./", "docker://")):
+                continue
+            if check:
+                print(f"{path}:{i + 1} {action}@{ref}")
+                rc = 1
+                continue
+            if m.group(5):
+                print(f"pin-actions: {path}:{i + 1} {action}@{ref} has a comment; pin it by hand",
+                      file=sys.stderr)
+                rc = 1
+                continue
+            repo = "/".join(action.split("/")[:2])
+            try:
+                sha, tag = resolve(repo, ref)
+            except (RuntimeError, KeyError, ValueError) as e:
+                print(f"pin-actions: {path}:{i + 1} {action}@{ref} did not resolve: {e}",
+                      file=sys.stderr)
+                rc = 1
+                continue
+            lines[i] = f"{m.group(1)}{quote}{action}@{sha}{quote} # {tag}{eol}"
+            changed = True
+        if changed:
+            with open(path, "w", newline="") as f:
+                f.write("\n".join(lines))
+    return rc
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

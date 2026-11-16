@@ -2,6 +2,19 @@
 
 All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY-MM-DD>` section per released version; under it, `###` categories in fixed order — Breaking Changes, Features, Bug Fixes, Improvements, Chores, Tests — empty ones omitted; items are `- **scope:** description (#PR)`, written from the version's merged commit subjects.
 
+## 0.3.170 - 2026-11-16
+
+### Features
+
+- **mining-coverage:** moved in from a machine-config repo as a generic tool; checks that session-mining reports' `COVERED <extract> <first>-<last>` ledgers cover every extract line by line and prints each `HOLE` range.
+- **pin-actions:** moved in from a machine-config repo as a generic tool; pins every GitHub Actions `uses:` in the given workflow files to a commit SHA with a version-tag comment, or lists the unpinned ones with `--check`; test seam renamed to `SYG_PIN_ACTIONS_GH`.
+- **gate-run:** moved in from a machine-config repo as a generic tool; runs several gate steps in one directory with one log per step and exits nonzero unless every step passed (zero steps is exit 7).
+- **mem-pressure-log:** moved in from a machine-config repo as a generic tool; appends one JSON line of memory and PSI pressure readings per run, with log rotation, for timer-driven diagnosis of memory dips; env knobs renamed to `SYG_MEM_PRESSURE_MAX_BYTES`, `SYG_MEM_PRESSURE_MEMINFO`, `SYG_MEM_PRESSURE_PSI` and `SYG_MEM_PRESSURE_STATE_DIR`.
+
+### Tests
+
+- **probes:** ported `tests/mining-coverage.probe.sh`, `tests/pin-actions.probe.sh`, `tests/gate-run.probe.sh` and `tests/mem-pressure-log.probe.sh`.
+
 ## 0.3.169 - 2026-11-16
 
 ### Features

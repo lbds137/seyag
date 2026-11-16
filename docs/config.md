@@ -219,6 +219,8 @@ An optional TOML file fills in knobs the environment left unset: user `${XDG_CON
 | `SYG_KEYS_STORE` | `${XDG_DATA_HOME:-~/.local/share}/keys/keys.cred` | Path to the encrypted systemd-creds key store file used by keys. | `bin/keys` |
 | `SYG_KEYS_TIMEOUT_S` | `20` | Seconds one systemd-creds call in keys may take before it is killed (finite number >= 0; an invalid value is a usage error). | `bin/keys`, `bin/zai-usage` |
 | `SYG_KEYS_WITH_KEY` | `host+tpm2` | Value passed to systemd-creds encrypt --with-key= in keys (for example host on a machine without a TPM). | `bin/keys` |
+| `SYG_MEM_PRESSURE_MAX_BYTES` | `5242880` | Size in bytes past which mem-pressure-log rotates log.jsonl to log.jsonl.1 (one generation kept). | `bin/mem-pressure-log` |
+| `SYG_MEM_PRESSURE_STATE_DIR` | `$HOME/.local/state/mem-pressure` | Directory holding mem-pressure-log's log.jsonl. | `bin/mem-pressure-log` |
 
 ## Internal names
 
@@ -255,6 +257,9 @@ An optional TOML file fills in knobs the environment left unset: user `${XDG_CON
 | `SYG_KEYS_CREDS_CMD` | `bin/keys` | Test seam replacing the systemd-creds command in keys. |
 | `SYG_LIB` | `hooks/run.sh` | Internal run.sh flag: 1 once lib/components.sh is sourced and defines syg_enabled, 0 if it cannot be loaded; set by the script, not read from the environment. |
 | `SYG_LIB_DIR` | `hooks/env-print-guard.sh`, `hooks/pr-merge-review-check.sh` | Internal env variable passing the hooks/lib directory path to embedded Python helpers. |
+| `SYG_MEM_PRESSURE_MEMINFO` | `bin/mem-pressure-log` | Test seam overriding the meminfo file mem-pressure-log reads. |
+| `SYG_MEM_PRESSURE_PSI` | `bin/mem-pressure-log` | Test seam overriding the PSI memory file mem-pressure-log reads. |
+| `SYG_PIN_ACTIONS_GH` | `bin/pin-actions` | Test seam naming the gh binary pin-actions calls for commit and tag lookups. |
 | `SYG_PLUGIN_MANIFEST` | `bin/statusline` | Test seam overriding the plugin.json path read by statusline for the SYG version segment. |
 | `SYG_PR_BODY_ACK_FILE` | `hooks/pr-body-ref-gate.sh` | Test seam overriding the path to pr-body-ref-gate's per-UTC-day claim-scan acknowledgement file. |
 | `SYG_PR_MERGE_LIB_DIR` | `hooks/pr-merge-review-check.sh` | Test seam overriding the hooks/lib directory passed to pr-merge-review-check's Python parser. |

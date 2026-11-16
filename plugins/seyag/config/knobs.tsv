@@ -132,10 +132,15 @@ SYG_LONG_JOB_CMD	user	session	unset	Single-line runner prefix advertised at Sess
 SYG_LOSSY_PIPE_GH_WRAPPERS	user	guards	unset	Whitespace-separated read-wrapper command tokens guarded against head/tail/sed truncation in lossy-pipe-guard.
 SYG_LOSSY_PIPE_SUITES	user	guards	1	Set to 0 to disable lossy-pipe-guard on test and probe suite commands piped into head/tail/sed.
 SYG_MEM_GATE_CMD	user	session	unset	Single-line command advertised at SessionStart to check free memory before launching workers or test suites.
+SYG_MEM_PRESSURE_MAX_BYTES	user	misc	5242880	Size in bytes past which mem-pressure-log rotates log.jsonl to log.jsonl.1 (one generation kept).
+SYG_MEM_PRESSURE_MEMINFO	internal	misc	/proc/meminfo	Test seam overriding the meminfo file mem-pressure-log reads.
+SYG_MEM_PRESSURE_PSI	internal	misc	/proc/pressure/memory	Test seam overriding the PSI memory file mem-pressure-log reads.
+SYG_MEM_PRESSURE_STATE_DIR	user	misc	$HOME/.local/state/mem-pressure	Directory holding mem-pressure-log's log.jsonl.
 SYG_MERGE_REVIEW_LOGIN	user	pr	claude[bot]	GitHub login whose latest PR comment must be surfaced before pr-merge-review-check allows gh pr merge.
 SYG_MERGE_REVIEW_RELEASE_REMINDER	user	pr	prose:This PR merges into the repository's default branch — run this project's post-merge steps (version bump, release, deploy) before starting other work.	Custom reminder text shown once when merging a PR into the repository's default branch.
 SYG_MERGE_REVIEW_WORKFLOW	user	pr	.github/workflows/claude-code-review.yml	Review workflow file path whose self-edit in a PR explains a missing review comment in pr-merge-review-check.
 SYG_OWN_OWNERS	user	guards	unset	Whitespace- or comma-separated GitHub owner names unioned with hosts.yml user: as own repos in upstream-submission-guard.
+SYG_PIN_ACTIONS_GH	internal	misc	gh	Test seam naming the gh binary pin-actions calls for commit and tag lookups.
 SYG_PLUGIN_MANIFEST	internal	statusline	<script_dir>/../.claude-plugin/plugin.json	Test seam overriding the plugin.json path read by statusline for the SYG version segment.
 SYG_PRIVATE_TERMS_FILE	user	guards	unset	Path to a local file of Python regexes, one per line, blocked from public repos by private-term-guard and pre-push; pre-push also falls back to global git config seyag.privateTermsFile.
 SYG_PROFILE	user	session	full	Base component profile (full, guards, or none) before SYG_ENABLE and SYG_DISABLE are applied.
