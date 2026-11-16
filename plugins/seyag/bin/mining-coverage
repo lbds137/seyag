@@ -1,0 +1,73 @@
+#!/usr/bin/env python3
+"""mining-coverage - Check that mining reports' ledgers cover every extract, line by line.
+
+Each miner's report ends with one line per range it read:
+    COVERED <extract path> <first line>-<last line>
+Usage: mining-coverage --extracts LIST REPORT...
+  LIST is a file naming one extract path per line. Prints HOLE <path> <from>-<to> for every
+  unread range, and a summary line. Exit 0 = complete, 1 = holes, 2 = bad usage or unreadable
+  input. A range past the end of a file, or naming a file not in LIST, counts as unreadable
+  input, since it means a miner's ledger doesn't describe what it read.
+"""
+import argparse
+import re
+import sys
+
+LEDGER = re.compile(r"^COVERED (\S.*) (\d+)-(\d+)\s*$")
+
+
+def line_count(path):
+    with open(path, "rb") as fh:
+        return sum(1 for _ in fh)
+
+
+def holes(total, ranges):
+    """Unread (from, to) ranges of 1..total, given (from, to) ranges read."""
+    missing, next_line = [], 1
+    for first, last in sorted(ranges):
+        if first > next_line:
+            missing.append((next_line, first - 1))
+        next_line = max(next_line, last + 1)
+    if next_line <= total:
+        missing.append((next_line, total))
+    return missing
+
+
+def main():
+    parser = argparse.ArgumentParser(add_help=True, description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--extracts", required=True)
+    parser.add_argument("reports", nargs="*")
+    args = parser.parse_args()
+    try:
+        with open(args.extracts, encoding="utf-8") as fh:
+            totals = {p: line_count(p) for p in (l.strip() for l in fh) if p}
+        if not totals:
+            raise ValueError(f"{args.extracts} names no extracts")
+        read = {p: [] for p in totals}
+        for report in args.reports:
+            with open(report, encoding="utf-8", errors="replace") as fh:
+                for line in fh:
+                    m = LEDGER.match(line)
+                    if not m:
+                        continue
+                    path, first, last = m.group(1), int(m.group(2)), int(m.group(3))
+                    if path not in totals:
+                        raise ValueError(f"{report}: ledger names a file not in the list: {path}")
+                    if first < 1 or last < first or last > totals[path]:
+                        raise ValueError(f"{report}: bad range {first}-{last} for {path} ({totals[path]} lines)")
+                    read[path].append((first, last))
+    except (OSError, ValueError) as e:
+        print(f"mining-coverage: {e}", file=sys.stderr)
+        return 2
+    count = 0
+    for path, total in totals.items():
+        for first, last in holes(total, read[path]):
+            print(f"HOLE {path} {first}-{last}")
+            count += 1
+    print(f"mining-coverage: {len(totals)} extracts, {count} holes")
+    return 1 if count else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
