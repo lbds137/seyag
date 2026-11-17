@@ -59,6 +59,10 @@ rm -f "$T/PWNED"
 expect 1 "--repo refuses the crafted gitdir" "$C" --repo "$T/main" "$T/evil"
 expect 1 "the location rule refuses it" "$C" "$T/evil"
 expect 1 "and so does the real default, this fixture being under /tmp" env -u SYG_WORKER_TREE_CHECK_UNTRUSTED "$C" "$T/evil"
+# Only the SYG_ name is read: the control shows /var/tmp-only distrust lets this /tmp fixture through,
+# and the old unprefixed name set the same way changes nothing (default /tmp distrust still refuses)
+expect 0 "control: SYG_WORKER_TREE_CHECK_UNTRUSTED=/var/tmp trusts a /tmp fixture" env SYG_WORKER_TREE_CHECK_UNTRUSTED=/var/tmp "$C" "$T/good"
+expect 1 "the old WORKER_TREE_CHECK_UNTRUSTED name is not read" env -u SYG_WORKER_TREE_CHECK_UNTRUSTED WORKER_TREE_CHECK_UNTRUSTED=/var/tmp "$C" "$T/good"
 git -C "$T/main" worktree repair "$T/evil" >/dev/null 2>&1
 expect 0 "the repair line the refusal names restores it" "$C" --repo "$T/main" "$T/evil"
 

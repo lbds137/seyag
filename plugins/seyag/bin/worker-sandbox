@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# worker-sandbox: run claude for a headless worker inside gate-sandbox's worker profile (only the tree
-# writable, home and other repos hidden, every host address unreachable). A launcher runs this in claude's
-# place (for example via a configurable claude-command setting), so its own gates and overlay still apply.
+# worker-sandbox: run claude for a headless worker inside gate-sandbox's worker profile (only the
+# tree writable, home and other repos hidden, every host address unreachable). A launcher runs this
+# in claude's place (for example via a configurable claude-command setting), so its own gates and
+# overlay still apply.
 set -u
 me=worker-sandbox
 usage() {
@@ -11,19 +12,23 @@ worker-sandbox: run claude for a headless worker inside gate-sandbox's worker pr
 Usage: worker-sandbox --settings FILE [CLAUDE ARG...]   (what a launcher runs in claude's place)
        worker-sandbox --check                           build the whole sandbox, run `true` inside; 0 = usable
 
-Runs from the current directory, which must be in a git tree. FILE (the launcher's settings overlay) is bound
-read-only at /run/worker/settings.json, so the key never appears in an argv.
+Runs from the current directory, which must be in a git tree. worker-tree-check vets that tree's
+.git first (refusal = 125). FILE (the launcher's settings overlay) is bound read-only at
+/run/worker/settings.json, so the key never appears in an argv.
 
-Inside, claude runs in bypass mode with: / read-only; /run and $HOME empty; the toolchain, claude and
-gate-lock read-only; the tree per SYG_WORKER_SANDBOX_TREE, its untracked .env-style and key files masked;
-the repo's git dir, the tree's .git and (rw trees) its .claude read-only; internet through pasta, every
-host address, and every route (any routing table) through an interface with no default route (container
-bridges, an interface-based VPN that doesn't carry the default route), unreachable; a clean
-environment; capped /tmp, /run and home.
-Not walled: the worker can read its own API key, world-readable files outside $HOME and /run; untracked
-secret files are masked only to five levels deep and only by name (.env, .env.*, .dev.vars, *.pem, *.key);
-the default interface's own routes answer (the LAN; a full-tunnel VPN's own subnet), and so do userspace VPNs with no interface, AF_VSOCK and addresses the host gains after launch. Names
-resolve only where the host resolves through nss-resolve or a non-loopback nameserver.
+Inside, claude runs in bypass mode with: / read-only; /run and $HOME empty; the toolchain, claude
+and gate-lock read-only; the tree per SYG_WORKER_SANDBOX_TREE, its untracked .env-style and key
+files masked; the repo's git dir, the tree's .git and (rw trees) its .claude read-only; internet
+through pasta, every host address, and every route (any routing table) through an interface with no
+default route (container bridges, an interface-based VPN that doesn't carry the default route),
+unreachable; a clean environment; capped /tmp, /run and home.
+Not walled: the worker can read its own API key, world-readable files outside $HOME and /run;
+untracked secret files are masked by name only (.env, .env.*, .dev.vars, *.pem, *.key), at any
+depth outside node_modules and .git; the default interface's own routes answer (the LAN; a
+full-tunnel VPN's own subnet), and so do userspace VPNs with no interface, AF_VSOCK and addresses
+the host gains after launch. The default interface is any interface with a default route in any
+routing table. Names resolve only where the host resolves through nss-resolve or a non-loopback
+nameserver.
 No memory limit but what the caller sets (for example `systemd-run --user -p MemoryMax=`).
 
 Environment:
@@ -38,8 +43,10 @@ Environment:
   SYG_WORKER_SANDBOX_PATH the inner PATH after the bin directory (default $HOME/.local/bin:
                           $HOME/.local/share/mise/shims:/usr/bin:/bin; empty also means the default,
                           since an empty PATH entry would put the worker's own tree on its PATH)
+  SYG_WORKER_TREE_CHECK_UNTRUSTED is read by worker-tree-check (see its usage), not set here
 
-Exit: claude's own code; 125 when the sandbox can't be built (nothing ran).
+Exit: claude's own code; 125 when a pre-launch check refuses (nothing ran). A namespace failure
+inside bwrap or pasta exits with that tool's own code (usually 1).
 USAGE
 }
 case "${1:-}" in -h|--help) usage; exit 0 ;; esac
@@ -66,12 +73,16 @@ for p in "$settings" "$claude_real" "$bindir"; do
   case $p in *:*) echo "$me: a path with a colon can't be bound: $p" >&2; exit 125 ;; esac
 done
 
-# At its real path: gate-sandbox resolves a bind's destination on the host, so ~/.local/bin/claude (a
-# symlink into the versions dir) would land there anyway
+# At its real path: gate-sandbox resolves a bind's destination on the host, so ~/.local/bin/claude
+# (a symlink into the versions dir) would land there anyway
 binds=$claude_real
 [ -z "$settings" ] || binds+=":$settings->/run/worker/settings.json"
-# In a tree that ships this bin directory, gate-lock is already there, and gate-sandbox refuses a bind from inside the tree
+# In a tree that ships this bin directory, gate-lock is already there, and gate-sandbox refuses a
+# bind from inside the tree
 worker_bin=/run/worker/bin
+# A worker wrote this tree: vet its .git before any host git runs on it (here, and in gate-sandbox)
+"$bindir/worker-tree-check" "$PWD" \
+  || { echo "$me: worker-tree-check refused $PWD; not running git on it" >&2; exit 125; }
 top=$(git rev-parse --show-toplevel 2>/dev/null) \
   || { echo "$me: $PWD is not in a git tree" >&2; exit 125; }
 case $bindir/ in
@@ -88,13 +99,15 @@ export SYG_GATE_SANDBOX_RO_BINDS=$binds
 export SYG_GATE_SANDBOX_ENV="DISABLE_AUTOUPDATER${SYG_WORKER_SANDBOX_ENV:+ $SYG_WORKER_SANDBOX_ENV}"
 export DISABLE_AUTOUPDATER=1
 export SYG_GATE_SANDBOX_WALL=${SYG_WORKER_SANDBOX_WALL:-}
-# Inner only: gate-sandbox finds git, bwrap and pasta on the host's PATH, which a tree's bin/ stays off
+# Inner only: gate-sandbox finds git, bwrap and pasta on the host's PATH, which a tree's bin/ stays
+# off
 export SYG_GATE_SANDBOX_PATH="$worker_bin:${SYG_WORKER_SANDBOX_PATH:-$HOME/.local/bin:$HOME/.local/share/mise/shims:/usr/bin:/bin}"
 
 if [ "$check" = 1 ]; then
   exec "$bindir/gate-sandbox" "$PWD" -- /usr/bin/true
 fi
-# Bypass mode is set here, inside the launcher, so a launcher that ignored its claude-command setting would run
-# claude under its default mode, where a headless run gets no tools, rather than unwalled with all of them.
+# Bypass mode is set here, inside the launcher, so a launcher that ignored its claude-command
+# setting would run claude under its default mode, where a headless run gets no tools, rather than
+# unwalled with all of them.
 exec "$bindir/gate-sandbox" "$PWD" -- "$claude_real" --settings /run/worker/settings.json \
   --permission-mode bypassPermissions "$@"

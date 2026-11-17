@@ -4,19 +4,25 @@
 # installs, the pnpm store) read-only; the worktree read-write and the main repo's .git read-only;
 # private /tmp and /run/user; host processes invisible; only PATH, HOME, locale and the variables
 # named in SYG_GATE_SANDBOX_ENV pass. Off-worktree dependencies come in read-only: a symlinked
-# node_modules is bound at its resolved target, and SYG_GATE_SANDBOX_RO_BINDS (colon-separated SRC or
-# SRC->DST, either side inside the worktree refused) adds more. Usage: gate-sandbox CWD -- CMD [ARG...]
+# node_modules is bound at its resolved target, and SYG_GATE_SANDBOX_RO_BINDS (colon-separated SRC
+# or SRC->DST, either side inside the worktree refused) adds more.
+# Usage: gate-sandbox CWD -- CMD [ARG...]
 # SYG_GATE_SANDBOX_PROFILE=worker is the same sandbox for a whole worker rather than one gate (see
-# worker-sandbox): internet through pasta with every host address and every route (any routing table) through an interface
-# with no default route unreachable (SYG_GATE_SANDBOX_WALL adds more; --print-wall shows the set), /run empty but for name
-# resolution and the gate lock, the tree's .git and (SYG_GATE_SANDBOX_TREE=rw, the default) .claude
-# read-only, SYG_GATE_SANDBOX_TREE=ro for a read-only tree, SYG_GATE_SANDBOX_SCRATCH bound writable at ~/.claude,
-# size caps on its tmpfs mounts, untracked secret-shaped files masked, SYG_GATE_SANDBOX_PATH as the inner PATH.
+# worker-sandbox): internet through pasta with every host address and every route (any routing
+# table) through an interface with no default route unreachable (SYG_GATE_SANDBOX_WALL adds more;
+# --print-wall shows the set), /run empty but for name resolution and the gate lock, the tree's .git
+# and (SYG_GATE_SANDBOX_TREE=rw, the default) .claude read-only, SYG_GATE_SANDBOX_TREE=ro for a
+# read-only tree, SYG_GATE_SANDBOX_SCRATCH bound writable at ~/.claude, size caps on its tmpfs
+# mounts, untracked secret-shaped files masked (by name only, at any depth; node_modules and .git
+# pruned), SYG_GATE_SANDBOX_PATH as the inner PATH.
+# gate-sandbox runs host git on CWD's tree; for a tree a worker wrote, run `worker-tree-check`
+# first (worker-sandbox does).
 set -u
 me=gate-sandbox
 
-# The worker profile's host-side wall: one prefix per line on stdout, or exit 125 when the host's routes
-# can't be read or don't look like a host's (a failed query must not read as "nothing to wall").
+# The worker profile's host-side wall: one prefix per line on stdout, or exit 125 when the host's
+# routes can't be read or don't look like a host's (a failed query must not read as "nothing to
+# wall").
 # Needs $ipbin. Run in a subshell by the caller, so the exit leaves only the substitution.
 ipq() { # $1 = variable to set, rest = ip arguments
   local _v=$1 _o
@@ -25,7 +31,7 @@ ipq() { # $1 = variable to set, rest = ip arguments
   printf -v "$_v" %s "$_o"
 }
 compute_wall() {
-  local loc4 loc6 all4 all6 addrs nets extra
+  local loc4 loc6 all4 all6 addrs nets extra e
   ipq loc4 -o -4 route show table local type local
   ipq loc6 -o -6 route show table local type local
   ipq all4 -o -4 route show table all
@@ -37,9 +43,9 @@ compute_wall() {
   addrs=$(printf '%s\n%s\n' "$loc4" "$loc6" \
     | awk 'NF >= 2 && $2 !~ /^127\./ && $2 != "::1" { print ($2 ~ /\//) ? $2 : $2 ($2 ~ /:/ ? "/128" : "/32") }') \
     || { echo "$me: can't read the host's routes (parsing failed); refusing" >&2; exit 125; }
-  # A line may open with a route type (local, unreachable, ...): only a unicast one names a route to wall,
-  # and the local addresses came from the query above. A dev with a default route in any table is a
-  # default dev; a prefix on one is the LAN and stays open, wherever else it is also connected.
+  # A line may open with a route type (local, unreachable, ...): only a unicast one names a route to
+  # wall, and the local addresses came from the query above. A dev with a default route in any table
+  # is a default dev; a prefix on one is the LAN and stays open, wherever else it is also connected.
   nets=$(printf '%s\n%s\n' "$all4" "$all6" | awk '
     NF < 2 { next }
     {
@@ -62,8 +68,17 @@ compute_wall() {
       for (k = 1; k <= c; k++) { n = split(D[k], dv, " "); for (i = 1; i <= n; i++) if (dv[i] in isdef) lan[P[k]] = 1 }
       for (k = 1; k <= c; k++) if (!(P[k] in lan)) print P[k]
     }') || { echo "$me: can't read the host's routes (parsing failed); refusing" >&2; exit 125; }
-  printf '%s\n%s\n' "$addrs" "$nets" | sed '/^$/d' | sort -u
   read -r -a extra <<<"${SYG_GATE_SANDBOX_WALL:-}"
+  # a keyword like `default` would route-replace everything unreachable: only addresses and CIDRs
+  # pass (the prefix length's range is the kernel's to judge)
+  for e in ${extra[@]+"${extra[@]}"}; do
+    if [[ $e == *:* ]]; then
+      [[ $e =~ ^[0-9A-Fa-f:.]+(/[0-9]{1,3})?$ ]]
+    else
+      [[ $e =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}(/[0-9]{1,2})?$ ]]
+    fi || { echo "$me: SYG_GATE_SANDBOX_WALL: not an address or CIDR: $e" >&2; exit 125; }
+  done
+  printf '%s\n%s\n' "$addrs" "$nets" | sed '/^$/d' | sort -u
   [ "${#extra[@]}" = 0 ] || printf '%s\n' "${extra[@]}"
 }
 
@@ -101,20 +116,28 @@ case $profile in
     bwrap --help 2>&1 | grep -q -- '--size' || { echo "$me: the worker profile needs bubblewrap >= 0.10 (--size)" >&2; exit 125; }
     # Bare --share-net reaches host postgres and redis on loopback; pasta's namespace doesn't. Its
     # namespace reads as root, which refuses claude's bypass mode, so bwrap maps the real ids back.
-    # The wall: pasta copies the host's default interface into its namespace and routes everything else
-    # through it, so the host's own addresses and its bridge and VPN subnets would answer. compute_wall
-    # (also `--print-wall`) takes the set on the host at launch, and it is refused with unreachable routes
-    # inside the namespace before bwrap runs: every address the host answers on (loopback excepted: the
-    # namespace has its own), every route in any routing table through an interface that carries no default
-    # route (container bridges, an interface-based VPN that doesn't carry the default route), and
-    # SYG_GATE_SANDBOX_WALL (extra space-separated CIDRs or addresses). A host whose routes can't be read
-    # refuses (125) rather than launch with a smaller wall. Not walled: the default interface's own routes
-    # (the LAN, and a full-tunnel VPN's own subnet when the VPN carries the default route; a subnet a
-    # default interface is also connected to counts as the LAN), a userspace VPN with no interface,
-    # AF_VSOCK, the link-local subnet (measured unreachable through pasta) and anything the host gains after
-    # launch. Pasta picks its interface itself, so a default route that changes between this query and
-    # pasta's start can shift which subnet counts as the LAN. Routes go in with replace, so a duplicate
-    # entry is harmless; a failed one (a bad extra entry) fails the launch with 125.
+    # The wall: pasta copies the host's default interface into its namespace and routes everything
+    # else through it, so the host's own addresses and its bridge and VPN subnets would answer.
+    # compute_wall (also `--print-wall`) takes the set on the host at launch, and it is refused with
+    # unreachable routes inside the namespace before bwrap runs: every address the host answers on
+    # (loopback excepted: the namespace has its own), every route in any routing table through an
+    # interface that carries no default route (container bridges, an interface-based VPN that
+    # doesn't carry the default route), and SYG_GATE_SANDBOX_WALL (extra space-separated CIDRs or
+    # addresses).
+    # A host whose routes can't be read refuses (125) rather than launch with a smaller wall.
+    # Not walled: the default interface's own routes (the LAN, and a full-tunnel VPN's own subnet
+    # when the VPN carries the default route; a subnet a default interface is also connected to
+    # counts as the LAN), a userspace VPN with no interface, AF_VSOCK, IPv6 link-local (fe80::/10,
+    # measured unreachable through pasta; IPv4 169.254/16 on a non-default interface is walled like
+    # any other route) and anything the host gains after launch.
+    # A dev with a default route in ANY table counts as a default interface (its routes stay open),
+    # which is broader than full-tunnel: a split-tunnel client whose default sits only in a policy
+    # table reached by marked traffic stays open too. Deliberate: which table a packet uses depends
+    # on marks and rules the host can't evaluate statically.
+    # Pasta picks its interface itself, so a default route that changes between this query and
+    # pasta's start can shift which subnet counts as the LAN. Routes go in with replace, so a
+    # duplicate entry is harmless; a failed one (kernel-invalid, say /33) fails the launch with 125;
+    # an entry that isn't an address or CIDR is refused before that.
     wall=()
     wall_out=$(compute_wall) || exit 125
     while IFS= read -r pfx; do
@@ -123,14 +146,18 @@ case $profile in
     wall_sh='ip=$1 n=$2; shift 2
 for ((i = 0; i < n; i++)); do "$ip" route replace unreachable "$1" || { echo "gate-sandbox: cannot wall $1" >&2; exit 125; }; shift; done
 exec "$@"'
-    launcher=(pasta --config-net --quiet --no-map-gw -t none -u none -T none -U none --
+    # --dns none: pasta only uses its DNS list for its own DNS mapping; the namespace reads the
+    # host's resolv.conf/nss itself, and without it every run prints "Couldn't get any nameserver
+    # address"
+    launcher=(pasta --config-net --quiet --no-map-gw -t none -u none -T none -U none --dns none --
               "$bashbin" -c "$wall_sh" gate-sandbox-wall "$ipbin" "${#wall[@]}" "${wall[@]}")
-    # --unshare-all alone only tries the user namespace; the wall needs the worker out of pasta's, where
-    # it would hold CAP_NET_ADMIN over the routes
+    # --unshare-all alone only tries the user namespace; the wall needs the worker out of pasta's,
+    # where it would hold CAP_NET_ADMIN over the routes
     args=(--die-with-parent --unshare-all --unshare-user --share-net --new-session --uid "$(id -u)" --gid "$(id -g)"
           --ro-bind / / --dev /dev --proc /proc
           --size 2147483648 --tmpfs /tmp --size 16777216 --tmpfs /run --size 1073741824 --tmpfs "$HOME")
-    # An empty /run hides the host's sockets (dbus, the VPN daemon, cups); names still resolve through this one
+    # An empty /run hides the host's sockets (dbus, the VPN daemon, cups); names still resolve
+    # through this one
     resolve=/run/systemd/resolve/io.systemd.Resolve
     [ -S "$resolve" ] && args+=(--ro-bind "$resolve" "$resolve")
     # flock works across a bind, so a worker's gate-lock queues with every other gate on the machine
@@ -139,17 +166,29 @@ exec "$@"'
     args+=(--bind "$lock" /run/worker/gate.lock) ;;
   *) echo "$me: unknown SYG_GATE_SANDBOX_PROFILE: $profile" >&2; exit 125 ;;
 esac
+# SYG_GATE_SANDBOX_ENV: space-separated variable names; checked before the toolchain and the binds
+read -r -a envnames <<<"${SYG_GATE_SANDBOX_ENV:-}"
+for v in ${envnames[@]+"${envnames[@]}"}; do
+  [[ $v =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] \
+    || { echo "$me: SYG_GATE_SANDBOX_ENV: not a variable name: $v" >&2; exit 125; }
+done
 # the toolchain, read-only (a symlinked config is bound at its target too)
-# SYG_GATE_SANDBOX_TOOLCHAIN: colon-separated paths; unset = mise and the pnpm store, empty = none
+# SYG_GATE_SANDBOX_TOOLCHAIN: colon-separated paths; unset = mise and the pnpm store, empty = none.
+# A missing entry is skipped (the default list names optional paths); one resolving inside the
+# worktree is refused (the wt stays the only writable tree). The source is bound at its resolved
+# path, the destination is the configured one, so a symlinked entry is reachable where it is named.
 IFS=: read -r -a toolchain <<<"${SYG_GATE_SANDBOX_TOOLCHAIN-$HOME/.local/bin/mise:$HOME/.local/share/mise:$HOME/.local/state/mise:$HOME/.config/mise:$HOME/.local/share/pnpm}"
 for p in "${toolchain[@]}"; do
   [ -n "$p" ] || continue
-  [ -e "$p" ] || continue
-  args+=(--ro-bind "$p" "$p")
+  rp=$(realpath -e -- "$p" 2>/dev/null) || continue
+  case $rp in "$wt"|"$wt"/*)
+    echo "$me: SYG_GATE_SANDBOX_TOOLCHAIN: refused: resolves inside the worktree: $p" >&2; exit 125 ;;
+  esac
+  args+=(--ro-bind "$rp" "$p")
   for f in "$p"/*; do
     [ -L "$f" ] || continue
     t=$(realpath -e -- "$f" 2>/dev/null) || continue
-    case $t in "$HOME"/*) args+=(--ro-bind "$t" "$t") ;; esac
+    case $t in "$wt"|"$wt"/*) ;; "$HOME"/*) args+=(--ro-bind "$t" "$t") ;; esac
   done
 done
 # the worktree first, then .git read-only over it: bwrap mounts in order, so the reverse would
@@ -158,11 +197,14 @@ if [ "$tree" = ro ]; then args+=(--ro-bind "$wt" "$wt"); else args+=(--bind "$wt
 args+=(--ro-bind "$common" "$common")
 if [ "$profile" = worker ]; then
   # A whole worker runs for a long time with every tool: its gitfile stays put, and it can't plant
-  # settings or hooks for the next session in this tree (a symlink here would aim the bind elsewhere).
+  # settings or hooks for the next session in this tree (a symlink here would aim the bind
+  # elsewhere).
   [ ! -L "$wt/.git" ] || { echo "$me: $wt/.git is a symlink; refusing" >&2; exit 125; }
   [ ! -f "$wt/.git" ] || args+=(--ro-bind "$wt/.git" "$wt/.git")
   if [ "$tree" = rw ]; then
     [ ! -L "$wt/.claude" ] || { echo "$me: $wt/.claude is a symlink; refusing" >&2; exit 125; }
+    # bwrap would create the mountpoint through the read-write tree bind anyway; the host-side mkdir
+    # only makes that visible and checkable
     mkdir -p -- "$wt/.claude" || { echo "$me: can't create $wt/.claude" >&2; exit 125; }
     args+=(--ro-bind "$wt/.claude" "$wt/.claude")
   fi
@@ -170,10 +212,11 @@ if [ "$profile" = worker ]; then
   [ -n "$scratch" ] && [ -d "$scratch" ] || { echo "$me: the worker profile needs SYG_GATE_SANDBOX_SCRATCH" >&2; exit 125; }
   args+=(--bind "$scratch" "$HOME/.claude")
   # This profile has internet, and a main checkout holds real keys: an untracked secret-shaped file
-  # reads as empty. Tracked ones are already in the repo's history, and fixtures tests need.
+  # (by name only, at any depth outside node_modules and .git) reads as empty. Tracked ones are
+  # already in the repo's history, and fixtures tests need.
   while IFS= read -r -d '' f; do
     git -C "$wt" ls-files --error-unmatch -- "$f" >/dev/null 2>&1 || args+=(--ro-bind /dev/null "$f")
-  done < <(find -P "$wt" -maxdepth 5 \( -name node_modules -o -name .git \) -prune -o -type f \
+  done < <(find -P "$wt" \( -name node_modules -o -name .git \) -prune -o -type f \
              \( -name '.env' -o -name '.env.*' -o -name '.dev.vars' -o -name '*.pem' -o -name '*.key' \) -print0 2>/dev/null)
 fi
 # a symlinked node_modules (deps living outside the wt, e.g. the main checkout's) rides in
@@ -183,10 +226,10 @@ fi
 # input; a planted symlink must not become a host-read primitive — route it through
 # SYG_GATE_SANDBOX_RO_BINDS instead), or a target resolving inside the wt (never ro-shadow the
 # writable tree; same shape C2 refuses).
-# The worker profile follows only this repo's own main checkout, which worktrees do link to: the worker
-# wrote the tree and has internet, so a symlink it planted on an earlier run must not make this script
-# write through it or bind another repo's dependencies in. A run in the main checkout itself follows
-# nothing: there the link under judgment is the main's own.
+# The worker profile follows only this repo's own main checkout, which worktrees do link to: the
+# worker wrote the tree and has internet, so a symlink it planted on an earlier run must not make
+# this script write through it or bind another repo's dependencies in. A run in the main checkout
+# itself follows nothing: there the link under judgment is the main's own.
 nm=$wt/node_modules
 if [ -L "$nm" ] && t=$(realpath -e -- "$nm" 2>/dev/null) \
    && { [ "$profile" != worker ] || { mnm=$(dirname "$common")/node_modules; [ ! -L "$mnm" ] && [ "$t" = "$(realpath -e -- "$mnm" 2>/dev/null)" ]; }; }; then
@@ -238,7 +281,7 @@ if [ -n "${SYG_GATE_SANDBOX_RO_BINDS:-}" ]; then
 fi
 args+=(--chdir "$cwd" --clearenv
        --setenv PATH "${SYG_GATE_SANDBOX_PATH:-$PATH}" --setenv HOME "$HOME" --setenv LANG "${LANG:-C.UTF-8}")
-for v in LC_ALL LANGUAGE SYG_GATE_SANDBOX_RO_BINDS ${SYG_GATE_SANDBOX_ENV:-}; do
+for v in LC_ALL LANGUAGE SYG_GATE_SANDBOX_RO_BINDS ${envnames[@]+"${envnames[@]}"}; do
   [ -n "${!v+x}" ] && args+=(--setenv "$v" "${!v}")
 done
 [ "$profile" != worker ] || args+=(--setenv SYG_GATE_LOCK_FILE /run/worker/gate.lock)
