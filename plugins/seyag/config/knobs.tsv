@@ -147,7 +147,7 @@ SYG_MEM_PRESSURE_MAX_BYTES	user	misc	5242880	Size in bytes past which mem-pressu
 SYG_MEM_PRESSURE_MEMINFO	internal	misc	/proc/meminfo	Test seam overriding the meminfo file mem-pressure-log reads.
 SYG_MEM_PRESSURE_PSI	internal	misc	/proc/pressure/memory	Test seam overriding the PSI memory file mem-pressure-log reads.
 SYG_MEM_PRESSURE_STATE_DIR	user	misc	$HOME/.local/state/mem-pressure	Directory holding mem-pressure-log's log.jsonl.
-SYG_MEM_WATCH_CGROUP_ROOT	user	misc	/sys/fs/cgroup/user.slice	Directory mem-watch searches (four levels deep) for the app slice's memory.events oom_kill counter.
+SYG_MEM_WATCH_CGROUP_ROOT	user	misc	/sys/fs/cgroup/user.slice	Directory mem-watch searches, up to four levels deep, for this user's app.slice/memory.events oom_kill counter (user-<uid>.slice preferred; a root below the user slice also works; another uid's slice never).
 SYG_MEM_WATCH_MEMINFO	internal	misc	/proc/meminfo	Test seam overriding the meminfo file mem-watch reads.
 SYG_MERGE_REVIEW_LOGIN	user	pr	claude[bot]	GitHub login whose latest PR comment must be surfaced before pr-merge-review-check allows gh pr merge.
 SYG_MERGE_REVIEW_RELEASE_REMINDER	user	pr	prose:This PR merges into the repository's default branch — run this project's post-merge steps (version bump, release, deploy) before starting other work.	Custom reminder text shown once when merging a PR into the repository's default branch.

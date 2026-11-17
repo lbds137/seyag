@@ -2,7 +2,7 @@
 # mem-watch: block until RAM gets tight or the desktop gets an OOM kill, then exit so a
 # session waiting on it (run in the background) wakes up. Same shape as `claude-usage --wait`.
 #
-# Watches MemAvailable and the user app slice's oom_kill counter; see usage() for the flags.
+# Watches MemAvailable and this user's app slice's oom_kill counter; see usage() for the flags.
 # Probe: tests/mem-watch.probe.sh.
 
 set -uo pipefail
@@ -22,10 +22,13 @@ session waiting on it (run in the background) wakes up. Same shape as `claude-us
                      started it; none from a plain terminal)
   --help             print this usage and exit 0
 
-Also watches the user app slice's oom_kill counter (cgroup memory.events, found under
+Also watches this user's app slice's oom_kill counter (cgroup memory.events, found under
 $SYG_MEM_WATCH_CGROUP_ROOT, default /sys/fs/cgroup/user.slice) and exits early if it
 increments, since a kill can land before MemAvailable visibly crosses the threshold. If no
-such file is found, this run watches MemAvailable only, and says so in its first line.
+such file is found, this run watches MemAvailable only, and says so in its first line. A
+counter that vanishes or is not a number is skipped, and one that drops is taken as a reset;
+a reset and a kill inside one interval (5 to 0 to 1 between two checks) read as a reset, so
+that kill is missed.
 Exit codes: 0 triggered (or above threshold with --once), 1 below threshold with --once,
 2 usage error, no MemAvailable line or lib/owner.sh not loadable, 3 owner gone.
 
@@ -80,31 +83,51 @@ case "$threshold" in
         echo "mem-watch: --threshold-gb needs a number" >&2; exit 2 ;;
 esac
 
-mem_available_gb() {
-    awk '/^MemAvailable:/{printf "%.1f", $2/1024/1024}' "$meminfo" 2>/dev/null
+mem_available_kb() {
+    awk '/^MemAvailable:/{print $2}' "$meminfo" 2>/dev/null
 }
 
-# Read MemAvailable into $avail, or exit 2: an empty value would compare as below threshold
-# and fire a false trigger.
+# Read MemAvailable into $avail_kb (the raw value the threshold compares) and $avail (GB with
+# one decimal, for display), or exit 2: an empty value would compare as below threshold and
+# fire a false trigger.
 read_avail() {
-    avail=$(mem_available_gb)
-    [ -n "$avail" ] || { echo "mem-watch: no MemAvailable line in $meminfo" >&2; exit 2; }
+    avail_kb=$(mem_available_kb)
+    [ -n "$avail_kb" ] || { echo "mem-watch: no MemAvailable line in $meminfo" >&2; exit 2; }
+    avail=$(awk -v k="$avail_kb" 'BEGIN{printf "%.1f", k/1024/1024}')
 }
 
 # The app slice's memory.events path varies by session/service naming, so it's probed rather
 # than hard-coded; empty output means "watch MemAvailable only", handled by the caller.
 # systemd's per-user layout puts it at user-N.slice/user@N.service/app.slice/memory.events,
-# four levels below the root, hence maxdepth 4.
+# four levels below the root, hence maxdepth 4. Only app.slice/memory.events itself matches,
+# not a child scope's. This user's slice (user-<uid>.slice) wins; failing that, a candidate
+# with no user-N.slice component at all (a root pointed below the user slice); never another
+# uid's.
 oom_events_path() {
-    find "$cgroup_root" -maxdepth 4 -name memory.events 2>/dev/null | grep app.slice | head -1
+    local uid cands c
+    uid=$(id -u)
+    cands=$(find "$cgroup_root" -maxdepth 4 -path '*/app.slice/memory.events' 2>/dev/null)
+    while IFS= read -r c; do
+        case "$c" in */user-"$uid".slice/*) printf '%s' "$c"; return ;; esac
+    done <<< "$cands"
+    while IFS= read -r c; do
+        [ -n "$c" ] || continue
+        case "$c" in
+            */user-[0-9]*.slice/*) ;;
+            *) printf '%s' "$c"; return ;;
+        esac
+    done <<< "$cands"
 }
 
+# Prints the oom_kill counter, or nothing when the path is empty, unreadable or has no
+# oom_kill line: the caller treats "no value" as "not a kill", never as 0.
 oom_kill_count() {
     local path="$1" n=""
     if [ -n "$path" ] && [ -r "$path" ]; then
         n=$(awk '/^oom_kill /{print $2}' "$path" 2>/dev/null)
     fi
-    printf '%s' "${n:-0}"
+    case $n in '' | *[!0-9]*) n="" ;; esac
+    printf '%s' "$n"
 }
 
 top3() {
@@ -112,8 +135,9 @@ top3() {
         awk '{printf "%s%s %s %d MB", (NR > 1 ? ", " : ""), $1, $2, $3/1024}'
 }
 
+# Compares the raw kB, not the one-decimal display value, so 1.95-2.0 GB trips a 2 GB threshold.
 below_threshold() {
-    awk -v a="$1" -v t="$threshold" 'BEGIN{exit !(a < t)}'
+    awk -v a="$avail_kb" -v t="$threshold" 'BEGIN{exit !(a < t*1048576)}'
 }
 
 avail=""
@@ -122,8 +146,8 @@ read_avail
 if [ $once = 1 ]; then
     oom_path=$(oom_events_path)
     oom_now=$(oom_kill_count "$oom_path")
-    echo "mem-watch: MemAvailable $avail GB (threshold $threshold GB), oom_kill $oom_now, oom counter ${oom_path:-none}"
-    if below_threshold "$avail"; then exit 1; else exit 0; fi
+    echo "mem-watch: MemAvailable $avail GB (threshold $threshold GB), oom_kill ${oom_now:-n/a}, oom counter ${oom_path:-none}"
+    if below_threshold; then exit 1; else exit 0; fi
 fi
 
 oom_path=$(oom_events_path)
@@ -133,13 +157,21 @@ echo "mem-watch: pid $$, threshold $threshold GB, interval $interval s, oom coun
 while :; do
     read_avail
     oom_now=$(oom_kill_count "$oom_path")
-    if below_threshold "$avail"; then
-        echo "mem-watch: MemAvailable below threshold: MemAvailable $avail GB, oom_kill $oom_now (was $oom_start), top 3 RSS: $(top3)"
+    if below_threshold; then
+        echo "mem-watch: MemAvailable below threshold: MemAvailable $avail GB, oom_kill ${oom_now:-n/a} (was ${oom_start:-n/a}), top 3 RSS: $(top3)"
         exit 0
     fi
-    if [ "$oom_now" -ne "$oom_start" ]; then
-        echo "mem-watch: oom_kill incremented: MemAvailable $avail GB, oom_kill $oom_now (was $oom_start), top 3 RSS: $(top3)"
-        exit 0
+    # An unreadable or vanished counter is not a kill; the first readable value is the baseline;
+    # a smaller value means the counter was reset (the slice restarted), so rebaseline.
+    if [ -n "$oom_now" ]; then
+        if [ -z "$oom_start" ]; then
+            oom_start=$oom_now
+        elif [ "$oom_now" -lt "$oom_start" ]; then
+            oom_start=$oom_now
+        elif [ "$oom_now" -gt "$oom_start" ]; then
+            echo "mem-watch: oom_kill incremented: MemAvailable $avail GB, oom_kill $oom_now (was $oom_start), top 3 RSS: $(top3)"
+            exit 0
+        fi
     fi
     sleep "$interval"
     owner_or_exit

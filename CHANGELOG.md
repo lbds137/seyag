@@ -2,6 +2,18 @@
 
 All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY-MM-DD>` section per released version; under it, `###` categories in fixed order — Breaking Changes, Features, Bug Fixes, Improvements, Chores, Tests — empty ones omitted; items are `- **scope:** description (#PR)`, written from the version's merged commit subjects.
 
+## 0.3.175 - 2026-11-16
+
+### Bug Fixes
+
+- **mem-watch:** the threshold compares the raw MemAvailable kB instead of the one-decimal GB display value, so 1.95 to 2.0 GB now trips `--threshold-gb 2` (#TBD).
+- **mem-watch:** a counter that vanishes or cannot be read is no longer read as 0 and then as a kill: with no value this pass nothing is compared, the first readable value is the baseline, and a smaller value (the slice restarted) rebaselines; only a larger value triggers. A non-numeric value counts as no value too. Lines print `n/a` for a missing value. A reset and a kill inside one interval read as a reset, so that kill is missed (#TBD).
+- **mem-watch:** the counter search matches only `app.slice/memory.events` (not a child scope's) and takes this user's `user-<uid>.slice` first, else a candidate with no `user-N.slice` in its path, never another uid's (#TBD).
+
+### Tests
+
+- **mem-watch, mem-gate:** `tests/mem-watch.probe.sh` pins the just-under threshold (once and loop), a vanished counter, a non-numeric counter, a reset counter, own-uid preference, another uid's slice alone, a child scope, and a root below the user slice; the existing oom case uses the running uid; `tests/mem-gate.probe.sh` notes that the `owner_default` daemon exclusion and parent walk have no direct coverage (#TBD).
+
 ## 0.3.174 - 2026-11-16
 
 ### Features
