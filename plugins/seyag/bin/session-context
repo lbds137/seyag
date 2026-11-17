@@ -78,7 +78,8 @@ last_reply() {
     tac "$1" 2>/dev/null | grep -a -F '"type":"assistant"' \
         | jq -Rcn 'first(inputs | fromjson? | objects | select(.type == "assistant" and .isSidechain != true)
                          | .message | objects | select(.model != "<synthetic>" and (.usage | type) == "object")
-                         | {model, tokens: (.usage | (.input_tokens // 0) + (.cache_read_input_tokens // 0)
+                         | select([.usage.input_tokens // 0, .usage.cache_read_input_tokens // 0, .usage.cache_creation_input_tokens // 0] | all(type == "number"))
+                         | {model: (.model | if type == "string" then . else null end), tokens: (.usage | (.input_tokens // 0) + (.cache_read_input_tokens // 0)
                                                     + (.cache_creation_input_tokens // 0))}) // {}'
 }
 

@@ -11,10 +11,11 @@ Reads each live session's current transcript (`claude agents --json` lists
 real sessions, not headless -p children) and replays its deferred_tools_delta
 records for mcp__claude-in-chrome__* tools. States: "on"; "lost" (added, then
 all removed); "off" (this process never listed them, e.g. it resumed while
-logged out). A logged-out restart comes up with Chrome off and /login doesn't
-restore it; a fresh start does.
-Exit 1 when any session is lost or off, has no transcript, or the session
-list can't be read; exit 2 on a usage error.
+logged out); "unreadable" (the transcript is there but can't be opened or read).
+A logged-out restart comes up with Chrome off and /login doesn't restore it;
+a fresh start does.
+Exit 1 when any session is lost or off, has no transcript or an unreadable one,
+or the session list can't be read; exit 2 on a usage error.
 """
 import glob
 import json
@@ -43,38 +44,58 @@ def live_sessions(agents_file):
     return [a for a in arr if isinstance(a, dict) and a.get("pid") is not None and a.get("sessionId")]
 
 
+def prefixed(names):
+    """The Chrome tool names in a delta's name list; a value that isn't a list, or an item that isn't a string, is ignored."""
+    if not isinstance(names, list):
+        return set()
+    return {n for n in names if isinstance(n, str) and n.startswith(PREFIX)}
+
+
 def chrome_state(path):
-    """Return (state, last_change_ts): state is 'on', 'lost' or 'off'."""
+    """Return (state, last_change_ts): state is 'on', 'lost', 'off', or 'unreadable' (the file can't be opened or read)."""
     had = False
     current = set()
     last_ts = None
-    with open(path, errors="replace") as fh:
-        for line in fh:
-            if '"deferred_tools_delta"' not in line or PREFIX not in line:
-                continue
-            try:
-                rec = json.loads(line)
-            except ValueError:
-                continue
-            att = rec.get("attachment") or {}
-            if att.get("type") != "deferred_tools_delta":
-                continue
-            before = bool(current)
-            for key in ("addedNames", "readdedNames"):
-                current |= {n for n in att.get(key) or [] if n.startswith(PREFIX)}
-            current -= {n for n in att.get("removedNames") or [] if n.startswith(PREFIX)}
-            if current:
-                had = True
-            if before != bool(current):
-                last_ts = rec.get("timestamp")
+    try:
+        with open(path, errors="replace") as fh:
+            for line in fh:
+                if '"deferred_tools_delta"' not in line or PREFIX not in line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(rec, dict):
+                    continue
+                att = rec.get("attachment") or {}
+                if not isinstance(att, dict) or att.get("type") != "deferred_tools_delta":
+                    continue
+                before = bool(current)
+                for key in ("addedNames", "readdedNames"):
+                    current |= prefixed(att.get(key))
+                current -= prefixed(att.get("removedNames"))
+                if current:
+                    had = True
+                if before != bool(current):
+                    last_ts = rec.get("timestamp")
+    except OSError:
+        return "unreadable", None
     if current:
         return "on", last_ts
     return ("lost" if had else "off"), last_ts
 
 
+def mtime_or_old(path):
+    """The file's mtime; a file that vanished since the glob sorts oldest instead of raising."""
+    try:
+        return os.path.getmtime(path)
+    except OSError:
+        return -1
+
+
 def transcript_for(projects_dir, session_id):
-    hits = glob.glob(os.path.join(projects_dir, "*", session_id + ".jsonl"))
-    return max(hits, key=os.path.getmtime) if hits else None
+    hits = glob.glob(os.path.join(glob.escape(projects_dir), "*", glob.escape(session_id) + ".jsonl"))
+    return max(hits, key=mtime_or_old) if hits else None
 
 
 def usage_error(msg):
@@ -110,12 +131,13 @@ def main(argv):
     rows = []
     for a in live_sessions(agents_file):
         sid = a["sessionId"]
-        path = transcript_for(projects_dir, sid)
+        # a session id that isn't a string can't name a transcript: it stays a row, reported as no-transcript
+        path = transcript_for(projects_dir, sid) if isinstance(sid, str) else None
         state, ts = chrome_state(path) if path else ("no-transcript", None)
-        rows.append({"name": a.get("name") or "", "id": a.get("id") or sid[:8], "pid": a.get("pid"),
+        rows.append({"name": a.get("name") or "", "id": a.get("id") or str(sid)[:8], "pid": a.get("pid"),
                      "cwd": a.get("cwd") or "", "state": state, "since": ts})
     missing = [r for r in rows if r["state"] in ("lost", "off")]
-    unread = [r for r in rows if r["state"] == "no-transcript"]
+    unread = [r for r in rows if r["state"] in ("no-transcript", "unreadable")]
     if as_json:
         print(json.dumps(rows, indent=1))
     else:
@@ -124,7 +146,10 @@ def main(argv):
             print(f"no Chrome ({r['state']}): {r['name'] or '(unnamed)'} [{r['id']}] pid {r['pid']} {when} "
                   f"({r['cwd']}); restart it fresh to get Chrome back")
         for r in unread:
-            print(f"unknown: {r['name'] or '(unnamed)'} [{r['id']}] has no transcript under the projects dir")
+            if r["state"] == "unreadable":
+                print(f"unknown: {r['name'] or '(unnamed)'} [{r['id']}] transcript can't be read")
+            else:
+                print(f"unknown: {r['name'] or '(unnamed)'} [{r['id']}] has no transcript under the projects dir")
         if not missing and not unread:
             print(f"chrome-loss-scan: {len(rows)} live session(s), all have Chrome")
     # An unreadable transcript is not evidence of Chrome: a layout change must go red, not green.

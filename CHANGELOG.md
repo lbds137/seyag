@@ -12,6 +12,11 @@ All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY
 - **session-stalled, driver-busy-hours:** knobs `SYG_STALLED_ZAI_TZ`, `SYG_AGY_SUMMARIES_DB` and `SYG_AGY_BRAIN_DIR`; `SYG_STALLED_NOW` is the test seam (#331).
 - **classifier-denials:** the project-name prefix strip is derived from `$HOME` (#331).
 - **bin:** the six tools read transcripts from `CLAUDE_PROJECTS_DIR`, else `${CLAUDE_CONFIG_DIR:-~/.claude}/projects`; the python tools (`chrome-loss-scan`, `driver-busy-hours`, `relay-ruling`) read their knobs from the environment only, not config.toml (#331).
+- **classifier-denials:** a projects root whose path holds glob characters (`[`, `*`, `?`) is read as a literal path, and a transcript line that is a bare JSON string or list is skipped instead of failing the run; a line whose timestamp is not a string is skipped too (#331).
+- **chrome-loss-scan:** a transcript that can't be opened or read is reported as `unreadable` (`unknown` in the text output) and exits 1, instead of a traceback; a session id that isn't a string is reported as `no-transcript` and exits 1, instead of a crash; transcript records that aren't JSON objects are skipped; a projects root with glob characters is read as a literal path; a delta's names that are not a list, and list items that are not strings, are ignored (#331).
+- **relay-ruling:** a message, origin or attachment field that isn't an object reads as empty, so the lookup still finds the owner's turn; a non-string text part is skipped, a non-string timestamp reads as an unknown time, and a non-string session id reads as missing (#331).
+- **driver-busy-hours:** the help text describes the Antigravity (agy) merge and its knobs; an empty `CLAUDE_PROJECTS_DIR`, `SYG_AGY_SUMMARIES_DB` or `SYG_AGY_BRAIN_DIR` counts as unset; a transcript message that is not an object, or has a non-string model, adds no reply to the per-model counts (its timestamp still counts toward busy time); a non-string id counts as no id (#331).
+- **session-context:** a reply whose token counts are not numbers is skipped, so an older reply counts instead of the session showing 0 tokens; a non-string model reads as blank (#331).
 
 ### Tests
 

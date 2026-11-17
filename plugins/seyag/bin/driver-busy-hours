@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""driver-busy-hours: busy time of main-loop Claude Code sessions in a time window.
+"""driver-busy-hours: busy time of main-loop Claude Code sessions and Antigravity (agy) root conversations in a time window.
 
 Busy time is the sum of gaps between consecutive transcript events (any line with a
 timestamp: owner turns, replies, tool results) that are no longer than --gap seconds;
@@ -12,6 +12,11 @@ main loop), not subagents/. Each session also lists its assistant replies per mo
 The total is wall-clock driver time: the union of the reported sessions' busy intervals,
 so two sessions busy at once (or a resumed session that copied old lines) count once.
 Per-session figures are each session alone.
+
+Antigravity (agy) root conversations for the same project are merged into the session
+list and the total, read from ~/.gemini/antigravity-cli (SYG_AGY_SUMMARIES_DB and
+SYG_AGY_BRAIN_DIR override the two paths). A non-empty CLAUDE_PROJECTS_DIR turns that
+merge off unless one of those two knobs is set.
 
 Usage:
   driver-busy-hours --slug=-home-user-Projects-acme --since 2026-10-26 --until 2026-10-26
@@ -115,11 +120,12 @@ def session_stats(path, since, until, gap):
                 continue
             stamps.append(t)
             if row.get("type") == "assistant":
-                msg = row.get("message") or {}
+                msg = row.get("message") if isinstance(row.get("message"), dict) else {}
                 model = msg.get("model")
-                if model and model != "<synthetic>":
-                    if msg.get("id"):
-                        replies[msg["id"]] = model
+                if isinstance(model, str) and model and model != "<synthetic>":
+                    mid = msg.get("id")
+                    if isinstance(mid, str) and mid:
+                        replies[mid] = model
                     else:
                         unnamed[model] += 1
     stamps.sort()
@@ -182,13 +188,13 @@ def agy_session_stats(path, since, until, gap):
 
 
 def collect_agy_sessions(folder_slug, raw_slug, session_prefixes, since, until, gap):
-    has_explicit_claude = "CLAUDE_PROJECTS_DIR" in os.environ
-    has_explicit_agy = "SYG_AGY_SUMMARIES_DB" in os.environ or "SYG_AGY_BRAIN_DIR" in os.environ
+    has_explicit_claude = bool(os.environ.get("CLAUDE_PROJECTS_DIR"))
+    has_explicit_agy = bool(os.environ.get("SYG_AGY_SUMMARIES_DB") or os.environ.get("SYG_AGY_BRAIN_DIR"))
     if has_explicit_claude and not has_explicit_agy:
         return folder_slug, []
     base = os.path.expanduser("~/.gemini/antigravity-cli")
-    db_path = os.environ.get("SYG_AGY_SUMMARIES_DB", os.path.join(base, "conversation_summaries.db"))
-    brain_dir = os.environ.get("SYG_AGY_BRAIN_DIR", os.path.join(base, "brain"))
+    db_path = os.environ.get("SYG_AGY_SUMMARIES_DB") or os.path.join(base, "conversation_summaries.db")
+    brain_dir = os.environ.get("SYG_AGY_BRAIN_DIR") or os.path.join(base, "brain")
     if not os.path.isfile(db_path) or not os.path.isdir(brain_dir):
         return folder_slug, []
     uri = f"file:{urllib.parse.quote(os.path.abspath(db_path))}?mode=ro"
