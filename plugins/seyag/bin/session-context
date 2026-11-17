@@ -10,7 +10,7 @@
 # nudges a flagged session to write its handoff and ask the owner for /compact or /clear at its next
 # clean boundary. Flag thresholds: 500k tokens, 200k for Fable (its own, smaller weekly cap);
 # override with SYG_SESSION_CONTEXT_THRESHOLD / SYG_SESSION_CONTEXT_THRESHOLD_FABLE (whole
-# numbers; anything else exits 2). A threshold is policy, NOT the model's window (a [1m] session
+# numbers of at most 15 digits; anything else exits 2). A threshold is policy, NOT the model's window (a [1m] session
 # has 1M; the transcript's model id drops the marker, so the window is unknown here and never
 # printed). Transcripts are read from CLAUDE_PROJECTS_DIR, else ${CLAUDE_CONFIG_DIR:-~/.claude}/projects.
 #
@@ -47,11 +47,12 @@ limit=${SYG_SESSION_CONTEXT_THRESHOLD:-500000}
 limit_fable=${SYG_SESSION_CONTEXT_THRESHOLD_FABLE:-200000}
 extra_model=${SYG_SESSION_CONTEXT_EXTRA_MODEL:-other}
 limit_extra=${SYG_SESSION_CONTEXT_EXTRA_THRESHOLD:-150000}
-# A bad threshold would reach jq as invalid JSON and print nothing: refuse it up front.
+# A bad threshold would reach jq as invalid JSON and print nothing: refuse it up front. The 15-digit cap
+# keeps $((10#...)) below well inside bash's 64-bit range (past 18 digits it wraps silently).
 for knob in SYG_SESSION_CONTEXT_THRESHOLD SYG_SESSION_CONTEXT_THRESHOLD_FABLE SYG_SESSION_CONTEXT_EXTRA_THRESHOLD; do
     v=${!knob:-}
-    if [ -n "$v" ] && ! [[ $v =~ ^[0-9]+$ ]]; then
-        echo "session-context: $knob must be a whole number, got '$v'" >&2
+    if [ -n "$v" ] && ! [[ $v =~ ^[0-9]{1,15}$ ]]; then
+        echo "session-context: $knob must be a whole number of at most 15 digits, got '$v'" >&2
         exit 2
     fi
 done
@@ -65,6 +66,7 @@ jq -e 'type == "array"' <<< "$agents" >/dev/null 2>&1 \
 # The main checkout's folder name (agent worktrees count as their repo), as claude-role names it.
 folder_of() {
     local d=$1 common
+    [ -n "$d" ] || { echo; return; }   # no cwd: blank, not the working directory's repo
     if common=$(git -C "$d" rev-parse --path-format=absolute --git-common-dir 2>/dev/null); then
         d=$(dirname "$common")
     fi
@@ -83,7 +85,8 @@ last_reply() {
                                                     + (.cache_creation_input_tokens // 0))}) // {}'
 }
 
-claude_rows=$(jq -r '.[] | [.name // "", .cwd // "", .sessionId // "", .status // ""] | join("\u001f")' <<< "$agents" \
+claude_rows=$(jq -r '.[] | [(.name | if type == "string" then . else "" end), (.cwd | if type == "string" then . else "" end),
+                              (.sessionId | if type == "string" then . else "" end), (.status | if type == "string" then . else "" end)] | join("\u001f")' <<< "$agents" \
     | while IFS=$'\037' read -r name cwd sid status; do
         reply='{}'
         if [ -n "$sid" ]; then
@@ -110,10 +113,10 @@ if [ -n "${SYG_SESSION_CONTEXT_EXTRA_CMD:-}" ]; then
     if extra_raw=$(bash -c "$SYG_SESSION_CONTEXT_EXTRA_CMD" </dev/null) \
         && jq -e 'type == "array"' <<< "$extra_raw" >/dev/null 2>&1 \
         && extra_rows=$(jq -c --argjson la "$limit_extra" --arg model "$extra_model" 'if all(.[]; .tokens == null or (.tokens | type) == "number") then [.[] | {
-            name: (.name // "extra"),
-            folder: (.folder // ""),
-            sessionId: (.sessionId // ""),
-            status: (.status // "idle"),
+            name: (.name | if type == "string" then . else "extra" end),
+            folder: (.folder | if type == "string" then . else "" end),
+            sessionId: (.sessionId | if type == "string" then . else "" end),
+            status: (.status | if type == "string" then . else "idle" end),
             model: $model,
             tokens: (.tokens // 0),
             flag_at: $la,

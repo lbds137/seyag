@@ -79,8 +79,8 @@ SYG_CONTEXT_BLOCK_PATHS	user	session	unset	Colon-separated path globs matched li
 SYG_CONTEXT_COOLDOWN_MIN	user	session	30	Cooldown in minutes between context-size-reminder banners in a session.
 SYG_CONTEXT_THRESHOLD	user	session	500000	Context token threshold at which context-size-reminder fires on non-Fable models.
 SYG_CONTEXT_THRESHOLD_FABLE	user	session	200000	Context token threshold at which context-size-reminder fires when the model starts with claude-fable.
-SYG_SESSION_CONTEXT_THRESHOLD	user	session	500000	Context token threshold at which session-context flags a session on non-Fable models (a whole number; separate from the in-session reminder's SYG_CONTEXT_THRESHOLD).
-SYG_SESSION_CONTEXT_THRESHOLD_FABLE	user	session	200000	Context token threshold at which session-context flags a session whose model id contains fable (a whole number).
+SYG_SESSION_CONTEXT_THRESHOLD	user	session	500000	Context token threshold at which session-context flags a session on non-Fable models (a whole number of at most 15 digits; separate from the in-session reminder's SYG_CONTEXT_THRESHOLD).
+SYG_SESSION_CONTEXT_THRESHOLD_FABLE	user	session	200000	Context token threshold at which session-context flags a session whose model id contains fable (a whole number of at most 15 digits).
 SYG_CREDIT_ADMIN_KEY_CMD	user	credit	unset	Command run on a cache miss (when ANTHROPIC_ADMIN_API_KEY is unset, empty or contains a newline) to print the organization Admin API key on stdout.
 SYG_CREDIT_ADMIN_URL	internal	credit	https://api.anthropic.com	Test seam overriding the Anthropic Admin API origin URL in api-credit and statusline.
 SYG_CREDIT_ANCHOR	user	credit	<SYG_CREDIT_LEDGER>.anchor.json	Path to the JSON file storing api-credit calibrate balance anchors.
