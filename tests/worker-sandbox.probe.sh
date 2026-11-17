@@ -157,6 +157,14 @@ out=$(inside); rc=$?
   && ok "a planted node_modules symlink isn't followed or written through" \
   || bad "planted node_modules: rc=$rc out=[$out]"
 rm -f "$W/node_modules"
+# 6b (main). The same planted link, run from the MAIN checkout: there the link under judgment is the main's own
+ln -s "$T/victim/node_modules" "$M/node_modules"
+fake '[ -e node_modules/dep ] && echo followed; echo done; exit 0'
+out=$(cd "$M" && SYG_WORKER_SANDBOX_CLAUDE=$T/fake-claude "$B/worker-sandbox" --settings "$T/overlay.json" 2>"$T/err"); rc=$?
+[ "$out" = "done" ] && [ ! -e "$T/victim/node_modules/.vite-temp" ] \
+  && ok "a planted node_modules symlink in the main checkout isn't followed or written through" \
+  || bad "planted node_modules in main checkout: rc=$rc out=[$out] err=[$(cat "$T/err")]"
+rm -f "$M/node_modules"; rmdir "$M/.claude" 2>/dev/null
 # The one target it does follow: this repo's own main checkout, which gated worktrees really link to
 mkdir -p "$M/node_modules"; echo dep >"$M/node_modules/dep"
 ln -s "$M/node_modules" "$W/node_modules"

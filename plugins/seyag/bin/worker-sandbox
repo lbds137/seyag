@@ -18,9 +18,10 @@ Inside, claude runs in bypass mode with: / read-only; /run and $HOME empty; the 
 gate-lock read-only; the tree per SYG_WORKER_SANDBOX_TREE, its untracked .env-style and key files masked;
 the repo's git dir, the tree's .git and (rw trees) its .claude read-only; internet through pasta, host
 loopback and the address pasta copies from the host refused; a clean environment; capped /tmp, /run and home.
-Not walled: the worker can read its own API key, world-readable files outside $HOME and /run; the host's
-other addresses (a second interface, VPN or container bridge) and the LAN answer. Names resolve only where
-the host resolves through nss-resolve or a non-loopback nameserver.
+Not walled: the worker can read its own API key, world-readable files outside $HOME and /run; untracked
+secret files are masked only to five levels deep and only by name (.env, .env.*, .dev.vars, *.pem, *.key);
+the host's other addresses (a second interface, VPN or container bridge) and the LAN answer. Names resolve
+only where the host resolves through nss-resolve or a non-loopback nameserver.
 No memory limit but what the caller sets (for example `systemd-run --user -p MemoryMax=`).
 
 Environment:

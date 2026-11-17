@@ -177,7 +177,7 @@ An optional TOML file fills in knobs the environment left unset: user `${XDG_CON
 
 | Name | Default | What it does | Found in |
 | --- | --- | --- | --- |
-| `SYG_GATE_LOCK_FILE` | `/tmp/gate.lock` | Lock file gate-lock holds while a gate command runs; one gate at a time machine-wide (keep it on a path every sandbox shares). | `bin/gate-lock`, `bin/gate-sandbox` |
+| `SYG_GATE_LOCK_FILE` | `/tmp/gate.lock` | Lock file gate-lock holds while a gate runs; one gate at a time machine-wide (keep it on a path every sandbox shares). Default is shared /tmp, so another user can hold it on a multi-user host; set a private path. | `bin/gate-lock`, `bin/gate-sandbox` |
 | `SYG_GATE_SANDBOX_ENV` | unset | Space-separated variable names gate-sandbox passes into the sandbox's otherwise cleared environment. | `bin/gate-sandbox`, `bin/worker-sandbox` |
 | `SYG_GATE_SANDBOX_PATH` | the caller's PATH | PATH inside gate-sandbox. | `bin/gate-sandbox`, `bin/worker-sandbox` |
 | `SYG_GATE_SANDBOX_PROFILE` | unset | gate-sandbox profile: unset for a one-gate sandbox, worker for a whole headless worker (set by worker-sandbox). | `bin/gate-sandbox`, `bin/worker-sandbox` |
