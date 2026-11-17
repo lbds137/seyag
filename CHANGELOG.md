@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY-MM-DD>` section per released version; under it, `###` categories in fixed order — Breaking Changes, Features, Bug Fixes, Improvements, Chores, Tests — empty ones omitted; items are `- **scope:** description (#330)`, written from the version's merged commit subjects.
+All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY-MM-DD>` section per released version; under it, `###` categories in fixed order — Breaking Changes, Features, Bug Fixes, Improvements, Chores, Tests — empty ones omitted; items are `- **scope:** description (#PR)`, written from the version's merged commit subjects.
 
 ## 0.3.178 - 2026-11-17
 
@@ -165,7 +165,7 @@ All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY
 ### Chores
 
 - **bin:** `safe-worktree-clean` re-wraps the ragged header/`--help` lines the holdscope batch left behind and comments the display-only `", "` split that builds the sweep tree names (`--json`'s `sweep_plan_trees` is unaffected) (#313).
-- **docs:** restores the `(#330)` placeholder on the format line, which a cite-fill replace_all had clobbered to `(#310)` (#313).
+- **docs:** restores the `(#PR)` placeholder on the format line, which a cite-fill replace_all had clobbered to `(#310)` (#313).
 - **hooks:** the pending-marker-pass header re-flowed: the scan sentence runs to `SYG_BQ_PENDING_MARKERS (...)`, the paragraph-filter and banner notes sit after the negator paragraph, and the banner note names the conditional placeholder (#314).
 - **docs:** the 0.3.166 bq-fp bullets shortened to commit-subject length; details stay in the hook header (authoritative) (#314).
 

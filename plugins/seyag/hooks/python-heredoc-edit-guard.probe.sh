@@ -253,6 +253,10 @@ run 2 "node -pe readFileSync+writeFileSync edit (-pe is an eval)" "Bash" \
   "node -pe \"const fs=require('fs'); fs.writeFileSync('f.txt', fs.readFileSync('f.txt','utf8'))\""
 run 2 "node --max-old-space-size 4096 -e edit (numeric-valued option)" "Bash" \
   "node --max-old-space-size 4096 -e \"const fs=require('fs'); fs.writeFileSync('f.txt', fs.readFileSync('f.txt','utf8'))\""
+run 2 "node --eval=BODY readFileSync+writeFileSync edit (--eval= joined value)" "Bash" \
+  "node --eval=\"const fs=require('fs'); fs.writeFileSync('f.txt', fs.readFileSync('f.txt','utf8'))\""
+run 2 "node --print=BODY readFileSync+writeFileSync edit (--print= joined value)" "Bash" \
+  "node --print=\"const fs=require('fs'); fs.writeFileSync('f.txt', fs.readFileSync('f.txt','utf8'))\""
 run 2 "python3 -I<<'E' heredoc edit (no space before <<)" "Bash" "$(printf "python3 -I<<'E'\n%s\nE" "$BODY")"
 run 2 "python3.12t -c edit (free-threaded name)" "Bash" "python3.12t -c \"$BODY\""
 
