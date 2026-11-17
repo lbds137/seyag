@@ -71,8 +71,9 @@ fi
 # reaches the `-c` branch. At most 16 options are taken: that keeps a chain of
 # interpreter names linear (grep retries from every `python`/`node`, and a
 # value-taking option can swallow the next name). `-m` is deliberately not an
-# option. Accepted misses: an inline marker after `--`, and a node option
-# outside the listed value-takers whose value is a non-number separated by a space.
+# option. Accepted misses: an inline marker after `--` or after more than 16
+# options, and a node option outside the listed value-takers whose value is a
+# non-number separated by a space.
 PY_OPTS='python(?:3(?:\.\d+t?)?)?(?:\s++(?:-[bBdEiIOPqRsSuvx]++(?=\s|<<)|-[XW]\s*+\S++|--check-hash-based-pycs\s++\S++)){0,16}+'
 NODE_NOT_EVAL='(?!-pe\b|-e\b|--eval\b|-p\b|--print\b)'
 NODE_OPTS="node(?:\s++(?:(?:-r|--require|--import|--loader|--experimental-loader|-C|--conditions|--input-type|--env-file)\s++\S++|${NODE_NOT_EVAL}--?[\w-]++(?:=\S++|\s++\d++)?(?=\s))){0,16}+"

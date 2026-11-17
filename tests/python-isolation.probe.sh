@@ -31,7 +31,7 @@ import sys
 
 repo = sys.argv[1]
 # Known limit: a call through a variable ("$PY" -c) is not linted.
-PY3 = re.compile(r"(?<![\w.-])python(?:3(?:\.\d+)?)?(?![\w.-])")
+PY3 = re.compile(r"(?<![\w.-])python(?:3(?:\.\d+t?)?)?(?![\w.-])")
 SKIP_BEFORE = ("command -v ", "type ", "which ")
 CACHE_TOKEN = '"${SYG_PY_CACHE_ARG:--B}"'
 
@@ -88,12 +88,14 @@ MUST_FLAG = [
     "/usr/bin/python3 -c x",
     "python -c x",
     "python3.12 - <<E",
+    "python3.12t -c x",
     "env python3 -c x",
 ]
 MUST_NOT = [
     "python3 -I -c x",
     "/usr/bin/python3 -I -c x",
     "python3.12 -I -c x",
+    "python3.12t -I -c x",
     "python3 -I \"${SYG_PY_CACHE_ARG:--B}\" - <<E",
     "python3 -I -B - <<E",
     "python3 \"$LIB\"",
@@ -172,7 +174,7 @@ fi
 row() { # $1 label, $2 hook file, $3 payload, $4 optional extra env (NAME=value)
   local label=$1 hook=$2 payload=$3 extra_env=${4:-} lines
   clear_state
-  (cd "$PLANT" && printf '%s' "$payload" | env -u SYG_PY_CACHE_ARG CLAUDE_JOB_DIR= $extra_env \
+  (cd "$PLANT" && printf '%s' "$payload" | env -u SYG_PY_CACHE_ARG CLAUDE_JOB_DIR= ${extra_env:+"$extra_env"} \
     PATH="$SHIM:$PATH" PYTHONDONTWRITEBYTECODE=1 bash "$REPO/plugins/seyag/hooks/$hook" >/dev/null 2>&1)
   lines=$(grep -c . "$LOG")
   if [ "$lines" -lt 1 ]; then
