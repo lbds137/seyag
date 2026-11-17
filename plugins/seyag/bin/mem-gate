@@ -1,0 +1,106 @@
+#!/bin/bash
+# mem-gate: the shared memory gate. Call it before launching a worker, a test suite or any
+# fan-out, the way `claude-usage --ok` gates on plan usage. See usage() for the flags.
+# Probe: tests/mem-gate.probe.sh.
+
+set -uo pipefail
+
+usage() {
+  cat <<'EOF'
+mem-gate: the shared memory gate. Call it before launching a worker, a test suite or any
+fan-out, the way `claude-usage --ok` gates on plan usage.
+
+  mem-gate [--ok [MB]]                  exit 0 if MemAvailable >= MB now, else 1
+  mem-gate --wait [MB] [--timeout S]    block until MemAvailable >= MB, then exit 0;
+                                        exit 1 once S seconds pass (default 1800, 0 = forever)
+  mem-gate --help
+
+  MB defaults to $SYG_MEM_GATE_MIN_MB, else 2048.
+  --interval S   seconds between checks while waiting (default 15)
+  --owner PID    while waiting, exit 3 once PID is gone (default: the Claude session that
+                 started it; none from a plain terminal)
+
+Prints one status line: MemAvailable, the threshold, swap used, and the top 3 RSS processes
+when the gate fails. A long job (over ~10 minutes) should also run outside the session's
+process tree, where Claude Code's low-memory reaper can't kill it (the machine's
+`SYG_LONG_JOB_CMD` runner, when one is set).
+Exit codes: 0 pass, 1 below threshold (or timed out), 2 usage error, no MemAvailable line
+(also mid-wait) or lib/owner.sh not loadable, 3 owner gone.
+EOF
+}
+for a in "$@"; do case "$a" in -h|--help) usage; exit 0 ;; esac; done
+lib="$(dirname "$(readlink -f "$0")")/../lib/owner.sh"
+# shellcheck source=/dev/null
+. "$lib" || { echo "mem-gate: cannot load $lib" >&2; exit 2; }
+
+# SYG_MEM_GATE_MEMINFO points the probe at a fixture file instead of /proc/meminfo.
+meminfo=${SYG_MEM_GATE_MEMINFO:-/proc/meminfo}
+num() { case "$2" in '' | *[!0-9]*) echo "mem-gate: $1 needs a whole number, got '$2'" >&2; exit 2 ;; esac; }
+# The default floor comes from SYG_MEM_GATE_MIN_MB, checked only when no explicit MB is given.
+mode=ok mb='' timeout=1800 interval=15 owner=$(owner_default)
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --ok|--wait)
+      mode=${1#--}
+      if [ $# -ge 2 ] && [[ $2 != -* ]]; then num "$1" "$2"; mb=$2; shift; fi ;;
+    --timeout|--interval|--owner)
+      [ $# -ge 2 ] || { echo "mem-gate: $1 needs a value" >&2; exit 2; }
+      # owner_init validates --owner itself; an empty one means no owner.
+      [ "$1" = --owner ] || num "$1" "$2"
+      case "$1" in --timeout) timeout=$2 ;; --interval) interval=$2 ;; --owner) owner=$2 ;; esac
+      shift ;;
+    *) echo "mem-gate: unknown option $1 (see --help)" >&2; exit 2 ;;
+  esac
+  shift
+done
+if [ -z "$mb" ]; then
+  num SYG_MEM_GATE_MIN_MB "${SYG_MEM_GATE_MIN_MB:-2048}"
+  mb=${SYG_MEM_GATE_MIN_MB:-2048}
+fi
+# Leading zeros (08) are decimal here, not an invalid octal in the arithmetic below.
+mb=$((10#$mb)) timeout=$((10#$timeout)) interval=$((10#$interval))
+[ "$interval" -gt 0 ] || { echo "mem-gate: --interval must be at least 1" >&2; exit 2; }
+owner_init "$owner"
+
+avail_mb() { awk '/^MemAvailable:/{printf "%d", $2/1024}' "$meminfo"; }
+swap_used_mb() { awk '/^SwapTotal:/{t=$2} /^SwapFree:/{f=$2} END{printf "%d", (t-f)/1024}' "$meminfo"; }
+top3() {
+  ps -eo pid,comm,rss --sort=-rss | sed -n '2,4p' |
+    awk '{printf "%s%s %s %d MB", (NR > 1 ? ", " : ""), $1, $2, $3/1024}'
+}
+
+a=$(avail_mb)
+[ -n "$a" ] || { echo "mem-gate: no MemAvailable line in $meminfo" >&2; exit 2; }
+if [ "$a" -ge "$mb" ]; then
+  echo "mem-gate: ok: MemAvailable $a MB >= $mb MB, swap used $(swap_used_mb) MB"
+  exit 0
+fi
+if [ "$mode" = ok ]; then
+  echo "mem-gate: low: MemAvailable $a MB < $mb MB, swap used $(swap_used_mb) MB; top 3 RSS: $(top3)"
+  exit 1
+fi
+
+echo "mem-gate: waiting: MemAvailable $a MB < $mb MB; pid $$, checking every $interval s, timeout ${timeout} s (0 = none)"
+start=$SECONDS
+while :; do
+  # The last sleep stops at the timeout, so a wait never overshoots it by most of an interval.
+  nap=$interval
+  if [ "$timeout" -gt 0 ]; then
+    left=$((timeout - (SECONDS - start)))
+    [ "$left" -lt "$nap" ] && nap=$left
+    [ "$nap" -lt 1 ] && nap=1
+  fi
+  sleep "$nap"
+  owner_or_exit
+  a=$(avail_mb)
+  [ -n "$a" ] || { echo "mem-gate: no MemAvailable line in $meminfo" >&2; exit 2; }
+  if [ "$a" -ge "$mb" ]; then
+    echo "mem-gate: ok after $((SECONDS - start)) s: MemAvailable $a MB >= $mb MB"
+    exit 0
+  fi
+  if [ "$timeout" -gt 0 ] && [ $((SECONDS - start)) -ge "$timeout" ]; then
+    echo "mem-gate: timed out after $((SECONDS - start)) s: MemAvailable $a MB < $mb MB; top 3 RSS: $(top3)"
+    exit 1
+  fi
+done

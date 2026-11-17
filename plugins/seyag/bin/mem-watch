@@ -1,0 +1,146 @@
+#!/bin/bash
+# mem-watch: block until RAM gets tight or the desktop gets an OOM kill, then exit so a
+# session waiting on it (run in the background) wakes up. Same shape as `claude-usage --wait`.
+#
+# Watches MemAvailable and the user app slice's oom_kill counter; see usage() for the flags.
+# Probe: tests/mem-watch.probe.sh.
+
+set -uo pipefail
+
+usage() {
+  cat <<'EOF'
+mem-watch: block until RAM gets tight or the desktop gets an OOM kill, then exit so a
+session waiting on it (run in the background) wakes up. Same shape as `claude-usage --wait`.
+
+  mem-watch [--threshold-gb N] [--interval S] [--once] [--owner PID] [--help]
+
+  --threshold-gb N   exit once /proc/meminfo's MemAvailable drops below N GB (default 2)
+  --interval S       seconds between checks while waiting, at least 1 (default 20)
+  --once             print the current status line and exit now: 0 if above threshold,
+                     1 if below; no loop
+  --owner PID        while waiting, exit 3 once PID is gone (default: the Claude session that
+                     started it; none from a plain terminal)
+  --help             print this usage and exit 0
+
+Also watches the user app slice's oom_kill counter (cgroup memory.events, found under
+$SYG_MEM_WATCH_CGROUP_ROOT, default /sys/fs/cgroup/user.slice) and exits early if it
+increments, since a kill can land before MemAvailable visibly crosses the threshold. If no
+such file is found, this run watches MemAvailable only, and says so in its first line.
+Exit codes: 0 triggered (or above threshold with --once), 1 below threshold with --once,
+2 usage error, no MemAvailable line or lib/owner.sh not loadable, 3 owner gone.
+
+No daemon, no state file, no PID file: the startup line prints this run's own pid so it can
+be stopped by that pid, never by matching its name or arguments.
+EOF
+}
+for a in "$@"; do case "$a" in -h|--help) usage; exit 0 ;; esac; done
+lib="$(dirname "$(readlink -f "$0")")/../lib/owner.sh"
+# shellcheck source=/dev/null
+. "$lib" || { echo "mem-watch: cannot load $lib" >&2; exit 2; }
+
+# SYG_MEM_WATCH_MEMINFO points the probe at a fixture file instead of /proc/meminfo;
+# SYG_MEM_WATCH_CGROUP_ROOT is the directory searched for the app slice's memory.events.
+meminfo=${SYG_MEM_WATCH_MEMINFO:-/proc/meminfo}
+cgroup_root=${SYG_MEM_WATCH_CGROUP_ROOT:-/sys/fs/cgroup/user.slice}
+
+threshold=2
+interval=20
+once=0
+owner=$(owner_default)
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --threshold-gb)
+            [ $# -ge 2 ] || { echo "mem-watch: $1 needs a value" >&2; exit 2; }
+            threshold="$2"; shift
+            ;;
+        --interval)
+            [ $# -ge 2 ] || { echo "mem-watch: $1 needs a value" >&2; exit 2; }
+            interval="$2"; shift
+            ;;
+        --owner)
+            [ $# -ge 2 ] || { echo "mem-watch: $1 needs a value" >&2; exit 2; }
+            owner="$2"; shift
+            ;;
+        --once) once=1 ;;
+        *) echo "mem-watch: unknown option $1 (see --help)" >&2; exit 2 ;;
+    esac
+    shift
+done
+owner_init "$owner"
+
+case "$interval" in
+    '' | *[!0-9]*)
+        echo "mem-watch: --interval needs a whole number of seconds" >&2; exit 2 ;;
+esac
+interval=$((10#$interval))   # 08 is decimal, not an invalid octal
+[ "$interval" -ge 1 ] || { echo "mem-watch: --interval must be at least 1" >&2; exit 2; }
+case "$threshold" in
+    '' | *[!0-9.]* | . | *.*.*)
+        echo "mem-watch: --threshold-gb needs a number" >&2; exit 2 ;;
+esac
+
+mem_available_gb() {
+    awk '/^MemAvailable:/{printf "%.1f", $2/1024/1024}' "$meminfo" 2>/dev/null
+}
+
+# Read MemAvailable into $avail, or exit 2: an empty value would compare as below threshold
+# and fire a false trigger.
+read_avail() {
+    avail=$(mem_available_gb)
+    [ -n "$avail" ] || { echo "mem-watch: no MemAvailable line in $meminfo" >&2; exit 2; }
+}
+
+# The app slice's memory.events path varies by session/service naming, so it's probed rather
+# than hard-coded; empty output means "watch MemAvailable only", handled by the caller.
+# systemd's per-user layout puts it at user-N.slice/user@N.service/app.slice/memory.events,
+# four levels below the root, hence maxdepth 4.
+oom_events_path() {
+    find "$cgroup_root" -maxdepth 4 -name memory.events 2>/dev/null | grep app.slice | head -1
+}
+
+oom_kill_count() {
+    local path="$1" n=""
+    if [ -n "$path" ] && [ -r "$path" ]; then
+        n=$(awk '/^oom_kill /{print $2}' "$path" 2>/dev/null)
+    fi
+    printf '%s' "${n:-0}"
+}
+
+top3() {
+    ps -eo pid,comm,rss --sort=-rss | sed -n '2,4p' |
+        awk '{printf "%s%s %s %d MB", (NR > 1 ? ", " : ""), $1, $2, $3/1024}'
+}
+
+below_threshold() {
+    awk -v a="$1" -v t="$threshold" 'BEGIN{exit !(a < t)}'
+}
+
+avail=""
+read_avail
+
+if [ $once = 1 ]; then
+    oom_path=$(oom_events_path)
+    oom_now=$(oom_kill_count "$oom_path")
+    echo "mem-watch: MemAvailable $avail GB (threshold $threshold GB), oom_kill $oom_now, oom counter ${oom_path:-none}"
+    if below_threshold "$avail"; then exit 1; else exit 0; fi
+fi
+
+oom_path=$(oom_events_path)
+oom_start=$(oom_kill_count "$oom_path")
+echo "mem-watch: pid $$, threshold $threshold GB, interval $interval s, oom counter ${oom_path:-none (watching MemAvailable only)}"
+
+while :; do
+    read_avail
+    oom_now=$(oom_kill_count "$oom_path")
+    if below_threshold "$avail"; then
+        echo "mem-watch: MemAvailable below threshold: MemAvailable $avail GB, oom_kill $oom_now (was $oom_start), top 3 RSS: $(top3)"
+        exit 0
+    fi
+    if [ "$oom_now" -ne "$oom_start" ]; then
+        echo "mem-watch: oom_kill incremented: MemAvailable $avail GB, oom_kill $oom_now (was $oom_start), top 3 RSS: $(top3)"
+        exit 0
+    fi
+    sleep "$interval"
+    owner_or_exit
+done

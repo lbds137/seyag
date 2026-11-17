@@ -2,6 +2,18 @@
 
 All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY-MM-DD>` section per released version; under it, `###` categories in fixed order — Breaking Changes, Features, Bug Fixes, Improvements, Chores, Tests — empty ones omitted; items are `- **scope:** description (#PR)`, written from the version's merged commit subjects.
 
+## 0.3.174 - 2026-11-16
+
+### Features
+
+- **mem-gate:** the shared memory gate (`mem-gate [--ok [MB]]`, `--wait [MB] [--timeout S] [--interval S]`, `--owner PID`) joins the plugin's `bin/`: exit 0 when MemAvailable is at least MB, 1 below it or timed out, 2 on a usage error, a meminfo without `MemAvailable` (also when it disappears mid-wait) or a lib that cannot be loaded, 3 when the owner is gone; MB defaults to the new `SYG_MEM_GATE_MIN_MB` knob (default 2048) and an explicit MB wins; test seam `SYG_MEM_GATE_MEMINFO` (#TBD).
+- **mem-watch:** the memory watcher (`mem-watch [--threshold-gb N] [--interval S] [--once] [--owner PID]`) joins `bin/`: exits when MemAvailable drops below the threshold or the user app slice's `oom_kill` counter increments; the counter is searched under the new `SYG_MEM_WATCH_CGROUP_ROOT` knob (default `/sys/fs/cgroup/user.slice`), test seam `SYG_MEM_WATCH_MEMINFO`. `--interval 0` is a usage error (it would busy-loop), a meminfo without a `MemAvailable` line exits 2 instead of reading as below threshold, a `lib/owner.sh` that cannot be loaded exits 2, and the top-3 text prints `PID comm N MB` (#TBD).
+- **lib/owner.sh:** the owner-tracking helpers (`owner_default`, `owner_init`, `owner_alive`, `owner_or_exit`) as a sourced `plugins/seyag/lib/owner.sh`, shared by `mem-gate` and `mem-watch`; `tests/shell-files.sh` lists `plugins/seyag/lib/*.sh` so shellcheck and the syntax probe cover it (#TBD).
+
+### Tests
+
+- **mem-gate, mem-watch:** `tests/mem-gate.probe.sh` and `tests/mem-watch.probe.sh` pin both tools against fixture meminfo and cgroup trees: thresholds, the knob, leading-zero numbers, wait timeout and recovery, the oom trigger, the missing-MemAvailable exit (also mid-wait), a lib that cannot be loaded, owner gone and usage errors (#TBD).
+
 ## 0.3.173 - 2026-11-16
 
 ### Breaking Changes
