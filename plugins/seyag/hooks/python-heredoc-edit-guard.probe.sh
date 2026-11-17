@@ -19,7 +19,7 @@ FAILURES=0
 run() {
   local expected="$1" label="$2" tool="$3" cmd="$4"
   printf '%s' "$cmd" | jq -Rsc --arg t "$tool" '{tool_name:$t,tool_input:{command:.}}' \
-    | timeout 20 "$HOOK" >/dev/null 2>&1
+    | timeout "${RUN_TIMEOUT:-20}" "$HOOK" >/dev/null 2>&1
   local actual=$?
   if [ "$actual" -eq "$expected" ]; then
     printf 'PASS  (exit %d)  %s\n' "$actual" "$label"
@@ -227,5 +227,57 @@ run 2 "whitespace run after an open( argument blocks fast" "Bash" "$CMD13"
 
 CMD14="echo \"python${SPACES150K}x\""
 run 0 "long space run after python passes fast" "Bash" "$CMD14"
+
+# --- cases 15-: interpreter options between the name and the inline marker ----
+# BODY is a read-modify-write of f.txt; each row must reach check 3 (the same
+# target is read and written), so an exit 2 proves the option form was caught.
+BODY="p=open('f.txt').read(); open('f.txt','w').write(p)"
+run 2 "python3 -I - heredoc (option before stdin dash)" "Bash" "$(printf "python3 -I - <<'E'\n%s\nE" "$BODY")"
+run 2 "python3 -I -c inline body" "Bash" "python3 -I -c \"$BODY\""
+run 2 "python3 -B -c inline body" "Bash" "python3 -B -c \"$BODY\""
+run 2 "python3 -I stdin heredoc with no dash" "Bash" "$(printf "python3 -I <<'E'\n%s\nE" "$BODY")"
+run 2 "python3 -IB -c (combined short options)" "Bash" "python3 -IB -c \"$BODY\""
+run 2 "python3 -Ic (option cluster ending in c)" "Bash" "python3 -Ic \"$BODY\""
+run 2 "python3 -X utf8 -I -c (-X takes a value)" "Bash" "python3 -X utf8 -I -c \"$BODY\""
+run 2 "python3 -Xpycache_prefix=/x -c (-X joined value)" "Bash" "python3 -Xpycache_prefix=/x -c \"$BODY\""
+run 2 "python3.12 -c (versioned name)" "Bash" "python3.12 -c \"$BODY\""
+run 2 "/usr/bin/python3 -I -c (path-prefixed name)" "Bash" "/usr/bin/python3 -I -c \"$BODY\""
+run 2 "python -W ignore -c (bare name, -W takes a value)" "Bash" "python -W ignore -c \"$BODY\""
+run 2 "node --no-warnings -e readFileSync+writeFileSync edit" "Bash" \
+  "node --no-warnings -e \"const fs=require('fs'); fs.writeFileSync('f.txt', fs.readFileSync('f.txt','utf8'))\""
+run 2 "node -r x -e readFileSync+writeFileSync edit" "Bash" \
+  "node -r x -e \"const fs=require('fs'); fs.writeFileSync('f.txt', fs.readFileSync('f.txt','utf8'))\""
+run 2 "node -p readFileSync+writeFileSync edit (-p counts like -e)" "Bash" \
+  "node -p \"const fs=require('fs'); fs.writeFileSync('f.txt', fs.readFileSync('f.txt','utf8'))\""
+run 2 "node -pe readFileSync+writeFileSync edit (-pe is an eval)" "Bash" \
+  "node -pe \"const fs=require('fs'); fs.writeFileSync('f.txt', fs.readFileSync('f.txt','utf8'))\""
+run 2 "node --max-old-space-size 4096 -e edit (numeric-valued option)" "Bash" \
+  "node --max-old-space-size 4096 -e \"const fs=require('fs'); fs.writeFileSync('f.txt', fs.readFileSync('f.txt','utf8'))\""
+run 2 "python3 -I<<'E' heredoc edit (no space before <<)" "Bash" "$(printf "python3 -I<<'E'\n%s\nE" "$BODY")"
+run 2 "python3.12t -c edit (free-threaded name)" "Bash" "python3.12t -c \"$BODY\""
+
+# Exit 0: the option-shaped text is not an inline script, or the write is not
+# in the interpreter's own body.
+run 0 "python3 -m mod -c cfg; echo body (-m is a module, not an option)" "Bash" \
+  "python3 -m tool -c cfg; echo \"$BODY\""
+run 0 "python3 -I script.py; echo body (script file, not inline)" "Bash" \
+  "python3 -I script.py; echo \"$BODY\""
+run 0 "node script.js -e; echo body (script file, not inline)" "Bash" \
+  "node script.js -e; echo \"fs.writeFileSync('f.txt', fs.readFileSync('f.txt','utf8'))\""
+
+# Fast rows: a long option run or a long -X value must not backtrack past the
+# 20 s timeout (exit 0 = allowed, finished in time).
+DASHI=$(printf -- '-I %.0s' $(seq 1 20000))
+A200K=$(head -c 200000 /dev/zero | tr '\0' 'a')
+run 0 "python3 followed by 20000 repetitions of -I then x: fast" "Bash" "python3 ${DASHI}x"
+run 0 "python3 -X then 200 KB value then q: fast" "Bash" "python3 -X ${A200K} q"
+# Chain rows: 200 KB of interpreter names with value-taking options. Each name
+# restarts a grep match, so an unbounded option run goes quadratic here. Bounded,
+# the hook takes ~0.1 s on each; unbounded, 10-16 s (measured 11-17), so these
+# rows get a 5 s timeout: the default 20 s would pass the quadratic form too.
+CHAIN_PY=$(printf 'python -X %.0s' $(seq 1 20000))
+CHAIN_NODE=$(printf 'node -r %.0s' $(seq 1 25000))
+RUN_TIMEOUT=5 run 0 "chain row: 200 KB of 'python -X ' then x: fast" "Bash" "${CHAIN_PY}x"
+RUN_TIMEOUT=5 run 0 "chain row: 200 KB of 'node -r ' then x: fast" "Bash" "${CHAIN_NODE}x"
 
 exit $FAILURES

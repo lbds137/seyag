@@ -11,7 +11,10 @@
 #
 # Three checks must ALL match for a block:
 #   1. an interpreter-script invocation shape (python -c/-, a heredoc into
-#      python, or node -e/--eval)
+#      python, or node -e/-p/--eval/--print). Interpreter options may sit
+#      between the name (`python`, `python3`, `python3.N`) and the marker
+#      (`python3 -I -c`, `node --no-warnings -e`); `node -p`/`--print`
+#      counts like `-e`.
 #   2. a file-write call shape inside the command text (open(...,'w'/'a'),
 #      write_text/write_bytes, writeFileSync/appendFileSync)
 #   3. some write target is also READ in the script, compared as the
@@ -62,7 +65,18 @@ fi
 # `grep -P` failing for a reason OTHER than "no match" (e.g. PCRE support
 # missing) must not be mistaken for "no match" — capture the exit status
 # rather than relying on `&&`/`||` short-circuiting alone.
-INTERP_RE='python3?\s+(-c\b|-\s|-$)|python3?\s*(?:-\s*)?<<|node\s+(-e|--eval)\b'
+# Interpreter options may sit between the name and the inline-script marker
+# (`python3 -I -c`, `python3 -X utf8 - <<E`, `node --no-warnings -e`). Each is
+# consumed possessively and must end at whitespace (or `<<`), so `-Ic` still
+# reaches the `-c` branch. At most 16 options are taken: that keeps a chain of
+# interpreter names linear (grep retries from every `python`/`node`, and a
+# value-taking option can swallow the next name). `-m` is deliberately not an
+# option. Accepted misses: an inline marker after `--`, and a node option
+# outside the listed value-takers whose value is a non-number separated by a space.
+PY_OPTS='python(?:3(?:\.\d+t?)?)?(?:\s++(?:-[bBdEiIOPqRsSuvx]++(?=\s|<<)|-[XW]\s*+\S++|--check-hash-based-pycs\s++\S++)){0,16}+'
+NODE_NOT_EVAL='(?!-pe\b|-e\b|--eval\b|-p\b|--print\b)'
+NODE_OPTS="node(?:\s++(?:(?:-r|--require|--import|--loader|--experimental-loader|-C|--conditions|--input-type|--env-file)\s++\S++|${NODE_NOT_EVAL}--?[\w-]++(?:=\S++|\s++\d++)?(?=\s))){0,16}+"
+INTERP_RE="${PY_OPTS}\s++(?:-[bBdEiIOPqRsSuvx]*c\b|-(?:\s|$))|${PY_OPTS}\s*+(?:-\s*+)?<<|${NODE_OPTS}\s++(?:-pe|-e|--eval|-p|--print)\b"
 WRITE_RE="open\([^)]*,\s*['\"][wa]|\.open\(\s*['\"][wa]|mode\s*=\s*['\"][wa]|write_text\(|write_bytes\(|writeFileSync\(|appendFileSync\("
 
 grep -Pq "$INTERP_RE" <<<"$GUARD_CMD" 2>/dev/null

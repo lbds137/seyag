@@ -858,7 +858,7 @@ PY
 echo '{"data":[{"starting_at":"2026-10-07T00:00:00Z","ending_at":"2026-10-08T00:00:00Z","results":[{"currency":"USD","amount":"929"}]}],"has_more":false}' > "$h/cr/ok.json"
 echo ok > "$h/cr/mode"
 : > "$h/cr/hits.log"
-PYTHONDONTWRITEBYTECODE=1 python3 -I "$h/cr/srv.py" "$h/cr" &
+python3 -I -B "$h/cr/srv.py" "$h/cr" &
 SRV_PID=$!
 trap 'kill "$SRV_PID" 2>/dev/null; rm -rf "$h"' EXIT
 for _ in $(seq 1 50); do [ -s "$h/cr/port" ] && break; sleep 0.1; done
