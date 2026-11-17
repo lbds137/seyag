@@ -31,10 +31,21 @@ Usage: classifier-denials [--since HOURS] [--detail]    (default 24h; --detail l
 hours = 24.0
 detail = False
 i = 0
+USAGE = "usage: classifier-denials [--since HOURS] [--detail]"
+def usage_error(msg):
+    print("classifier-denials: " + msg, file=sys.stderr)
+    print(USAGE, file=sys.stderr)
+    sys.exit(2)
 while i < len(args):
-    if args[i] == "--since": hours = float(args[i + 1]); i += 2
+    if args[i] == "--since":
+        try:
+            hours = float(args[i + 1])
+            if hours != hours or hours in (float("inf"), float("-inf")): raise ValueError
+        except (IndexError, ValueError):
+            usage_error("--since needs a number of hours")
+        i += 2
     elif args[i] == "--detail": detail = True; i += 1
-    else: i += 1
+    else: usage_error("unknown argument: " + args[i])
 root = os.environ.get("CLAUDE_PROJECTS_DIR") or os.path.join(os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude"), "projects")
 cutoff = time.time() - hours * 3600
 home_slug = re.sub(r"[^A-Za-z0-9]", "-", os.path.expanduser("~"))
@@ -47,7 +58,7 @@ events = []
 for path in glob.glob(os.path.join(root, "*", "*.jsonl")):
     try:
         if os.stat(path).st_mtime < cutoff: continue
-        proj = os.path.basename(os.path.dirname(path)).replace(home_slug + "-Projects-", "").replace(home_slug + "-", "")
+        proj = re.sub("^" + re.escape(home_slug) + "-(Projects-)?", "", os.path.basename(os.path.dirname(path)))
         sid = os.path.basename(path)[:8]
         with open(path, errors="replace") as fh:
             for line in fh:

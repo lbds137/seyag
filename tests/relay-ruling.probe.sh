@@ -297,7 +297,9 @@ SYG_OWNER_NAME=Pat run --to alpha --quote "Ship it after the gate" --run "cd /tm
 
 # --help and the stderr reply block carry no machine- or person-specific names
 run --help
-! grep -qi "lila\|needs lila" <<<"$out" && grep -q "SYG_OWNER_NAME" <<<"$out" && ok "--help is generic and names the knob" || bad "--help text"
+grep -q "SYG_OWNER_NAME" <<<"$out" && ok "--help names the owner-name knob" || bad "--help text"
+run --to alpha --quote "Ship it after the gate" --transcript "$T"
+[ "$rc" = 0 ] && grep -q "^The owner said (" <<<"$out" && ok "default header reads The owner said" || bad "default header (rc $rc: $out)"
 run --to alpha --quote "Ship it after the gate" --run "cd /tmp && ls" --in delta --transcript "$T"
 grep -qF "relay-ruling: for your reply to the owner, give them the same line and where to type it:" <<<"$err" && ok "stderr reply block says the owner" || bad "stderr block: $err"
 

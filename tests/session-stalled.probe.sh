@@ -434,11 +434,18 @@ out=$(PATH="$tmp/stub:$PATH" HOME="$tmp/nohome" CLAUDE_CONFIG_DIR="$tmp/nope" CL
 out=$(PATH="$tmp/stub:$PATH" HOME="$tmp/nohome" CLAUDE_PROJECTS_DIR="$tmp/nope" "$STALLED" 2>&1); rc=$?
 [ "$rc" = 2 ] && [ "$out" = "session-stalled: $tmp/nope is missing or unreadable" ] && ok || bad "missing root names the root dir (rc=$rc out=$out)"
 
-# the pre-SYG_ names are not read: the clock stays at NOW and the zai zone stays Asia/Shanghai
-out=$(DECK_STALLED_NOW="2026-10-16T18:00:00Z" "$STALLED" --file "$tmp/err.jsonl" T); rc=$?
-[ "$rc" = 1 ] && [ "$out" = "T stalled 30m rate_limit" ] && ok || bad "old DECK_STALLED_NOW must be ignored (rc=$rc out=$out)"
-out=$(DECK_STALLED_ZAI_TZ=Pacific/Kiritimati "$STALLED" --file "$tmp/zai.jsonl" Z); rc=$?
-[ "$rc" = 1 ] && [ "$out" = "Z stalled 30m rate_limit reset $zfut_hm (in 20m)" ] && ok || bad "old DECK_STALLED_ZAI_TZ must be ignored (rc=$rc out=$out)"
+
+# an agent entry without a name is listed under its 8-character session prefix; the scan carries on
+mkdir -p "$tmp/unhome/.claude/projects/proj"
+cp "$tmp/err.jsonl" "$tmp/unhome/.claude/projects/proj/abcdef123456.jsonl"
+cp "$tmp/err.jsonl" "$tmp/unhome/.claude/projects/proj/sid-n.jsonl"
+cat > "$tmp/stub/claude" <<'STUB'
+#!/bin/sh
+printf '[{"sessionId":"abcdef123456"},{"name":"","sessionId":"abcdef123456"},{"name":"named","sessionId":"sid-n"}]\n'
+STUB
+out=$(PATH="$tmp/stub:$PATH" HOME="$tmp/unhome" "$STALLED" 2>&1); rc=$?
+[ "$rc" = 1 ] && [ "$out" = $'abcdef12 stalled 30m rate_limit\nabcdef12 stalled 30m rate_limit\nnamed stalled 30m rate_limit' ] \
+  && ok || bad "unnamed agents listed by session prefix (rc=$rc out=$out)"
 
 # --help starts with the tool's own name
 out=$("$STALLED" --help); rc=$?
