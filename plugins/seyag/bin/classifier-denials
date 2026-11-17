@@ -55,7 +55,7 @@ UNAVAIL = re.compile(r"[~\w/.\-\[\]:]+ is temporarily unavailable \([^)]*\)")
 REASON = re.compile(r"Reason: (.*?)\.? If you have other tasks", re.S)
 cnt = collections.defaultdict(lambda: [0, 0])
 events = []
-for path in glob.glob(os.path.join(root, "*", "*.jsonl")):
+for path in glob.glob(os.path.join(glob.escape(root), "*", "*.jsonl")):
     try:
         if os.stat(path).st_mtime < cutoff: continue
         proj = re.sub("^" + re.escape(home_slug) + "-(Projects-)?", "", os.path.basename(os.path.dirname(path)))
@@ -65,8 +65,10 @@ for path in glob.glob(os.path.join(root, "*", "*.jsonl")):
                 if not any(n in line for n in NEEDLES): continue
                 try: d = json.loads(line)
                 except ValueError: continue
+                if not isinstance(d, dict): continue  # a bare JSON string or list that quotes the text
                 if d.get("type") != "user" or not d.get("toolDenialKind"): continue  # a quotation of the text has no denial key
                 ts = d.get("timestamp", "")
+                if not isinstance(ts, str): continue  # a non-string stamp can't be placed in time
                 try:
                     t = datetime.datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
                 except ValueError:

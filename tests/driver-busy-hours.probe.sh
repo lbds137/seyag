@@ -153,6 +153,28 @@ out=$(env -u CLAUDE_PROJECTS_DIR HOME="$tmp/nohome" CLAUDE_CONFIG_DIR="$tmp/cfg"
 out=$(HOME="$tmp/nohome" CLAUDE_CONFIG_DIR="$tmp/nope" "$BIN" --slug=-home-user-Projects-demo --since 2026-10-26T00:00Z --until 2026-10-26T23:59Z --json)
 [ "$(jq -r .busy_seconds <<< "$out")" = 330 ] && ok "CLAUDE_PROJECTS_DIR wins over CLAUDE_CONFIG_DIR" || bad "projects dir root: $out"
 
+# An empty CLAUDE_PROJECTS_DIR counts as unset: the agy merge stays on (the Claude root is CLAUDE_CONFIG_DIR/projects).
+agyhome="$tmp/agyhome"; mkdir -p "$agyhome/.gemini/antigravity-cli"
+ln -sfn "$agy_db" "$agyhome/.gemini/antigravity-cli/conversation_summaries.db"; ln -sfn "$agy_brain" "$agyhome/.gemini/antigravity-cli/brain"
+out=$(CLAUDE_PROJECTS_DIR='' HOME="$agyhome" CLAUDE_CONFIG_DIR="$tmp/cfg" "$BIN" --slug odd --since 2026-10-26T00:00Z --until 2026-10-26T23:59Z --json)
+[ "$(jq -r .busy_seconds <<< "$out")" = 360 ] && jq -e '.sessions | any(.session == "agyroot1")' <<< "$out" >/dev/null \
+  && ok "an empty CLAUDE_PROJECTS_DIR is unset: agy root conversations still merge" || bad "empty projects dir: $(jq -c '{busy_seconds, sessions}' <<< "$out")"
+
+# An empty SYG_AGY_SUMMARIES_DB is unset: with SYG_AGY_BRAIN_DIR set, the default DB under HOME is read (the merged total).
+out=$(SYG_AGY_SUMMARIES_DB='' SYG_AGY_BRAIN_DIR="$agy_brain" HOME="$agyhome" CLAUDE_PROJECTS_DIR="$CLAUDE_PROJECTS_DIR" "$BIN" --slug odd --since 2026-10-26T00:00Z --until 2026-10-26T23:59Z --json)
+[ "$(jq -r .busy_seconds <<< "$out")" = 360 ] && jq -e '.sessions | any(.session == "agyroot1")' <<< "$out" >/dev/null \
+  && ok "an empty SYG_AGY_SUMMARIES_DB is unset: the default DB under HOME is read" || bad "empty summaries db: $(jq -c '{busy_seconds, sessions}' <<< "$out")"
+
+# Wrong JSON types in a transcript (a non-object message, a non-string model or id): skipped, the valid replies still count, no crash.
+wt="$CLAUDE_PROJECTS_DIR/-home-user-Projects-wrongtype"; mkdir -p "$wt"
+{ echo '{"type":"assistant","timestamp":"2026-10-26T10:00:00Z","message":"text"}'
+  echo '{"type":"assistant","timestamp":"2026-10-26T10:01:00Z","message":{"id":"w1","model":["x"]}}'
+  echo '{"type":"assistant","timestamp":"2026-10-26T10:02:00Z","message":{"id":["not-a-string"],"model":"claude-opus-5-5"}}'
+  echo '{"type":"assistant","timestamp":"2026-10-26T10:03:00Z","message":{"id":"w2","model":"claude-opus-5-5"}}'; } > "$wt/s.jsonl"
+out=$("$BIN" --slug wrongtype --since 2026-10-26T00:00Z --until 2026-10-26T23:59Z --json 2> "$tmp/err"); rc=$?
+[ $rc = 0 ] && [ "$(jq -r '.sessions[0].busy_seconds' <<< "$out")" = 180 ] && [ "$(jq -c '.sessions[0].replies_by_model' <<< "$out")" = '{"claude-opus-5-5":2}' ] && ! grep -q Traceback "$tmp/err" \
+  && ok "non-object message is skipped, a non-string model is skipped, a non-string id counts as no id; no crash" || bad "wrong types: rc=$rc $(cat "$tmp/err") $(jq -c . <<< "$out")"
+
 # A negative --gap is a usage error.
 "$BIN" --slug demo --since 2026-10-26 --until 2026-10-26 --gap -5 > /dev/null 2> "$tmp/err"; rc=$?
 [ $rc = 2 ] && grep -q -- '--gap must not be negative' "$tmp/err" && ok "a negative --gap exits 2" || bad "negative gap: rc=$rc $(cat "$tmp/err")"

@@ -318,4 +318,53 @@ out=$(HOME="$t/nohome" CLAUDE_CONFIG_DIR="$t/cfgdir" CLAUDE_PROJECTS_DIR="$t/pdi
 out=$(HOME="$t/nohome" CLAUDE_CONFIG_DIR="$t/cfgdir" CLAUDE_PROJECTS_DIR="$t/pdir" CLAUDE_CODE_SESSION_ID=sid-cfg "$RR" --to alpha --quote "Ship it after the gate" 2>"$t/err"); rc=$?
 [ "$rc" = 4 ] && ok "with CLAUDE_PROJECTS_DIR set the config-dir transcript is not searched (exit 4)" || bad "projects dir exclusive (rc $rc: $out)"
 
+# Non-object nested fields (message, origin, attachment) before a real owner turn: skipped, the real turn is still found, no traceback.
+odd="$t/odd.jsonl"
+cat >"$odd" <<'EOF'
+{"type":"user","timestamp":"2026-11-02T09:00:00.000Z","sessionId":"ccdd-2222","message":"plain string"}
+{"type":"user","timestamp":"2026-11-02T09:01:00.000Z","sessionId":"ccdd-2222","message":[1]}
+{"type":"user","timestamp":"2026-11-02T09:02:00.000Z","sessionId":"ccdd-2222","origin":"x","message":{"role":"user","content":"odd origin zz1"}}
+{"type":"attachment","timestamp":"2026-11-02T09:03:00.000Z","sessionId":"ccdd-2222","attachment":"x"}
+{"type":"user","timestamp":"2026-11-02T12:00:00.000Z","sessionId":"ccdd-2222","origin":{"kind":"human"},"message":{"role":"user","content":"Ship it after the odd gate"}}
+EOF
+run --to alpha --quote "Ship it after the odd gate" --transcript "$odd"
+[ "$rc" = 0 ] && has "The owner said (Mon 2026-11-02 12:00 UTC" && has '"Ship it after the odd gate"' && ! grep -q Traceback "$t/err" \
+  && ok "non-object message, origin and attachment fields are skipped; the owner turn after them is found" || bad "non-object fields (rc $rc: $out $err)"
+
+# Non-string text parts and non-string timestamps (a turn, a queued message, a peer attachment) are skipped or read as unknown: no traceback.
+numts="$t/numts.jsonl"
+cat >"$numts" <<'EOF'
+{"type":"user","timestamp":"2026-11-02T09:10:00.000Z","sessionId":"ccdd-2222","origin":{"kind":"human"},"message":{"role":"user","content":[{"type":"text","text":5},{"type":"text","text":"Ship it after the numeric-text gate"}]}}
+{"type":"user","timestamp":12345,"sessionId":"ccdd-2222","origin":{"kind":"human"},"message":{"role":"user","content":"Ship it after the numeric-stamp gate"}}
+{"type":"attachment","timestamp":5,"sessionId":"ccdd-2222","attachment":{"type":"queued_command","origin":{"kind":"peer","name":"sender-c","body":"sender-c: numeric-stamp peer note zz3"},"prompt":"x"}}
+{"type":"queue-operation","operation":"enqueue","timestamp":7,"sessionId":"ccdd-2222","content":"queued numeric zz4"}
+{"type":"user","timestamp":"2026-11-02T14:00:00.000Z","sessionId":"ccdd-2222","origin":{"kind":"human"},"promptSource":"queued","message":{"role":"user","content":"queued numeric zz4"}}
+EOF
+run --to alpha --quote "Ship it after the numeric-text gate" --transcript "$numts"
+[ "$rc" = 0 ] && has "The owner said (Mon 2026-11-02 09:10 UTC" && ! grep -q Traceback "$t/err" && ok "a non-string text part is skipped; the turn is still found" || bad "text part (rc $rc: $out $err)"
+run --to alpha --quote "Ship it after the numeric-stamp gate" --transcript "$numts"
+[ "$rc" = 0 ] && has "The owner said (time unknown" && ok "a non-string turn timestamp reads as unknown" || bad "numeric turn stamp (rc $rc: $out $err)"
+run --peer --to alpha --quote "numeric-stamp peer note zz3" --transcript "$numts"
+[ "$rc" = 0 ] && has "(its message at time unknown" && ok "a non-string peer attachment timestamp reads as unknown" || bad "numeric peer stamp (rc $rc: $out $err)"
+run --to alpha --quote "queued numeric zz4" --transcript "$numts"
+[ "$rc" = 0 ] && has "Mon 2026-11-02 14:00 UTC" && ! has "time unknown" && ok "a non-string enqueue stamp falls back to the turn's own time" || bad "numeric enqueue (rc $rc: $out $err)"
+
+# A non-string sessionId reads as missing: the turn is still found, and the source falls back to the file's name.
+numsid="$t/fallback.jsonl"
+cat >"$numsid" <<'EOF'
+{"type":"user","timestamp":"2026-11-02T15:00:00.000Z","sessionId":12345,"origin":{"kind":"human"},"message":{"role":"user","content":"Ship it after the numeric-session gate"}}
+EOF
+run --to alpha --quote "Ship it after the numeric-session gate" --transcript "$numsid"
+[ "$rc" = 0 ] && has "The owner said (Mon 2026-11-02 15:00 UTC, in fallback):" && ! grep -q Traceback "$t/err" \
+  && ok "a non-string sessionId reads as missing; the source falls back to the file name" || bad "numeric sessionId (rc $rc: $out $err)"
+
+# A stamp near year 1 can't be shown in a zone west of UTC (astimezone overflows): it reads as an unknown time, no traceback.
+year1="$t/year1.jsonl"
+cat >"$year1" <<'EOF'
+{"type":"user","timestamp":"0001-01-01T00:00:00Z","sessionId":"ccdd-2222","origin":{"kind":"human"},"message":{"role":"user","content":"Ship it after the year-one gate"}}
+EOF
+out=$(TZ=America/New_York "$RR" --to alpha --quote "Ship it after the year-one gate" --transcript "$year1" 2>"$t/err"); rc=$?
+[ "$rc" = 0 ] && grep -qF "The owner said (0001-01-01T00:00:00Z, in" <<<"$out" && ! grep -q Traceback "$t/err" \
+  && ok "a year-1 stamp in a western zone is shown as stored, no traceback" || bad "year-1 stamp (rc $rc: $out $(cat "$t/err"))"
+
 exit $fail

@@ -59,6 +59,25 @@ mkdir -p "$proj/zz${hs}-Projects-mid"; mk "[Git Destructive]" > "$proj/zz${hs}-P
 out=$(HOME="$fakehome" CLAUDE_PROJECTS_DIR="$proj" "$B" --since 1 2>&1)
 chk "^  zz-" "a home slug in the middle of a folder name is kept"
 
+# The projects root is a literal path: glob characters in its name ([x]) don't change which folders are read.
+mkdir -p "$tmp/pro[x]jects/${hs}-Projects-xray"; mk "[Git Destructive]" > "$tmp/pro[x]jects/${hs}-Projects-xray/eeeeeeee5555.jsonl"
+out=$(HOME="$fakehome" CLAUDE_PROJECTS_DIR="$tmp/pro[x]jects" "$B" --since 1 2>&1)
+chk "A(policy)=1 B(infra)=0" "a projects root with [] in its name is read"
+
+# A line that parses to a JSON string (not an object) and quotes the needle is skipped: no traceback, the real denial still counts.
+mkdir -p "$tmp/bare/${hs}-Projects-echo"
+{ printf '%s\n' '"denied by the Claude Code auto mode classifier. Reason: [Git Destructive]. If you have other tasks"'; mk "[Git Destructive]"; } > "$tmp/bare/${hs}-Projects-echo/ffffffff6666.jsonl"
+out=$(HOME="$fakehome" CLAUDE_PROJECTS_DIR="$tmp/bare" "$B" --since 1 2>&1); rc=$?
+[ "$rc" = 0 ] && grep -q "A(policy)=1 B(infra)=0" <<< "$out" && ! grep -q Traceback <<< "$out" \
+  && ok "a bare JSON string quoting the needle is skipped; the real denial counts" || bad "bare string line: rc $rc, $out"
+
+# A non-string timestamp can't be placed in time: that line is skipped, no traceback, and the real denial still counts.
+mkdir -p "$tmp/numts/${hs}-Projects-foxtrot"
+{ printf '%s\n' '{"type":"user","toolDenialKind":"automode-blocked","timestamp":12345,"message":{"content":[{"type":"tool_result","content":"Permission for this action was denied by the Claude Code auto mode classifier. Reason: [Git Destructive]. If you have other tasks"}]}}'; mk "[Git Destructive]"; } > "$tmp/numts/${hs}-Projects-foxtrot/gggggggg7777.jsonl"
+out=$(HOME="$fakehome" CLAUDE_PROJECTS_DIR="$tmp/numts" "$B" --since 1 2>&1); rc=$?
+[ "$rc" = 0 ] && grep -q "A(policy)=1 B(infra)=0" <<< "$out" && ! grep -q Traceback <<< "$out" \
+  && ok "a non-string timestamp skips that line; the real denial counts" || bad "numeric timestamp: rc $rc, $out"
+
 # Usage errors exit 2 with a message and the usage line, never a traceback or a silent ignore.
 for args in "--since" "--since abc" "--since nan" "--bogus" "--detail extra"; do
   out=$(HOME="$fakehome" CLAUDE_PROJECTS_DIR="$proj" "$B" $args 2>&1 >/dev/null); rc=$?

@@ -85,6 +85,41 @@ got=$(CLAUDE_CONFIG_DIR="$t/empty" CLAUDE_PROJECTS_DIR="$t/cfg/projects" "$CLS" 
 got=$(CLAUDE_PROJECTS_DIR="$t/empty" "$CLS" --agents "$t/agents.json" --projects "$t/cfg/projects" --json | state_of)
 [ "$got" = "s-on=on@T1" ] && ok "an explicit --projects wins over the environment" || bad "--projects root: got '$got'"
 
+# A projects root with glob characters in its name is read as a literal path.
+mkdir -p "$t/pro[x]jects/-a"; cp "$P/-a/s-on.jsonl" "$t/pro[x]jects/-a/s-brk.jsonl"
+agents s-brk
+got=$("$CLS" --agents "$t/agents.json" --projects "$t/pro[x]jects" --json | state_of)
+[ "$got" = "s-brk=on@T1" ] && ok "a projects root with [] in its name is searched" || bad "glob root: got '$got'"
+
+# Records that parse to a JSON list (or an attachment that is not an object) are skipped, not a crash.
+{ delta T1 "$C1" ""; echo '["deferred_tools_delta", "mcp__claude-in-chrome__computer"]'; echo '{"type":"attachment","attachment":["deferred_tools_delta", "mcp__claude-in-chrome__x"]}'; } > "$P/-a/s-odd.jsonl"
+agents s-odd
+got=$("$CLS" --agents "$t/agents.json" --projects "$P" --json 2>"$t/err" | state_of)
+[ "$got" = "s-odd=on@T1" ] && ! grep -q Traceback "$t/err" && ok "non-object records skipped; the real delta still counts" || bad "non-object records: got '$got' err '$(cat "$t/err")'"
+
+# A transcript that can't be read (a directory named <sid>.jsonl) is "unreadable": no traceback, reported as unknown, exit 1.
+mkdir -p "$P/-a/s-dir.jsonl"
+agents s-dir
+got=$("$CLS" --agents "$t/agents.json" --projects "$P" --json 2>"$t/err" | state_of)
+[ "$got" = "s-dir=unreadable@None" ] && ! grep -q Traceback "$t/err" && ok "unreadable transcript has state unreadable, no traceback" || bad "unreadable state: got '$got' err '$(cat "$t/err")'"
+out=$("$CLS" --agents "$t/agents.json" --projects "$P" 2>"$t/err"); rc=$?
+[ "$rc" = 1 ] && grep -qF "unknown: s-dir [s-dir] transcript can't be read" <<<"$out" && ! grep -q Traceback "$t/err" && ! grep -q 'all have Chrome' <<<"$out" \
+  && ok "unreadable transcript is reported as unknown and exits 1" || bad "unreadable text: rc $rc out '$out' err '$(cat "$t/err")'"
+
+# Names that aren't a list, and list items that aren't strings, are ignored: no crash, the real delta still counts.
+{ delta T1 "$C1" ""; echo '{"type":"attachment","timestamp":"T2","attachment":{"type":"deferred_tools_delta","addedNames":5,"removedNames":"mcp__claude-in-chrome__computer"}}'; echo '{"type":"attachment","timestamp":"T3","attachment":{"type":"deferred_tools_delta","addedNames":[7,"mcp__claude-in-chrome__navigate"],"removedNames":[false]}}'; } > "$P/-a/s-names.jsonl"
+agents s-names
+got=$("$CLS" --agents "$t/agents.json" --projects "$P" --json 2>"$t/err" | state_of)
+[ "$got" = "s-names=on@T1" ] && ! grep -q Traceback "$t/err" && ok "non-list names and non-string list items are ignored" || bad "names: got '$got' err '$(cat "$t/err")'"
+
+# A session id that isn't a string has no transcript: reported red as unknown (its id from the fallback), no traceback.
+echo '[{"id":"num","sessionId":5,"pid":1,"name":"nm","cwd":"/x"},{"pid":1,"sessionId":12345678901,"name":"nn"}]' > "$t/agents-num.json"
+got=$("$CLS" --agents "$t/agents-num.json" --projects "$P" --json 2>"$t/err" | state_of)
+[ "$got" = "num=no-transcript@None 12345678=no-transcript@None" ] && ! grep -q Traceback "$t/err" && ok "a non-string session id is reported as no-transcript, no traceback" || bad "numeric session id: got '$got' err '$(cat "$t/err")'"
+out=$("$CLS" --agents "$t/agents-num.json" --projects "$P" 2>"$t/err"); rc=$?
+[ "$rc" = 1 ] && grep -qF "unknown: nm [num] has no transcript under the projects dir" <<<"$out" && ! grep -q Traceback "$t/err" \
+  && ok "a non-string session id exits 1 with the unknown line" || bad "numeric session id text: rc $rc out '$out' err '$(cat "$t/err")'"
+
 # Usage errors exit 2 with a message and the usage line, never a traceback or a silent ignore.
 for args in "--agents" "--projects" "--json --agents" "--bogus" "--json extra"; do
   out=$("$CLS" $args 2>&1 >/dev/null); rc=$?

@@ -77,12 +77,23 @@ def squash(s):
     return " ".join(s.split())
 
 
+def obj(v):
+    """A transcript sub-object: the field's value if it is an object, else {} (a string or list is not one)."""
+    return v if isinstance(v, dict) else {}
+
+
+def str_or_empty(v):
+    """A transcript text field (timestamp, sessionId): a value that isn't a string reads as missing ("")."""
+    return v if isinstance(v, str) else ""
+
+
 def entry_text(e):
-    c = (e.get("message") or {}).get("content")
+    c = obj(e.get("message")).get("content")
     if isinstance(c, str):
         return c
     if isinstance(c, list):
-        return "\n".join(p.get("text", "") for p in c if isinstance(p, dict) and p.get("type") == "text")
+        texts = (p.get("text", "") for p in c if isinstance(p, dict) and p.get("type") == "text")
+        return "\n".join(t if isinstance(t, str) else "" for t in texts)
     return ""
 
 
@@ -116,25 +127,25 @@ def candidates(e):
     entry of type queued_command whose attachment.origin carries the kind, sender name and body."""
     t = e.get("type")
     if t == "user":
-        o = e.get("origin") or {}
+        o = obj(e.get("origin"))
         if o.get("handback"):
             return None  # a subagent's report to this session, also stamped kind "peer": not a session's relay
         text = entry_text(e)
         body = PEER_WRAP.sub("", text) if o.get("kind") == "peer" else text
         name = FROM_NAME.search(text) or FROM_ADDR.search(text)
         sender = o.get("name") or (name.group(1) if name else None)
-        return o.get("kind"), bool(e.get("isMeta")), e.get("timestamp", ""), body, sender
+        return o.get("kind"), bool(e.get("isMeta")), str_or_empty(e.get("timestamp")), body, sender
     if t == "attachment":
-        a = e.get("attachment") or {}
+        a = obj(e.get("attachment"))
         if a.get("type") != "queued_command":
             return None
-        o = a.get("origin") or {}
+        o = obj(a.get("origin"))
         if o.get("handback"):
             return None
         prompt = a.get("prompt") if isinstance(a.get("prompt"), str) else ""
         body = o.get("body") if isinstance(o.get("body"), str) else PEER_WRAP.sub("", prompt)
         return (o.get("kind"), bool(a.get("isMeta")) and o.get("kind") != "peer",
-                e.get("timestamp") or a.get("timestamp", ""), body, o.get("name") or o.get("from"))
+                str_or_empty(e.get("timestamp")) or str_or_empty(a.get("timestamp")), body, o.get("name") or o.get("from"))
     return None
 
 
@@ -142,7 +153,7 @@ def asked_ids(e):
     """Ids of the AskUserQuestion calls in a main-chain assistant entry."""
     if e.get("type") != "assistant" or e.get("isSidechain"):
         return []
-    c = (e.get("message") or {}).get("content")
+    c = obj(e.get("message")).get("content")
     return [p.get("id") for p in (c if isinstance(c, list) else ())
             if isinstance(p, dict) and p.get("type") == "tool_use" and p.get("name") == "AskUserQuestion"
             and isinstance(p.get("id"), str)]
@@ -159,7 +170,7 @@ def answers(e, asked):
     r = e.get("toolUseResult")
     if e.get("type") != "user" or e.get("isSidechain") or not isinstance(r, dict):
         return []
-    c = (e.get("message") or {}).get("content")
+    c = obj(e.get("message")).get("content")
     if not any(isinstance(p, dict) and p.get("type") == "tool_result"
                and isinstance(p.get("tool_use_id"), str) and p["tool_use_id"] in asked
                for p in (c if isinstance(c, list) else ())):
@@ -205,7 +216,7 @@ def matches(path, want_kind, quote):
                 # drops the oldest; a queued turn pops the oldest below.
                 k = squash(e["content"])
                 if e.get("operation") == "enqueue":
-                    enqueued.setdefault(k, []).append(e.get("timestamp", ""))
+                    enqueued.setdefault(k, []).append(str_or_empty(e.get("timestamp")))
                 elif e.get("operation") == "remove" and enqueued.get(k):
                     enqueued[k].pop(0)
                 continue
@@ -219,7 +230,7 @@ def matches(path, want_kind, quote):
                     # One hit per answer entry; each matched question keeps its own answer (two
                     # questions can match one quote with different whole answers).
                     how = "picked" if any(g[0] == "picked" for g in got) else "noted"
-                    out.append((e.get("timestamp", ""), None, e.get("sessionId", ""), None,
+                    out.append((str_or_empty(e.get("timestamp")), None, str_or_empty(e.get("sessionId")), None,
                                 (how, [(g[1], g[2]) for g in got if g[0] == how])))
             c = candidates(e)
             if not c:
@@ -237,14 +248,16 @@ def matches(path, want_kind, quote):
             if want_kind == "human" and queued and enqueued.get(sb):
                 ts = enqueued[sb].pop(0) or ts
             if pat.search(sb):
-                out.append((ts, sb, e.get("sessionId", ""), sender, None))
+                out.append((ts, sb, str_or_empty(e.get("sessionId")), sender, None))
     return out
 
 
 def local_time(ts):
+    if not isinstance(ts, str):
+        return "time unknown"
     try:
         t = datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone()
-    except ValueError:
+    except (ValueError, OverflowError, OSError):  # astimezone overflows near year 1 in a zone west of UTC
         return ts or "time unknown"
     return t.strftime("%a %Y-%m-%d %H:%M %Z")
 

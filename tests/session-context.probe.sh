@@ -180,6 +180,20 @@ json=$(CLAUDE_PROJECTS_DIR="$TMP/alt" "$BIN/session-context" --json)
 json=$(CLAUDE_PROJECTS_DIR="" "$BIN/session-context" --json)
 [ "$(jq -c '[.[] | .tokens]' <<< "$json")" = '[120000]' ] && ok "an empty CLAUDE_PROJECTS_DIR falls back to CLAUDE_CONFIG_DIR/projects" || bad "empty projects dir: $json"
 
+# Wrong JSON types in a reply: a string token count skips that reply (an older reply counts; a silent 0 would hide a flagged session),
+# and a numeric model leaves the model blank rather than failing the scan.
+mkdir -p "$TMP/cfg/projects/p3"
+{ reply claude-opus-5-5 0 120000 0; echo '{"type":"assistant","message":{"model":"claude-opus-5-5","usage":{"input_tokens":"700000","cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}'; } > "$TMP/cfg/projects/p3/s-strtok.jsonl"
+echo '{"type":"assistant","message":{"model":7,"usage":{"input_tokens":900000,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}' > "$TMP/cfg/projects/p3/s-nummodel.jsonl"
+echo '[{"name":"Str","cwd":"/nowhere/Projects/str","sessionId":"s-strtok","status":"busy"},{"name":"Num","cwd":"/nowhere/Projects/num","sessionId":"s-nummodel","status":"busy"}]' > "$TMP/agents.json"
+err=$("$BIN/session-context" --json 2>&1 >"$TMP/out.json"); rc=$?
+json=$(cat "$TMP/out.json")
+[ $rc = 0 ] && [ -z "$err" ] && [ "$(jq -c '[.[] | select(.name == "Str") | .tokens]' <<< "$json")" = '[120000]' ] \
+    && ok "a string token count skips that reply; the older reply counts" || bad "string tokens: rc $rc, err '$err', $json"
+[ "$(jq -c '[.[] | select(.name == "Num") | [.tokens, .model, .flagged]]' <<< "$json")" = '[[900000,"",true]]' ] \
+    && ok "a numeric model is left blank; the row keeps its tokens and flag" || bad "numeric model: $json"
+echo '[{"name":"Small","cwd":"/nowhere/Projects/small","sessionId":"s-small","status":"busy"}]' > "$TMP/agents.json"
+
 # --help prints the whole header comment, through the extra-knob block
 out=$("$BIN/session-context" --help)
 grep -q 'SYG_SESSION_CONTEXT_EXTRA_CMD' <<< "$out" && [ "${out##*$'\n'}" = "says so and the Claude rows still print." ] \
