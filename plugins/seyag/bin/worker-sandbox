@@ -13,7 +13,9 @@ Usage: worker-sandbox --settings FILE [CLAUDE ARG...]   (what a launcher runs in
        worker-sandbox --check                           build the whole sandbox, run `true` inside; 0 = usable
 
 Runs from the current directory, which must be in a git tree. worker-tree-check vets that tree's
-.git first (refusal = 125). FILE (the launcher's settings overlay) is bound read-only at
+.git first (refusal = 125): without --repo it refuses a linked worktree holding any nested .git
+(submodules, editable git checkouts) and a gitdir under SYG_WORKER_TREE_CHECK_UNTRUSTED (default
+/tmp:/var/tmp:/dev/shm; set it for hermetic fixtures under /tmp). FILE (the launcher's settings overlay) is bound read-only at
 /run/worker/settings.json, so the key never appears in an argv.
 
 Inside, claude runs in bypass mode with: / read-only; /run and $HOME empty; the toolchain, claude
@@ -24,9 +26,9 @@ default route (container bridges, an interface-based VPN that doesn't carry the 
 unreachable; a clean environment; capped /tmp, /run and home.
 Not walled: the worker can read its own API key, world-readable files outside $HOME and /run;
 untracked secret files are masked by name only (.env, .env.*, .dev.vars, *.pem, *.key), at any
-depth outside node_modules and .git; the default interface's own routes answer (the LAN; a
-full-tunnel VPN's own subnet), and so do userspace VPNs with no interface, AF_VSOCK and addresses
-the host gains after launch. The default interface is any interface with a default route in any
+depth outside node_modules, .git, site-packages, dist-packages, .tox, .nox and target; the
+default interface's own routes answer (the LAN; a full-tunnel VPN's own subnet), and so do
+userspace VPNs with no interface, AF_VSOCK and addresses the host gains after launch. The default interface is any interface with a default route in any
 routing table. Names resolve only where the host resolves through nss-resolve or a non-loopback
 nameserver.
 No memory limit but what the caller sets (for example `systemd-run --user -p MemoryMax=`).

@@ -4,11 +4,14 @@ All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY
 
 ## 0.3.173 - 2026-11-16
 
+### Breaking Changes
+
+- **worker-sandbox:** runs `worker-tree-check` on the current tree before any host git runs on it (`--check` included), so it now refuses (125, "worker-tree-check refused", nothing runs) trees the check rejects without `--repo`: a linked worktree holding any nested `.git` (submodules, editable git checkouts) and a gitdir under `SYG_WORKER_TREE_CHECK_UNTRUSTED` (default `/tmp:/var/tmp:/dev/shm`); set that knob for hermetic fixtures under `/tmp` (#325).
+
 ### Bug Fixes
 
 - **gate-lock:** the TERM/INT/HUP trap is installed before the command is forked, so a signal between the fork and the trap is no longer lost or fatal, and the final exit code is read with a second `wait` so a signal-interrupted wait can't report 128+N for a command that exited with its own code; the command now reads gate-lock's own stdin (a background job otherwise got `/dev/null`) (#325).
-- **gate-sandbox:** `SYG_GATE_SANDBOX_ENV` entries must be variable names (anything else refuses with 125; the list is no longer expanded unquoted, so a glob can't match files); a `SYG_GATE_SANDBOX_TOOLCHAIN` entry resolving inside the worktree is refused with 125 and a symlinked entry is bound at its resolved target on its own path; an extra `SYG_GATE_SANDBOX_WALL` entry must be an address or CIDR (a keyword like `default` would have walled everything) and a malformed one refuses with 125 before anything prints; untracked secret-shaped files are masked at any depth outside `node_modules` and `.git`, not only the first five levels; pasta runs with `--dns none`, which silences its "Couldn't get any nameserver address" line on every worker run without changing name resolution (#325).
-- **worker-sandbox:** runs `worker-tree-check` on the current tree before any host git runs on it (`--check` included); a refused tree exits 125 with "worker-tree-check refused" and nothing runs (#325).
+- **gate-sandbox:** `SYG_GATE_SANDBOX_ENV` entries must be variable names (anything else refuses with 125; the list is no longer expanded unquoted, so a glob can't match files); a `SYG_GATE_SANDBOX_TOOLCHAIN` entry resolving inside the worktree is refused with 125 and a symlinked entry is bound at its resolved target on its own path; an extra `SYG_GATE_SANDBOX_WALL` entry must be an address or CIDR (a keyword like `default` would have walled everything) and a malformed one refuses with 125 before anything prints; untracked secret-shaped files are masked at any depth outside `node_modules`, `.git`, `site-packages`, `dist-packages`, `.tox`, `.nox` and `target` (the pruned dirs keep a venv's `*.pem` CA bundles readable), not only the first five levels; pasta runs with `--dns none`, which silences its "Couldn't get any nameserver address" line on every worker run without changing name resolution (#325).
 
 ### Improvements
 

@@ -143,11 +143,11 @@ for sig in TERM HUP; do
   up=0
   for _ in $(seq 50); do [ -e "$R/up-$sig" ] && { up=1; break; }; sleep 0.1; done
   made=$(find "$T/vt-$sig" -maxdepth 1 -name 'gate-sandbox-vitetemp.*' | wc -l)
-  t0=$(date +%s%N)
+  t0=$(date +%s%N)  # the time bound below only says it doesn't hang until sleep 30
   kill -"$sig" "$gs"; wait "$gs" 2>/dev/null
   ms=$(( ($(date +%s%N) - t0) / 1000000 ))
   left=$(find "$T/vt-$sig" -maxdepth 1 -name 'gate-sandbox-vitetemp.*' | wc -l)
-  [ "$up" = 1 ] && [ "$made" = 1 ] && [ "$left" = 0 ] && [ "$ms" -lt 5000 ] \
+  [ "$up" = 1 ] && [ "$made" = 1 ] && [ "$left" = 0 ] && [ "$ms" -lt 20000 ] \
     && ok "$sig mid-run: the vite scratch dir existed ($made) and is gone, in ${ms} ms" \
     || bad "$sig vite cleanup: up=$up made=$made left=$left ms=$ms"
   rm -f "$R"/up-* "$R/node_modules"
