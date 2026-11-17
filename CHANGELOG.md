@@ -2,6 +2,12 @@
 
 All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY-MM-DD>` section per released version; under it, `###` categories in fixed order — Breaking Changes, Features, Bug Fixes, Improvements, Chores, Tests — empty ones omitted; items are `- **scope:** description (#PR)`, written from the version's merged commit subjects.
 
+## 0.3.180 - 2026-11-17
+
+### Improvements
+
+- **rules:** core.md's ask rule names the harness's ask tool (`AskUserQuestion`; agy: `ask_question`) and covers non-blocking owner decisions that already have a recommendation: they go out when they arise, while work continues, instead of waiting for a later batch (#PR).
+
 ## 0.3.179 - 2026-11-17
 
 ### Features
