@@ -29,6 +29,7 @@ while :; do
   wait "$child"; rc=$?
   kill -0 "$child" 2>/dev/null || break  # wait returned for a trapped signal; the child still runs
 done
+trap '' TERM INT HUP  # the child is gone: a signal must not interrupt the final wait into 128+N
 # bash may reap the child while a trapped signal interrupts wait, so the loop's rc can be 128+N;
 # bash remembers a reaped background child's status, and this wait returns the real code (127 =
 # a bash that forgot it: keep the loop's code)

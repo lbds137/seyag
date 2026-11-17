@@ -315,14 +315,16 @@ fi
 # 5b. Untracked secret-shaped files read as empty; a tracked one, a fixture, reads as itself
 echo real-key >"$W/.env"; mkdir -p "$W/svc"; echo real-key >"$W/svc/.env.local"; echo real-key >"$W/tls.pem"
 mkdir -p "$W/a/b/c/d/e/f"; echo real-key >"$W/a/b/c/d/e/f/.env"
+# a venv's CA bundle is *.pem but not a secret: site-packages is pruned, so it reads as itself
+CA=.venv/lib/python3.12/site-packages/certifi/cacert.pem; mkdir -p "$W/${CA%/*}"; echo ca-bundle >"$W/$CA"
 echo fixture-value >"$W/.env.test"
 git -C "$W" add .env.test
-fake 'for f in .env svc/.env.local tls.pem a/b/c/d/e/f/.env; do [ -s "$f" ] && echo "readable: $f"; done; cat .env.test; exit 0'
+fake 'for f in .env svc/.env.local tls.pem a/b/c/d/e/f/.env; do [ -s "$f" ] && echo "readable: $f"; done; cat .venv/lib/python3.12/site-packages/certifi/cacert.pem .env.test; exit 0'
 out=$(inside); rc=$?
-[ "$rc" = 0 ] && [ "$out" = fixture-value ] && [ "$(cat "$W/.env")" = real-key ] && [ "$(cat "$W/a/b/c/d/e/f/.env")" = real-key ] \
-  && ok "untracked .env, nested .env.local, .pem and a .env seven levels deep read as empty inside, unchanged on the host; tracked .env.test reads" \
+[ "$rc" = 0 ] && [ "$out" = $'ca-bundle\nfixture-value' ] && [ "$(cat "$W/.env")" = real-key ] && [ "$(cat "$W/a/b/c/d/e/f/.env")" = real-key ] \
+  && ok "untracked .env, nested .env.local, .pem and a .env seven levels deep read as empty inside, unchanged on the host; a venv CA bundle and tracked .env.test read" \
   || bad "masking: rc=$rc out=[$out] err=[$(cat "$T/err")]"
-git -C "$W" rm -q --cached .env.test; rm -rf "$W/.env" "$W/.env.test" "$W/svc" "$W/tls.pem" "$W/a"
+git -C "$W" rm -q --cached .env.test; rm -rf "$W/.env" "$W/.env.test" "$W/svc" "$W/tls.pem" "$W/a" "$W/.venv"
 
 # 6. A symlinked .claude or .git can't aim a bind elsewhere
 mv "$W/.claude" "$T/claude-kept"
