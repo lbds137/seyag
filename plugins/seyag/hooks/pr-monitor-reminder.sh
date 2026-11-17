@@ -134,7 +134,7 @@ PAYLOAD_CWD=$(jq -r '.cwd // empty' <<<"$INPUT" 2>/dev/null || echo "")
 # (MAX_ARG_STRLEN), and python failing to exec would fail open.
 HOOK_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib"
 SCAN=$(HOOK_LIB="$HOOK_LIB" PAYLOAD_CWD="$PAYLOAD_CWD" \
-  python3 3<<<"$COMMAND" << 'PYEOF' 2>/dev/null
+  python3 -I "${SYG_PY_CACHE_ARG:--B}" 3<<<"$COMMAND" << 'PYEOF' 2>/dev/null
 import os
 import re
 import sys

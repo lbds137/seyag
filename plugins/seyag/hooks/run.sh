@@ -119,7 +119,9 @@ syg_hook_ready() {
   # pyc against its source's mtime and size, which suffices for a checkout that
   # changes by git pull. A caller's own prefix wins; with no absolute cache dir
   # (no HOME, a relative XDG_CACHE_HOME) bytecode is not written at all.
-  # python3 -I ignores both variables: a hook that passes -I must also pass -B.
+  # Hooks call `python3 -I "${SYG_PY_CACHE_ARG:--B}"`: -I (cwd off sys.path)
+  # ignores PYTHON* env vars, so the cache prefix travels as an explicit -X
+  # argument; unset (a direct or probe run) falls back to -B.
   # Hooks run whatever bytecode the prefix holds, so it must be private to the
   # user (the default is under the user's own cache dir). The cache is never pruned
   # and is safe to delete at any time, syntax-ok stamps included.
@@ -129,6 +131,13 @@ syg_hook_ready() {
     else
       export PYTHONDONTWRITEBYTECODE=1
     fi
+  fi
+  if [ -n "${PYTHONDONTWRITEBYTECODE:-}" ]; then
+    export SYG_PY_CACHE_ARG=-B
+  elif [ -n "${PYTHONPYCACHEPREFIX:-}" ]; then
+    export SYG_PY_CACHE_ARG="-Xpycache_prefix=$PYTHONPYCACHEPREFIX"
+  else
+    export SYG_PY_CACHE_ARG=-B
   fi
   # Hooks only read git; a hook killed mid-index-refresh, or one racing the
   # session's own git command, would leave or collide with index.lock.

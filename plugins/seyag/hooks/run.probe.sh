@@ -4,7 +4,8 @@
 #   2. no project copy → the plugin hook runs; exit 2 + stderr pass through
 #   3. stdin reaches the hook; stdout passes through
 #   4. PYTHONPYCACHEPREFIX points hooks at a per-user bytecode cache (a caller's
-#      prefix wins; no absolute cache dir → PYTHONDONTWRITEBYTECODE=1)
+#      prefix wins; no absolute cache dir → PYTHONDONTWRITEBYTECODE=1); the same
+#      prefix reaches `python3 -I` hooks as SYG_PY_CACHE_ARG (-B when none)
 #   5. sdk-* entrypoints skip the turn-shape hooks; a background session a person
 #      drives (entrypoint cli, SESSION_ATTENDED=0) keeps them
 #   6. GIT_OPTIONAL_LOCKS=0 reaches every git call a hook makes
@@ -106,6 +107,34 @@ OUT=$(printf 'payload' | CLAUDE_PROJECT_DIR="$TMP/proj-without" runsh PYTHONDONT
 RC=$?
 check "caller's PYTHONDONTWRITEBYTECODE=1 is kept alongside the cache prefix" \
   2 "$RC" "stdout:payload:$TMP/home/.cache/seyag/pycache:1" "$OUT" "BLOCKED by fake-guard" "$(cat "$TMP/err")"
+
+# --- 2f-2i. SYG_PY_CACHE_ARG: the carrier of the prefix for hooks' `python3 -I` ------
+# python3 -I ignores PYTHONPYCACHEPREFIX, so run.sh exports the prefix as an -X
+# argument (one word); with no cache to use it exports -B.
+cat > "$TMP/plugin/hooks/fake-arg.sh" <<'EOF'
+#!/bin/bash
+echo "arg:${SYG_PY_CACHE_ARG-unset}"
+exit 2
+EOF
+OUT=$(printf 'payload' | CLAUDE_PROJECT_DIR="$TMP/proj-without" runsh HOME="$TMP/home" fake-arg 2>"$TMP/err")
+RC=$?
+check "SYG_PY_CACHE_ARG: HOME default → -Xpycache_prefix=<HOME>/.cache/seyag/pycache" \
+  2 "$RC" "arg:-Xpycache_prefix=$TMP/home/.cache/seyag/pycache" "$OUT" "" "$(cat "$TMP/err")"
+
+OUT=$(printf 'payload' | CLAUDE_PROJECT_DIR="$TMP/proj-without" runsh PYTHONPYCACHEPREFIX="$TMP/mine" HOME="$TMP/home" fake-arg 2>"$TMP/err")
+RC=$?
+check "SYG_PY_CACHE_ARG: caller's PYTHONPYCACHEPREFIX → -Xpycache_prefix=<that prefix>" \
+  2 "$RC" "arg:-Xpycache_prefix=$TMP/mine" "$OUT" "" "$(cat "$TMP/err")"
+
+OUT=$(printf 'payload' | CLAUDE_PROJECT_DIR="$TMP/proj-without" runsh HOME= fake-arg 2>"$TMP/err")
+RC=$?
+check "SYG_PY_CACHE_ARG: no cache dir → -B, no absolute cache dir" \
+  2 "$RC" "arg:-B" "$OUT" "" "$(cat "$TMP/err")"
+
+OUT=$(printf 'payload' | CLAUDE_PROJECT_DIR="$TMP/proj-without" runsh PYTHONDONTWRITEBYTECODE=1 HOME="$TMP/home" fake-arg 2>"$TMP/err")
+RC=$?
+check "SYG_PY_CACHE_ARG: caller's PYTHONDONTWRITEBYTECODE=1 → -B" \
+  2 "$RC" "arg:-B" "$OUT" "" "$(cat "$TMP/err")"
 
 # --- 3. unknown / unsafe hook names fail open ----------------------------------
 printf '' | CLAUDE_PROJECT_DIR="$TMP/proj-without" runsh no-such-hook >/dev/null 2>&1

@@ -175,7 +175,7 @@ if ! CONFIG_JSON=$(jq -cS '.config' <<<"$MEASURE_JSON" 2>/dev/null); then
   echo "lines-check: malformed JSON from context-audit measure" >&2
   exit 2
 fi
-CONFIG_HASH=$(python3 -c 'import hashlib,sys; print(hashlib.sha256(sys.argv[1].encode("utf-8")).hexdigest())' "$CONFIG_JSON")
+CONFIG_HASH=$(python3 -I -B -c 'import hashlib,sys; print(hashlib.sha256(sys.argv[1].encode("utf-8")).hexdigest())' "$CONFIG_JSON")
 
 print_breakdown() {
   [ "$BREAKDOWN" -eq 1 ] || return 0
