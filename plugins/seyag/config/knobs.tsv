@@ -97,6 +97,9 @@ SYG_DISPATCH_ACK_FILE	internal	guards	/tmp/claude-<uid>/dispatch-posture-ack	Tes
 SYG_DISPATCH_SPEC_INLINE	user	guards	0	Set to 1 to require a ## Premise ledger section on inline isolation: "worktree" Agent prompts.
 SYG_DISPATCH_SPEC_RE	user	guards	[A-Za-z0-9._~/-]*\.claude/dispatch/[A-Za-z0-9._-]+\.md	Extended regex extracting the spec file path from Agent prompts in dispatch-spec-ledger-gate.
 SYG_DISPATCH_SRC_RE	user	guards	unset	Extended regex of source paths opting in dispatch-posture-gate to block >5-line inline edits.
+SYG_DRIVER_CLONE_PROJECTS	user	session	`$HOME/Projects`	Directory holding the base checkout and the new lane clone driver-clone creates.
+SYG_DRIVER_CLONE_ROLE_BIN	internal	misc	prose:the claude-role beside driver-clone	Test seam: the claude-role binary driver-clone calls to file the folder-trust bullet.
+SYG_DRIVER_CLONE_START_HINT	user	session	prose:start a session in the clone	Text driver-clone prints after "then:" as the last step once the lane exists.
 SYG_ENABLE	user	session	unset	Whitespace- or comma-separated components or hook names to enable on top of SYG_PROFILE.
 SYG_EPG_CWD	internal	guards	unset	Internal env variable passing the payload cwd from env-print-guard.sh to its embedded Python helper.
 SYG_EPG_TRUSTED_VARS	user	guards	unset	Space-separated variable names trusted as $VAR prefixes on file-sink redirection targets in env-print-guard.
@@ -121,6 +124,7 @@ SYG_HANDOFF_SECTIONS	user	stop-gates	^##[ \t]*(?:Handoff|Next)\b	Multiline Pytho
 SYG_HEADLESS_OFF	internal	session	turn-shape context handoff-pick-check security	Internal constant listing components disabled automatically in headless (sdk-*) runs.
 SYG_HEADLESS_OFF_HOOKS	internal	session	blocking-question-channel-check turn-end-shape-gate promise-ledger-check queued-message-receipt bare-token-binding-reminder handoff-pick-check context-size-reminder	Internal fallback list of hooks disabled in headless runs when components.tsv cannot be read.
 SYG_HOOK	internal	session	unset	Internal variable holding the resolved hook script path inside run.sh.
+SYG_IN_PERSON_SECTION	user	session	In Person	Heading (without the ##) of the role file section claude-role --need --in-person writes and --json reads as .deck: what needs the owner physically present.
 SYG_KEYS_CREDS_CMD	internal	misc	systemd-creds	Test seam replacing the systemd-creds command in keys.
 SYG_KEYS_LEGACY_FILE	user	misc	unset	Optional read-only plaintext NAME=value fallback file consulted by keys get after the encrypted store.
 SYG_KEYS_LOCK_WAIT_S	user	misc	15	Seconds keys waits for the store lock or the TPM lock before failing (finite number >= 0).
@@ -152,11 +156,13 @@ SYG_MEM_WATCH_MEMINFO	internal	misc	/proc/meminfo	Test seam overriding the memin
 SYG_MERGE_REVIEW_LOGIN	user	pr	claude[bot]	GitHub login whose latest PR comment must be surfaced before pr-merge-review-check allows gh pr merge.
 SYG_MERGE_REVIEW_RELEASE_REMINDER	user	pr	prose:This PR merges into the repository's default branch — run this project's post-merge steps (version bump, release, deploy) before starting other work.	Custom reminder text shown once when merging a PR into the repository's default branch.
 SYG_MERGE_REVIEW_WORKFLOW	user	pr	.github/workflows/claude-code-review.yml	Review workflow file path whose self-edit in a PR explains a missing review comment in pr-merge-review-check.
+SYG_NEEDS_OWNER_SECTION	user	session	Needs Owner	Heading (without the ##) of the role file section claude-role --need writes and --json reads as .needs: what waits on the owner.
 SYG_OWN_OWNERS	user	guards	unset	Whitespace- or comma-separated GitHub owner names unioned with hosts.yml user: as own repos in upstream-submission-guard.
 SYG_PIN_ACTIONS_GH	internal	misc	gh	Test seam naming the gh binary pin-actions calls for commit and tag lookups.
 SYG_PLUGIN_MANIFEST	internal	statusline	<script_dir>/../.claude-plugin/plugin.json	Test seam overriding the plugin.json path read by statusline for the SYG version segment.
 SYG_PRIVATE_TERMS_FILE	user	guards	unset	Path to a local file of Python regexes, one per line, blocked from public repos by private-term-guard and pre-push; pre-push also falls back to global git config seyag.privateTermsFile.
 SYG_PROFILE	user	session	full	Base component profile (full, guards, or none) before SYG_ENABLE and SYG_DISABLE are applied.
+SYG_PROJECT_NAMES_FILE	user	session	unset	Optional tab-separated table of folder and short name that driver-clone reads for the base short name and appends the new lane to. Unset means the base role file role: field is the short name and no row is written.
 SYG_PR_BODY_ACK_FILE	internal	pr	${XDG_STATE_HOME:-$HOME/.local/state}/seyag/pr-body-claim-ack	Test seam overriding the path to pr-body-ref-gate's per-UTC-day claim-scan acknowledgement file.
 SYG_PR_BODY_BASE_REF	user	pr	origin/main	Git ref on which TASK-N and doc-N references in a PR body must resolve in pr-body-ref-gate.
 SYG_PR_BODY_CLAIM_SCAN	user	pr	1	Set to 0 to disable pr-body-ref-gate rule 2 (uncited claim-shaped lines) while keeping tracker-reference checks.
@@ -167,12 +173,21 @@ SYG_PR_BODY_TASK_PATHS	user	pr	tracker/tasks tracker/archive/tasks	Whitespace-se
 SYG_PR_MERGE_LIB_DIR	internal	pr	<hooks_dir>/lib	Test seam overriding the hooks/lib directory passed to pr-merge-review-check's Python parser.
 SYG_PR_MONITOR_SEEN_FILE	internal	pr	${XDG_RUNTIME_DIR:-/tmp}/.claude_pr_monitor_seen.<uid>	Test seam overriding the deduplication state file for pr-monitor-reminder.
 SYG_PUBLISH_CHECKED	user	guards	unset	Colon-separated <owner/repo> list (or any non-empty value for a gist) in the session env unblocking publish-gate.
+SYG_ROLE_CONTEXT_CMD	user	session	unset	Command (bash -c) claude-role --board runs for session context sizes: prints a JSON array of {folder, tokens, flagged, flag_at}. Unset means no context lines; a failing one prints an unavailable line.
+SYG_ROLE_CONTEXT_LINE	user	session	unset	One line claude-role prints first at session start (hook mode), before the role file and even for a headless or task run. Empty prints nothing.
+SYG_ROLE_DIR	user	session	`${XDG_DATA_HOME:-$HOME/.local/share}/seyag/roles`	Directory of role files (one <project folder>.md each) read and written by claude-role and driver-clone.
+SYG_ROLE_HEADLESS	internal	misc	unset	Set to 1 by a launcher of headless runs: claude-role hook mode then prints a "not a role session" line and never the role file.
+SYG_ROLE_HEADLESS_ROUTES	user	session	unset	Whitespace- or comma-separated route preset names that only headless runs may use; claude-role --set route=NAME refuses them for a role session.
+SYG_ROLE_NOW_EPOCH	internal	misc	unset	Test seam overriding the clock (epoch seconds) claude-role uses to decide which Next items are due.
+SYG_ROLE_PREAMBLE_FILE	user	session	unset	Template file for the instruction block claude-role prints at session start; the placeholders {role}, {path}, {needs} and {in_person} are replaced literally. Unset, empty or unreadable means the built-in text.
+SYG_ROLE_TASK	internal	misc	unset	Set by a launcher of a named task session: claude-role hook mode then prints the task name and a "not a role session" line and never the role file.
 SYG_ROUTE_CHECK_CMD	user	routing	unset	Shell command run by route-check at SessionStart when a session requires an approved model route.
 SYG_ROUTE_CHECK_OK	user	routing	unset	Exact first word that SYG_ROUTE_CHECK_CMD's first stdout line must match for route-check to pass.
 SYG_ROUTE_CHECK_TIMEOUT	internal	routing	10	Test seam overriding the timeout in seconds (positive integer) for SYG_ROUTE_CHECK_CMD in route-check.
 SYG_ROUTE_MARKER_FIELD	user	routing	unset	YAML frontmatter field name in SYG_ROUTE_MARKER_FILE whose non-empty value requires an approved route.
 SYG_ROUTE_MARKER_FILE	user	routing	unset	Path template ({project} expanded) checked with SYG_ROUTE_MARKER_FIELD to require an approved route.
 SYG_ROUTE_REQUIRED	user	routing	unset	Boolean (1/true/yes/on vs 0/false/no/off) requiring an approved model route in route-check.
+SYG_ROUTE_SHOW_CMD	user	session	unset	Command (bash -c, the name as its argument) claude-role --set route=NAME runs to check a route preset exists; nonzero refuses the route. Unset means only the name shape is checked.
 SYG_SECURITY_SWEEP	user	session	unset	Set to 1 to run security-sweep --session-line --cap 2 at SessionStart (startup and clear).
 SYG_SECURITY_SWEEP_REPOS	user	session	unset	Whitespace-separated owner/name repos opting in and scoping security-sweep at SessionStart and in security-sweep.
 SYG_STATE_DIR	internal	session	/tmp/claude-<uid>	Test seam overriding the directory session-start prunes and the prompt hooks (queued-message-receipt, context-size-reminder, context-block-gate) write their per-session state into.

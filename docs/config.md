@@ -89,14 +89,25 @@ An optional TOML file fills in knobs the environment left unset: user `${XDG_CON
 | `SYG_CONTEXT_THRESHOLD_FABLE` | `200000` | Context token threshold at which context-size-reminder fires when the model starts with claude-fable. | `hooks/context-size-reminder.sh` |
 | `SYG_CROSS_REVIEW_CMD` | unset | Single-line command advertised at SessionStart that names the route to a reviewer from a different model family than the author's. | `hooks/session-start.sh` |
 | `SYG_DISABLE` | unset | Whitespace- or comma-separated components or hook names to disable; wins over SYG_ENABLE. | `hooks/components.tsv`, `hooks/context-size-reminder.sh`, `hooks/handoff-pick-check.sh`, `hooks/lib/components.sh`, `hooks/pr-merge-review-check.sh`, `hooks/run.sh`, `hooks/session-start.sh` |
+| `SYG_DRIVER_CLONE_PROJECTS` | ``$HOME/Projects`` | Directory holding the base checkout and the new lane clone driver-clone creates. | `bin/driver-clone` |
+| `SYG_DRIVER_CLONE_START_HINT` | start a session in the clone | Text driver-clone prints after "then:" as the last step once the lane exists. | `bin/driver-clone` |
 | `SYG_ENABLE` | unset | Whitespace- or comma-separated components or hook names to enable on top of SYG_PROFILE. | `hooks/components.tsv`, `hooks/context-size-reminder.sh`, `hooks/lib/components.sh`, `hooks/run.sh` |
 | `SYG_EVENT_HOOK_TIMEOUT` | `45` | Per-hook timeout in seconds when run.sh --event runs hooks in parallel. | `hooks/run.sh` |
+| `SYG_IN_PERSON_SECTION` | `In Person` | Heading (without the ##) of the role file section claude-role --need --in-person writes and --json reads as .deck: what needs the owner physically present. | `bin/claude-role`, `bin/driver-clone` |
 | `SYG_LAUNCH_RECORD_DIR` | unset | Directory path opting in launch-record to write <session_id>.json launch metadata at SessionStart. | `hooks/launch-record.sh` |
 | `SYG_LAUNCH_RECORD_ENV` | unset | Space-separated environment variable names recorded under extra in launch-record JSON files. | `hooks/launch-record.sh` |
 | `SYG_LAUNCH_RECORD_HYBRID_OK` | unset | Set to 1 to suppress launch-record's warning when model slots mix provider families. | `hooks/launch-record.sh` |
 | `SYG_LONG_JOB_CMD` | unset | Single-line runner prefix advertised at SessionStart for running >10-minute jobs outside the session tree. | `bin/mem-gate`, `hooks/session-start.sh` |
 | `SYG_MEM_GATE_CMD` | unset | Single-line command advertised at SessionStart to check free memory before launching workers or test suites. The plugin's own mem-gate (`mem-gate --ok`) is one such command. | `hooks/session-start.sh` |
+| `SYG_NEEDS_OWNER_SECTION` | `Needs Owner` | Heading (without the ##) of the role file section claude-role --need writes and --json reads as .needs: what waits on the owner. | `bin/claude-role`, `bin/driver-clone` |
 | `SYG_PROFILE` | `full` | Base component profile (full, guards, or none) before SYG_ENABLE and SYG_DISABLE are applied. | `hooks/components.tsv`, `hooks/context-size-reminder.sh`, `hooks/lib/components.sh`, `hooks/run.sh`, `hooks/session-start.sh` |
+| `SYG_PROJECT_NAMES_FILE` | unset | Optional tab-separated table of folder and short name that driver-clone reads for the base short name and appends the new lane to. Unset means the base role file role: field is the short name and no row is written. | `bin/driver-clone` |
+| `SYG_ROLE_CONTEXT_CMD` | unset | Command (bash -c) claude-role --board runs for session context sizes: prints a JSON array of {folder, tokens, flagged, flag_at}. Unset means no context lines; a failing one prints an unavailable line. | `bin/claude-role` |
+| `SYG_ROLE_CONTEXT_LINE` | unset | One line claude-role prints first at session start (hook mode), before the role file and even for a headless or task run. Empty prints nothing. | `bin/claude-role` |
+| `SYG_ROLE_DIR` | ``${XDG_DATA_HOME:-$HOME/.local/share}/seyag/roles`` | Directory of role files (one <project folder>.md each) read and written by claude-role and driver-clone. | `bin/claude-role`, `bin/driver-clone` |
+| `SYG_ROLE_HEADLESS_ROUTES` | unset | Whitespace- or comma-separated route preset names that only headless runs may use; claude-role --set route=NAME refuses them for a role session. | `bin/claude-role` |
+| `SYG_ROLE_PREAMBLE_FILE` | unset | Template file for the instruction block claude-role prints at session start; the placeholders {role}, {path}, {needs} and {in_person} are replaced literally. Unset, empty or unreadable means the built-in text. | `bin/claude-role` |
+| `SYG_ROUTE_SHOW_CMD` | unset | Command (bash -c, the name as its argument) claude-role --set route=NAME runs to check a route preset exists; nonzero refuses the route. Unset means only the name shape is checked. | `bin/claude-role` |
 | `SYG_SECURITY_SWEEP` | unset | Set to 1 to run security-sweep --session-line --cap 2 at SessionStart (startup and clear). | `hooks/session-start.sh` |
 | `SYG_SECURITY_SWEEP_REPOS` | unset | Whitespace-separated owner/name repos opting in and scoping security-sweep at SessionStart and in security-sweep. | `hooks/session-start.sh` |
 | `SYG_STATE_MAX_DAYS` | `7` | Age in whole days after which session-start deletes stale prompt-hook state files in SYG_STATE_DIR. | `hooks/dispatch-posture-gate.sh`, `hooks/session-start.sh` |
@@ -268,6 +279,7 @@ An optional TOML file fills in knobs the environment left unset: user `${XDG_CON
 | `SYG_CREDIT_NOW` | `bin/api-credit`, `bin/statusline` | Test clock (ISO-8601 UTC timestamp) overriding current time in api-credit and statusline. |
 | `SYG_CREDIT_PRICE_TABLE_CMD` | `bin/api-credit` | Test seam overriding the price-table command run by api-credit. |
 | `SYG_DISPATCH_ACK_FILE` | `hooks/dispatch-posture-gate.sh` | Test seam overriding the path to dispatch-posture-gate's per-commit acknowledgement and cumulative line ledger file. |
+| `SYG_DRIVER_CLONE_ROLE_BIN` | `bin/driver-clone` | Test seam: the claude-role binary driver-clone calls to file the folder-trust bullet. |
 | `SYG_EPG_CWD` | `hooks/env-print-guard.sh` | Internal env variable passing the payload cwd from env-print-guard.sh to its embedded Python helper. |
 | `SYG_HEADLESS_OFF` | `hooks/lib/components.sh` | Internal constant listing components disabled automatically in headless (sdk-*) runs. |
 | `SYG_HEADLESS_OFF_HOOKS` | `hooks/lib/components.sh`, `hooks/run.sh` | Internal fallback list of hooks disabled in headless runs when components.tsv cannot be read. |
@@ -284,6 +296,9 @@ An optional TOML file fills in knobs the environment left unset: user `${XDG_CON
 | `SYG_PR_BODY_ACK_FILE` | `hooks/pr-body-ref-gate.sh` | Test seam overriding the path to pr-body-ref-gate's per-UTC-day claim-scan acknowledgement file. |
 | `SYG_PR_MERGE_LIB_DIR` | `hooks/pr-merge-review-check.sh` | Test seam overriding the hooks/lib directory passed to pr-merge-review-check's Python parser. |
 | `SYG_PR_MONITOR_SEEN_FILE` | `hooks/pr-monitor-reminder.sh` | Test seam overriding the deduplication state file for pr-monitor-reminder. |
+| `SYG_ROLE_HEADLESS` | `bin/claude-role` | Set to 1 by a launcher of headless runs: claude-role hook mode then prints a "not a role session" line and never the role file. |
+| `SYG_ROLE_NOW_EPOCH` | `bin/claude-role` | Test seam overriding the clock (epoch seconds) claude-role uses to decide which Next items are due. |
+| `SYG_ROLE_TASK` | `bin/claude-role` | Set by a launcher of a named task session: claude-role hook mode then prints the task name and a "not a role session" line and never the role file. |
 | `SYG_ROUTE_CHECK_TIMEOUT` | `hooks/route-check.sh` | Test seam overriding the timeout in seconds (positive integer) for SYG_ROUTE_CHECK_CMD in route-check. |
 | `SYG_STATE_DIR` | `hooks/context-block-gate.sh`, `hooks/context-size-reminder.sh`, `hooks/queued-message-receipt.sh`, `hooks/session-start.sh` | Test seam overriding the directory session-start prunes and the prompt hooks (queued-message-receipt, context-size-reminder, context-block-gate) write their per-session state into. |
 | `SYG_SWEEP_FRAG` | `bin/removed-identifier-sweep` | Internal env variable passing one fragment to awk for regex validation inside removed-identifier-sweep. |

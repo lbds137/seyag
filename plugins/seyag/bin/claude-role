@@ -1,0 +1,874 @@
+#!/bin/bash
+# claude-role - Give each Claude session its role (charter, handoff, next task) from a file on disk
+#
+# Usage:
+#   claude-role            # SessionStart hook: reads the hook JSON on stdin, prints context for the session
+#   claude-role --board    # every role's status, what it holds, and when it last checked in
+#   claude-role --in-person
+#                          # every role's in-person section ($SYG_IN_PERSON_SECTION, default "In Person"):
+#                          # what needs the owner physically present (--deck is an alias)
+#   claude-role --json     # board + the in-person items (.deck) and the "Needs Owner" items (.needs;
+#                          # section $SYG_NEEDS_OWNER_SECTION) as JSON (the source for a dashboard)
+#   claude-role --list     # "<folder><TAB><role name><TAB><parked><TAB><privacy><TAB><route>" for every
+#                          # role file (launchers and dashboards read it); <parked> is the file's
+#                          # `parked:` field, <privacy> its `privacy:` field (set on the non-code
+#                          # sessions that see personal data), <route> its `route:` field (the preset
+#                          # a launcher starts it on); each is empty when absent
+#                          # The read verbs (--board, --in-person, --json, --list) exit 1 with a stderr
+#                          # message when $SYG_ROLE_DIR is not a directory.
+#   claude-role --path     # the role file for the current folder
+#   claude-role --size [--file F]
+#                          # rendered session-start size (N/10000 UTF-16 units) and headroom
+#   claude-role --set status="…" [holds="…"] [route=PRESET] [parked="…"] [--handoff FILE] [--file F]
+#                          # checkpoint: set fields in the calling session's role file (its start
+#                          # folder via CLAUDE_PID, else the current folder); status/holds
+#                          # stamp updated. route= must be a preset-shaped name, is refused when listed
+#                          # in $SYG_ROLE_HEADLESS_ROUTES, and is checked by $SYG_ROUTE_SHOW_CMD when
+#                          # set (empty = no route of its own); parked= non-empty parks the role,
+#                          # empty unparks it. --handoff FILE replaces the `## Handoff` section with
+#                          # FILE (which starts with its own `## Handoff` heading).
+#   claude-role --need "TEXT" [--in-person] [--due YYYY-MM-DD] [--file F]
+#                          # append a dated bullet to the needs section (default "## Needs Owner"), or
+#                          # to the in-person section with --in-person (--deck is an alias)
+#   claude-role --need-done "MATCH" [--file F]
+#                          # remove the one bullet matching MATCH from the needs / in-person sections
+#   claude-role --note "TEXT" [--file F]
+#                          # append "- **MM-DD HH:MM:** TEXT" to "## Handoff"
+#   claude-role --next "TEXT" [--due DATE[ HH:MM]] [--file F]
+#                          # append "- TEXT" (or "- TEXT (due …)") to "## Next"
+#                          # Write verbs combine atomically, stamp updated, print N/10000 chars at
+#                          # session start (UTF-16 units), and past 10000 move the oldest stamped
+#                          # Handoff notes to <stem>-handoff-archive-<YYYY-MM-DD>.md beside the role
+#                          # file (refusing --handoff FILE or when no notes are left).
+#
+# Role files are $SYG_ROLE_DIR/<folder>.md (default ${XDG_DATA_HOME:-~/.local/share}/seyag/roles),
+# named after the project folder (the main checkout's name, so agent worktrees find it too).
+#
+# Knobs (env or config.toml): SYG_ROLE_DIR, SYG_ROLE_CONTEXT_LINE (one line printed first at session
+# start), SYG_ROLE_PREAMBLE_FILE (template for the instruction block; {role} {path} {needs}
+# {in_person} are replaced), SYG_NEEDS_OWNER_SECTION, SYG_IN_PERSON_SECTION, SYG_ROLE_CONTEXT_CMD
+# (prints [{folder,tokens,flagged,flag_at}] JSON for the board), SYG_ROUTE_SHOW_CMD,
+# SYG_ROLE_HEADLESS_ROUTES. A launcher of headless runs sets SYG_ROLE_HEADLESS=1; a launcher of a
+# named task session sets SYG_ROLE_TASK=<name>.
+
+set -u
+
+# Optional config files (the config.toml loader) fill in knobs the environment
+# left unset before any knob below is read; the environment still wins.
+bin_dir=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")
+if [ -r "$bin_dir/../hooks/lib/config-env.sh" ] \
+    && source "$bin_dir/../hooks/lib/config-env.sh" 2>/dev/null \
+    && declare -F syg_config_env >/dev/null; then
+    syg_config_env "$(readlink -f "$bin_dir/..")"
+fi
+
+shopt -s nullglob   # an empty role dir has no roles, not a literal "*.md"
+ROLES=${SYG_ROLE_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/seyag/roles}
+NEEDS_SEC=${SYG_NEEDS_OWNER_SECTION:-Needs Owner}
+INPERSON_SEC=${SYG_IN_PERSON_SECTION:-In Person}
+# 10000: full hook output reached 10000 chars, previews began at 10004 (242 starts); re-measure if Claude Code changes it
+SESSION_START_CAP=10000
+
+# The read verbs need the role dir; hook mode just finds no file and stays silent.
+need_role_dir() {
+    [ -d "$ROLES" ] || { echo "claude-role: no role dir at $ROLES (set SYG_ROLE_DIR)" >&2; exit 1; }
+}
+
+# Project folder name for a directory: the main checkout's name inside a git repo, else the folder's.
+folder_of() {
+    local d=$1 common
+    if common=$(git -C "$d" rev-parse --path-format=absolute --git-common-dir 2>/dev/null); then
+        d=$(dirname "$common")
+    fi
+    basename "$d"
+}
+
+# field <file> <key>: a value from the file's leading --- frontmatter block. Claude Code's memory
+# system rewrites frontmatter it finds in a memory directory, nesting keys under `metadata:` and quoting
+# values, so accept an indented key and strip one layer of quotes. --set writes double-quoted JSON
+# strings, so unescape \\ \" \n \t \/ there in ONE left-to-right pass (sequential gsub calls would
+# read "\\n", an escaped backslash then n, as a newline); any other backslash pair stays as-is.
+# Single-quoted values map YAML's '' to '.
+field() {
+    awk -v k="$2" '
+        function unescape(s,    out, n, i, c, e) {
+            out = ""; n = length(s)
+            for (i = 1; i <= n; i++) {
+                c = substr(s, i, 1)
+                if (c == "\\" && i < n) {
+                    e = substr(s, i + 1, 1)
+                    if (e == "\\")      { out = out "\\"; i++ }
+                    else if (e == "\"") { out = out "\""; i++ }
+                    else if (e == "n")  { out = out "\n"; i++ }
+                    else if (e == "t")  { out = out "\t"; i++ }
+                    else if (e == "/")  { out = out "/";  i++ }
+                    else out = out c
+                } else out = out c
+            }
+            return out
+        }
+        { sub(/\r$/, "") } NR == 1 && /^---$/ { f = 1; next } f && /^---$/ { exit }
+        f { line = $0; sub(/^[ \t]+/, "", line)
+            if (index(line, k ":") == 1) {
+                sub(/^[^:]*: */, "", line)
+                if (line ~ /^".*"$/) line = unescape(substr(line, 2, length(line) - 2))
+                else if (line ~ /^\x27.*\x27$/) {
+                    line = substr(line, 2, length(line) - 2)
+                    gsub(/\x27\x27/, "\x27", line)
+                }
+                print line; exit } }' "$1"
+}
+
+# flat: field()'s value as one line — a status/holds can carry a newline once \n is unescaped, and
+# a raw newline or tab would break the board's one block per role and --list's TSV columns. --json
+# needs none of this: jq --arg takes the value whole.
+flat() { local v; v=$(cat); v=${v//$'\t'/ }; printf '%s' "${v//$'\n'/ }"; }   # $(cat) drops field's own trailing newline
+
+# section_items <file> <heading>: the bullets of its "## <heading>" section, one per line, without
+# the "- ". A placeholder bullet for an empty section ("(none)", "none", "nothing", "-") isn't an item.
+section_items() {
+    awk -v h="## $2" '{ sub(/\r$/, "") } /^## / { t = $0; sub(/[ \t]+$/, "", t); s = (t == h); next }
+         s && /^- / { t = tolower(substr($0, 3)); gsub(/^[ \t_*(]+|[ \t_*.)]+$/, "", t)
+                      if (t !~ /^(none|nothing|-|—)?$/) print substr($0, 3) }' "$1"
+}
+deck_items() { section_items "$1" "$INPERSON_SEC"; }   # needs the owner physically present
+needs_items() { section_items "$1" "$NEEDS_SEC"; }     # waits on the owner, doable anywhere
+
+# items_json: bullets on stdin -> a JSON array. "what — unblocks (due YYYY-MM-DD) (added YYYY-MM-DD)",
+# each part optional, splits into those four fields. The trailing date tags strip in either order;
+# only a full YYYY-MM-DD counts, so a malformed date stays visible in `what`.
+items_json() {
+    jq -R '"\\((?<k>added|due) (?<d>[0-9]{4}-[0-9]{2}-[0-9]{2})\\)" as $tag
+           | ([scan("\\(added ([0-9]{4}-[0-9]{2}-[0-9]{2})\\)\\s*(?:\\(due [0-9-]+\\)\\s*)?$")] | .[0][0] // "") as $added
+           | ([scan("\\(due ([0-9]{4}-[0-9]{2}-[0-9]{2})\\)\\s*(?:\\(added [0-9-]+\\)\\s*)?$")] | .[0][0] // "") as $due
+           | sub("(\\s*" + $tag + "){1,2}\\s*$"; "") | index(" — ") as $i
+           | { what: (if $i then .[:$i] else . end), unblocks: (if $i then .[$i + 3:] else "" end),
+               added: $added }
+             + (if $due != "" or $mode == "needs" then {due: $due} else {} end)' --arg mode "$1" | jq -s .
+}
+
+usage() {
+    awk 'NR > 1 { if (!/^#/) exit; sub(/^# ?/, ""); print }' "$0"
+}
+
+# context_line: SYG_ROLE_CONTEXT_LINE plus a newline; nothing at all (not even a newline) when it is empty.
+context_line() {
+    [ -z "${SYG_ROLE_CONTEXT_LINE:-}" ] || printf '%s\n' "$SYG_ROLE_CONTEXT_LINE"
+}
+
+# The built-in instruction block (the template when SYG_ROLE_PREAMBLE_FILE is unset); it ends in one blank line.
+IFS= read -r -d '' DEFAULT_PREAMBLE <<'EOF'
+[Role] You are the "{role}" session. Your role file is {path}; its contents follow.
+- At each checkpoint, run: claude-role --set status="…" holds="…" (stamps updated; never edit the frontmatter by hand). claude-role --note "…" adds a time-stamped Handoff line. Any clock time you write comes from `date`, never a guess.
+- Before a /clear, or when your context is getting large: rewrite Handoff and Next so a fresh session could continue from them alone (`claude-role --set --handoff FILE` swaps in a Handoff section you wrote to FILE). Every write prints the size against the 10000-character session-start limit; past it, the oldest time-stamped Handoff notes move to <name>-handoff-archive-<date>.md beside the role file (a --handoff FILE rewrite is refused instead). `claude-role --size` shows headroom; `claude-role --next "…"` (`--due "YYYY-MM-DD HH:MM"`) appends a Next bullet.
+- After a fresh start or /clear, open with one line: your role and the next task. Then continue.
+- `claude-role --board` shows every role's status.
+- Anything waiting on the owner gets one bullet the turn it arises: `claude-role --need "what they do — what it unblocks"` (stamps the date; `--due YYYY-MM-DD` optional) writes "## {needs}"; add `--in-person` when they must be physically present, which writes "## {in_person}". `claude-role --need-done "words from the bullet"` deletes it once done.
+
+EOF
+
+# preamble <file>: the instruction block. The template is SYG_ROLE_PREAMBLE_FILE's content, else the
+# built-in text; {role} (the file's role field), {path}, {needs} and {in_person} are replaced in ONE
+# literal pass (python, never bash ${t//pat/$v}: bash 5.2 expands & in the replacement).
+preamble() {
+    local f=$1 tpl=$DEFAULT_PREAMBLE role=""
+    [ -f "$f" ] && role=$(field "$f" role)
+    if [ -n "${SYG_ROLE_PREAMBLE_FILE:-}" ]; then
+        if [ -f "$SYG_ROLE_PREAMBLE_FILE" ] && [ -r "$SYG_ROLE_PREAMBLE_FILE" ]; then
+            tpl=$(cat "$SYG_ROLE_PREAMBLE_FILE"; printf x); tpl=${tpl%x}   # keep trailing newlines
+        else
+            echo "claude-role: SYG_ROLE_PREAMBLE_FILE $SYG_ROLE_PREAMBLE_FILE is unreadable; using the built-in text" >&2
+        fi
+    fi
+    printf '%s' "$tpl" | python3 -I -c '
+import re, sys
+v = dict(zip(("role", "path", "needs", "in_person"), sys.argv[1:5]))
+t = sys.stdin.buffer.read().decode("utf-8", "surrogateescape")
+t = re.sub(r"\{(role|path|needs|in_person)\}", lambda m: v[m[1]], t)
+sys.stdout.buffer.write(t.encode("utf-8", "surrogateescape"))' "$role" "$f" "$NEEDS_SEC" "$INPERSON_SEC"
+}
+
+# head_text <file>: everything the session start prints before the due lines and the role file.
+# --size, --set's cap maths and the hook's size check and output all build on it, so they cannot drift.
+head_text() {
+    context_line
+    preamble "$1"
+}
+
+# due_lines <file>: SessionStart "Due now" lines for ## Next bullets with (due YYYY-MM-DD[ HH:MM])
+# at or before now (SYG_ROLE_NOW_EPOCH overrides the clock in tests); nothing when none is due.
+CR_LIB="$(dirname "$(readlink -f "$0")")/../lib"   # lib/next_due.py: the parser for due-time Next items
+due_lines() {
+    [ -f "$1" ] || return 0
+    python3 -I "$CR_LIB/next_due.py" lines "$1" "${SYG_ROLE_NOW_EPOCH:-}"
+}
+
+case "${1:-}" in
+    --board)
+        need_role_dir
+        # Context size of the role's running sessions, from SYG_ROLE_CONTEXT_CMD (it prints
+        # [{folder, tokens, flagged, flag_at}] JSON); "-" when none runs. Unset: no context lines.
+        ctx=""
+        if [ -n "${SYG_ROLE_CONTEXT_CMD:-}" ]; then
+            ctx=$(bash -c "$SYG_ROLE_CONTEXT_CMD" </dev/null 2>/dev/null) || ctx=""
+            [ -n "$ctx" ] || echo "(context sizes unavailable: SYG_ROLE_CONTEXT_CMD failed)"
+        fi
+        for f in "$ROLES"/*.md; do
+            [ -n "$(field "$f" role)" ] || continue    # README and handoff notes aren't roles
+            printf '%s  (%s, %s)\n    status: %s\n    holds:  %s\n' "$(field "$f" role | flat)" \
+                   "${f##*/}" "$(field "$f" updated)" "$(field "$f" status | flat)" "$(field "$f" holds | flat)"
+            [ -n "$ctx" ] && printf '    context: %s\n' "$(jq -r --arg d "$(basename "$f" .md)" \
+                '[.[] | select(.folder == $d) | "\(.tokens / 1000 | floor)k"
+                  + (if .flagged then " COMPACT (over \(.flag_at / 1000 | floor)k)" else "" end)] | if length == 0 then "-" else join(", ") end' \
+                <<< "$ctx")"
+        done
+        exit 0 ;;
+    --in-person|--deck)
+        if [ $# -eq 1 ]; then
+            need_role_dir
+            # Every role's in-person bullets: what the owner must do physically present, grouped by role.
+            for f in "$ROLES"/*.md; do
+                r=$(field "$f" role | flat)
+                [ -n "$r" ] || continue
+                items=$(deck_items "$f" | sed 's/^/  - /')
+                [ -n "$items" ] && printf '%s  (%s)\n%s\n' "$r" "${f##*/}" "$items"
+            done
+            exit 0
+        fi ;;&
+    --json)
+        need_role_dir
+        # Board + in-person (.deck) and needs (.needs) items as one JSON document, for a dashboard to sync.
+        # A bullet "what — unblocks (added YYYY-MM-DD)" splits into those three fields.
+        for f in "$ROLES"/*.md; do
+            r=$(field "$f" role)
+            [ -n "$r" ] || continue
+            jq -n --arg role "$r" --arg file "${f##*/}" --arg status "$(field "$f" status)" \
+                  --arg holds "$(field "$f" holds)" --arg updated "$(field "$f" updated)" \
+                  --arg privacy "$(field "$f" privacy | flat)" --arg route "$(field "$f" route | flat)" \
+                  --arg next "$(awk '{ sub(/\r$/, "") } /^## / { s = ($0 ~ /^## Next[ \t]*$/); next } s' "$f" | sed '/./,$!d')" \
+                  --argjson deck "$(deck_items "$f" | items_json deck)" \
+                  --argjson needs "$(needs_items "$f" | items_json needs)" \
+                  '{role: $role, file: $file, status: $status, holds: $holds, updated: $updated,
+                    privacy: $privacy, route: $route, next: $next, deck: $deck, needs: $needs}'
+        done | jq -s --arg synced "$(date '+%F %H:%M')" '{syncedAt: $synced, roles: .}'
+        exit 0 ;;
+    --list)
+        need_role_dir
+        for f in "$ROLES"/*.md; do
+            r=$(field "$f" role | flat)
+            [ -n "$r" ] && printf '%s\t%s\t%s\t%s\t%s\n' "$(basename "$f" .md)" "$r" \
+                "$(field "$f" parked | flat)" "$(field "$f" privacy | flat)" \
+                "$(field "$f" route | flat)"
+        done
+        exit 0 ;;
+    --path)
+        echo "$ROLES/$(folder_of "$PWD").md"; exit 0 ;;
+    --size)
+        home_dir=$PWD
+        if [ -n "${CLAUDE_PID:-}" ] && sess=$(readlink "/proc/$CLAUDE_PID/cwd" 2>/dev/null) && [ -d "$sess" ]; then
+            home_dir=$sess
+        fi
+        file="$ROLES/$(folder_of "$home_dir").md"
+        has_file=0
+        shift
+        while [ $# -gt 0 ]; do
+            case "$1" in
+                --file)
+                    [ "$has_file" -eq 0 ] || { echo "claude-role: --file given more than once" >&2; exit 2; }
+                    [ $# -ge 2 ] && [ -n "$2" ] || { echo "claude-role: --file needs a FILE" >&2; exit 2; }
+                    has_file=1; file=$2; shift 2 ;;
+                *)
+                    echo "claude-role: unknown argument '$1' (try --help)" >&2
+                    usage >&2
+                    exit 2 ;;
+            esac
+        done
+        [ -f "$file" ] || { echo "claude-role --size: no role file at $file" >&2; exit 1; }
+        head=$(head_text "$file"; due_lines "$file"; printf x); head=${head%x}
+        CR_HEAD="$head" python3 - "$file" "$SESSION_START_CAP" <<'PYEOF'
+import os, sys
+path, cap = sys.argv[1], int(sys.argv[2])
+raw = open(path, encoding="utf-8").read()
+# Measure as the hook does: bytes decoded with errors="replace" (a non-UTF-8 head byte counts one unit).
+n = len((os.environ["CR_HEAD"] + raw).encode("utf-8", "surrogateescape").decode("utf-8", "replace").encode("utf-16-le")) // 2
+print(f"{os.path.basename(path)}: {n}/{cap} chars at session start (headroom {cap - n})")
+PYEOF
+        exit $? ;;
+    -h|--help)
+        usage; exit 0 ;;
+    --set|--handoff|--need|--need-done|--note|--next|--due|--in-person|--deck)
+        # Edits the frontmatter by KEY in whichever layout the file has (top-level, or nested under
+        # `metadata:` by the memory system), so a checkpoint never depends on line numbers or on a
+        # `^status:` anchor. Values are written as double-quoted YAML strings. `updated` is stamped
+        # when status, holds, or a section-writing verb runs; the config fields (route, parked)
+        # aren't a check-in.
+        # The calling session's own folder, not the shell's cwd: a session that cd's into another
+        # repo (a commit made elsewhere) would otherwise overwrite that repo's role. Claude Code
+        # sets CLAUDE_PID, and its process cwd is the folder the session was started in.
+        home_dir=$PWD
+        if [ -n "${CLAUDE_PID:-}" ] && sess=$(readlink "/proc/$CLAUDE_PID/cwd" 2>/dev/null) && [ -d "$sess" ]; then
+            home_dir=$sess
+        fi
+        file="$ROLES/$(folder_of "$home_dir").md"
+        pairs=(); handoff=""
+        has_set=0; has_handoff=0; has_need=0; has_need_done=0; has_note=0; has_next=0; has_due=0; has_deck=0; deck_flag=--in-person; has_file=0
+        need_text=""; need_done_match=""; note_text=""; next_text=""; due_date=""
+        while [ $# -gt 0 ]; do
+            case "$1" in
+                --set)
+                    [ "$has_set" -eq 0 ] || { echo "claude-role: --set given more than once" >&2; exit 2; }
+                    has_set=1; shift ;;
+                --file)
+                    [ "$has_file" -eq 0 ] || { echo "claude-role: --file given more than once" >&2; exit 2; }
+                    [ $# -ge 2 ] && [ -n "$2" ] || { echo "claude-role: --file needs a FILE" >&2; exit 2; }
+                    has_file=1; file=$2; shift 2 ;;
+                --handoff)
+                    [ "$has_handoff" -eq 0 ] || { echo "claude-role: --handoff given more than once" >&2; exit 2; }
+                    [ $# -ge 2 ] && [ -n "$2" ] || { echo "claude-role --set: --handoff needs a FILE" >&2; exit 2; }
+                    has_handoff=1; handoff=$2; shift 2 ;;
+                --need)
+                    [ "$has_need" -eq 0 ] || { echo "claude-role: --need given more than once" >&2; exit 2; }
+                    [ $# -ge 2 ] || { echo "claude-role: --need needs TEXT" >&2; exit 2; }
+                    has_need=1; need_text=$2; shift 2 ;;
+                --in-person|--deck)
+                    [ "$has_deck" -eq 0 ] || { echo "claude-role: --in-person given more than once" >&2; exit 2; }
+                    has_deck=1; deck_flag=$1; shift ;;
+                --due)
+                    [ "$has_due" -eq 0 ] || { echo "claude-role: --due given more than once" >&2; exit 2; }
+                    [ $# -ge 2 ] || { echo "claude-role: --due needs YYYY-MM-DD" >&2; exit 2; }
+                    has_due=1; due_date=$2; shift 2 ;;
+                --need-done)
+                    [ "$has_need_done" -eq 0 ] || { echo "claude-role: --need-done given more than once" >&2; exit 2; }
+                    [ $# -ge 2 ] || { echo "claude-role: --need-done needs MATCH" >&2; exit 2; }
+                    has_need_done=1; need_done_match=$2; shift 2 ;;
+                --note)
+                    [ "$has_note" -eq 0 ] || { echo "claude-role: --note given more than once" >&2; exit 2; }
+                    [ $# -ge 2 ] || { echo "claude-role: --note needs TEXT" >&2; exit 2; }
+                    has_note=1; note_text=$2; shift 2 ;;
+                --next)
+                    [ "$has_next" -eq 0 ] || { echo "claude-role: --next given more than once" >&2; exit 2; }
+                    [ $# -ge 2 ] || { echo "claude-role: --next needs TEXT" >&2; exit 2; }
+                    has_next=1; next_text=$2; shift 2 ;;
+                status=* | holds=* | route=* | parked=*)
+                    pairs+=("$1"); shift ;;
+                *)
+                    echo "claude-role --set: unknown argument '$1'" >&2
+                    usage >&2
+                    exit 2 ;;
+            esac
+        done
+        if [ "$has_deck" -eq 1 ] && [ "$has_need" -eq 0 ]; then
+            echo "claude-role: $deck_flag requires --need" >&2; exit 2
+        fi
+        if [ "$has_due" -eq 1 ] && [ "$has_need" -eq 0 ] && [ "$has_next" -eq 0 ]; then
+            echo "claude-role: --due requires --need or --next" >&2; exit 2
+        fi
+        if [ "$has_due" -eq 1 ] && [ "$has_need" -eq 1 ] && [ "$has_next" -eq 1 ]; then
+            echo "claude-role: --due cannot combine with both --need and --next" >&2; exit 2
+        fi
+        [ ${#pairs[@]} -gt 0 ] || [ "$has_handoff" -eq 1 ] || [ "$has_need" -eq 1 ] || [ "$has_need_done" -eq 1 ] || [ "$has_note" -eq 1 ] || [ "$has_next" -eq 1 ] \
+            || { echo "claude-role --set: nothing to set (use status=… holds=… route=… parked=… --handoff FILE --need TEXT --need-done MATCH --note TEXT --next TEXT)" >&2; exit 2; }
+        # route: empty (no route of its own), not a headless-only preset (SYG_ROLE_HEADLESS_ROUTES:
+        # role sessions run in the background, headless runs only take those), a preset-shaped name,
+        # and, when SYG_ROUTE_SHOW_CMD is set, one that command accepts.
+        hr=${SYG_ROLE_HEADLESS_ROUTES:-}
+        read -ra headless_routes <<< "${hr//,/ }"
+        for p in "${pairs[@]}"; do
+            case "$p" in
+                route=) continue ;;
+                route=*) ;;
+                *) continue ;;
+            esac
+            r=${p#route=}
+            for h in "${headless_routes[@]}"; do
+                [ "$h" = "$r" ] && { echo "claude-role --set: route $r is headless only; a role session can't take it" >&2; exit 2; }
+            done
+            case "$r" in
+                *[!a-z0-9-]* | -*)  # not a preset name (and `-h` would be the route command's help)
+                    echo "claude-role --set: route '$r' is not a preset name (lowercase letters, digits and dashes, e.g. my-preset)" >&2; exit 2 ;;
+            esac
+            if [ -n "${SYG_ROUTE_SHOW_CMD:-}" ]; then
+                err=$(bash -c "$SYG_ROUTE_SHOW_CMD \"\$1\"" claude-role "$r" 2>&1 >/dev/null </dev/null) \
+                    || {
+                        pre=${err%%: *}   # drop a leading "<word>: " (the command's own name)
+                        if [ "$pre" != "$err" ] && [[ $pre =~ ^[A-Za-z0-9_.-]+$ ]]; then err=${err#*: }; fi
+                        echo "claude-role --set: route '$r' refused: $err" >&2; exit 2
+                    }
+            fi
+        done
+        head=$(head_text "$file"; printf x); head=${head%x}
+        CR_HANDOFF="$handoff" CR_HAS_NEED="$has_need" CR_NEED="$need_text" \
+        CR_HAS_DECK="$has_deck" CR_HAS_DUE="$has_due" CR_DUE="$due_date" \
+        CR_HAS_NEED_DONE="$has_need_done" CR_NEED_DONE="$need_done_match" \
+        CR_HAS_NOTE="$has_note" CR_NOTE="$note_text" \
+        CR_HAS_NEXT="$has_next" CR_NEXT="$next_text" CR_HEAD="$head" CR_LIB="$CR_LIB" \
+        CR_NEEDS_SEC="$NEEDS_SEC" CR_INPERSON_SEC="$INPERSON_SEC" \
+        python3 - "$file" "$(date '+%F %H:%M')" "$SESSION_START_CAP" "${pairs[@]}" <<'PYEOF' || exit $?
+import datetime, json, os, re, sys, time
+sys.path.insert(0, os.environ["CR_LIB"])
+from next_due import due_lines
+
+def die2(msg):
+    sys.stderr.write(msg + "\n")
+    sys.exit(2)
+
+path, stamp, cap, pairs = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4:]
+handoff_path = os.environ.get("CR_HANDOFF", "")
+has_need = os.environ.get("CR_HAS_NEED") == "1"
+need_text = os.environ.get("CR_NEED", "")
+has_deck = os.environ.get("CR_HAS_DECK") == "1"
+has_due = os.environ.get("CR_HAS_DUE") == "1"
+due_date = os.environ.get("CR_DUE", "")
+has_need_done = os.environ.get("CR_HAS_NEED_DONE") == "1"
+need_done_match = os.environ.get("CR_NEED_DONE", "")
+has_note = os.environ.get("CR_HAS_NOTE") == "1"
+note_text = os.environ.get("CR_NOTE", "")
+has_next = os.environ.get("CR_HAS_NEXT") == "1"
+next_text = os.environ.get("CR_NEXT", "")
+head = os.environ.get("CR_HEAD", "")
+needs_hdr = "## " + os.environ["CR_NEEDS_SEC"]
+inperson_hdr = "## " + os.environ["CR_INPERSON_SEC"]
+
+need_has_added = False
+if has_need:
+    if not need_text or "\n" in need_text or "\r" in need_text:
+        die2("claude-role --need: TEXT must be one non-empty line")
+    if need_text.startswith("- "):
+        need_text = need_text[2:]
+    if not need_text.strip():
+        die2("claude-role --need: TEXT must not be empty")
+    need_has_added = bool(re.search(r"\(added \d{4}-\d{2}-\d{2}\)\s*$", need_text))
+    if need_has_added and has_due:
+        die2("claude-role --need: TEXT already ends in (added YYYY-MM-DD); cannot combine with --due")
+
+if has_due and has_need:
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", due_date):
+        die2(f"claude-role --need: invalid --due date '{due_date}' (use YYYY-MM-DD)")
+    try:
+        datetime.date.fromisoformat(due_date)
+    except ValueError:
+        die2(f"claude-role --need: '{due_date}' is not a calendar date")
+
+if has_need_done:
+    if not need_done_match or "\n" in need_done_match or "\r" in need_done_match:
+        die2("claude-role --need-done: MATCH must be one non-empty line")
+
+if has_note:
+    if not note_text or "\n" in note_text or "\r" in note_text:
+        die2("claude-role --note: TEXT must be one non-empty line")
+
+if has_next:
+    if not next_text or "\n" in next_text or "\r" in next_text:
+        die2("claude-role --next: TEXT must be one non-empty line")
+    if next_text.startswith("- "):
+        next_text = next_text[2:]
+    if not next_text.strip():
+        die2("claude-role --next: TEXT must not be empty")
+    if "(due " in next_text:
+        die2("claude-role --next: TEXT already contains a '(due ' marker (use --due instead)")
+    if has_due:
+        dm = re.fullmatch(r"(\d{4}-\d{2}-\d{2})(?: (\d{2}):(\d{2}))?", due_date)
+        if not dm:
+            die2(f"claude-role --next: invalid --due '{due_date}' (use YYYY-MM-DD or 'YYYY-MM-DD HH:MM')")
+        try:
+            datetime.date.fromisoformat(dm.group(1))
+        except ValueError:
+            die2(f"claude-role --next: '{dm.group(1)}' is not a calendar date")
+        if dm.group(2) is not None and not (0 <= int(dm.group(2)) <= 23 and 0 <= int(dm.group(3)) <= 59):
+            die2(f"claude-role --next: invalid --due time '{dm.group(2)}:{dm.group(3)}' (use 00:00..23:59)")
+
+if not os.path.isfile(path):
+    sys.exit(f"claude-role --set: no role file at {path}")
+if handoff_path and not os.path.isfile(handoff_path):
+    sys.exit(f"claude-role --set: no handoff file at {handoff_path}")
+
+raw = open(path, encoding="utf-8").read()
+lines = raw.split("\n")
+if not lines or lines[0] != "---" or "---" not in lines[1:]:
+    sys.exit(f"claude-role --set: {path} has no leading --- frontmatter block")
+end = lines.index("---", 1)
+values = dict(p.split("=", 1) for p in pairs)
+# A status that leads with today's date and a guessed clock time later than now misleads every
+# reader of the board; `updated` already carries the real time.
+# The date may be YYYY-MM-DD or the short MM-DD every role file uses.
+now_min = int(stamp[11:13]) * 60 + int(stamp[14:16])
+
+def future_today(date, hh, mm):
+    return date in (stamp[:10], stamp[5:10]) and int(hh) * 60 + int(mm) > now_min + 2
+
+m = re.match(r"\s*((?:\d{4}-)?\d{2}-\d{2})\s+~?(\d{1,2}):(\d{2})\b", values.get("status", ""))
+if m and future_today(*m.groups()):
+    sys.exit(f"claude-role --set: status starts with {m.group(1)} {m.group(2)}:{m.group(3)}, "
+             f"but it's {stamp[11:]} now (run `date`); `updated` is stamped for you, so "
+             "the status needn't carry a time at all")
+
+# CommonMark fences: up to 3 spaces of indent, 3+ backticks or tildes. A backtick opener has no
+# backtick later on its line (else it's an inline span); a fence closes on a bare run of the
+# same character, at least as long as its opener. Returns (headings, unfenced_indices, unclosed).
+def scan(seq):
+    found, unfenced, fence = [], set(), ""
+    for i, line in seq:
+        m = re.match(r" {0,3}(`{3,}|~{3,})(.*)$", line)
+        if m and not fence and not (m[1][0] == "`" and "`" in m[2]):
+            fence = m[1]
+        elif m and fence and m[1][0] == fence[0] and len(m[1]) >= len(fence) and not m[2].strip():
+            fence = ""
+        elif not fence:
+            unfenced.add(i)
+            if line.startswith("## "):
+                found.append(i)
+    return found, unfenced, bool(fence)
+
+def body_scan():
+    return scan((i, lines[i]) for i in range(end + 1, len(lines)))
+
+# Only writes that find a section need this; a checkpoint or a park must still get through.
+if (handoff_path or has_need or has_need_done or has_note or has_next) and body_scan()[2]:
+    sys.exit(f"claude-role --set: {path} has an unclosed code fence, which would hide its later sections; close it first")
+
+final = 0
+while len(lines) > end + 1 and lines[-1] == "":
+    lines.pop()
+    final += 1
+
+is_handoff = re.compile(r"## Handoff(\s|\(|$)").match
+# Exactly `## Next` (trailing blanks allowed), the heading --json/--board read; `## Next steps` is another section.
+is_next = re.compile(r"## Next[ \t]*$").match
+
+# --handoff FILE: FILE (starting with its own `## Handoff` heading) replaces the Handoff section,
+# from its heading to the next `## ` heading; with none, it goes in before `## Next` (else last).
+# Headings inside fenced code blocks don't count; the file's trailing newlines are kept as they were.
+if handoff_path:
+    new = open(handoff_path, encoding="utf-8").read().rstrip("\n").split("\n")
+    # Line-leading stamps only (the heading's parenthetical, a `- **MM-DD HH:MM` bullet): dated today
+    # and later than now, they're guessed. A dated schedule mid-line ("opens 11-11 06:43") is fine.
+    # Lines inside code fences are examples, not stamps.
+    _, new_unfenced, _ = scan(enumerate(new))
+    for k, l in enumerate(new):
+        if k not in new_unfenced:
+            continue
+        sm = (re.match(r"## Handoff\s*\([^)]*?((?:\d{4}-)?\d{2}-\d{2})\s+~?(\d{1,2}):(\d{2})\b", l)
+              or re.match(r"- \*\*((?:\d{4}-)?\d{2}-\d{2})\s+~?(\d{1,2}):(\d{2})\b", l))
+        if sm and future_today(*sm.groups()):
+            sys.exit(f"claude-role --set: {handoff_path} stamps {sm.group(1)} {sm.group(2)}:{sm.group(3)}, "
+                     f"but it's {stamp[11:]} now (run `date`): {l[:80]} (a line-leading stamp records "
+                     "when something happened; write a future schedule mid-line instead)")
+    if not is_handoff(new[0]):
+        sys.exit(f"claude-role --set: {handoff_path} must start with a `## Handoff` heading")
+    if any(l.startswith("## ") for l in new[1:]):
+        sys.exit(f"claude-role --set: {handoff_path} holds a second `## ` section; the handoff is one section")
+    if scan(enumerate(new))[2]:
+        sys.exit(f"claude-role --set: {handoff_path} has an unclosed code fence, which would hide later sections; close it first")
+    heads, _, _ = body_scan()
+    hand = [i for i in heads if is_handoff(lines[i])]
+    if len(hand) > 1:
+        sys.exit(f"claude-role --set: {path} has {len(hand)} Handoff sections; merge them by hand first")
+    if hand:
+        start = hand[0]
+        stop = next((i for i in heads if i > start), len(lines))
+    else:
+        start = stop = next((i for i in heads if lines[i].startswith("## Next")), len(lines))
+    if stop < len(lines):
+        new = new + [""]
+    elif start == len(lines) and lines[-1] != "":
+        new = [""] + new
+    lines[start:stop] = new
+
+if has_next:
+    heads, _, _ = body_scan()
+    nxt = [i for i in heads if is_next(lines[i])]
+    next_line = f"- {next_text} (due {due_date})" if has_due else f"- {next_text}"
+    if nxt:
+        start = nxt[0]
+        stop = next((i for i in heads if i > start), len(lines))
+        last_nb = max(i for i in range(start, stop) if lines[i].strip())
+        lines.insert(last_nb + 1, next_line)
+    else:
+        pos = next(
+            (i for i in heads if lines[i].rstrip(" \t") == needs_hdr),
+            next((i for i in heads if lines[i].rstrip(" \t") == inperson_hdr), len(lines)),
+        )
+        new_sec = ["## Next", next_line]
+        if pos < len(lines):
+            new_sec = new_sec + [""]
+            if lines[pos - 1] != "":
+                new_sec = [""] + new_sec
+        elif pos == len(lines) and lines[-1] != "":
+            new_sec = [""] + new_sec
+        lines[pos:pos] = new_sec
+
+if has_note:
+    heads, _, _ = body_scan()
+    hand = [i for i in heads if is_handoff(lines[i])]
+    if len(hand) > 1:
+        sys.exit(f"claude-role --note: {path} has {len(hand)} Handoff sections; merge them by hand first")
+    note_line = f"- **{stamp[5:]}:** {note_text}"
+    if hand:
+        start = hand[0]
+        stop = next((i for i in heads if i > start), len(lines))
+        last_nb = max(i for i in range(start, stop) if lines[i].strip())
+        lines.insert(last_nb + 1, note_line)
+    else:
+        pos = next((i for i in heads if lines[i].startswith("## Next")), len(lines))
+        new_sec = ["## Handoff", note_line]
+        if pos < len(lines):
+            new_sec = new_sec + [""]
+            if lines[pos - 1] != "":
+                new_sec = [""] + new_sec
+        elif pos == len(lines) and lines[-1] != "":
+            new_sec = [""] + new_sec
+        lines[pos:pos] = new_sec
+
+TAG_RE = re.compile(r"(\s*\((?:added|due) \d{4}-\d{2}-\d{2}\)){1,2}\s*$")
+
+def is_filler(line):
+    s = line.strip()
+    if not s:
+        return False
+    if s.startswith("- "):
+        s = s[2:].strip()
+    s = re.sub(r"[_*()]", "", s).strip()
+    if s.endswith("."):
+        s = s[:-1].strip()
+    return s.lower() in {"none", "nothing", "nothing open", "nothing pending", "-", "—"}
+
+def bare_bullet(line):
+    s = line.strip()
+    if s.startswith("- "):
+        s = s[2:]
+    return TAG_RE.sub("", s).strip()
+
+out_msgs = []
+need_added = False
+if has_need:
+    if need_has_added:
+        bullet = f"- {need_text.rstrip()}"
+    elif has_due:
+        bullet = f"- {need_text} (due {due_date}) (added {stamp[:10]})"
+    else:
+        bullet = f"- {need_text} (added {stamp[:10]})"
+    target_hdr = inperson_hdr if has_deck else needs_hdr
+    heads, unfenced, _ = body_scan()
+    sec_hits = [i for i in heads if lines[i].rstrip(" \t") == target_hdr]
+    if sec_hits:
+        start = sec_hits[0]
+        stop = next((i for i in heads if i > start), len(lines))
+        existing = next(
+            (lines[i] for i in range(start + 1, stop)
+             if i in unfenced and lines[i].startswith("- ") and not is_filler(lines[i])
+             and bare_bullet(lines[i]) == bare_bullet(bullet)),
+            None,
+        )
+        if existing is not None:
+            out_msgs.append(f"already there: {existing}")
+        else:
+            for i in [i for i in range(stop - 1, start, -1) if i in unfenced and is_filler(lines[i])]:
+                del lines[i]
+                stop -= 1
+                # The filler's own leading blank goes too, or the section keeps a doubled one.
+                if i - 1 > start and not lines[i - 1].strip() and (i >= stop or not lines[i].strip()):
+                    del lines[i - 1]
+                    stop -= 1
+            last_nb = max(i for i in range(start, stop) if lines[i].strip())
+            lines.insert(last_nb + 1, bullet)
+            need_added = True
+    else:
+        if has_deck:
+            pos = len(lines)
+        else:
+            pos = next((i for i in heads if lines[i].rstrip(" \t") == inperson_hdr), len(lines))
+        new_sec = [target_hdr, bullet]
+        if pos < len(lines):
+            new_sec = new_sec + [""]
+            if lines[pos - 1] != "":
+                new_sec = [""] + new_sec
+        elif pos == len(lines) and lines[-1] != "":
+            new_sec = [""] + new_sec
+        lines[pos:pos] = new_sec
+        need_added = True
+
+if has_need_done:
+    heads, unfenced, _ = body_scan()
+    candidates = []
+    for sec_hdr in (needs_hdr, inperson_hdr):
+        for start in (i for i in heads if lines[i].rstrip(" \t") == sec_hdr):
+            stop = next((i for i in heads if i > start), len(lines))
+            for i in range(start + 1, stop):
+                if i in unfenced and lines[i].startswith("- ") and not is_filler(lines[i]):
+                    candidates.append((i, stop))
+    q = need_done_match.lower()
+    hits = [(i, stop) for i, stop in candidates if q in lines[i].lower()]
+    if len(hits) != 1:
+        shown = [lines[i] for i, _ in (hits if hits else candidates)]
+        listing = "\n".join(f"  {b}" for b in shown) if shown else "  (none)"
+        label = f"{len(hits)} bullets match" if hits else "no bullet matches"
+        sys.exit(f"claude-role --need-done: {label} {need_done_match!r}; candidates:\n{listing}")
+    idx, stop = hits[0]
+    del_end = idx + 1
+    while del_end < stop and lines[del_end][:1] in (" ", "\t") and lines[del_end].strip():
+        del_end += 1
+    out_msgs.append(f"removed: {lines[idx]}")
+    del lines[idx:del_end]
+
+lines += [""] * final
+
+if "status" in values or "holds" in values or (has_need and need_added) or has_need_done or has_note or has_next:
+    values["updated"] = stamp
+
+def quote(key, value):
+    # `updated` stays bare, matching every existing role file; free text is quoted.
+    return value if key == "updated" else json.dumps(value, ensure_ascii=False)
+
+# Indent of the role fields: that of the `role:` line, else top level.
+indent = next((m.group(1) for l in lines[1:end] if (m := re.match(r"^(\s*)role:", l))), "")
+for key, value in values.items():
+    pat = re.compile(r"^(\s*)" + re.escape(key) + r":")
+    hits = [i for i in range(1, end) if pat.match(lines[i])]
+    if hits:
+        # Keep the hit at the role fields' indent; a duplicate at another indent (e.g. a stray
+        # top-level line from a botched hand edit inside a nested block) is dropped.
+        keep = next((i for i in hits if pat.match(lines[i]).group(1) == indent), hits[0])
+        lines[keep] = indent + key + ": " + quote(key, value)
+        for j in sorted((i for i in hits if i != keep), reverse=True):
+            del lines[j]
+            end -= 1
+    else:
+        lines.insert(end, indent + key + ": " + quote(key, value))
+        end += 1
+
+def u16(s):
+    return len(s.encode("utf-8", "surrogateescape").decode("utf-8", "replace").encode("utf-16-le")) // 2   # as the hook measures: replace bad bytes
+
+now_ep = int(os.environ["SYG_ROLE_NOW_EPOCH"]) if os.environ.get("SYG_ROLE_NOW_EPOCH") else int(time.time())
+
+def rendered_u16(s):   # what the hook renders: the head, the "Due now" block, then the file
+    return u16(head + due_lines(s, now_ep) + s)
+
+text = "\n".join(lines)
+old_size = rendered_u16(raw)
+new_size = rendered_u16(text)
+guarded = bool({"status", "holds"} & values.keys() or handoff_path or has_need or has_note or has_next)
+NOTE_RE = re.compile(r"^- \*\*\d{2}-\d{2} \d{2}:\d{2}:\*\*")
+arch_write = None
+if guarded and new_size > cap and new_size > old_size and not handoff_path:
+    heads, unfenced, _ = body_scan()
+    hand = [i for i in heads if is_handoff(lines[i])]
+    if len(hand) == 1:
+        h_start = hand[0]
+        h_stop = next((i for i in heads if i > h_start), len(lines))
+        notes = []
+        i = h_start + 1
+        while i < h_stop:
+            if i in unfenced and NOTE_RE.match(lines[i]):
+                j = i + 1
+                while j < h_stop and lines[j][:1] in (" ", "\t") and lines[j].strip():
+                    j += 1
+                notes.append((i, j))
+                i = j
+            else:
+                i += 1
+        # Never move the note this call adds (--note inserts it last; compare the line, don't assume).
+        if has_note and notes and lines[notes[-1][0]] == note_line:
+            notes = notes[:-1]
+        cand_lines = list(lines)
+        moved_lines = []
+        moved_count = 0
+        offset = 0
+        for s_i, e_i in notes:
+            moved_lines.extend(lines[s_i:e_i])
+            del cand_lines[s_i - offset : e_i - offset]
+            offset += e_i - s_i
+            moved_count += 1
+            cand_text = "\n".join(cand_lines)
+            cand_size = rendered_u16(cand_text)
+            if cand_size <= cap:
+                lines = cand_lines
+                text = cand_text
+                new_size = cand_size
+                base = os.path.basename(path)
+                stem = base[:-3] if base.endswith(".md") else base
+                arch_base = f"{stem}-handoff-archive-{stamp[:10]}.md"
+                arch_path = os.path.join(os.path.dirname(path), arch_base)
+                arch_hdr = f"## Moved by claude-role {stamp} (oldest Handoff notes, verbatim, to fit the 10000 cap)"
+                if os.path.exists(arch_path):
+                    prev = open(arch_path, encoding="utf-8").read()
+                    prefix = prev.rstrip("\n") + "\n\n" if prev.strip() else ""
+                    arch_text = prefix + "\n".join([arch_hdr] + moved_lines) + "\n"
+                else:
+                    arch_text = "\n".join([f"# {stem} Handoff archive", "", arch_hdr] + moved_lines) + "\n"
+                arch_write = (arch_path, arch_text)
+                out_msgs.append(f"archived {moved_count} oldest Handoff notes to {arch_base}")
+                break
+
+if guarded and new_size > cap and new_size > old_size:
+    heads, _, _ = body_scan()
+    secs = []
+    for idx, start in enumerate(heads):
+        stop = heads[idx + 1] if idx + 1 < len(heads) else len(lines)
+        name = lines[start][3:].strip()
+        sec_text = "\n".join(lines[start:stop]).rstrip("\n")
+        secs.append((name, u16(sec_text)))
+    top = ", ".join(f"{n} {sz}" for n, sz in sorted(secs, key=lambda x: -x[1])[:3])
+    sys.exit(
+        f"claude-role: refused, nothing written: {os.path.basename(path)} would render "
+        f"{new_size}/{cap} chars at session start (over by {new_size - cap}). "
+        f"Largest sections: {top}. Trim one (rewrite Handoff, don't append), then rerun."
+    )
+
+# Archive first: a failure between the two writes leaves the notes in both files (a retry archives
+# them again, a duplicate), never in neither.
+if arch_write is not None:
+    arch_path, arch_text = arch_write
+    arch_tmp = arch_path + ".tmp"
+    with open(arch_tmp, "w", encoding="utf-8") as f:
+        f.write(arch_text)
+    os.replace(arch_tmp, arch_path)
+if text != raw:
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(text)
+    os.replace(tmp, path)
+for msg in out_msgs:
+    print(msg)
+print(f"{os.path.basename(path)}: {new_size}/{cap} chars at session start")
+PYEOF
+        exit 0 ;;
+    "") ;;
+    *)
+        echo "claude-role: unknown argument '$1' (try --help)" >&2
+        usage >&2
+        exit 2 ;;
+esac
+
+# Hook mode. Only a fresh context needs this: a new session or /clear (resume and compact keep it).
+input=$(cat)
+source=$(jq -r '.source // "startup"' <<< "$input" 2>/dev/null)
+case "$source" in startup|clear) ;; *) exit 0 ;; esac
+cwd=$(jq -r '.cwd // empty' <<< "$input" 2>/dev/null)
+
+context_line
+
+# A headless run (a launcher of headless runs sets this) is a worker or a one-shot call, not the folder's role.
+if [ "${SYG_ROLE_HEADLESS:-}" = 1 ]; then
+    echo "[Role] Headless run: not a role session. Leave every role file under $ROLES alone."
+    exit 0
+fi
+# A named task session (a launcher sets this) borrows a role's folder, not its role.
+if [ -n "${SYG_ROLE_TASK:-}" ]; then
+    echo "[Role] This is the \"$SYG_ROLE_TASK\" task session, not a role session. Your prompt is your whole brief; leave every role file under $ROLES alone unless it tells you to write one."
+    exit 0
+fi
+file="$ROLES/$(folder_of "${cwd:-$PWD}").md"
+[ -f "$file" ] || exit 0
+due=$(due_lines "$file"; printf x); due=${due%x}
+rendered=$(
+    { head_text "$file"; printf '%s' "$due"; cat "$file"; } \
+    | python3 -c 'import sys; print(len(sys.stdin.buffer.read().decode("utf-8", "replace").encode("utf-16-le")) // 2)'
+)
+if [ "$rendered" -gt "$SESSION_START_CAP" ]; then
+    echo "[Role] Your role file $file renders to $rendered/$SESSION_START_CAP characters at session start, and Claude Code replaces hook output past $SESSION_START_CAP characters with a 2 KB preview. Read it with the Read tool now, then trim it (Charter short, Handoff rewritten, not appended)."
+    exit 0
+fi
+preamble "$file"
+printf '%s' "$due"
+cat "$file"

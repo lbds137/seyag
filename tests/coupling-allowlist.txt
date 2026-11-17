@@ -19,9 +19,6 @@ lbds137:CLAUDE.md
 # Lila
 Lila:CLAUDE.md
 Lila:plugins/seyag/skills/going-public/SKILL.md
-# claude-role
-claude-role:plugins/seyag/bin/context-audit
-claude-role:plugins/seyag/skills/doc-audit/SKILL.md
 # deck-sessions
 deck-sessions:CLAUDE.md
 deck-sessions:plugins/seyag/hooks/session-start.sh
