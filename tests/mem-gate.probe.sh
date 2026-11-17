@@ -178,6 +178,9 @@ for args in "--interval 0" "--timeout abc" "--ok abc" "--bogus" "--owner"; do
 done
 
 # owner_default, when it finds a session above this probe: its pid's exe is a claude binary.
+# The daemon/bg-pty-host exclusion and the walk past non-claude parents have no direct coverage
+# here (faking a claude process tree hermetically isn't practical); this only checks that a
+# found owner is a claude binary.
 o=$(bash -c ". '$REPO/plugins/seyag/lib/owner.sh'; owner_default")
 if [ -n "$o" ]; then
   case "$(readlink "/proc/$o/exe")" in

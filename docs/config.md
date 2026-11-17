@@ -238,7 +238,7 @@ An optional TOML file fills in knobs the environment left unset: user `${XDG_CON
 | `SYG_MEM_GATE_MIN_MB` | `2048` | Default MemAvailable floor in MB for mem-gate --ok/--wait; an explicit MB argument wins. | `bin/mem-gate` |
 | `SYG_MEM_PRESSURE_MAX_BYTES` | `5242880` | Size in bytes past which mem-pressure-log rotates log.jsonl to log.jsonl.1 (one generation kept). | `bin/mem-pressure-log` |
 | `SYG_MEM_PRESSURE_STATE_DIR` | `$HOME/.local/state/mem-pressure` | Directory holding mem-pressure-log's log.jsonl. | `bin/mem-pressure-log` |
-| `SYG_MEM_WATCH_CGROUP_ROOT` | `/sys/fs/cgroup/user.slice` | Directory mem-watch searches (four levels deep) for the app slice's memory.events oom_kill counter. | `bin/mem-watch` |
+| `SYG_MEM_WATCH_CGROUP_ROOT` | `/sys/fs/cgroup/user.slice` | Directory mem-watch searches, up to four levels deep, for this user's app.slice/memory.events oom_kill counter (user-<uid>.slice preferred; a root below the user slice also works; another uid's slice never). | `bin/mem-watch` |
 
 ## Internal names
 
