@@ -197,7 +197,7 @@ head_text() {
 
 # due_lines <file>: SessionStart "Due now" lines for ## Next bullets with (due YYYY-MM-DD[ HH:MM])
 # at or before now (SYG_ROLE_NOW_EPOCH overrides the clock in tests); nothing when none is due.
-CR_LIB="$(dirname "$(readlink -f "$0")")/../lib"   # lib/next_due.py: the parser for due-time Next items
+CR_LIB="$bin_dir/../lib"   # lib/next_due.py: the parser for due-time Next items
 due_lines() {
     [ -f "$1" ] || return 0
     python3 -I "$CR_LIB/next_due.py" lines "$1" "${SYG_ROLE_NOW_EPOCH:-}"
@@ -285,10 +285,10 @@ case "${1:-}" in
         done
         [ -f "$file" ] || { echo "claude-role --size: no role file at $file" >&2; exit 1; }
         head=$(head_text "$file"; due_lines "$file"; printf x); head=${head%x}
-        CR_HEAD="$head" python3 - "$file" "$SESSION_START_CAP" <<'PYEOF'
+        CR_HEAD="$head" python3 -I - "$file" "$SESSION_START_CAP" <<'PYEOF'
 import os, sys
 path, cap = sys.argv[1], int(sys.argv[2])
-raw = open(path, encoding="utf-8").read()
+raw = open(path, "rb").read().decode("utf-8", "surrogateescape")   # bad bytes are measured, not fatal
 # Measure as the hook does: bytes decoded with errors="replace" (a non-UTF-8 head byte counts one unit).
 n = len((os.environ["CR_HEAD"] + raw).encode("utf-8", "surrogateescape").decode("utf-8", "replace").encode("utf-16-le")) // 2
 print(f"{os.path.basename(path)}: {n}/{cap} chars at session start (headroom {cap - n})")
@@ -403,7 +403,7 @@ PYEOF
         CR_HAS_NOTE="$has_note" CR_NOTE="$note_text" \
         CR_HAS_NEXT="$has_next" CR_NEXT="$next_text" CR_HEAD="$head" CR_LIB="$CR_LIB" \
         CR_NEEDS_SEC="$NEEDS_SEC" CR_INPERSON_SEC="$INPERSON_SEC" \
-        python3 - "$file" "$(date '+%F %H:%M')" "$SESSION_START_CAP" "${pairs[@]}" <<'PYEOF' || exit $?
+        python3 -I - "$file" "$(date '+%F %H:%M')" "$SESSION_START_CAP" "${pairs[@]}" <<'PYEOF' || exit $?
 import datetime, json, os, re, sys, time
 sys.path.insert(0, os.environ["CR_LIB"])
 from next_due import due_lines
@@ -482,7 +482,10 @@ if not os.path.isfile(path):
 if handoff_path and not os.path.isfile(handoff_path):
     sys.exit(f"claude-role --set: no handoff file at {handoff_path}")
 
-raw = open(path, encoding="utf-8").read()
+try:
+    raw = open(path, encoding="utf-8").read()
+except UnicodeDecodeError:
+    sys.exit(f"claude-role --set: {path} is not UTF-8; fix its encoding first")
 lines = raw.split("\n")
 if not lines or lines[0] != "---" or "---" not in lines[1:]:
     sys.exit(f"claude-role --set: {path} has no leading --- frontmatter block")
@@ -863,9 +866,12 @@ file="$ROLES/$(folder_of "${cwd:-$PWD}").md"
 due=$(due_lines "$file"; printf x); due=${due%x}
 rendered=$(
     { head_text "$file"; printf '%s' "$due"; cat "$file"; } \
-    | python3 -c 'import sys; print(len(sys.stdin.buffer.read().decode("utf-8", "replace").encode("utf-16-le")) // 2)'
+    | python3 -I -c 'import sys; print(len(sys.stdin.buffer.read().decode("utf-8", "replace").encode("utf-16-le")) // 2)'
 )
-if [ "$rendered" -gt "$SESSION_START_CAP" ]; then
+if [[ ! $rendered =~ ^[0-9]+$ ]]; then
+    # The measure failed: fail open (print the role as before) without a shell error.
+    echo "claude-role: could not measure $file; printing it unchecked" >&2
+elif [ "$rendered" -gt "$SESSION_START_CAP" ]; then
     echo "[Role] Your role file $file renders to $rendered/$SESSION_START_CAP characters at session start, and Claude Code replaces hook output past $SESSION_START_CAP characters with a 2 KB preview. Read it with the Read tool now, then trim it (Charter short, Handoff rewritten, not appended)."
     exit 0
 fi

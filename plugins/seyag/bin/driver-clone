@@ -81,7 +81,14 @@ esac
 [[ $base_name != *'"'* && $base_name != *'\'* && $base_name != *$'\t'* && $base_name != *$'\n'* && $base_name != *$'\r'* ]] \
   || die "the base role's short name '$base_name' can't hold a quote, backslash, tab, newline or CR"
 # route: read from the base role's frontmatter (nested under metadata: or flat); empty = the launcher's default
-route=$(awk '/^---$/ { n++; next } n == 1 && /^[[:space:]]*route:/ { sub(/^[[:space:]]*route:[[:space:]]*/, ""); gsub(/"/, ""); print; exit }' "$base_role")
+route=$(awk '/^---$/ { n++; next } n == 1 && /^[[:space:]]*route:/ { sub(/^[[:space:]]*route:[[:space:]]*/, ""); print; exit }' "$base_role")
+route=${route%$'\r'}
+case $route in
+  \"?*\" | \'?*\') route=${route:1:${#route}-2} ;;
+esac
+[[ $route != *'"'* && $route != *'\'* ]] || die "the base role's route: value '$route' can't hold a quote or backslash"
+[[ $dest != *'"'* && $dest != *'\'* && $dest != *$'\t'* && $dest != *$'\n'* && $dest != *$'\r'* ]] \
+  || die "SYG_DRIVER_CLONE_PROJECTS gives the clone path '$dest', which can't hold a quote, backslash, tab, newline or CR"
 hint=${SYG_DRIVER_CLONE_START_HINT:-start a session in $dest}
 
 trust="Run claude once in $dest and accept the folder-trust prompt — unblocks starting $name (driver-clone)"

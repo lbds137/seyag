@@ -1028,5 +1028,41 @@ mkdir "$home/empty-dir"
 err=$(SYG_ROLE_DIR="$home/empty-dir" "$CR" --list 2>&1); rc=$?
 [ $rc = 0 ] && [ -z "$err" ] && ok "an empty role dir lists nothing, quietly" || bad "empty role dir: rc=$rc $err"
 
+# Python isolation: a json.py / re.py / datetime.py in the caller's cwd must not shadow the stdlib in
+# --set, --size or the hook (each python runs with -I), and next_due.py still imports.
+shadow="$home/shadow"; mkdir -p "$shadow"
+for m in json re datetime; do printf 'open("%s/marker-%s", "a").close()\n' "$shadow" "$m" > "$shadow/$m.py"; done
+printf -- '---\nrole: "Iso role"\nstatus: "idle"\n---\n\n## Next\n- overdue (due 2020-01-01)\n' > "$roles/iso.md"
+iso_set=$(cd "$shadow" && "$CR" --set status=x --file "$roles/iso.md" 2>&1); rc=$?
+[ $rc = 0 ] && [[ "$iso_set" =~ ^iso\.md:\ [0-9]+/10000\ chars\ at\ session\ start$ ]] && grep -q 'status: "x"' "$roles/iso.md" \
+  && ok "isolation: --set from a cwd with json.py/re.py/datetime.py works" || bad "isolation --set: rc=$rc $iso_set"
+iso_size=$(cd "$shadow" && "$CR" --size --file "$roles/iso.md" 2>&1); rc=$?
+[ $rc = 0 ] && [[ "$iso_size" =~ ^iso\.md:\ [0-9]+/10000\ chars ]] && ok "isolation: --size from the shadowed cwd works" || bad "isolation --size: rc=$rc $iso_size"
+iso_hook=$(cd "$shadow" && echo '{"source":"startup","cwd":"'"$home"'/Projects/iso"}' | "$CR" 2>&1); rc=$?
+[ $rc = 0 ] && grep -qF 'Due now (## Next' <<< "$iso_hook" && grep -qF 'You are the "Iso role" session' <<< "$iso_hook" \
+  && ok "isolation: the hook from the shadowed cwd works and still reads next_due.py" || bad "isolation hook: rc=$rc $(head -c 300 <<< "$iso_hook")"
+markers=("$shadow"/marker-*)
+[ -e "${markers[0]}" ] && bad "isolation: a shadow module ran (${markers[*]##*/})" || ok "isolation: no shadow module ran"
+rm -f "$roles/iso.md"
+
+# A non-UTF-8 role FILE: --size counts as the hook does; --set refuses in one line, file untouched.
+printf -- '---\nrole: "Bytes role"\nstatus: "idle"\n---\n\ncaf\351\n' > "$roles/bytes.md"
+bytes_hook=$(echo '{"source":"startup","cwd":"'"$home"'/Projects/bytes"}' | "$CR" | python3 -c 'import sys; print(len(sys.stdin.buffer.read().decode("utf-8", "replace").encode("utf-16-le")) // 2)')
+bytes_size=$("$CR" --size --file "$roles/bytes.md" 2>&1); rc=$?
+[ $rc = 0 ] && [ "$bytes_size" = "bytes.md: $bytes_hook/10000 chars at session start (headroom $((10000 - bytes_hook)))" ] \
+  && ok "non-UTF-8 role file: --size exits 0 and equals the hook's measure ($bytes_hook)" || bad "bytes --size: rc=$rc '$bytes_size' vs $bytes_hook"
+before_bytes=$(cksum < "$roles/bytes.md")
+bytes_set=$("$CR" --set status=x --file "$roles/bytes.md" 2>&1); rc=$?
+[ $rc = 1 ] && [ "$bytes_set" = "claude-role --set: $roles/bytes.md is not UTF-8; fix its encoding first" ] && [ "$(cksum < "$roles/bytes.md")" = "$before_bytes" ] \
+  && ok "non-UTF-8 role file: --set exits 1 with a one-line message, file unchanged" || bad "bytes --set: rc=$rc '$bytes_set'"
+rm -f "$roles/bytes.md"
+
+# lib/next_due.py directly: the json form for one due and one not-due bullet.
+printf -- '---\nrole: "Due json"\n---\n\n## Next\n- due one (due 2026-11-08 17:04)\n- later one (due 2026-11-09 09:00)\n' > "$home/duejson.md"
+ep=$(date -d '2026-11-08 18:00:00' +%s)
+got=$(python3 -I "$REPO/plugins/seyag/lib/next_due.py" json "$home/duejson.md" "$ep")
+want='[{"stamp": "2026-11-08 17:04", "age": "56m ago", "text": "due one (due 2026-11-08 17:04)"}]'
+[ "$got" = "$want" ] && ok "next_due.py json: one due bullet as {stamp, age, text}, the not-due one omitted" || bad "next_due json: $got"
+
 echo "claude-role probe: $pass passed, $fail failed"
 [ "$fail" = 0 ]
