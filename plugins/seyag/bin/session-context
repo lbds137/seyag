@@ -1,0 +1,135 @@
+#!/bin/bash
+# session-context - How big each running Claude session's context is, flagging the ones to compact
+#
+# Usage:
+#   session-context            # one row per running session: name, folder, model, context tokens
+#   session-context --flagged  # only the sessions over their flag threshold
+#   session-context --json     # [{name, folder, sessionId, status, model, tokens, flag_at, flagged}]
+#
+# Long context drains the shared 5-hour window faster (every turn re-reads it), so a periodic session check
+# nudges a flagged session to write its handoff and ask the owner for /compact or /clear at its next
+# clean boundary. Flag thresholds: 500k tokens, 200k for Fable (its own, smaller weekly cap);
+# override with SYG_SESSION_CONTEXT_THRESHOLD / SYG_SESSION_CONTEXT_THRESHOLD_FABLE (whole
+# numbers; anything else exits 2). A threshold is policy, NOT the model's window (a [1m] session
+# has 1M; the transcript's model id drops the marker, so the window is unknown here and never
+# printed). Transcripts are read from CLAUDE_PROJECTS_DIR, else ${CLAUDE_CONFIG_DIR:-~/.claude}/projects.
+#
+# Tokens come from the session transcript's newest assistant reply (input + cache read + cache
+# write), the same sum seyag's statusline shows. Subagent (sidechain) lines don't count. Right
+# after a /compact the number is still the pre-compact size until the session's next reply. A
+# session with no reply yet shows 0.
+#
+# Rows for another harness's sessions: SYG_SESSION_CONTEXT_EXTRA_CMD names a command (run as
+# `bash -c`, stdin closed) that prints a JSON array of {name, folder, sessionId, status, tokens};
+# each becomes a row with model SYG_SESSION_CONTEXT_EXTRA_MODEL (default "other") and flag
+# threshold SYG_SESSION_CONTEXT_EXTRA_THRESHOLD (default 150000). Unset: no extra rows. Set but
+# failing (nonzero exit, not a JSON array, or a row whose tokens is not a number): a stderr line
+# says so and the Claude rows still print.
+
+set -uo pipefail
+
+# Optional config files (the config.toml loader) fill in knobs the environment
+# left unset before any knob below is read; the environment still wins.
+bin_dir=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")
+if [ -r "$bin_dir/../hooks/lib/config-env.sh" ] \
+    && source "$bin_dir/../hooks/lib/config-env.sh" 2>/dev/null \
+    && declare -F syg_config_env >/dev/null; then
+    syg_config_env "$(readlink -f "$bin_dir/..")"
+fi
+
+case "${1:-}" in
+    -h|--help) awk 'NR >= 2 { if ($0 !~ /^#/) exit; sub(/^# ?/, ""); print }' "$0"; exit 0 ;;
+    ""|--flagged|--json) ;;
+    *) echo "session-context: unknown argument '$1' (try --help)" >&2; exit 2 ;;
+esac
+limit=${SYG_SESSION_CONTEXT_THRESHOLD:-500000}
+limit_fable=${SYG_SESSION_CONTEXT_THRESHOLD_FABLE:-200000}
+extra_model=${SYG_SESSION_CONTEXT_EXTRA_MODEL:-other}
+limit_extra=${SYG_SESSION_CONTEXT_EXTRA_THRESHOLD:-150000}
+# A bad threshold would reach jq as invalid JSON and print nothing: refuse it up front.
+for knob in SYG_SESSION_CONTEXT_THRESHOLD SYG_SESSION_CONTEXT_THRESHOLD_FABLE SYG_SESSION_CONTEXT_EXTRA_THRESHOLD; do
+    v=${!knob:-}
+    if [ -n "$v" ] && ! [[ $v =~ ^[0-9]+$ ]]; then
+        echo "session-context: $knob must be a whole number, got '$v'" >&2
+        exit 2
+    fi
+done
+limit=$((10#$limit)); limit_fable=$((10#$limit_fable)); limit_extra=$((10#$limit_extra))
+projects="${CLAUDE_PROJECTS_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects}"
+
+agents=$(claude agents --json) || { echo "session-context: claude agents --json failed" >&2; exit 1; }
+jq -e 'type == "array"' <<< "$agents" >/dev/null 2>&1 \
+    || { echo "session-context: claude agents --json didn't return a list (format changed?)" >&2; exit 1; }
+
+# The main checkout's folder name (agent worktrees count as their repo), as claude-role names it.
+folder_of() {
+    local d=$1 common
+    if common=$(git -C "$d" rev-parse --path-format=absolute --git-common-dir 2>/dev/null); then
+        d=$(dirname "$common")
+    fi
+    basename "$d"
+}
+
+# last_reply <transcript>: {model, tokens} of the newest real assistant reply ({} if none).
+# Synthetic entries (API errors, interrupts), subagent sidechain lines and lines of an unexpected
+# shape are skipped.
+last_reply() {
+    tac "$1" 2>/dev/null | grep -a -F '"type":"assistant"' \
+        | jq -Rcn 'first(inputs | fromjson? | objects | select(.type == "assistant" and .isSidechain != true)
+                         | .message | objects | select(.model != "<synthetic>" and (.usage | type) == "object")
+                         | {model, tokens: (.usage | (.input_tokens // 0) + (.cache_read_input_tokens // 0)
+                                                    + (.cache_creation_input_tokens // 0))}) // {}'
+}
+
+claude_rows=$(jq -r '.[] | [.name // "", .cwd // "", .sessionId // "", .status // ""] | join("\u001f")' <<< "$agents" \
+    | while IFS=$'\037' read -r name cwd sid status; do
+        reply='{}'
+        if [ -n "$sid" ]; then
+            for t in "$projects"/*/"$sid.jsonl"; do
+                # No exit-status test: jq stops at the first match, so tac dies of SIGPIPE on any
+                # real-sized transcript and the pipeline "fails" with the right answer in hand.
+                [ -f "$t" ] && { reply=$(last_reply "$t"); [ -n "$reply" ] || reply='{}'; break; }
+            done
+        fi
+        jq -cn --arg name "$name" --arg folder "$(folder_of "$cwd")" --arg sid "$sid" --arg status "$status" \
+              --argjson reply "$reply" --argjson limit "$limit" --argjson lf "$limit_fable" \
+              '($reply.model // "") as $m | ($reply.tokens // 0) as $t
+               | (if ($m | test("fable")) then $lf else $limit end) as $lim
+               | {name: $name, folder: $folder, sessionId: $sid, status: $status, model: $m,
+                  tokens: $t, flag_at: $lim, flagged: ($t > $lim)}'
+    done | jq -s '.')
+# Every listed session must have a row: a dropped one would hide a flagged session.
+[ "$(jq length <<< "$claude_rows")" = "$(jq length <<< "$agents")" ] \
+    || { echo "session-context: built $(jq length <<< "$claude_rows") rows for $(jq length <<< "$agents") sessions" >&2; exit 1; }
+
+extra_rows='[]'
+if [ -n "${SYG_SESSION_CONTEXT_EXTRA_CMD:-}" ]; then
+    # Set but failing is loud: a silently dropped harness would hide its flagged sessions.
+    if extra_raw=$(bash -c "$SYG_SESSION_CONTEXT_EXTRA_CMD" </dev/null) \
+        && jq -e 'type == "array"' <<< "$extra_raw" >/dev/null 2>&1 \
+        && extra_rows=$(jq -c --argjson la "$limit_extra" --arg model "$extra_model" 'if all(.[]; .tokens == null or (.tokens | type) == "number") then [.[] | {
+            name: (.name // "extra"),
+            folder: (.folder // ""),
+            sessionId: (.sessionId // ""),
+            status: (.status // "idle"),
+            model: $model,
+            tokens: (.tokens // 0),
+            flag_at: $la,
+            flagged: ((.tokens // 0) > $la)
+        }] else error("tokens is not a number") end' <<< "$extra_raw" 2>/dev/null); then
+        :
+    else
+        extra_rows='[]'
+        echo "session-context: SYG_SESSION_CONTEXT_EXTRA_CMD failed; its sessions are missing" >&2
+    fi
+fi
+rows_fail() { echo "session-context: could not build the rows" >&2; exit 1; }
+rows=$(jq -c --argjson a "$extra_rows" '(. + $a) | sort_by(-.tokens)' <<< "$claude_rows") && [ -n "$rows" ] || rows_fail
+
+case "${1:-}" in
+    --json) echo "$rows"; exit 0 ;;
+    --flagged) rows=$(jq '[.[] | select(.flagged)]' <<< "$rows") && [ -n "$rows" ] || rows_fail ;;
+esac
+table=$(jq -r '.[] | [(if .flagged then "!" else " " end), .name, .folder, (.model | sub("^claude-"; "")),
+              "\(.tokens / 1000 | floor)k", "flag@\(.flag_at / 1000 | floor)k", .status] | @tsv' <<< "$rows") || rows_fail
+[ -z "$table" ] || column -t -s $'\t' <<< "$table"

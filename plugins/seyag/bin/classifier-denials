@@ -1,0 +1,88 @@
+#!/usr/bin/env bash
+# classifier-denials: count auto-mode classifier denials in the session transcripts, split into
+#   A = deliberate policy block (REASON is a bracketed category, e.g. [Git Destructive])
+#   B = infrastructure failure (Stage N classifier error, "usually transient", No reason provided, timed out, unavailable)
+# Two message shapes count: "denied by the Claude Code auto mode classifier. Reason: ..." and
+# "<model> is temporarily unavailable (timed out|rate-limited|server error ...), so auto mode cannot determine the safety of ...".
+# Reads transcripts under CLAUDE_PROJECTS_DIR (default ${CLAUDE_CONFIG_DIR:-~/.claude}/projects); nothing depends on sessions reporting.
+# Usage: classifier-denials [--since HOURS] [--detail]    (default 24h; --detail lists each B-class event)
+set -u
+
+# Optional config files (the config.toml loader) fill in knobs the environment
+# left unset before any knob below is read; the environment still wins.
+bin_dir=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")
+if [ -r "$bin_dir/../hooks/lib/config-env.sh" ] \
+    && source "$bin_dir/../hooks/lib/config-env.sh" 2>/dev/null \
+    && declare -F syg_config_env >/dev/null; then
+    syg_config_env "$(readlink -f "$bin_dir/..")"
+fi
+
+python3 -I - "$@" <<'PY'
+import sys, os, re, json, glob, time, datetime, collections
+args = sys.argv[1:]
+if "-h" in args or "--help" in args:
+    print("""classifier-denials: count auto-mode classifier denials in the session transcripts, split into
+  A = deliberate policy block (REASON is a bracketed category, e.g. [Git Destructive])
+  B = infrastructure failure (Stage N classifier error, "usually transient", No reason provided, timed out, unavailable)
+Reads transcripts under CLAUDE_PROJECTS_DIR (default ${CLAUDE_CONFIG_DIR:-~/.claude}/projects); nothing depends on sessions reporting.
+
+Usage: classifier-denials [--since HOURS] [--detail]    (default 24h; --detail lists each B-class event)""")
+    sys.exit(0)
+hours = 24.0
+detail = False
+i = 0
+while i < len(args):
+    if args[i] == "--since": hours = float(args[i + 1]); i += 2
+    elif args[i] == "--detail": detail = True; i += 1
+    else: i += 1
+root = os.environ.get("CLAUDE_PROJECTS_DIR") or os.path.join(os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude"), "projects")
+cutoff = time.time() - hours * 3600
+home_slug = re.sub(r"[^A-Za-z0-9]", "-", os.path.expanduser("~"))
+NEEDLES = ("denied by the Claude Code auto mode classifier", "so auto mode cannot determine the safety")
+INFRA = re.compile(r"Stage \d+ classifier error|usually transient|No reason provided|timed out|timeout|unavailable", re.I)
+UNAVAIL = re.compile(r"[~\w/.\-\[\]:]+ is temporarily unavailable \([^)]*\)")
+REASON = re.compile(r"Reason: (.*?)\.? If you have other tasks", re.S)
+cnt = collections.defaultdict(lambda: [0, 0])
+events = []
+for path in glob.glob(os.path.join(root, "*", "*.jsonl")):
+    try:
+        if os.stat(path).st_mtime < cutoff: continue
+        proj = os.path.basename(os.path.dirname(path)).replace(home_slug + "-Projects-", "").replace(home_slug + "-", "")
+        sid = os.path.basename(path)[:8]
+        with open(path, errors="replace") as fh:
+            for line in fh:
+                if not any(n in line for n in NEEDLES): continue
+                try: d = json.loads(line)
+                except ValueError: continue
+                if d.get("type") != "user" or not d.get("toolDenialKind"): continue  # a quotation of the text has no denial key
+                ts = d.get("timestamp", "")
+                try:
+                    t = datetime.datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+                except ValueError:
+                    continue
+                if t < cutoff: continue
+                flat = line.replace("\\n", " ")
+                m = REASON.search(flat)
+                if d["toolDenialKind"] == "automode-unavailable":
+                    u = UNAVAIL.search(flat)
+                    reason = (u.group(0) if u else "unavailable")[:110]
+                    cls = 1
+                elif m:
+                    reason = m.group(1)[:110]
+                    cls = 1 if INFRA.search(reason) else 0
+                else:
+                    u = UNAVAIL.search(flat)
+                    if not u: continue
+                    reason = u.group(0)[:110]
+                    cls = 1
+                cnt[proj][cls] += 1
+                if cls: events.append((ts, proj, sid, reason))
+    except OSError:
+        continue
+ta = sum(v[0] for v in cnt.values()); tb = sum(v[1] for v in cnt.values())
+print("classifier denials, last %gh: A(policy)=%d B(infra)=%d" % (hours, ta, tb))
+for proj, (a, b) in sorted(cnt.items(), key=lambda x: -(x[1][1] * 1000 + x[1][0])):
+    print("  %-34s A=%-3d B=%-3d" % (proj[:34], a, b))
+if detail:
+    for ts, proj, sid, reason in sorted(events): print("  B %s %s %s %s" % (ts[:19], proj[:24], sid, reason))
+PY

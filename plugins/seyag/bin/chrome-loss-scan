@@ -1,0 +1,112 @@
+#!/usr/bin/env python3
+"""chrome-loss-scan - list live Claude Code sessions that have no Claude in Chrome tools.
+
+Usage:
+  chrome-loss-scan            # one line per session without Chrome; exit 1 if any
+  chrome-loss-scan --json     # machine-readable, every live session with its state
+  chrome-loss-scan --agents FILE --projects DIR   # test seams (FILE = `claude agents --json` output)
+                              # --projects defaults to CLAUDE_PROJECTS_DIR, else ${CLAUDE_CONFIG_DIR:-~/.claude}/projects
+
+Reads each live session's current transcript (`claude agents --json` lists
+real sessions, not headless -p children) and replays its deferred_tools_delta
+records for mcp__claude-in-chrome__* tools. States: "on"; "lost" (added, then
+all removed); "off" (this process never listed them, e.g. it resumed while
+logged out). A logged-out restart comes up with Chrome off and /login doesn't
+restore it; a fresh start does.
+Exit 1 when any session is lost or off, has no transcript, or the session
+list can't be read.
+"""
+import glob
+import json
+import os
+import subprocess
+import sys
+
+PREFIX = "mcp__claude-in-chrome__"
+
+
+def live_sessions(agents_file):
+    try:
+        if agents_file:
+            with open(agents_file) as fh:
+                arr = json.load(fh)
+        else:
+            res = subprocess.run(["claude", "agents", "--json"], capture_output=True, text=True, timeout=20, check=False)
+            if res.returncode != 0:
+                sys.exit(f"chrome-loss-scan: `claude agents --json` failed (exit {res.returncode}): {res.stderr.strip()[:200]}")
+            arr = json.loads(res.stdout)
+    except (OSError, ValueError, subprocess.SubprocessError) as e:
+        sys.exit(f"chrome-loss-scan: can't read the session list: {e}")
+    if not isinstance(arr, list):
+        # A changed output shape must not read as "no sessions, all fine".
+        sys.exit(f"chrome-loss-scan: session list is a {type(arr).__name__}, expected a list")
+    return [a for a in arr if isinstance(a, dict) and a.get("pid") is not None and a.get("sessionId")]
+
+
+def chrome_state(path):
+    """Return (state, last_change_ts): state is 'on', 'lost' or 'off'."""
+    had = False
+    current = set()
+    last_ts = None
+    with open(path, errors="replace") as fh:
+        for line in fh:
+            if '"deferred_tools_delta"' not in line or PREFIX not in line:
+                continue
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            att = rec.get("attachment") or {}
+            if att.get("type") != "deferred_tools_delta":
+                continue
+            before = bool(current)
+            for key in ("addedNames", "readdedNames"):
+                current |= {n for n in att.get(key) or [] if n.startswith(PREFIX)}
+            current -= {n for n in att.get("removedNames") or [] if n.startswith(PREFIX)}
+            if current:
+                had = True
+            if before != bool(current):
+                last_ts = rec.get("timestamp")
+    if current:
+        return "on", last_ts
+    return ("lost" if had else "off"), last_ts
+
+
+def transcript_for(projects_dir, session_id):
+    hits = glob.glob(os.path.join(projects_dir, "*", session_id + ".jsonl"))
+    return max(hits, key=os.path.getmtime) if hits else None
+
+
+def main(argv):
+    if "-h" in argv or "--help" in argv:
+        print(__doc__.strip())
+        return 0
+    as_json = "--json" in argv
+    agents_file = argv[argv.index("--agents") + 1] if "--agents" in argv else None
+    projects_dir = argv[argv.index("--projects") + 1] if "--projects" in argv else (os.environ.get("CLAUDE_PROJECTS_DIR") or os.path.join(os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude"), "projects"))
+    rows = []
+    for a in live_sessions(agents_file):
+        sid = a["sessionId"]
+        path = transcript_for(projects_dir, sid)
+        state, ts = chrome_state(path) if path else ("no-transcript", None)
+        rows.append({"name": a.get("name") or "", "id": a.get("id") or sid[:8], "pid": a.get("pid"),
+                     "cwd": a.get("cwd") or "", "state": state, "since": ts})
+    missing = [r for r in rows if r["state"] in ("lost", "off")]
+    unread = [r for r in rows if r["state"] == "no-transcript"]
+    if as_json:
+        print(json.dumps(rows, indent=1))
+    else:
+        for r in missing:
+            when = f"since {r['since']}" if r["since"] else "since its start"
+            print(f"no Chrome ({r['state']}): {r['name'] or '(unnamed)'} [{r['id']}] pid {r['pid']} {when} "
+                  f"({r['cwd']}); restart it fresh to get Chrome back")
+        for r in unread:
+            print(f"unknown: {r['name'] or '(unnamed)'} [{r['id']}] has no transcript under the projects dir")
+        if not missing and not unread:
+            print(f"chrome-loss-scan: {len(rows)} live session(s), all have Chrome")
+    # An unreadable transcript is not evidence of Chrome: a layout change must go red, not green.
+    return 1 if missing or unread else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

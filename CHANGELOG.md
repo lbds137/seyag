@@ -2,6 +2,21 @@
 
 All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY-MM-DD>` section per released version; under it, `###` categories in fixed order — Breaking Changes, Features, Bug Fixes, Improvements, Chores, Tests — empty ones omitted; items are `- **scope:** description (#PR)`, written from the version's merged commit subjects.
 
+## 0.3.179 - 2026-11-17
+
+### Features
+
+- **bin:** six session-log tools join the plugin: `classifier-denials` (auto-mode classifier denials per project, policy vs infrastructure), `chrome-loss-scan` (live sessions that lost their Claude in Chrome tools), `driver-busy-hours` (busy time of a project's main-loop sessions over a window), `session-stalled` (sessions whose last entry is an API error, with the quota reset time), `session-context` (context size per running session, flagged past a threshold) and `relay-ruling` (builds a relayed ruling's text from the transcript, never from memory) (#PR).
+- **session-context:** another harness's sessions join through `SYG_SESSION_CONTEXT_EXTRA_CMD` (a command printing a JSON array), labelled `SYG_SESSION_CONTEXT_EXTRA_MODEL` and flagged at `SYG_SESSION_CONTEXT_EXTRA_THRESHOLD`; a failing command warns on stderr and keeps the Claude rows. Flag thresholds are `SYG_SESSION_CONTEXT_THRESHOLD` (500000) and `SYG_SESSION_CONTEXT_THRESHOLD_FABLE` (200000), validated as whole numbers (a bad one exits 2); a row whose `tokens` is not a number takes the failure path, and a row-building failure exits 1 instead of printing nothing (#PR).
+- **relay-ruling:** `SYG_OWNER_NAME` names the owner in the relay header; the destructive-step line names the section from `SYG_NEEDS_OWNER_SECTION` (#PR).
+- **session-stalled, driver-busy-hours:** knobs `SYG_STALLED_ZAI_TZ`, `SYG_AGY_SUMMARIES_DB` and `SYG_AGY_BRAIN_DIR`; `SYG_STALLED_NOW` is the test seam (#PR).
+- **classifier-denials:** the project-name prefix strip is derived from `$HOME` (#PR).
+- **bin:** the six tools read transcripts from `CLAUDE_PROJECTS_DIR`, else `${CLAUDE_CONFIG_DIR:-~/.claude}/projects`; the python tools (`chrome-loss-scan`, `driver-busy-hours`, `relay-ruling`) read their knobs from the environment only, not config.toml (#PR).
+
+### Tests
+
+- **session-log tools:** hermetic probes `tests/classifier-denials.probe.sh`, `tests/chrome-loss-scan.probe.sh`, `tests/driver-busy-hours.probe.sh`, `tests/session-stalled.probe.sh`, `tests/session-context.probe.sh` and `tests/relay-ruling.probe.sh` (stub `claude`, fixture transcripts, fake `HOME`; each renamed knob has a case where the old name is ignored) (#PR).
+
 ## 0.3.178 - 2026-11-17
 
 ### Bug Fixes

@@ -1,0 +1,226 @@
+#!/usr/bin/env bash
+# session-stalled: list sessions whose last real transcript entry is an API error
+# (rate limit, overloaded, ...), i.e. stuck after a failed call rather than idle.
+# Usage: session-stalled [--due]               check every live agent (claude agents --json)
+#        session-stalled [--due] --file F [N]  check one transcript (tests); N names it
+# Prints "NAME stalled Nm ERRKIND" per stalled session; silent when none. Exit 1 if any.
+# When the error names its quota reset, the line adds "reset HH:MM (in Nm)" or
+# "reset HH:MM (passed Nm ago)", in local time. Two shapes are read:
+#   z.ai:      "... Your limit will reset at 2026-10-09 15:52:12" — z.ai stamps UTC+8
+#              (checked against the 429's request-id stamp); SYG_STALLED_ZAI_TZ overrides
+#              the zone (default Asia/Shanghai).
+#   Anthropic: "... resets 9pm (America/New_York)" / "resets 10:30pm (...)" — the first
+#              such wall-clock time after the error, in the zone it names.
+# --due prints only the stalled sessions to resume now: reset passed, no reset
+# named, or an unparsed reset on an error at least 7 days old. A future reset is hidden.
+set -euo pipefail
+
+# Optional config files (the config.toml loader) fill in knobs the environment
+# left unset before any knob below is read; the environment still wins.
+bin_dir=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")
+if [ -r "$bin_dir/../hooks/lib/config-env.sh" ] \
+    && source "$bin_dir/../hooks/lib/config-env.sh" 2>/dev/null \
+    && declare -F syg_config_env >/dev/null; then
+    syg_config_env "$(readlink -f "$bin_dir/..")"
+fi
+
+usage() {
+  cat <<'EOF'
+session-stalled: list sessions whose last real transcript entry is an API error
+(rate limit, overloaded, ...), i.e. stuck after a failed call rather than idle.
+
+Usage: session-stalled [--due]               check every live agent (claude agents --json)
+       session-stalled [--due] --file F [N]  check one transcript (tests); N names it
+
+Prints "NAME stalled Nm ERRKIND" per stalled session; silent when none. Exit 1 if any.
+When the error names its quota reset, the line adds "reset HH:MM (in Nm)" or
+"reset HH:MM (passed Nm ago)", in local time. Two shapes are read:
+  z.ai:      "... Your limit will reset at 2026-10-09 15:52:12" -- z.ai stamps UTC+8
+             (SYG_STALLED_ZAI_TZ overrides the zone, default Asia/Shanghai).
+  Anthropic: "... resets 9pm (America/New_York)" -- the first such wall-clock time after the
+             error, in the zone it names.
+--due prints only the stalled sessions to resume now: reset passed, no reset named, or an
+unparsed reset on an error at least 7 days old. A future reset is hidden.
+EOF
+}
+for a in "$@"; do case "$a" in -h|--help) usage; exit 0 ;; esac; done
+
+due=0 file="" fname=file
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --due) due=1; shift ;;
+    --file)
+      if [ $# -lt 2 ] || [ -z "${2:-}" ] || [[ "$2" == -* ]]; then
+        echo "session-stalled: --file needs a transcript" >&2
+        exit 2
+      fi
+      file=$2; shift 2
+      case "${1:-}" in ""|-*) ;; *) fname=$1; shift ;; esac ;;
+    *) echo "session-stalled: unknown argument: $1" >&2; exit 2 ;;
+  esac
+done
+
+check_file() { # name file
+  DUE=$due python3 -I - "$1" "$2" <<'PY'
+import sys
+
+MONTHS = ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec")
+try:
+    import os, re, json, datetime
+    from zoneinfo import ZoneInfo
+    name, path = sys.argv[1], sys.argv[2]
+    raw_now = os.environ.get("SYG_STALLED_NOW")
+    if raw_now:
+        now = datetime.datetime.fromisoformat(raw_now.replace("Z", "+00:00"))
+        if now.tzinfo is None or now.tzinfo.utcoffset(now) is None:
+            raise ValueError("SYG_STALLED_NOW must include a UTC offset")
+        now = now.astimezone(datetime.timezone.utc)
+    else:
+        now = datetime.datetime.now(datetime.timezone.utc)
+    last = None
+    with open(path, errors="replace") as fh:
+        for line in fh:
+            try:
+                d = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(d, dict) and d.get("type") in ("assistant", "user"):
+                last = d
+    if not (last and last.get("isApiErrorMessage")):
+        sys.exit(0)
+    raw_ts = last.get("timestamp")
+    try:  # an unreadable stamp still leaves a stalled session: report it with an unknown age
+        ts = datetime.datetime.fromisoformat(raw_ts.replace("Z", "+00:00"))
+        if ts.tzinfo is None or ts.tzinfo.utcoffset(ts) is None:
+            ts = None
+        else:
+            ts = ts.astimezone(datetime.timezone.utc)
+    except (AttributeError, ValueError, TypeError, OverflowError):
+        ts = None
+    msg = last.get("message")
+    content = msg.get("content") if isinstance(msg, dict) else None
+    if isinstance(content, list):
+        text = " ".join(
+            c if isinstance(c, str) else str(c.get("text") or "")
+            for c in content
+            if isinstance(c, (dict, str))
+        )
+    else:
+        text = str(content or "")
+
+    def reset_time():
+        m = re.search(r"reset at (\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)", text)
+        if m:
+            zone = ZoneInfo(os.environ.get("SYG_STALLED_ZAI_TZ") or "Asia/Shanghai")
+            cand = datetime.datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S").replace(tzinfo=zone)
+            return cand.astimezone(datetime.timezone.utc).astimezone()
+        m = re.search(
+            r"resets (?:([A-Za-z]{3})\s+(\d{1,2})(?:,?\s+at|,)?\s+)?(\d+)(?::(\d\d))?\s*([ap]m) \(([^)]+)\)",
+            text,
+            re.I,
+        )
+        if m and ts is not None:  # the hour-only form is relative to the error's own date
+            h = int(m.group(3))
+            if not 1 <= h <= 12:
+                return None
+            hour = h % 12 + (12 if m.group(5).lower() == "pm" else 0)
+            minute = int(m.group(4) or 0)
+            zone = ZoneInfo(m.group(6))
+            ts_utc = ts.replace(second=0, microsecond=0)
+            local = ts_utc.astimezone(zone)
+            if m.group(1):
+                mon = MONTHS.index(m.group(1).lower()) + 1
+                day = int(m.group(2))
+                for y in (local.year, local.year + 1):
+                    try:
+                        us = instants(y, mon, day, hour, minute, zone)
+                    except ValueError:
+                        continue
+                    cand_utc = next((u for u in us if u >= ts_utc), us[0])
+                    if (cand_utc - ts_utc).days >= -180:
+                        return cand_utc.astimezone()
+                return None
+            for d_off in (0, 1):
+                d = local.date() + datetime.timedelta(days=d_off)
+                for u in instants(d.year, d.month, d.day, hour, minute, zone):
+                    if u >= ts_utc:
+                        return u.astimezone()
+        return None
+
+    def instants(y, mon, day, hour, minute, zone):
+        """UTC instants of a wall time: both on a fall-back day, the normalised one in a spring gap."""
+        u0 = datetime.datetime(y, mon, day, hour, minute, tzinfo=zone, fold=0).astimezone(datetime.timezone.utc)
+        u1 = datetime.datetime(y, mon, day, hour, minute, tzinfo=zone, fold=1).astimezone(datetime.timezone.utc)
+        return [u0, u1] if u0 < u1 else [u0]
+
+    try:
+        reset = reset_time()
+    except (ValueError, KeyError, OSError, OverflowError):  # unknown zone or malformed stamp: report without it
+        reset = None
+    # a quota reset, not a dropped connection ("Connection reset by peer" is a network stall, due now)
+    quota_text = re.sub(r"connection\W+(?:\w+\W+){0,2}reset|reset by peer", "", text, flags=re.I)
+    has_reset = bool(re.search(r"\breset", quota_text, re.I))
+    unparsed_fresh = has_reset and (ts is None or (now - ts) < datetime.timedelta(days=7))
+    if os.environ.get("DUE") == "1" and (reset > now if reset is not None else unparsed_fresh):
+        sys.exit(0)
+    mins = f"{int((now - ts).total_seconds() // 60)}m" if ts is not None else "?m"
+    err = last.get("error") or "api_error"
+    line = f"{name} stalled {mins} {err}"
+    if reset is not None:
+        secs = (reset - now).total_seconds()
+        when = f"in {max(1, int(secs // 60))}m" if secs > 0 else f"passed {int(-secs // 60)}m ago"
+        fmt = "%Y-%m-%d %H:%M" if abs(secs) > 86400 else "%H:%M"
+        line += f" reset {reset.astimezone():{fmt}} ({when})"
+    print(line)
+    sys.exit(1)
+except Exception as e:
+    print(f"session-stalled: {e}", file=sys.stderr)
+    sys.exit(2)
+PY
+}
+
+if [ -n "$file" ]; then
+  check_file "$fname" "$file"
+  exit $?
+fi
+
+raw=$(claude agents --json) || { echo "session-stalled: claude agents --json failed" >&2; exit 2; }
+agents=$(python3 -I -c '
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    items = d if isinstance(d, list) else (d.get("agents") if isinstance(d, dict) else None)
+    if not isinstance(items, list):
+        raise ValueError("expected agent list")
+    for x in items:
+        print(x["name"], x["sessionId"], sep="\037")
+except Exception as e:
+    sys.exit(f"session-stalled: invalid claude agents --json output: {e}")
+' <<< "$raw") || exit 2
+
+rc=0
+if [ -n "$agents" ]; then
+  projects_root="${CLAUDE_PROJECTS_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects}"
+  if [ ! -d "$projects_root" ] || [ ! -r "$projects_root" ] || [ ! -x "$projects_root" ]; then
+    echo "session-stalled: $projects_root is missing or unreadable" >&2
+    exit 2
+  fi
+  while IFS=$'\037' read -r name sid; do
+    [ -n "$sid" ] || continue
+    # a find error (an unreadable folder) is reported, but a transcript it did find is still checked
+    fs=0; f=$(/usr/bin/find "$projects_root" -maxdepth 2 -name "$sid.jsonl" -print -quit) || fs=$?
+    [ "$fs" -eq 0 ] || rc=2
+    [ -n "$f" ] || continue
+    if check_file "$name" "$f"; then
+      :
+    else
+      s=$?
+      if [ "$s" -eq 1 ]; then
+        [ "$rc" -eq 0 ] && rc=1
+      else
+        rc=2
+      fi
+    fi
+  done <<< "$agents"
+fi
+exit $rc

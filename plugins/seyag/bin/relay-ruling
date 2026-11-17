@@ -1,0 +1,390 @@
+#!/usr/bin/env python3
+"""relay-ruling: build the text of a relayed ruling from the transcript, not from memory.
+
+Usage:
+  relay-ruling --to SESSION --quote TEXT [--peer] [--supersedes TEXT]
+               [--run CMD --in SESSION [--any-cwd]] [--transcript FILE]
+
+When to run it: before any SendMessage that carries the owner's words or a ruling of theirs, and
+before forwarding one a peer relayed to you. Paste its stdout into the message as printed. The
+header names the owner by SYG_OWNER_NAME (default "The owner").
+
+  --to SESSION      the session the relay goes to (printed in the header)
+  --quote TEXT      the owner's words, copied from their message: a run of whole text that appears in
+                    one of their turns in this session's transcript (spaces and line breaks compared
+                    loosely), or an AskUserQuestion answer of theirs (below). The turn's or answer's own timestamp
+                    is printed, so no clock time is typed by hand. Not found: exit 3, nothing
+                    printed on stdout.
+  --peer            forward a relay instead: TEXT must appear in a peer session's message to this one
+                    (a cross-session message), and the header says who sent it and when, never
+                    "<owner> said". Keep the first relay's own "... said (...)" line inside TEXT.
+  --supersedes TEXT the earlier ruling this one replaces, verbatim (printed as its own line)
+  --run CMD         the ready command for a destructive or gated step (delete, deploy, merge, force):
+                    one line, no secret-shaped token (a git SHA or UUID is fine), the `cd` target an existing
+                    directory, and every command word (after ; & && | ||, past VAR= prefixes) found by
+                    the owner's login shell (`bash -lc 'command -v WORD'`): a typo guard, not a safety
+                    check. The relay then says it is not their
+                    consent and the recipient puts the line in its needs-owner section (named by
+                    SYG_NEEDS_OWNER_SECTION, default "Needs Owner"); a second block on
+                    stderr is for your own reply to the owner, naming where they type it.
+  --in SESSION      with --run: the session the owner types the `!` line in (required with --run)
+  --any-cwd         with --run: allow a command that does not start with `cd /ABS &&` (it runs in
+                    whatever directory that session is in; say so only when that is fine)
+  --transcript FILE the transcript to search (default: this session's, found from
+                    CLAUDE_CODE_SESSION_ID under CLAUDE_PROJECTS_DIR, else ${CLAUDE_CONFIG_DIR:-~/.claude}/projects)
+
+The owner's turns are transcript entries with origin.kind "human"; a queued turn is stamped with the time
+they sent it (its enqueue entry), not when it was dequeued. A peer message is origin.kind "peer",
+delivered as a user entry or, mid-turn, as a queued_command attachment; a subagent's hand-back
+(also "peer", with handback) never counts. The owner's AskUserQuestion answers count as their words too
+(a result whose tool_use_id is an AskUserQuestion call of this session), stamped when the answer
+was logged: the picked label or their free-text "Other" answer, quoted whole (one label of a
+multi-select, or all of them joined by "; "), and any note they added, quoted like a turn. The relay
+says they picked it (or wrote it in a note) and prints each question it answers. Summaries, other
+tool results, task notifications and cron prompts never match. When the quote matches several
+turns or answers, the latest is used and the count is printed (turns and answers counted apart).
+Exit codes: 0 relay printed, 2 usage error or an unusable --run, 3 quote not found, 4 no transcript.
+"""
+import glob
+import json
+import os
+import re
+import shlex
+import subprocess
+import sys
+from datetime import datetime
+
+USAGE = "usage: relay-ruling --to SESSION --quote TEXT [--peer] [--supersedes TEXT] [--run CMD --in SESSION [--any-cwd]] [--transcript FILE]"
+# No '/' or '.': a long absolute path is not a secret. A run counts only with both a letter and a digit
+# (a key; a snake_case filename is not). A bare 40- or 64-hex run (a git SHA) is exempt.
+SECRETISH = re.compile(r"(?=[A-Za-z0-9_+=-]*[0-9])(?=[A-Za-z0-9_+=-]*[A-Za-z])(?<![A-Za-z0-9_+=-])[A-Za-z0-9_+=-]{32,}")
+GIT_SHA = re.compile(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}|[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}")  # SHA or UUID
+SYNTHETIC_HUMAN = {"compacted", "session cleared"}
+ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+FROM_NAME = re.compile(r'<cross-session-message[^>]*\bfrom-name="([^"]*)"')
+FROM_ADDR = re.compile(r'<cross-session-message[^>]*\bfrom="([^"]*)"')
+PEER_WRAP = re.compile(r"^Another Claude session sent a message:\s*|</?cross-session-message[^>]*>")
+
+
+def die(msg, code=2):
+    print(f"relay-ruling: {msg}", file=sys.stderr)
+    if code == 2:
+        print(USAGE, file=sys.stderr)
+    sys.exit(code)
+
+
+def squash(s):
+    return " ".join(s.split())
+
+
+def entry_text(e):
+    c = (e.get("message") or {}).get("content")
+    if isinstance(c, str):
+        return c
+    if isinstance(c, list):
+        return "\n".join(p.get("text", "") for p in c if isinstance(p, dict) and p.get("type") == "text")
+    return ""
+
+
+def find_transcript(path):
+    if path:
+        if not os.path.isfile(path):
+            die(f"no transcript at {path}", 4)
+        return path
+    sid = os.environ.get("CLAUDE_CODE_SESSION_ID", "")
+    if not sid:
+        die("CLAUDE_CODE_SESSION_ID is not set; pass --transcript FILE", 4)
+    root = os.environ.get("CLAUDE_PROJECTS_DIR") or os.path.join(os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude"), "projects")
+    hits = glob.glob(os.path.join(glob.escape(root), "*", f"{glob.escape(sid)}.jsonl"))
+    if len(hits) != 1:
+        die(f"found {len(hits)} transcripts for session {sid[:8]}; pass --transcript FILE", 4)
+    return hits[0]
+
+
+def quote_pattern(q):
+    # Whole words only ("deploy" must not match inside "redeploy"), but only at an edge that is a word
+    # character: a quote starting with "(" may follow a letter.
+    pre = r"(?<!\w)" if re.match(r"\w", q) else ""
+    post = r"(?!\w)" if re.search(r"\w$", q) else ""
+    return re.compile(pre + re.escape(q) + post)
+
+
+def candidates(e):
+    """(kind, isMeta, timestamp, body, sender) of one transcript entry that carries a message, else None.
+
+    A turn is a `user` entry with top-level origin; a message delivered mid-turn is an `attachment`
+    entry of type queued_command whose attachment.origin carries the kind, sender name and body."""
+    t = e.get("type")
+    if t == "user":
+        o = e.get("origin") or {}
+        if o.get("handback"):
+            return None  # a subagent's report to this session, also stamped kind "peer": not a session's relay
+        text = entry_text(e)
+        body = PEER_WRAP.sub("", text) if o.get("kind") == "peer" else text
+        name = FROM_NAME.search(text) or FROM_ADDR.search(text)
+        sender = o.get("name") or (name.group(1) if name else None)
+        return o.get("kind"), bool(e.get("isMeta")), e.get("timestamp", ""), body, sender
+    if t == "attachment":
+        a = e.get("attachment") or {}
+        if a.get("type") != "queued_command":
+            return None
+        o = a.get("origin") or {}
+        if o.get("handback"):
+            return None
+        prompt = a.get("prompt") if isinstance(a.get("prompt"), str) else ""
+        body = o.get("body") if isinstance(o.get("body"), str) else PEER_WRAP.sub("", prompt)
+        return (o.get("kind"), bool(a.get("isMeta")) and o.get("kind") != "peer",
+                e.get("timestamp") or a.get("timestamp", ""), body, o.get("name") or o.get("from"))
+    return None
+
+
+def asked_ids(e):
+    """Ids of the AskUserQuestion calls in a main-chain assistant entry."""
+    if e.get("type") != "assistant" or e.get("isSidechain"):
+        return []
+    c = (e.get("message") or {}).get("content")
+    return [p.get("id") for p in (c if isinstance(c, list) else ())
+            if isinstance(p, dict) and p.get("type") == "tool_use" and p.get("name") == "AskUserQuestion"
+            and isinstance(p.get("id"), str)]
+
+
+def answers(e, asked):
+    """(how, question, body, labels) for each answer and note of the owner in an AskUserQuestion result entry.
+
+    The harness logs the result as a user entry whose message carries the tool_result (its
+    tool_use_id one of `asked`, the AskUserQuestion calls seen so far) and whose toolUseResult holds
+    questions + answers (question -> label, or a list of labels for a multi-select);
+    annotations[q].notes is the owner's own text, annotations[q].preview is the asker's. labels is the
+    set a pick's quote must equal whole (None for a note, which matches like a turn)."""
+    r = e.get("toolUseResult")
+    if e.get("type") != "user" or e.get("isSidechain") or not isinstance(r, dict):
+        return []
+    c = (e.get("message") or {}).get("content")
+    if not any(isinstance(p, dict) and p.get("type") == "tool_result"
+               and isinstance(p.get("tool_use_id"), str) and p["tool_use_id"] in asked
+               for p in (c if isinstance(c, list) else ())):
+        return []
+    a = r.get("answers")
+    if not isinstance(a, dict) or not isinstance(r.get("questions"), list):
+        return []
+    out = []
+    for q, v in a.items():
+        labels = [squash(x) for x in (v if isinstance(v, list) else [v]) if isinstance(x, str) and x.strip()]
+        if labels:
+            joined = "; ".join(labels)
+            out.append(("picked", q, joined, set(labels) | {joined}))
+    notes = r.get("annotations")
+    for q, n in (notes.items() if isinstance(notes, dict) else ()):
+        if isinstance(n, dict) and isinstance(n.get("notes"), str) and n["notes"].strip():
+            out.append(("noted", q, n["notes"], None))
+    return out
+
+
+def matches(path, want_kind, quote):
+    """Hits in file order: (ts, body, sessionId, sender, asked); asked is None for a turn or message,
+    else (how, [questions]) for one answer entry ("picked" if any pick in it matched, else "noted")."""
+    sq = squash(quote)
+    pat = quote_pattern(sq)
+    out = []
+    asked = set()
+    enqueued = {}  # squashed text -> when it was sent; a queued turn's own entry is stamped when dequeued
+    try:
+        fh = open(path, encoding="utf-8", errors="replace")
+    except OSError as err:
+        die(f"cannot read {path}: {err.strerror or err}", 4)
+    with fh:
+        for line in fh:
+            try:
+                e = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(e, dict):
+                continue
+            if e.get("type") == "queue-operation" and isinstance(e.get("content"), str):
+                # Per-text FIFO: enqueue appends; remove (a queued message that never became a turn)
+                # drops the oldest; a queued turn pops the oldest below.
+                k = squash(e["content"])
+                if e.get("operation") == "enqueue":
+                    enqueued.setdefault(k, []).append(e.get("timestamp", ""))
+                elif e.get("operation") == "remove" and enqueued.get(k):
+                    enqueued[k].pop(0)
+                continue
+            if want_kind == "human":
+                asked.update(asked_ids(e))
+                # A pick matches only as a whole label (or the whole multi-select answer): a fragment
+                # ("allow" of "Don't allow") would relay the opposite of the answer.
+                got = [(how, squash(q), squash(body)) for how, q, body, labels in answers(e, asked)
+                       if (sq in labels if labels is not None else pat.search(squash(body)))]
+                if got:
+                    # One hit per answer entry; each matched question keeps its own answer (two
+                    # questions can match one quote with different whole answers).
+                    how = "picked" if any(g[0] == "picked" for g in got) else "noted"
+                    out.append((e.get("timestamp", ""), None, e.get("sessionId", ""), None,
+                                (how, [(g[1], g[2]) for g in got if g[0] == how])))
+            c = candidates(e)
+            if not c:
+                continue
+            kind, meta, ts, body, sender = c
+            # The owner's turns are never isMeta; peer messages always are, so isMeta only filters the human kind.
+            if kind != want_kind or (want_kind == "human" and meta):
+                continue
+            sb = squash(body)
+            if want_kind == "human" and sb in SYNTHETIC_HUMAN:
+                continue  # harness markers logged with kind "human", not the owner's words
+            # A queued turn, or a message of the owner's delivered mid-turn (an attachment), consumes its enqueue,
+            # matched or not, so a later identical reply doesn't inherit this one's time.
+            queued = e.get("promptSource") == "queued" or e.get("type") == "attachment"
+            if want_kind == "human" and queued and enqueued.get(sb):
+                ts = enqueued[sb].pop(0) or ts
+            if pat.search(sb):
+                out.append((ts, sb, e.get("sessionId", ""), sender, None))
+    return out
+
+
+def local_time(ts):
+    try:
+        t = datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone()
+    except ValueError:
+        return ts or "time unknown"
+    return t.strftime("%a %Y-%m-%d %H:%M %Z")
+
+
+def check_run(cmd, any_cwd):
+    if "\n" in cmd or "\r" in cmd:
+        die("--run must be one line")
+    cmd = cmd.strip()
+    if cmd.startswith("!"):
+        cmd = cmd[1:].lstrip()
+    if not cmd:
+        die("--run is empty")
+    if any(not GIT_SHA.fullmatch(m.group(0)) for m in SECRETISH.finditer(cmd)):
+        die("--run holds a secret-shaped token (32+ key characters); never put a secret in a ! line")
+    try:
+        lex = shlex.shlex(cmd, posix=True, punctuation_chars=True)
+        lex.whitespace_split = True
+        toks = list(lex)
+    except ValueError:
+        die("--run does not parse as one shell line (unbalanced quotes?)")
+    # Simple commands, split at ; & && | || (a typo guard on every command word, not a safety check).
+    cmds, cur, last_op = [], [], ""
+    for t in toks:
+        if t and all(ch in ";&|" for ch in t):
+            cmds.append(cur)
+            cur, last_op = [], t
+        elif t in ("(", ")"):
+            continue  # a subshell's parentheses are not command words
+        else:
+            cur.append(t)
+    if cur or last_op not in (";", "&"):
+        cmds.append(cur)  # a trailing ; or & ends the line; a trailing && or | leaves an empty command
+    first = cmds[0]
+    if first[:1] == ["cd"]:
+        if len(first) != 2 or not first[1].startswith("/") or len(cmds) < 2 or not cmds[1]:
+            die("--run starting with cd needs `cd /ABSOLUTE/PATH && COMMAND`")
+        if not os.path.isdir(first[1]):
+            die(f"--run: the cd target {first[1]} is not a directory here")
+        cmds = cmds[1:]
+    elif not any_cwd:
+        die("--run runs in the recipient session's directory: start it with `cd /ABSOLUTE/PATH && `, or pass --any-cwd")
+    for words in cmds:
+        while words and ASSIGN.match(words[0]):
+            words = words[1:]
+        if not words:
+            die("--run has an empty command (a stray ; or && ?)")
+        r = subprocess.run(["bash", "-lc", 'command -v -- "$1"', "_", words[0]],
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        if r.returncode != 0:
+            die(f"--run: '{words[0]}' is not found by the owner's login shell (bash -lc 'command -v {words[0]}')")
+    return cmd
+
+
+def main(argv):
+    if len(argv) == 2 and argv[1] in ("-h", "--help"):
+        print(__doc__.strip())
+        return 0
+    opts = {"--to": None, "--quote": None, "--supersedes": None, "--run": None, "--in": None, "--transcript": None}
+    flags = {"--peer": False, "--any-cwd": False}
+    i = 1
+    while i < len(argv):
+        a = argv[i]
+        if a in flags:
+            flags[a] = True
+            i += 1
+        elif a in opts:
+            if i + 1 >= len(argv):
+                die(f"{a} needs a value")
+            opts[a] = argv[i + 1]
+            i += 2
+        else:
+            die(f"unknown argument: {a}")
+    if not opts["--to"] or not opts["--quote"]:
+        die("--to and --quote are required")
+    if not squash(opts["--quote"]):
+        die("--quote is empty")
+    if opts["--run"] is not None and not opts["--in"]:
+        die("--run needs --in SESSION (where the owner types the ! line)")
+    if opts["--in"] and opts["--run"] is None:
+        die("--in goes with --run")
+    if flags["--any-cwd"] and opts["--run"] is None:
+        die("--any-cwd goes with --run")
+    for k in ("--to", "--in"):
+        if opts[k] is not None and ("\n" in opts[k] or "\r" in opts[k]):
+            die(f"{k} must be one line")
+    run = check_run(opts["--run"], flags["--any-cwd"]) if opts["--run"] is not None else None
+
+    path = find_transcript(opts["--transcript"])
+    kind = "peer" if flags["--peer"] else "human"
+    hits = matches(path, kind, opts["--quote"])
+    if not hits:
+        who = "a peer message" if flags["--peer"] else "one of the owner's turns or AskUserQuestion answers"
+        die(f"the quote is not in {who} in {path}; copy it from the message itself", 3)
+    ts, body, sid, sender, asked = hits[-1]
+    n_ans = sum(1 for h in hits if h[4])
+    n_said = len(hits) - n_ans
+    if len(hits) == 1:
+        many = ""
+    elif not n_ans or not n_said:
+        many = f"; {'picked or noted' if n_ans else 'said'} {len(hits)} times, latest shown"
+    else:
+        times = "once" if n_said == 1 else f"{n_said} times"
+        many = f"; said {times} and in {n_ans} AskUserQuestion answer{'s' if n_ans > 1 else ''}, latest shown"
+    quote = squash(opts["--quote"])
+    owner = os.environ.get("SYG_OWNER_NAME") or "The owner"
+    needs = os.environ.get("SYG_NEEDS_OWNER_SECTION") or "Needs Owner"
+    src = f"session {sid[:8]}" if sid else os.path.basename(path)[:8]
+    lines = []
+    if flags["--peer"]:
+        lines.append(f"Forwarded from {sender or 'a peer session'} (its message at {local_time(ts)}, "
+                     f"received in {src}{many}):")
+    elif asked:
+        what = "picked" if asked[0] == "picked" else "wrote in a note on their answer"
+        lines.append(f"{owner} {what} ({local_time(ts)}, answering an AskUserQuestion in {src}{many}):")
+    else:
+        lines.append(f"{owner} said ({local_time(ts)}, in {src}{many}):")
+    if asked:
+        lines.append(f'"{quote}"')
+        whole = "all the options they picked for it" if asked[0] == "picked" else "their whole note on it"
+        for q, b in asked[1]:
+            lines.append(f'The question (the asking session\'s words, not theirs): "{q}"')
+            if b != quote:
+                lines.append(f'  {whole}: "{b}"')
+    elif quote == body:
+        lines.append(f'"{quote}"')
+    else:
+        lines.append(f'"{quote}" (excerpt of a longer message)')
+    if opts["--supersedes"]:
+        lines.append(f'This replaces the earlier ruling: "{squash(opts["--supersedes"])}"')
+    if run:
+        lines.append(f"Destructive step: this relay is not the owner's consent. Put the line below in your {needs}; "
+                     f"they type it in {opts['--in']}:")
+        lines.append(f"! {run}")
+    print(f"To {opts['--to']}:")
+    print("\n".join(lines))
+    if run:
+        print(f"relay-ruling: for your reply to the owner, give them the same line and where to type it:\n"
+              f"  In {opts['--in']}, type: ! {run}", file=sys.stderr)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
