@@ -49,6 +49,129 @@ out=$(PATH=$T/noip SYG_GATE_SANDBOX_PROFILE=worker SYG_GATE_SANDBOX_SCRATCH=$SYG
 [ "$rc" = 125 ] && [[ $out == *"ip (iproute2) not found"* ]] && ok "no ip: the worker profile refuses (125)" \
   || bad "no ip: rc=$rc out=[$out]"
 
+# 8d. No bwrap: its own refusal, not the version one
+mkdir -p "$T/nobwrap"
+for t in bash env git realpath dirname basename id mkdir; do ln -s "$(command -v "$t")" "$T/nobwrap/$t"; done
+printf '#!/bin/sh\nexit 0\n' >"$T/nobwrap/pasta"; cp "$T/nobwrap/pasta" "$T/nobwrap/ip"; chmod +x "$T/nobwrap/pasta" "$T/nobwrap/ip"
+out=$(PATH=$T/nobwrap SYG_GATE_SANDBOX_PROFILE=worker SYG_GATE_SANDBOX_SCRATCH=$SYG_WORKER_SANDBOX_SCRATCH "$B/gate-sandbox" "$W" -- /usr/bin/true 2>&1); rc=$?
+[ "$rc" = 125 ] && [[ $out == *"bwrap not found"* ]] && ok "no bwrap: the worker profile refuses (125) naming bwrap" \
+  || bad "no bwrap: rc=$rc out=[$out]"
+
+# Stubs for the host-side route queries: a fixture host, and the ways a query can't be trusted. A stub
+# bwrap (help names --size) and pasta (exits 0) let the worker profile get as far as the wall on any host.
+SB=$T/stubs; mkdir -p "$SB" "$T/fx" "$T/fx-no-lo"
+printf '#!/bin/sh\necho "usage: bwrap [OPTION...] --size BYTES"\n' >"$SB/bwrap"
+printf '#!/bin/sh\nexit 0\n' >"$SB/pasta"
+chmod +x "$SB/bwrap" "$SB/pasta"
+cat >"$T/fx/local4" <<'EOF'
+local 127.0.0.0/8 dev lo table local proto kernel scope host src 127.0.0.1
+local 127.0.0.1 dev lo table local proto kernel scope host src 127.0.0.1
+local 192.168.50.45 dev wlan0 table local proto kernel scope host src 192.168.50.45
+local 172.17.0.1 dev docker0 table local proto kernel scope host src 172.17.0.1
+local 10.8.0.2 dev tun0 table local proto kernel scope host src 10.8.0.2
+EOF
+cat >"$T/fx/local6" <<'EOF'
+local ::1 dev lo table local proto kernel metric 0 pref medium
+local fd00::5 dev br0 table local proto kernel metric 0 pref medium
+EOF
+cat >"$T/fx/all4" <<'EOF'
+default via 192.168.50.1 dev wlan0 proto dhcp src 192.168.50.45 metric 600
+192.168.50.0/24 dev wlan0 proto kernel scope link src 192.168.50.45 metric 600
+192.168.50.0/24 dev eth0 proto kernel scope link src 192.168.50.46 metric 100
+172.17.0.0/16 dev docker0 proto kernel scope link src 172.17.0.1 linkdown
+169.254.0.0/16 dev docker0 scope link metric 1000
+10.8.0.1 dev tun0 proto kernel scope link src 10.8.0.2
+100.64.0.0/10 dev tailscale0 table 52
+10.20.0.0/16 dev wg0 scope link
+default dev wg0 table 51820
+224.0.0.0/4 dev eth0 scope link
+unicast 10.99.0.0/16 dev br9 proto static
+local 127.0.0.1 dev lo table local proto kernel scope host src 127.0.0.1
+local 192.168.50.45 dev wlan0 table local proto kernel scope host src 192.168.50.45
+broadcast 192.168.50.255 dev wlan0 table local proto kernel scope link src 192.168.50.45
+EOF
+cat >"$T/fx/all6" <<'EOF'
+fd00::/64 dev br0 proto kernel metric 256 pref medium
+fe80::/64 dev wlan0 proto kernel metric 256 pref medium
+ff00::/8 dev eth0 proto kernel metric 256 pref medium
+multicast ff00::/8 dev wlan0 table local proto kernel metric 256 pref medium
+unreachable ::/96 dev lo proto kernel metric 1024 pref medium
+local ::1 dev lo table local proto kernel metric 0 pref medium
+local fd00::5 dev br0 table local proto kernel metric 0 pref medium
+EOF
+cp "$T/fx/all4" "$T/fx/all6" "$T/fx-no-lo/"
+printf 'local 192.168.50.45 dev wlan0 table local proto kernel scope host src 192.168.50.45 \n' >"$T/fx-no-lo/local4"
+printf 'local fd00::5 dev br0 table local proto kernel metric 0 pref medium\n' >"$T/fx-no-lo/local6"
+mkdir -p "$T/ipstub" "$T/ipstub-no-lo"
+for d in fx:ipstub fx-no-lo:ipstub-no-lo; do
+  cat >"$T/${d#*:}/ip" <<EOF
+#!/bin/bash
+fx=$T/${d%:*}
+[ -n "\${STUB_IP_FAIL:-}" ] && [[ "\$*" == *"\$STUB_IP_FAIL"* ]] && { echo "ip: boom" >&2; exit 1; }
+case "\$*" in
+  "-o -4 route show table local type local") cat "\$fx/local4" ;;
+  "-o -6 route show table local type local") cat "\$fx/local6" ;;
+  "-o -4 route show table all") cat "\$fx/all4" ;;
+  "-o -6 route show table all") cat "\$fx/all6" ;;
+  *) exit 1 ;;
+esac
+EOF
+  chmod +x "$T/${d#*:}/ip"
+done
+
+# 7d. --print-wall computes the set from a fixture host, no sandbox: the host's addresses (loopback
+# excepted), and every route in any table through an interface with no default route. wlan0 and wg0
+# carry default routes (wg0's in table 51820), so 192.168.50.0/24, which eth0 shares with wlan0, and
+# wg0's 10.20.0.0/16 stay open; link-local, multicast, defaults, loopback and type-keyword lines are skipped.
+want='10.8.0.1/32
+10.8.0.2/32
+10.99.0.0/16
+100.64.0.0/10
+169.254.0.0/16
+172.17.0.0/16
+172.17.0.1/32
+192.168.50.45/32
+fd00::/64
+fd00::5/128'
+got=$(PATH=$T/ipstub:$PATH "$B/gate-sandbox" --print-wall 2>"$T/err"); rc=$?
+[ "$rc" = 0 ] && [ "$(LC_ALL=C sort <<<"$got")" = "$want" ] \
+  && ok "--print-wall: fixture host gives exactly the expected wall ($(grep -c . <<<"$want") prefixes)" \
+  || bad "print-wall fixture: rc=$rc got=[$got] err=[$(cat "$T/err")]"
+got=$(PATH=$T/ipstub:$PATH SYG_GATE_SANDBOX_WALL="198.51.100.0/24 203.0.113.9" "$B/gate-sandbox" --print-wall 2>"$T/err"); rc=$?
+[ "$rc" = 0 ] && [ "$(LC_ALL=C sort <<<"$got")" = "$(LC_ALL=C sort <<<"$want
+198.51.100.0/24
+203.0.113.9")" ] \
+  && ok "--print-wall: SYG_GATE_SANDBOX_WALL extras are in the set" \
+  || bad "print-wall extras: rc=$rc got=[$got] err=[$(cat "$T/err")]"
+
+# 9. The route queries fail closed: an ip that errors on any query, or a local table without loopback
+# (so the query or its parse saw no real data), refuses (125); a worker launch refuses with the same words.
+for failq in "route show" "-6 route show table all" "-4 route show table local"; do
+  got=$(PATH=$T/ipstub:$PATH STUB_IP_FAIL=$failq "$B/gate-sandbox" --print-wall 2>"$T/err"); rc=$?
+  [ "$rc" = 125 ] && [ -z "$got" ] && grep -q "can't read the host's routes" "$T/err" \
+    && ok "--print-wall refuses (125) when ip fails on [$failq]" \
+    || bad "ip fails on [$failq]: rc=$rc got=[$got] err=[$(cat "$T/err")]"
+done
+out=$(PATH=$SB:$T/ipstub:$PATH STUB_IP_FAIL="route show" SYG_GATE_SANDBOX_PROFILE=worker SYG_GATE_SANDBOX_SCRATCH=$SYG_WORKER_SANDBOX_SCRATCH "$B/gate-sandbox" "$W" -- /usr/bin/true 2>&1); rc=$?
+[ "$rc" = 125 ] && [[ $out == *"can't read the host's routes"* ]] && ok "a worker launch refuses (125) when the host's routes can't be read" \
+  || bad "worker launch with failing ip: rc=$rc out=[$out]"
+got=$(PATH=$T/ipstub-no-lo:$PATH "$B/gate-sandbox" --print-wall 2>"$T/err"); rc=$?
+[ "$rc" = 125 ] && [ -z "$got" ] && grep -q "can't read the host's routes" "$T/err" \
+  && ok "--print-wall refuses (125) when the local table lacks 127.0.0.1" \
+  || bad "no loopback in local table: rc=$rc got=[$got] err=[$(cat "$T/err")]"
+out=$(PATH=$SB:$T/ipstub-no-lo:$PATH SYG_GATE_SANDBOX_PROFILE=worker SYG_GATE_SANDBOX_SCRATCH=$SYG_WORKER_SANDBOX_SCRATCH "$B/gate-sandbox" "$W" -- /usr/bin/true 2>&1); rc=$?
+[ "$rc" = 125 ] && [[ $out == *"can't read the host's routes"* ]] && ok "a worker launch refuses (125) when the local table lacks 127.0.0.1" \
+  || bad "worker launch, no loopback: rc=$rc out=[$out]"
+
+# 11. A bwrap too old for --size refuses naming the floor (stub: help without --size; ip and pasta stubs)
+mkdir -p "$T/oldbwrap"
+printf '#!/bin/sh\necho "usage: bwrap [OPTION...]"\n' >"$T/oldbwrap/bwrap"; chmod +x "$T/oldbwrap/bwrap"
+cp "$SB/pasta" "$T/oldbwrap/pasta"; cp "$T/ipstub/ip" "$T/oldbwrap/ip"
+for t in bash env git realpath dirname basename id mkdir grep; do ln -s "$(command -v "$t")" "$T/oldbwrap/$t"; done
+out=$(PATH=$T/oldbwrap SYG_GATE_SANDBOX_PROFILE=worker SYG_GATE_SANDBOX_SCRATCH=$SYG_WORKER_SANDBOX_SCRATCH "$B/gate-sandbox" "$W" -- /usr/bin/true 2>&1); rc=$?
+[ "$rc" = 125 ] && [[ $out == *"bubblewrap >= 0.10"* ]] && ok "a bwrap without --size refuses (125) naming >= 0.10" \
+  || bad "old bwrap: rc=$rc out=[$out]"
+
 # The rest build a real sandbox, with pasta for the network.
 # shellcheck source=tests/sandbox-capable.sh
 . "$REPO/tests/sandbox-capable.sh"
@@ -233,11 +356,12 @@ out=$(cd "$W" && SYG_WORKER_SANDBOX_RO_BINDS=$T/connect.py SYG_WORKER_SANDBOX_CL
 kill "$listener" 2>/dev/null; wait "$listener" 2>/dev/null
 n=$(wc -l <<<"$addrs")
 # Every host address is walled: loopback and the copied address answer "refused" from the namespace
-# itself, the rest "No route to host"; only OPEN is a failure. Each must also have printed a line.
+# itself, the rest "No route to host". Only those two count as closed: a timeout or another error is
+# not proof of a wall, and each address must have printed a line.
 all_closed=1
 while read -r a; do
   line=$(awk -v a="$a" '$1 == a' <<<"$out" | head -1)
-  [ -n "$line" ] && [[ $line != *" OPEN" ]] || all_closed=0
+  [[ $line == "$a refused" || $line == *"No route to host"* ]] || all_closed=0
 done <<<"$addrs"
 [ "$(grep -c ' OPEN$' <<<"$control")" = "$n" ] && [ "$all_closed" = 1 ] \
   && ok "every host address unreachable from inside ($n); all $n open to bare --share-net (control)" \
@@ -254,20 +378,10 @@ ctl=$(cd "$W" && SYG_WORKER_SANDBOX_RO_BINDS=$T/connect.py SYG_WORKER_SANDBOX_CL
   && ok "SYG_WORKER_SANDBOX_WALL=192.0.2.0/24: 'No route to host' in ${ms} ms; without it: [$ctl]" \
   || bad "wall knob live: rc=$rc ms=$ms out=[$out] ctl=[$ctl] err=[$(cat "$T/err")]"
 
-# 7d. The bridge tier by route table: every prefix the host-side computation walls is an unreachable
-# route inside. The same computation gate-sandbox does, written out here rather than sourced:
-# local addresses (minus loopback), plus the connected prefixes of interfaces with no default route.
-defs=$( { ip -o -4 route show default; ip -o -6 route show default; } | awk '{for (i = 1; i < NF; i++) if ($i == "dev") print $(i + 1)}')
-expected=$( {
-  { ip -o -4 route show table local type local; ip -o -6 route show table local type local; } | awk '{print $2}' \
-    | grep -v -e '^127\.' -e '^::1$'
-  { ip -o -4 route show table main scope link; ip -o -6 route show table main | grep 'proto kernel'; } \
-    | awk -v defs="$defs" 'BEGIN { n = split(defs, d, "\n"); for (i = 1; i <= n; i++) isdef[d[i]] = 1 }
-        { dev = ""; for (i = 1; i < NF; i++) if ($i == "dev") dev = $(i + 1)
-          if (dev == "" || $1 == "default" || $1 == "fe80::/64" || $1 ~ /^ff/) next
-          if (dev in isdef) lan[$1] = 1; else cand[++c] = $1 }
-        END { for (i = 1; i <= c; i++) if (!(cand[i] in lan)) print cand[i] }'
-} | awk '{ if ($0 ~ /:/) sub(/\/128$/, ""); else sub(/\/32$/, ""); print }' | sort -u)
+# 7d2. Live route table: every prefix `gate-sandbox --print-wall` prints on this host is an unreachable
+# route inside (the computation itself is pinned on a fixture host above; no logic is copied here).
+# ip prints a host route without its /32 or /128.
+expected=$(env -u SYG_GATE_SANDBOX_WALL "$B/gate-sandbox" --print-wall | awk '{ if ($0 ~ /:/) sub(/\/128$/, ""); else sub(/\/32$/, ""); print }')
 fake 'ip -o route show type unreachable; ip -o -6 route show type unreachable; exit 0'
 out=$(inside); rc=$?
 got=$(awk '{print $2}' <<<"$out")
@@ -281,9 +395,11 @@ done <<<"$expected"
   || bad "wall routes: rc=$rc missing=[$missing] expected=[$expected] out=[$out] err=[$(cat "$T/err")]"
 
 # 7e. The worker can't undo the wall: no capabilities in its user namespace, so route and rule edits fail
-fake 'ip route del unreachable 192.0.2.0/24 2>/dev/null && echo del-worked
-ip route flush table main 2>/dev/null && echo flush-worked
-ip rule add from all lookup 99 2>/dev/null && echo rule-worked
+# Each attempt must fail for the capability reason, not any other (a typo'd command also "fails").
+fake 'for c in "route del unreachable 192.0.2.0/24" "route flush table main" "rule add from all lookup 99"; do
+  e=$(ip $c 2>&1) && echo "worked: $c"
+  case $e in *"Operation not permitted"*) ;; *) echo "not EPERM: $c: $e" ;; esac
+done
 awk '"'"'/^CapEff/ {print $2}'"'"' /proc/self/status
 exit 0'
 out=$(cd "$W" && SYG_WORKER_SANDBOX_WALL=192.0.2.0/24 SYG_WORKER_SANDBOX_CLAUDE=$T/fake-claude "$B/worker-sandbox" --settings "$T/overlay.json" 2>"$T/err"); rc=$?

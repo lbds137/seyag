@@ -17,11 +17,12 @@ read-only at /run/worker/settings.json, so the key never appears in an argv.
 Inside, claude runs in bypass mode with: / read-only; /run and $HOME empty; the toolchain, claude and
 gate-lock read-only; the tree per SYG_WORKER_SANDBOX_TREE, its untracked .env-style and key files masked;
 the repo's git dir, the tree's .git and (rw trees) its .claude read-only; internet through pasta, every
-host address and the subnets of the host's non-default interfaces (bridges, VPN) unreachable; a clean
+host address, and every route (any routing table) through an interface with no default route (container
+bridges, an interface-based VPN that doesn't carry the default route), unreachable; a clean
 environment; capped /tmp, /run and home.
 Not walled: the worker can read its own API key, world-readable files outside $HOME and /run; untracked
 secret files are masked only to five levels deep and only by name (.env, .env.*, .dev.vars, *.pem, *.key);
-the LAN (the default interface's subnet) answers, and so do addresses the host gains after launch. Names
+the default interface's own routes answer (the LAN; a full-tunnel VPN's own subnet), and so do userspace VPNs with no interface, AF_VSOCK and addresses the host gains after launch. Names
 resolve only where the host resolves through nss-resolve or a non-loopback nameserver.
 No memory limit but what the caller sets (for example `systemd-run --user -p MemoryMax=`).
 
