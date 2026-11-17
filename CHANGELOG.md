@@ -2,6 +2,18 @@
 
 All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY-MM-DD>` section per released version; under it, `###` categories in fixed order — Breaking Changes, Features, Bug Fixes, Improvements, Chores, Tests — empty ones omitted; items are `- **scope:** description (#PR)`, written from the version's merged commit subjects.
 
+## 0.3.178 - 2026-11-17
+
+### Bug Fixes
+
+- **python-heredoc-edit-guard:** an interpreter option between the name and the inline marker no longer defeats the guard (`python3 -I -c`, `python3 -X utf8 - <<E`, `python3 -Ic`, `python3 -I<<E`, `node --no-warnings -e`, `node --max-old-space-size 4096 -e`); versioned names (`python3.12 -c`) match; `node -p`/`-pe`/`--print` count like `-e` (#PR).
+- **hooks:** a caller's relative `PYTHONPYCACHEPREFIX` never reaches the hooks' `python3 -I` (they get `-B`); `run.sh` exports `SYG_PY_CACHE_ARG=-B` for it, and only an absolute prefix becomes `-Xpycache_prefix` (#PR).
+
+### Tests
+
+- **python-isolation:** the lint covers path-prefixed, versioned and bare `python` call sites; the runtime rows add `live-checkout-guard`, which reaches its `python3 -c` judge; a docstring in `hooks/lib/upstream_guard_lib.py` now says `Python` so prose stays out of the widened lint (#PR).
+- **statusline:** the fixture server runs under `python3 -I -B` (#PR).
+
 ## 0.3.177 - 2026-11-17
 
 ### Bug Fixes

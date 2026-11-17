@@ -117,8 +117,10 @@ syg_hook_ready() {
   # every module the hook imports, stdlib included, so the first call after a
   # cold cache (or a Python update) compiles them once. CPython checks a cached
   # pyc against its source's mtime and size, which suffices for a checkout that
-  # changes by git pull. A caller's own prefix wins; with no absolute cache dir
-  # (no HOME, a relative XDG_CACHE_HOME) bytecode is not written at all.
+  # changes by git pull. A caller's absolute prefix wins; a relative one never
+  # reaches the hooks' `python3 -I` (SYG_PY_CACHE_ARG=-B); the caller's variable
+  # is left as set. With no absolute cache dir (no HOME, a relative
+  # XDG_CACHE_HOME) bytecode is not written at all.
   # Hooks call `python3 -I "${SYG_PY_CACHE_ARG:--B}"`: -I (cwd off sys.path)
   # ignores PYTHON* env vars, so the cache prefix travels as an explicit -X
   # argument; unset (a direct or probe run) falls back to -B.
@@ -134,7 +136,7 @@ syg_hook_ready() {
   fi
   if [ -n "${PYTHONDONTWRITEBYTECODE:-}" ]; then
     export SYG_PY_CACHE_ARG=-B
-  elif [ -n "${PYTHONPYCACHEPREFIX:-}" ]; then
+  elif [[ ${PYTHONPYCACHEPREFIX:-} == /* ]]; then
     export SYG_PY_CACHE_ARG="-Xpycache_prefix=$PYTHONPYCACHEPREFIX"
   else
     export SYG_PY_CACHE_ARG=-B

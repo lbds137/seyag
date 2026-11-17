@@ -4,8 +4,9 @@
 #   2. no project copy → the plugin hook runs; exit 2 + stderr pass through
 #   3. stdin reaches the hook; stdout passes through
 #   4. PYTHONPYCACHEPREFIX points hooks at a per-user bytecode cache (a caller's
-#      prefix wins; no absolute cache dir → PYTHONDONTWRITEBYTECODE=1); the same
-#      prefix reaches `python3 -I` hooks as SYG_PY_CACHE_ARG (-B when none)
+#      absolute prefix wins; a relative one is ignored; no absolute cache dir →
+#      PYTHONDONTWRITEBYTECODE=1); the same prefix reaches `python3 -I` hooks as
+#      SYG_PY_CACHE_ARG (-B when none)
 #   5. sdk-* entrypoints skip the turn-shape hooks; a background session a person
 #      drives (entrypoint cli, SESSION_ATTENDED=0) keeps them
 #   6. GIT_OPTIONAL_LOCKS=0 reaches every git call a hook makes
@@ -134,6 +135,11 @@ check "SYG_PY_CACHE_ARG: no cache dir → -B, no absolute cache dir" \
 OUT=$(printf 'payload' | CLAUDE_PROJECT_DIR="$TMP/proj-without" runsh PYTHONDONTWRITEBYTECODE=1 HOME="$TMP/home" fake-arg 2>"$TMP/err")
 RC=$?
 check "SYG_PY_CACHE_ARG: caller's PYTHONDONTWRITEBYTECODE=1 → -B" \
+  2 "$RC" "arg:-B" "$OUT" "" "$(cat "$TMP/err")"
+
+OUT=$(printf 'payload' | CLAUDE_PROJECT_DIR="$TMP/proj-without" runsh PYTHONPYCACHEPREFIX=rel/pc HOME="$TMP/home" fake-arg 2>"$TMP/err")
+RC=$?
+check "SYG_PY_CACHE_ARG: caller's relative PYTHONPYCACHEPREFIX → -B (not a relative -X)" \
   2 "$RC" "arg:-B" "$OUT" "" "$(cat "$TMP/err")"
 
 # --- 3. unknown / unsafe hook names fail open ----------------------------------

@@ -9,7 +9,7 @@ returned or logged), `load_own_owners` (the hosts.yml `user:` under
 github.com, read with a line scan, unioned with SYG_OWN_OWNERS), the git
 reading helpers (`git_argv`, `git_run`, `git_config`, `git_remote_get_url`)
 and `git_remotes_targets` (the directory's GitHub candidates with
-`remote.<name>.gh-resolved` priority, memoized per process — a fresh python
+`remote.<name>.gh-resolved` priority, memoized per process — a fresh Python
 process per invocation, so the memo never outlives a run). `git_run` keeps
 its load-bearing failure posture: a 5 s timeout, errors="replace" decoding
 and exception -> None, so a non-UTF-8 byte in a remote URL or a wedged git

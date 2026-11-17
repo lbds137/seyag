@@ -30,7 +30,8 @@ import subprocess
 import sys
 
 repo = sys.argv[1]
-PY3 = re.compile(r"(?<![\w./-])python3(?![\w.])")
+# Known limit: a call through a variable ("$PY" -c) is not linted.
+PY3 = re.compile(r"(?<![\w.-])python(?:3(?:\.\d+)?)?(?![\w.-])")
 SKIP_BEFORE = ("command -v ", "type ", "which ")
 CACHE_TOKEN = '"${SYG_PY_CACHE_ARG:--B}"'
 
@@ -84,9 +85,15 @@ MUST_FLAG = [
     "python3 -B - <<E",
     "python3",
     "python3 \"${SYG_PY_CACHE_ARG:--B}\" -c x",
+    "/usr/bin/python3 -c x",
+    "python -c x",
+    "python3.12 - <<E",
+    "env python3 -c x",
 ]
 MUST_NOT = [
     "python3 -I -c x",
+    "/usr/bin/python3 -I -c x",
+    "python3.12 -I -c x",
     "python3 -I \"${SYG_PY_CACHE_ARG:--B}\" - <<E",
     "python3 -I -B - <<E",
     "python3 \"$LIB\"",
@@ -162,10 +169,10 @@ else
   bad "plant control: no planted module was imported without -I (the plant is broken)"
 fi
 
-row() { # $1 label, $2 hook file, $3 payload
-  local label=$1 hook=$2 payload=$3 lines
+row() { # $1 label, $2 hook file, $3 payload, $4 optional extra env (NAME=value)
+  local label=$1 hook=$2 payload=$3 extra_env=${4:-} lines
   clear_state
-  (cd "$PLANT" && printf '%s' "$payload" | env -u SYG_PY_CACHE_ARG CLAUDE_JOB_DIR= \
+  (cd "$PLANT" && printf '%s' "$payload" | env -u SYG_PY_CACHE_ARG CLAUDE_JOB_DIR= $extra_env \
     PATH="$SHIM:$PATH" PYTHONDONTWRITEBYTECODE=1 bash "$REPO/plugins/seyag/hooks/$hook" >/dev/null 2>&1)
   lines=$(grep -c . "$LOG")
   if [ "$lines" -lt 1 ]; then
@@ -185,6 +192,13 @@ row "lossy-pipe-guard.sh (python3 3<<<)" lossy-pipe-guard.sh \
   '{"tool_name":"Bash","tool_input":{"command":"git push | tail"}}'
 row "grep-escaped-dollar-guard.sh (python3 -c)" grep-escaped-dollar-guard.sh \
   '{"tool_name":"Bash","tool_input":{"command":"cat <<'"'"'E'"'"'\nhello\nE"}}'
+# live-checkout-guard reaches its python3 -c judge only for a git command with the
+# cwd inside a live root: a plant git repo named in SYG_LIVE_CHECKOUTS.
+LIVE="$TMP/live"
+mkdir -p "$LIVE" && git -C "$LIVE" init -q
+row "live-checkout-guard.sh (python3 -c live_checkout judge)" live-checkout-guard.sh \
+  "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"git switch -c scratch\"},\"cwd\":\"$LIVE\"}" \
+  "SYG_LIVE_CHECKOUTS=$LIVE"
 
 printf '%s\n' \
   '{"type":"user","isMeta":null,"message":{"content":"go"}}' \
