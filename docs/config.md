@@ -177,6 +177,20 @@ An optional TOML file fills in knobs the environment left unset: user `${XDG_CON
 
 | Name | Default | What it does | Found in |
 | --- | --- | --- | --- |
+| `SYG_GATE_LOCK_FILE` | `/tmp/gate.lock` | Lock file gate-lock holds while a gate command runs; one gate at a time machine-wide (keep it on a path every sandbox shares). | `bin/gate-lock`, `bin/gate-sandbox` |
+| `SYG_GATE_SANDBOX_ENV` | unset | Space-separated variable names gate-sandbox passes into the sandbox's otherwise cleared environment. | `bin/gate-sandbox`, `bin/worker-sandbox` |
+| `SYG_GATE_SANDBOX_PATH` | the caller's PATH | PATH inside gate-sandbox. | `bin/gate-sandbox`, `bin/worker-sandbox` |
+| `SYG_GATE_SANDBOX_PROFILE` | unset | gate-sandbox profile: unset for a one-gate sandbox, worker for a whole headless worker (set by worker-sandbox). | `bin/gate-sandbox`, `bin/worker-sandbox` |
+| `SYG_GATE_SANDBOX_RO_BINDS` | unset | Colon-separated SRC or SRC->DST read-only binds added to gate-sandbox; entries resolving inside the worktree are refused. | `bin/gate-sandbox`, `bin/worker-sandbox` |
+| `SYG_GATE_SANDBOX_SCRATCH` | unset | Worker profile only: host directory bound writable at ~/.claude inside the sandbox (required). | `bin/gate-sandbox`, `bin/worker-sandbox` |
+| `SYG_GATE_SANDBOX_TOOLCHAIN` | `$HOME/.local/bin/mise:$HOME/.local/share/mise:$HOME/.local/state/mise:$HOME/.config/mise:$HOME/.local/share/pnpm` | Colon-separated toolchain paths gate-sandbox binds read-only (absent ones skipped); empty for none. Each entry widens what the sandbox can read (an entry of $HOME undoes the hidden home). | `bin/gate-sandbox` |
+| `SYG_GATE_SANDBOX_TREE` | `rw` | Worker profile only: rw or ro mount of the worktree. | `bin/gate-sandbox`, `bin/worker-sandbox` |
+| `SYG_WORKER_SANDBOX_ENV` | unset | Extra space-separated variable names worker-sandbox passes into the worker (DISABLE_AUTOUPDATER always passes). | `bin/worker-sandbox` |
+| `SYG_WORKER_SANDBOX_PATH` | `$HOME/.local/bin:$HOME/.local/share/mise/shims:/usr/bin:/bin` | Inner PATH tail worker-sandbox appends after its bin directory; empty means the default. | `bin/worker-sandbox` |
+| `SYG_WORKER_SANDBOX_RO_BINDS` | unset | More read-only binds for the worker, in SYG_GATE_SANDBOX_RO_BINDS' format. | `bin/worker-sandbox` |
+| `SYG_WORKER_SANDBOX_SCRATCH` | unset | Host directory worker-sandbox binds writable at ~/.claude, where claude keeps its transcripts (required; the caller copies out what it wants and deletes it). | `bin/worker-sandbox` |
+| `SYG_WORKER_SANDBOX_TREE` | `rw` | rw or ro mount of the worker's tree. | `bin/worker-sandbox` |
+| `SYG_WORKER_TREE_CHECK_UNTRUSTED` | `/tmp:/var/tmp:/dev/shm` | Colon-separated directories a worker can write; worker-tree-check refuses a gitdir under them when no --repo anchor is given. | `bin/worker-tree-check` |
 | `SYG_WORKTREE_BACKUP_ALLOW_VOLATILE` | unset | Set to 1 to allow safe-worktree-clean --apply-hold backups on tmpfs or ramfs. | `bin/safe-worktree-clean` |
 | `SYG_WORKTREE_BACKUP_DIR` | `${XDG_STATE_HOME:-$HOME/.local/state}/seyag/worktree-backups` | Directory where safe-worktree-clean --apply-hold writes HOLD worktree backup bundles. | `bin/safe-worktree-clean` |
 | `SYG_WORKTREE_BASE` | `origin/<default branch>` | Base git ref against which safe-worktree-clean judges worktrees when --base is not passed. | `bin/safe-worktree-clean` |
@@ -270,6 +284,7 @@ An optional TOML file fills in knobs the environment left unset: user `${XDG_CON
 | `SYG_SWEEP_VALID_FRAGMENTS` | `bin/removed-identifier-sweep` | Internal env variable exporting validated SYG_SWEEP_EXCLUDE_PATHS fragments to awk in removed-identifier-sweep. |
 | `SYG_USER_RULES_DIR` | `hooks/session-start.sh` | Test seam overriding the user rules directory checked by session-start against rules/core.md. |
 | `SYG_WEEK_BURN_NOW` | `bin/week-burn-window` | Test clock (epoch seconds) overriding current time in week-burn-window. |
+| `SYG_WORKER_SANDBOX_CLAUDE` | `bin/worker-sandbox` | Test seam naming the program worker-sandbox binds and runs as claude. |
 | `SYG_WORKTREE_RUN_STAMP` | `bin/safe-worktree-clean` | Internal timestamp directory name exported from a multi-repo safe-worktree-clean --apply-hold parent to child runs; a value that is empty or not a plain name ([0-9A-Za-z][0-9A-Za-z._-]*) exits 2. |
 | `SYG_WORKTREE_STATE_BATCH_FAIL` | `bin/safe-worktree-clean` | Internal test seam in safe-worktree-clean: set to exactly 1 it skips tree_state_sha's hash-object batch child (batch_ok=false, rc_batch=1) so probes exercise the per-file hash fallback; any other value is ignored. |
 | `SYG_WORKTREE_SWEEP_CHILD` | `bin/safe-worktree-clean` | Internal marker set to 1 when safe-worktree-clean invokes itself per repo in a multi-repo sweep. |

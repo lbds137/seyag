@@ -1,0 +1,158 @@
+#!/usr/bin/env bash
+# gate-sandbox: run a gate command (tests, lint, ...) inside a bubblewrap sandbox scoped to one
+# git worktree. Inside: no network; / read-only; $HOME empty except the toolchain (mise and its
+# installs, the pnpm store) read-only; the worktree read-write and the main repo's .git read-only;
+# private /tmp and /run/user; host processes invisible; only PATH, HOME, locale and the variables
+# named in SYG_GATE_SANDBOX_ENV pass. Off-worktree dependencies come in read-only: a symlinked
+# node_modules is bound at its resolved target, and SYG_GATE_SANDBOX_RO_BINDS (colon-separated SRC or
+# SRC->DST, either side inside the worktree refused) adds more. Usage: gate-sandbox CWD -- CMD [ARG...]
+# SYG_GATE_SANDBOX_PROFILE=worker is the same sandbox for a whole worker rather than one gate (see
+# worker-sandbox): internet through pasta with host loopback refused, /run empty but for name
+# resolution and the gate lock, the tree's .git and (SYG_GATE_SANDBOX_TREE=rw, the default) .claude
+# read-only, SYG_GATE_SANDBOX_TREE=ro for a read-only tree, SYG_GATE_SANDBOX_SCRATCH bound writable at ~/.claude,
+# size caps on its tmpfs mounts, untracked secret-shaped files masked, SYG_GATE_SANDBOX_PATH as the inner PATH.
+set -u
+me=gate-sandbox
+case "${1:-}" in -h|--help) echo "usage: $me CWD -- CMD [ARG...]   run CMD in a bubblewrap sandbox scoped to CWD's git worktree"; exit 0 ;; esac
+[ $# -ge 3 ] && [ "$2" = -- ] || { echo "usage: $me CWD -- CMD [ARG...]" >&2; exit 125; }
+cwd=$(realpath -e -- "$1") || { echo "$me: no such directory: $1" >&2; exit 125; }
+shift 2
+wt=$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null) \
+  || { echo "$me: $cwd is not in a git worktree" >&2; exit 125; }
+common=$(git -C "$cwd" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) \
+  || { echo "$me: git common dir unreadable for $cwd" >&2; exit 125; }
+
+profile=${SYG_GATE_SANDBOX_PROFILE:-}
+tree=rw
+launcher=()
+case $profile in
+  '')
+    args=(--die-with-parent --unshare-all --new-session
+          --ro-bind / / --dev /dev --proc /proc --tmpfs /tmp --tmpfs /run/user --tmpfs "$HOME") ;;
+  worker)
+    tree=${SYG_GATE_SANDBOX_TREE:-rw}
+    case $tree in rw|ro) ;; *) echo "$me: SYG_GATE_SANDBOX_TREE must be rw or ro: $tree" >&2; exit 125 ;; esac
+    command -v pasta >/dev/null || { echo "$me: pasta not found; a worker sandbox has no network without it" >&2; exit 125; }
+    # Bare --share-net reaches host postgres and redis on loopback; pasta's namespace doesn't. Its
+    # namespace reads as root, which refuses claude's bypass mode, so bwrap maps the real ids back.
+    launcher=(pasta --config-net --quiet --no-map-gw -t none -u none -T none -U none --)
+    args=(--die-with-parent --unshare-all --share-net --new-session --uid "$(id -u)" --gid "$(id -g)"
+          --ro-bind / / --dev /dev --proc /proc
+          --size 2147483648 --tmpfs /tmp --size 16777216 --tmpfs /run --size 1073741824 --tmpfs "$HOME")
+    # An empty /run hides the host's sockets (dbus, the VPN daemon, cups); names still resolve through this one
+    resolve=/run/systemd/resolve/io.systemd.Resolve
+    [ -S "$resolve" ] && args+=(--ro-bind "$resolve" "$resolve")
+    # flock works across a bind, so a worker's gate-lock queues with every other gate on the machine
+    lock=${SYG_GATE_LOCK_FILE:-/tmp/gate.lock}
+    : >>"$lock" || { echo "$me: can't open the gate lock: $lock" >&2; exit 125; }
+    args+=(--bind "$lock" /run/worker/gate.lock) ;;
+  *) echo "$me: unknown SYG_GATE_SANDBOX_PROFILE: $profile" >&2; exit 125 ;;
+esac
+# the toolchain, read-only (a symlinked config is bound at its target too)
+# SYG_GATE_SANDBOX_TOOLCHAIN: colon-separated paths; unset = mise and the pnpm store, empty = none
+IFS=: read -r -a toolchain <<<"${SYG_GATE_SANDBOX_TOOLCHAIN-$HOME/.local/bin/mise:$HOME/.local/share/mise:$HOME/.local/state/mise:$HOME/.config/mise:$HOME/.local/share/pnpm}"
+for p in "${toolchain[@]}"; do
+  [ -n "$p" ] || continue
+  [ -e "$p" ] || continue
+  args+=(--ro-bind "$p" "$p")
+  for f in "$p"/*; do
+    [ -L "$f" ] || continue
+    t=$(realpath -e -- "$f" 2>/dev/null) || continue
+    case $t in "$HOME"/*) args+=(--ro-bind "$t" "$t") ;; esac
+  done
+done
+# the worktree first, then .git read-only over it: bwrap mounts in order, so the reverse would
+# leave a main tree's .git writable; every bind below must stay after --bind "$wt" to win
+if [ "$tree" = ro ]; then args+=(--ro-bind "$wt" "$wt"); else args+=(--bind "$wt" "$wt"); fi
+args+=(--ro-bind "$common" "$common")
+if [ "$profile" = worker ]; then
+  # A whole worker runs for a long time with every tool: its gitfile stays put, and it can't plant
+  # settings or hooks for the next session in this tree (a symlink here would aim the bind elsewhere).
+  [ ! -L "$wt/.git" ] || { echo "$me: $wt/.git is a symlink; refusing" >&2; exit 125; }
+  [ ! -f "$wt/.git" ] || args+=(--ro-bind "$wt/.git" "$wt/.git")
+  if [ "$tree" = rw ]; then
+    [ ! -L "$wt/.claude" ] || { echo "$me: $wt/.claude is a symlink; refusing" >&2; exit 125; }
+    mkdir -p -- "$wt/.claude" || { echo "$me: can't create $wt/.claude" >&2; exit 125; }
+    args+=(--ro-bind "$wt/.claude" "$wt/.claude")
+  fi
+  scratch=${SYG_GATE_SANDBOX_SCRATCH:-}
+  [ -n "$scratch" ] && [ -d "$scratch" ] || { echo "$me: the worker profile needs SYG_GATE_SANDBOX_SCRATCH" >&2; exit 125; }
+  args+=(--bind "$scratch" "$HOME/.claude")
+  # This profile has internet, and a main checkout holds real keys: an untracked secret-shaped file
+  # reads as empty. Tracked ones are already in the repo's history, and fixtures tests need.
+  while IFS= read -r -d '' f; do
+    git -C "$wt" ls-files --error-unmatch -- "$f" >/dev/null 2>&1 || args+=(--ro-bind /dev/null "$f")
+  done < <(find -P "$wt" -maxdepth 5 \( -name node_modules -o -name .git \) -prune -o -type f \
+             \( -name '.env' -o -name '.env.*' -o -name '.dev.vars' -o -name '*.pem' -o -name '*.key' \) -print0 2>/dev/null)
+fi
+# a symlinked node_modules (deps living outside the wt, e.g. the main checkout's) rides in
+# read-only: bound at its RESOLVED target path — bwrap refuses a symlink destination — and the
+# symlink then resolves through the namespace (the toolchain-loop pattern below). Skipped
+# silently: not a symlink, dangling target, target not a node_modules dir (the wt is untrusted
+# input; a planted symlink must not become a host-read primitive — route it through
+# SYG_GATE_SANDBOX_RO_BINDS instead), or a target resolving inside the wt (never ro-shadow the
+# writable tree; same shape C2 refuses).
+# The worker profile follows only this repo's own main checkout, which worktrees do link to: the worker
+# wrote the tree and has internet, so a symlink it planted on an earlier run must not make this script
+# write through it or bind another repo's dependencies in.
+nm=$wt/node_modules
+if [ -L "$nm" ] && t=$(realpath -e -- "$nm" 2>/dev/null) \
+   && { [ "$profile" != worker ] || [ "$t" = "$(realpath -m -- "$(dirname "$common")/node_modules")" ]; }; then
+  case $t in
+    "$wt"|"$wt"/*) ;;
+    *) if [ "$(basename "$t")" = node_modules ] && [ -d "$t" ]; then
+         args+=(--ro-bind "$t" "$t")
+         # vite bundles a config into <node_modules>/.vite-temp before importing it; under the
+         # ro bind that write EROFSes at vitest startup, so a fresh host-side dir is bound over
+         # the subpath (a later mount wins) and removed on exit — private scratch, never the
+         # main tree's. The nested bind needs its mountpoint to exist: bwrap cannot mkdir
+         # through an ro bind, so pre-create the dir host-side (vite makes it on the host too;
+         # idempotent, gitignored, and the target is a dir the wt symlink already resolves to).
+         # On any failure skip the overlay: vitest then fails with the old EROFS, nothing else
+         # changes.
+         if mkdir -p -- "$t/.vite-temp" 2>/dev/null \
+            && vite_tmp=$(mktemp -d "${TMPDIR:-/tmp}/gate-sandbox-vitetemp.XXXXXX"); then
+           args+=(--bind "$vite_tmp" "$t/.vite-temp")
+           have_vite_tmp=1
+         fi
+       fi ;;
+  esac
+fi
+# SYG_GATE_SANDBOX_RO_BINDS: colon-separated SRC or SRC->DST (split on the first ->), each ro-bound;
+# a missing SRC, or SRC/DST resolving inside the worktree, is refused (the wt stays the only
+# writable tree)
+if [ -n "${SYG_GATE_SANDBOX_RO_BINDS:-}" ]; then
+  IFS=: read -r -a ro_entries <<<"$SYG_GATE_SANDBOX_RO_BINDS"
+  for entry in "${ro_entries[@]}"; do
+    [ -n "$entry" ] || continue
+    case $entry in
+      *'->'*) src=${entry%%'->'*} dst=${entry#*'->'} ;;
+      *)    src=$entry dst=$entry ;;
+    esac
+    [ -n "$src" ] && [ -n "$dst" ] \
+      || { echo "$me: SYG_GATE_SANDBOX_RO_BINDS: empty source or destination: $entry" >&2; exit 125; }
+    rsrc=$(realpath -e -- "$src" 2>/dev/null) \
+      || { echo "$me: SYG_GATE_SANDBOX_RO_BINDS: source does not exist: $src" >&2; exit 125; }
+    rdst=$(realpath -m -- "$dst" 2>/dev/null) \
+      || { echo "$me: SYG_GATE_SANDBOX_RO_BINDS: bad destination: $dst" >&2; exit 125; }
+    case $rsrc in "$wt"|"$wt"/*)
+      echo "$me: SYG_GATE_SANDBOX_RO_BINDS: refused: source resolves inside the worktree: $entry" >&2; exit 125 ;;
+    esac
+    case $rdst in "$wt"|"$wt"/*)
+      echo "$me: SYG_GATE_SANDBOX_RO_BINDS: refused: destination resolves inside the worktree: $entry" >&2; exit 125 ;;
+    esac
+    args+=(--ro-bind "$rsrc" "$rdst")
+  done
+fi
+args+=(--chdir "$cwd" --clearenv
+       --setenv PATH "${SYG_GATE_SANDBOX_PATH:-$PATH}" --setenv HOME "$HOME" --setenv LANG "${LANG:-C.UTF-8}")
+for v in LC_ALL LANGUAGE SYG_GATE_SANDBOX_RO_BINDS ${SYG_GATE_SANDBOX_ENV:-}; do
+  [ -n "${!v+x}" ] && args+=(--setenv "$v" "${!v}")
+done
+[ "$profile" != worker ] || args+=(--setenv SYG_GATE_LOCK_FILE /run/worker/gate.lock)
+if [ "${have_vite_tmp:-}" = 1 ]; then
+  trap 'rm -rf -- "$vite_tmp"' EXIT
+  "${launcher[@]}" bwrap "${args[@]}" -- "$@"
+else
+  exec "${launcher[@]}" bwrap "${args[@]}" -- "$@"
+fi
