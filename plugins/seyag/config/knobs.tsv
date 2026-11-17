@@ -6,9 +6,9 @@
 ANTHROPIC_ADMIN_API_KEY	user	credit	unset	Organization Admin API key enabling provider cost_report balance queries in api-credit and statusline (takes precedence over SYG_CREDIT_ADMIN_KEY_CMD).
 CC_ROUTE_KEYS	user	routing	~/.claude/lane-keys.env	Path to the lane key file where zai-usage looks up ZAI_AUTH_TOKEN first.
 CC_ROUTE_PRESET	user	routing	unset	Route preset name; set to anthropic-api so claude-usage treats a first-party endpoint as the Console API-key lane.
-CLAUDE_CONFIG_DIR	user	session	~/.claude	Claude Code user config directory, used by context-audit (CLAUDE.md, rules, settings, memory, skills, installed_plugins.json) and session-log (settings.json cleanupPeriodDays); statusline does not follow it.
+CLAUDE_CONFIG_DIR	user	session	~/.claude	Claude Code config directory: context-audit (CLAUDE.md, rules, settings, memory, skills, plugins), session-log, and the projects folder the session tools use when CLAUDE_PROJECTS_DIR is unset; statusline ignores it.
 CLAUDE_PLUGIN_REGISTRY	user	statusline	$HOME/.claude/plugins/installed_plugins.json	Path to installed_plugins.json read by statusline to compare the installed seyag version against the checkout manifest.
-CLAUDE_PROJECTS_DIR	user	session	~/.claude/projects	Directory of per-project Claude Code session transcript folders read by session-log, usage-sweep, and price-table.
+CLAUDE_PROJECTS_DIR	user	session	~/.claude/projects	Per-project transcript folders, read by session-log, usage-sweep, price-table, classifier-denials, session-stalled, session-context, chrome-loss-scan, relay-ruling, driver-busy-hours; unset: CLAUDE_CONFIG_DIR/projects.
 CLAUDE_SESSION_ARCHIVE	user	session	~/Documents/claude-session-archive	Directory holding exported cse_*.jsonl claude.ai session archives read by session-log.
 CLAUDE_USAGE_API_CREDIT	internal	usage	<script_dir>/api-credit	Test seam overriding the sibling api-credit binary path in claude-usage.
 CLAUDE_USAGE_EXTRA_OK	user	usage	unset	Set to 1 to let claude-usage --ok and --wait pass past the weekly reserve while extra usage is enabled and under budget.
@@ -47,7 +47,9 @@ SECURITY_SWEEP_GH	internal	misc	gh	Test seam overriding the gh binary path in se
 SECURITY_SWEEP_GH_TIMEOUT	internal	misc	60	Test seam overriding the per-call gh timeout in seconds (positive integer) in security-sweep.
 SESSION_LEDGER	user	session	~/.claude/mined-corpus/ledger.tsv	Path to the TSV ledger where session-log ledger and session-log mark read and record mined transcript spans.
 SEYAG_KEYS_BIN	user	usage	<script_dir>/keys	Override path to the keys binary invoked by zai-usage to read ZAI_AUTH_TOKEN from the encrypted credential store.
+SYG_AGY_BRAIN_DIR	user	session	~/.gemini/antigravity-cli/brain	Antigravity (agy) CLI transcript folders (<id>/.system_generated/logs) merged by driver-busy-hours; with CLAUDE_PROJECTS_DIR set, read only if this or SYG_AGY_SUMMARIES_DB is. Environment only (not config.toml).
 SYG_AGY_CONVERSATIONS_DIR	user	session	~/.gemini/antigravity-cli/conversations	Directory of *.db conversation databases read by agy-extract when no database paths are passed.
+SYG_AGY_SUMMARIES_DB	user	session	~/.gemini/antigravity-cli/conversation_summaries.db	SQLite conversation_summaries database of the Antigravity (agy) CLI that driver-busy-hours reads to find root conversations and their workspaces; read together with SYG_AGY_BRAIN_DIR. Environment only (not config.toml).
 SYG_ALLOW_BROAD_WALK	user	guards	unset	Set to 1 in the command text to bypass broad-walk-guard for an intentional broad filesystem walk.
 SYG_ALLOW_CACHE_RM	user	guards	unset	Set to 1 in the command text to bypass cache-rm-redirect for an owner-approved cache deletion.
 SYG_ALLOW_COMMIT_BRANCH	internal	guards	unset	Example per-command bypass assignment in the command text mentioned in lib/branch_switch.py docstring; not read by a hook.
@@ -77,6 +79,8 @@ SYG_CONTEXT_BLOCK_PATHS	user	session	unset	Colon-separated path globs matched li
 SYG_CONTEXT_COOLDOWN_MIN	user	session	30	Cooldown in minutes between context-size-reminder banners in a session.
 SYG_CONTEXT_THRESHOLD	user	session	500000	Context token threshold at which context-size-reminder fires on non-Fable models.
 SYG_CONTEXT_THRESHOLD_FABLE	user	session	200000	Context token threshold at which context-size-reminder fires when the model starts with claude-fable.
+SYG_SESSION_CONTEXT_THRESHOLD	user	session	500000	Context token threshold at which session-context flags a session on non-Fable models (a whole number; separate from the in-session reminder's SYG_CONTEXT_THRESHOLD).
+SYG_SESSION_CONTEXT_THRESHOLD_FABLE	user	session	200000	Context token threshold at which session-context flags a session whose model id contains fable (a whole number).
 SYG_CREDIT_ADMIN_KEY_CMD	user	credit	unset	Command run on a cache miss (when ANTHROPIC_ADMIN_API_KEY is unset, empty or contains a newline) to print the organization Admin API key on stdout.
 SYG_CREDIT_ADMIN_URL	internal	credit	https://api.anthropic.com	Test seam overriding the Anthropic Admin API origin URL in api-credit and statusline.
 SYG_CREDIT_ANCHOR	user	credit	<SYG_CREDIT_LEDGER>.anchor.json	Path to the JSON file storing api-credit calibrate balance anchors.
@@ -156,7 +160,8 @@ SYG_MEM_WATCH_MEMINFO	internal	misc	/proc/meminfo	Test seam overriding the memin
 SYG_MERGE_REVIEW_LOGIN	user	pr	claude[bot]	GitHub login whose latest PR comment must be surfaced before pr-merge-review-check allows gh pr merge.
 SYG_MERGE_REVIEW_RELEASE_REMINDER	user	pr	prose:This PR merges into the repository's default branch — run this project's post-merge steps (version bump, release, deploy) before starting other work.	Custom reminder text shown once when merging a PR into the repository's default branch.
 SYG_MERGE_REVIEW_WORKFLOW	user	pr	.github/workflows/claude-code-review.yml	Review workflow file path whose self-edit in a PR explains a missing review comment in pr-merge-review-check.
-SYG_NEEDS_OWNER_SECTION	user	session	Needs Owner	Heading (without the ##) of the role file section claude-role --need writes and --json reads as .needs: what waits on the owner.
+SYG_NEEDS_OWNER_SECTION	user	session	Needs Owner	Heading (without the ##) of the role file section claude-role --need writes and --json reads as .needs: what waits on the owner; relay-ruling names it in its destructive-step line and reads it from the environment only.
+SYG_OWNER_NAME	user	session	The owner	Name relay-ruling prints in the relay header the recipient reads (`<name> said (...)`, `<name> picked (...)`); an empty value falls back to the default. Environment only (not config.toml).
 SYG_OWN_OWNERS	user	guards	unset	Whitespace- or comma-separated GitHub owner names unioned with hosts.yml user: as own repos in upstream-submission-guard.
 SYG_PIN_ACTIONS_GH	internal	misc	gh	Test seam naming the gh binary pin-actions calls for commit and tag lookups.
 SYG_PLUGIN_MANIFEST	internal	statusline	<script_dir>/../.claude-plugin/plugin.json	Test seam overriding the plugin.json path read by statusline for the SYG version segment.
@@ -191,6 +196,11 @@ SYG_ROUTE_REQUIRED	user	routing	unset	Boolean (1/true/yes/on vs 0/false/no/off) 
 SYG_ROUTE_SHOW_CMD	user	session	unset	Command (bash -c, the name as its argument) claude-role --set route=NAME runs to check a route preset exists; nonzero refuses the route. Unset means only the name shape is checked.
 SYG_SECURITY_SWEEP	user	session	unset	Set to 1 to run security-sweep --session-line --cap 2 at SessionStart (startup and clear).
 SYG_SECURITY_SWEEP_REPOS	user	session	unset	Whitespace-separated owner/name repos opting in and scoping security-sweep at SessionStart and in security-sweep.
+SYG_SESSION_CONTEXT_EXTRA_CMD	user	session	unset	Command session-context runs (bash -c, stdin closed) to add another harness's sessions: a JSON array of {name, folder, sessionId, status, tokens}. Unset adds none; a failure warns on stderr and keeps the Claude rows.
+SYG_SESSION_CONTEXT_EXTRA_MODEL	user	session	other	Model label session-context gives the rows from SYG_SESSION_CONTEXT_EXTRA_CMD.
+SYG_SESSION_CONTEXT_EXTRA_THRESHOLD	user	session	150000	Context token threshold at which session-context flags a row from SYG_SESSION_CONTEXT_EXTRA_CMD.
+SYG_STALLED_NOW	internal	misc	unset	Test seam: ISO-8601 timestamp with a UTC offset that session-stalled uses as the current time; a value without an offset is a usage error.
+SYG_STALLED_ZAI_TZ	user	session	Asia/Shanghai	IANA time zone in which session-stalled reads the z.ai quota-reset stamp (`Your limit will reset at YYYY-MM-DD HH:MM:SS`); an unknown zone leaves the reset unparsed.
 SYG_STATE_DIR	internal	session	/tmp/claude-<uid>	Test seam overriding the directory session-start prunes and the prompt hooks (queued-message-receipt, context-size-reminder, context-block-gate) write their per-session state into.
 SYG_STATE_MAX_DAYS	user	session	7	Age in whole days after which session-start deletes stale prompt-hook state files in SYG_STATE_DIR.
 SYG_STATUSLINE_DEBUG	user	statusline	unset	Set to 1 to append terminal column, fit budget, and wrap diagnostics to the statusline.

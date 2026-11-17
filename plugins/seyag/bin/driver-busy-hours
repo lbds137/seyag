@@ -1,0 +1,345 @@
+#!/usr/bin/env python3
+"""driver-busy-hours: busy time of main-loop Claude Code sessions in a time window.
+
+Busy time is the sum of gaps between consecutive transcript events (any line with a
+timestamp: owner turns, replies, tool results) that are no longer than --gap seconds;
+a longer gap counts as idle. Only events inside the window pair up, so a gap that
+straddles a window edge counts as idle. Only top-level transcripts count (the driver's
+main loop), not subagents/. Each session also lists its assistant replies per model
+(one reply = one message id, however many transcript lines it spans), so a mid-window
+/model switch or advisor traffic shows up beside the hours.
+
+The total is wall-clock driver time: the union of the reported sessions' busy intervals,
+so two sessions busy at once (or a resumed session that copied old lines) count once.
+Per-session figures are each session alone.
+
+Usage:
+  driver-busy-hours --slug=-home-user-Projects-acme --since 2026-10-26 --until 2026-10-26
+  driver-busy-hours --slug acme --since 2026-10-26T09:00 --until 2026-10-26T17:00 --json
+  driver-busy-hours --slug acme --since 2026-10-27 --until 2026-10-27 --session 69ab05e5
+
+Options:
+  --slug S     project folder under CLAUDE_PROJECTS_DIR (default ${CLAUDE_CONFIG_DIR:-~/.claude}/projects): the full name
+               (written --slug=-home-... since it starts with a dash), or a tail such as acme
+               that exactly one folder name ends with after a dash
+  --since T    window start: YYYY-MM-DD or YYYY-MM-DDTHH:MM[:SS], local time unless it ends in
+               Z (UTC) or carries an offset (+02:00)
+  --until T    window end, same forms; a bare date means through the end of that day
+  --session P  only sessions whose id starts with P (repeatable; default: every session)
+  --gap SEC    longest gap still counted as busy (default 300)
+  --json       machine-readable output
+A transcript timestamp without an offset is read as UTC; a line whose timestamp isn't a
+string is skipped; an unreadable transcript is skipped with a warning on stderr.
+Exit: 0 ok, 2 usage error (bad time, --since after --until, no or ambiguous folder,
+missing projects root).
+"""
+import argparse
+import datetime as dt
+import json
+import os
+import re
+import sqlite3
+import sys
+import urllib.parse
+from collections import Counter
+
+sys.dont_write_bytecode = True
+SAFE_CID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+WORKTREE_RE = re.compile(r"/\.claude/worktrees/[^/]+/?$")
+
+
+def usage_error(msg):
+    print(f"driver-busy-hours: {msg}", file=sys.stderr)
+    raise SystemExit(2)
+
+
+def parse_time(text, end):
+    utc = text.endswith("Z")
+    body = text[:-1] if utc else text
+    try:
+        if len(body) == 10:
+            t = dt.datetime.strptime(body, "%Y-%m-%d")
+            if end:
+                t += dt.timedelta(days=1) - dt.timedelta(microseconds=1)
+        else:
+            t = dt.datetime.fromisoformat(body)
+    except ValueError:
+        usage_error(f"bad time {text!r} (YYYY-MM-DD or YYYY-MM-DDTHH:MM[:SS], optional Z or offset)")
+    if utc:
+        if t.tzinfo is not None:
+            usage_error(f"bad time {text!r}: Z and an offset together")
+        return t.replace(tzinfo=dt.timezone.utc)
+    return t if t.tzinfo is not None else t.astimezone()
+
+
+def find_folder(root, slug, allow_missing=False):
+    if not os.path.isdir(root):
+        usage_error(f"projects root {root} is not a directory (set CLAUDE_PROJECTS_DIR)")
+    if os.path.isdir(os.path.join(root, slug)):
+        return os.path.join(root, slug)
+    hits = sorted(d for d in os.listdir(root) if d.endswith("-" + slug) and os.path.isdir(os.path.join(root, d)))
+    if len(hits) > 1:
+        shown = ", ".join(hits[:5]) + (", ..." if len(hits) > 5 else "")
+        usage_error(f"--slug {slug!r} matches {len(hits)} folders ({shown}) under {root}; pass the full folder name")
+    if not hits:
+        if allow_missing:
+            return None
+        usage_error(f"--slug {slug!r} matches no folder under {root}; pass the full folder name")
+    return os.path.join(root, hits[0])
+
+
+def event_time(ts):
+    if not isinstance(ts, str):
+        return None
+    try:
+        t = dt.datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return t if t.tzinfo is not None else t.replace(tzinfo=dt.timezone.utc)
+
+
+def session_stats(path, since, until, gap):
+    stamps = []
+    replies = {}
+    unnamed = Counter()
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(row, dict) or row.get("type") == "api-request-blob":
+                continue
+            t = event_time(row.get("timestamp"))
+            if t is None or not since <= t <= until:
+                continue
+            stamps.append(t)
+            if row.get("type") == "assistant":
+                msg = row.get("message") or {}
+                model = msg.get("model")
+                if model and model != "<synthetic>":
+                    if msg.get("id"):
+                        replies[msg["id"]] = model
+                    else:
+                        unnamed[model] += 1
+    stamps.sort()
+    intervals = [
+        (a, b) for a, b in zip(stamps, stamps[1:]) if (b - a).total_seconds() <= gap and b > a
+    ]
+    models = Counter(replies.values()) + unnamed
+    return len(stamps), intervals, dict(models)
+
+
+def agy_slug_of_uris(workspace_uris_raw):
+    if not isinstance(workspace_uris_raw, str) or not workspace_uris_raw.strip():
+        return ""
+    try:
+        uris = json.loads(workspace_uris_raw)
+    except ValueError:
+        return ""
+    if not isinstance(uris, list):
+        return ""
+    for u in uris:
+        if not isinstance(u, str):
+            continue
+        if u.startswith("file://"):
+            p = urllib.parse.unquote(urllib.parse.urlparse(u).path)
+        elif u.startswith("/"):
+            p = u
+        else:
+            continue
+        if p.endswith("/.git"):
+            continue
+        p = WORKTREE_RE.sub("", p.rstrip("/"))
+        if p:
+            return re.sub(r"[^A-Za-z0-9]", "-", p)
+    return ""
+
+
+def agy_session_stats(path, since, until, gap):
+    stamps = []
+    agy_replies = 0
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(row, dict):
+                continue
+            t = event_time(row.get("created_at"))
+            if t is None or not since <= t <= until:
+                continue
+            stamps.append(t)
+            if row.get("type") == "PLANNER_RESPONSE":
+                agy_replies += 1
+    stamps.sort()
+    intervals = [
+        (a, b) for a, b in zip(stamps, stamps[1:]) if (b - a).total_seconds() <= gap and b > a
+    ]
+    models = {"agy": agy_replies} if agy_replies else {}
+    return len(stamps), intervals, models
+
+
+def collect_agy_sessions(folder_slug, raw_slug, session_prefixes, since, until, gap):
+    has_explicit_claude = "CLAUDE_PROJECTS_DIR" in os.environ
+    has_explicit_agy = "SYG_AGY_SUMMARIES_DB" in os.environ or "SYG_AGY_BRAIN_DIR" in os.environ
+    if has_explicit_claude and not has_explicit_agy:
+        return folder_slug, []
+    base = os.path.expanduser("~/.gemini/antigravity-cli")
+    db_path = os.environ.get("SYG_AGY_SUMMARIES_DB", os.path.join(base, "conversation_summaries.db"))
+    brain_dir = os.environ.get("SYG_AGY_BRAIN_DIR", os.path.join(base, "brain"))
+    if not os.path.isfile(db_path) or not os.path.isdir(brain_dir):
+        return folder_slug, []
+    uri = f"file:{urllib.parse.quote(os.path.abspath(db_path))}?mode=ro"
+    try:
+        con = sqlite3.connect(uri, uri=True, timeout=2.0)
+        con.row_factory = sqlite3.Row
+    except sqlite3.Error:
+        return folder_slug, []
+    try:
+        child_ids = set()
+        try:
+            for r in con.execute("SELECT conversation_id FROM conversation_parents"):
+                ccid = r["conversation_id"]
+                if isinstance(ccid, str):
+                    child_ids.add(ccid)
+        except sqlite3.Error:
+            pass
+        rows = con.execute(
+            "SELECT conversation_id, workspace_uris FROM conversation_summaries "
+            "WHERE nesting_depth = 0 AND parent_conversation_id = '' "
+            "ORDER BY conversation_id"
+        ).fetchall()
+    except sqlite3.Error:
+        con.close()
+        return folder_slug, []
+    con.close()
+
+    target_slug = folder_slug
+    if target_slug is None:
+        matched_slugs = sorted(
+            {
+                s
+                for r in rows
+                if isinstance(r["conversation_id"], str)
+                and SAFE_CID_RE.match(r["conversation_id"])
+                and r["conversation_id"] not in child_ids
+                for s in [agy_slug_of_uris(r["workspace_uris"] or "")]
+                if s and (s == raw_slug or s.endswith("-" + raw_slug))
+            }
+        )
+        if len(matched_slugs) > 1:
+            shown = ", ".join(matched_slugs[:5]) + (", ..." if len(matched_slugs) > 5 else "")
+            usage_error(f"--slug {raw_slug!r} matches {len(matched_slugs)} agy workspaces ({shown}); pass the full slug")
+        if not matched_slugs:
+            return None, []
+        target_slug = matched_slugs[0]
+
+    found = []
+    for r in rows:
+        cid = r["conversation_id"]
+        if not isinstance(cid, str) or not SAFE_CID_RE.match(cid) or cid in child_ids:
+            continue
+        if session_prefixes and not any(cid.startswith(p) for p in session_prefixes):
+            continue
+        if agy_slug_of_uris(r["workspace_uris"] or "") != target_slug:
+            continue
+        tpath = os.path.join(brain_dir, cid, ".system_generated", "logs", "transcript.jsonl")
+        if not os.path.isfile(tpath):
+            continue
+        try:
+            events, intervals, models = agy_session_stats(tpath, since, until, gap)
+        except OSError as e:
+            print(f"driver-busy-hours: skipped {tpath}: {e.strerror or e}", file=sys.stderr)
+            continue
+        if events:
+            found.append((cid, events, intervals, models))
+    return target_slug, found
+
+
+def union_seconds(intervals):
+    total = 0.0
+    end = None
+    for a, b in sorted(intervals):
+        if end is None or a > end:
+            total += (b - a).total_seconds()
+            end = b
+        elif b > end:
+            total += (b - end).total_seconds()
+            end = b
+    return total
+
+
+def main():
+    ap = argparse.ArgumentParser(add_help=False)
+    ap.add_argument("--slug")
+    ap.add_argument("--since")
+    ap.add_argument("--until")
+    ap.add_argument("--session", action="append", default=[])
+    ap.add_argument("--gap", type=int, default=300)
+    ap.add_argument("--json", action="store_true")
+    ap.add_argument("-h", "--help", action="store_true")
+    args = ap.parse_args()
+    if args.help:
+        print(__doc__.strip())
+        return 0
+    if not (args.slug and args.since and args.until):
+        usage_error("--slug, --since and --until are required (see --help)")
+    since = parse_time(args.since, end=False)
+    until = parse_time(args.until, end=True)
+    if since > until:
+        usage_error(f"--since {args.since} is after --until {args.until}")
+    root = os.environ.get("CLAUDE_PROJECTS_DIR") or os.path.join(os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude"), "projects")
+    folder = find_folder(root, args.slug, allow_missing=True)
+    sessions = []
+    every = []
+    if folder is not None:
+        for name in sorted(os.listdir(folder)):
+            path = os.path.join(folder, name)
+            if not name.endswith(".jsonl") or not os.path.isfile(path):
+                continue
+            sid = name[:-6]
+            if args.session and not any(sid.startswith(p) for p in args.session):
+                continue
+            try:
+                events, intervals, models = session_stats(path, since, until, gap=args.gap)
+            except OSError as e:
+                print(f"driver-busy-hours: skipped {path}: {e.strerror or e}", file=sys.stderr)
+                continue
+            if events:
+                busy = sum((b - a).total_seconds() for a, b in intervals)
+                sessions.append({"session": sid, "events": events, "busy_seconds": round(busy), "replies_by_model": models})
+                every.extend(intervals)
+    resolved_slug, agy_found = collect_agy_sessions(
+        os.path.basename(folder) if folder is not None else None, args.slug, args.session, since, until, args.gap
+    )
+    if folder is None and resolved_slug is None:
+        usage_error(f"--slug {args.slug!r} matches no folder under {root}; pass the full folder name")
+    for cid, events, intervals, models in agy_found:
+        busy = sum((b - a).total_seconds() for a, b in intervals)
+        sessions.append({"session": cid, "events": events, "busy_seconds": round(busy), "replies_by_model": models})
+        every.extend(intervals)
+    total = round(union_seconds(every))
+    out = {
+        "folder": os.path.basename(folder) if folder is not None else resolved_slug,
+        "since": since.isoformat(),
+        "until": until.isoformat(),
+        "gap_seconds": args.gap,
+        "busy_seconds": total,
+        "busy_hours": round(total / 3600, 2),
+        "sessions": sessions,
+    }
+    if args.json:
+        print(json.dumps(out, indent=2))
+        return 0
+    print(f"{out['folder']}  {out['since']} -> {out['until']}  gap {args.gap}s")
+    for s in sessions:
+        models = ", ".join(f"{m} {n}" for m, n in sorted(s["replies_by_model"].items())) or "no replies"
+        print(f"  {s['session']}  busy {s['busy_seconds'] / 3600:.2f} h  events {s['events']}  ({models})")
+    print(f"total busy {out['busy_hours']:.2f} h (wall clock, sessions overlapping counted once)")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
