@@ -7,7 +7,8 @@
 # node_modules is bound at its resolved target, and SYG_GATE_SANDBOX_RO_BINDS (colon-separated SRC or
 # SRC->DST, either side inside the worktree refused) adds more. Usage: gate-sandbox CWD -- CMD [ARG...]
 # SYG_GATE_SANDBOX_PROFILE=worker is the same sandbox for a whole worker rather than one gate (see
-# worker-sandbox): internet through pasta with host loopback refused, /run empty but for name
+# worker-sandbox): internet through pasta with every host address and the subnets of the host's non-default
+# interfaces unreachable (SYG_GATE_SANDBOX_WALL adds more), /run empty but for name
 # resolution and the gate lock, the tree's .git and (SYG_GATE_SANDBOX_TREE=rw, the default) .claude
 # read-only, SYG_GATE_SANDBOX_TREE=ro for a read-only tree, SYG_GATE_SANDBOX_SCRATCH bound writable at ~/.claude,
 # size caps on its tmpfs mounts, untracked secret-shaped files masked, SYG_GATE_SANDBOX_PATH as the inner PATH.
@@ -33,10 +34,49 @@ case $profile in
     tree=${SYG_GATE_SANDBOX_TREE:-rw}
     case $tree in rw|ro) ;; *) echo "$me: SYG_GATE_SANDBOX_TREE must be rw or ro: $tree" >&2; exit 125 ;; esac
     command -v pasta >/dev/null || { echo "$me: pasta not found; a worker sandbox has no network without it" >&2; exit 125; }
+    ipbin=$(command -v ip) || { echo "$me: ip (iproute2) not found; the worker profile walls host addresses with it" >&2; exit 125; }
+    bashbin=$(command -v bash) || { echo "$me: bash not found; the worker profile walls host addresses with it" >&2; exit 125; }
+    bwrap --help 2>&1 | grep -q -- '--size' || { echo "$me: the worker profile needs bubblewrap >= 0.10 (--size)" >&2; exit 125; }
     # Bare --share-net reaches host postgres and redis on loopback; pasta's namespace doesn't. Its
     # namespace reads as root, which refuses claude's bypass mode, so bwrap maps the real ids back.
-    launcher=(pasta --config-net --quiet --no-map-gw -t none -u none -T none -U none --)
-    args=(--die-with-parent --unshare-all --share-net --new-session --uid "$(id -u)" --gid "$(id -g)"
+    # The wall: pasta copies the host's default interface into its namespace and routes everything else
+    # through it, so the host's own addresses and its bridge and VPN subnets would answer. The set below is
+    # taken on the host at launch and refused with unreachable routes inside the namespace before bwrap
+    # runs: every address the host answers on (loopback excepted: the namespace has its own), the connected
+    # subnets of every interface with no default route, and SYG_GATE_SANDBOX_WALL (extra space-separated
+    # CIDRs or addresses). Not covered: addresses that appear after launch (a VPN connecting mid-run); the
+    # default interface's own subnet (the LAN), reachable by design; host link-local, which was measured
+    # unreachable through pasta. A subnet a default interface is also connected to counts as the LAN (two
+    # NICs on one LAN). Routes go in with replace, so a duplicate entry is harmless; a failed one (a bad
+    # extra entry) fails the launch with 125.
+    wall=()
+    defs=$({ "$ipbin" -o -4 route show default; "$ipbin" -o -6 route show default; } \
+      | awk '{ for (i = 1; i < NF; i++) if ($i == "dev") print $(i + 1) }')
+    while IFS= read -r pfx; do
+      [ -n "$pfx" ] && wall+=("$pfx")
+    done < <({
+      { "$ipbin" -o -4 route show table local type local; "$ipbin" -o -6 route show table local type local; } \
+        | awk '$2 !~ /^127\./ && $2 != "::1" { print ($2 ~ /\//) ? $2 : $2 ($2 ~ /:/ ? "/128" : "/32") }'
+      { "$ipbin" -o -4 route show table main scope link; "$ipbin" -o -6 route show table main; } \
+        | awk -v defs="$defs" 'BEGIN { n = split(defs, d, "\n"); for (i = 1; i <= n; i++) isdef[d[i]] = 1 }
+            / proto kernel( |$)/ { dev = ""; for (i = 1; i < NF; i++) if ($i == "dev") dev = $(i + 1)
+              if (dev == "" || $1 == "default" || $1 == "fe80::/64" || $1 ~ /^ff/) next
+              if (dev in isdef) lan[$1] = 1; else cand[++c] = $1 }
+            # a subnet a default interface is also on is the LAN (two NICs on one LAN): it stays open
+            END { for (i = 1; i <= c; i++) if (!(cand[i] in lan)) print cand[i] }'
+    } | sort -u)
+    if [ -n "${SYG_GATE_SANDBOX_WALL:-}" ]; then
+      read -r -a extra <<<"$SYG_GATE_SANDBOX_WALL"
+      wall+=("${extra[@]}")
+    fi
+    wall_sh='ip=$1 n=$2; shift 2
+for ((i = 0; i < n; i++)); do "$ip" route replace unreachable "$1" || { echo "gate-sandbox: cannot wall $1" >&2; exit 125; }; shift; done
+exec "$@"'
+    launcher=(pasta --config-net --quiet --no-map-gw -t none -u none -T none -U none --
+              "$bashbin" -c "$wall_sh" gate-sandbox-wall "$ipbin" "${#wall[@]}" "${wall[@]}")
+    # --unshare-all alone only tries the user namespace; the wall needs the worker out of pasta's, where
+    # it would hold CAP_NET_ADMIN over the routes
+    args=(--die-with-parent --unshare-all --unshare-user --share-net --new-session --uid "$(id -u)" --gid "$(id -g)"
           --ro-bind / / --dev /dev --proc /proc
           --size 2147483648 --tmpfs /tmp --size 16777216 --tmpfs /run --size 1073741824 --tmpfs "$HOME")
     # An empty /run hides the host's sockets (dbus, the VPN daemon, cups); names still resolve through this one

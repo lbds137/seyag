@@ -87,5 +87,26 @@ out=$(unset SYG_GATE_SANDBOX_RO_BINDS; "$B/gate-sandbox" "$R" -- sh -c 'echo ok 
   && ok "SYG_GATE_SANDBOX_RO_BINDS unset leaves behavior unchanged" \
   || bad "unset behavior: rc=$rc out=[$out]"
 
+# 6. SYG_GATE_SANDBOX_TOOLCHAIN: empty binds none; a list binds read-only
+if [ -e "$HOME/.local/share/mise" ]; then
+  out=$(SYG_GATE_SANDBOX_TOOLCHAIN='' "$B/gate-sandbox" "$R" -- sh -c '[ -e "$HOME/.local/share/mise" ] && echo visible; echo done' 2>&1); rc=$?
+  [ $rc = 0 ] && [ "$out" = "done" ] \
+    && ok "SYG_GATE_SANDBOX_TOOLCHAIN= (empty) leaves the mise dir out of the sandbox" \
+    || bad "empty toolchain: rc=$rc out=[$out]"
+else
+  echo "note: $HOME/.local/share/mise isn't on this host, so the empty-TOOLCHAIN row is skipped"
+fi
+mkdir -p "$T/tc"; echo marker-tc >"$T/tc/marker"
+out=$(SYG_GATE_SANDBOX_TOOLCHAIN=$T/tc "$B/gate-sandbox" "$R" -- sh -c 'cat "$1/marker"; touch "$1/w" 2>/dev/null && echo writable; exit 0' _ "$T/tc" 2>&1); rc=$?
+[ $rc = 0 ] && [ "$out" = marker-tc ] && [ ! -e "$T/tc/w" ] \
+  && ok "SYG_GATE_SANDBOX_TOOLCHAIN=DIR: the marker reads inside and the write fails" \
+  || bad "toolchain list: rc=$rc out=[$out]"
+
+# 7. SYG_GATE_SANDBOX_ENV: the named variable passes, an unlisted one doesn't
+out=$(FOO_Y=listed BAR_Y=unlisted SYG_GATE_SANDBOX_ENV="FOO_Y" "$B/gate-sandbox" "$R" -- sh -c 'echo "foo=${FOO_Y-unset} bar=${BAR_Y-unset}"' 2>&1); rc=$?
+[ $rc = 0 ] && [ "$out" = "foo=listed bar=unset" ] \
+  && ok "SYG_GATE_SANDBOX_ENV passes the named variable and not an unlisted one" \
+  || bad "env knob: rc=$rc out=[$out]"
+
 echo "gate-sandbox probe: $pass passed, $fail failed"
 [ "$fail" = 0 ]

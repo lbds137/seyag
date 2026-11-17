@@ -113,6 +113,7 @@ SYG_GATE_SANDBOX_RO_BINDS	user	worktrees	unset	Colon-separated SRC or SRC->DST r
 SYG_GATE_SANDBOX_SCRATCH	user	worktrees	unset	Worker profile only: host directory bound writable at ~/.claude inside the sandbox (required).
 SYG_GATE_SANDBOX_TOOLCHAIN	user	worktrees	$HOME/.local/bin/mise:$HOME/.local/share/mise:$HOME/.local/state/mise:$HOME/.config/mise:$HOME/.local/share/pnpm	Colon-separated toolchain paths gate-sandbox binds read-only (absent ones skipped); empty for none. Each entry widens what the sandbox can read (an entry of $HOME undoes the hidden home).
 SYG_GATE_SANDBOX_TREE	user	worktrees	rw	Worker profile only: rw or ro mount of the worktree.
+SYG_GATE_SANDBOX_WALL	user	worktrees	unset	Worker profile only: extra space-separated CIDRs or addresses gate-sandbox walls off with unreachable routes, on top of every host address and the non-default interfaces' subnets.
 SYG_GH_WRAPPERS	user	guards	unset	Whitespace-separated wrapper command prefix tokens scanned as gh invocations by session-url-gate and private-term-guard.
 SYG_HANDOFF_CMDS	user	stop-gates	unset	Python regex matching Bash commands that write a handoff (replaces built-in HANDOFF.md/handoff.md path defaults).
 SYG_HANDOFF_PATHS	user	stop-gates	(^|/)(?:HANDOFF\.md|handoff\.md)$	Python regex matching file paths whose Edit/Write counts as a handoff write (replaces built-in defaults when set).
@@ -193,6 +194,7 @@ SYG_WORKER_SANDBOX_PATH	user	worktrees	$HOME/.local/bin:$HOME/.local/share/mise/
 SYG_WORKER_SANDBOX_RO_BINDS	user	worktrees	unset	More read-only binds for the worker, in SYG_GATE_SANDBOX_RO_BINDS' format.
 SYG_WORKER_SANDBOX_SCRATCH	user	worktrees	unset	Host directory worker-sandbox binds writable at ~/.claude, where claude keeps its transcripts (required; the caller copies out what it wants and deletes it).
 SYG_WORKER_SANDBOX_TREE	user	worktrees	rw	rw or ro mount of the worker's tree.
+SYG_WORKER_SANDBOX_WALL	user	worktrees	unset	Extra space-separated CIDRs or addresses worker-sandbox walls off (passed as SYG_GATE_SANDBOX_WALL); a bad entry fails the launch.
 SYG_WORKER_TREE_CHECK_UNTRUSTED	user	worktrees	/tmp:/var/tmp:/dev/shm	Colon-separated directories a worker can write; worker-tree-check refuses a gitdir under them when no --repo anchor is given.
 SYG_WORKTREE_BACKUP_ALLOW_VOLATILE	user	worktrees	unset	Set to 1 to allow safe-worktree-clean --apply-hold backups on tmpfs or ramfs.
 SYG_WORKTREE_BACKUP_DIR	user	worktrees	${XDG_STATE_HOME:-$HOME/.local/state}/seyag/worktree-backups	Directory where safe-worktree-clean --apply-hold writes HOLD worktree backup bundles.
