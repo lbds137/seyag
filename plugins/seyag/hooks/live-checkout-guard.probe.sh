@@ -502,7 +502,7 @@ run_hook 0 "non-guarded tool (Read) fails open" \
 # --- 9. Judge module (hooks/lib/live_checkout.py): cwd-safe, one jq, cached ---
 # a. The hook process runs in a directory holding a planted subprocess.py. The
 #    judge must not import it: python3 -I in the guard keeps the cwd off
-#    sys.path. This row deliberately does not set PYTHONSAFEPATH itself.
+#    sys.path.
 PLANT="$TMP/planted-cwd"
 MARKER="$TMP/planted-marker"
 mkdir -p "$PLANT"
@@ -521,17 +521,14 @@ else
   fail=1
 fi
 
-# a2. Pre-3.11 emulation: Python before 3.11 ignores PYTHONSAFEPATH. A python3
-#     shim on PATH (hook process only) unsets that variable before the real
-#     interpreter runs, so only -I keeps the cwd out; the shim must run and the
-#     guard must still block.
+# a2. python3 shim on PATH (hook process only): the shim records it ran (so the
+#     row cannot pass with the shim unused) and the hook still keeps the planted
+#     subprocess.py out and blocks.
 REAL_PY3=$(command -v python3)
 PY_SHIM="$TMP/py-shim"
 mkdir -p "$PY_SHIM"
-# The shim records that it ran, so a row cannot pass because the shim was never
-# on the hook's PATH.
 PY3_RAN="$TMP/py3-shim-ran"
-printf '#!/bin/bash\necho ran >>"%s"\nexec env -u PYTHONSAFEPATH "%s" "$@"\n' "$PY3_RAN" "$REAL_PY3" >"$PY_SHIM/python3"
+printf '#!/bin/bash\necho ran >>"%s"\nexec "%s" "$@"\n' "$PY3_RAN" "$REAL_PY3" >"$PY_SHIM/python3"
 chmod +x "$PY_SHIM/python3"
 rm -f "$PY3_RAN" "$MARKER"
 (cd "$PLANT" && printf '%s' "$PLANT_PAYLOAD" | env \
@@ -540,9 +537,9 @@ rm -f "$PY3_RAN" "$MARKER"
 py3_rc=$?
 count=$((count + 1))
 if [ "$py3_rc" = 2 ] && [ ! -e "$MARKER" ] && [ -s "$PY3_RAN" ]; then
-  echo "ok   [2]: pre-3.11 emulation (PYTHONSAFEPATH ignored): planted subprocess.py in the process cwd is not imported; still blocks"
+  echo "ok   [2]: python3 shim: planted subprocess.py in the process cwd is not imported; still blocks"
 else
-  echo "FAIL [rc=$py3_rc, marker $([ -e "$MARKER" ] && echo present || echo absent), shim $([ -s "$PY3_RAN" ] && echo ran || echo did-not-run)]: pre-3.11 emulation (PYTHONSAFEPATH ignored): planted subprocess.py in the process cwd is not imported; still blocks"
+  echo "FAIL [rc=$py3_rc, marker $([ -e "$MARKER" ] && echo present || echo absent), shim $([ -s "$PY3_RAN" ] && echo ran || echo did-not-run)]: python3 shim: planted subprocess.py in the process cwd is not imported; still blocks"
   fail=1
 fi
 
