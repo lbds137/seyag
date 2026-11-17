@@ -329,7 +329,7 @@ resolve_body_word() {
     *'$'* | *'\'* | *'"'* | *"'"* | \~/*) ;;
     *) return 0 ;;
   esac
-  if BODY_PATH=$(python3 - "$1" "$2" <<'PYEOF' 2>/dev/null
+  if BODY_PATH=$(python3 -I "${SYG_PY_CACHE_ARG:--B}" - "$1" "$2" <<'PYEOF' 2>/dev/null
 import os
 import re
 import sys
@@ -412,7 +412,7 @@ find_body_file_flag() {
     *) return 0 ;;
   esac
   found=$(HOOK_LIB="$(dirname "${BASH_SOURCE[0]}")/lib" BODY_WORD_RE="$BODY_WORD_RE" \
-    python3 - "${IS_GH_PR_WRITE:-0}" 3<<<"$CMD" <<'PYEOF' 2>/dev/null
+    python3 -I "${SYG_PY_CACHE_ARG:--B}" - "${IS_GH_PR_WRITE:-0}" 3<<<"$CMD" <<'PYEOF' 2>/dev/null
 import os
 import re
 import sys
@@ -533,7 +533,7 @@ has_gh_pr_short_flag() {
     *) return 1 ;;
   esac
   masked=$(HOOK_LIB="$(dirname "${BASH_SOURCE[0]}")/lib" \
-    python3 - 3<<<"$CMD" <<'PYEOF' 2>/dev/null
+    python3 -I "${SYG_PY_CACHE_ARG:--B}" - 3<<<"$CMD" <<'PYEOF' 2>/dev/null
 import os
 import sys
 

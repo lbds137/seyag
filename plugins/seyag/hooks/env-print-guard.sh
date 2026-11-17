@@ -171,7 +171,7 @@ _ADMIT_RE='(^|[^A-Za-z0-9_])(env|printenv|set|jq)([^A-Za-z0-9_]|$)'
 
 LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib"
 
-REASON=$(SYG_LIB_DIR="$LIB_DIR" SYG_EPG_CWD="$CWD" SYG_EPG_TRUSTED_VARS="$TRUSTED_VARS" python3 - 3<<<"$COMMAND" <<'PY' 2>/dev/null
+REASON=$(SYG_LIB_DIR="$LIB_DIR" SYG_EPG_CWD="$CWD" SYG_EPG_TRUSTED_VARS="$TRUSTED_VARS" python3 -I "${SYG_PY_CACHE_ARG:--B}" - 3<<<"$COMMAND" <<'PY' 2>/dev/null
 import os
 import re
 import shlex

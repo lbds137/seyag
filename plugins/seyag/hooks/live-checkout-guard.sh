@@ -284,11 +284,10 @@ if [ "$TOOL_NAME" != "Bash" ]; then
 fi
 
 # The judge is hooks/lib/live_checkout.py, imported so CPython caches its
-# bytecode. The -c string drops '' and '.' from sys.path: Python before 3.11
-# ignores PYTHONSAFEPATH and puts the cwd first for -c, so the strip is what
-# keeps the cwd off sys.path there. PYTHONSAFEPATH=1 is kept for 3.11+. Then the
-# lib dir goes first. Any failure -> exit 0 (fail open).
-RESULT=$(CWD="$CWD" LIVE_ROOTS="$LIVE_ROOTS" PYTHONSAFEPATH=1 python3 -c 'import sys; sys.path[:] = [p for p in sys.path if p not in ("", ".")]; sys.path.insert(0, sys.argv[1]); import live_checkout' "$HOOK_LIB" 3<<<"$CMD" 2>/dev/null) || exit 0
+# bytecode. python3 -I keeps the cwd off sys.path on every Python version and
+# ignores PYTHON* env vars, so run.sh's cache prefix arrives as SYG_PY_CACHE_ARG
+# (-B when unset). The lib dir goes first. Any failure -> exit 0 (fail open).
+RESULT=$(CWD="$CWD" LIVE_ROOTS="$LIVE_ROOTS" python3 -I "${SYG_PY_CACHE_ARG:--B}" -c 'import sys; sys.path.insert(0, sys.argv[1]); import live_checkout' "$HOOK_LIB" 3<<<"$CMD" 2>/dev/null) || exit 0
 
 [ -n "$RESULT" ] || exit 0
 

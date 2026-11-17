@@ -501,8 +501,8 @@ run_hook 0 "non-guarded tool (Read) fails open" \
 
 # --- 9. Judge module (hooks/lib/live_checkout.py): cwd-safe, one jq, cached ---
 # a. The hook process runs in a directory holding a planted subprocess.py. The
-#    judge must not import it: the guard sets PYTHONSAFEPATH=1 for that. This
-#    row deliberately does not set PYTHONSAFEPATH itself.
+#    judge must not import it: python3 -I in the guard keeps the cwd off
+#    sys.path. This row deliberately does not set PYTHONSAFEPATH itself.
 PLANT="$TMP/planted-cwd"
 MARKER="$TMP/planted-marker"
 mkdir -p "$PLANT"
@@ -523,7 +523,8 @@ fi
 
 # a2. Pre-3.11 emulation: Python before 3.11 ignores PYTHONSAFEPATH. A python3
 #     shim on PATH (hook process only) unsets that variable before the real
-#     interpreter runs, so only the guard's sys.path strip keeps the cwd out.
+#     interpreter runs, so only -I keeps the cwd out; the shim must run and the
+#     guard must still block.
 REAL_PY3=$(command -v python3)
 PY_SHIM="$TMP/py-shim"
 mkdir -p "$PY_SHIM"

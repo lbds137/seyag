@@ -234,7 +234,7 @@ if [ "${1:-}" = "--check" ]; then
   fi
   HOOK_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib"
   CK_VERDICT=$(SYG_CHECK_TARGET="${2:-}" SYG_CHECK_LIB="$HOOK_LIB" \
-    python3 - 2>/dev/null <<'PYEOF'
+    python3 -I "${SYG_PY_CACHE_ARG:--B}" - 2>/dev/null <<'PYEOF'
 import os
 import re
 import sys
@@ -368,7 +368,7 @@ fi
 CWD=$(jq -r '.cwd // empty' <<<"$INPUT" 2>/dev/null) || CWD=""
 
 HOOK_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib"
-RESULT=$(CWD="$CWD" HOOK_LIB="$HOOK_LIB" python3 - 3<<<"$CMD" <<'PYEOF' 2>/dev/null
+RESULT=$(CWD="$CWD" HOOK_LIB="$HOOK_LIB" python3 -I "${SYG_PY_CACHE_ARG:--B}" - 3<<<"$CMD" <<'PYEOF' 2>/dev/null
 import os
 import re
 import sys

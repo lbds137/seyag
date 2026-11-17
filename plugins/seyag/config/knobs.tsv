@@ -173,6 +173,7 @@ SYG_PR_BODY_TASK_PATHS	user	pr	tracker/tasks tracker/archive/tasks	Whitespace-se
 SYG_PR_MERGE_LIB_DIR	internal	pr	<hooks_dir>/lib	Test seam overriding the hooks/lib directory passed to pr-merge-review-check's Python parser.
 SYG_PR_MONITOR_SEEN_FILE	internal	pr	${XDG_RUNTIME_DIR:-/tmp}/.claude_pr_monitor_seen.<uid>	Test seam overriding the deduplication state file for pr-monitor-reminder.
 SYG_PUBLISH_CHECKED	user	guards	unset	Colon-separated <owner/repo> list (or any non-empty value for a gist) in the session env unblocking publish-gate.
+SYG_PY_CACHE_ARG	internal	guards	unset	Python flag run.sh exports (`-Xpycache_prefix=<dir>`, or `-B`) for hooks' `python3 -I`, which ignores PYTHONPYCACHEPREFIX; unset on a direct run, where hooks fall back to `-B`.
 SYG_ROLE_CONTEXT_CMD	user	session	unset	Command (bash -c) claude-role --board runs for session context sizes: prints a JSON array of {folder, tokens, flagged, flag_at}. Unset means no context lines; a failing one prints an unavailable line.
 SYG_ROLE_CONTEXT_LINE	user	session	unset	One line claude-role prints first at session start (hook mode), before the role file and even for a headless or task run. Empty prints nothing.
 SYG_ROLE_DIR	user	session	`${XDG_DATA_HOME:-$HOME/.local/share}/seyag/roles`	Directory of role files (one <project folder>.md each) read and written by claude-role and driver-clone.

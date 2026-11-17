@@ -115,7 +115,7 @@ log="${XDG_STATE_HOME:-$HOME/.local/state}/claude-usage/readings.jsonl"
 # falls back to 0 = infinitely stale; 0 needs no guard, since now - 0 > STALE_MAX_S always.
 last_fetch=$(head -n 1 "$log.last" 2>/dev/null)
 case $last_fetch in ''|*[!0-9]*) last_fetch=0 ;; esac
-python3 - "$log" "$hold" "$now" "$((margin_min * 60))" "$rate_override" \
+python3 -I -B - "$log" "$hold" "$now" "$((margin_min * 60))" "$rate_override" \
     "$RATE_WINDOW_S" "$MIN_SPAN_S" "$STALE_MAX_S" "$BURN_RESERVE" "$last_fetch" "$RATE_FLOOR" <<'PY' || exit 1
 import json
 import math

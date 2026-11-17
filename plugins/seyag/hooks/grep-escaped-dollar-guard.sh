@@ -148,9 +148,10 @@ fi
 # hook exists to catch. Not the environment either: Linux caps one env string
 # at 128 KiB (MAX_ARG_STRLEN), and python would fail to exec.
 #
-# Bytecode: run.sh points PYTHONPYCACHEPREFIX at a per-user cache, so when
-# dispatched via run.sh this import writes nothing into hooks/lib (a direct
-# manual run still does; cache caveats: see run.sh).
+# Bytecode: python3 -I ignores PYTHONPYCACHEPREFIX, so run.sh hands the per-user
+# cache prefix over as SYG_PY_CACHE_ARG (-Xpycache_prefix=...), and this import
+# writes nothing into hooks/lib; a direct manual run falls back to -B (cache
+# caveats: see run.sh).
 #
 # On ANY python failure — python3 absent, the import failing, a non-zero exit —
 # the RAW command text is kept. That is the conservative direction rather than
@@ -173,7 +174,7 @@ STRIPPED_CMD="$GUARD_CMD"
 case "$GUARD_CMD" in
   *'<<'*)
     HOOK_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib"
-    STRIP_OUT=$(HOOK_LIB="$HOOK_LIB" python3 -c '
+    STRIP_OUT=$(HOOK_LIB="$HOOK_LIB" python3 -I "${SYG_PY_CACHE_ARG:--B}" -c '
 import os
 import sys
 

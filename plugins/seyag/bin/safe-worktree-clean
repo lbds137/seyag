@@ -252,7 +252,7 @@ RUN_STAMP=${SYG_WORKTREE_RUN_STAMP:-$(date +%Y-%m-%dT%H%M%S)}
 RUN_DIR=$(realpath -m -- "$BACKUP_ROOT/$RUN_STAMP")
 
 parse_repo_plan() {
-  python3 -c '
+  python3 -I -B -c '
 import json, sys
 d = json.load(sys.stdin)
 print((d.get("repo") or "") + "\x1e" + (d.get("hold_plan") or ""))
@@ -355,7 +355,7 @@ if [ ${#REPOS[@]} -gt 1 ]; then
     # JSONs already name each repo's commit-carrying plan trees (hold_plan_commit_carrying).
     {
       printf '%s\0' "${CHILD_JSONS[@]}"
-    } | python3 -c '
+    } | python3 -I -B -c '
 import json, sys
 plan_id = sys.argv[1]
 data = sys.stdin.buffer.read().decode("utf-8", "surrogateescape").split("\0")[:-1]
@@ -421,7 +421,7 @@ if refused:
           [ -n "$r_plan" ] && has_hold_plan=true
         fi
       else
-        err_json=$(python3 -c 'import json, sys; print(json.dumps({"repo": sys.argv[1], "error": f"exit {sys.argv[2]}"}))' "$r" "$c_rc")
+        err_json=$(python3 -I -B -c 'import json, sys; print(json.dumps({"repo": sys.argv[1], "error": f"exit {sys.argv[2]}"}))' "$r" "$c_rc")
         JSON_OBJS+=("$err_json")
         if [ -z "$APPLY_HOLD" ]; then
           R_MAINS+=("$(realpath -m -- "$r")")
@@ -475,7 +475,7 @@ if refused:
       for j in "${JSON_OBJS[@]}"; do
         printf '%s\0' "$j"
       done
-    } | python3 -c '
+    } | python3 -I -B -c '
 import json, sys
 f = sys.stdin.buffer.read().decode("utf-8", "surrogateescape").split("\0")[:-1]
 sweep_plan = f[0] or None
@@ -637,7 +637,7 @@ AGE_MIN=${SYG_WORKTREE_LOCK_AGE_MIN:-}
 # cwd or any argument lies inside a given path. Unreadable foreign pids are skipped; exit 3 when
 # /proc itself cannot be read, which callers turn into HOLD.
 proc_scan() {
-  python3 - "$@" <<'PYEOF'
+  python3 -I -B - "$@" <<'PYEOF'
 import os, sys
 
 mode, paths = sys.argv[1], [os.path.realpath(p) for p in sys.argv[2:]]
@@ -1808,7 +1808,7 @@ if $JSON; then
     for k in "${!L_PATH[@]}"; do
       printf '%s\0%s\0%s\0%s\0' "${L_PATH[$k]}" "${L_VERDICT[$k]}" "${L_DETAIL[$k]}" "${L_ACTION[$k]}"
     done
-  } | python3 -c '
+  } | python3 -I -B -c '
 import json, sys
 f = sys.stdin.buffer.read().decode("utf-8", "surrogateescape").split("\0")[:-1]
 repo, base, apply_, locks, hold_plan, trees_raw, cc_raw, n = f[:8]

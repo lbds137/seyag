@@ -129,7 +129,7 @@ LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib"
 # python3 itself missing — no tokenizer exists then, `|| MERGE_EXTRACT=""`
 # stands the hook down, and reimplementing the splitter in bash is not worth
 # that gap.
-MERGE_EXTRACT=$(SYG_LIB_DIR="${SYG_PR_MERGE_LIB_DIR:-$LIB_DIR}" python3 - 3<<<"$COMMAND" <<'PY' 2>/dev/null
+MERGE_EXTRACT=$(SYG_LIB_DIR="${SYG_PR_MERGE_LIB_DIR:-$LIB_DIR}" python3 -I "${SYG_PY_CACHE_ARG:--B}" - 3<<<"$COMMAND" <<'PY' 2>/dev/null
 import os
 import re
 import sys
