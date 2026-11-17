@@ -116,8 +116,8 @@ An optional TOML file fills in knobs the environment left unset: user `${XDG_CON
 | `SYG_SESSION_CONTEXT_EXTRA_CMD` | unset | Command session-context runs (bash -c, stdin closed) to add another harness's sessions: a JSON array of {name, folder, sessionId, status, tokens}. Unset adds none; a failure warns on stderr and keeps the Claude rows. | `bin/session-context` |
 | `SYG_SESSION_CONTEXT_EXTRA_MODEL` | `other` | Model label session-context gives the rows from SYG_SESSION_CONTEXT_EXTRA_CMD. | `bin/session-context` |
 | `SYG_SESSION_CONTEXT_EXTRA_THRESHOLD` | `150000` | Context token threshold at which session-context flags a row from SYG_SESSION_CONTEXT_EXTRA_CMD. | `bin/session-context` |
-| `SYG_SESSION_CONTEXT_THRESHOLD` | `500000` | Context token threshold at which session-context flags a session on non-Fable models (a whole number; separate from the in-session reminder's SYG_CONTEXT_THRESHOLD). | `bin/session-context` |
-| `SYG_SESSION_CONTEXT_THRESHOLD_FABLE` | `200000` | Context token threshold at which session-context flags a session whose model id contains fable (a whole number). | `bin/session-context` |
+| `SYG_SESSION_CONTEXT_THRESHOLD` | `500000` | Context token threshold at which session-context flags a session on non-Fable models (a whole number of at most 15 digits; separate from the in-session reminder's SYG_CONTEXT_THRESHOLD). | `bin/session-context` |
+| `SYG_SESSION_CONTEXT_THRESHOLD_FABLE` | `200000` | Context token threshold at which session-context flags a session whose model id contains fable (a whole number of at most 15 digits). | `bin/session-context` |
 | `SYG_STALLED_ZAI_TZ` | `Asia/Shanghai` | IANA time zone in which session-stalled reads the z.ai quota-reset stamp (`Your limit will reset at YYYY-MM-DD HH:MM:SS`); an unknown zone leaves the reset unparsed. | `bin/session-stalled` |
 | `SYG_STATE_MAX_DAYS` | `7` | Age in whole days after which session-start deletes stale prompt-hook state files in SYG_STATE_DIR. | `hooks/dispatch-posture-gate.sh`, `hooks/session-start.sh` |
 

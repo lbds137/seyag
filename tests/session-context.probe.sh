@@ -87,9 +87,9 @@ rm "$TMP/agents-fail"
 echo '{"agents": []}' > "$TMP/agents.json"
 err=$("$BIN/session-context" 2>&1 >/dev/null); rc=$?
 [ $rc = 1 ] && grep -q "didn't return a list" <<< "$err" && ok "a non-list agents reply exits 1, not an empty table" || bad "non-list agents: rc $rc, $err"
-echo '[{"name":"Bad","cwd":"/nowhere","sessionId":"s-big","status":["not","text"]}]' > "$TMP/agents.json"
+echo '["x", {"name":"Bad","cwd":"/nowhere","sessionId":"s-big","status":"busy"}]' > "$TMP/agents.json"
 err=$("$BIN/session-context" 2>&1 >/dev/null); rc=$?
-[ $rc = 1 ] && grep -q "built 0 rows for 1 sessions" <<< "$err" && ok "a dropped row exits 1" || bad "dropped row: rc $rc, $err"
+[ $rc = 1 ] && grep -q "built 0 rows for 2 sessions" <<< "$err" && ok "a dropped row exits 1" || bad "dropped row: rc $rc, $err"
 
 # Two sessions in one folder, one of them in an agent worktree (named after the main checkout).
 jq -c --arg wt "$TMP/wt/agent-x" '. + [{name: "Twin", cwd: $wt, sessionId: "s-twin", status: "busy"}]' \
@@ -155,15 +155,27 @@ printf '#!/bin/sh\necho '"'"'[{"name":"Xn","sessionId":"x-n","tokens":null}]'"'"
 err=$(SYG_SESSION_CONTEXT_EXTRA_CMD="$TMP/extra-tok.sh" "$BIN/session-context" --json 2>&1 >"$TMP/out.json"); rc=$?
 [ $rc = 0 ] && [ -z "$err" ] && jq -e '.[] | select(.sessionId == "x-n") | .tokens == 0' "$TMP/out.json" >/dev/null \
     && ok "extra row with null tokens counts as 0" || bad "extra null tokens: rc $rc, $err"
+# Non-string name, folder, sessionId and status in an extra row take their defaults; no failure line.
+printf '#!/bin/sh\necho '"'"'[{"name":7,"folder":[1],"sessionId":null,"status":{},"tokens":10}]'"'"'\n' > "$TMP/extra-odd.sh"; chmod +x "$TMP/extra-odd.sh"
+err=$(SYG_SESSION_CONTEXT_EXTRA_CMD="$TMP/extra-odd.sh" "$BIN/session-context" --json 2>&1 >"$TMP/out.json"); rc=$?
+[ $rc = 0 ] && [ -z "$err" ] && jq -e '.[] | select(.tokens == 10) | (.name == "extra" and .folder == "" and .sessionId == "" and .status == "idle")' "$TMP/out.json" >/dev/null \
+    && ok "extra row with non-string name, folder, status: defaults, no failure line" || bad "extra odd fields: rc $rc, err '$err', out $(cat "$TMP/out.json")"
 
 # Thresholds must be whole numbers: a bad one exits 2 with a message, never an empty table.
 for knob in SYG_SESSION_CONTEXT_THRESHOLD SYG_SESSION_CONTEXT_THRESHOLD_FABLE SYG_SESSION_CONTEXT_EXTRA_THRESHOLD; do
     for v in 12k -1 5e5 1.5; do
         out=$(env "$knob=$v" "$BIN/session-context" --json 2>"$TMP/err"); rc=$?
-        [ $rc = 2 ] && [ -z "$out" ] && [ "$(cat "$TMP/err")" = "session-context: $knob must be a whole number, got '$v'" ] \
+        [ $rc = 2 ] && [ -z "$out" ] && [ "$(cat "$TMP/err")" = "session-context: $knob must be a whole number of at most 15 digits, got '$v'" ] \
             && ok "$knob=$v exits 2 with the message" || bad "$knob=$v: rc $rc, out '$out', err $(cat "$TMP/err")"
     done
 done
+# A 20-digit threshold would overflow the bash arithmetic: refused, not wrapped. 15 digits is the largest accepted.
+out=$(SYG_SESSION_CONTEXT_THRESHOLD=99999999999999999999 "$BIN/session-context" --json 2>"$TMP/err"); rc=$?
+[ $rc = 2 ] && [ -z "$out" ] && [ "$(cat "$TMP/err")" = "session-context: SYG_SESSION_CONTEXT_THRESHOLD must be a whole number of at most 15 digits, got '99999999999999999999'" ] \
+    && ok "a 20-digit threshold exits 2 with the 15-digit message" || bad "20-digit threshold: rc $rc, out '$out', err $(cat "$TMP/err")"
+out=$(SYG_SESSION_CONTEXT_THRESHOLD=999999999999999 "$BIN/session-context" --json 2>"$TMP/err"); rc=$?
+[ $rc = 0 ] && [ -z "$(cat "$TMP/err")" ] && jq -e '.[0].flag_at == 999999999999999' <<< "$out" >/dev/null \
+    && ok "a 15-digit threshold is accepted" || bad "15-digit threshold: rc $rc, err $(cat "$TMP/err"), out $out"
 # the in-session reminder's thresholds are a different policy: not read here
 json=$(SYG_CONTEXT_THRESHOLD=1000 SYG_CONTEXT_THRESHOLD_FABLE=1000 "$BIN/session-context" --json)
 [ "$(jq -c '[.[] | .flag_at]' <<< "$json")" = '[500000]' ] && ok "SYG_CONTEXT_THRESHOLD(_FABLE) are not read (flag_at stays 500000)" || bad "reminder thresholds read: $json"
@@ -192,6 +204,19 @@ json=$(cat "$TMP/out.json")
     && ok "a string token count skips that reply; the older reply counts" || bad "string tokens: rc $rc, err '$err', $json"
 [ "$(jq -c '[.[] | select(.name == "Num") | [.tokens, .model, .flagged]]' <<< "$json")" = '[[900000,"",true]]' ] \
     && ok "a numeric model is left blank; the row keeps its tokens and flag" || bad "numeric model: $json"
+echo '[{"name":"Small","cwd":"/nowhere/Projects/small","sessionId":"s-small","status":"busy"}]' > "$TMP/agents.json"
+
+# A session with no cwd gets an empty folder, even when run from inside a git repo (not the repo's name).
+echo '[{"name":"NoCwd","sessionId":"s-small","status":"busy"}]' > "$TMP/agents.json"
+json=$(cd "$TMP/repos/big-repo" && "$BIN/session-context" --json)
+[ "$(get NoCwd .folder)" = '""' ] && ok "a session with no cwd has an empty folder, even inside a repo" || bad "no-cwd folder: $(get NoCwd .folder)"
+# Non-string name, cwd, sessionId and status in the agents list become blanks; the row is kept, the normal row unchanged.
+echo '[{"name":5,"cwd":3,"sessionId":{"x":1},"status":true},{"name":"Small","cwd":"/nowhere/Projects/small","sessionId":"s-small","status":"busy"}]' > "$TMP/agents.json"
+err=$("$BIN/session-context" --json 2>&1 >"$TMP/out.json"); rc=$?
+json=$(cat "$TMP/out.json")
+[ $rc = 0 ] && [ -z "$err" ] && [ "$(jq -c '[.[] | select(.name == "") | [.sessionId, .folder, .status]]' <<< "$json")" = '[["","",""]]' ] \
+    && [ "$(get Small '[.tokens, .folder, .status]')" = '[120000,"small","busy"]' ] \
+    && ok "non-string agent fields become blanks; the row is kept, the normal row unchanged" || bad "non-string agent fields: rc $rc, err '$err', $json"
 echo '[{"name":"Small","cwd":"/nowhere/Projects/small","sessionId":"s-small","status":"busy"}]' > "$TMP/agents.json"
 
 # --help prints the whole header comment, through the extra-knob block
