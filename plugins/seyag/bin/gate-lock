@@ -15,14 +15,22 @@ if ! flock -n 9; then
   echo "gate-lock: waiting for $lock (another gate run holds it)" >&2
   flock 9 || { echo "gate-lock: flock $lock failed" >&2; exit 125; }
 fi
-# The command runs without the lock fd (a stray grandchild can't hold the lock forever), and a
-# TERM/INT/HUP to gate-lock (a caller's timeout) is passed on and waited out, so the lock is
-# released only once the command is gone. SIGKILL can't be caught; then the lock goes early.
-"$@" 9>&- &
+# The command runs without the lock fd (a stray grandchild can't hold the lock forever) and with
+# gate-lock's own stdin (bash would give a background job /dev/null). The trap is installed before
+# the fork, so a TERM/INT/HUP to gate-lock (a caller's timeout) is never lost: it is passed on and
+# waited out, so the lock is released only once the command is gone. SIGKILL can't be caught; then
+# the lock goes early.
+child='' got=''
+trap 'got=1; [ -z "$child" ] || kill -TERM "$child" 2>/dev/null' TERM INT HUP
+"$@" 9>&- <&0 &
 child=$!
-trap 'kill -TERM "$child" 2>/dev/null' TERM INT HUP
+[ -z "$got" ] || kill -TERM "$child" 2>/dev/null   # a signal that landed before $child was known
 while :; do
   wait "$child"; rc=$?
   kill -0 "$child" 2>/dev/null || break  # wait returned for a trapped signal; the child still runs
 done
+# bash may reap the child while a trapped signal interrupts wait, so the loop's rc can be 128+N;
+# bash remembers a reaped background child's status, and this wait returns the real code (127 =
+# a bash that forgot it: keep the loop's code)
+r0=$rc; wait "$child"; rc=$?; [ "$rc" != 127 ] || rc=$r0
 exit "$rc"

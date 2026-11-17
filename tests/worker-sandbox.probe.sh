@@ -11,6 +11,8 @@ bad() { fail=$((fail+1)); echo "FAIL: $1"; }
 
 T=$(realpath "$(mktemp -d)"); trap 'chmod -R u+rwX "$T" 2>/dev/null; rm -rf "$T"' EXIT
 export SYG_GATE_LOCK_FILE=$T/gate.lock
+# worker-sandbox runs worker-tree-check first, which distrusts /tmp by default; the fixtures live there
+export SYG_WORKER_TREE_CHECK_UNTRUSTED=/var/tmp:/dev/shm
 M=$T/main; W=$T/tree
 git init -q "$M"
 git -C "$M" -c user.email=t@t -c user.name=t commit -q --allow-empty -m i
@@ -33,6 +35,15 @@ fake 'exit 0'
 out=$(cd "$W" && SYG_WORKER_SANDBOX_TREE=sideways SYG_WORKER_SANDBOX_CLAUDE=$T/fake-claude "$B/worker-sandbox" --settings "$T/overlay.json" 2>&1); rc=$?
 [ "$rc" = 125 ] && [[ $out == *"must be rw or ro"* ]] && ok "a bad tree mode refuses (125) naming the rule, nothing runs" \
   || bad "bad tree mode: rc=$rc out=[$out]"
+
+# 4c. A tree whose .git points at a gitdir that isn't registered for it: worker-tree-check refuses
+# before any host git runs, and the fake claude (which writes a marker) never starts. A copy, not $W.
+BT=$T/badtree; mkdir -p "$BT"; echo 'gitdir: /nonexistent/x' >"$BT/.git"
+fake ': >"'"$T"'/bad-ran"; exit 0'
+out=$(cd "$BT" && SYG_WORKER_SANDBOX_CLAUDE=$T/fake-claude "$B/worker-sandbox" --settings "$T/overlay.json" 2>&1); rc=$?
+[ "$rc" = 125 ] && [[ $out == *"worker-tree-check refused"* ]] && [ ! -e "$T/bad-ran" ] \
+  && ok "a tree with a forged gitfile refuses (125) via worker-tree-check; nothing ran" \
+  || bad "forged gitfile: rc=$rc out=[$out] ran=$([ -e "$T/bad-ran" ] && echo yes || echo no)"
 
 # 8. No pasta: refuses rather than run with another network (or none of the walls)
 mkdir -p "$T/nopasta"
@@ -99,6 +110,11 @@ unreachable ::/96 dev lo proto kernel metric 1024 pref medium
 local ::1 dev lo table local proto kernel metric 0 pref medium
 local fd00::5 dev br0 table local proto kernel metric 0 pref medium
 EOF
+# Real `ip -o route show table all` shapes (iproute2 in a pasta namespace): a multipath route one of
+# whose hops is a default dev (stays open), a route with an nhid (walled), and a prefixed local entry
+printf '10.7.0.0/24 \\\tnexthop via 10.9.0.2 dev br7 weight 1 \\\tnexthop dev wlan0 weight 1 \n' >>"$T/fx/all4"
+echo '10.6.0.0/24 nhid 5 via 10.9.0.3 dev br6' >>"$T/fx/all4"
+echo 'local 10.4.0.0/24 dev lo table local scope host' >>"$T/fx/local4"
 cp "$T/fx/all4" "$T/fx/all6" "$T/fx-no-lo/"
 printf 'local 192.168.50.45 dev wlan0 table local proto kernel scope host src 192.168.50.45 \n' >"$T/fx-no-lo/local4"
 printf 'local fd00::5 dev br0 table local proto kernel metric 0 pref medium\n' >"$T/fx-no-lo/local6"
@@ -122,8 +138,12 @@ done
 # 7d. --print-wall computes the set from a fixture host, no sandbox: the host's addresses (loopback
 # excepted), and every route in any table through an interface with no default route. wlan0 and wg0
 # carry default routes (wg0's in table 51820), so 192.168.50.0/24, which eth0 shares with wlan0, and
-# wg0's 10.20.0.0/16 stay open; link-local, multicast, defaults, loopback and type-keyword lines are skipped.
-want='10.8.0.1/32
+# wg0's 10.20.0.0/16 stay open, and so does the multipath 10.7.0.0/24 (one hop is on wlan0);
+# link-local, multicast, defaults, loopback and type-keyword lines are skipped. 10.6.0.0/24 (an nhid
+# route) is walled, and so is the prefixed local entry 10.4.0.0/24.
+want='10.4.0.0/24
+10.6.0.0/24
+10.8.0.1/32
 10.8.0.2/32
 10.99.0.0/16
 100.64.0.0/10
@@ -143,6 +163,22 @@ got=$(PATH=$T/ipstub:$PATH SYG_GATE_SANDBOX_WALL="198.51.100.0/24 203.0.113.9" "
 203.0.113.9")" ] \
   && ok "--print-wall: SYG_GATE_SANDBOX_WALL extras are in the set" \
   || bad "print-wall extras: rc=$rc got=[$got] err=[$(cat "$T/err")]"
+# An extra entry must be an address or CIDR: a keyword such as `default` would wall everything.
+# A shape-valid but kernel-invalid prefix length (10.0.0.0/33) passes here; the launch rejects it.
+got=$(PATH=$T/ipstub:$PATH SYG_GATE_SANDBOX_WALL="default" "$B/gate-sandbox" --print-wall 2>"$T/err"); rc=$?
+[ "$rc" = 125 ] && [ -z "$got" ] && grep -q 'SYG_GATE_SANDBOX_WALL: not an address or CIDR: default' "$T/err" \
+  && ok "--print-wall refuses (125) a keyword in SYG_GATE_SANDBOX_WALL, printing nothing" \
+  || bad "wall keyword: rc=$rc got=[$got] err=[$(cat "$T/err")]"
+got=$(PATH=$T/ipstub:$PATH SYG_GATE_SANDBOX_WALL="10.0.0.0/33 fd12::/64 203.0.113.9" "$B/gate-sandbox" --print-wall 2>"$T/err"); rc=$?
+[ "$rc" = 0 ] && grep -qFx 10.0.0.0/33 <<<"$got" && grep -qFx fd12::/64 <<<"$got" && grep -qFx 203.0.113.9 <<<"$got" \
+  && ok "--print-wall accepts v4 and v6 CIDRs and a bare address (the prefix length's range is the kernel's)" \
+  || bad "wall shape accepts: rc=$rc got=[$got] err=[$(cat "$T/err")]"
+for badw in 'a.b.c.d' '10.0.0.0/8;x' '1.2.3' 'fd00::g'; do
+  got=$(PATH=$T/ipstub:$PATH SYG_GATE_SANDBOX_WALL="$badw" "$B/gate-sandbox" --print-wall 2>"$T/err"); rc=$?
+  [ "$rc" = 125 ] && [ -z "$got" ] && grep -qF "not an address or CIDR: $badw" "$T/err" \
+    && ok "--print-wall refuses (125) the malformed wall entry [$badw]" \
+    || bad "wall entry [$badw]: rc=$rc got=[$got] err=[$(cat "$T/err")]"
+done
 
 # 9. The route queries fail closed: an ip that errors on any query, or a local table without loopback
 # (so the query or its parse saw no real data), refuses (125); a worker launch refuses with the same words.
@@ -183,15 +219,29 @@ fi
 
 # 8c. A bad extra CIDR in the wall knob fails the launch rather than run with a smaller wall
 fake 'echo ran; exit 0'
-out=$(cd "$W" && SYG_WORKER_SANDBOX_WALL=not-a-cidr SYG_WORKER_SANDBOX_CLAUDE=$T/fake-claude "$B/worker-sandbox" --settings "$T/overlay.json" 2>"$T/err"); rc=$?
-[ "$rc" = 125 ] && [ -z "$out" ] && grep -q 'cannot wall not-a-cidr' "$T/err" \
-  && ok "a bad SYG_WORKER_SANDBOX_WALL entry refuses the launch (125), nothing runs" \
+# (shape-valid, kernel-invalid: `ip route replace` fails inside the namespace; a malformed entry never gets that far)
+out=$(cd "$W" && SYG_WORKER_SANDBOX_WALL=10.0.0.0/33 SYG_WORKER_SANDBOX_CLAUDE=$T/fake-claude "$B/worker-sandbox" --settings "$T/overlay.json" 2>"$T/err"); rc=$?
+[ "$rc" = 125 ] && [ -z "$out" ] && grep -q 'cannot wall 10.0.0.0/33' "$T/err" \
+  && ok "a kernel-invalid SYG_WORKER_SANDBOX_WALL entry refuses the launch (125), nothing runs" \
   || bad "bad wall entry: rc=$rc out=[$out] err=[$(cat "$T/err")]"
+# 8e. A malformed entry is refused on the host before any sandbox starts (the fake claude would print)
+out=$(cd "$W" && SYG_WORKER_SANDBOX_WALL=not-a-cidr SYG_WORKER_SANDBOX_CLAUDE=$T/fake-claude "$B/worker-sandbox" --settings "$T/overlay.json" 2>"$T/err"); rc=$?
+[ "$rc" = 125 ] && [ -z "$out" ] && grep -q 'not an address or CIDR: not-a-cidr' "$T/err" \
+  && ok "a malformed SYG_WORKER_SANDBOX_WALL entry refuses the launch (125) naming it, nothing runs" \
+  || bad "malformed wall entry: rc=$rc out=[$out] err=[$(cat "$T/err")]"
 
 # 1. --check builds the sandbox and runs nothing else
 fake 'exit 0'
 (cd "$W" && SYG_WORKER_SANDBOX_CLAUDE=$T/fake-claude "$B/worker-sandbox" --check) 2>"$T/err" && ok "--check builds the sandbox on this host" \
   || bad "--check failed: $(cat "$T/err")"
+
+# 1b. A real worker run's stderr carries no pasta nameserver complaint (pasta runs with --dns none; the
+# namespace resolves through the host's own resolver setup)
+fake 'exit 0'
+(cd "$W" && SYG_WORKER_SANDBOX_CLAUDE=$T/fake-claude "$B/worker-sandbox" --settings "$T/overlay.json") 2>"$T/err"; rc=$?
+[ "$rc" = 0 ] && ! grep -q "Couldn't get any nameserver" "$T/err" \
+  && ok "a worker run prints no pasta nameserver warning" \
+  || bad "pasta dns warning: rc=$rc err=[$(cat "$T/err")]"
 
 # 2. Exit code and argv come through; the overlay is a bound path, not a key in argv
 fake 'printf "%s\n" "$@"; exit 7'
@@ -264,26 +314,32 @@ fi
 
 # 5b. Untracked secret-shaped files read as empty; a tracked one, a fixture, reads as itself
 echo real-key >"$W/.env"; mkdir -p "$W/svc"; echo real-key >"$W/svc/.env.local"; echo real-key >"$W/tls.pem"
+mkdir -p "$W/a/b/c/d/e/f"; echo real-key >"$W/a/b/c/d/e/f/.env"
 echo fixture-value >"$W/.env.test"
 git -C "$W" add .env.test
-fake 'for f in .env svc/.env.local tls.pem; do [ -s "$f" ] && echo "readable: $f"; done; cat .env.test; exit 0'
+fake 'for f in .env svc/.env.local tls.pem a/b/c/d/e/f/.env; do [ -s "$f" ] && echo "readable: $f"; done; cat .env.test; exit 0'
 out=$(inside); rc=$?
-[ "$rc" = 0 ] && [ "$out" = fixture-value ] && [ "$(cat "$W/.env")" = real-key ] \
-  && ok "untracked .env, nested .env.local and .pem read as empty inside, unchanged on the host; tracked .env.test reads" \
+[ "$rc" = 0 ] && [ "$out" = fixture-value ] && [ "$(cat "$W/.env")" = real-key ] && [ "$(cat "$W/a/b/c/d/e/f/.env")" = real-key ] \
+  && ok "untracked .env, nested .env.local, .pem and a .env seven levels deep read as empty inside, unchanged on the host; tracked .env.test reads" \
   || bad "masking: rc=$rc out=[$out] err=[$(cat "$T/err")]"
-git -C "$W" rm -q --cached .env.test; rm -rf "$W/.env" "$W/.env.test" "$W/svc" "$W/tls.pem"
+git -C "$W" rm -q --cached .env.test; rm -rf "$W/.env" "$W/.env.test" "$W/svc" "$W/tls.pem" "$W/a"
 
 # 6. A symlinked .claude or .git can't aim a bind elsewhere
 mv "$W/.claude" "$T/claude-kept"
 mkdir "$T/decoy"; ln -s "$T/decoy" "$W/.claude"
 out=$(inside); rc=$?
-[ "$rc" = 125 ] && grep -q 'symlink' "$T/err" && ok "a symlinked .claude refuses (125)" \
+[ "$rc" = 125 ] && grep -q '\.claude is a symlink' "$T/err" && ok "a symlinked .claude refuses (125)" \
   || bad "symlinked .claude: rc=$rc err=[$(cat "$T/err")]"
 rm -f "$W/.claude"; mv "$T/claude-kept" "$W/.claude"
 mv "$W/.git" "$T/git-kept"; ln -s "$T/git-kept" "$W/.git"
 out=$(inside); rc=$?
-[ "$rc" = 125 ] && grep -q 'symlink' "$T/err" && ok "a symlinked .git refuses (125)" \
-  || bad "symlinked .git: rc=$rc err=[$(cat "$T/err")]"
+# worker-sandbox's worker-tree-check refuses a symlinked .git before gate-sandbox runs ...
+[ "$rc" = 125 ] && grep -q 'worker-tree-check refused' "$T/err" && ok "a symlinked .git refuses (125) via worker-tree-check" \
+  || bad "symlinked .git via worker-sandbox: rc=$rc err=[$(cat "$T/err")]"
+# ... so gate-sandbox's own refusal is pinned by a direct call
+out=$(SYG_GATE_SANDBOX_PROFILE=worker SYG_GATE_SANDBOX_SCRATCH=$SYG_WORKER_SANDBOX_SCRATCH "$B/gate-sandbox" "$W" -- /usr/bin/true 2>&1); rc=$?
+[ "$rc" = 125 ] && [[ $out == *".git is a symlink; refusing"* ]] && ok "gate-sandbox itself refuses a symlinked .git (125)" \
+  || bad "symlinked .git in gate-sandbox: rc=$rc out=[$out]"
 rm -f "$W/.git"; mv "$T/git-kept" "$W/.git"
 
 # 6b. A planted node_modules symlink: the host doesn't write through it, and it isn't bound in
@@ -316,7 +372,7 @@ rm -f "$W/node_modules"; rm -rf "$M/node_modules"
 # 6c. Run from a bin/ inside the tree (a run on a tree that ships this bin directory): that bin/ goes on the inner PATH,
 # gate-lock's way in, and stays off the one the host builds the sandbox with. A planted git there doesn't run.
 mkdir -p "$W/bin"
-cp "$B/worker-sandbox" "$B/gate-sandbox" "$B/gate-lock" "$W/bin/"
+cp "$B/worker-sandbox" "$B/gate-sandbox" "$B/gate-lock" "$B/worker-tree-check" "$W/bin/"
 printf '#!/bin/sh\ntouch "%s"\nexit 1\n' "$T/planted-ran" >"$W/bin/git"; chmod +x "$W/bin/git"
 fake 'gate-lock echo gate-lock-ran; exit 0'
 out=$(cd "$W" && SYG_WORKER_SANDBOX_TREE=ro SYG_WORKER_SANDBOX_CLAUDE=$T/fake-claude "$W/bin/worker-sandbox" --settings "$T/overlay.json" 2>"$T/err"); rc=$?
@@ -412,6 +468,10 @@ fake '[ -n "${FOO_X:-}" ] && echo "foo=$FOO_X"; [ -n "${BAR_X:-}" ] && echo bar-
 out=$(cd "$W" && FOO_X=1 BAR_X=2 SYG_WORKER_SANDBOX_ENV=FOO_X SYG_WORKER_SANDBOX_CLAUDE=$T/fake-claude "$B/worker-sandbox" --settings "$T/overlay.json" 2>"$T/err"); rc=$?
 [ "$rc" = 0 ] && [ "$out" = foo=1 ] && ok "SYG_WORKER_SANDBOX_ENV passes the named variable and no other" \
   || bad "worker env knob: rc=$rc out=[$out] err=[$(cat "$T/err")]"
+# the old unprefixed WORKER_SANDBOX_ENV is not read
+out=$(cd "$W" && FOO_X=1 BAR_X=2 WORKER_SANDBOX_ENV=BAR_X SYG_WORKER_SANDBOX_ENV=FOO_X SYG_WORKER_SANDBOX_CLAUDE=$T/fake-claude "$B/worker-sandbox" --settings "$T/overlay.json" 2>"$T/err"); rc=$?
+[ "$rc" = 0 ] && [ "$out" = foo=1 ] && ok "the old WORKER_SANDBOX_ENV name passes nothing" \
+  || bad "old worker env name: rc=$rc out=[$out] err=[$(cat "$T/err")]"
 fake 'echo "$PATH"; exit 0'
 out=$(cd "$W" && SYG_WORKER_SANDBOX_PATH='' SYG_WORKER_SANDBOX_CLAUDE=$T/fake-claude "$B/worker-sandbox" --settings "$T/overlay.json" 2>"$T/err"); rc=$?
 [ "$rc" = 0 ] && [[ $out == *"/usr/bin:/bin" ]] && [[ $out != *::* && $out != *: ]] \

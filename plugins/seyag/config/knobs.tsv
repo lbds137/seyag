@@ -106,12 +106,12 @@ SYG_EXTRA_USAGE_BUDGET_CMD_TIMEOUT	user	usage	10	Timeout in seconds (positive in
 SYG_EXTRA_USAGE_BUDGET_USD	user	usage	unset	Static extra-usage budget in USD (non-negative decimal) for claude-usage and statusline.
 SYG_EXTRA_USAGE_TOML	user	statusline	unset	Path to a TOML file with bought_usd and optional used_usd_at_anchor read on each statusline render.
 SYG_GATE_LOCK_FILE	user	worktrees	/tmp/gate.lock	Lock file gate-lock holds while a gate runs; one gate at a time machine-wide (keep it on a path every sandbox shares). Default is shared /tmp, so another user can hold it on a multi-user host; set a private path.
-SYG_GATE_SANDBOX_ENV	user	worktrees	unset	Space-separated variable names gate-sandbox passes into the sandbox's otherwise cleared environment.
+SYG_GATE_SANDBOX_ENV	user	worktrees	unset	Space-separated variable names gate-sandbox passes into the sandbox's otherwise cleared environment. Each must be a variable name, or the launch refuses with 125.
 SYG_GATE_SANDBOX_PATH	user	worktrees	prose:the caller's PATH	PATH inside gate-sandbox.
 SYG_GATE_SANDBOX_PROFILE	user	worktrees	unset	gate-sandbox profile: unset for a one-gate sandbox, worker for a whole headless worker (set by worker-sandbox).
 SYG_GATE_SANDBOX_RO_BINDS	user	worktrees	unset	Colon-separated SRC or SRC->DST read-only binds added to gate-sandbox; entries resolving inside the worktree are refused.
 SYG_GATE_SANDBOX_SCRATCH	user	worktrees	unset	Worker profile only: host directory bound writable at ~/.claude inside the sandbox (required).
-SYG_GATE_SANDBOX_TOOLCHAIN	user	worktrees	$HOME/.local/bin/mise:$HOME/.local/share/mise:$HOME/.local/state/mise:$HOME/.config/mise:$HOME/.local/share/pnpm	Colon-separated toolchain paths gate-sandbox binds read-only (absent ones skipped); empty for none. Each entry widens what the sandbox can read (an entry of $HOME undoes the hidden home).
+SYG_GATE_SANDBOX_TOOLCHAIN	user	worktrees	$HOME/.local/bin/mise:$HOME/.local/share/mise:$HOME/.local/state/mise:$HOME/.config/mise:$HOME/.local/share/pnpm	Colon-separated toolchain paths bound read-only (absent ones skipped; one inside the worktree refuses, 125); empty for none. Each widens what the sandbox reads ($HOME undoes the hidden home).
 SYG_GATE_SANDBOX_TREE	user	worktrees	rw	Worker profile only: rw or ro mount of the worktree.
 SYG_GATE_SANDBOX_WALL	user	worktrees	unset	Worker profile only: extra space-separated CIDRs or addresses gate-sandbox walls off with unreachable routes, on top of every host address and every route (any routing table) through an interface with no default route.
 SYG_GH_WRAPPERS	user	guards	unset	Whitespace-separated wrapper command prefix tokens scanned as gh invocations by session-url-gate and private-term-guard.

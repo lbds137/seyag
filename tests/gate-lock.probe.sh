@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Probe for plugins/seyag/bin/gate-lock: usage and exit codes, a busy lock waits (and the command
-# does not run until it frees), the command never inherits the lock fd, and TERM is forwarded and
-# waited out so the lock outlives the signal until the command is gone.
+# does not run until it frees), the command never inherits the lock fd, TERM, INT and HUP are
+# forwarded (as TERM) and waited out so the lock outlives the signal until the command is gone, the
+# command reads gate-lock's own stdin, and the old unprefixed GATE_LOCK_FILE does not override
+# SYG_GATE_LOCK_FILE.
 # Usage: tests/gate-lock.probe.sh   (from anywhere)
 set -u
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -98,5 +100,39 @@ else
   bad "TERM forwarding: the child never started"
   : >"$t/finish"
 fi
+
+# (g) INT and HUP are forwarded the same way, as TERM (the child's trap is on TERM)
+# A job started with & from a non-interactive shell has SIGINT ignored on entry, and bash cannot trap
+# a signal that was ignored on entry: `env --default-signal=INT` restores it for the background child.
+for sig in INT HUP; do
+  d=$t/sig-$sig; mkdir "$d"
+  env --default-signal=INT "$GL" "$t/child.sh" "$d" &
+  gl=$!; bg+=("$gl")
+  if wait_for exists "$d/child-up"; then
+    kill -"$sig" "$gl"
+    wait_for exists "$d/term-seen" && seen=1 || seen=0
+    flock -n "$SYG_GATE_LOCK_FILE" true && free_early=1 || free_early=0
+    : >"$d/finish"
+    wait "$gl"; rc=$?
+    flock -n "$SYG_GATE_LOCK_FILE" true && free_late=1 || free_late=0
+    [ "$seen" = 1 ] && [ "$free_early" = 0 ] && [ "$rc" = 0 ] && [ "$free_late" = 1 ] \
+      && ok "$sig forwarded to the command as TERM; lock held until it is gone; exit is the command's" \
+      || bad "$sig forwarding (seen=$seen free_early=$free_early rc=$rc free_late=$free_late)"
+  else
+    bad "$sig forwarding: the child never started"
+    : >"$d/finish"
+  fi
+done
+
+# (h) the command reads gate-lock's stdin (a background job would otherwise get /dev/null)
+out=$(printf 'hello\n' | "$GL" cat)
+[ "$out" = hello ] && ok "the command reads gate-lock's stdin" || bad "stdin passthrough ([$out])"
+
+# (i) the old unprefixed GATE_LOCK_FILE doesn't override SYG_GATE_LOCK_FILE (hermetic: both under
+# $t, so no row ever falls back to the real /tmp/gate.lock and queues behind live gates)
+SYG_GATE_LOCK_FILE=$t/new.lock GATE_LOCK_FILE=$t/old.lock "$GL" true
+[ -e "$t/new.lock" ] && [ ! -e "$t/old.lock" ] \
+  && ok "the old GATE_LOCK_FILE name doesn't override SYG_GATE_LOCK_FILE" \
+  || bad "old lock name (new=$([ -e "$t/new.lock" ] && echo yes || echo no) old=$([ -e "$t/old.lock" ] && echo yes || echo no))"
 
 exit "$fail"

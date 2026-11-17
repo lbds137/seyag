@@ -178,12 +178,12 @@ An optional TOML file fills in knobs the environment left unset: user `${XDG_CON
 | Name | Default | What it does | Found in |
 | --- | --- | --- | --- |
 | `SYG_GATE_LOCK_FILE` | `/tmp/gate.lock` | Lock file gate-lock holds while a gate runs; one gate at a time machine-wide (keep it on a path every sandbox shares). Default is shared /tmp, so another user can hold it on a multi-user host; set a private path. | `bin/gate-lock`, `bin/gate-sandbox` |
-| `SYG_GATE_SANDBOX_ENV` | unset | Space-separated variable names gate-sandbox passes into the sandbox's otherwise cleared environment. | `bin/gate-sandbox`, `bin/worker-sandbox` |
+| `SYG_GATE_SANDBOX_ENV` | unset | Space-separated variable names gate-sandbox passes into the sandbox's otherwise cleared environment. Each must be a variable name, or the launch refuses with 125. | `bin/gate-sandbox`, `bin/worker-sandbox` |
 | `SYG_GATE_SANDBOX_PATH` | the caller's PATH | PATH inside gate-sandbox. | `bin/gate-sandbox`, `bin/worker-sandbox` |
 | `SYG_GATE_SANDBOX_PROFILE` | unset | gate-sandbox profile: unset for a one-gate sandbox, worker for a whole headless worker (set by worker-sandbox). | `bin/gate-sandbox`, `bin/worker-sandbox` |
 | `SYG_GATE_SANDBOX_RO_BINDS` | unset | Colon-separated SRC or SRC->DST read-only binds added to gate-sandbox; entries resolving inside the worktree are refused. | `bin/gate-sandbox`, `bin/worker-sandbox` |
 | `SYG_GATE_SANDBOX_SCRATCH` | unset | Worker profile only: host directory bound writable at ~/.claude inside the sandbox (required). | `bin/gate-sandbox`, `bin/worker-sandbox` |
-| `SYG_GATE_SANDBOX_TOOLCHAIN` | `$HOME/.local/bin/mise:$HOME/.local/share/mise:$HOME/.local/state/mise:$HOME/.config/mise:$HOME/.local/share/pnpm` | Colon-separated toolchain paths gate-sandbox binds read-only (absent ones skipped); empty for none. Each entry widens what the sandbox can read (an entry of $HOME undoes the hidden home). | `bin/gate-sandbox` |
+| `SYG_GATE_SANDBOX_TOOLCHAIN` | `$HOME/.local/bin/mise:$HOME/.local/share/mise:$HOME/.local/state/mise:$HOME/.config/mise:$HOME/.local/share/pnpm` | Colon-separated toolchain paths bound read-only (absent ones skipped; one inside the worktree refuses, 125); empty for none. Each widens what the sandbox reads ($HOME undoes the hidden home). | `bin/gate-sandbox` |
 | `SYG_GATE_SANDBOX_TREE` | `rw` | Worker profile only: rw or ro mount of the worktree. | `bin/gate-sandbox`, `bin/worker-sandbox` |
 | `SYG_GATE_SANDBOX_WALL` | unset | Worker profile only: extra space-separated CIDRs or addresses gate-sandbox walls off with unreachable routes, on top of every host address and every route (any routing table) through an interface with no default route. | `bin/gate-sandbox`, `bin/worker-sandbox` |
 | `SYG_WORKER_SANDBOX_ENV` | unset | Extra space-separated variable names worker-sandbox passes into the worker (DISABLE_AUTOUPDATER always passes). | `bin/worker-sandbox` |
@@ -192,7 +192,7 @@ An optional TOML file fills in knobs the environment left unset: user `${XDG_CON
 | `SYG_WORKER_SANDBOX_SCRATCH` | unset | Host directory worker-sandbox binds writable at ~/.claude, where claude keeps its transcripts (required; the caller copies out what it wants and deletes it). | `bin/worker-sandbox` |
 | `SYG_WORKER_SANDBOX_TREE` | `rw` | rw or ro mount of the worker's tree. | `bin/worker-sandbox` |
 | `SYG_WORKER_SANDBOX_WALL` | unset | Extra space-separated CIDRs or addresses worker-sandbox walls off (passed as SYG_GATE_SANDBOX_WALL); a bad entry fails the launch. | `bin/worker-sandbox` |
-| `SYG_WORKER_TREE_CHECK_UNTRUSTED` | `/tmp:/var/tmp:/dev/shm` | Colon-separated directories a worker can write; worker-tree-check refuses a gitdir under them when no --repo anchor is given. | `bin/worker-tree-check` |
+| `SYG_WORKER_TREE_CHECK_UNTRUSTED` | `/tmp:/var/tmp:/dev/shm` | Colon-separated directories a worker can write; worker-tree-check refuses a gitdir under them when no --repo anchor is given. | `bin/worker-sandbox`, `bin/worker-tree-check` |
 | `SYG_WORKTREE_BACKUP_ALLOW_VOLATILE` | unset | Set to 1 to allow safe-worktree-clean --apply-hold backups on tmpfs or ramfs. | `bin/safe-worktree-clean` |
 | `SYG_WORKTREE_BACKUP_DIR` | `${XDG_STATE_HOME:-$HOME/.local/state}/seyag/worktree-backups` | Directory where safe-worktree-clean --apply-hold writes HOLD worktree backup bundles. | `bin/safe-worktree-clean` |
 | `SYG_WORKTREE_BASE` | `origin/<default branch>` | Base git ref against which safe-worktree-clean judges worktrees when --base is not passed. | `bin/safe-worktree-clean` |

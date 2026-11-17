@@ -2,6 +2,22 @@
 
 All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY-MM-DD>` section per released version; under it, `###` categories in fixed order — Breaking Changes, Features, Bug Fixes, Improvements, Chores, Tests — empty ones omitted; items are `- **scope:** description (#PR)`, written from the version's merged commit subjects.
 
+## 0.3.173 - 2026-11-16
+
+### Bug Fixes
+
+- **gate-lock:** the TERM/INT/HUP trap is installed before the command is forked, so a signal between the fork and the trap is no longer lost or fatal, and the final exit code is read with a second `wait` so a signal-interrupted wait can't report 128+N for a command that exited with its own code; the command now reads gate-lock's own stdin (a background job otherwise got `/dev/null`) (#TBD).
+- **gate-sandbox:** `SYG_GATE_SANDBOX_ENV` entries must be variable names (anything else refuses with 125; the list is no longer expanded unquoted, so a glob can't match files); a `SYG_GATE_SANDBOX_TOOLCHAIN` entry resolving inside the worktree is refused with 125 and a symlinked entry is bound at its resolved target on its own path; an extra `SYG_GATE_SANDBOX_WALL` entry must be an address or CIDR (a keyword like `default` would have walled everything) and a malformed one refuses with 125 before anything prints; untracked secret-shaped files are masked at any depth outside `node_modules` and `.git`, not only the first five levels; pasta runs with `--dns none`, which silences its "Couldn't get any nameserver address" line on every worker run without changing name resolution (#TBD).
+- **worker-sandbox:** runs `worker-tree-check` on the current tree before any host git runs on it (`--check` included); a refused tree exits 125 with "worker-tree-check refused" and nothing runs (#TBD).
+
+### Improvements
+
+- **gate-sandbox, worker-sandbox:** comments and usage say what holds: masking is by name only at any depth, IPv6 link-local (not IPv4 169.254/16 on a non-default interface) is the unreachable-through-pasta exception, a device with a default route in any table counts as a default interface (broader than full-tunnel), exit 125 means a pre-launch check refused while a namespace failure inside bwrap or pasta exits with that tool's code, `SYG_WORKER_TREE_CHECK_UNTRUSTED` is read by `worker-tree-check`, and gate-sandbox runs host git on its tree so a worker-written tree wants `worker-tree-check` first; comment lines rewrapped to 100 columns (#TBD).
+
+### Tests
+
+- **probes:** `tests/gate-lock.probe.sh` pins INT and HUP forwarding (as TERM), stdin passthrough and that the old `GATE_LOCK_FILE` name does not override `SYG_GATE_LOCK_FILE`; `tests/gate-sandbox.probe.sh` pins the ENV and TOOLCHAIN refusals, a symlinked toolchain entry, the old `GATE_SANDBOX_ENV` name passing nothing, and vite scratch-dir cleanup on TERM and HUP; `tests/worker-sandbox.probe.sh` pins the tree-check refusal (forged gitfile, symlinked `.git` split from gate-sandbox's own refusal), the WALL shape refusals and the kernel-invalid `10.0.0.0/33` launch failure, a seven-levels-deep masked `.env`, multipath, nhid and prefixed-local rows in the `--print-wall` fixture, the old `WORKER_SANDBOX_ENV` name, and no pasta nameserver warning; `tests/worker-tree-check.probe.sh` pins that the old `WORKER_TREE_CHECK_UNTRUSTED` name is not read (#TBD).
+
 ## 0.3.172 - 2026-11-16
 
 ### Bug Fixes

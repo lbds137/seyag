@@ -29,6 +29,19 @@ out=$(SYG_GATE_SANDBOX_RO_BINDS="$T/does-not-exist" "$B/gate-sandbox" "$R" -- tr
   && ok "non-existent SRC in SYG_GATE_SANDBOX_RO_BINDS refused with exit 125" \
   || bad "non-existent SRC: rc=$rc out=[$out]"
 
+# 4b. SYG_GATE_SANDBOX_ENV entries are variable names: a glob or anything else refuses, exit 125
+out=$(SYG_GATE_SANDBOX_ENV='FOO_Y *' "$B/gate-sandbox" "$R" -- true 2>&1); rc=$?
+[ $rc = 125 ] && [[ $out == *SYG_GATE_SANDBOX_ENV* ]] && [[ $out == *'*'* ]] \
+  && ok "SYG_GATE_SANDBOX_ENV entry '*' refused with exit 125 naming the knob" \
+  || bad "ENV name shape: rc=$rc out=[$out]"
+
+# 4c. A SYG_GATE_SANDBOX_TOOLCHAIN entry resolving inside the worktree refused (the wt stays the only
+# writable tree), exit 125, message names the rule
+out=$(SYG_GATE_SANDBOX_TOOLCHAIN="$R/in-wt" "$B/gate-sandbox" "$R" -- true 2>&1); rc=$?
+[ $rc = 125 ] && [[ $out == *SYG_GATE_SANDBOX_TOOLCHAIN* ]] && [[ $out == *"inside the worktree"* ]] \
+  && ok "SYG_GATE_SANDBOX_TOOLCHAIN inside the worktree refused with exit 125 and rule message" \
+  || bad "toolchain inside wt: rc=$rc out=[$out]"
+
 # The rest need a real sandbox.
 # shellcheck source=tests/sandbox-capable.sh
 . "$REPO/tests/sandbox-capable.sh"
@@ -102,11 +115,43 @@ out=$(SYG_GATE_SANDBOX_TOOLCHAIN=$T/tc "$B/gate-sandbox" "$R" -- sh -c 'cat "$1/
   && ok "SYG_GATE_SANDBOX_TOOLCHAIN=DIR: the marker reads inside and the write fails" \
   || bad "toolchain list: rc=$rc out=[$out]"
 
+# 6b. A toolchain entry that is a symlink binds its target at the entry's own path
+ln -s "$T/tc" "$T/tc-link"
+out=$(SYG_GATE_SANDBOX_TOOLCHAIN=$T/tc-link "$B/gate-sandbox" "$R" -- cat "$T/tc-link/marker" 2>&1); rc=$?
+[ $rc = 0 ] && [ "$out" = marker-tc ] \
+  && ok "SYG_GATE_SANDBOX_TOOLCHAIN symlink entry: its target reads at the configured path" \
+  || bad "toolchain symlink: rc=$rc out=[$out]"
+
 # 7. SYG_GATE_SANDBOX_ENV: the named variable passes, an unlisted one doesn't
 out=$(FOO_Y=listed BAR_Y=unlisted SYG_GATE_SANDBOX_ENV="FOO_Y" "$B/gate-sandbox" "$R" -- sh -c 'echo "foo=${FOO_Y-unset} bar=${BAR_Y-unset}"' 2>&1); rc=$?
 [ $rc = 0 ] && [ "$out" = "foo=listed bar=unset" ] \
   && ok "SYG_GATE_SANDBOX_ENV passes the named variable and not an unlisted one" \
   || bad "env knob: rc=$rc out=[$out]"
+# 7b. The old unprefixed GATE_SANDBOX_ENV is not read
+out=$(GATE_SANDBOX_ENV=FOO_Z FOO_Z=x "$B/gate-sandbox" "$R" -- sh -c 'echo "${FOO_Z-unset}"' 2>&1); rc=$?
+[ $rc = 0 ] && [ "$out" = unset ] \
+  && ok "the old GATE_SANDBOX_ENV name passes nothing" \
+  || bad "old env name: rc=$rc out=[$out]"
+
+# 8. vite's scratch dir is removed when gate-sandbox is signalled mid-run (a pin: bash runs the EXIT
+# trap on an untrapped fatal signal, and bwrap dies with its parent), and fast
+for sig in TERM HUP; do
+  ln -s "$T/deps/node_modules" "$R/node_modules"
+  mkdir -p "$T/vt-$sig"
+  TMPDIR=$T/vt-$sig "$B/gate-sandbox" "$R" -- sh -c ': >"$1/up-'$sig'"; sleep 30' _ "$R" >/dev/null 2>&1 &
+  gs=$!
+  up=0
+  for _ in $(seq 50); do [ -e "$R/up-$sig" ] && { up=1; break; }; sleep 0.1; done
+  made=$(find "$T/vt-$sig" -maxdepth 1 -name 'gate-sandbox-vitetemp.*' | wc -l)
+  t0=$(date +%s%N)
+  kill -"$sig" "$gs"; wait "$gs" 2>/dev/null
+  ms=$(( ($(date +%s%N) - t0) / 1000000 ))
+  left=$(find "$T/vt-$sig" -maxdepth 1 -name 'gate-sandbox-vitetemp.*' | wc -l)
+  [ "$up" = 1 ] && [ "$made" = 1 ] && [ "$left" = 0 ] && [ "$ms" -lt 5000 ] \
+    && ok "$sig mid-run: the vite scratch dir existed ($made) and is gone, in ${ms} ms" \
+    || bad "$sig vite cleanup: up=$up made=$made left=$left ms=$ms"
+  rm -f "$R"/up-* "$R/node_modules"
+done
 
 echo "gate-sandbox probe: $pass passed, $fail failed"
 [ "$fail" = 0 ]
