@@ -1,18 +1,18 @@
 # Changelog
 
-All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY-MM-DD>` section per released version; under it, `###` categories in fixed order — Breaking Changes, Features, Bug Fixes, Improvements, Chores, Tests — empty ones omitted; items are `- **scope:** description (#PR)`, written from the version's merged commit subjects.
+All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY-MM-DD>` section per released version; under it, `###` categories in fixed order — Breaking Changes, Features, Bug Fixes, Improvements, Chores, Tests — empty ones omitted; items are `- **scope:** description (#330)`, written from the version's merged commit subjects.
 
 ## 0.3.178 - 2026-11-17
 
 ### Bug Fixes
 
-- **python-heredoc-edit-guard:** an interpreter option between the name and the inline marker no longer defeats the guard (`python3 -I -c`, `python3 -X utf8 - <<E`, `python3 -Ic`, `python3 -I<<E`, `node --no-warnings -e`, `node --max-old-space-size 4096 -e`); versioned names (`python3.12 -c`) match; `node -p`/`-pe`/`--print` count like `-e` (#PR).
-- **hooks:** a caller's relative `PYTHONPYCACHEPREFIX` never reaches the hooks' `python3 -I` (they get `-B`); `run.sh` exports `SYG_PY_CACHE_ARG=-B` for it, and only an absolute prefix becomes `-Xpycache_prefix` (#PR).
+- **python-heredoc-edit-guard:** an interpreter option between the name and the inline marker no longer defeats the guard (`python3 -I -c`, `python3 -X utf8 - <<E`, `python3 -Ic`, `python3 -I<<E`, `node --no-warnings -e`, `node --max-old-space-size 4096 -e`); versioned names (`python3.12 -c`) match; `node -p`/`-pe`/`--print` count like `-e` (#330).
+- **hooks:** a caller's relative `PYTHONPYCACHEPREFIX` never reaches the hooks' `python3 -I` (they get `-B`); `run.sh` exports `SYG_PY_CACHE_ARG=-B` for it, and only an absolute prefix becomes `-Xpycache_prefix` (#330).
 
 ### Tests
 
-- **python-isolation:** the lint covers path-prefixed, versioned and bare `python` call sites; the runtime rows add `live-checkout-guard`, which reaches its `python3 -c` judge; a docstring in `hooks/lib/upstream_guard_lib.py` now says `Python` so prose stays out of the widened lint (#PR).
-- **statusline:** the fixture server runs under `python3 -I -B` (#PR).
+- **python-isolation:** the lint covers path-prefixed, versioned and bare `python` call sites; the runtime rows add `live-checkout-guard`, which reaches its `python3 -c` judge; a docstring in `hooks/lib/upstream_guard_lib.py` now says `Python` so prose stays out of the widened lint (#330).
+- **statusline:** the fixture server runs under `python3 -I -B` (#330).
 
 ## 0.3.177 - 2026-11-17
 
@@ -165,7 +165,7 @@ All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY
 ### Chores
 
 - **bin:** `safe-worktree-clean` re-wraps the ragged header/`--help` lines the holdscope batch left behind and comments the display-only `", "` split that builds the sweep tree names (`--json`'s `sweep_plan_trees` is unaffected) (#313).
-- **docs:** restores the `(#PR)` placeholder on the format line, which a cite-fill replace_all had clobbered to `(#310)` (#313).
+- **docs:** restores the `(#330)` placeholder on the format line, which a cite-fill replace_all had clobbered to `(#310)` (#313).
 - **hooks:** the pending-marker-pass header re-flowed: the scan sentence runs to `SYG_BQ_PENDING_MARKERS (...)`, the paragraph-filter and banner notes sit after the negator paragraph, and the banner note names the conditional placeholder (#314).
 - **docs:** the 0.3.166 bq-fp bullets shortened to commit-subject length; details stay in the hook header (authoritative) (#314).
 
