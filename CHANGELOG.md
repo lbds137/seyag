@@ -11,6 +11,10 @@ All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY
 - **worker-sandbox:** moved in from a machine-config repo as a generic tool; runs claude for a headless worker inside gate-sandbox's worker profile; env knobs renamed to `SYG_WORKER_SANDBOX_TREE`, `SYG_WORKER_SANDBOX_SCRATCH`, `SYG_WORKER_SANDBOX_CLAUDE` and `SYG_WORKER_SANDBOX_RO_BINDS`; new knobs `SYG_WORKER_SANDBOX_ENV` (extra variables passed in; the launcher-specific default is gone) and `SYG_WORKER_SANDBOX_PATH` (inner PATH tail). The network wall refuses host loopback and the one address pasta copies from the host; the host's other addresses and the LAN answer, and names resolve only where the host resolves through nss-resolve or a non-loopback nameserver (wall hardening is a later unit).
 - **worker-tree-check:** moved in from a machine-config repo as a generic tool; refuses a worker-writable git tree whose gitfile, nested repos or HEAD entries could make host git run attacker config, without running git on it; env knob renamed to `SYG_WORKER_TREE_CHECK_UNTRUSTED`.
 
+### Fixes
+
+- **gate-sandbox:** the worker profile no longer follows a `node_modules` symlink planted in a repo's main checkout. Its "this repo's own main checkout" test resolved the very link it was judging there, so a worker could get another repo's dependencies bound in and make the host write `.vite-temp` through the link. The source copy had the same hole; a main-checkout case in `tests/worker-sandbox.probe.sh` pins it.
+
 ### Tests
 
 - **probes:** ported `tests/gate-sandbox.probe.sh`, `tests/worker-tree-check.probe.sh` and `tests/worker-sandbox.probe.sh`; new `tests/gate-lock.probe.sh`; new sourced helper `tests/sandbox-capable.sh` replaces whole-probe skips with a bwrap/pasta capability check, and CI sets `SYG_PROBE_REQUIRE_SANDBOX=1` so the sandbox cases can never be skipped there.

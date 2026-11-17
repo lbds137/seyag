@@ -94,10 +94,11 @@ fi
 # writable tree; same shape C2 refuses).
 # The worker profile follows only this repo's own main checkout, which worktrees do link to: the worker
 # wrote the tree and has internet, so a symlink it planted on an earlier run must not make this script
-# write through it or bind another repo's dependencies in.
+# write through it or bind another repo's dependencies in. A run in the main checkout itself follows
+# nothing: there the link under judgment is the main's own.
 nm=$wt/node_modules
 if [ -L "$nm" ] && t=$(realpath -e -- "$nm" 2>/dev/null) \
-   && { [ "$profile" != worker ] || [ "$t" = "$(realpath -m -- "$(dirname "$common")/node_modules")" ]; }; then
+   && { [ "$profile" != worker ] || { mnm=$(dirname "$common")/node_modules; [ ! -L "$mnm" ] && [ "$t" = "$(realpath -e -- "$mnm" 2>/dev/null)" ]; }; }; then
   case $t in
     "$wt"|"$wt"/*) ;;
     *) if [ "$(basename "$t")" = node_modules ] && [ -d "$t" ]; then

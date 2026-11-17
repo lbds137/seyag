@@ -105,7 +105,7 @@ SYG_EXTRA_USAGE_BUDGET_CMD	user	usage	unset	Shell command printing the extra-usa
 SYG_EXTRA_USAGE_BUDGET_CMD_TIMEOUT	user	usage	10	Timeout in seconds (positive integer) for SYG_EXTRA_USAGE_BUDGET_CMD in claude-usage.
 SYG_EXTRA_USAGE_BUDGET_USD	user	usage	unset	Static extra-usage budget in USD (non-negative decimal) for claude-usage and statusline.
 SYG_EXTRA_USAGE_TOML	user	statusline	unset	Path to a TOML file with bought_usd and optional used_usd_at_anchor read on each statusline render.
-SYG_GATE_LOCK_FILE	user	worktrees	/tmp/gate.lock	Lock file gate-lock holds while a gate command runs; one gate at a time machine-wide (keep it on a path every sandbox shares).
+SYG_GATE_LOCK_FILE	user	worktrees	/tmp/gate.lock	Lock file gate-lock holds while a gate runs; one gate at a time machine-wide (keep it on a path every sandbox shares). Default is shared /tmp, so another user can hold it on a multi-user host; set a private path.
 SYG_GATE_SANDBOX_ENV	user	worktrees	unset	Space-separated variable names gate-sandbox passes into the sandbox's otherwise cleared environment.
 SYG_GATE_SANDBOX_PATH	user	worktrees	prose:the caller's PATH	PATH inside gate-sandbox.
 SYG_GATE_SANDBOX_PROFILE	user	worktrees	unset	gate-sandbox profile: unset for a one-gate sandbox, worker for a whole headless worker (set by worker-sandbox).
