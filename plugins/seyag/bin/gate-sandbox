@@ -7,14 +7,75 @@
 # node_modules is bound at its resolved target, and SYG_GATE_SANDBOX_RO_BINDS (colon-separated SRC or
 # SRC->DST, either side inside the worktree refused) adds more. Usage: gate-sandbox CWD -- CMD [ARG...]
 # SYG_GATE_SANDBOX_PROFILE=worker is the same sandbox for a whole worker rather than one gate (see
-# worker-sandbox): internet through pasta with every host address and the subnets of the host's non-default
-# interfaces unreachable (SYG_GATE_SANDBOX_WALL adds more), /run empty but for name
+# worker-sandbox): internet through pasta with every host address and every route (any routing table) through an interface
+# with no default route unreachable (SYG_GATE_SANDBOX_WALL adds more; --print-wall shows the set), /run empty but for name
 # resolution and the gate lock, the tree's .git and (SYG_GATE_SANDBOX_TREE=rw, the default) .claude
 # read-only, SYG_GATE_SANDBOX_TREE=ro for a read-only tree, SYG_GATE_SANDBOX_SCRATCH bound writable at ~/.claude,
 # size caps on its tmpfs mounts, untracked secret-shaped files masked, SYG_GATE_SANDBOX_PATH as the inner PATH.
 set -u
 me=gate-sandbox
-case "${1:-}" in -h|--help) echo "usage: $me CWD -- CMD [ARG...]   run CMD in a bubblewrap sandbox scoped to CWD's git worktree"; exit 0 ;; esac
+
+# The worker profile's host-side wall: one prefix per line on stdout, or exit 125 when the host's routes
+# can't be read or don't look like a host's (a failed query must not read as "nothing to wall").
+# Needs $ipbin. Run in a subshell by the caller, so the exit leaves only the substitution.
+ipq() { # $1 = variable to set, rest = ip arguments
+  local _v=$1 _o
+  shift
+  _o=$("$ipbin" "$@") || { echo "$me: can't read the host's routes (ip $* failed); refusing" >&2; exit 125; }
+  printf -v "$_v" %s "$_o"
+}
+compute_wall() {
+  local loc4 loc6 all4 all6 addrs nets extra
+  ipq loc4 -o -4 route show table local type local
+  ipq loc6 -o -6 route show table local type local
+  ipq all4 -o -4 route show table all
+  ipq all6 -o -6 route show table all
+  # positive control: every host has loopback in its local table, so a query or parse that saw none
+  # saw nothing real
+  [[ $loc4 == *127.0.0.1* ]] \
+    || { echo "$me: can't read the host's routes (the local table has no 127.0.0.1); refusing" >&2; exit 125; }
+  addrs=$(printf '%s\n%s\n' "$loc4" "$loc6" \
+    | awk 'NF >= 2 && $2 !~ /^127\./ && $2 != "::1" { print ($2 ~ /\//) ? $2 : $2 ($2 ~ /:/ ? "/128" : "/32") }') \
+    || { echo "$me: can't read the host's routes (parsing failed); refusing" >&2; exit 125; }
+  # A line may open with a route type (local, unreachable, ...): only a unicast one names a route to wall,
+  # and the local addresses came from the query above. A dev with a default route in any table is a
+  # default dev; a prefix on one is the LAN and stays open, wherever else it is also connected.
+  nets=$(printf '%s\n%s\n' "$all4" "$all6" | awk '
+    NF < 2 { next }
+    {
+      f = 1
+      if ($1 ~ /^(local|broadcast|unreachable|prohibit|blackhole|throw|multicast|anycast|nat|unicast)$/) {
+        if ($1 != "unicast") next
+        f = 2
+      }
+      pfx = $f; devs = ""
+      for (i = 1; i < NF; i++) if ($i == "dev") devs = devs " " $(i + 1)
+      if (pfx == "default") { n = split(devs, dv, " "); for (i = 1; i <= n; i++) isdef[dv[i]] = 1; next }
+      nl = ""; n = split(devs, dv, " "); for (i = 1; i <= n; i++) if (dv[i] != "lo") nl = nl " " dv[i]
+      if (nl == "") next
+      if (pfx == "0.0.0.0/0" || pfx == "::/0" || pfx ~ /^fe80:/ || pfx ~ /^ff/) next
+      if (pfx ~ /^[0-9]+\./) { split(pfx, o, "."); if (o[1] + 0 >= 224 && o[1] + 0 <= 239) next }
+      if (pfx !~ /\//) pfx = pfx (pfx ~ /:/ ? "/128" : "/32")
+      c++; P[c] = pfx; D[c] = nl
+    }
+    END {
+      for (k = 1; k <= c; k++) { n = split(D[k], dv, " "); for (i = 1; i <= n; i++) if (dv[i] in isdef) lan[P[k]] = 1 }
+      for (k = 1; k <= c; k++) if (!(P[k] in lan)) print P[k]
+    }') || { echo "$me: can't read the host's routes (parsing failed); refusing" >&2; exit 125; }
+  printf '%s\n%s\n' "$addrs" "$nets" | sed '/^$/d' | sort -u
+  read -r -a extra <<<"${SYG_GATE_SANDBOX_WALL:-}"
+  [ "${#extra[@]}" = 0 ] || printf '%s\n' "${extra[@]}"
+}
+
+case "${1:-}" in
+  -h|--help)
+    echo "usage: $me CWD -- CMD [ARG...]   run CMD in a bubblewrap sandbox scoped to CWD's git worktree"
+    echo "       $me --print-wall          print the host prefixes the worker profile walls (SYG_GATE_SANDBOX_WALL included), one per line"
+    exit 0 ;;
+  --print-wall)
+    ipbin=$(command -v ip) || { echo "$me: ip (iproute2) not found; the worker profile walls host addresses with it" >&2; exit 125; }
+    compute_wall; exit $? ;;
+esac
 [ $# -ge 3 ] && [ "$2" = -- ] || { echo "usage: $me CWD -- CMD [ARG...]" >&2; exit 125; }
 cwd=$(realpath -e -- "$1") || { echo "$me: no such directory: $1" >&2; exit 125; }
 shift 2
@@ -36,39 +97,29 @@ case $profile in
     command -v pasta >/dev/null || { echo "$me: pasta not found; a worker sandbox has no network without it" >&2; exit 125; }
     ipbin=$(command -v ip) || { echo "$me: ip (iproute2) not found; the worker profile walls host addresses with it" >&2; exit 125; }
     bashbin=$(command -v bash) || { echo "$me: bash not found; the worker profile walls host addresses with it" >&2; exit 125; }
+    command -v bwrap >/dev/null || { echo "$me: bwrap not found; the worker profile builds its sandbox with it" >&2; exit 125; }
     bwrap --help 2>&1 | grep -q -- '--size' || { echo "$me: the worker profile needs bubblewrap >= 0.10 (--size)" >&2; exit 125; }
     # Bare --share-net reaches host postgres and redis on loopback; pasta's namespace doesn't. Its
     # namespace reads as root, which refuses claude's bypass mode, so bwrap maps the real ids back.
     # The wall: pasta copies the host's default interface into its namespace and routes everything else
-    # through it, so the host's own addresses and its bridge and VPN subnets would answer. The set below is
-    # taken on the host at launch and refused with unreachable routes inside the namespace before bwrap
-    # runs: every address the host answers on (loopback excepted: the namespace has its own), the connected
-    # subnets of every interface with no default route, and SYG_GATE_SANDBOX_WALL (extra space-separated
-    # CIDRs or addresses). Not covered: addresses that appear after launch (a VPN connecting mid-run); the
-    # default interface's own subnet (the LAN), reachable by design; host link-local, which was measured
-    # unreachable through pasta. A subnet a default interface is also connected to counts as the LAN (two
-    # NICs on one LAN). Routes go in with replace, so a duplicate entry is harmless; a failed one (a bad
-    # extra entry) fails the launch with 125.
+    # through it, so the host's own addresses and its bridge and VPN subnets would answer. compute_wall
+    # (also `--print-wall`) takes the set on the host at launch, and it is refused with unreachable routes
+    # inside the namespace before bwrap runs: every address the host answers on (loopback excepted: the
+    # namespace has its own), every route in any routing table through an interface that carries no default
+    # route (container bridges, an interface-based VPN that doesn't carry the default route), and
+    # SYG_GATE_SANDBOX_WALL (extra space-separated CIDRs or addresses). A host whose routes can't be read
+    # refuses (125) rather than launch with a smaller wall. Not walled: the default interface's own routes
+    # (the LAN, and a full-tunnel VPN's own subnet when the VPN carries the default route; a subnet a
+    # default interface is also connected to counts as the LAN), a userspace VPN with no interface,
+    # AF_VSOCK, the link-local subnet (measured unreachable through pasta) and anything the host gains after
+    # launch. Pasta picks its interface itself, so a default route that changes between this query and
+    # pasta's start can shift which subnet counts as the LAN. Routes go in with replace, so a duplicate
+    # entry is harmless; a failed one (a bad extra entry) fails the launch with 125.
     wall=()
-    defs=$({ "$ipbin" -o -4 route show default; "$ipbin" -o -6 route show default; } \
-      | awk '{ for (i = 1; i < NF; i++) if ($i == "dev") print $(i + 1) }')
+    wall_out=$(compute_wall) || exit 125
     while IFS= read -r pfx; do
       [ -n "$pfx" ] && wall+=("$pfx")
-    done < <({
-      { "$ipbin" -o -4 route show table local type local; "$ipbin" -o -6 route show table local type local; } \
-        | awk '$2 !~ /^127\./ && $2 != "::1" { print ($2 ~ /\//) ? $2 : $2 ($2 ~ /:/ ? "/128" : "/32") }'
-      { "$ipbin" -o -4 route show table main scope link; "$ipbin" -o -6 route show table main; } \
-        | awk -v defs="$defs" 'BEGIN { n = split(defs, d, "\n"); for (i = 1; i <= n; i++) isdef[d[i]] = 1 }
-            / proto kernel( |$)/ { dev = ""; for (i = 1; i < NF; i++) if ($i == "dev") dev = $(i + 1)
-              if (dev == "" || $1 == "default" || $1 == "fe80::/64" || $1 ~ /^ff/) next
-              if (dev in isdef) lan[$1] = 1; else cand[++c] = $1 }
-            # a subnet a default interface is also on is the LAN (two NICs on one LAN): it stays open
-            END { for (i = 1; i <= c; i++) if (!(cand[i] in lan)) print cand[i] }'
-    } | sort -u)
-    if [ -n "${SYG_GATE_SANDBOX_WALL:-}" ]; then
-      read -r -a extra <<<"$SYG_GATE_SANDBOX_WALL"
-      wall+=("${extra[@]}")
-    fi
+    done <<<"$wall_out"
     wall_sh='ip=$1 n=$2; shift 2
 for ((i = 0; i < n; i++)); do "$ip" route replace unreachable "$1" || { echo "gate-sandbox: cannot wall $1" >&2; exit 125; }; shift; done
 exec "$@"'
