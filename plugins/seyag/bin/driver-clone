@@ -1,0 +1,127 @@
+#!/bin/bash
+# driver-clone: set up a parallel driver lane for a repo (seyag skills/delegation § "Parallel work:
+# three tiers", tier 3): its own clone, never a worktree of a checkout another session runs or
+# installs from. Everything else keys on the clone's folder name, so the lane needs no other
+# plumbing: claude-role finds <role dir>/<folder>.md, and anything that lists or starts sessions by folder
+# finds the lane by its name.
+set -uo pipefail
+
+# Optional config files (the config.toml loader) fill in knobs the environment
+# left unset before any knob below is read; the environment still wins.
+bin_dir=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")
+if [ -r "$bin_dir/../hooks/lib/config-env.sh" ] \
+    && source "$bin_dir/../hooks/lib/config-env.sh" 2>/dev/null \
+    && declare -F syg_config_env >/dev/null; then
+    syg_config_env "$(readlink -f "$bin_dir/..")"
+fi
+
+me=driver-clone
+usage="usage: $me REPO LANE --name \"Short Name\" [--dry-run]
+  Clones REPO's origin into \$SYG_DRIVER_CLONE_PROJECTS/REPO-LANE (default ~/Projects), writes the
+  lane's role file stub (REPO-LANE.md in the role dir \$SYG_ROLE_DIR: the base role's route, a Charter
+  pointing at the split in REPO.md), adds a row to \$SYG_PROJECT_NAMES_FILE when that is set, and files
+  the folder-trust step under the calling session's in-person section (claude-role --need --in-person).
+  Refuses if any of those already exists.
+  It commits nothing: commit the names row if one was added, then write the split in REPO.md
+  (owned paths, the release owner, name prefixes) before starting the lane.
+  LANE is lowercase letters and digits (\"b\"). --dry-run prints the plan and changes nothing.
+  With no names file the base role's short name is its role: field.
+  After it: accept the trust prompt, then \$SYG_DRIVER_CLONE_START_HINT (default: start a session in the clone)."
+
+repo="" lane="" name="" dry=0
+while [ $# -gt 0 ]; do
+  case $1 in
+    -h|--help) echo "$usage"; exit 0 ;;
+    --name) [ $# -ge 2 ] || { echo "$me: --name needs a value" >&2; exit 2; }; name=$2; shift 2 ;;
+    --dry-run) dry=1; shift ;;
+    -*) echo "$me: unknown option $1" >&2; echo "$usage" >&2; exit 2 ;;
+    *) if [ -z "$repo" ]; then repo=$1; elif [ -z "$lane" ]; then lane=$1
+       else echo "$me: unexpected argument $1" >&2; exit 2; fi; shift ;;
+  esac
+done
+[ -n "$repo" ] && [ -n "$lane" ] && [ -n "$name" ] || { echo "$usage" >&2; exit 2; }
+[[ $lane =~ ^[a-z0-9]+$ ]] || { echo "$me: LANE '$lane' must be lowercase letters and digits" >&2; exit 2; }
+[[ $repo =~ ^[A-Za-z0-9._-]+$ && $repo != .* ]] || { echo "$me: REPO '$repo' must be a folder name under the projects dir" >&2; exit 2; }
+[[ $name != *'"'* && $name != *'\'* && $name != *$'\t'* && $name != *$'\n'* ]] || { echo "$me: --name can't hold a quote, backslash, tab or newline" >&2; exit 2; }
+
+projects=${SYG_DRIVER_CLONE_PROJECTS:-$HOME/Projects}
+roles=${SYG_ROLE_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/seyag/roles}
+names=${SYG_PROJECT_NAMES_FILE:-}   # optional short-name table: folder<TAB>short name
+needs_sec=${SYG_NEEDS_OWNER_SECTION:-Needs Owner}
+inperson_sec=${SYG_IN_PERSON_SECTION:-In Person}
+role_bin=${SYG_DRIVER_CLONE_ROLE_BIN:-$bin_dir/claude-role}
+folder=$repo-$lane
+base=$projects/$repo dest=$projects/$folder
+base_role=$roles/$repo.md new_role=$roles/$folder.md
+
+die() { echo "$me: $1" >&2; exit "${2:-1}"; }
+[ -d "$base" ] || die "no base checkout at $base"
+url=$(git -C "$base" remote get-url origin 2>/dev/null) || die "$base has no origin remote to clone from"
+[ -f "$base_role" ] || die "no base role file at $base_role (a lane splits an existing role)"
+[ -w "$roles" ] || die "can't write the roles dir $roles"
+[ ! -e "$dest" ] || die "$dest already exists"
+[ ! -e "$new_role" ] || die "$new_role already exists"
+if [ -n "$names" ]; then
+  [ -f "$names" ] || die "no names table at $names"
+  awk -F'\t' -v f="$folder" '$1 == f { found = 1 } END { exit !found }' "$names" && die "$names already has a $folder row"
+  base_name=$(awk -F'\t' -v f="$repo" '$1 == f { print $2; exit }' "$names")
+  [ -n "$base_name" ] || die "$names has no row for $repo, so the base role has no short name"
+else
+  # no names table: the base role's own role: field is its short name
+  base_name=$(awk '/^---$/ { n++; next } n == 1 && /^[[:space:]]*role:/ { sub(/^[[:space:]]*role:[[:space:]]*/, ""); print; exit }' "$base_role")
+  [ -n "$base_name" ] || die "$base_role has no role: field, so the base role has no short name (set SYG_PROJECT_NAMES_FILE or fill role:)"
+fi
+# The base short name lands in a quoted frontmatter value: strip a CR and one layer of quotes, then
+# hold it to the same rule as --name.
+base_name=${base_name%$'\r'}
+case $base_name in
+  \"?*\" | \'?*\') base_name=${base_name:1:${#base_name}-2} ;;
+esac
+[ -n "$base_name" ] || die "the base role's short name is empty (set SYG_PROJECT_NAMES_FILE or fill role:)"
+[[ $base_name != *'"'* && $base_name != *'\'* && $base_name != *$'\t'* && $base_name != *$'\n'* && $base_name != *$'\r'* ]] \
+  || die "the base role's short name '$base_name' can't hold a quote, backslash, tab, newline or CR"
+# route: read from the base role's frontmatter (nested under metadata: or flat); empty = the launcher's default
+route=$(awk '/^---$/ { n++; next } n == 1 && /^[[:space:]]*route:/ { sub(/^[[:space:]]*route:[[:space:]]*/, ""); gsub(/"/, ""); print; exit }' "$base_role")
+hint=${SYG_DRIVER_CLONE_START_HINT:-start a session in $dest}
+
+trust="Run claude once in $dest and accept the folder-trust prompt — unblocks starting $name (driver-clone)"
+echo "$me: clone $url → $dest"
+echo "$me: role file $new_role (role: $name, route: ${route:-default})"
+[ -z "$names" ] || echo "$me: names row $folder → $name"
+echo "$me: $inperson_sec: $trust"
+[ "$dry" = 1 ] && { echo "$me: dry run, nothing changed"; exit 0; }
+
+git clone -q "$url" "$dest" || die "git clone failed"
+# From here a failed step undoes only what this run made (the clone, then the role file)
+undo() { rm -f -- "$new_role"; rm -rf -- "$dest"; die "$1; undid the clone and role file, so a rerun starts clean"; }
+stamp=$(date '+%Y-%m-%d %H:%M')
+cat > "$new_role" <<EOF || undo "writing $new_role failed"
+---
+name: ""
+metadata:
+  node_type: memory
+  role: "$name"
+  route: "$route"
+  status: "$(date +%m-%d) new lane of $base_name: read the split in $repo.md"
+  holds: "Own clone $dest: never touch $base or another lane's worktrees, branches or jobs."
+  updated: $stamp
+---
+
+## Charter
+Parallel driver for $repo, lane $lane (seyag skills/delegation § "Parallel work: three tiers", tier 3). Checkout: its own clone \`$dest\`, never a worktree of another lane's checkout. The split (owned paths, which lane owns releases, each lane's name prefix for worktrees, branches, jobs and specs) is authoritative in $repo.md: read it at start; this file never copies it. A need inside another lane's area goes to that lane by SendMessage, never as an edit.
+
+## Handoff
+
+## Next
+- Read the split in $repo.md. If it isn't written yet, ask $base_name by SendMessage before any edit.
+
+## $needs_sec
+
+## $inperson_sec
+EOF
+if [ -n "$names" ]; then
+  [ -z "$(tail -c 1 "$names")" ] || echo >> "$names"   # a last row with no newline would fuse with ours
+  printf '%s\t%s\n' "$folder" "$name" >> "$names" || undo "appending to $names failed"
+fi
+"$role_bin" --need "$trust" --in-person || echo "$me: claude-role --need failed; file the trust step by hand: $trust" >&2
+echo "$me: done. ${names:+Commit the new row in $names; }$base_name writes the split in $repo.md; then the trust step, then: $hint"
