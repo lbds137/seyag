@@ -31,7 +31,8 @@ inside() { # the fake claude from the tree, with its output and exit code
 # 4b. A bad tree mode refuses (the fake claude must exist, or the 125 would be "claude not found")
 fake 'exit 0'
 out=$(cd "$W" && SYG_WORKER_SANDBOX_TREE=sideways SYG_WORKER_SANDBOX_CLAUDE=$T/fake-claude "$B/worker-sandbox" --settings "$T/overlay.json" 2>&1); rc=$?
-[ "$rc" = 125 ] && ok "a bad tree mode refuses (125), nothing runs" || bad "bad tree mode: rc=$rc out=[$out]"
+[ "$rc" = 125 ] && [[ $out == *"must be rw or ro"* ]] && ok "a bad tree mode refuses (125) naming the rule, nothing runs" \
+  || bad "bad tree mode: rc=$rc out=[$out]"
 
 # 8. No pasta: refuses rather than run with another network (or none of the walls)
 mkdir -p "$T/nopasta"
@@ -41,6 +42,13 @@ out=$(PATH=$T/nopasta SYG_GATE_SANDBOX_PROFILE=worker SYG_GATE_SANDBOX_SCRATCH=$
 [ "$rc" = 125 ] && [[ $out == *"pasta not found"* ]] && ok "no pasta: the worker profile refuses (125)" \
   || bad "no pasta: rc=$rc out=[$out]"
 
+# 8b. No ip (iproute2): the wall is built with it, so the worker profile refuses rather than launch unwalled
+mkdir -p "$T/noip"
+for t in bash env git realpath dirname basename id mkdir bwrap pasta; do ln -s "$(command -v "$t")" "$T/noip/$t"; done
+out=$(PATH=$T/noip SYG_GATE_SANDBOX_PROFILE=worker SYG_GATE_SANDBOX_SCRATCH=$SYG_WORKER_SANDBOX_SCRATCH "$B/gate-sandbox" "$W" -- /usr/bin/true 2>&1); rc=$?
+[ "$rc" = 125 ] && [[ $out == *"ip (iproute2) not found"* ]] && ok "no ip: the worker profile refuses (125)" \
+  || bad "no ip: rc=$rc out=[$out]"
+
 # The rest build a real sandbox, with pasta for the network.
 # shellcheck source=tests/sandbox-capable.sh
 . "$REPO/tests/sandbox-capable.sh"
@@ -49,6 +57,13 @@ if ! syg_can_pasta; then
   [ "$fail" = 0 ] || exit 1
   syg_sandbox_skip "pasta+bwrap cannot build a worker sandbox here (nested sandbox?)"
 fi
+
+# 8c. A bad extra CIDR in the wall knob fails the launch rather than run with a smaller wall
+fake 'echo ran; exit 0'
+out=$(cd "$W" && SYG_WORKER_SANDBOX_WALL=not-a-cidr SYG_WORKER_SANDBOX_CLAUDE=$T/fake-claude "$B/worker-sandbox" --settings "$T/overlay.json" 2>"$T/err"); rc=$?
+[ "$rc" = 125 ] && [ -z "$out" ] && grep -q 'cannot wall not-a-cidr' "$T/err" \
+  && ok "a bad SYG_WORKER_SANDBOX_WALL entry refuses the launch (125), nothing runs" \
+  || bad "bad wall entry: rc=$rc out=[$out] err=[$(cat "$T/err")]"
 
 # 1. --check builds the sandbox and runs nothing else
 fake 'exit 0'
@@ -217,26 +232,79 @@ fake "python3 $T/connect.py $port $(tr '\n' ' ' <<<"$addrs"); exit 0"
 out=$(cd "$W" && SYG_WORKER_SANDBOX_RO_BINDS=$T/connect.py SYG_WORKER_SANDBOX_CLAUDE=$T/fake-claude "$B/worker-sandbox" --settings "$T/overlay.json" 2>"$T/err"); rc=$?
 kill "$listener" 2>/dev/null; wait "$listener" 2>/dev/null
 n=$(wc -l <<<"$addrs")
-# What holds: loopback and the address(es) pasta copies into its namespace (the namespace itself
-# answers "refused" there). The host's other addresses stay reachable: a known gap, the wall-hardening
-# unit's. The copied set comes from the same pasta launcher line gate-sandbox uses.
-copied=$(pasta --config-net --quiet --no-map-gw -t none -u none -T none -U none -- ip -o addr show 2>/dev/null \
-  | awk '$2 != "lo" {print $4}' | cut -d/ -f1 | grep -v '^fe80')
-walled=$(printf '%s\n' 127.0.0.1 ::1 "$copied" | grep -v '^$' | sort -u)
-walled_n=0; walled_ok=1; others=0
+# Every host address is walled: loopback and the copied address answer "refused" from the namespace
+# itself, the rest "No route to host"; only OPEN is a failure. Each must also have printed a line.
+all_closed=1
 while read -r a; do
-  if grep -qFx "$a" <<<"$walled"; then
-    walled_n=$((walled_n+1))
-    grep -qFx "$a refused" <<<"$out" || walled_ok=0
-  else
-    others=$((others+1))
-    echo "note: host address $a is $(awk -v a="$a" '$1 == a {print $2}' <<<"$out" | head -1) from inside (known gap, wall-hardening unit)"
-  fi
+  line=$(awk -v a="$a" '$1 == a' <<<"$out" | head -1)
+  [ -n "$line" ] && [[ $line != *" OPEN" ]] || all_closed=0
 done <<<"$addrs"
-# Refused, not just "failed": a namespace with no network at all would time out or say unreachable
-[ "$(grep -c ' OPEN$' <<<"$control")" = "$n" ] && [ "$walled_ok" = 1 ] && [ "$walled_n" -ge 2 ] \
-  && ok "loopback and pasta's copied address refused ($walled_n); $others other host address(es) reachable (known gap); all $n open to bare --share-net (control)" \
-  || bad "host addresses: control=[$control] rc=$rc out=[$out] copied=[$copied] err=[$(cat "$T/err")]"
+[ "$(grep -c ' OPEN$' <<<"$control")" = "$n" ] && [ "$all_closed" = 1 ] \
+  && ok "every host address unreachable from inside ($n); all $n open to bare --share-net (control)" \
+  || bad "host addresses: control=[$control] rc=$rc out=[$out] err=[$(cat "$T/err")]"
+
+# 7c. The knob is a live wall on any host: 192.0.2.1 (TEST-NET-1) is never routed to the host, so
+# "No route to host" in under 2 s proves the route was applied (a bare timeout would not).
+fake "python3 $T/connect.py 80 192.0.2.1; exit 0"
+t0=$(date +%s%N)
+out=$(cd "$W" && SYG_WORKER_SANDBOX_WALL=192.0.2.0/24 SYG_WORKER_SANDBOX_RO_BINDS=$T/connect.py SYG_WORKER_SANDBOX_CLAUDE=$T/fake-claude "$B/worker-sandbox" --settings "$T/overlay.json" 2>"$T/err"); rc=$?
+ms=$(( ($(date +%s%N) - t0) / 1000000 ))
+ctl=$(cd "$W" && SYG_WORKER_SANDBOX_RO_BINDS=$T/connect.py SYG_WORKER_SANDBOX_CLAUDE=$T/fake-claude "$B/worker-sandbox" --settings "$T/overlay.json" 2>>"$T/err")
+[[ $out == *"No route to host"* ]] && [ "$ms" -lt 2000 ] && [[ $ctl != *"No route to host"* ]] \
+  && ok "SYG_WORKER_SANDBOX_WALL=192.0.2.0/24: 'No route to host' in ${ms} ms; without it: [$ctl]" \
+  || bad "wall knob live: rc=$rc ms=$ms out=[$out] ctl=[$ctl] err=[$(cat "$T/err")]"
+
+# 7d. The bridge tier by route table: every prefix the host-side computation walls is an unreachable
+# route inside. The same computation gate-sandbox does, written out here rather than sourced:
+# local addresses (minus loopback), plus the connected prefixes of interfaces with no default route.
+defs=$( { ip -o -4 route show default; ip -o -6 route show default; } | awk '{for (i = 1; i < NF; i++) if ($i == "dev") print $(i + 1)}')
+expected=$( {
+  { ip -o -4 route show table local type local; ip -o -6 route show table local type local; } | awk '{print $2}' \
+    | grep -v -e '^127\.' -e '^::1$'
+  { ip -o -4 route show table main scope link; ip -o -6 route show table main | grep 'proto kernel'; } \
+    | awk -v defs="$defs" 'BEGIN { n = split(defs, d, "\n"); for (i = 1; i <= n; i++) isdef[d[i]] = 1 }
+        { dev = ""; for (i = 1; i < NF; i++) if ($i == "dev") dev = $(i + 1)
+          if (dev == "" || $1 == "default" || $1 == "fe80::/64" || $1 ~ /^ff/) next
+          if (dev in isdef) lan[$1] = 1; else cand[++c] = $1 }
+        END { for (i = 1; i <= c; i++) if (!(cand[i] in lan)) print cand[i] }'
+} | awk '{ if ($0 ~ /:/) sub(/\/128$/, ""); else sub(/\/32$/, ""); print }' | sort -u)
+fake 'ip -o route show type unreachable; ip -o -6 route show type unreachable; exit 0'
+out=$(inside); rc=$?
+got=$(awk '{print $2}' <<<"$out")
+missing=
+while read -r pfx; do
+  [ -n "$pfx" ] || continue
+  grep -qFx -- "$pfx" <<<"$got" || missing+=" $pfx"
+done <<<"$expected"
+[ "$rc" = 0 ] && [ -n "$expected" ] && [ -z "$missing" ] \
+  && ok "every host-side wall prefix is an unreachable route inside ($(grep -c . <<<"$expected"))" \
+  || bad "wall routes: rc=$rc missing=[$missing] expected=[$expected] out=[$out] err=[$(cat "$T/err")]"
+
+# 7e. The worker can't undo the wall: no capabilities in its user namespace, so route and rule edits fail
+fake 'ip route del unreachable 192.0.2.0/24 2>/dev/null && echo del-worked
+ip route flush table main 2>/dev/null && echo flush-worked
+ip rule add from all lookup 99 2>/dev/null && echo rule-worked
+awk '"'"'/^CapEff/ {print $2}'"'"' /proc/self/status
+exit 0'
+out=$(cd "$W" && SYG_WORKER_SANDBOX_WALL=192.0.2.0/24 SYG_WORKER_SANDBOX_CLAUDE=$T/fake-claude "$B/worker-sandbox" --settings "$T/overlay.json" 2>"$T/err"); rc=$?
+[ "$rc" = 0 ] && [ "$out" = 0000000000000000 ] \
+  && ok "the worker can't delete or flush routes or add rules; CapEff is zero" \
+  || bad "undo the wall: rc=$rc out=[$out] err=[$(cat "$T/err")]"
+
+# 7f. Knob rows: SYG_WORKER_SANDBOX_ENV passes the named variable only; SYG_WORKER_SANDBOX_PATH empty and custom
+fake '[ -n "${FOO_X:-}" ] && echo "foo=$FOO_X"; [ -n "${BAR_X:-}" ] && echo bar-leaked; exit 0'
+out=$(cd "$W" && FOO_X=1 BAR_X=2 SYG_WORKER_SANDBOX_ENV=FOO_X SYG_WORKER_SANDBOX_CLAUDE=$T/fake-claude "$B/worker-sandbox" --settings "$T/overlay.json" 2>"$T/err"); rc=$?
+[ "$rc" = 0 ] && [ "$out" = foo=1 ] && ok "SYG_WORKER_SANDBOX_ENV passes the named variable and no other" \
+  || bad "worker env knob: rc=$rc out=[$out] err=[$(cat "$T/err")]"
+fake 'echo "$PATH"; exit 0'
+out=$(cd "$W" && SYG_WORKER_SANDBOX_PATH='' SYG_WORKER_SANDBOX_CLAUDE=$T/fake-claude "$B/worker-sandbox" --settings "$T/overlay.json" 2>"$T/err"); rc=$?
+[ "$rc" = 0 ] && [[ $out == *"/usr/bin:/bin" ]] && [[ $out != *::* && $out != *: ]] \
+  && ok "an empty SYG_WORKER_SANDBOX_PATH gives the default tail, no empty entry" \
+  || bad "empty worker PATH: rc=$rc out=[$out] err=[$(cat "$T/err")]"
+out=$(cd "$W" && SYG_WORKER_SANDBOX_PATH=/opt/x:/usr/bin:/bin SYG_WORKER_SANDBOX_CLAUDE=$T/fake-claude "$B/worker-sandbox" --settings "$T/overlay.json" 2>"$T/err"); rc=$?
+[ "$rc" = 0 ] && [ "$out" = "/run/worker/bin:/opt/x:/usr/bin:/bin" ] \
+  && ok "a custom SYG_WORKER_SANDBOX_PATH follows the bin directory" \
+  || bad "custom worker PATH: rc=$rc out=[$out] want=[/run/worker/bin:/opt/x:/usr/bin:/bin] err=[$(cat "$T/err")]"
 
 # 7b. The internet does work: the wall above isn't just "no network". Skipped when the host is offline.
 netprobe='import socket

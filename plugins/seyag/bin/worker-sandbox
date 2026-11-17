@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # worker-sandbox: run claude for a headless worker inside gate-sandbox's worker profile (only the tree
-# writable, home and other repos hidden, host loopback unreachable). A launcher runs this in claude's
+# writable, home and other repos hidden, every host address unreachable). A launcher runs this in claude's
 # place (for example via a configurable claude-command setting), so its own gates and overlay still apply.
 set -u
 me=worker-sandbox
@@ -16,12 +16,13 @@ read-only at /run/worker/settings.json, so the key never appears in an argv.
 
 Inside, claude runs in bypass mode with: / read-only; /run and $HOME empty; the toolchain, claude and
 gate-lock read-only; the tree per SYG_WORKER_SANDBOX_TREE, its untracked .env-style and key files masked;
-the repo's git dir, the tree's .git and (rw trees) its .claude read-only; internet through pasta, host
-loopback and the address pasta copies from the host refused; a clean environment; capped /tmp, /run and home.
+the repo's git dir, the tree's .git and (rw trees) its .claude read-only; internet through pasta, every
+host address and the subnets of the host's non-default interfaces (bridges, VPN) unreachable; a clean
+environment; capped /tmp, /run and home.
 Not walled: the worker can read its own API key, world-readable files outside $HOME and /run; untracked
 secret files are masked only to five levels deep and only by name (.env, .env.*, .dev.vars, *.pem, *.key);
-the host's other addresses (a second interface, VPN or container bridge) and the LAN answer. Names resolve
-only where the host resolves through nss-resolve or a non-loopback nameserver.
+the LAN (the default interface's subnet) answers, and so do addresses the host gains after launch. Names
+resolve only where the host resolves through nss-resolve or a non-loopback nameserver.
 No memory limit but what the caller sets (for example `systemd-run --user -p MemoryMax=`).
 
 Environment:
@@ -32,6 +33,7 @@ Environment:
   SYG_WORKER_SANDBOX_RO_BINDS more read-only binds, in SYG_GATE_SANDBOX_RO_BINDS' format
   SYG_WORKER_SANDBOX_ENV  extra space-separated variable names passed into the worker (default none;
                           DISABLE_AUTOUPDATER always passes)
+  SYG_WORKER_SANDBOX_WALL extra space-separated CIDRs or addresses walled off (default none)
   SYG_WORKER_SANDBOX_PATH the inner PATH after the bin directory (default $HOME/.local/bin:
                           $HOME/.local/share/mise/shims:/usr/bin:/bin; empty also means the default,
                           since an empty PATH entry would put the worker's own tree on its PATH)
@@ -84,6 +86,7 @@ export SYG_GATE_SANDBOX_SCRATCH=$scratch
 export SYG_GATE_SANDBOX_RO_BINDS=$binds
 export SYG_GATE_SANDBOX_ENV="DISABLE_AUTOUPDATER${SYG_WORKER_SANDBOX_ENV:+ $SYG_WORKER_SANDBOX_ENV}"
 export DISABLE_AUTOUPDATER=1
+export SYG_GATE_SANDBOX_WALL=${SYG_WORKER_SANDBOX_WALL:-}
 # Inner only: gate-sandbox finds git, bwrap and pasta on the host's PATH, which a tree's bin/ stays off
 export SYG_GATE_SANDBOX_PATH="$worker_bin:${SYG_WORKER_SANDBOX_PATH:-$HOME/.local/bin:$HOME/.local/share/mise/shims:/usr/bin:/bin}"
 

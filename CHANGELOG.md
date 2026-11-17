@@ -2,6 +2,17 @@
 
 All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY-MM-DD>` section per released version; under it, `###` categories in fixed order — Breaking Changes, Features, Bug Fixes, Improvements, Chores, Tests — empty ones omitted; items are `- **scope:** description (#PR)`, written from the version's merged commit subjects.
 
+## 0.3.172 - 2026-11-16
+
+### Bug Fixes
+
+- **gate-sandbox:** the worker profile's network wall now covers every address the host answers on and the connected subnets of every host interface that carries no default route (docker or libvirt bridges, VPN peers), not only loopback and the one address pasta copies in. The routes are added as `unreachable` inside pasta's namespace before bwrap runs and the launch fails with 125 if any add fails; the worker is out of pasta's user namespace (`--unshare-user` is now explicit) and cannot undo them. Not covered, by design: the default interface's own subnet (the LAN) and addresses the host gains after launch. New knobs `SYG_GATE_SANDBOX_WALL` and `SYG_WORKER_SANDBOX_WALL` add extra CIDRs.
+- **gate-sandbox:** the worker profile now refuses with 125 when `ip` (iproute2) is missing or bubblewrap lacks `--size` (older than 0.10), instead of failing later in bwrap.
+
+### Tests
+
+- **probes:** `tests/worker-sandbox.probe.sh` asserts every host address unreachable from inside (docker0 is the live case on CI), the knob as a live "No route to host" wall, the unreachable routes for the host-side set, that the worker cannot delete routes, flush the table or add rules (CapEff zero), the no-`ip` and bad-CIDR refusals, the bad-tree-mode message, and the `SYG_WORKER_SANDBOX_ENV` and `SYG_WORKER_SANDBOX_PATH` knob rows; `tests/gate-sandbox.probe.sh` adds rows for `SYG_GATE_SANDBOX_TOOLCHAIN` and `SYG_GATE_SANDBOX_ENV`.
+
 ## 0.3.171 - 2026-11-16
 
 ### Features
