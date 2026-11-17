@@ -6,11 +6,11 @@ All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY
 
 ### Bug Fixes
 
-- **hooks, bin:** every inline `python3` (`-c`, `-`, a heredoc or here-string on stdin) in the hooks and bins now runs isolated (`-I`), so a module file such as `re.py` or `json.py` in the session's working directory can no longer shadow the standard library inside a hook. `-I` also ignores `PYTHONPYCACHEPREFIX`, so `run.sh` exports the bytecode cache as `SYG_PY_CACHE_ARG` (`-Xpycache_prefix=<dir>`, or `-B` when the caller set `PYTHONDONTWRITEBYTECODE` or no cache dir exists) and hooks call `python3 -I "${SYG_PY_CACHE_ARG:--B}"`; a direct run with it unset falls back to `-B`. `live-checkout-guard` drops its `PYTHONSAFEPATH` and `sys.path` strip for the same `-I` (#TBD).
+- **hooks, bin:** every inline `python3` (`-c`, `-`, a heredoc or here-string on stdin) in the hooks and bins now runs isolated (`-I`), so a module file such as `re.py` or `json.py` in the session's working directory can no longer shadow the standard library inside a hook. `-I` also ignores `PYTHONPYCACHEPREFIX`, so `run.sh` exports the bytecode cache as `SYG_PY_CACHE_ARG` (`-Xpycache_prefix=<dir>`, or `-B` when the caller set `PYTHONDONTWRITEBYTECODE` or no cache dir exists) and hooks call `python3 -I "${SYG_PY_CACHE_ARG:--B}"`; a direct run with it unset falls back to `-B`. `live-checkout-guard` drops its `PYTHONSAFEPATH` and `sys.path` strip for the same `-I` (#329).
 
 ### Tests
 
-- **python-isolation:** `tests/python-isolation.probe.sh` lints every shipped inline `python3` site for `-I` (with a positive control over fixture strings), runs four hooks (one per invocation form) from a directory planting `re.py`/`json.py`/`shlex.py`/`subprocess.py` behind a `python3` shim, and checks no `__pycache__` lands in the plugin tree; `run.probe.sh` pins the `SYG_PY_CACHE_ARG` values (#TBD).
+- **python-isolation:** `tests/python-isolation.probe.sh` lints every shipped inline `python3` site for `-I` (with a positive control over fixture strings), runs four hooks (one per invocation form) from a directory planting `re.py`/`json.py`/`shlex.py`/`subprocess.py` behind a `python3` shim, and checks no `__pycache__` lands in the plugin tree; `run.probe.sh` pins the `SYG_PY_CACHE_ARG` values; a run.sh row checks the prefix reaches the hook's python and bytecode lands under it (#329).
 
 ## 0.3.176 - 2026-11-17
 
