@@ -153,4 +153,10 @@ out=$(env -u CLAUDE_PROJECTS_DIR HOME="$tmp/nohome" CLAUDE_CONFIG_DIR="$tmp/cfg"
 out=$(HOME="$tmp/nohome" CLAUDE_CONFIG_DIR="$tmp/nope" "$BIN" --slug=-home-user-Projects-demo --since 2026-10-26T00:00Z --until 2026-10-26T23:59Z --json)
 [ "$(jq -r .busy_seconds <<< "$out")" = 330 ] && ok "CLAUDE_PROJECTS_DIR wins over CLAUDE_CONFIG_DIR" || bad "projects dir root: $out"
 
+# A negative --gap is a usage error.
+"$BIN" --slug demo --since 2026-10-26 --until 2026-10-26 --gap -5 > /dev/null 2> "$tmp/err"; rc=$?
+[ $rc = 2 ] && grep -q -- '--gap must not be negative' "$tmp/err" && ok "a negative --gap exits 2" || bad "negative gap: rc=$rc $(cat "$tmp/err")"
+"$BIN" --slug demo --since 2026-10-26 --until 2026-10-26 --gap 0 --json > /dev/null 2>&1; rc=$?
+[ $rc = 0 ] && ok "--gap 0 is allowed" || bad "gap 0: rc=$rc"
+
 exit $fail

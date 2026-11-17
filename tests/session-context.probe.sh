@@ -16,7 +16,7 @@ trap 'rm -rf "$TMP"' EXIT
 mkdir -p "$TMP/stub" "$TMP/cfg/projects/p1" "$TMP/cfg/projects/p2"
 export CLAUDE_CONFIG_DIR="$TMP/cfg"
 export PATH="$TMP/stub:$PATH"
-unset DECK_CONTEXT_LIMIT DECK_CONTEXT_LIMIT_FABLE DECK_CONTEXT_LIMIT_AGY AGY_CONTEXT_THRESHOLD SYG_CONTEXT_THRESHOLD SYG_CONTEXT_THRESHOLD_FABLE SYG_SESSION_CONTEXT_THRESHOLD SYG_SESSION_CONTEXT_THRESHOLD_FABLE CLAUDE_PROJECTS_DIR SYG_SESSION_CONTEXT_EXTRA_CMD SYG_SESSION_CONTEXT_EXTRA_MODEL SYG_SESSION_CONTEXT_EXTRA_THRESHOLD AGY_PRESENCE_DIR
+unset SYG_CONTEXT_THRESHOLD SYG_CONTEXT_THRESHOLD_FABLE SYG_SESSION_CONTEXT_THRESHOLD SYG_SESSION_CONTEXT_THRESHOLD_FABLE CLAUDE_PROJECTS_DIR SYG_SESSION_CONTEXT_EXTRA_CMD SYG_SESSION_CONTEXT_EXTRA_MODEL SYG_SESSION_CONTEXT_EXTRA_THRESHOLD
 export SYG_CONFIG=0
 
 reply() {   # reply <model> <input> <cache_read> <cache_write>: one assistant transcript line
@@ -77,9 +77,6 @@ grep -qE '^ +Small +small +opus-5-5 +120k +flag@500k +busy' <<< "$out" && ok "ta
 
 json=$(SYG_SESSION_CONTEXT_THRESHOLD=100000 SYG_SESSION_CONTEXT_THRESHOLD_FABLE=300000 "$BIN/session-context" --json)
 [ "$(jq -c '[.[] | .flagged]' <<< "$json")" = '[true,false,true,false]' ] && ok "limits overridable by SYG_SESSION_CONTEXT_THRESHOLD(_FABLE)" || bad "env limits: $json"
-json=$(DECK_CONTEXT_LIMIT=100000 DECK_CONTEXT_LIMIT_FABLE=300000 "$BIN/session-context" --json)
-[ "$(jq -c '[.[] | .flagged]' <<< "$json")" = '[true,true,false,false]' ] && [ "$(jq -c '[.[] | .flag_at]' <<< "$json")" = '[500000,200000,500000,500000]' ] \
-    && ok "old DECK_CONTEXT_LIMIT / _FABLE names are ignored" || bad "old env limits honoured: $json"
 
 "$BIN/session-context" --bogus >/dev/null 2>&1; rc=$?
 [ $rc = 2 ] && ok "unknown argument exits 2" || bad "unknown argument rc $rc"
@@ -129,7 +126,8 @@ cat > "$TMP/extra-stdin.sh" <<'SH'
 if read -r _l; then echo '[{"name":"HadStdin","tokens":1}]'; else echo '[]'; fi
 SH
 chmod +x "$TMP/extra-stdin.sh"
-json=$(SYG_SESSION_CONTEXT_EXTRA_CMD="$TMP/extra-stdin.sh" "$BIN/session-context" --json 2>&1 < <(yes))
+printf 'y\ny\n' > "$TMP/stdin-feed"   # a file, not `yes`: its broken-pipe error would land in the capture
+json=$(SYG_SESSION_CONTEXT_EXTRA_CMD="$TMP/extra-stdin.sh" "$BIN/session-context" --json 2>&1 < "$TMP/stdin-feed")
 jq -e 'all(.name != "HadStdin")' <<< "$json" >/dev/null && ok "EXTRA_CMD stdin is /dev/null" || bad "extra stdin: $json"
 # Set but failing: loud on stderr, Claude rows still printed, exit 0.
 msg="session-context: SYG_SESSION_CONTEXT_EXTRA_CMD failed; its sessions are missing"
@@ -145,10 +143,6 @@ for c in fail obj junk scalars; do
 done
 err=$(SYG_SESSION_CONTEXT_EXTRA_CMD="$TMP/no-such-command" "$BIN/session-context" 2>&1 >/dev/null); rc=$?
 [ $rc = 0 ] && grep -qF "$msg" <<< "$err" && ok "EXTRA_CMD naming a missing command fails loudly too" || bad "extra missing: rc $rc, $err"
-# the old agy hook is gone: the presence dir no longer adds rows
-err=$(AGY_PRESENCE_DIR="$TMP" "$BIN/session-context" --json 2>&1 >"$TMP/out.json"); rc=$?
-[ $rc = 0 ] && [ -z "$err" ] && [ "$(jq -c 'map(.name)' "$TMP/out.json")" = '["Small"]' ] \
-    && ok "AGY_PRESENCE_DIR is not read" || bad "AGY_PRESENCE_DIR: rc $rc, $err"
 
 # A row whose tokens is present but not a number takes the failure path (null counts as 0).
 for tk in '"170000"' 'true' '{"n":1}' '[5]'; do
@@ -194,6 +188,12 @@ grep -q 'SYG_SESSION_CONTEXT_EXTRA_CMD' <<< "$out" && [ "${out##*$'\n'}" = "says
 case "$out" in "session-context "*) ok "--help starts with session-context" ;; *) bad "--help first line: ${out%%$'\n'*}" ;; esac
 err=$("$BIN/session-context" --bogus 2>&1 >/dev/null)
 [ "$err" = "session-context: unknown argument '--bogus' (try --help)" ] && ok "usage error names session-context" || bad "usage error: $err"
+
+# More than one argument is a usage error.
+for args in "--json --flagged" "--flagged --json" "--json extra"; do
+    err=$("$BIN/session-context" $args 2>&1 >/dev/null); rc=$?
+    [ $rc = 2 ] && [ "$err" = "session-context: one mode at most (try --help)" ] && ok "'$args' exits 2: one mode at most" || bad "'$args': rc $rc, $err"
+done
 
 [ $fail = 0 ] && echo "all ok" || echo "FAILURES above"
 exit $fail

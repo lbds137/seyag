@@ -85,4 +85,11 @@ got=$(CLAUDE_CONFIG_DIR="$t/empty" CLAUDE_PROJECTS_DIR="$t/cfg/projects" "$CLS" 
 got=$(CLAUDE_PROJECTS_DIR="$t/empty" "$CLS" --agents "$t/agents.json" --projects "$t/cfg/projects" --json | state_of)
 [ "$got" = "s-on=on@T1" ] && ok "an explicit --projects wins over the environment" || bad "--projects root: got '$got'"
 
+# Usage errors exit 2 with a message and the usage line, never a traceback or a silent ignore.
+for args in "--agents" "--projects" "--json --agents" "--bogus" "--json extra"; do
+  out=$("$CLS" $args 2>&1 >/dev/null); rc=$?
+  [ "$rc" = 2 ] && grep -q "^chrome-loss-scan: " <<<"$out" && grep -q "^usage: chrome-loss-scan" <<<"$out" && ! grep -q Traceback <<<"$out" \
+    && ok "usage error exits 2: $args" || bad "usage error for '$args': rc $rc, $out"
+done
+
 exit $fail

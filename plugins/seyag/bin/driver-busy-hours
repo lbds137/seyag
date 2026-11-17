@@ -286,6 +286,8 @@ def main():
         return 0
     if not (args.slug and args.since and args.until):
         usage_error("--slug, --since and --until are required (see --help)")
+    if args.gap < 0:
+        usage_error(f"--gap must not be negative, got {args.gap}")
     since = parse_time(args.since, end=False)
     until = parse_time(args.until, end=True)
     if since > until:

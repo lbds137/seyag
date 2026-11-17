@@ -37,6 +37,7 @@ if [ -r "$bin_dir/../hooks/lib/config-env.sh" ] \
     syg_config_env "$(readlink -f "$bin_dir/..")"
 fi
 
+[ $# -le 1 ] || { echo "session-context: one mode at most (try --help)" >&2; exit 2; }
 case "${1:-}" in
     -h|--help) awk 'NR >= 2 { if ($0 !~ /^#/) exit; sub(/^# ?/, ""); print }' "$0"; exit 0 ;;
     ""|--flagged|--json) ;;

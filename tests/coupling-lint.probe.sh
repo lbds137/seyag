@@ -26,7 +26,7 @@ total=0 n_new=0 n_stale=0 grep_failed=0
 # strings, excludes via pathspec. git grep's exit 1 just means "no matches"
 # for that token — a zero-hit token simply needs no allowlist entries.
 for tok in "${TOKENS[@]}"; do
-  out="$(git -C "$REPO" -c core.quotePath=false grep -F -c "$tok" -- "${PATHSPEC[@]}")"
+  out="$(git -C "$REPO" -c core.quotePath=false grep -F -i -c "$tok" -- "${PATHSPEC[@]}")"
   rc=$?
   if [ "$rc" -ge 2 ]; then
     bad "git grep failed for $tok (rc=$rc)"

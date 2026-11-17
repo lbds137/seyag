@@ -27,12 +27,12 @@ printf '{"type":"user","toolDenialKind":"automode-unavailable","timestamp":"%s",
 printf '{"type":"user","timestamp":"%s","message":{"content":[{"type":"tool_result","content":"quoted: so auto mode cannot determine the safety of Bash; denied by the Claude Code auto mode classifier. Reason: [Git Destructive]. If you have other tasks"}]}}\n' "$now" >> "$f"
 
 out=$(HOME="$fakehome" CLAUDE_PROJECTS_DIR="$proj" "$B" --since 1 2>&1)
-chk() { if /usr/bin/grep -q -- "$1" <<< "$out"; then ok "$2"; else bad "$2: missing [$1] in: $out"; fi; }
+chk() { if grep -q -- "$1" <<< "$out"; then ok "$2"; else bad "$2: missing [$1] in: $out"; fi; }
 chk "A(policy)=2 B(infra)=3" "totals split A=2 B=3 (quoted text not counted)"
 chk "^  alpha  *A=2 .*B=3" "project name has the home slug and Projects- prefix stripped"
 
 old=$(HOME="$fakehome" CLAUDE_PROJECTS_DIR="$proj" "$B" --since 0.0000001 2>&1)
-/usr/bin/grep -q "A(policy)=0 B(infra)=0" <<< "$old" && ok "--since cutoff applied" || bad "cutoff not applied: $old"
+grep -q "A(policy)=0 B(infra)=0" <<< "$old" && ok "--since cutoff applied" || bad "cutoff not applied: $old"
 
 # The strip comes from $HOME: a bare home-slug prefix (no Projects-) is stripped too, a
 # different home's slug is left alone, and the literal slug of an unrelated home is not special.
@@ -53,5 +53,17 @@ out=$(HOME="$fakehome" CLAUDE_CONFIG_DIR="$tmp/cfg" "$B" --since 1 2>&1)
 chk "A(policy)=4 B(infra)=3" "default root is CLAUDE_CONFIG_DIR/projects"
 out=$(HOME="$fakehome" CLAUDE_CONFIG_DIR="$tmp/emptycfg" CLAUDE_PROJECTS_DIR="$proj" "$B" --since 1 2>&1)
 chk "A(policy)=4 B(infra)=3" "CLAUDE_PROJECTS_DIR wins over CLAUDE_CONFIG_DIR"
+
+# The prefix strip is anchored to the start of the folder name: a slug in the middle stays.
+mkdir -p "$proj/zz${hs}-Projects-mid"; mk "[Git Destructive]" > "$proj/zz${hs}-Projects-mid/dddddddd4444.jsonl"
+out=$(HOME="$fakehome" CLAUDE_PROJECTS_DIR="$proj" "$B" --since 1 2>&1)
+chk "^  zz-" "a home slug in the middle of a folder name is kept"
+
+# Usage errors exit 2 with a message and the usage line, never a traceback or a silent ignore.
+for args in "--since" "--since abc" "--since nan" "--bogus" "--detail extra"; do
+  out=$(HOME="$fakehome" CLAUDE_PROJECTS_DIR="$proj" "$B" $args 2>&1 >/dev/null); rc=$?
+  [ "$rc" = 2 ] && grep -q "^classifier-denials: " <<< "$out" && grep -q "^usage: classifier-denials" <<< "$out" && ! grep -q Traceback <<< "$out" \
+    && ok "usage error exits 2: $args" || bad "usage error for '$args': rc $rc, $out"
+done
 
 exit $fail

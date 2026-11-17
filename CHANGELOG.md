@@ -15,7 +15,8 @@ All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY
 
 ### Tests
 
-- **session-log tools:** hermetic probes `tests/classifier-denials.probe.sh`, `tests/chrome-loss-scan.probe.sh`, `tests/driver-busy-hours.probe.sh`, `tests/session-stalled.probe.sh`, `tests/session-context.probe.sh` and `tests/relay-ruling.probe.sh` (stub `claude`, fixture transcripts, fake `HOME`; each renamed knob has a case where the old name is ignored) (#331).
+- **session-log tools:** hermetic probes `tests/classifier-denials.probe.sh`, `tests/chrome-loss-scan.probe.sh`, `tests/driver-busy-hours.probe.sh`, `tests/session-stalled.probe.sh`, `tests/session-context.probe.sh` and `tests/relay-ruling.probe.sh` (stub `claude`, fixture transcripts, fake `HOME`; the old agy database names are ignored) (#331).
+- **coupling-lint:** tokens match case-insensitively, so a lowercase owner or tool name no longer slips past the allowlist (#331).
 
 ## 0.3.178 - 2026-11-17
 

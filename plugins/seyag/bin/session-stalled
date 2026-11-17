@@ -193,7 +193,7 @@ try:
     if not isinstance(items, list):
         raise ValueError("expected agent list")
     for x in items:
-        print(x["name"], x["sessionId"], sep="\037")
+        print(x.get("name") or x["sessionId"][:8], x["sessionId"], sep="\037")
 except Exception as e:
     sys.exit(f"session-stalled: invalid claude agents --json output: {e}")
 ' <<< "$raw") || exit 2
@@ -208,7 +208,7 @@ if [ -n "$agents" ]; then
   while IFS=$'\037' read -r name sid; do
     [ -n "$sid" ] || continue
     # a find error (an unreadable folder) is reported, but a transcript it did find is still checked
-    fs=0; f=$(/usr/bin/find "$projects_root" -maxdepth 2 -name "$sid.jsonl" -print -quit) || fs=$?
+    fs=0; f=$(find "$projects_root" -maxdepth 2 -name "$sid.jsonl" -print -quit) || fs=$?
     [ "$fs" -eq 0 ] || rc=2
     [ -n "$f" ] || continue
     if check_file "$name" "$f"; then

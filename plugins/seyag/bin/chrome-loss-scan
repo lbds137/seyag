@@ -14,7 +14,7 @@ all removed); "off" (this process never listed them, e.g. it resumed while
 logged out). A logged-out restart comes up with Chrome off and /login doesn't
 restore it; a fresh start does.
 Exit 1 when any session is lost or off, has no transcript, or the session
-list can't be read.
+list can't be read; exit 2 on a usage error.
 """
 import glob
 import json
@@ -77,13 +77,36 @@ def transcript_for(projects_dir, session_id):
     return max(hits, key=os.path.getmtime) if hits else None
 
 
+def usage_error(msg):
+    print(f"chrome-loss-scan: {msg}", file=sys.stderr)
+    print("usage: chrome-loss-scan [--json] [--agents FILE --projects DIR]", file=sys.stderr)
+    return 2
+
+
 def main(argv):
     if "-h" in argv or "--help" in argv:
         print(__doc__.strip())
         return 0
-    as_json = "--json" in argv
-    agents_file = argv[argv.index("--agents") + 1] if "--agents" in argv else None
-    projects_dir = argv[argv.index("--projects") + 1] if "--projects" in argv else (os.environ.get("CLAUDE_PROJECTS_DIR") or os.path.join(os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude"), "projects"))
+    as_json = False
+    agents_file = None
+    projects_arg = None
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a == "--json":
+            as_json = True
+            i += 1
+        elif a in ("--agents", "--projects"):
+            if i + 1 >= len(argv):
+                return usage_error(f"{a} needs a value")
+            if a == "--agents":
+                agents_file = argv[i + 1]
+            else:
+                projects_arg = argv[i + 1]
+            i += 2
+        else:
+            return usage_error(f"unknown argument: {a}")
+    projects_dir = projects_arg or os.environ.get("CLAUDE_PROJECTS_DIR") or os.path.join(os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude"), "projects")
     rows = []
     for a in live_sessions(agents_file):
         sid = a["sessionId"]
