@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+# worker-sandbox: run claude for a headless worker inside gate-sandbox's worker profile (only the tree
+# writable, home and other repos hidden, host loopback unreachable). A launcher runs this in claude's
+# place (for example via a configurable claude-command setting), so its own gates and overlay still apply.
+set -u
+me=worker-sandbox
+usage() {
+  cat <<'USAGE'
+worker-sandbox: run claude for a headless worker inside gate-sandbox's worker profile.
+
+Usage: worker-sandbox --settings FILE [CLAUDE ARG...]   (what a launcher runs in claude's place)
+       worker-sandbox --check                           build the whole sandbox, run `true` inside; 0 = usable
+
+Runs from the current directory, which must be in a git tree. FILE (the launcher's settings overlay) is bound
+read-only at /run/worker/settings.json, so the key never appears in an argv.
+
+Inside, claude runs in bypass mode with: / read-only; /run and $HOME empty; the toolchain, claude and
+gate-lock read-only; the tree per SYG_WORKER_SANDBOX_TREE, its untracked .env-style and key files masked;
+the repo's git dir, the tree's .git and (rw trees) its .claude read-only; internet through pasta, host
+loopback and the host's own addresses refused; a clean environment; capped /tmp, /run and home.
+Not walled: the worker can read its own API key, world-readable files outside $HOME and /run, and the
+LAN answers. No memory limit but what the caller sets (for example `systemd-run --user -p MemoryMax=`).
+
+Environment:
+  SYG_WORKER_SANDBOX_TREE     rw (default) or ro
+  SYG_WORKER_SANDBOX_SCRATCH  host dir bound writable at ~/.claude, where claude keeps its transcripts
+                          (required; the caller copies out what it wants and deletes it)
+  SYG_WORKER_SANDBOX_CLAUDE   the program bound as claude (test seam; default: claude on PATH)
+  SYG_WORKER_SANDBOX_RO_BINDS more read-only binds, in SYG_GATE_SANDBOX_RO_BINDS' format
+  SYG_WORKER_SANDBOX_ENV  extra space-separated variable names passed into the worker (default none;
+                          DISABLE_AUTOUPDATER always passes)
+  SYG_WORKER_SANDBOX_PATH the inner PATH after the bin directory (default $HOME/.local/bin:
+                          $HOME/.local/share/mise/shims:/usr/bin:/bin; empty also means the default,
+                          since an empty PATH entry would put the worker's own tree on its PATH)
+
+Exit: claude's own code; 125 when the sandbox can't be built (nothing ran).
+USAGE
+}
+case "${1:-}" in -h|--help) usage; exit 0 ;; esac
+
+bindir=$(dirname "$(realpath "$0")")
+check=0 settings=""
+case "${1:-}" in
+  --check) check=1; shift ;;
+  --settings)
+    [ $# -ge 2 ] && [ -n "$2" ] || { echo "$me: --settings needs a file" >&2; exit 125; }
+    settings=$(realpath -e -- "$2") || { echo "$me: no such settings file: $2" >&2; exit 125; }
+    shift 2 ;;
+  *) usage >&2; exit 125 ;;
+esac
+
+scratch=${SYG_WORKER_SANDBOX_SCRATCH:-}
+[ -n "$scratch" ] && [ -d "$scratch" ] \
+  || { echo "$me: SYG_WORKER_SANDBOX_SCRATCH must name an existing directory" >&2; exit 125; }
+claude_src=${SYG_WORKER_SANDBOX_CLAUDE:-$(command -v claude)}
+claude_real=$(realpath -e -- "$claude_src" 2>/dev/null) \
+  || { echo "$me: claude not found (${claude_src:-not on PATH})" >&2; exit 125; }
+# SYG_GATE_SANDBOX_RO_BINDS splits on colons, so a path holding one would bind the wrong thing
+for p in "$settings" "$claude_real" "$bindir"; do
+  case $p in *:*) echo "$me: a path with a colon can't be bound: $p" >&2; exit 125 ;; esac
+done
+
+# At its real path: gate-sandbox resolves a bind's destination on the host, so ~/.local/bin/claude (a
+# symlink into the versions dir) would land there anyway
+binds=$claude_real
+[ -z "$settings" ] || binds+=":$settings->/run/worker/settings.json"
+# In a tree that ships this bin directory, gate-lock is already there, and gate-sandbox refuses a bind from inside the tree
+worker_bin=/run/worker/bin
+top=$(git rev-parse --show-toplevel 2>/dev/null) \
+  || { echo "$me: $PWD is not in a git tree" >&2; exit 125; }
+case $bindir/ in
+  "$top"/*) worker_bin=$bindir ;;
+  *) binds+=":$bindir/gate-lock->/run/worker/bin/gate-lock" ;;
+esac
+
+[ -z "${SYG_WORKER_SANDBOX_RO_BINDS:-}" ] || binds+=":$SYG_WORKER_SANDBOX_RO_BINDS"
+
+export SYG_GATE_SANDBOX_PROFILE=worker
+export SYG_GATE_SANDBOX_TREE=${SYG_WORKER_SANDBOX_TREE:-rw}
+export SYG_GATE_SANDBOX_SCRATCH=$scratch
+export SYG_GATE_SANDBOX_RO_BINDS=$binds
+export SYG_GATE_SANDBOX_ENV="DISABLE_AUTOUPDATER${SYG_WORKER_SANDBOX_ENV:+ $SYG_WORKER_SANDBOX_ENV}"
+export DISABLE_AUTOUPDATER=1
+# Inner only: gate-sandbox finds git, bwrap and pasta on the host's PATH, which a tree's bin/ stays off
+export SYG_GATE_SANDBOX_PATH="$worker_bin:${SYG_WORKER_SANDBOX_PATH:-$HOME/.local/bin:$HOME/.local/share/mise/shims:/usr/bin:/bin}"
+
+if [ "$check" = 1 ]; then
+  exec "$bindir/gate-sandbox" "$PWD" -- /usr/bin/true
+fi
+# Bypass mode is set here, inside the launcher, so a launcher that ignored its claude-command setting would run
+# claude under its default mode, where a headless run gets no tools, rather than unwalled with all of them.
+exec "$bindir/gate-sandbox" "$PWD" -- "$claude_real" --settings /run/worker/settings.json \
+  --permission-mode bypassPermissions "$@"

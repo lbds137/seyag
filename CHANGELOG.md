@@ -2,6 +2,19 @@
 
 All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY-MM-DD>` section per released version; under it, `###` categories in fixed order — Breaking Changes, Features, Bug Fixes, Improvements, Chores, Tests — empty ones omitted; items are `- **scope:** description (#PR)`, written from the version's merged commit subjects.
 
+## 0.3.171 - 2026-11-16
+
+### Features
+
+- **gate-lock:** moved in from a machine-config repo as a generic tool; runs one gate command under a machine-wide flock (a busy lock waits, TERM is forwarded and waited out, exit 125 for its own errors); env knob renamed to `SYG_GATE_LOCK_FILE`.
+- **gate-sandbox:** moved in from a machine-config repo as a generic tool; runs a command in a bubblewrap sandbox scoped to one git worktree, with a worker profile for whole headless workers; env knobs renamed to `SYG_GATE_SANDBOX_PROFILE`, `SYG_GATE_SANDBOX_TREE`, `SYG_GATE_SANDBOX_SCRATCH`, `SYG_GATE_SANDBOX_RO_BINDS`, `SYG_GATE_SANDBOX_ENV` and `SYG_GATE_SANDBOX_PATH`; new knob `SYG_GATE_SANDBOX_TOOLCHAIN` (the read-only toolchain paths, default unchanged).
+- **worker-sandbox:** moved in from a machine-config repo as a generic tool; runs claude for a headless worker inside gate-sandbox's worker profile; env knobs renamed to `SYG_WORKER_SANDBOX_TREE`, `SYG_WORKER_SANDBOX_SCRATCH`, `SYG_WORKER_SANDBOX_CLAUDE` and `SYG_WORKER_SANDBOX_RO_BINDS`; new knobs `SYG_WORKER_SANDBOX_ENV` (extra variables passed in; the launcher-specific default is gone) and `SYG_WORKER_SANDBOX_PATH` (inner PATH tail).
+- **worker-tree-check:** moved in from a machine-config repo as a generic tool; refuses a worker-writable git tree whose gitfile, nested repos or HEAD entries could make host git run attacker config, without running git on it; env knob renamed to `SYG_WORKER_TREE_CHECK_UNTRUSTED`.
+
+### Tests
+
+- **probes:** ported `tests/gate-sandbox.probe.sh`, `tests/worker-tree-check.probe.sh` and `tests/worker-sandbox.probe.sh`; new `tests/gate-lock.probe.sh`; new sourced helper `tests/sandbox-capable.sh` replaces whole-probe skips with a bwrap/pasta capability check, and CI sets `SYG_PROBE_REQUIRE_SANDBOX=1` so the sandbox cases can never be skipped there.
+
 ## 0.3.170 - 2026-11-16
 
 ### Features

@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# gate-lock: run one gate command (tests, lint, typecheck, build) under the machine-wide gate lock,
+# so only one gate run uses the machine's RAM at a time. A busy lock waits; it never fails.
+# The lock file is SYG_GATE_LOCK_FILE, default /tmp/gate.lock: /tmp is writable and shared with the
+# host inside common agent sandboxes where $HOME is read-only.
+# Exit: the command's own code; 125 for gate-lock's own errors (2 would read as a lint failure).
+set -u
+if [ $# = 0 ] || [ "$1" = -h ] || [ "$1" = --help ]; then
+  echo "usage: gate-lock CMD [ARG...]   run CMD holding \${SYG_GATE_LOCK_FILE:-/tmp/gate.lock}; waits if busy" >&2
+  [ $# = 0 ] && exit 125 || exit 0
+fi
+lock=${SYG_GATE_LOCK_FILE:-/tmp/gate.lock}
+exec 9>>"$lock" || { echo "gate-lock: can't open $lock" >&2; exit 125; }
+if ! flock -n 9; then
+  echo "gate-lock: waiting for $lock (another gate run holds it)" >&2
+  flock 9 || { echo "gate-lock: flock $lock failed" >&2; exit 125; }
+fi
+# The command runs without the lock fd (a stray grandchild can't hold the lock forever), and a
+# TERM/INT/HUP to gate-lock (a caller's timeout) is passed on and waited out, so the lock is
+# released only once the command is gone. SIGKILL can't be caught; then the lock goes early.
+"$@" 9>&- &
+child=$!
+trap 'kill -TERM "$child" 2>/dev/null' TERM INT HUP
+while :; do
+  wait "$child"; rc=$?
+  kill -0 "$child" 2>/dev/null || break  # wait returned for a trapped signal; the child still runs
+done
+exit "$rc"

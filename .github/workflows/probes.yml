@@ -68,6 +68,8 @@ jobs:
         env:
           JOB_INDEX: ${{ strategy.job-index }}
           JOB_TOTAL: ${{ strategy.job-total }}
+          # CI must run the sandbox probe cases, never skip them for lack of bwrap or pasta.
+          SYG_PROBE_REQUIRE_SANDBOX: "1"
         # An empty index would make every job run shard 1, so fail on it instead.
         run: bash tests/run-probes.sh -j 0 --shard "$((${JOB_INDEX:?} + 1))/${JOB_TOTAL:?}"
 

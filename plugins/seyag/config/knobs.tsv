@@ -105,6 +105,14 @@ SYG_EXTRA_USAGE_BUDGET_CMD	user	usage	unset	Shell command printing the extra-usa
 SYG_EXTRA_USAGE_BUDGET_CMD_TIMEOUT	user	usage	10	Timeout in seconds (positive integer) for SYG_EXTRA_USAGE_BUDGET_CMD in claude-usage.
 SYG_EXTRA_USAGE_BUDGET_USD	user	usage	unset	Static extra-usage budget in USD (non-negative decimal) for claude-usage and statusline.
 SYG_EXTRA_USAGE_TOML	user	statusline	unset	Path to a TOML file with bought_usd and optional used_usd_at_anchor read on each statusline render.
+SYG_GATE_LOCK_FILE	user	worktrees	/tmp/gate.lock	Lock file gate-lock holds while a gate command runs; one gate at a time machine-wide (keep it on a path every sandbox shares).
+SYG_GATE_SANDBOX_ENV	user	worktrees	unset	Space-separated variable names gate-sandbox passes into the sandbox's otherwise cleared environment.
+SYG_GATE_SANDBOX_PATH	user	worktrees	prose:the caller's PATH	PATH inside gate-sandbox.
+SYG_GATE_SANDBOX_PROFILE	user	worktrees	unset	gate-sandbox profile: unset for a one-gate sandbox, worker for a whole headless worker (set by worker-sandbox).
+SYG_GATE_SANDBOX_RO_BINDS	user	worktrees	unset	Colon-separated SRC or SRC->DST read-only binds added to gate-sandbox; entries resolving inside the worktree are refused.
+SYG_GATE_SANDBOX_SCRATCH	user	worktrees	unset	Worker profile only: host directory bound writable at ~/.claude inside the sandbox (required).
+SYG_GATE_SANDBOX_TOOLCHAIN	user	worktrees	$HOME/.local/bin/mise:$HOME/.local/share/mise:$HOME/.local/state/mise:$HOME/.config/mise:$HOME/.local/share/pnpm	Colon-separated toolchain paths gate-sandbox binds read-only (absent ones skipped); empty for none. Each entry widens what the sandbox can read (an entry of $HOME undoes the hidden home).
+SYG_GATE_SANDBOX_TREE	user	worktrees	rw	Worker profile only: rw or ro mount of the worktree.
 SYG_GH_WRAPPERS	user	guards	unset	Whitespace-separated wrapper command prefix tokens scanned as gh invocations by session-url-gate and private-term-guard.
 SYG_HANDOFF_CMDS	user	stop-gates	unset	Python regex matching Bash commands that write a handoff (replaces built-in HANDOFF.md/handoff.md path defaults).
 SYG_HANDOFF_PATHS	user	stop-gates	(^|/)(?:HANDOFF\.md|handoff\.md)$	Python regex matching file paths whose Edit/Write counts as a handoff write (replaces built-in defaults when set).
@@ -179,6 +187,13 @@ SYG_USER_RULES_DIR	internal	session	$HOME/.claude/rules	Test seam overriding the
 SYG_WEEK_BURN_MARGIN_MIN	user	usage	30	Margin in minutes (integer >= 0) added to the computed burn window in week-burn-window.
 SYG_WEEK_BURN_NOW	internal	usage	unset	Test clock (epoch seconds) overriding current time in week-burn-window.
 SYG_WEEK_BURN_RATE	user	usage	unset	Override burn rate in %/h (number > 0) for week-burn-window, replacing the 6-hour log slope.
+SYG_WORKER_SANDBOX_CLAUDE	internal	worktrees	prose:claude on PATH	Test seam naming the program worker-sandbox binds and runs as claude.
+SYG_WORKER_SANDBOX_ENV	user	worktrees	unset	Extra space-separated variable names worker-sandbox passes into the worker (DISABLE_AUTOUPDATER always passes).
+SYG_WORKER_SANDBOX_PATH	user	worktrees	$HOME/.local/bin:$HOME/.local/share/mise/shims:/usr/bin:/bin	Inner PATH tail worker-sandbox appends after its bin directory; empty means the default.
+SYG_WORKER_SANDBOX_RO_BINDS	user	worktrees	unset	More read-only binds for the worker, in SYG_GATE_SANDBOX_RO_BINDS' format.
+SYG_WORKER_SANDBOX_SCRATCH	user	worktrees	unset	Host directory worker-sandbox binds writable at ~/.claude, where claude keeps its transcripts (required; the caller copies out what it wants and deletes it).
+SYG_WORKER_SANDBOX_TREE	user	worktrees	rw	rw or ro mount of the worker's tree.
+SYG_WORKER_TREE_CHECK_UNTRUSTED	user	worktrees	/tmp:/var/tmp:/dev/shm	Colon-separated directories a worker can write; worker-tree-check refuses a gitdir under them when no --repo anchor is given.
 SYG_WORKTREE_BACKUP_ALLOW_VOLATILE	user	worktrees	unset	Set to 1 to allow safe-worktree-clean --apply-hold backups on tmpfs or ramfs.
 SYG_WORKTREE_BACKUP_DIR	user	worktrees	${XDG_STATE_HOME:-$HOME/.local/state}/seyag/worktree-backups	Directory where safe-worktree-clean --apply-hold writes HOLD worktree backup bundles.
 SYG_WORKTREE_BASE	user	worktrees	origin/<default branch>	Base git ref against which safe-worktree-clean judges worktrees when --base is not passed.
