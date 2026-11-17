@@ -132,6 +132,21 @@ out=$(SYG_DRIVER_CLONE_ROLE_BIN=$T/role-fail "$DC" flat b --name "Flat B" 2>&1);
 [ $rc = 0 ] && grep -q "file the trust step by hand: Run claude once in $P/flat-b" <<<"$out" && [ -d "$P/flat-b" ] \
   && ok "failing claude-role: lane kept, trust step printed" || bad "claude-role failure (rc $rc): $out"
 
+# A base route: with a backslash or an embedded quote, and a projects path with a quote, are refused
+# before anything is cloned, naming the field or knob.
+git clone -q "$T/origin.git" "$P/rbad" 2>/dev/null; printf -- '---\nrole: "Rbad"\nroute: "a\\\\b"\n---\n' > "$R/rbad.md"
+out=$(SYG_PROJECT_NAMES_FILE='' "$DC" rbad b --name "Rbad B" 2>&1); rc=$?
+[ $rc != 0 ] && grep -qF "route: value" <<<"$out" && [ ! -e "$P/rbad-b" ] && [ ! -e "$R/rbad-b.md" ] \
+  && ok "a base route: with a backslash is refused, nothing cloned" || bad "bad route (rc $rc): $out"
+git clone -q "$T/origin.git" "$P/rq" 2>/dev/null; printf -- "---\nrole: Rq\nroute: 'x\"y'\n---\n" > "$R/rq.md"
+out=$(SYG_PROJECT_NAMES_FILE='' "$DC" rq b --name "Rq B" 2>&1); rc=$?
+[ $rc != 0 ] && grep -qF "route: value" <<<"$out" && [ ! -e "$P/rq-b" ] \
+  && ok "a base route: with an embedded quote is refused, nothing cloned" || bad "quoted route (rc $rc): $out"
+QP="$T/q\"p"; mkdir -p "$QP"; git clone -q "$T/origin.git" "$QP/qbase" 2>/dev/null; printf -- '---\nrole: Qbase\n---\n' > "$R/qbase.md"
+out=$(SYG_DRIVER_CLONE_PROJECTS="$QP" SYG_PROJECT_NAMES_FILE='' "$DC" qbase b --name "Q B" 2>&1); rc=$?
+[ $rc != 0 ] && grep -qF "SYG_DRIVER_CLONE_PROJECTS" <<<"$out" && [ ! -e "$QP/qbase-b" ] && [ ! -e "$R/qbase-b.md" ] \
+  && ok "a projects path with a quote is refused, nothing cloned" || bad "bad projects path (rc $rc): $out"
+
 # The base short name is validated like --name, on both paths: one layer of quotes is stripped, a
 # backslash (or quote, tab, CR) is refused before anything is cloned.
 git clone -q "$T/origin.git" "$P/quoted" 2>/dev/null; printf -- "---\nrole: 'Quoted Base'\n---\n" > "$R/quoted.md"
