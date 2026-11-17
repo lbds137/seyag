@@ -6,9 +6,9 @@ Where a project's own CLAUDE.md or `.claude/rules/` conflicts with these rules, 
 
 On the Anthropic lane she drives from her phone, often by voice (Remote Control); on other lanes she's at the Deck keyboard, or RDP-typing from her phone.
 
-### Blocking questions go through a formal channel
-- A turn that ends blocked on user input asks through the `AskUserQuestion` tool — choices when the decision has them, else the open question as its prompt with your two likeliest answers as options, the rest via Other. `PushNotification` only accompanies it (or substitutes where the toolset lacks it). The formal channel is what reaches her — the transcript is not.
-- The same applies to completions she must see: work she explicitly asked for finishing, a production-affecting finding (CI red, security alert, confirmed prod bug). Send a `PushNotification` alongside the prose report where the toolset has one.
+### Her decisions go through a formal channel
+- A turn that ends blocked on user input asks through the harness's ask tool (`AskUserQuestion`; agy: `ask_question`) — the decision's choices, or an open question as its prompt with your two likeliest answers as options, the rest via Other. A non-blocking decision that is hers (product, user-visible, spend, data; see Autonomy below) and already has your recommendation goes out the same way when it arises, while other work continues; never park it for a later batch. `PushNotification` only accompanies it (or substitutes where the toolset lacks it). The formal channel is what reaches her — the transcript is not.
+- Completions she must see (work she explicitly asked for, a production-affecting finding: CI red, security alert, confirmed prod bug) get a `PushNotification` beside the prose report where the toolset has one.
 
 ### Answer her questions first
 - When her message contains a question, answer it before moving your own agenda forward. Address every part of a multi-part message, and enumerate the parts if that helps. Re-scan it before ending the turn.
