@@ -5,7 +5,9 @@
 #      control over fixture strings runs first).
 #   B. runtime: four hooks, one per invocation form, run from a directory that
 #      plants re.py/json.py/shlex.py/subprocess.py; none may import a plant,
-#      and every python3 spawn must carry -I.
+#      and every python3 spawn must carry -I. Then recursive-rm-guard once more
+#      through run.sh with a pycache prefix: the prefix argument must reach the
+#      hook's python3 and bytecode must land under it.
 #   C. no bytecode lands in the plugin tree.
 # Usage: tests/python-isolation.probe.sh   (from anywhere)
 
@@ -140,6 +142,7 @@ PLANT="$TMP/plant"
 SHIM="$TMP/shim"
 LOG="$TMP/shim.log"
 mkdir -p "$PLANT" "$SHIM"
+# shlex.py/subprocess.py are a broad net for future hooks; today's rows import re (all) and json (promise-ledger-check).
 for m in re json shlex subprocess; do
   printf 'open(r"%s/marker-%s", "w").close()\n' "$TMP" "$m" >"$PLANT/$m.py"
 done
@@ -189,6 +192,38 @@ printf '%s\n' \
   >"$TMP/transcript.jsonl"
 row "promise-ledger-check.sh (python3 <<)" promise-ledger-check.sh \
   "{\"stop_hook_active\":false,\"transcript_path\":\"$TMP/transcript.jsonl\"}"
+
+# recursive-rm-guard through run.sh (single-hook mode), with a pycache prefix: run.sh
+# exports SYG_PY_CACHE_ARG=-Xpycache_prefix=<dir> when PYTHONPYCACHEPREFIX is set and
+# PYTHONDONTWRITEBYTECODE is not, so the hook's `python3 -I` must carry that argument
+# and write its bytecode under the prefix. Same plant, shim and payload as the row above.
+RUN_PC="$TMP/pc"
+RUN_PROJ="$TMP/proj"
+mkdir -p "$RUN_PROJ"
+clear_state
+(cd "$PLANT" && printf '%s' '{"tool_name":"Bash","tool_input":{"command":"rm -rf build"}}' | env \
+  -u SYG_PY_CACHE_ARG -u PYTHONDONTWRITEBYTECODE -u CLAUDE_CODE_ENTRYPOINT -u SYG_PROFILE -u SYG_ENABLE -u SYG_DISABLE \
+  CLAUDE_JOB_DIR= CLAUDE_PROJECT_DIR="$RUN_PROJ" XDG_CACHE_HOME="$TMP/xdg-cache" \
+  PATH="$SHIM:$PATH" PYTHONPYCACHEPREFIX="$RUN_PC" bash "$REPO/plugins/seyag/hooks/run.sh" recursive-rm-guard >/dev/null 2>&1)
+lines=$(grep -c . "$LOG")
+spawn_bad=0
+re_spawn='(^| )-I( |$)'
+while IFS= read -r line; do
+  if ! [[ $line =~ $re_spawn ]] || [[ $line != *"-Xpycache_prefix=$RUN_PC"* ]]; then
+    spawn_bad=$((spawn_bad + 1))
+  fi
+done <"$LOG"
+if [ "$lines" -lt 1 ]; then
+  bad "run.sh recursive-rm-guard (pycache prefix): python step not reached (shim.log empty)"
+elif [ "$spawn_bad" -gt 0 ]; then
+  bad "run.sh recursive-rm-guard (pycache prefix): $spawn_bad python3 spawn(s) lack standalone -I or -Xpycache_prefix=$RUN_PC: $(head -1 "$LOG")"
+elif [ -n "$(markers)" ]; then
+  bad "run.sh recursive-rm-guard (pycache prefix): a planted module in the cwd was imported: $(markers)"
+elif [ -z "$(find "$RUN_PC" -name '*.pyc' -print -quit 2>/dev/null)" ]; then
+  bad "run.sh recursive-rm-guard (pycache prefix): no bytecode written under $RUN_PC"
+else
+  ok "run.sh recursive-rm-guard (pycache prefix): $lines python3 spawn(s), all -I with the prefix argument, no planted module, bytecode under the prefix"
+fi
 
 # --- C. No bytecode in the plugin tree ------------------------------------------
 PYC_AFTER=$(find "$REPO/plugins" -name __pycache__ 2>/dev/null | sort)
