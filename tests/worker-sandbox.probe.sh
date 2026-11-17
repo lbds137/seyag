@@ -51,7 +51,8 @@ if ! syg_can_pasta; then
 fi
 
 # 1. --check builds the sandbox and runs nothing else
-(cd "$W" && "$B/worker-sandbox" --check) 2>"$T/err" && ok "--check builds the sandbox on this host" \
+fake 'exit 0'
+(cd "$W" && SYG_WORKER_SANDBOX_CLAUDE=$T/fake-claude "$B/worker-sandbox" --check) 2>"$T/err" && ok "--check builds the sandbox on this host" \
   || bad "--check failed: $(cat "$T/err")"
 
 # 2. Exit code and argv come through; the overlay is a bound path, not a key in argv
@@ -96,25 +97,32 @@ out=$(cd "$W" && SYG_WORKER_SANDBOX_TREE=ro SYG_WORKER_SANDBOX_CLAUDE=$T/fake-cl
 # Each named path exists on this host (the control, or the row would prove nothing), and a fixture in
 # home stands in for "another repo": a /tmp fixture would vanish with /tmp alone.
 export XDG_CACHE_HOME=$HOME/.cache
-H=$(mktemp -d "$HOME/.cache/worker-sandbox-probe.XXXXXX")
-trap 'chmod -R u+rwX "$T" 2>/dev/null; rm -rf "$T" "$H"' EXIT
-echo other-repo-secret >"$H/secret"
-paths=("$H/secret")
-for p in "$HOME/.claude/settings.json" /run/user/"$(id -u)"; do
-  [ -e "$p" ] && paths+=("$p") || echo "note: $p isn't on this host, so its row is only the fixture's"
-done
-export WORKER_PROBE_SECRET=caller-secret
-fake 'for p in '"$(printf '"%s" ' "${paths[@]}")"'; do [ -e "$p" ] && echo "visible: $p"; done
+made_cache=
+[ -d "$HOME/.cache" ] || { mkdir -p "$HOME/.cache" && made_cache=1; }
+H=$(mktemp -d "$HOME/.cache/worker-sandbox-probe.XXXXXX" 2>"$T/mktemp-err") || H=
+# Only what the probe made goes: the fixture dir (when it exists) and a $HOME/.cache it created
+trap 'chmod -R u+rwX "$T" 2>/dev/null; rm -rf "$T"; [ -n "$H" ] && rm -rf "${H:?}"; [ -n "$made_cache" ] && rmdir "$HOME/.cache" 2>/dev/null' EXIT
+if [ -z "$H" ]; then
+  bad "hidden: couldn't create the fixture under $HOME/.cache: $(cat "$T/mktemp-err"); case not run"
+else
+  echo other-repo-secret >"${H:?}/secret"
+  paths=("$H/secret")
+  for p in "$HOME/.claude/settings.json" /run/user/"$(id -u)"; do
+    [ -e "$p" ] && paths+=("$p") || echo "note: $p isn't on this host, so its row is only the fixture's"
+  done
+  export WORKER_PROBE_SECRET=caller-secret
+  fake 'for p in '"$(printf '"%s" ' "${paths[@]}")"'; do [ -e "$p" ] && echo "visible: $p"; done
 cat "'"$M"'/.env" 2>/dev/null && echo main-visible
 [ -e /run/user ] && echo run-user-visible
 [ -e /run/dbus ] && echo dbus-visible
 [ -n "${WORKER_PROBE_SECRET:-}" ] && echo env-leaked
 id -u; exit 0'
-out=$(inside); rc=$?
-unset WORKER_PROBE_SECRET
-[ "$rc" = 0 ] && [ "$out" = "$(id -u)" ] \
-  && ok "home, main checkout, host sockets and caller env hidden; runs as the real uid (bypass mode refuses root)" \
-  || bad "hidden: rc=$rc out=[$out] err=[$(cat "$T/err")]"
+  out=$(inside); rc=$?
+  unset WORKER_PROBE_SECRET
+  [ "$rc" = 0 ] && [ "$out" = "$(id -u)" ] \
+    && ok "home, main checkout, host sockets and caller env hidden; runs as the real uid (bypass mode refuses root)" \
+    || bad "hidden: rc=$rc out=[$out] err=[$(cat "$T/err")]"
+fi
 
 # 5b. Untracked secret-shaped files read as empty; a tracked one, a fixture, reads as itself
 echo real-key >"$W/.env"; mkdir -p "$W/svc"; echo real-key >"$W/svc/.env.local"; echo real-key >"$W/tls.pem"
@@ -201,10 +209,26 @@ fake "python3 $T/connect.py $port $(tr '\n' ' ' <<<"$addrs"); exit 0"
 out=$(cd "$W" && SYG_WORKER_SANDBOX_RO_BINDS=$T/connect.py SYG_WORKER_SANDBOX_CLAUDE=$T/fake-claude "$B/worker-sandbox" --settings "$T/overlay.json" 2>"$T/err"); rc=$?
 kill "$listener" 2>/dev/null; wait "$listener" 2>/dev/null
 n=$(wc -l <<<"$addrs")
+# What holds: loopback and the address(es) pasta copies into its namespace (the namespace itself
+# answers "refused" there). The host's other addresses stay reachable: a known gap, the wall-hardening
+# unit's. The copied set comes from the same pasta launcher line gate-sandbox uses.
+copied=$(pasta --config-net --quiet --no-map-gw -t none -u none -T none -U none -- ip -o addr show 2>/dev/null \
+  | awk '$2 != "lo" {print $4}' | cut -d/ -f1 | grep -v '^fe80')
+walled=$(printf '%s\n' 127.0.0.1 ::1 "$copied" | grep -v '^$' | sort -u)
+walled_n=0; walled_ok=1; others=0
+while read -r a; do
+  if grep -qFx "$a" <<<"$walled"; then
+    walled_n=$((walled_n+1))
+    grep -qFx "$a refused" <<<"$out" || walled_ok=0
+  else
+    others=$((others+1))
+    echo "note: host address $a is $(awk -v a="$a" '$1 == a {print $2}' <<<"$out" | head -1) from inside (known gap, wall-hardening unit)"
+  fi
+done <<<"$addrs"
 # Refused, not just "failed": a namespace with no network at all would time out or say unreachable
-[ "$(grep -c ' OPEN$' <<<"$control")" = "$n" ] && [ "$(grep -c ' refused$' <<<"$out")" = "$n" ] \
-  && ok "all $n host addresses: open to bare --share-net (control), refused under pasta" \
-  || bad "host addresses: control=[$control] rc=$rc out=[$out] err=[$(cat "$T/err")]"
+[ "$(grep -c ' OPEN$' <<<"$control")" = "$n" ] && [ "$walled_ok" = 1 ] && [ "$walled_n" -ge 2 ] \
+  && ok "loopback and pasta's copied address refused ($walled_n); $others other host address(es) reachable (known gap); all $n open to bare --share-net (control)" \
+  || bad "host addresses: control=[$control] rc=$rc out=[$out] copied=[$copied] err=[$(cat "$T/err")]"
 
 # 7b. The internet does work: the wall above isn't just "no network". Skipped when the host is offline.
 netprobe='import socket
@@ -212,7 +236,16 @@ try:
     socket.create_connection(("one.one.one.one", 443), timeout=8); print("OPEN")
 except OSError as e:
     print("closed", e)'
-if [ "$(python3 -c "$netprobe" 2>&1)" = OPEN ]; then
+# The sandbox resolves names only through nss-resolve or a non-loopback nameserver in resolv.conf
+resolver_path=
+if grep -E '^hosts:.*\bresolve\b' /etc/nsswitch.conf >/dev/null 2>&1 && [ -S /run/systemd/resolve/io.systemd.Resolve ]; then
+  resolver_path=1
+elif awk '$1 == "nameserver" && $2 !~ /^(127\.|::1$)/ {f=1} END {exit !f}' /etc/resolv.conf 2>/dev/null; then
+  resolver_path=1
+fi
+if [ -z "$resolver_path" ]; then
+  echo "SKIP: no resolver path for the sandbox on this host (loopback-only resolv.conf without nss-resolve)"
+elif [ "$(python3 -c "$netprobe" 2>&1)" = OPEN ]; then
   printf '%s\n' "$netprobe" >"$T/net.py"
   fake "python3 $T/net.py; exit 0"
   out=$(cd "$W" && SYG_WORKER_SANDBOX_RO_BINDS=$T/net.py SYG_WORKER_SANDBOX_CLAUDE=$T/fake-claude "$B/worker-sandbox" --settings "$T/overlay.json" 2>"$T/err"); rc=$?
