@@ -6,11 +6,11 @@ All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY
 
 ### Bug Fixes
 
-- **worker-tree-check:** closes three ways a worker-written tree passed while host git would read a config the worker planted: with no `.git` above DIR it now refuses under `--linked`/`--repo` and, without them, refuses a HEAD anywhere from DIR up to `/` (a bare-shaped gitdir planted where the `.git` file was); a real `.git` directory now honours `--repo` (it must be MAIN_TOP's own) and runs the HEAD walk under it; and a DIR inside a linked worktree its repo still registers, whose `.git` file is gone, is refused. Also refuses a symlinked gitdir written with a trailing slash and a gitfile with a second line but no final newline, and `SYG_WORKER_TREE_CHECK_UNTRUSTED=/` now distrusts every path. Help text says what holds. (#PR)
+- **worker-tree-check:** closes three ways a worker-written tree passed while host git would read a config the worker planted: with no `.git` above DIR it now refuses under `--linked`/`--repo` and, without them, refuses a HEAD anywhere from DIR up to `/` (a bare-shaped gitdir planted where the `.git` file was); a real `.git` directory now honours `--repo` (it must be MAIN_TOP's own) and runs the HEAD walk under it; and a DIR inside a linked worktree its repo still registers, whose `.git` file is gone, is refused. Also refuses a symlinked gitdir written with a trailing `/` or `/.` and a gitfile with a second line but no final newline, and `SYG_WORKER_TREE_CHECK_UNTRUSTED=/` now distrusts every path. Help text says what holds. (#337)
 
 ### Tests
 
-- **probes:** `tests/worker-tree-check.probe.sh` pins each new refusal against the old script (red-first), with a positive control that git really runs the planted payload and a check that the probe itself never does, plus the documented no-scan of a main checkout without `--repo`. (#PR)
+- **probes:** `tests/worker-tree-check.probe.sh` pins each new refusal against the old script (red-first), with a positive control that git really runs the planted payload and a check that the probe itself never does, plus the documented no-scan of a main checkout without `--repo`. (#337)
 
 ## 0.3.183 - 2026-11-18
 
