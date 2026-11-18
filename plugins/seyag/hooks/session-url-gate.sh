@@ -4,8 +4,9 @@
 # it must not enter a commit, tag, note, PR, issue, release or gist, in any
 # project. Tzurot's .husky/commit-msg guards the commit-message path only; this
 # hook checks the command text, bodies read from files, the commit MESSAGES of
-# a push, and the added file lines of the commit being made and of pushed
-# commits (see KNOWN GAPS for what it does not see).
+# a push, and added lines holding a link the same diff does not also remove
+# (net-new; per diff on commit, per commit on push) of the commit being made
+# and of pushed commits (see KNOWN GAPS for what it does not see).
 #
 # THE ADDED LAYER: git-hooks/pre-push (opt-in, `seyag-git-hooks install
 # --global`) also scans what a push from a public repo sends, however bash
@@ -77,10 +78,12 @@
 #      pass. A refspec with `$`, a backtick or a glob is read as HEAD.
 #      `gh repo create … --push` runs the same scan on HEAD in the repo
 #      directory (`--source <dir>` if given, else the tracked cwd).
-#   4. Added lines in every file: of the commit being made by `git commit`
-#      (staged, plus what a same-command `git add`, `commit -a` or a pathspec
-#      commit adds, as lib/commit_diff.py computes it), and of each commit a
-#      `git push` or `gh repo create --push` sends (same sources as 3).
+#   4. Added lines holding a link the same diff does not also remove (net-new;
+#      per diff on commit, per commit on push) in every file: of the commit
+#      being made by `git commit` (staged, plus what a same-command `git add`,
+#      `commit -a` or a pathspec commit adds, as lib/commit_diff.py computes
+#      it), and of each commit a `git push` or `gh repo create --push` sends
+#      (same sources as 3).
 #
 # MESSAGE: names the path that matched (command text, file <f>, commit
 # <sha> <subject>, staged <path>, or commit <sha> <path>), masks the id (`claude.ai/code/session_…`; the full link
@@ -103,7 +106,8 @@
 # commit are read only as lib/commit_diff.py approximates them: content written
 # earlier in the same command does not exist yet when this PreToolUse hook
 # runs, a merge commit's own changes are not read on push (no `-m`), and pushed
-# diffs past 4 MiB of log output are not read.
+# diffs past 4 MiB of log output are not read. A link moved within one commit
+# (file move, delete+add) is carried and passes.
 #
 # FAIL-OPEN: no jq/python3, unparsable JSON or command, or an internal python
 # error → exit 0. Prefilter, in bash, before python spawns: a `gh` word always
@@ -156,7 +160,7 @@ import sys
 sys.path.insert(0, os.environ["HOOK_LIB"])
 from outbound import bypass_block_message, outbound_items, prepush_bypasses
 from prepush_state import enforcing_judge, global_install_present
-from session_link import SECRET, mask
+from session_link import SECRET, mask, tokens
 
 cmd = os.fsdecode(open(3, "rb").read()).removesuffix("\n")
 payload_cwd = os.environ.get("CWD") or "."
@@ -173,7 +177,7 @@ if bypass_tokens:
     sys.exit(0)
 
 
-hits = [item for item in outbound_items(cmd, payload_cwd, BYPASS)
+hits = [item for item in outbound_items(cmd, payload_cwd, BYPASS, net_tokens=tokens)
         if SECRET.search(item.text)]
 findings = [mask(item.label) for item in hits]
 

@@ -24,6 +24,11 @@ PUSHED LINES (`pushed_added_lines`): the added lines of every commit in
 `git log -p <sources> --not --remotes`, so commits already on any remote are
 not read; at most 4 MiB of log output is read.
 
+NET-NEW FILTERING (`commit_line_groups`, `pushed_line_groups`, `removed_lines`,
+`net_added`): pairs each diff group's added entries with its `-` content lines
+so `net_added(groups, tokens)` keeps only added lines holding at least one
+token not matched one-for-one by the group's removed lines.
+
 Every diff call pins diff.relative, diff.srcPrefix, diff.dstPrefix (and the
 related prefix and quoting options) so a repo's own config cannot move the
 headers the parser reads. Headers are told apart from content by hunk state.
@@ -31,6 +36,7 @@ headers the parser reads. Headers are told apart from content by hunk state.
 No top-level side effects: importing this module runs nothing.
 """
 
+from collections import Counter
 import os
 import subprocess
 
@@ -174,6 +180,39 @@ def added_lines(diff_text):
     return out
 
 
+def removed_lines(diff_text):
+    """Line text for each removed line; headers (`--- a/...`) come before `@@`
+    and are excluded by hunk state."""
+    out, in_header = [], True
+    for ln in diff_text.split("\n"):
+        if ln.startswith("diff --git "):
+            in_header = True
+        elif ln.startswith("@@"):
+            in_header = False
+        elif not in_header and ln.startswith("-"):
+            out.append(ln[1:])
+    return out
+
+
+def net_added(groups, tokens):
+    """Added entries from `groups` (each `(added_pairs, removed_texts)`) whose
+    line (`entry[-1]`) holds at least one token from `tokens(line)` not matched
+    one-for-one by `removed_texts` in the same group."""
+    out = []
+    for added, removed in groups:
+        rem = Counter(t for r in removed for t in tokens(r))
+        for entry in added:
+            new = False
+            for t in tokens(entry[-1]):
+                if rem[t] > 0:
+                    rem[t] -= 1
+                else:
+                    new = True
+            if new:
+                out.append(entry)
+    return out
+
+
 def untracked_files(d, top, paths):
     args = ["ls-files", "--others", "--exclude-standard", "--full-name"]
     if paths:
@@ -195,35 +234,45 @@ def untracked_files(d, top, paths):
     return res
 
 
-def commit_lines(d, spec, adds):
-    """(path, line) for each line the commit run in `d` will carry. `spec` is
-    `parse_commit`'s result; `adds` the `parse_add` results of earlier
-    `git add`s in the same command, each with its "dir"."""
+def _diff_group(diff_text):
+    text = diff_text or ""
+    return added_lines(text), removed_lines(text)
+
+
+def commit_line_groups(d, spec, adds):
+    """List of `(added_pairs, removed_texts)` groups for the commit run in `d`:
+    one group per diff call, plus untracked-file groups with nothing removed."""
     top = toplevel(d)
     if not top:
         return []
-    found = []
-    staged = git(d, "diff", "--cached", *DIFF_OPTS)
-    found += added_lines(staged or "")
+    groups = [_diff_group(git(d, "diff", "--cached", *DIFF_OPTS))]
     for ad in adds:
         if toplevel(ad["dir"]) != top:
             continue
         if ad["weird"] or (ad["all"] and not ad["paths"]):
-            found += added_lines(git(d, "diff", *DIFF_OPTS) or "")
+            groups.append(_diff_group(git(d, "diff", *DIFF_OPTS)))
             if ad["untracked"] or ad["weird"]:
-                found += untracked_files(d, top, [])
+                groups.append((untracked_files(d, top, []), []))
         else:
             if ad["paths"]:
-                found += added_lines(git(
-                    ad["dir"], "diff", *DIFF_OPTS, "--", *ad["paths"]) or "")
-                found += untracked_files(ad["dir"], top, ad["paths"])
+                groups.append(_diff_group(git(
+                    ad["dir"], "diff", *DIFF_OPTS, "--", *ad["paths"])))
+                groups.append((untracked_files(ad["dir"], top, ad["paths"]), []))
     if spec["all"]:
-        found += added_lines(git(d, "diff", *DIFF_OPTS) or "")
+        groups.append(_diff_group(git(d, "diff", *DIFF_OPTS)))
     if spec["paths"] or spec["only"]:
         if spec["paths"]:
-            found += added_lines(git(
-                d, "diff", "HEAD", *DIFF_OPTS, "--", *spec["paths"]) or "")
-    return found
+            groups.append(_diff_group(git(
+                d, "diff", "HEAD", *DIFF_OPTS, "--", *spec["paths"])))
+    return groups
+
+
+def commit_lines(d, spec, adds):
+    """(path, line) for each line the commit run in `d` will carry. `spec` is
+    `parse_commit`'s result; `adds` the `parse_add` results of earlier
+    `git add`s in the same command, each with its "dir"."""
+    return [pair for added, _removed in commit_line_groups(d, spec, adds)
+            for pair in added]
 
 
 def _log_patch(d, src):
@@ -248,14 +297,15 @@ def _log_patch(d, src):
     return data.decode("utf-8", errors="replace")
 
 
-def pushed_added_lines(directory, sources):
-    """(sha_short, subject, path, line) for each added line of every commit
-    reachable from `sources` and on no remote; a commit reached from several
-    sources is read once."""
-    out, seen = [], set()
+def pushed_line_groups(directory, sources):
+    """`(added_entries, removed_texts)` per commit reachable from `sources` and
+    on no remote (a commit reached from several sources is read once); each
+    added entry is `(sha_short, subject, path, line)`."""
+    groups, seen = [], set()
     for src in dict.fromkeys(sources):
         sha = subject = path = None
-        skip, in_header = False, False
+        added = removed = None
+        skip, in_header = False, True
         for ln in _log_patch(directory, src).split("\n"):
             if ln.startswith("\x01"):
                 parts = ln[1:].split("\x02", 1)
@@ -263,7 +313,10 @@ def pushed_added_lines(directory, sources):
                 subject = parts[1] if len(parts) > 1 else ""
                 skip = sha in seen
                 seen.add(sha)
-                path, in_header = None, False
+                path, in_header = None, True
+                if not skip:
+                    added, removed = [], []
+                    groups.append((added, removed))
             elif skip or sha is None:
                 continue
             elif ln.startswith("diff --git "):
@@ -274,5 +327,15 @@ def pushed_added_lines(directory, sources):
             elif ln.startswith("@@"):
                 in_header = False
             elif not in_header and path and ln.startswith("+"):
-                out.append((sha, subject, path, ln[1:]))
-    return out
+                added.append((sha, subject, path, ln[1:]))
+            elif not in_header and ln.startswith("-"):
+                removed.append(ln[1:])
+    return groups
+
+
+def pushed_added_lines(directory, sources):
+    """(sha_short, subject, path, line) for each added line of every commit
+    reachable from `sources` and on no remote; a commit reached from several
+    sources is read once."""
+    return [entry for added, _removed in pushed_line_groups(directory, sources)
+            for entry in added]

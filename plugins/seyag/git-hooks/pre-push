@@ -27,10 +27,11 @@
 #
 # WHAT IS SCANNED: lib/prepush_scan.py's docstring is the list: each pushed
 # commit's message, author, committer, added or renamed paths and added
-# lines, an annotated tag being pushed, and the notes a pushed refs/notes/*
-# adds; commits any remote-tracking ref of the remote already reaches are
-# skipped. Replace refs are ignored, binary files are read as text, and a
-# ref that peels to a tree or blob is refused. Terms and masking come from
+# lines (net-new per commit for session links), an annotated tag being
+# pushed, and the notes a pushed refs/notes/* adds; commits any
+# remote-tracking ref of the remote already reaches are skipped. Replace
+# refs are ignored, binary files are read as text, and a ref that peels
+# to a tree or blob is refused. Terms and masking come from
 # lib/private_terms.py, the link pattern from lib/session_link.py (the
 # guards' own code).
 #
