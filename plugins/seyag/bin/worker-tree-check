@@ -13,39 +13,48 @@ Checks the .git nearest above DIR (default: the current directory) before you ru
   worker-tree-check "$tree" && git -C "$tree" diff
 
 A gitfile must hold one gitdir line naming <common>/worktrees/<id>, and that entry's commondir and
-gitdir files must point back at <common> and at this tree, with no symlinks on the way. A real .git
-directory passes unless a repo above this tree still registers it as a linked worktree.
+gitdir files must point back at <common> and at this tree. A symlinked .git or a symlinked gitdir
+entry (however the path is spelled at its end) is refused; symlinks in parent components are
+resolved. A real .git directory passes unless a repo above this tree still registers it as a linked
+worktree, or DIR sits inside a linked worktree that repo still registers (--linked refuses it, and
+--repo refuses one that is not MAIN_TOP's own).
 
-A linked worktree must also hold no .git below its top, of any kind and ignored or not, and DIR's own
-repo must not sit inside one: git status recurses into a gitlink, git add -A stages an untracked
+A linked worktree must also hold no .git below its top, of any kind and ignored or not, and DIR's
+own repo must not sit inside one: git status recurses into a gitlink, git add -A stages an untracked
 nested repo as one, and that repo's config then runs on the host. A directory the check can't read
-is refused too, since it could hide one. So is a linked-worktree DIR at or below a directory holding
-a HEAD entry of any kind: git needs one to call a directory a gitdir, discovers that with no .git
-name, and its core.worktree can claim this tree. A main checkout is not scanned: nested repos are normal there, and a main-tree run
-is covered only as far as Scope says.
+is refused too, since it could hide one. So is a DIR at or below a directory below the tree's top
+holding a HEAD entry of any kind (in a linked worktree, with no .git above, or with --repo; a HEAD
+at the top itself is the tree's own file): git needs one to call a directory a gitdir, discovers
+that with no .git name, and its core.worktree can claim this tree. Without --repo, a main checkout
+is not scanned: nested repos are normal there, and a main-tree run is covered only as far as Scope
+says.
 
-  --linked         also refuse a real .git directory: this tree was a linked worktree before the run
-  --repo MAIN_TOP  the tree must belong to this main checkout, and that anchor replaces the location
-                   rule below
+  --linked         also refuse a real .git directory or a DIR with no .git above it: this tree was a
+                   linked worktree before the run
+  --repo MAIN_TOP  the tree must belong to this main checkout (refuses a DIR with no .git above it,
+                   or a real .git directory that is not MAIN_TOP's own), replacing the location rule
+                   below
 
 Without --repo, nothing but the tree says which repo it belongs to, so a gitdir inside the tree or
 under a directory a worker can write is refused. Those are SYG_WORKER_TREE_CHECK_UNTRUSTED, colon
 separated, default /tmp:/var/tmp:/dev/shm (a caller's setting: hermetic fixtures live under /tmp).
 A worker with no filesystem sandbox could write elsewhere too, and there the location rule would be
 a weaker test; a tampered tree is still caught by the back-pointers unless the worker forges those
-in a crafted gitdir outside these directories. A worker sandbox such as worker-sandbox keeps .git read-only.
+in a crafted gitdir outside these directories. A worker sandbox such as worker-sandbox keeps .git
+read-only.
 
-Exit: 0 safe, or no .git above DIR (git has nothing to read); 1 refused; 2 usage.
+Exit: 0 safe, or no .git and no HEAD above DIR, with neither --linked nor --repo given; 1 refused;
+2 usage.
 
 Scope: this judges where .git points, not what the repo holds. A worker that can write the real
 common dir (a main-tree run's worker may, unprobed for other sandboxes) can edit its config or
-hooks directly, which no check of the pointer sees. A repo a
-main-tree run plants below that checkout is not caught either.
-A HEAD entry is judged only on the way from DIR up to the top, so check the directory git will
-really run in: planted elsewhere in the tree, a gitdir is harmless until something runs git inside it.
-A submodule or --separate-git-dir checkout is refused too (not a worktrees/ entry), and so is a
-linked worktree holding any checkout with a .git in it (submodules, a venv's pip -e git+ checkouts,
-a worktree inside a worktree): fails closed, and no worker is dispatched into one.
+hooks directly, which no check of the pointer sees. A repo a main-tree run plants below that
+checkout is not caught either. A HEAD entry is judged only on the way from DIR up to the top (or /
+when no .git is above DIR), so check the directory git will really run in: planted elsewhere in the
+tree, a gitdir is harmless until something runs git inside it. A submodule or --separate-git-dir
+checkout is refused too (not a worktrees/ entry), and so is a linked worktree holding any checkout
+with a .git in it (submodules, a venv's pip -e git+ checkouts, a worktree inside a worktree): fails
+closed, and no worker is dispatched into one.
 EOF
 }
 
@@ -67,13 +76,6 @@ if [ -n "$repo" ]; then
   repo=$(realpath -e -- "$repo" 2>/dev/null) && [ -d "$repo" ] \
     || { echo "$me: --repo is not a directory" >&2; exit 2; }
 fi
-
-tree=$start
-until [ -e "$tree/.git" ] || [ -L "$tree/.git" ]; do
-  [ "$tree" != / ] || exit 0
-  tree=$(dirname -- "$tree")
-done
-gf=$tree/.git
 
 refuse() { # REASON [WHAT TO LOOK AT AND HOW TO RESTORE, default: the tree's own gitfile]
   {
@@ -97,7 +99,33 @@ pointer() { # FILE
   case $v in /*) ;; *) v=$(dirname -- "$1")/$v ;; esac
   realpath -m -- "$v"
 }
-under() { case $1 in "$2"|"$2"/*) return 0 ;; esac; return 1; }
+under() { case $1 in "$2"|"$2"/*) return 0 ;; /*) [ "$2" = / ] && return 0 ;; esac; return 1; }
+# git run from DIR discovers the nearest gitdir on the way up, whatever it is called. HEAD alone is
+# the test: objects and refs can come from a commondir, and HEAD can be a dangling symlink.
+check_head() { # [STOP_EXCLUSIVE]
+  local d=$start
+  while [ "$d" != "${1-}" ]; do
+    if [ -e "$d/HEAD" ] || [ -L "$d/HEAD" ]; then
+      refuse "$d holds a HEAD, so git run there may take it for a gitdir and read its config" "Look at that path, then remove it with plain tools once you know what it is."
+    fi
+    [ "$d" != / ] || break
+    d=$(dirname -- "$d")
+  done
+}
+
+tree=$start
+until [ -e "$tree/.git" ] || [ -L "$tree/.git" ]; do
+  if [ "$tree" = / ]; then
+    tree=$start
+    if [ "$linked" = 1 ] || [ -n "$repo" ]; then
+      refuse "no .git above it, but --linked/--repo says it is a git tree" "Look at $start with plain tools: its .git is gone, and a planted gitdir may stand in for it."
+    fi
+    check_head
+    exit 0
+  fi
+  tree=$(dirname -- "$tree")
+done
+gf=$tree/.git
 
 # Run from inside a planted repo, the scan at the end would only see that repo; a main checkout's .git
 # is a directory, so only a linked worktree shows up here.
@@ -120,16 +148,27 @@ if [ -d "$gf" ]; then
       [ "$v" != "$gf" ] || refuse ".git is a directory, but $a still registers this tree as a linked worktree"
     done
   done
+  if [ -n "$repo" ] && [ "$tree" != "$repo" ]; then
+    refuse "it is the repo at $tree, not $repo" "Look at $gf, then remove that repo with plain tools once you know what it is."
+  fi
+  for f in "$gf"/worktrees/*/gitdir; do
+    v=$(pointer "$f") || continue
+    rt=$(dirname -- "$v")
+    ! under "$start" "$rt" || refuse "DIR is inside $rt, a linked worktree this repo registers, whose .git is gone" "Look at $rt with plain tools; to restore its gitfile once you know what happened: git -C $tree worktree repair $rt"
+  done
+  [ -z "$repo" ] || check_head "$tree"
   exit 0
 fi
 [ -f "$gf" ] || refuse ".git is neither a file nor a directory"
 
-[ "$(wc -c <"$gf")" -le 4096 ] && [ "$(wc -l <"$gf")" -le 1 ] || refuse ".git is not a one-line gitfile"
+[ "$(wc -c <"$gf")" -le 4096 ] && [ "$(head -c -1 -- "$gf" | wc -l)" = 0 ] || refuse ".git is not a one-line gitfile"
 # bash's read drops a NUL and git stops at it, so past one this check and git would read different paths
 [ "$(tr -d '\0' <"$gf" | wc -c)" = "$(wc -c <"$gf")" ] || refuse ".git holds a NUL byte"
 IFS= read -r line <"$gf" || [ -n "$line" ] || refuse ".git is empty"
 case $line in "gitdir: "?*) p=${line#gitdir: } ;; *) refuse ".git has no gitdir line" ;; esac
 case $p in /*) ;; *) p=$tree/$p ;; esac
+while [[ $p == ?*/ ]]; do p=${p%/}; done
+case $p in */.|*/..|.|..) refuse "its gitdir path ends in . or .." ;; esac
 [ ! -L "$p" ] || refuse "its gitdir is a symlink"
 wgit=$(realpath -e -- "$p" 2>/dev/null) && [ -d "$wgit" ] || refuse "its gitdir does not exist"
 [ "$(basename -- "$(dirname -- "$wgit")")" = worktrees ] || refuse "its gitdir is not a worktrees/ entry"
@@ -147,15 +186,7 @@ else
     ! under "$common" "$r" || refuse "its gitdir is under $r, which a worker can write"
   done
 fi
-# git run from DIR discovers the nearest gitdir on the way up, whatever it is called. HEAD alone is
-# the test: objects and refs can come from a commondir, and HEAD can be a dangling symlink.
-d=$start
-while [ "$d" != "$tree" ]; do
-  if [ -e "$d/HEAD" ] || [ -L "$d/HEAD" ]; then
-    refuse "$d holds a HEAD, so git run there may take it for a gitdir and read its config" "Look at that path, then remove it with plain tools once you know what it is."
-  fi
-  d=$(dirname -- "$d")
-done
+check_head "$tree"
 # The pointer is sound; now what git would recurse into. No pruning: .gitignore and node_modules are
 # the worker's to write. find's own failure refuses, because an unreadable directory can hide a repo.
 nested=$(find "$tree" -mindepth 2 -name .git -print -quit 2>/dev/null); find_rc=$?
