@@ -237,7 +237,8 @@ git -C "$CLONE2" config tag.gpgsign false
 printf 'base-line-1\n' > "$CLONE/f1.txt"
 printf 'base-line-2\n' > "$CLONE/f2.txt"
 printf 'l1\nl2\nl3\nl4\nl5\nl6\nl7\n' > "$CLONE/ctx.txt"
-git -C "$CLONE" add f1.txt f2.txt ctx.txt
+printf 'a\nb\nc\nd\ne\nf\ng\n' > "$CLONE/ws.txt"
+git -C "$CLONE" add f1.txt f2.txt ctx.txt ws.txt
 git -C "$CLONE" commit -qm "initial base"
 git -C "$CLONE" push -q -u origin main
 MAIN_INIT=$(git -C "$CLONE" rev-parse HEAD)
@@ -267,6 +268,7 @@ reset_fixture() {
   git -C "$CLONE" config --unset diff.context 2>/dev/null || true
   git -C "$CLONE" config --unset-all url.ssh://git@github.com/.insteadOf 2>/dev/null || true
   git -C "$CLONE" config --unset-all url.ssh://git@github.com/acme/decoy.git.insteadOf 2>/dev/null || true
+  git -C "$CLONE" config --unset-all url.ssh://git@github.com/acme/decoy.git.pushInsteadOf 2>/dev/null || true
   git -C "$CLONE" tag -d feat >/dev/null 2>&1 || true
   git -C "$WORK/decoy.git" branch -D feat >/dev/null 2>&1 || true
   git -C "$CLONE" tag -d v-local >/dev/null 2>&1 || true
@@ -1159,5 +1161,65 @@ git -C "$CLONE" tag -d feat >/dev/null 2>&1 || true
 [ "$rem_after" = "$loc_after" ] && [ "$rem_after" != "$rem_before" ] \
   && ok "ao. tag named feat: origin feat moved to local head" \
   || bad "ao. origin feat not moved"
+
+# --- Round 6 new cases ap-aq ---
+
+# ap. pushInsteadOf: refuse "url.pushInsteadOf is set; the push could go elsewhere".
+reset_fixture
+git init -q --bare "$WORK/decoy.git" 2>/dev/null || true
+git -C "$CLONE" config url.ssh://git@github.com/acme/decoy.git.pushInsteadOf "ssh://git@github.com/acme/widget.git"
+assert_refusal "ap. pushInsteadOf" "url.pushInsteadOf is set; the push could go elsewhere" run_fp
+git -C "$CLONE" config --unset url.ssh://git@github.com/acme/decoy.git.pushInsteadOf
+has_decoy_feat=$(git -C "$WORK/decoy.git" rev-parse --verify -q refs/heads/feat 2>/dev/null || true)
+[ -z "$has_decoy_feat" ] \
+  && ok "ap. decoy.git untouched" \
+  || bad "ap. decoy.git has feat: $has_decoy_feat"
+
+# ap2. pushInsteadOf behind an aliased origin: refuse "url.pushInsteadOf is set; the push could go elsewhere".
+reset_fixture
+git init -q --bare "$WORK/decoy.git" 2>/dev/null || true
+git -C "$CLONE" config remote.origin.url "gh:acme/widget.git"
+git -C "$CLONE" config url.ssh://git@github.com/.insteadOf "gh:"
+git -C "$CLONE" config url.ssh://git@github.com/acme/decoy.git.pushInsteadOf "ssh://git@github.com/acme/widget.git"
+fetch_premise=$(git -C "$CLONE" remote get-url origin)
+push_premise=$(git -C "$CLONE" remote get-url --push origin)
+[ "$fetch_premise" = "ssh://git@github.com/acme/widget.git" ] && [ "$push_premise" = "ssh://git@github.com/acme/widget.git" ] \
+  && ok "ap2. premise: fetch and push URLs both resolve to ssh://git@github.com/acme/widget.git" \
+  || bad "ap2. premise failed (fetch: $fetch_premise, push: $push_premise)"
+assert_refusal "ap2. pushInsteadOf with aliased origin" "url.pushInsteadOf is set; the push could go elsewhere" run_fp
+git -C "$CLONE" config remote.origin.url "$ORIGIN_URL"
+git -C "$CLONE" config --unset url.ssh://git@github.com/.insteadOf
+git -C "$CLONE" config --unset url.ssh://git@github.com/acme/decoy.git.pushInsteadOf
+has_decoy_feat=$(git -C "$WORK/decoy.git" rev-parse --verify -q refs/heads/feat 2>/dev/null || true)
+[ -z "$has_decoy_feat" ] \
+  && ok "ap2. decoy.git untouched" \
+  || bad "ap2. decoy.git has feat: $has_decoy_feat"
+
+# aq. Whitespace-only change across the rebase: refuse "rebase proof failed".
+reset_fixture
+printf 'a\nb\nc\nd2\ne\nf\ng\n' > "$CLONE/ws.txt"
+git -C "$CLONE" commit -qam "feat ws line d2"
+git -C "$CLONE" push -q origin feat
+
+git -C "$CLONE" checkout -q main
+printf 'a\nb \nc\nd\ne\nf\ng\n' > "$CLONE/ws.txt"
+git -C "$CLONE" commit -qam "main ws line b with trailing space"
+git -C "$CLONE" push -q origin main
+git -C "$CLONE" checkout -q feat
+
+aq_wt="$WORK/aq_premise_wt"
+git -C "$CLONE" worktree add -q --detach "$aq_wt" feat
+GIT_EDITOR=true GIT_SEQUENCE_EDITOR=true git -C "$aq_wt" rebase -q origin/main
+pre_stable=$(git -C "$CLONE" -c diff.noprefix=false -c diff.mnemonicPrefix=false -c diff.relative=false show --ignore-submodules=none --no-ext-diff --no-color --no-textconv --no-renames -U3 --binary --full-index --format= HEAD | git patch-id --stable | cut -d' ' -f1)
+post_stable=$(git -C "$aq_wt" -c diff.noprefix=false -c diff.mnemonicPrefix=false -c diff.relative=false show --ignore-submodules=none --no-ext-diff --no-color --no-textconv --no-renames -U3 --binary --full-index --format= HEAD | git patch-id --stable | cut -d' ' -f1)
+pre_verb=$(git -C "$CLONE" -c diff.noprefix=false -c diff.mnemonicPrefix=false -c diff.relative=false show --ignore-submodules=none --no-ext-diff --no-color --no-textconv --no-renames -U3 --binary --full-index --format= HEAD | git patch-id --verbatim | cut -d' ' -f1)
+post_verb=$(git -C "$aq_wt" -c diff.noprefix=false -c diff.mnemonicPrefix=false -c diff.relative=false show --ignore-submodules=none --no-ext-diff --no-color --no-textconv --no-renames -U3 --binary --full-index --format= HEAD | git patch-id --verbatim | cut -d' ' -f1)
+git -C "$CLONE" worktree remove --force "$aq_wt" >/dev/null 2>&1 || true
+
+[ "$pre_stable" = "$post_stable" ] && [ "$pre_verb" != "$post_verb" ] \
+  && ok "aq. premise: stable ids equal, verbatim ids differ" \
+  || bad "aq. premise failed (stable: $pre_stable vs $post_stable, verbatim: $pre_verb vs $post_verb)"
+
+assert_refusal "aq. whitespace change across rebase" "rebase proof failed" run_fp --onto-base
 
 exit $fail
