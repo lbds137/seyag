@@ -15,7 +15,11 @@
 #                     proves new tree == old tree and no `fixup! ` remains.
 #   --onto-base       squash first if there are fixups, then rebase onto the
 #                     PR's current base tip; proves pre-rebase and rebased
-#                     commit lists have identical `git patch-id --stable` lists.
+#                     commit lists have identical `git patch-id --verbatim` lists.
+#
+# Notes:
+#   patch-ids ignore line numbers, so the proof shows the same hunks at possibly shifted positions;
+#   the --onto-base local move (`checkout -B`) has no compare-and-swap; HEAD is re-read just before it, and a commit made in that window stays in the reflog.
 #
 # Exit codes:
 #   0  pushed, or --dry-run proved everything
@@ -24,8 +28,7 @@
 #   3  local branch moved, push failed (prints old full SHA to recover)
 
 set -uo pipefail
-usage() { sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; }
-case "${1:-}" in -h | --help) usage; exit 0 ;; esac
+usage() { sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'; }
 
 ONTO_BASE=false
 DRY_RUN=false
@@ -106,6 +109,14 @@ if [[ "$fetch_urls" == *$'\n'* ]] || [[ "$push_urls" == *$'\n'* ]]; then
   refuse "origin must have exactly one URL"
 fi
 
+pi=$(git config --get-regexp '^url\..*\.pushinsteadof$' 2>/dev/null); pi_rc=$?
+if [ "$pi_rc" -ne 0 ] && [ "$pi_rc" -ne 1 ]; then
+  refuse "git config failed"
+fi
+if [ -n "$pi" ]; then
+  refuse "url.pushInsteadOf is set; the push could go elsewhere"
+fi
+
 if [ "$push_urls" != "$fetch_urls" ]; then
   refuse "origin push URL differs from its fetch URL"
 fi
@@ -181,9 +192,7 @@ check_gate_facts() {
   if [ "$pr_state" != "OPEN" ] || [ "$pr_head" != "$b" ]; then
     refuse "no open PR for $b"
   fi
-  if [ "$pr_cross" = "true" ] || [ "$pr_cross" != "false" ]; then
-    refuse "PR head is a fork"
-  fi
+  [ "$pr_cross" != "false" ] && refuse "PR head is a fork"
   if [ "${pr_head_nwo,,}" != "${nwo,,}" ]; then
     refuse "PR head is a fork"
   fi
@@ -299,25 +308,23 @@ if $ONTO_BASE && [ "$mb" != "$B" ]; then
   fi
   NEW=$(git -C "$T/wt" rev-parse --verify -q HEAD 2>/dev/null) || refuse "rebase proof failed"
 
-  pre_list=$(git -C "$T/wt" rev-list --reverse "$mb..$MID" 2>/dev/null) || refuse "rebase proof failed"
-  [ -n "$pre_list" ] || refuse "rebase proof failed"
-  pre_ids=()
-  while IFS= read -r c; do
-    [ -n "$c" ] || continue
-    pid=$(git -C "$T/wt" -c diff.noprefix=false -c diff.mnemonicPrefix=false -c diff.relative=false show --ignore-submodules=none --no-ext-diff --no-color --no-textconv --no-renames -U3 --binary --full-index --format= "$c" 2>/dev/null | git patch-id --stable | cut -d' ' -f1) || refuse "rebase proof failed"
-    [ -n "$pid" ] || refuse "rebase proof failed"
-    pre_ids+=("$pid")
-  done <<<"$pre_list"
+  patch_ids() {
+    local range=$1 list c pid
+    list=$(git -C "$T/wt" rev-list --reverse "$range" 2>/dev/null) || refuse "rebase proof failed"
+    [ -n "$list" ] || refuse "rebase proof failed"
+    while IFS= read -r c; do
+      [ -n "$c" ] || continue
+      pid=$(git -C "$T/wt" -c diff.noprefix=false -c diff.mnemonicPrefix=false -c diff.relative=false show --ignore-submodules=none --no-ext-diff --no-color --no-textconv --no-renames -U3 --binary --full-index --format= "$c" 2>/dev/null | git patch-id --verbatim | cut -d' ' -f1) || refuse "rebase proof failed"
+      [ -n "$pid" ] || refuse "rebase proof failed"
+      printf '%s\n' "$pid"
+    done <<<"$list"
+  }
 
-  post_list=$(git -C "$T/wt" rev-list --reverse "$B..$NEW" 2>/dev/null) || refuse "rebase proof failed"
-  [ -n "$post_list" ] || refuse "rebase proof failed"
-  post_ids=()
-  while IFS= read -r c; do
-    [ -n "$c" ] || continue
-    pid=$(git -C "$T/wt" -c diff.noprefix=false -c diff.mnemonicPrefix=false -c diff.relative=false show --ignore-submodules=none --no-ext-diff --no-color --no-textconv --no-renames -U3 --binary --full-index --format= "$c" 2>/dev/null | git patch-id --stable | cut -d' ' -f1) || refuse "rebase proof failed"
-    [ -n "$pid" ] || refuse "rebase proof failed"
-    post_ids+=("$pid")
-  done <<<"$post_list"
+  # Command substitution, not < <(...): a refuse inside patch_ids exits only its subshell.
+  pre_out=$(patch_ids "$mb..$MID") || exit 1
+  post_out=$(patch_ids "$B..$NEW") || exit 1
+  mapfile -t pre_ids <<<"$pre_out"
+  mapfile -t post_ids <<<"$post_out"
 
   if [ "${#pre_ids[@]}" -eq 0 ] || [ "${#post_ids[@]}" -eq 0 ] || [ "${#pre_ids[@]}" -ne "${#post_ids[@]}" ] || [ "${pre_ids[*]-}" != "${post_ids[*]-}" ]; then
     refuse "rebase proof failed"
