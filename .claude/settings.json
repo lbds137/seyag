@@ -2,6 +2,7 @@
   "worktree": { "baseRef": "head" },
   "env": {
     "SYG_DISPATCH_SRC_RE": "^(plugins/seyag/(hooks|skills|rules|agents)|tests)/",
-    "SYG_CI_ANCHOR": "Probes"
+    "SYG_CI_ANCHOR": "Probes",
+    "SYG_CI_AUTOMERGE_JOB": "automerge"
   }
 }

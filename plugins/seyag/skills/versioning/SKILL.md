@@ -20,6 +20,15 @@ The project's CLAUDE.md names its version file (`plugin.json`, `package.json`, `
 
 One `## <version> - <YYYY-MM-DD>` section per release, newest first. Under it, `###` categories in this fixed order, empty ones omitted: Breaking Changes, Features, Bug Fixes, Improvements, Chores, Tests. Items are `- **scope:** description (#PR)`. Add a compare link when the forge has one.
 
+## Citing the PR number
+
+- The notes item cites `(#PR)`, but the release commit is written before the PR exists. Issues and PRs share one counter, so predict the number as the newest one + 1:
+  ```bash
+  echo $(( $(gh api 'repos/{owner}/{repo}/issues?state=all&per_page=1&sort=created&direction=desc' -q '.[0].number') + 1 ))
+  ```
+  Re-run it right before opening; if it moved, amend the cite first. Open the PR non-draft; check the real number; on a mismatch push a fix commit (safe on a non-draft PR: no ready flip to race).
+- A PR that must open as a draft and get the cite afterwards: push the cite, wait until that push's review run exists (`gh api "repos/{owner}/{repo}/actions/runs?head_sha=$(git rev-parse HEAD)" -q '.workflow_runs[].name' | grep -Fx '<review workflow name>'`), only then `gh pr ready` (if none appears within ~2 minutes, the workflow does not run on that push, so flip ready anyway — the ready event dispatches its own run). A ready flip seconds after a push can leave the surviving review run on the push's draft payload, so an automerge job skips; `pr-ci-wait` reports `CI_GATE_AUTOMERGE_SKIPPED`, and close plus reopen re-triggers.
+
 ## Source of truth
 
 Write items from the batch's commit subjects, never from memory — the range is `<prev-release-base>..HEAD` on the PR branch, written before the merge lands (the bump-and-notes commit itself is not an item):

@@ -694,8 +694,9 @@ PATH A — your toolset includes Monitor:
      cd $Q_TOPLEVEL && pr-ci-wait $PR_NUM --sha \$(git rev-parse $Q_REV)
 
 3. When it fires, read which sentinel printed: CI_COMPLETE (released),
-   CI_GATE_TIMEOUT, CI_GATE_STARTUP_FAILURE, CI_GATE_REVIEW_MISSING — or none
-   at all, meaning the Monitor's own timeout fired first; re-arm.
+   CI_GATE_TIMEOUT, CI_GATE_STARTUP_FAILURE, CI_GATE_REVIEW_MISSING,
+   CI_GATE_AUTOMERGE_SKIPPED — or none at all, meaning the Monitor's own
+   timeout fired first; re-arm.
    Then fetch reviews (three different endpoints; conversation comments,
    inline code-review comments, and review summaries are NOT the same thing):
      gh pr view $PR_NUM --comments
@@ -716,7 +717,7 @@ BACKGROUND mode (run_in_background — a foreground Bash call is killed at its
    on the sentinel as soon as the task exits instead of leaving it armed.
 2. When the task completes, read which sentinel printed in its task output:
    CI_COMPLETE (released), CI_GATE_TIMEOUT, CI_GATE_STARTUP_FAILURE,
-   CI_GATE_REVIEW_MISSING — or none at all; re-arm.
+   CI_GATE_REVIEW_MISSING, CI_GATE_AUTOMERGE_SKIPPED — or none at all; re-arm.
    Then fetch reviews (three different endpoints; conversation comments,
    inline code-review comments, and review summaries are NOT the same thing):
      gh pr view $PR_NUM --comments

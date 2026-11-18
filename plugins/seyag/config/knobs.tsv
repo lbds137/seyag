@@ -66,6 +66,7 @@ SYG_BQ_PENDING_MARKERS	user	stop-gates	say the word\b|waiting on you\b|needs? yo
 SYG_CHECK_LIB	internal	guards	unset	The hooks/lib directory the hook passes to its python child for shared target/owner resolution in the --check preflight.
 SYG_CHECK_TARGET	internal	guards	unset	The target argument the hook passes to its python child in the --check preflight.
 SYG_CI_ANCHOR	user	pr	unset	Workflow name whose completion (with nothing pending) settles pr-ci-wait; unset uses the quiet-window rule.
+SYG_CI_AUTOMERGE_JOB	user	pr	unset	Automerge job name in the review workflow run checked by pr-ci-wait: if skipped on a green, open, non-draft PR authored by the authenticated gh user, reports CI_GATE_AUTOMERGE_SKIPPED; unset or empty disables the check.
 SYG_CI_REVIEW	user	pr	prose:auto-detected: the workflow named Claude Code Review if one exists, otherwise no review check	Review workflow name that must complete before pr-ci-wait releases; set empty to disable.
 SYG_CLASSIFIER_LEDGER	user	session	unset	JSONL file path opting in classifier-ledger to record PostToolUseFailure events.
 SYG_CLOCK_STAMP_HINT	user	guards	unset	Optional line appended to clock-stamp-guard block messages (for example naming a project stamping tool).

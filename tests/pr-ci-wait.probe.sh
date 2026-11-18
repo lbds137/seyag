@@ -74,6 +74,14 @@ FIXTURE_HEAD_SHA=$(git -C "$FIXTURE_REPO" rev-parse HEAD)
 # Driven entirely by env vars the cases set:
 #   FAKE_GH_HEAD_SHA   stdout for `api repos/.../pulls/N --jq .head.sha`
 #   FAKE_GH_HEAD_EXIT  its exit code (default 0)
+#   FAKE_GH_PR_STATE   stdout for `api repos/.../pulls/N` when not querying
+#                       `--jq .head.sha` (default
+#                       `{"state":"open","draft":false,"merged":false,"head":"<FIXTURE_HEAD_SHA>","author":"me"}`)
+#   FAKE_GH_PR_STATE_EXIT its exit code (default 0; non-zero also prints
+#                       `gh: HTTP 502` to stderr)
+#   FAKE_GH_USER       stdout for `api user` (default `me`)
+#   FAKE_GH_USER_EXIT  its exit code (default 0; non-zero also prints
+#                       `gh: HTTP 502` to stderr)
 #   FAKE_GH_SEQ_DIR    dir of step-NNN.json (or .err) fixtures for the runs
 #                       poll; each call advances a counter, clamped to the
 #                       last fixture (repeat-last), so a case that never
@@ -89,6 +97,12 @@ FIXTURE_HEAD_SHA=$(git -C "$FIXTURE_REPO" rev-parse HEAD)
 #                       deletes it and fails with `gh: HTTP 502`
 #   FAKE_GH_JOBS_EXIT   non-empty: every jobs call fails with `gh: HTTP 502` and
 #                       this exit code (the lookup error never clears)
+#   FAKE_GH_JOBLIST     JSON array the jobs endpoint prints when not querying
+#                       `total_count` (default `[]`)
+#   FAKE_GH_JOBLIST_LOG file the per-run job-list endpoints are appended to,
+#                       one line per call (unset: not logged)
+#   FAKE_GH_JOBLIST_EXIT non-empty: every job-list call fails with
+#                       `gh: HTTP 502` and this exit code
 cat > "$FAKE_BIN/gh" <<'SHIM'
 #!/bin/bash
 set -uo pipefail
@@ -98,21 +112,49 @@ case "$CMD" in
     ENDPOINT="${1:-}"
     case "$ENDPOINT" in
       */pulls/*)
-        echo "${FAKE_GH_HEAD_SHA:-}"
-        exit "${FAKE_GH_HEAD_EXIT:-0}"
+        case "$*" in
+          *"--jq .head.sha")
+            echo "${FAKE_GH_HEAD_SHA:-}"
+            exit "${FAKE_GH_HEAD_EXIT:-0}"
+            ;;
+        esac
+        DEFAULT_PR_STATE="{\"state\":\"open\",\"draft\":false,\"merged\":false,\"head\":\"$FIXTURE_HEAD_SHA\",\"author\":\"me\"}"
+        echo "${FAKE_GH_PR_STATE:-$DEFAULT_PR_STATE}"
+        if [ "${FAKE_GH_PR_STATE_EXIT:-0}" -ne 0 ]; then
+          echo "gh: HTTP 502" >&2
+        fi
+        exit "${FAKE_GH_PR_STATE_EXIT:-0}"
+        ;;
+      user)
+        echo "${FAKE_GH_USER:-me}"
+        if [ "${FAKE_GH_USER_EXIT:-0}" -ne 0 ]; then
+          echo "gh: HTTP 502" >&2
+        fi
+        exit "${FAKE_GH_USER_EXIT:-0}"
         ;;
       */actions/runs/*/jobs*)
-        [ -n "${FAKE_GH_JOBS_LOG:-}" ] && echo "$ENDPOINT" >> "$FAKE_GH_JOBS_LOG"
-        if [ -n "${FAKE_GH_JOBS_ERR_ONCE:-}" ] && [ -e "$FAKE_GH_JOBS_ERR_ONCE" ]; then
-          rm -f "$FAKE_GH_JOBS_ERR_ONCE"
+        case "$*" in
+          *total_count*)
+            [ -n "${FAKE_GH_JOBS_LOG:-}" ] && echo "$ENDPOINT" >> "$FAKE_GH_JOBS_LOG"
+            if [ -n "${FAKE_GH_JOBS_ERR_ONCE:-}" ] && [ -e "$FAKE_GH_JOBS_ERR_ONCE" ]; then
+              rm -f "$FAKE_GH_JOBS_ERR_ONCE"
+              echo "gh: HTTP 502" >&2
+              exit 1
+            fi
+            if [ -n "${FAKE_GH_JOBS_EXIT:-}" ]; then
+              echo "gh: HTTP 502" >&2
+              exit "$FAKE_GH_JOBS_EXIT"
+            fi
+            echo "${FAKE_GH_JOBS_TOTAL:-1}"
+            exit 0
+            ;;
+        esac
+        [ -n "${FAKE_GH_JOBLIST_LOG:-}" ] && echo "$ENDPOINT" >> "$FAKE_GH_JOBLIST_LOG"
+        if [ -n "${FAKE_GH_JOBLIST_EXIT:-}" ]; then
           echo "gh: HTTP 502" >&2
-          exit 1
+          exit "$FAKE_GH_JOBLIST_EXIT"
         fi
-        if [ -n "${FAKE_GH_JOBS_EXIT:-}" ]; then
-          echo "gh: HTTP 502" >&2
-          exit "$FAKE_GH_JOBS_EXIT"
-        fi
-        echo "${FAKE_GH_JOBS_TOTAL:-1}"
+        echo "${FAKE_GH_JOBLIST:-[]}"
         exit 0
         ;;
       */actions/runs\?*)
@@ -196,6 +238,7 @@ run() {
   # (CI_GATE_TIMEOUT/review-missing after 2 of 3 polls).
   OUT=$(cd "$FIXTURE_REPO" && timeout "$CASE_TIMEOUT" env -i \
     PATH="$FAKE_BIN:$PATH" HOME="$HOME" PYTHONDONTWRITEBYTECODE=1 \
+    FIXTURE_HEAD_SHA="$FIXTURE_HEAD_SHA" \
     PR_CI_WAIT_POLL_S="${PR_CI_WAIT_POLL_S:-0.05}" \
     PR_CI_WAIT_MAX_S="${PR_CI_WAIT_MAX_S:-5}" \
     PR_CI_WAIT_GRACE_S="${PR_CI_WAIT_GRACE_S:-5}" \
@@ -583,6 +626,157 @@ ELAPSED16=$(( $(date +%s) - START16 ))
 [[ "$OUT" == *"(the 5s floor; PR_CI_WAIT_MAX_S was spent)"* && "$OUT" != *"what was left"* ]] \
   && pass "hung --watch: the warning names the floor, not the leftover budget" \
   || { fail "hung --watch: the warning names the floor, not the leftover budget"; printf '%s\n' "$OUT" | sed 's/^/      /'; }
+
+# --- AS1..AS14. automerge-skipped check (SYG_CI_AUTOMERGE_JOB) --------------
+AS_RUNS_GREEN='[{"id":1,"name":"Probes","status":"completed","conclusion":"success"},{"id":10,"name":"Claude Code Review","status":"completed","conclusion":"success"},{"id":21,"name":"Claude Code Review","status":"completed","conclusion":"success","run_attempt":1},{"id":30,"name":"Claude Code Review","status":"completed","conclusion":"cancelled"}]'
+AS_RUNS_RED='[{"id":1,"name":"Probes","status":"completed","conclusion":"failure","run_attempt":1},{"id":10,"name":"Claude Code Review","status":"completed","conclusion":"success"},{"id":21,"name":"Claude Code Review","status":"completed","conclusion":"success","run_attempt":1},{"id":30,"name":"Claude Code Review","status":"completed","conclusion":"cancelled"}]'
+AS_JOBS_SKIPPED='[{"name":"claude-review","conclusion":"success"},{"name":"automerge","conclusion":"skipped"}]'
+AS_JOBS_RAN='[{"name":"claude-review","conclusion":"success"},{"name":"automerge","conclusion":"success"}]'
+AS_JOBS_NO_AUTOMERGE='[{"name":"claude-review","conclusion":"success"}]'
+
+# --- AS1. race shape: automerge skipped on green open non-draft PR -----------
+JOBLIST_LOG_AS1="$WORK/joblist-as1.log"
+D=$(seq_dir as1-race "$AS_RUNS_GREEN")
+run "AS1: automerge skipped on green open non-draft PR -> CI_GATE_AUTOMERGE_SKIPPED" 1 \
+  FAKE_GH_SEQ_DIR="$D" SYG_CI_ANCHOR=Probes SYG_CI_REVIEW="Claude Code Review" \
+  SYG_CI_AUTOMERGE_JOB=automerge FAKE_GH_JOBLIST="$AS_JOBS_SKIPPED" \
+  FAKE_GH_JOBLIST_LOG="$JOBLIST_LOG_AS1"
+[[ "$OUT" == *"CI_GATE_AUTOMERGE_SKIPPED"* && "$OUT" != *"CI_COMPLETE"* && "$OUT" == *"gh pr close"* ]] \
+  && pass "AS1: CI_GATE_AUTOMERGE_SKIPPED sentinel and gh pr close instruction" \
+  || { fail "AS1: CI_GATE_AUTOMERGE_SKIPPED sentinel and gh pr close instruction"; printf '%s\n' "$OUT" | sed 's/^/      /'; }
+JOBLIST_LINES_AS1=$({ wc -l < "$JOBLIST_LOG_AS1"; } 2>/dev/null || echo 0)
+[ "$JOBLIST_LINES_AS1" -eq 1 ] && grep -q 'runs/21/attempts/1/jobs' "$JOBLIST_LOG_AS1" \
+  && pass "AS1: one joblist lookup on latest non-cancelled review run (runs/21/attempts/1/jobs)" \
+  || fail "AS1: one joblist lookup on latest non-cancelled review run (lines=$JOBLIST_LINES_AS1, log=$(cat "$JOBLIST_LOG_AS1" 2>/dev/null))"
+
+# --- AS2. draft PR: automerge skipped is held by design -> CI_COMPLETE -------
+D=$(seq_dir as2-draft "$AS_RUNS_GREEN")
+run "AS2: automerge skipped on draft PR -> CI_COMPLETE" 0 \
+  FAKE_GH_SEQ_DIR="$D" SYG_CI_ANCHOR=Probes SYG_CI_REVIEW="Claude Code Review" \
+  SYG_CI_AUTOMERGE_JOB=automerge FAKE_GH_JOBLIST="$AS_JOBS_SKIPPED" \
+  FAKE_GH_PR_STATE="{\"state\":\"open\",\"draft\":true,\"merged\":false,\"head\":\"$FIXTURE_HEAD_SHA\",\"author\":\"me\"}"
+[[ "$OUT" == *"CI_COMPLETE"* && "$OUT" != *"CI_GATE_AUTOMERGE_SKIPPED"* && "$OUT" == *"held by design"* ]] \
+  && pass "AS2: draft PR reports CI_COMPLETE and held by design" \
+  || { fail "AS2: draft PR reports CI_COMPLETE and held by design"; printf '%s\n' "$OUT" | sed 's/^/      /'; }
+
+# --- AS3. automerge ran (success) -> CI_COMPLETE -----------------------------
+D=$(seq_dir as3-ran "$AS_RUNS_GREEN")
+run "AS3: automerge ran -> CI_COMPLETE" 0 \
+  FAKE_GH_SEQ_DIR="$D" SYG_CI_ANCHOR=Probes SYG_CI_REVIEW="Claude Code Review" \
+  SYG_CI_AUTOMERGE_JOB=automerge FAKE_GH_JOBLIST="$AS_JOBS_RAN"
+[[ "$OUT" == *"CI_COMPLETE"* && "$OUT" != *"CI_GATE_AUTOMERGE_SKIPPED"* ]] \
+  && pass "AS3: automerge success reports CI_COMPLETE" \
+  || { fail "AS3: automerge success reports CI_COMPLETE"; printf '%s\n' "$OUT" | sed 's/^/      /'; }
+
+# --- AS4. knob unset -> CI_COMPLETE, no joblist lookup -----------------------
+JOBLIST_LOG_AS4="$WORK/joblist-as4.log"
+D=$(seq_dir as4-unset "$AS_RUNS_GREEN")
+run "AS4: SYG_CI_AUTOMERGE_JOB unset -> CI_COMPLETE" 0 \
+  FAKE_GH_SEQ_DIR="$D" SYG_CI_ANCHOR=Probes SYG_CI_REVIEW="Claude Code Review" \
+  FAKE_GH_JOBLIST="$AS_JOBS_SKIPPED" FAKE_GH_JOBLIST_LOG="$JOBLIST_LOG_AS4"
+[[ "$OUT" == *"CI_COMPLETE"* ]] && [ ! -e "$JOBLIST_LOG_AS4" ] \
+  && pass "AS4: knob unset reports CI_COMPLETE and joblist log not created" \
+  || { fail "AS4: knob unset reports CI_COMPLETE and joblist log not created"; printf '%s\n' "$OUT" | sed 's/^/      /'; }
+
+# --- AS5. lookup failure -> degrades to CI_COMPLETE --------------------------
+D=$(seq_dir as5-err "$AS_RUNS_GREEN")
+run "AS5: joblist lookup failure -> CI_COMPLETE" 0 \
+  FAKE_GH_SEQ_DIR="$D" SYG_CI_ANCHOR=Probes SYG_CI_REVIEW="Claude Code Review" \
+  SYG_CI_AUTOMERGE_JOB=automerge FAKE_GH_JOBLIST_EXIT=1
+[[ "$OUT" == *"CI_COMPLETE"* && "$OUT" != *"CI_GATE_AUTOMERGE_SKIPPED"* && "$OUT" == *"automerge check could not run"* ]] \
+  && pass "AS5: lookup failure warns and reports CI_COMPLETE" \
+  || { fail "AS5: lookup failure warns and reports CI_COMPLETE"; printf '%s\n' "$OUT" | sed 's/^/      /'; }
+
+# --- AS6. red CI: anchor run conclusion failure -> CI_COMPLETE ---------------
+D=$(seq_dir as6-red "$AS_RUNS_RED")
+run "AS6: red CI with automerge skipped -> CI_COMPLETE" 0 \
+  FAKE_GH_SEQ_DIR="$D" SYG_CI_ANCHOR=Probes SYG_CI_REVIEW="Claude Code Review" \
+  SYG_CI_AUTOMERGE_JOB=automerge FAKE_GH_JOBLIST="$AS_JOBS_SKIPPED"
+[[ "$OUT" == *"CI_COMPLETE"* && "$OUT" != *"CI_GATE_AUTOMERGE_SKIPPED"* ]] \
+  && pass "AS6: red CI reports CI_COMPLETE" \
+  || { fail "AS6: red CI reports CI_COMPLETE"; printf '%s\n' "$OUT" | sed 's/^/      /'; }
+
+# --- AS7. merged PR -> CI_COMPLETE -------------------------------------------
+D=$(seq_dir as7-merged "$AS_RUNS_GREEN")
+run "AS7: merged PR with automerge skipped -> CI_COMPLETE" 0 \
+  FAKE_GH_SEQ_DIR="$D" SYG_CI_ANCHOR=Probes SYG_CI_REVIEW="Claude Code Review" \
+  SYG_CI_AUTOMERGE_JOB=automerge FAKE_GH_JOBLIST="$AS_JOBS_SKIPPED" \
+  FAKE_GH_PR_STATE="{\"state\":\"closed\",\"draft\":false,\"merged\":true,\"head\":\"$FIXTURE_HEAD_SHA\",\"author\":\"me\"}"
+[[ "$OUT" == *"CI_COMPLETE"* && "$OUT" != *"CI_GATE_AUTOMERGE_SKIPPED"* && "$OUT" != *"automerge check could not run"* ]] \
+  && pass "AS7: merged PR reports CI_COMPLETE" \
+  || { fail "AS7: merged PR reports CI_COMPLETE"; printf '%s\n' "$OUT" | sed 's/^/      /'; }
+
+# --- AS8. knob set but no such job -> CI_COMPLETE ----------------------------
+D=$(seq_dir as8-nojob "$AS_RUNS_GREEN")
+run "AS8: SYG_CI_AUTOMERGE_JOB set but job absent -> CI_COMPLETE" 0 \
+  FAKE_GH_SEQ_DIR="$D" SYG_CI_ANCHOR=Probes SYG_CI_REVIEW="Claude Code Review" \
+  SYG_CI_AUTOMERGE_JOB=automerge FAKE_GH_JOBLIST="$AS_JOBS_NO_AUTOMERGE"
+[[ "$OUT" == *"CI_COMPLETE"* && "$OUT" != *"CI_GATE_AUTOMERGE_SKIPPED"* ]] \
+  && pass "AS8: missing job reports CI_COMPLETE" \
+  || { fail "AS8: missing job reports CI_COMPLETE"; printf '%s\n' "$OUT" | sed 's/^/      /'; }
+
+# --- AS9. PR-state lookup failure -> degrades to CI_COMPLETE -----------------
+D=$(seq_dir as9-pr-err "$AS_RUNS_GREEN")
+run "AS9: PR-state lookup failure -> CI_COMPLETE" 0 \
+  FAKE_GH_SEQ_DIR="$D" SYG_CI_ANCHOR=Probes SYG_CI_REVIEW="Claude Code Review" \
+  SYG_CI_AUTOMERGE_JOB=automerge FAKE_GH_JOBLIST="$AS_JOBS_SKIPPED" \
+  FAKE_GH_PR_STATE_EXIT=1
+[[ "$OUT" == *"CI_COMPLETE"* && "$OUT" != *"CI_GATE_AUTOMERGE_SKIPPED"* && "$OUT" == *"automerge check could not run"* ]] \
+  && pass "AS9: PR-state failure warns and reports CI_COMPLETE" \
+  || { fail "AS9: PR-state failure warns and reports CI_COMPLETE"; printf '%s\n' "$OUT" | sed 's/^/      /'; }
+
+# --- AS10. closed, not merged PR -> CI_COMPLETE ------------------------------
+D=$(seq_dir as10-closed "$AS_RUNS_GREEN")
+run "AS10: closed unmerged PR with automerge skipped -> CI_COMPLETE" 0 \
+  FAKE_GH_SEQ_DIR="$D" SYG_CI_ANCHOR=Probes SYG_CI_REVIEW="Claude Code Review" \
+  SYG_CI_AUTOMERGE_JOB=automerge FAKE_GH_JOBLIST="$AS_JOBS_SKIPPED" \
+  FAKE_GH_PR_STATE="{\"state\":\"closed\",\"draft\":false,\"merged\":false,\"head\":\"$FIXTURE_HEAD_SHA\",\"author\":\"me\"}"
+[[ "$OUT" == *"CI_COMPLETE"* && "$OUT" != *"CI_GATE_AUTOMERGE_SKIPPED"* && "$OUT" != *"automerge check could not run"* ]] \
+  && pass "AS10: closed unmerged PR reports CI_COMPLETE" \
+  || { fail "AS10: closed unmerged PR reports CI_COMPLETE"; printf '%s\n' "$OUT" | sed 's/^/      /'; }
+
+# --- AS11. PR author differs from authenticated gh user -> CI_COMPLETE -------
+D=$(seq_dir as11-author "$AS_RUNS_GREEN")
+run "AS11: automerge skipped on PR by another author -> CI_COMPLETE" 0 \
+  FAKE_GH_SEQ_DIR="$D" SYG_CI_ANCHOR=Probes SYG_CI_REVIEW="Claude Code Review" \
+  SYG_CI_AUTOMERGE_JOB=automerge FAKE_GH_JOBLIST="$AS_JOBS_SKIPPED" \
+  FAKE_GH_PR_STATE="{\"state\":\"open\",\"draft\":false,\"merged\":false,\"head\":\"$FIXTURE_HEAD_SHA\",\"author\":\"someone-else\"}"
+[[ "$OUT" == *"CI_COMPLETE"* && "$OUT" != *"CI_GATE_AUTOMERGE_SKIPPED"* && "$OUT" == *"not the authenticated gh user"* ]] \
+  && pass "AS11: non-viewer author reports CI_COMPLETE and explains author skip" \
+  || { fail "AS11: non-viewer author reports CI_COMPLETE and explains author skip"; printf '%s\n' "$OUT" | sed 's/^/      /'; }
+
+# --- AS12. PR head moved since watched SHA -> CI_COMPLETE --------------------
+MOVED_HEAD_SHA=$(printf 'c%.0s' {1..40})
+D=$(seq_dir as12-head-moved "$AS_RUNS_GREEN")
+run "AS12: automerge skipped after PR head moved -> CI_COMPLETE" 0 \
+  FAKE_GH_SEQ_DIR="$D" SYG_CI_ANCHOR=Probes SYG_CI_REVIEW="Claude Code Review" \
+  SYG_CI_AUTOMERGE_JOB=automerge FAKE_GH_JOBLIST="$AS_JOBS_SKIPPED" \
+  FAKE_GH_PR_STATE="{\"state\":\"open\",\"draft\":false,\"merged\":false,\"head\":\"$MOVED_HEAD_SHA\",\"author\":\"me\"}"
+[[ "$OUT" == *"CI_COMPLETE"* && "$OUT" != *"CI_GATE_AUTOMERGE_SKIPPED"* && "$OUT" == *"head moved"* ]] \
+  && pass "AS12: moved PR head reports CI_COMPLETE and notes head moved" \
+  || { fail "AS12: moved PR head reports CI_COMPLETE and notes head moved"; printf '%s\n' "$OUT" | sed 's/^/      /'; }
+
+# --- AS13. SYG_CI_AUTOMERGE_JOB set with SYG_CI_REVIEW= (empty) -> CI_COMPLETE
+JOBLIST_LOG_AS13="$WORK/joblist-as13.log"
+D=$(seq_dir as13-noreview "$AS_RUNS_GREEN")
+run "AS13: SYG_CI_AUTOMERGE_JOB set with SYG_CI_REVIEW= -> CI_COMPLETE" 0 \
+  FAKE_GH_SEQ_DIR="$D" SYG_CI_ANCHOR=Probes SYG_CI_REVIEW= \
+  SYG_CI_AUTOMERGE_JOB=automerge FAKE_GH_JOBLIST="$AS_JOBS_SKIPPED" \
+  FAKE_GH_JOBLIST_LOG="$JOBLIST_LOG_AS13"
+[[ "$OUT" == *"CI_COMPLETE"* && "$OUT" != *"CI_GATE_AUTOMERGE_SKIPPED"* && "$OUT" == *"review workflow is off"* ]] \
+  && [ ! -e "$JOBLIST_LOG_AS13" ] \
+  && pass "AS13: empty SYG_CI_REVIEW disables automerge check and skips joblist lookup" \
+  || { fail "AS13: empty SYG_CI_REVIEW disables automerge check and skips joblist lookup"; printf '%s\n' "$OUT" | sed 's/^/      /'; }
+
+# --- AS14. gh api user failure -> degrades to CI_COMPLETE --------------------
+D=$(seq_dir as14-user-err "$AS_RUNS_GREEN")
+run "AS14: gh api user failure -> CI_COMPLETE" 0 \
+  FAKE_GH_SEQ_DIR="$D" SYG_CI_ANCHOR=Probes SYG_CI_REVIEW="Claude Code Review" \
+  SYG_CI_AUTOMERGE_JOB=automerge FAKE_GH_JOBLIST="$AS_JOBS_SKIPPED" \
+  FAKE_GH_USER_EXIT=1
+[[ "$OUT" == *"CI_COMPLETE"* && "$OUT" != *"CI_GATE_AUTOMERGE_SKIPPED"* && "$OUT" == *"automerge check could not run"* ]] \
+  && pass "AS14: gh api user failure warns and reports CI_COMPLETE" \
+  || { fail "AS14: gh api user failure warns and reports CI_COMPLETE"; printf '%s\n' "$OUT" | sed 's/^/      /'; }
 
 echo "---"
 echo "$FAILURES failed"
