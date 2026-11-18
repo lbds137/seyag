@@ -6,7 +6,7 @@ All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY
 
 ### Features
 
-- **scratch-dir:** new bin: a per-session scratch dir (job tmp inside a job); recursive-rm-guard allows deletes strictly inside it, keyed on the hook payload's session id (`SYG_SCRATCH_ROOT`, `SYG_SCRATCH_RM_EXEMPT`). Implementer and delegation contracts point workers at it. (#PR)
+- **scratch-dir:** new bin: a per-session scratch dir (job tmp inside a job); recursive-rm-guard allows deletes strictly inside it, keyed on the hook payload's session id (`SYG_SCRATCH_ROOT`, `SYG_SCRATCH_RM_EXEMPT`). Implementer and delegation contracts point workers at it. (#335)
 
 ## 0.3.182 - 2026-11-17
 
