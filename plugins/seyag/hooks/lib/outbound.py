@@ -2,11 +2,11 @@
 session-url-gate.sh and private-term-guard.sh.
 
 `outbound_items(cmd, cwd, bypass_assignment, dir_filter=None,
-commit_text_owner=None)` returns `Item(label, text, directory, kind, sha)`
-records; each hook matches its own pattern over `text`. `label` names the
-source and can hold user text (a commit subject, a path); `kind` (`text`,
-`file`, `staged`, `commit-message`, `commit-diff`) and `sha` name it without
-user text. `directory` is the
+commit_text_owner=None, net_tokens=None)` returns `Item(label, text, directory,
+kind, sha)` records; each hook matches its own pattern over `text`. `label`
+names the source and can hold user text (a commit subject, a path); `kind`
+(`text`, `file`, `staged`, `commit-message`, `commit-diff`) and `sha` name it
+without user text. `directory` is the
 directory the command producing the item runs in (the event cwd tracked
 across possible states by `lib/shell_state.py`'s `walk` — `cd`/`pushd`/`popd`,
 `~` and `$NAME`/`${NAME}` from `PWD`, `OLDPWD`, tracked assignments and the
@@ -85,10 +85,13 @@ ITEMS, for every unbypassed command:
   - ("staged <path>", line): each line lib/commit_diff.py's `commit_lines`
     reports for a `git commit`, `git add`/`git stage` earlier in the same
     command tracked as there (an add is tracked even with a bypass prefix:
-    the bypass belongs to the commit).
+    the bypass belongs to the commit); when `net_tokens` is given, only lines
+    holding a net-new token in their diff group (`net_added` over
+    `commit_line_groups`).
   - ("commit <sha> <path>", line): each added line of the pushed commits
     (same sources as the message scan), from commit_diff's
-    `pushed_added_lines`.
+    `pushed_added_lines` (or `net_added` over `pushed_line_groups`, one group
+    per commit, when `net_tokens` is given).
   - ("push refspec", name): the destination of each literal refspec of a
     `git push`, as a short name (refs/heads/, refs/tags/, refs/notes/ stripped,
     as the pre-push scans it), so a new remote ref's name is seen before git
@@ -705,12 +708,16 @@ def _refspec_items(args, directory):
             for name in push_destinations(args)]
 
 
-def _push_items(sources, directory):
+def _push_items(sources, directory, net_tokens=None):
     items = []
     for sha, subject, body in pushed_messages(sources, directory):
         items.append(Item(f"commit {sha} {subject}", subject + "\n" + body, directory,
                           "commit-message", sha))
-    for sha, _subject, path, line in commit_diff.pushed_added_lines(directory, sources):
+    pushed_lines = (
+        commit_diff.net_added(commit_diff.pushed_line_groups(directory, sources), net_tokens)
+        if net_tokens is not None else commit_diff.pushed_added_lines(directory, sources)
+    )
+    for sha, _subject, path, line in pushed_lines:
         items.append(Item(f"commit {sha} {path}", line, directory, "commit-diff", sha))
     return items
 
@@ -1083,7 +1090,7 @@ def _carries_bypass(raw, unwrapped, argv, bypass_assignment):
 
 
 def outbound_items(cmd, cwd, bypass_assignment, dir_filter=None,
-                   commit_text_owner=None):
+                   commit_text_owner=None, net_tokens=None):
     items = []
     text_dirs = set()
     adds = []
@@ -1119,18 +1126,21 @@ def outbound_items(cmd, cwd, bypass_assignment, dir_filter=None,
     def cached_push_items(sources, d):
         if not exists(d):
             return ()
-        key = (d, tuple(sources))
+        key = (d, tuple(sources), net_tokens)
         if key not in push_cache:
-            push_cache[key] = _push_items(sources, d)
+            push_cache[key] = _push_items(sources, d, net_tokens=net_tokens)
         return push_cache[key]
 
     def cached_commit_lines(d, args):
         if not exists(d):
             return ()
-        key = (d, tuple(args), len(adds))  # an earlier `git add` changes the answer
+        key = (d, tuple(args), len(adds), net_tokens)  # an earlier `git add` changes the answer
         if key not in staged_cache:
-            staged_cache[key] = commit_diff.commit_lines(
-                d, commit_diff.parse_commit(args), adds)
+            spec = commit_diff.parse_commit(args)
+            staged_cache[key] = (
+                commit_diff.net_added(commit_diff.commit_line_groups(d, spec, adds), net_tokens)
+                if net_tokens is not None else commit_diff.commit_lines(d, spec, adds)
+            )
         return staged_cache[key]
 
     def command_text(d):

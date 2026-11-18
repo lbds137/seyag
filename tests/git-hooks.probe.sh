@@ -490,6 +490,46 @@ PATH="$NOPY" "$GIT_BIN" -C "$R" push -q origin main >"$TMP/out" 2>&1; rc=$?
   && ok "no python3 on PATH: a public repo's push is refused" || bad "no python3: rc=$rc $(cat "$TMP/out")"
 PATH="$NOPY" "$GIT_BIN" -C "$R" -c seyag.publicRepo=false push -q origin main >"$TMP/out" 2>&1 \
   && ok "control: the same PATH pushes from a repo not marked public" || bad "no python3 control: $(cat "$TMP/out")"
+# Session-link net-new in added lines: an edited line keeping its link passes;
+# a changed id, an unpushed A-then-B pair, and a merge's own link line refuse.
+fresh public
+printf 'old %s\n' "$LINK" >"$R/doc.md"
+git -C "$R" add doc.md && git -C "$R" commit -q -m seed
+GIT_CONFIG_GLOBAL="$TMP/gbase" git -C "$R" push -q origin main 2>/dev/null
+printf 'new %s\n' "$LINK" >"$R/doc.md"
+git -C "$R" add doc.md && git -C "$R" commit -q -m edit
+git -C "$R" push -q origin main >"$TMP/out" 2>&1 \
+  && ok "session link: edited line keeping the link passes pre-push" \
+  || bad "session link edited line: $(cat "$TMP/out")"
+printf 'new %sx\n' "$LINK" >"$R/doc.md"
+git -C "$R" add doc.md && git -C "$R" commit -q -m change-id
+git -C "$R" push -q origin main >"$TMP/out" 2>&1
+[ $? -ne 0 ] && grep -qF "  added line of " "$TMP/out" && grep -qF "a session link" "$TMP/out" \
+  && ! grep -qF FIXTUREID "$TMP/out" \
+  && ok "session link: edited line with a changed id is refused (masked)" \
+  || bad "session link changed id: $(cat "$TMP/out")"
+fresh public
+printf 'old %s\n' "$LINK" >"$R/doc.md"
+git -C "$R" add doc.md && git -C "$R" commit -q -m add-link
+A_SHA=$(git -C "$R" rev-parse --short=12 HEAD)
+printf 'new %s\n' "$LINK" >"$R/doc.md"
+git -C "$R" add doc.md && git -C "$R" commit -q -m edit-link
+B_SHA=$(git -C "$R" rev-parse --short=12 HEAD)
+git -C "$R" push -q origin main >"$TMP/out" 2>&1
+[ $? -ne 0 ] && grep -qF "  added line of $A_SHA (a session link):" "$TMP/out" \
+  && ! grep -qF "$B_SHA" "$TMP/out" && ! grep -qF FIXTUREID "$TMP/out" \
+  && ok "session link: unpushed A adds link then B edits line is refused on A" \
+  || bad "session link A-then-B: $(cat "$TMP/out")"
+fresh public
+git -C "$R" checkout -q -b side && git -C "$R" commit -q --allow-empty -m s
+git -C "$R" checkout -q main && git -C "$R" commit -q --allow-empty -m m
+git -C "$R" merge -q --no-commit side >/dev/null
+printf 'see %s\n' "$LINK" >"$R/evil" && git -C "$R" add evil && git -C "$R" commit -q -m merge
+git -C "$R" push -q origin main >"$TMP/out" 2>&1
+[ $? -ne 0 ] && grep -qF "  added line of " "$TMP/out" && grep -qF "a session link" "$TMP/out" \
+  && ! grep -qF FIXTUREID "$TMP/out" \
+  && ok "session link: merge commit adding a link line of its own is refused" \
+  || bad "session link merge: $(cat "$TMP/out")"
 # python3 -I ignores PYTHONDONTWRITEBYTECODE, so the hook must pass -B itself.
 if [ "$PYC_BEFORE" = absent ] && [ -e "$REPO/plugins/seyag/hooks/lib/__pycache__" ]; then
   bad "the pre-push left a __pycache__ beside hooks/lib"

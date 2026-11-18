@@ -23,10 +23,11 @@ WHAT IS SCANNED, for each stdin line `<local ref> <local sha> <remote ref>
         -r --cc --name-only --diff-filter=AR -M --root -z`; `--cc` adds a
         merge's own new paths, those new against every parent);
       - `added line`: every added line (`git diff-tree --stdin -r --cc -p -M
-        --root`, with lib/commit_diff.py's pinned prefixes and DIFF_OPTS); a
-        merge's lines are the ones new against every parent. A pushed
-        `refs/notes/*` ref labels them `note`: a notes commit adds a note as
-        a blob, so its added lines are the note text.
+        --root`, with lib/commit_diff.py's pinned prefixes and DIFF_OPTS; for
+        session links on non-merge commits, only links net-new in that
+        commit's diff); a merge's lines are the ones new against every parent.
+        A pushed `refs/notes/*` ref labels them `note`: a notes commit adds a
+        note as a blob, so its added lines are the note text.
   - `tag`: when the local sha is an annotated tag object, `git cat-file -p`
     of it, and of each tag it points to in turn.
   - `ref`: the remote ref's short name (`refs/heads/`, `refs/tags/` and
@@ -47,6 +48,7 @@ install-level gaps.
 No top-level side effects: importing this module runs nothing.
 """
 
+from collections import Counter
 import os
 import re
 import signal
@@ -117,24 +119,25 @@ class Matcher:
     def full(self):
         return len(self.hits) >= MAX_HITS
 
-    def check(self, kind, sha, text):
-        """Record a hit line when `text` holds a term or a session link."""
+    def check(self, kind, sha, text, link=True):
+        """Record a hit line when `text` holds a term or (when `link` is True)
+        a session link."""
         if self.full() or not text:
             return
         signal.alarm(MATCH_SECONDS)
         try:
             found = private_terms.spans(self.compiled, text)
-            link = session_link.SECRET.search(text) is not None
+            has_link = link and session_link.SECRET.search(text) is not None
         finally:
             signal.alarm(0)
-        if not found and not link:
+        if not found and not has_link:
             return
         what = []
         if found:
             nums = {n for _s, _e, n in found}
             self.terms_hit |= nums
             what.append(f"private term #{min(nums)}")
-        if link:
+        if has_link:
             what.append("a session link")
         shown = session_link.mask(private_terms.masked(text, found)) if found \
             else session_link.mask(text)
@@ -267,9 +270,29 @@ def _scan_lines(m, commits, notes):
     writer.start()
     try:
         sha, width, in_hunk = None, 1, False
+        deferred = []
+        removed = Counter()
+
+        def flush():
+            for kind, csha, text in deferred:
+                new = False
+                for t in session_link.tokens(text):
+                    if removed[t] > 0:
+                        removed[t] -= 1
+                    else:
+                        new = True
+                m.check(kind, csha, text, link=new)
+                if m.full():
+                    break
+            deferred.clear()
+            removed.clear()
+
         for raw in p.stdout:
             ln = _decode(raw.rstrip(b"\n"))
             if ln in known:
+                flush()
+                if m.full():
+                    break
                 sha, in_hunk = ln, False
             elif ln.startswith("diff --git ") or ln.startswith("diff --cc ") \
                     or ln.startswith("diff --combined "):
@@ -278,9 +301,18 @@ def _scan_lines(m, commits, notes):
                 width = len(ln) - len(ln.lstrip("@")) - 1
                 in_hunk = True
             elif in_hunk and sha and ln[:width] == "+" * width:
-                m.check("note" if sha in notes else "added line", sha, ln[width:])
-                if m.full():
-                    break
+                kind = "note" if sha in notes else "added line"
+                text = ln[width:]
+                if width == 1 and session_link.tokens(text):
+                    deferred.append((kind, sha, text))
+                else:
+                    m.check(kind, sha, text)
+                    if m.full():
+                        break
+            elif in_hunk and sha and width == 1 and ln.startswith("-"):
+                removed.update(session_link.tokens(ln[1:]))
+        if not m.full():
+            flush()
         if m.full():
             p.kill()
         p.stdout.close()

@@ -408,6 +408,73 @@ git -C "$PUSHED" push -q origin main 2>/dev/null
 run 0 "near-miss: the same commit once it is on the remote" "$PUSHED" "${NOENV[@]}" -- \
   "git push origin main"
 
+NET="$TMP/net_repo"
+git init -q "$NET"
+git -C "$NET" commit -q --allow-empty -m "base"
+printf 'header\nold text %s\n' "$LINK" >"$NET/notes.md"
+git -C "$NET" add notes.md
+git -C "$NET" commit -q -m "seed link"
+printf 'header\nnew text %s\n' "$LINK" >"$NET/notes.md"
+git -C "$NET" add notes.md
+run 0 "edited line keeps its link" "$NET" "${NOENV[@]}" -- \
+  "git commit -m x"
+printf 'header\nold text %s\nunrelated line\n' "$LINK" >"$NET/notes.md"
+git -C "$NET" add notes.md
+run 0 "untouched link + unrelated edit" "$NET" "${NOENV[@]}" -- \
+  "git commit -m x"
+printf 'header\nnew text %sx\n' "$LINK" >"$NET/notes.md"
+git -C "$NET" add notes.md
+run 2 "edited line changes the link id" "$NET" "${NOENV[@]}" -- \
+  "git commit -m x"
+assert_out "changed id names the staged path" present "staged notes.md"
+assert_out "changed id never echoes the id" absent "$ID"
+printf 'header\nnew text %s\nsecond %s\n' "$LINK" "$LINK" >"$NET/notes.md"
+git -C "$NET" add notes.md
+run 2 "edited line keeps link + second copy of the same link added" "$NET" "${NOENV[@]}" -- \
+  "git commit -m x"
+assert_out "second copy names the staged path" present "staged notes.md"
+git -C "$NET" reset -q
+printf 'header\nnewer text %s\n' "$LINK" >"$NET/notes.md"
+run 0 "same-command git add: edited line keeps its link" "$NET" "${NOENV[@]}" -- \
+  "git add notes.md && git commit -m x"
+
+NETMV="$TMP/net_mv"
+git init -q "$NETMV"
+git -C "$NETMV" commit -q --allow-empty -m "base"
+printf 'header\nold text %s\n' "$LINK" >"$NETMV/notes.md"
+git -C "$NETMV" add notes.md
+git -C "$NETMV" commit -q -m "seed link"
+git -C "$NETMV" mv notes.md moved.md
+run 0 "git mv of a committed file holding a link" "$NETMV" "${NOENV[@]}" -- \
+  "git commit -m x"
+
+NETP="$TMP/net_push"
+NETP_REMOTE="$TMP/net_push_remote.git"
+git init -q --bare "$NETP_REMOTE"
+git init -q "$NETP"
+git -C "$NETP" remote add origin "$NETP_REMOTE"
+git -C "$NETP" commit -q --allow-empty -m "base"
+git -C "$NETP" branch -M main
+git -C "$NETP" push -q origin main 2>/dev/null
+printf 'before %s\n' "$LINK" >"$NETP/doc.md"
+git -C "$NETP" add doc.md
+git -C "$NETP" commit -q -m "commit A"
+A_SHA=$(git -C "$NETP" rev-parse --short HEAD)
+printf 'after %s\n' "$LINK" >"$NETP/doc.md"
+git -C "$NETP" add doc.md
+git -C "$NETP" commit -q -m "commit B"
+B_SHA=$(git -C "$NETP" rev-parse --short HEAD)
+run 2 "push: commit A adds link, commit B edits that line keeping it" "$NETP" "${NOENV[@]}" -- \
+  "git push origin main"
+assert_out "push names commit A's sha" present "commit $A_SHA doc.md"
+assert_out "push does not name commit B's sha" absent "commit $B_SHA"
+git -C "$NETP" push -q origin main 2>/dev/null
+printf 'third %s\n' "$LINK" >"$NETP/doc.md"
+git -C "$NETP" add doc.md
+git -C "$NETP" commit -q -m "commit C"
+run 0 "push: remote already has the link line, unpushed commit edits it keeping the link" "$NETP" "${NOENV[@]}" -- \
+  "git push origin main"
+
 # =============================================================================
 # Group 8: directory tracking for body-file reads
 # =============================================================================

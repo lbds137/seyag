@@ -2,6 +2,16 @@
 
 All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY-MM-DD>` section per released version; under it, `###` categories in fixed order — Breaking Changes, Features, Bug Fixes, Improvements, Chores, Tests — empty ones omitted; items are `- **scope:** description (#PR)`, written from the version's merged commit subjects.
 
+## 0.3.185 - 2026-11-18
+
+### Bug Fixes
+
+- **session-url-gate, pre-push:** a session link on an added line now blocks only when it is new in that diff: a link the same diff also removes (an edited line that keeps its link) is carried, matched by full link and by count. Netting is per diff call on commit and per commit on push and in the pre-push scanner, never across commits, so a link added in an unpushed commit still blocks on that commit; `--cc` merge hunks keep the old rule. private-term-guard is unchanged (`outbound_items(net_tokens=…)` is opt-in). (#338)
+
+### Tests
+
+- **probes:** session-url-gate pins an edited line keeping its link, staged or added in the same command (passes), a changed id and a second added copy (block), and an A-adds/B-edits push that blocks naming A, plus regression rows for an untouched link beside an unrelated edit and a `git mv` of a linked file (both pass); `tests/git-hooks.probe.sh` pins the same for the pre-push plus a merge adding its own link; private-term-guard pins that an edited line keeping a term still blocks. (#338)
+
 ## 0.3.184 - 2026-11-18
 
 ### Bug Fixes

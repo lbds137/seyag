@@ -203,6 +203,15 @@ run 2 "public: git add of an untracked file with the term, then commit" "$UNT" "
   "git add loose.md && git commit -m x"
 run 0 "near-miss: the untracked file without the git add" "$UNT" "${T[@]}" -- \
   "git commit -m x"
+STG_EDIT="$TMP/stg_edit"; mkrepo "$STG_EDIT" true
+printf 'old prefix zorbleflux plan\n' >"$STG_EDIT/notes.md"
+git -C "$STG_EDIT" add notes.md
+git -C "$STG_EDIT" commit -q -m "seed term"
+printf 'new prefix zorbleflux plan\n' >"$STG_EDIT/notes.md"
+git -C "$STG_EDIT" add notes.md
+run 2 "public: editing a committed line that keeps the term still blocks" "$STG_EDIT" "${T[@]}" -- \
+  "git commit -m x"
+assert_out "edited term line still names staged lines" present "matched in: staged lines (see git diff --cached)."
 
 # =============================================================================
 # Public: push
