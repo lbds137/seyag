@@ -126,7 +126,7 @@ On the Anthropic lane she drives from her phone, often by voice (Remote Control)
 ## Safety
 
 These add to the global ask-first list in `~/.claude/CLAUDE.md`.
-- Also ask before: `git merge` (where the project is rebase-only), `git push --force`, and `git stash pop` (stashes are one global stack, not per branch; `git stash list` first).
+- Also ask before: `git merge` (where the project is rebase-only), `git push --force` (except through `fixup-push`, which proves the rewrite and refuses otherwise; announce it), and `git stash pop` (stashes are one global stack, not per branch; `git stash list` first).
 - In repos other sessions also write (claude-memory, dev-docs), stage explicit paths and read `git status --short` (untracked files included) before committing; never `git add -A` or `commit -a` blind. The `claude-memory-backup` job commits everything in the memory repo by design.
 - Before querying configs or API objects that can embed secrets (Discord webhook URLs carry the token; so do git remotes with tokens), select the safe fields (id, name, events, `last_response`, host) in the first call instead of printing the object.
 - **Never kill by pattern.** List, then kill by PID; stop a background waiter by its exact PID or a sentinel file it polls. A `ps | grep` liveness probe matches itself and reports the work as running forever.
