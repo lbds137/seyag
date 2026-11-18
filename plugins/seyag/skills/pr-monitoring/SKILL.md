@@ -82,6 +82,7 @@ stop after step 1 even if every check is green:
 | `CI_GATE_TIMEOUT` | `pr-ci-wait` hit its give-up ceiling (25 min default). | Re-arm; do **not** assume CI passed. |
 | `CI_GATE_STARTUP_FAILURE` | A workflow died before dispatch (`startup_failure`) or failed with zero jobs; either is invisible in `gh pr checks`. | Run `gh run rerun <run-id>`, then re-arm; a zero-job failure that repeats points at the workflow file (check the run page). |
 | `CI_GATE_REVIEW_MISSING` | CI settled, but no review workflow run appeared within the 5-min grace window. | Re-query the run list; if still absent, the workflow never dispatched (`gh run rerun` has nothing to rerun and re-pushing is not a reliable lever) — check its `on:` filter against the PR event. |
+| `CI_GATE_AUTOMERGE_SKIPPED` | CI is green and the review run is green, but the review run's automerge job (`SYG_CI_AUTOMERGE_JOB`) was skipped on an open non-draft PR authored by the authenticated gh user, so it will not merge itself. | Re-trigger with `gh pr close <N> && gh pr reopen <N>` and re-arm; never merge by hand over the gate. |
 | _(none printed)_ | The Monitor's own 30-min `timeout_ms` killed the process first. | Re-arm. |
 
 2. **Confirm CI state and the SHA-pinned workflow run list.** Note the final

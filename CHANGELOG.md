@@ -2,6 +2,20 @@
 
 All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY-MM-DD>` section per released version; under it, `###` categories in fixed order — Breaking Changes, Features, Bug Fixes, Improvements, Chores, Tests — empty ones omitted; items are `- **scope:** description (#PR)`, written from the version's merged commit subjects.
 
+## 0.3.186 - 2026-11-18
+
+### Features
+
+- **pr-ci-wait:** new sentinel `CI_GATE_AUTOMERGE_SKIPPED` (exit 1). With `SYG_CI_AUTOMERGE_JOB` set, after a green release it reads the latest completed non-cancelled review run's jobs on its own attempt; when that job was `skipped` while every non-cancelled run on the SHA is green and the PR is open, non-draft, unmerged, still at this SHA and authored by the authenticated gh user, it reports the skip with the close/reopen re-trigger instead of `CI_COMPLETE`. Advisory: any lookup failure degrades to `CI_COMPLETE`. This repo opts in with `automerge`. The sentinel lists in the README, pr-monitoring skill and pr-monitor-reminder banner carry it. (#339)
+
+### Improvements
+
+- **versioning:** new "Citing the PR number" section: predict the number as the newest issue/PR + 1 and re-check before opening a non-draft PR; for a draft, flip ready only once the cite push's review run exists, since a flip seconds after a push can leave the surviving review run on a draft payload. (#339)
+
+### Tests
+
+- **probes:** `tests/pr-ci-wait.probe.sh` pins the race shape (two green review runs and a newer cancelled one; the newest non-cancelled is read) plus draft, merged, closed, red CI, other author, moved head, missing job, check off, and each lookup failure; the fake gh tells the job-list and PR-state calls apart from the existing job-count and head-SHA calls. (#339)
+
 ## 0.3.185 - 2026-11-18
 
 ### Bug Fixes

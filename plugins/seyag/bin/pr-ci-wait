@@ -19,8 +19,9 @@ current head (`head.sha`) is read and used instead, and a log line says so
 config lines).
 
 Sentinels (printed on their own line, exactly, once): CI_COMPLETE,
-CI_GATE_TIMEOUT, CI_GATE_STARTUP_FAILURE, CI_GATE_REVIEW_MISSING. A
-`gh pr checks N` report always prints last, on every outcome.
+CI_GATE_TIMEOUT, CI_GATE_STARTUP_FAILURE, CI_GATE_REVIEW_MISSING,
+CI_GATE_AUTOMERGE_SKIPPED. A `gh pr checks N` report always prints last, on
+every outcome.
 
 A completed run with conclusion `failure` and zero jobs on its attempt (a run
 that never started, e.g. during a GitHub outage) takes the same
@@ -29,30 +30,48 @@ are not checked. A failed job-count lookup holds release until it succeeds (it
 counts as a failed gh call for logging, and a `startup_failure` run in the same
 poll is still reported).
 
-Exit codes: 0 only on CI_COMPLETE; 1 for every other gate outcome (timeout,
-startup failure, review missing); 2 for a usage/argument error (bad --sha,
---sha naming no local commit, or a PR head that persistently disagrees with
---sha after one re-read).
+When SYG_CI_AUTOMERGE_JOB is set (alongside an active review workflow), a
+settled release checks the latest completed non-cancelled review run's jobs on
+its own attempt: if that job's conclusion is `skipped` while every non-cancelled
+run on the SHA is green and the PR is open, non-draft, authored by the
+authenticated gh user, and its head is still this SHA, the gate prints
+CI_GATE_AUTOMERGE_SKIPPED instead of CI_COMPLETE (for example, when a
+draft-to-ready flip raced a push so the review run evaluated the draft event
+payload). The check is advisory: any gh or parse failure warns and degrades to
+CI_COMPLETE rather than holding release.
 
-Workflow config (both are workflow `name` values, not job or step names):
-  SYG_CI_ANCHOR       The workflow whose completion (plus nothing else still
-                       pending) means CI has settled. Unset or empty falls
-                       back to the QUIET-WINDOW rule: settled once >=1 run
-                       exists, nothing is pending, and the run-id set has
-                       been unchanged and all-completed for the quiet window
-                       (see PR_CI_WAIT_QUIET_S) across polls — weaker than an
-                       anchor, because a workflow created after the window
-                       closes is missed.
-  SYG_CI_REVIEW       The workflow whose run must exist and complete before
-                       release, asserted POSITIVELY (a run that never
-                       dispatches is otherwise invisible to "nothing
-                       pending"). Unset: auto-detected as the first top-level
-                       `name:` line equal to "Claude Code Review" in any
-                       .github/workflows/*.yml|*.yaml at the repo root; none
-                       found means no review assertion at all (settled ==
-                       releasable). Set but EMPTY (SYG_CI_REVIEW=)
-                       disables the assertion explicitly, overriding
-                       auto-detection.
+Exit codes: 0 only on CI_COMPLETE; 1 for every other gate outcome (timeout,
+startup failure, review missing, automerge skipped); 2 for a usage/argument
+error (bad --sha, --sha naming no local commit, or a PR head that persistently
+disagrees with --sha after one re-read).
+
+Workflow config (SYG_CI_ANCHOR and SYG_CI_REVIEW are workflow `name` values;
+SYG_CI_AUTOMERGE_JOB is a job `name` inside the review workflow):
+  SYG_CI_ANCHOR         The workflow whose completion (plus nothing else still
+                        pending) means CI has settled. Unset or empty falls
+                        back to the QUIET-WINDOW rule: settled once >=1 run
+                        exists, nothing is pending, and the run-id set has
+                        been unchanged and all-completed for the quiet window
+                        (see PR_CI_WAIT_QUIET_S) across polls — weaker than an
+                        anchor, because a workflow created after the window
+                        closes is missed.
+  SYG_CI_REVIEW         The workflow whose run must exist and complete before
+                        release, asserted POSITIVELY (a run that never
+                        dispatches is otherwise invisible to "nothing
+                        pending"). Unset: auto-detected as the first top-level
+                        `name:` line equal to "Claude Code Review" in any
+                        .github/workflows/*.yml|*.yaml at the repo root; none
+                        found means no review assertion at all (settled ==
+                        releasable). Set but EMPTY (SYG_CI_REVIEW=)
+                        disables the assertion explicitly, overriding
+                        auto-detection.
+  SYG_CI_AUTOMERGE_JOB  The job inside the review workflow's run that merges
+                        the PR once checks pass. When set (and a review
+                        workflow is active), a green settled release checks
+                        that this job was not skipped on an open, non-draft PR
+                        authored by the authenticated gh user whose head is
+                        still this SHA. Unset or empty disables the check (no
+                        extra gh calls).
 
 Test knobs (env, seconds; do not set these for a real wait — they exist so
 the probe can run in seconds instead of minutes):
@@ -102,6 +121,7 @@ SENTINELS = {
     "timeout": "CI_GATE_TIMEOUT",
     "startup-failure": "CI_GATE_STARTUP_FAILURE",
     "review-missing": "CI_GATE_REVIEW_MISSING",
+    "automerge-skipped": "CI_GATE_AUTOMERGE_SKIPPED",
 }
 
 
@@ -273,8 +293,8 @@ def autodetect_review_workflow():
 
 
 def resolve_workflow_config():
-    """Reads SYG_CI_ANCHOR / SYG_CI_REVIEW, prints the effective
-    config, and returns (anchor_or_None, review_workflow_or_None)."""
+    """Reads SYG_CI_ANCHOR / SYG_CI_REVIEW / SYG_CI_AUTOMERGE_JOB, prints the effective
+    config, and returns (anchor_or_None, review_workflow_or_None, automerge_job_or_None)."""
     anchor_raw = os.environ.get("SYG_CI_ANCHOR")
     anchor = anchor_raw or None
     if anchor:
@@ -307,7 +327,19 @@ def resolve_workflow_config():
                 'review: none found (no workflow named "Claude Code Review" under '
                 ".github/workflows) — settled == releasable"
             )
-    return anchor, review
+
+    automerge_raw = os.environ.get("SYG_CI_AUTOMERGE_JOB")
+    automerge_job = automerge_raw or None
+    if automerge_job:
+        if review is not None:
+            log(f'automerge: job "{automerge_job}" (SYG_CI_AUTOMERGE_JOB)')
+        else:
+            log(f'automerge: no check (SYG_CI_AUTOMERGE_JOB="{automerge_job}", but review workflow is off)')
+            automerge_job = None
+    else:
+        log("automerge: no check (SYG_CI_AUTOMERGE_JOB unset)")
+
+    return anchor, review, automerge_job
 
 
 def fetch_runs(sha):
@@ -525,6 +557,102 @@ def run_wait(sha, anchor, review_workflow):
         time.sleep(POLL_S)
 
 
+def check_automerge(pr, sha, review_workflow, job_name):
+    # The check is advisory; holding on a lookup error would turn green CI into a timeout.
+    if not job_name or not review_workflow:
+        return "releasable"
+    try:
+        runs = fetch_runs(sha)
+        candidates = [
+            r
+            for r in runs
+            if r.get("name") == review_workflow
+            and r.get("status") == "completed"
+            and r.get("conclusion") != "cancelled"
+        ]
+        if not candidates:
+            log(f'automerge: no completed non-cancelled "{review_workflow}" run found; skipping check')
+            return "releasable"
+        review_run = max(candidates, key=lambda r: r.get("id") or 0)
+        run_id = review_run.get("id")
+        attempt = review_run.get("run_attempt")
+        base = f"repos/{REPO_SPEC}/actions/runs/{run_id}"
+        path = f"{base}/attempts/{attempt}/jobs" if attempt is not None else f"{base}/jobs"
+        raw_jobs = gh(
+            ["api", f"{path}?per_page=100", "--jq", "[.jobs[] | {name, conclusion}]"],
+            JOBS_FETCH_TIMEOUT_S,
+        )
+        try:
+            jobs = json.loads(raw_jobs)
+        except json.JSONDecodeError:
+            raise GhApiError(f"unparseable jobs response: {raw_jobs.strip()[:120]}")
+        if not isinstance(jobs, list):
+            raise GhApiError(f"unparseable jobs response: {raw_jobs.strip()[:120]}")
+        matching = [j for j in jobs if isinstance(j, dict) and j.get("name") == job_name]
+        if not matching:
+            log(f'automerge: job "{job_name}" not found in review run {run_id}')
+            return "releasable"
+        if matching[0].get("conclusion") != "skipped":
+            return "releasable"
+
+        green_conclusions = {"success", "neutral", "skipped"}
+        all_green = all(
+            r.get("status") == "completed" and r.get("conclusion") in green_conclusions
+            for r in runs
+            if r.get("conclusion") != "cancelled"
+        )
+        if not all_green:
+            return "releasable"
+
+        raw_pr = gh(
+            [
+                "api",
+                f"repos/{REPO_SPEC}/pulls/{pr}",
+                "--jq",
+                "{state, draft, merged, head: .head.sha, author: .user.login}",
+            ],
+            HEAD_FETCH_TIMEOUT_S,
+        )
+        try:
+            pr_state = json.loads(raw_pr)
+        except json.JSONDecodeError:
+            raise GhApiError(f"unparseable PR state response: {raw_pr.strip()[:120]}")
+        if not isinstance(pr_state, dict):
+            raise GhApiError(f"unparseable PR state response: {raw_pr.strip()[:120]}")
+        viewer = gh(["api", "user", "--jq", ".login"], HEAD_FETCH_TIMEOUT_S).strip()
+        if not viewer:
+            raise GhApiError("empty user login response")
+    except GhApiError as exc:
+        log(f"⚠️  automerge check could not run: {exc}; reporting CI_COMPLETE")
+        return "releasable"
+
+    if pr_state.get("state") != "open" or pr_state.get("merged"):
+        return "releasable"
+    if pr_state.get("draft"):
+        log(f'automerge job "{job_name}" skipped on a draft PR: held by design')
+        return "releasable"
+    head = (pr_state.get("head") or "").strip().lower()
+    if head != sha:
+        log(f"automerge: PR head moved to {head[:8]} since this SHA; reporting CI_COMPLETE")
+        return "releasable"
+    author = (pr_state.get("author") or "").strip()
+    if author != viewer:
+        log(
+            f'automerge job "{job_name}" skipped on a PR by {author}, not the authenticated gh user: '
+            "the workflow's own author rules may skip it by design; reporting CI_COMPLETE"
+        )
+        return "releasable"
+    log(
+        f'⚠️  automerge job "{job_name}" was skipped on review run {run_id}, '
+        f"but PR #{pr} is open, non-draft and every run on this SHA is green: "
+        "it will not merge itself. Likely cause: the run's event payload predates "
+        "a draft-to-ready flip (a push and `gh pr ready` seconds apart). "
+        f"Re-trigger the workflow with `gh pr close {pr} && gh pr reopen {pr}`; "
+        "do not merge around the gate."
+    )
+    return "automerge-skipped"
+
+
 def run_checks(pr, watch, timeout_s=CHECKS_REPORT_TIMEOUT_S, bound="what was left of PR_CI_WAIT_MAX_S"):
     args = ["pr", "checks", str(pr)]
     if watch:
@@ -560,7 +688,7 @@ def main():
         die("PR number must be positive")
 
     log(f"⏱️  Waiting for CI on PR #{args.pr}" + (f" @ {args.sha.lower()[:8]}…" if args.sha else " …"))
-    anchor, review = resolve_workflow_config()
+    anchor, review, automerge_job = resolve_workflow_config()
     sha, was_omitted = resolve_sha(args.pr, args.sha)
 
     if not was_omitted:
@@ -581,6 +709,8 @@ def main():
             run_checks(args.pr, watch=True, timeout_s=WATCH_MIN_S,
                        bound=f"the {WATCH_MIN_S}s floor; PR_CI_WAIT_MAX_S was spent")
         time.sleep(SETTLE_S)
+        if automerge_job and review:
+            outcome = check_automerge(args.pr, sha, review, automerge_job)
 
     log(SENTINELS[outcome])
     run_checks(args.pr, watch=False)
