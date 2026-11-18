@@ -2,6 +2,12 @@
 
 All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY-MM-DD>` section per released version; under it, `###` categories in fixed order — Breaking Changes, Features, Bug Fixes, Improvements, Chores, Tests — empty ones omitted; items are `- **scope:** description (#PR)`, written from the version's merged commit subjects.
 
+## 0.3.181 - 2026-11-17
+
+### Features
+
+- **fixup-push:** new bin: rewrites an open PR's own feature branch (autosquash with the base kept, or `--onto-base` rebase) and force-pushes it with a pinned lease, only after proving the rewrite (tree equality or an unchanged patch-id list) and that the branch is not default or protected; refuses any rewrite it cannot prove (#PR)
+
 ## 0.3.180 - 2026-11-17
 
 ### Improvements

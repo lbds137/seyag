@@ -1,0 +1,400 @@
+#!/bin/bash
+# fixup-push: rewrite and force-push an open PR's own feature branch when provably safe.
+#
+# Usage:
+#   fixup-push [--onto-base] [--dry-run]
+#   fixup-push -h|--help
+#
+# Rewrites the current branch of the cwd's worktree inside a temporary detached
+# worktree and force-pushes it to `origin` with a pinned lease only when every
+# safety check and rewrite proof passes; refuses (exit 1, no local branch or
+# remote ref moved) otherwise.
+#
+# Shapes:
+#   squash (default)  fold `fixup! ` commits into their targets (--keep-base);
+#                     proves new tree == old tree and no `fixup! ` remains.
+#   --onto-base       squash first if there are fixups, then rebase onto the
+#                     PR's current base tip; proves pre-rebase and rebased
+#                     commit lists have identical `git patch-id --stable` lists.
+#
+# Exit codes:
+#   0  pushed, or --dry-run proved everything
+#   1  refused (no local branch or remote ref moved)
+#   2  usage error
+#   3  local branch moved, push failed (prints old full SHA to recover)
+
+set -uo pipefail
+usage() { sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; }
+case "${1:-}" in -h | --help) usage; exit 0 ;; esac
+
+ONTO_BASE=false
+DRY_RUN=false
+while [ $# -gt 0 ]; do
+  case $1 in
+    -h | --help)
+      usage
+      exit 0
+      ;;
+    --onto-base)
+      ONTO_BASE=true
+      ;;
+    --dry-run)
+      DRY_RUN=true
+      ;;
+    *)
+      echo "fixup-push: unknown argument: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+  shift
+done
+
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_NAMESPACE GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT GIT_REPLACE_REF_BASE GIT_DIFF_OPTS GIT_EXTERNAL_DIFF
+export GIT_NO_REPLACE_OBJECTS=1
+
+refuse() {
+  printf 'fixup-push: refused: %s\n' "$1" >&2
+  exit 1
+}
+
+top=$(git rev-parse --show-toplevel 2>/dev/null) || refuse "not in a git worktree"
+cd "$top" || refuse "not in a git worktree"
+
+validate_branch_name() {
+  local br=$1
+  if [[ ! "$br" =~ ^[A-Za-z0-9._/-]+$ ]] || [[ "$br" =~ ^[-.] ]] || [[ "$br" == *..* ]] || [[ "$br" == *//* ]]; then
+    refuse "unsupported branch name"
+  fi
+}
+
+check_hidden() {
+  local v line ch
+  v=$(git ls-files -v 2>/dev/null) || refuse "git ls-files failed"
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    ch=${line:0:1}
+    case "$ch" in
+      [a-z]|S)
+        refuse "hidden tracked changes (assume-unchanged/skip-worktree)"
+        ;;
+    esac
+  done <<<"$v"
+}
+
+# 1. Current branch (detached HEAD refuses).
+ref=$(git symbolic-ref -q HEAD 2>/dev/null) || refuse "detached HEAD"
+[[ "$ref" =~ ^refs/heads/ ]] || refuse "detached HEAD"
+b=${ref#refs/heads/}
+[ -n "$b" ] || refuse "detached HEAD"
+validate_branch_name "$b"
+
+# 2. Tracked changes, staged or not (untracked files are allowed).
+check_hidden
+if ! git diff --ignore-submodules=none --quiet 2>/dev/null || ! git diff --ignore-submodules=none --cached --quiet 2>/dev/null; then
+  refuse "uncommitted changes"
+fi
+
+# 3. Origin remote and repo facts from gh.
+fetch_urls=$(git remote get-url --all origin 2>/dev/null) || refuse "origin must have exactly one URL"
+push_urls=$(git remote get-url --all --push origin 2>/dev/null) || refuse "origin must have exactly one URL"
+
+[ -n "$fetch_urls" ] || refuse "origin must have exactly one URL"
+[ -n "$push_urls" ] || refuse "origin must have exactly one URL"
+
+if [[ "$fetch_urls" == *$'\n'* ]] || [[ "$push_urls" == *$'\n'* ]]; then
+  refuse "origin must have exactly one URL"
+fi
+
+if [ "$push_urls" != "$fetch_urls" ]; then
+  refuse "origin push URL differs from its fetch URL"
+fi
+origin_url="$fetch_urls"
+
+get_url_check=$(git ls-remote --get-url "$origin_url" 2>/dev/null) || refuse "origin URL is rewritten again by url.insteadOf"
+if [ "$get_url_check" != "$origin_url" ]; then
+  refuse "origin URL is rewritten again by url.insteadOf"
+fi
+
+if [[ "$origin_url" =~ ^- ]]; then
+  refuse "origin URL is not a supported host URL"
+fi
+
+matched=false
+host=""
+owner=""
+repo=""
+if [[ "$origin_url" =~ ^https://([A-Za-z0-9._-]+)/([A-Za-z0-9._-]+)/([A-Za-z0-9._-]+)$ ]]; then
+  host="${BASH_REMATCH[1]}"
+  owner="${BASH_REMATCH[2]}"
+  repo="${BASH_REMATCH[3]}"
+  matched=true
+elif [[ "$origin_url" =~ ^ssh://(([A-Za-z0-9._-]+)@)?([A-Za-z0-9._-]+)/([A-Za-z0-9._-]+)/([A-Za-z0-9._-]+)$ ]]; then
+  host="${BASH_REMATCH[3]}"
+  owner="${BASH_REMATCH[4]}"
+  repo="${BASH_REMATCH[5]}"
+  matched=true
+elif [[ "$origin_url" =~ ^([A-Za-z0-9._-]+)@([A-Za-z0-9._-]+):([A-Za-z0-9._-]+)/([A-Za-z0-9._-]+)$ ]]; then
+  host="${BASH_REMATCH[2]}"
+  owner="${BASH_REMATCH[3]}"
+  repo="${BASH_REMATCH[4]}"
+  matched=true
+fi
+
+if ! $matched; then
+  refuse "origin URL is not a supported host URL"
+fi
+
+repo="${repo%.git}"
+if [ -z "$repo" ] || [[ "$host" != *.* ]] || [[ "$host" =~ ^- ]] || [[ "$owner" =~ ^- ]] || [[ "$repo" =~ ^- ]]; then
+  refuse "origin URL is not a supported host URL"
+fi
+
+repo_out=$(gh repo view "$host/$owner/$repo" --json nameWithOwner,defaultBranchRef -q '.nameWithOwner + " " + .defaultBranchRef.name' 2>/dev/null) \
+  || refuse "gh repo view failed"
+if [[ ! "$repo_out" =~ ^([^[:space:]]+)[[:space:]]+([^[:space:]]+)$ ]]; then
+  refuse "gh repo view failed"
+fi
+nwo=${BASH_REMATCH[1]}
+default_branch=${BASH_REMATCH[2]}
+if [ -z "$default_branch" ] || [ "$default_branch" = "null" ]; then
+  refuse "gh repo view failed"
+fi
+
+if [ "${nwo,,}" != "${owner,,}/${repo,,}" ]; then
+  refuse "gh repo does not match origin"
+fi
+
+if [ "$b" = "$default_branch" ]; then
+  refuse "default branch"
+fi
+
+# 4 & 5. Gate facts (PR, protection, child PRs).
+check_gate_facts() {
+  local pr_out pr_num pr_state pr_head pr_base pr_cross pr_head_nwo extra prot rules_len child_prs
+  pr_out=$(gh pr view "$b" --repo "$host/$nwo" --json number,state,headRefName,baseRefName,isCrossRepository,headRepository,headRepositoryOwner -q '[.number,.state,.headRefName,.baseRefName,.isCrossRepository,(.headRepositoryOwner.login + "/" + .headRepository.name)]|@tsv' 2>/dev/null) \
+    || refuse "no open PR for $b"
+  IFS=$'\t' read -r pr_num pr_state pr_head pr_base pr_cross pr_head_nwo extra <<<"$pr_out"
+  if [ -z "${pr_num:-}" ] || [ -z "${pr_state:-}" ] || [ -z "${pr_head:-}" ] || [ -z "${pr_base:-}" ] || [ -z "${pr_cross:-}" ] || [ -z "${pr_head_nwo:-}" ] || [ -n "${extra:-}" ]; then
+    refuse "no open PR for $b"
+  fi
+  if [ "$pr_state" != "OPEN" ] || [ "$pr_head" != "$b" ]; then
+    refuse "no open PR for $b"
+  fi
+  if [ "$pr_cross" = "true" ] || [ "$pr_cross" != "false" ]; then
+    refuse "PR head is a fork"
+  fi
+  if [ "${pr_head_nwo,,}" != "${nwo,,}" ]; then
+    refuse "PR head is a fork"
+  fi
+  validate_branch_name "$pr_base"
+  if [ -n "$base" ] && [ "$pr_base" != "$base" ]; then
+    refuse "PR base changed during the run"
+  fi
+  base="$pr_base"
+
+  prot=$(gh api --hostname "$host" "repos/$nwo/branches/$b" --jq .protected 2>/dev/null) \
+    || refuse "branch is protected or protection is unknown"
+  [ "$prot" = "false" ] || refuse "branch is protected or protection is unknown"
+
+  rules_len=$(gh api --hostname "$host" "repos/$nwo/rules/branches/$b" --jq length 2>/dev/null) \
+    || refuse "branch is protected or protection is unknown"
+  [ "$rules_len" = "0" ] || refuse "branch is protected or protection is unknown"
+
+  child_prs=$(gh pr list --repo "$host/$nwo" --base "$b" --state open --json number -q length 2>/dev/null) \
+    || refuse "another open PR is based on $b"
+  if [ "$child_prs" != "0" ]; then
+    refuse "another open PR is based on $b"
+  fi
+}
+
+base=""
+check_gate_facts
+
+# 6. Fetch and lease premise.
+git fetch -q --no-tags "$origin_url" "+refs/heads/$b:refs/remotes/origin/$b" "+refs/heads/$base:refs/remotes/origin/$base" 2>/dev/null || refuse "git fetch failed"
+R=$(git rev-parse --verify -q "refs/remotes/origin/$b" 2>/dev/null) || refuse "cannot resolve remote branch"
+B=$(git rev-parse --verify -q "refs/remotes/origin/$base" 2>/dev/null) || refuse "cannot resolve remote base"
+OLD=$(git rev-parse --verify -q HEAD 2>/dev/null) || refuse "cannot resolve HEAD"
+if ! git merge-base --is-ancestor "$R" "$OLD" 2>/dev/null; then
+  refuse "remote branch has commits not in local"
+fi
+ahead=$(git rev-list --count "$R..$OLD") || refuse "git rev-list failed"
+
+# 7. Range inspection.
+mb=$(git merge-base "$OLD" "$B" 2>/dev/null) || refuse "no merge-base with $base"
+[ -n "$mb" ] || refuse "no merge-base with $base"
+ahead_base=$(git rev-list --count "$mb..$OLD" 2>/dev/null) || refuse "git rev-list failed"
+if [ "${ahead_base:-0}" -le 0 ]; then
+  refuse "no commits ahead of $base"
+fi
+merges=$(git rev-list --merges "$mb..$OLD" 2>/dev/null) || refuse "git rev-list failed"
+[ -z "$merges" ] || refuse "merge commits in range"
+
+subjects=$(git log --format=%s "$mb..$OLD" 2>/dev/null) || refuse "git log failed"
+nfix=0
+while IFS= read -r subj; do
+  [ -n "$subj" ] || continue
+  case "$subj" in
+    "squash! "* | "amend! "* | "fixup! amend!"*)
+      refuse "squash!/amend! commits need a message edit"
+      ;;
+    "fixup! "*)
+      nfix=$((nfix + 1))
+      ;;
+  esac
+done <<<"$subjects"
+
+# 8. Rewrite necessity check.
+if [ "$nfix" -eq 0 ] && ! $ONTO_BASE; then
+  refuse "no fixup! commits to squash"
+fi
+if $ONTO_BASE && [ "$nfix" -eq 0 ] && [ "$mb" = "$B" ]; then
+  refuse "nothing to rewrite"
+fi
+
+# 9. Temporary detached worktree.
+T=$(mktemp -d) || refuse "mktemp failed"
+cleanup() {
+  if [ -n "$T" ]; then
+    if [ -d "$T/wt" ]; then
+      if ! git worktree remove --force "$T/wt" >/dev/null 2>&1; then
+        echo "fixup-push: warning: temp worktree left at $T/wt" >&2
+      fi
+    fi
+    rmdir "$T" 2>/dev/null || true
+    T=""
+  fi
+}
+trap cleanup EXIT
+git worktree add -q --detach "$T/wt" "$OLD" 2>/dev/null || refuse "git worktree add failed"
+
+# 10. Squash stage (when nfix > 0).
+if [ "$nfix" -gt 0 ]; then
+  if ! GIT_EDITOR=true GIT_SEQUENCE_EDITOR=true git -c rebase.updateRefs=false -c rebase.rebaseMerges=false -c rebase.autoStash=false -C "$T/wt" rebase --no-update-refs -q -i --autosquash --keep-base "$B" >/dev/null 2>&1; then
+    git -C "$T/wt" rebase --abort >/dev/null 2>&1 || true
+    refuse "autosquash failed"
+  fi
+  MID=$(git -C "$T/wt" rev-parse --verify -q HEAD 2>/dev/null) || refuse "squash proof failed"
+  mid_tree=$(git -C "$T/wt" rev-parse --verify -q "$MID^{tree}" 2>/dev/null) || refuse "squash proof failed"
+  old_tree=$(git rev-parse --verify -q "$OLD^{tree}" 2>/dev/null) || refuse "squash proof failed"
+  [ "$mid_tree" = "$old_tree" ] || refuse "squash proof failed"
+  mid_subjects=$(git -C "$T/wt" log --format=%s "$mb..$MID" 2>/dev/null) || refuse "squash proof failed"
+  while IFS= read -r subj; do
+    case "$subj" in
+      "fixup! "*) refuse "squash proof failed" ;;
+    esac
+  done <<<"$mid_subjects"
+else
+  MID=$OLD
+fi
+
+# 11. Onto-base stage (only with --onto-base and mb != B).
+did_onto=false
+if $ONTO_BASE && [ "$mb" != "$B" ]; then
+  did_onto=true
+  if ! GIT_EDITOR=true GIT_SEQUENCE_EDITOR=true git -c rebase.updateRefs=false -c rebase.rebaseMerges=false -c rebase.autoStash=false -C "$T/wt" rebase --no-update-refs -q "$B" >/dev/null 2>&1; then
+    git -C "$T/wt" rebase --abort >/dev/null 2>&1 || true
+    refuse "rebase onto $base conflicts"
+  fi
+  NEW=$(git -C "$T/wt" rev-parse --verify -q HEAD 2>/dev/null) || refuse "rebase proof failed"
+
+  pre_list=$(git -C "$T/wt" rev-list --reverse "$mb..$MID" 2>/dev/null) || refuse "rebase proof failed"
+  [ -n "$pre_list" ] || refuse "rebase proof failed"
+  pre_ids=()
+  while IFS= read -r c; do
+    [ -n "$c" ] || continue
+    pid=$(git -C "$T/wt" -c diff.noprefix=false -c diff.mnemonicPrefix=false -c diff.relative=false show --ignore-submodules=none --no-ext-diff --no-color --no-textconv --no-renames -U3 --binary --full-index --format= "$c" 2>/dev/null | git patch-id --stable | cut -d' ' -f1) || refuse "rebase proof failed"
+    [ -n "$pid" ] || refuse "rebase proof failed"
+    pre_ids+=("$pid")
+  done <<<"$pre_list"
+
+  post_list=$(git -C "$T/wt" rev-list --reverse "$B..$NEW" 2>/dev/null) || refuse "rebase proof failed"
+  [ -n "$post_list" ] || refuse "rebase proof failed"
+  post_ids=()
+  while IFS= read -r c; do
+    [ -n "$c" ] || continue
+    pid=$(git -C "$T/wt" -c diff.noprefix=false -c diff.mnemonicPrefix=false -c diff.relative=false show --ignore-submodules=none --no-ext-diff --no-color --no-textconv --no-renames -U3 --binary --full-index --format= "$c" 2>/dev/null | git patch-id --stable | cut -d' ' -f1) || refuse "rebase proof failed"
+    [ -n "$pid" ] || refuse "rebase proof failed"
+    post_ids+=("$pid")
+  done <<<"$post_list"
+
+  if [ "${#pre_ids[@]}" -eq 0 ] || [ "${#post_ids[@]}" -eq 0 ] || [ "${#pre_ids[@]}" -ne "${#post_ids[@]}" ] || [ "${pre_ids[*]-}" != "${post_ids[*]-}" ]; then
+    refuse "rebase proof failed"
+  fi
+  new_mb=$(git -C "$T/wt" merge-base "$NEW" "$B" 2>/dev/null) || refuse "rebase proof failed"
+  [ "$new_mb" = "$B" ] || refuse "rebase proof failed"
+else
+  NEW=$MID
+fi
+
+R7=${R:0:7}
+B7=${B:0:7}
+OLD7=${OLD:0:7}
+NEW7=${NEW:0:7}
+
+if [ "$nfix" -gt 0 ] && $did_onto; then
+  shape="squash+onto-base $B7"
+elif $did_onto; then
+  shape="onto-base $B7"
+else
+  shape="squash"
+fi
+
+# 12. --dry-run.
+if $DRY_RUN; then
+  printf 'fixup-push: dry run: would push %s %s..%s (%s), lease %s, %s local-only commit(s) included\n' \
+    "$b" "$R7" "$NEW7" "$shape" "$R7" "$ahead"
+  exit 0
+fi
+
+# 13. Move the local branch after re-verifying gate facts, HEAD, and tracked tree.
+check_gate_facts
+check_hidden
+cur_ref=$(git symbolic-ref -q HEAD 2>/dev/null || true)
+cur_b=""
+if [[ "$cur_ref" =~ ^refs/heads/ ]]; then
+  cur_b=${cur_ref#refs/heads/}
+fi
+cur_head=$(git rev-parse --verify -q HEAD 2>/dev/null || true)
+if [ "$cur_b" != "$b" ] || [ "$cur_head" != "$OLD" ] || ! git diff --ignore-submodules=none --quiet 2>/dev/null || ! git diff --ignore-submodules=none --cached --quiet 2>/dev/null; then
+  refuse "worktree changed during the run"
+fi
+
+if $did_onto; then
+  git -c submodule.recurse=false checkout -q --no-overwrite-ignore -B "$b" "$NEW" 2>/dev/null || refuse "checkout of the rewritten branch failed"
+else
+  git update-ref -m fixup-push "refs/heads/$b" "$NEW" "$OLD" 2>/dev/null || refuse "local branch moved during the run"
+fi
+
+cleanup
+
+# 14. Push from the caller's cwd with a pinned lease.
+fail_exit_3() {
+  local action=${1:-push failed}
+  local remote_head_actual actual7
+  remote_head_actual=$(git ls-remote "$origin_url" "refs/heads/$b" 2>/dev/null | awk '{print $1}')
+  if [ -n "$remote_head_actual" ]; then
+    actual7=${remote_head_actual:0:7}
+  else
+    actual7="unknown"
+  fi
+  printf 'fixup-push: %s; local %s moved %s..%s; remote %s at %s; old head %s\n' \
+    "$action" "$b" "$OLD7" "$NEW7" "$b" "$actual7" "$OLD" >&2
+  exit 3
+}
+
+cur_head_b=$(git rev-parse --verify -q "refs/heads/$b" 2>/dev/null || true)
+if [ "$cur_head_b" != "$NEW" ]; then
+  fail_exit_3 "push not attempted"
+fi
+
+# Push the proven SHA directly to the verified URL to close the window between ref check and push and ignore remote.* config.
+if ! git -c push.followTags=false -c push.recurseSubmodules=no push --no-follow-tags --no-recurse-submodules --force-with-lease="refs/heads/$b:$R" "$origin_url" "$NEW:refs/heads/$b"; then
+  fail_exit_3 "push failed"
+fi
+
+# 15. Success.
+printf 'fixup-push: pushed %s %s..%s (%s), lease %s; local was %s, %s local-only commit(s) included\n' \
+  "$b" "$R7" "$NEW7" "$shape" "$R7" "$OLD7" "$ahead"
+exit 0
