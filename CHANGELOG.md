@@ -6,7 +6,7 @@ All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY
 
 ### Improvements
 
-- **rules:** core.md's ask-before-force-push line exempts `fixup-push`, which proves the rewrite and refuses otherwise; the push is announced (#PR)
+- **rules:** core.md's ask-before-force-push line exempts `fixup-push`, which proves the rewrite and refuses otherwise; the push is announced (#334)
 
 ## 0.3.181 - 2026-11-17
 
