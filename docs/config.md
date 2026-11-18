@@ -53,6 +53,8 @@ An optional TOML file fills in knobs the environment left unset: user `${XDG_CON
 | `SYG_OWN_OWNERS` | unset | Whitespace- or comma-separated GitHub owner names unioned with hosts.yml user: as own repos in upstream-submission-guard. | `hooks/lib/upstream_guard_lib.py`, `hooks/upstream-submission-guard.sh` |
 | `SYG_PRIVATE_TERMS_FILE` | unset | Path to a local file of Python regexes, one per line, blocked from public repos by private-term-guard and pre-push; pre-push also falls back to global git config seyag.privateTermsFile. | `bin/pr-open`, `bin/seyag-git-hooks`, `git-hooks/pre-push`, `hooks/lib/prepush_scan.py`, `hooks/lib/private_terms.py`, `hooks/private-term-guard.sh` |
 | `SYG_PUBLISH_CHECKED` | unset | Colon-separated <owner/repo> list (or any non-empty value for a gist) in the session env unblocking publish-gate. | `hooks/publish-gate.sh` |
+| `SYG_SCRATCH_RM_EXEMPT` | `1` | Set to 0 to make recursive-rm-guard block deletes inside the session scratch dir too (the job tmp exemption is unaffected). | `hooks/recursive-rm-guard.sh` |
+| `SYG_SCRATCH_ROOT` | /tmp/seyag-scratch-UID | Parent of the per-session scratch dirs scratch-dir makes and recursive-rm-guard exempts. | `bin/scratch-dir`, `hooks/lib/delete_commands.py`, `hooks/recursive-rm-guard.sh` |
 | `SYG_STATUS_CLAIM_MARKERS` | unset | Pipe-separated (\|) regex alternatives appended to status-claim-cite's default completion and causality markers. | `hooks/status-claim-cite.sh` |
 | `SYG_SWEEP` | `1` | Set to 0 to silence removed-identifier-sweep without editing pre-commit hook wiring. | `bin/removed-identifier-sweep` |
 | `SYG_SWEEP_EXCLUDE_PATHS` | unset | Whitespace-separated awk regex fragments added to removed-identifier-sweep's path exclusions. | `bin/removed-identifier-sweep` |

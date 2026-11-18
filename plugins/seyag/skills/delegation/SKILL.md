@@ -75,6 +75,7 @@ line or byte budgets, API field limits>.>
 <Known traps: formatters that rewrite the file, gated baselines, hooks,
 fixture shapes. <PROJECT: standing landmines>. Edit files with the Edit tool,
 never an interpreter rewrite script.>
+<Scratch: `<absolute path from scratch-dir <unit>>`, minted by the driver; the worker writes scratch only there. The driver removes it with `rm -r <that literal path>` when the unit closes (recursive-rm-guard allows it).>
 
 ## Authorized routine decisions
 <2-3 calls the worker may make solo. Anything material not listed is a stop.>

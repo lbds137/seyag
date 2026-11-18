@@ -11,11 +11,15 @@ fail=0
 # The session running the probe may itself be a job: every case sets CLAUDE_JOB_DIR explicitly
 # (empty = no job) so the exemption never depends on the caller's environment.
 JOBDIR=""
-run() { # $1 want-rc, $2 command, $3 payload cwd (optional)
+# Session scratch exemption inputs, set explicitly per case too: the scratch root fixture (a
+# nonexistent dir until the scratch section), and the toggle (empty = on).
+SROOT="/nonexistent-scratch-root"
+EXEMPT=""
+run() { # $1 want-rc, $2 command, $3 payload cwd (optional), $4 payload session_id (optional)
   local rc shown=$2
   # The command reaches jq on stdin, not argv, so a case past 128 KiB is not capped by exec.
-  printf '%s' "$2" | jq -Rsc --arg d "${3:-}" '{tool_input: {command: .}} + (if $d == "" then {} else {cwd: $d} end)' |
-    CLAUDE_JOB_DIR="$JOBDIR" bash "$HOOK" >/dev/null 2>&1
+  printf '%s' "$2" | jq -Rsc --arg d "${3:-}" --arg s "${4:-}" '{tool_input: {command: .}} + (if $d == "" then {} else {cwd: $d} end) + (if $s == "" then {} else {session_id: $s} end)' |
+    CLAUDE_JOB_DIR="$JOBDIR" SYG_SCRATCH_ROOT="$SROOT" SYG_SCRATCH_RM_EXEMPT="$EXEMPT" bash "$HOOK" >/dev/null 2>&1
   rc=$?
   [ ${#shown} -gt 200 ] && shown="${shown:0:40}...[${#2} bytes]...${shown: -30}"
   if [ "$rc" = "$1" ]; then echo "ok   [$rc]: $shown ${JOBDIR:+(job)}"; else echo "FAIL [$rc want $1]: $shown ${JOBDIR:+(job)}"; fail=1; fi
@@ -249,6 +253,177 @@ run 2 'rm -rf $CLAUDE_JOB_DIR/tmp/scratch'
 JOBDIR=""                                                # no job at all (interactive session)
 run 2 'rm -rf $CLAUDE_JOB_DIR/tmp/scratch'
 run 2 "rm -rf $TMP/job/tmp/scratch"
+# Session scratch exemption: <root>/<sid> (0700, owned by the user), keyed on the payload's sid.
+SROOT="$TMP/sroot"
+SID=sess-AAA
+mkdir -m 700 "$SROOT" "$SROOT/$SID" "$SROOT/other-sess" "$SROOT/$SID/x"
+mkdir -p "$TMP/real-dir"
+ln -s "$TMP/real-dir" "$SROOT/linked-sess"
+ln -s "$TMP/outside" "$SROOT/$SID/escape"
+run 0 "rm -rf $SROOT/$SID/x" "" $SID
+run 0 "find $SROOT/$SID/x -delete" "" $SID
+run 0 "rm -rf $SROOT/$SID/new/deep" "" $SID
+run 0 "rm -rf $SROOT/$SID/*" "" $SID
+run 0 'rm -rf x' "$SROOT/$SID" $SID                                   # relative, payload cwd inside
+JOBDIR="$TMP/job"
+run 0 "rm -rf $SROOT/$SID/a \$CLAUDE_JOB_DIR/tmp/b" "" $SID           # both roots in one command
+run 2 "rm -rf $SROOT/$SID/a /tmp/elsewhere" "" $SID                   # one target outside both
+run 0 'rm -rf $CLAUDE_JOB_DIR/tmp/scratch'                           # job tmp alone, no session id
+JOBDIR=""
+run 2 "rm -rf $SROOT/$SID" "" $SID                                    # the dir itself
+run 2 "rm -rf $SROOT/$SID/" "" $SID
+run 2 "rm -rf $SROOT" "" $SID                                         # the root
+run 2 "rm -rf $SROOT/other-sess/x" "" $SID                            # another session's dir
+run 2 "rm -rf $SROOT/$SID/x"                                          # payload without session_id
+run 2 "rm -rf $SROOT/linked-sess/x" "" linked-sess                    # sid dir is a symlink
+run 2 "rm -rf $SROOT/$SID/../other-sess/x" "" $SID                    # .. steps out
+run 2 "rm -rf $SROOT/$SID/escape/" "" $SID                            # symlink inside, pointing out
+run 2 "rm -rf $SROOT/nosuch/x" "" nosuch                              # sid dir does not exist
+mkdir -m 700 "$SROOT/bad sid!" "$SROOT/bad sid!/x"                   # real dirs, so only the pattern refuses
+run 2 "rm -rf '$SROOT/bad sid!/x'" "" 'bad sid!'                      # sid fails the pattern
+run 2 "rm -rf $SROOT/other-sess/x" "" "$SID/../other-sess"            # a path-shaped sid that resolves to a real dir
+run 2 "ln -s /home/example $SROOT/$SID/l && rm -rf $SROOT/$SID/l/" "" $SID
+run 2 "cd $SROOT/$SID && rm -rf x" "$SROOT/$SID" $SID                 # cd before a relative target
+run 2 "rm -rf $SROOT/$SID/x \$T" "" $SID
+run 2 "find $SROOT/$SID/x /tmp/y -delete" "" $SID
+# Globs and find shapes, for BOTH roots (job tmp, session dir): <p>/gx/escape is a symlink out.
+JOBDIR="$TMP/job"
+mkdir -p "$TMP/job/tmp/gx/a" "$SROOT/$SID/gx/a"
+ln -s "$TMP/outside" "$TMP/job/tmp/gx/escape"
+ln -s "$TMP/outside" "$SROOT/$SID/gx/escape"
+for P in '$CLAUDE_JOB_DIR/tmp' "$SROOT/$SID"; do
+  run 2 "rm -rf $P/gx/..*/x" "" $SID
+  run 2 "rm -rf $P/gx/.[.]/x" "" $SID
+  run 2 "rm -rf $P/gx/[.][.]/x" "" $SID
+  run 2 "rm -rf $P/gx/.?/x" "" $SID
+  run 2 "rm -rf $P/gx/escap?/" "" $SID
+  run 2 "rm -rf $P/gx/*/*" "" $SID
+  run 2 "rm -rf $P/gx/*/" "" $SID
+  run 2 "rm -rf $P/gx/.*" "" $SID                                     # a dotfile glob can match ..
+  run 2 "find $P/gx/a -exec rm -rf $TMP/outside {} +" "" $SID         # an operand besides {}
+  run 2 "find $P/gx/a -exec rm -rf {}/../.. \\;" "" $SID
+  run 2 "find -L $P/gx -delete" "" $SID
+  run 2 "find -H $P/gx -delete" "" $SID
+  run 2 "find $P/gx -follow -delete" "" $SID
+  run 0 "rm -rf $P/gx/x*" "" $SID
+  run 0 "rm -rf $P/*" "" $SID
+  run 0 "find $P/gx/a -exec rm -rf {} +" "" $SID
+  run 0 "find $P/gx/a -exec rm -rf {} \\;" "" $SID
+  run 0 "find $P/gx/a -delete" "" $SID
+  # Round 3: find is exempt only in an allowlisted shape; D is P as a concrete path (payload cwd).
+  D=${P/\$CLAUDE_JOB_DIR/$TMP/job}
+  run 2 "find $P/gx/a - $TMP/outside -delete" "" $SID                  # - , !x and (x are start paths
+  run 2 "find $P/gx/a '!x' $TMP/outside -delete" "" $SID
+  run 2 "find $P/gx/a '(x' $TMP/outside -delete" "" $SID
+  run 2 "find '!x' -delete" "$D/gx" $SID                              # a start word like !x or (x: not judged
+  run 2 "find '(x' -delete" "$D/gx" $SID
+  run 2 "find -O3 $TMP/outside -delete" "$D/gx" $SID
+  run 2 "find -O3 -L $P/gx -delete" "$D/gx" $SID
+  run 2 "find -D exec $TMP/outside -delete" "$D/gx" $SID
+  run 2 "find -- $TMP/outside -delete" "$D/gx" $SID
+  run 2 "find -files0-from $TMP/list -delete" "$D/gx" $SID
+  run 2 "find $P/gx/a -exec rm -rf -- -victim {} +" "" $SID
+  run 2 "find $P/gx/a -exec rm -rf - {} +" "" $SID
+  run 2 "mkdir -p $P/gx/- && find $P/gx/a -execdir rm -rf -- -/../../../../tmp/outside {} +" "" $SID
+  run 2 "find $P/gx/a -exec rm -f -- {} +" "" $SID                     # -- is not in the allowlist
+  run 2 "find $P/gx/a -execdir rm {} +" "" $SID
+  run 2 "find $P/gx/a -ok rm {} \\;" "" $SID
+  run 2 "find $P/gx/a -o -delete" "" $SID
+  run 2 "find -D tree $P/gx/a -delete" "" $SID
+  run 2 "find $P/gx/a -newer /etc/passwd -delete" "" $SID
+  run 2 "find $P/gx/a -exec env rm {} +" "" $SID                       # no runner inside -exec
+  run 2 "find $P/gx/a -exec rm -rf {} + -delete" "" $SID               # exactly one action
+  run 2 "find $P/gx/a ! -name x -delete" "" $SID
+  run 2 "find $P/gx/a -name a -delete -print" "" $SID                  # the action is last
+  run 2 "rm -rf $P/gx/@(..)/x" "" $SID                                 # extglob
+  run 2 "rm -rf $P/gx/+(.)/x" "" $SID
+  run 2 "shopt -s extglob; rm -rf $P/@(..)/x" "" $SID
+  run 2 "shopt -s globskipdots; rm -rf $P/gx/a" "" $SID                # any shopt: no exemption
+  run 2 "set +o noglob; rm -rf $P/gx/a" "" $SID
+  run 2 "set -o noglob; rm -rf $P/gx/a" "" $SID
+  run 2 "rm -rf $P/gx/a\\*" "" $SID    # a backslash is not a plain word
+  run 2 "SYG_SCRATCH_ROOT=/x; rm -rf $P/gx/a" "" $SID
+  run 2 "declare SYG_SCRATCH_ROOT; rm -rf $P/gx/a" "" $SID
+  run 2 "rm -rf -- -victim" "$TMP/outside" $SID                        # a target after -- is still judged
+  run 0 "rm -rf -- -victim" "$D/gx" $SID
+  run 0 "find $P/gx/a -name a -delete" "" $SID
+  run 0 "find $P/gx/a $P/gx/b -type f -mtime +1 -delete" "" $SID
+  run 0 "find $P/gx/a -exec rm -rf {} \\;" "" $SID
+  run 0 "find $P/gx/a -exec /bin/rm -f {} +" "" $SID
+  run 0 "find $P/gx/a -name a -newer $P/gx/b -print -delete" "" $SID
+  # Round 4: only plain-word deletes are exempt; each of these splits differently in bash than in
+  # the guard's splitter (dequoted redirection words, $() splitting, quoted variables), or tampers.
+  run 2 "rm -rf $P/gx/a '>' $TMP/outside" "" $SID
+  run 2 "rm -rf '>' $TMP/outside" "" $SID
+  run 2 "rm -rf $P/gx/a \\> $TMP/outside" "" $SID
+  run 2 "find $P/gx/a '>' $TMP/outside -delete" "" $SID
+  run 2 "find $P/gx/a -exec rm -rf '>' $TMP/outside {} +" "" $SID
+  run 2 "rm -rf $P/gx/a -f\${IFS}$TMP/outside" "" $SID
+  run 2 "rm -rf $P/gx/a -f\$(:) $TMP/outside" "" $SID
+  run 2 "rm -rf $P/gx/a -f\"\$(: '\"')\" $TMP/outside -f\"\"" "" $SID
+  run 2 "find $P/gx/a -delete; find $TMP/outside \$(:) -delete" "" $SID
+  run 2 "rm -rf '$P/gx/a'" "" $SID                                     # any quote but a lone pair of "
+  run 2 "rm -rf $P/gx/a '>'" "" $SID
+  run 2 "CLAUDE_JOB_DIR[0]=$TMP/outside; rm -rf $P/gx/a" "" $SID
+  run 2 "declare -n R=CLAUDE_JOB_DIR; R=$TMP/outside; rm -rf $P/gx/a" "" $SID
+  run 2 "declare -n R=SYG_SCRATCH_ROOT; R=$TMP/outside; rm -rf $P/gx/a" "" $SID
+  run 2 "env -S 'X=1 CLAUDE_JOB_DIR=$TMP/outside rm -rf \$CLAUDE_JOB_DIR/tmp/a'" "" $SID
+  run 2 "env -S 'rm -rf a'" "$D/gx" $SID
+  run 2 "env -iC$TMP/outside rm -rf a" "$D/gx" $SID
+  run 2 "env --chd=$TMP/outside rm -rf a" "$D/gx" $SID
+  run 2 "env --split-string='rm -rf a'" "$D/gx" $SID
+  run 2 "parallel rm -rf ::: $P/gx/a :::: $TMP/list" "" $SID
+  run 2 "parallel --workdir $TMP/outside rm -rf ::: a" "$D/gx" $SID
+  run 2 "find $P/gx -maxdepth 0 -exec ln -s $TMP/outside $P/gx/l \\; && rm -rf $P/gx/l/" "" $SID
+  run 2 "bash -O extglob -c 'rm -rf $P/gx/a'" "" $SID
+  run 2 "sh +O extglob -c 'rm -rf $P/gx/a'" "" $SID
+  run 2 "echo '' ; rm -rf $P/gx/a" "" $SID                              # a quoted word anywhere in the command
+  # Plain-word spellings of the tampering, so only the variable rule (not the plain gate) can stop them.
+  run 2 "CLAUDE_JOB_DIR[0]=$TMP/outside && rm -rf $P/gx/a" "" $SID
+  run 2 "declare -n R=CLAUDE_JOB_DIR && R=$TMP/outside && rm -rf $P/gx/a" "" $SID
+  run 2 "export SYG_SCRATCH_ROOT && rm -rf $P/gx/a" "" $SID
+  run 2 "env SYG_SCRATCH_ROOT=/x rm -rf $P/gx/a" "" $SID
+  run 2 "rm -rf" "" $SID                                               # an empty target list is never exempt
+  run 2 "rm -rf --" "" $SID
+  run 0 "rm -rf $P/gx/a && mkdir $P/gx/a" "" $SID
+  run 0 "rm -rf $P/gx/a $P/gx/b" "" $SID
+  run 0 "rm -rf \"$P/gx/a\"" "" $SID
+  run 0 "cd /tmp && rm -rf $P/gx/a" "" $SID
+done
+run 2 "rm -rf '>' $TMP/outside" ""                                     # no session id, no roots: an empty target list
+run 2 "rm -rf '\$CLAUDE_JOB_DIR/tmp/x'" "$TMP/outside"
+run 2 "cd $TMP/outside && rm -rf \\\$CLAUDE_JOB_DIR/tmp/x"
+run 2 "rm -rf \$CLAUDE_JOB_DIR/tmp/x '>' /home/u/y"
+run 0 'rm -rf "$CLAUDE_JOB_DIR/tmp/x"'
+run 0 'rm -rf $CLAUDE_JOB_DIR/tmp/a $CLAUDE_JOB_DIR/tmp/b'
+run 0 'cd /tmp && rm -rf $CLAUDE_JOB_DIR/tmp/x'
+for V in 'CLAUDE_JOB_DIR+=/x' 'declare CLAUDE_JOB_DIR' 'typeset -x CLAUDE_JOB_DIR=/x' 'local CLAUDE_JOB_DIR' 'readonly CLAUDE_JOB_DIR=/x' \
+  'export CLAUDE_JOB_DIR' 'printf -v CLAUDE_JOB_DIR %s /x' 'read CLAUDE_JOB_DIR'; do
+  run 2 "$V; rm -rf \$CLAUDE_JOB_DIR/tmp/a" "" $SID
+done
+# The scratch root itself: a symlink to a dir holding <sid> (link path and real path both blocked),
+# a relative root, a root owned by someone else (not testable without root: the check is read, not run).
+mkdir -p "$TMP/realroot/$SID/x"
+ln -s "$TMP/realroot" "$TMP/linkroot"
+JOBDIR=""
+SROOT="$TMP/linkroot"
+run 2 "rm -rf $SROOT/$SID/x" "" $SID
+run 2 "rm -rf $TMP/realroot/$SID/x" "" $SID
+SROOT="relative-root"
+mkdir -p "$TMP/cwdroot/relative-root/$SID/x"
+# the hook process resolves the relative root against its own cwd, so run it from there
+pushd "$TMP/cwdroot" >/dev/null || exit 1
+run 2 "rm -rf relative-root/$SID/x" "$TMP/cwdroot" $SID
+popd >/dev/null || exit 1
+SROOT="$TMP/sroot"
+chmod 755 "$SROOT/$SID"
+run 0 "rm -rf $SROOT/$SID/x" "" $SID                                 # mode is scratch-dir's check, not the guard's
+chmod 700 "$SROOT/$SID"
+EXEMPT=0
+run 2 "rm -rf $SROOT/$SID/x" "" $SID                                  # toggle off
+EXEMPT=""
+SROOT="/nonexistent-scratch-root"
+run 2 "rm -rf $TMP/sroot/$SID/x" "" $SID                              # root knob points elsewhere
 # Bypass: the owner approved this deletion.
 run 0 'SYG_ALLOW_RM=1 rm -rf build'
 
@@ -256,7 +431,7 @@ run 0 'SYG_ALLOW_RM=1 rm -rf build'
 msg=$(jq -nc --arg c 'cd /tmp && rm -rf build-output' '{tool_input: {command: $c}}' | CLAUDE_JOB_DIR="" bash "$HOOK" 2>&1 >/dev/null)
 for phrase in 'RECURSIVE-RM GUARD' 'rm -rf build-output' 'unrecoverable' 'NEW directory' \
   '$CLAUDE_JOB_DIR/tmp' 'safe-clean' 'SYG_ALLOW_RM=1' 'approved in this conversation' \
-  'check gitignored' 'literal $CLAUDE_JOB_DIR/tmp/<name> path' 'outside a job'; do
+  'check gitignored' '`scratch-dir NAME`' 'each target is a literal path inside it' 'anywhere else'; do
   case "$msg" in
     *"$phrase"*) echo "ok   message carries: $phrase" ;;
     *) echo "FAIL message lacks: $phrase"; fail=1 ;;

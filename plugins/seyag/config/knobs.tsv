@@ -194,6 +194,8 @@ SYG_ROUTE_MARKER_FIELD	user	routing	unset	YAML frontmatter field name in SYG_ROU
 SYG_ROUTE_MARKER_FILE	user	routing	unset	Path template ({project} expanded) checked with SYG_ROUTE_MARKER_FIELD to require an approved route.
 SYG_ROUTE_REQUIRED	user	routing	unset	Boolean (1/true/yes/on vs 0/false/no/off) requiring an approved model route in route-check.
 SYG_ROUTE_SHOW_CMD	user	session	unset	Command (bash -c, the name as its argument) claude-role --set route=NAME runs to check a route preset exists; nonzero refuses the route. Unset means only the name shape is checked.
+SYG_SCRATCH_RM_EXEMPT	user	guards	1	Set to 0 to make recursive-rm-guard block deletes inside the session scratch dir too (the job tmp exemption is unaffected).
+SYG_SCRATCH_ROOT	user	guards	prose:/tmp/seyag-scratch-UID	Parent of the per-session scratch dirs scratch-dir makes and recursive-rm-guard exempts.
 SYG_SECURITY_SWEEP	user	session	unset	Set to 1 to run security-sweep --session-line --cap 2 at SessionStart (startup and clear).
 SYG_SECURITY_SWEEP_REPOS	user	session	unset	Whitespace-separated owner/name repos opting in and scoping security-sweep at SessionStart and in security-sweep.
 SYG_SESSION_CONTEXT_EXTRA_CMD	user	session	unset	Command session-context runs (bash -c, stdin closed) to add another harness's sessions: a JSON array of {name, folder, sessionId, status, tokens}. Unset adds none; a failure warns on stderr and keeps the Claude rows.

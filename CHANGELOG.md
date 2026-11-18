@@ -2,6 +2,12 @@
 
 All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY-MM-DD>` section per released version; under it, `###` categories in fixed order — Breaking Changes, Features, Bug Fixes, Improvements, Chores, Tests — empty ones omitted; items are `- **scope:** description (#PR)`, written from the version's merged commit subjects.
 
+## 0.3.183 - 2026-11-18
+
+### Features
+
+- **scratch-dir:** new bin: a per-session scratch dir (job tmp inside a job); recursive-rm-guard allows deletes strictly inside it, keyed on the hook payload's session id (`SYG_SCRATCH_ROOT`, `SYG_SCRATCH_RM_EXEMPT`). Implementer and delegation contracts point workers at it. (#PR)
+
 ## 0.3.182 - 2026-11-17
 
 ### Improvements
