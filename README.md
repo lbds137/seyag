@@ -2,7 +2,7 @@
 
 A Claude Code plugin marketplace with one plugin, `seyag`. The plugin is the portable "how to work honestly and well" layer, first built inside the Tzurot repo. It gives every Claude Code session on this machine the same working rules, shell-safety guards and turn-shape checks, whatever project the session is in.
 
-It assumes the owner does not read diffs and is rarely watching the live transcript — on the Anthropic lane she drives from her phone, often by voice; on other lanes she's at the Deck keyboard or RDP-typing from her phone. Agent review and automated checks are the quality gate, and any blocking question has to go through `AskUserQuestion` so it rises above the transcript.
+It assumes the owner does not read diffs and is rarely watching the live transcript — on the Anthropic lane she drives from her phone, often by voice; on other lanes she's at the Deck keyboard or RDP-typing from her phone. Agent review and automated checks are the quality gate, and any blocking question, or a non-blocking decision of hers that already has a recommendation, has to go through the harness's ask tool (`AskUserQuestion`; agy: `ask_question`) so it rises above the transcript.
 
 Every environment setting seyag's plugin code mentions, with its default and the files that mention it: [docs/config.md](docs/config.md) (generated from `plugins/seyag/config/knobs.tsv`; `tests/config-reference.probe.sh` keeps it in step with the code).
 
