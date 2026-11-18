@@ -6,7 +6,7 @@ All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY
 
 ### Improvements
 
-- **rules:** core.md's ask rule names the harness's ask tool (`AskUserQuestion`; agy: `ask_question`) and covers non-blocking owner decisions that already have a recommendation: they go out at the next clean break, with background work left running, instead of waiting for a later batch (#332).
+- **rules:** core.md's ask rule names the harness's ask tool (`AskUserQuestion`; agy: `ask_question`) and covers non-blocking owner decisions that already have a recommendation: they go out at the next turn end, with background work left running, instead of waiting for a later batch (#332).
 
 ## 0.3.179 - 2026-11-17
 
