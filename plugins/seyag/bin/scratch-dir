@@ -1,0 +1,83 @@
+#!/bin/bash
+# scratch-dir - Print (and create) this session's scratch directory
+#
+# Usage:
+#   scratch-dir          # the session's scratch dir
+#   scratch-dir NAME     # NAME inside it (letters, digits, . _ -), created 0700 if absent
+#
+# Per-session scratch whose deletes recursive-rm-guard allows without asking: a driver mints
+# `scratch-dir <unit>` and passes the absolute path to its workers, who write scratch only there.
+# In a Claude Code job the dir is $CLAUDE_JOB_DIR/tmp (removed with the job). Otherwise it is
+# $SYG_SCRATCH_ROOT/$CLAUDE_CODE_SESSION_ID (root default /tmp/seyag-scratch-<uid>), made 0700;
+# a path that is a symlink, not a directory, not yours, or open to group/other is refused (exit 1).
+# Exit 2 on a bad option, a bad NAME or more than one argument.
+
+set -uo pipefail
+
+usage() { sed -n '2,13s/^# \{0,1\}//p' "$0"; }
+
+# Optional config files fill in SYG_SCRATCH_ROOT the way they do for the hook (environment wins),
+# so this bin and recursive-rm-guard agree on the root.
+bin_dir=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")
+if [ -r "$bin_dir/../hooks/lib/config-env.sh" ] \
+    && source "$bin_dir/../hooks/lib/config-env.sh" 2>/dev/null \
+    && declare -F syg_config_env >/dev/null; then
+    syg_config_env "$(readlink -f "$bin_dir/..")"
+fi
+
+NAME=""
+have_name=false
+for a in "$@"; do
+    case "$a" in
+        -h | --help) usage; exit 0 ;;
+        -*) usage >&2; exit 2 ;;
+        *)
+            $have_name && { usage >&2; exit 2; }
+            NAME=$a; have_name=true ;;
+    esac
+done
+
+if $have_name && { [[ ! $NAME =~ ^[A-Za-z0-9._-]{1,100}$ ]] || [ "$NAME" = . ] || [ "$NAME" = .. ]; }; then
+    echo "scratch-dir: bad NAME (letters, digits, . _ -)" >&2
+    exit 2
+fi
+
+uid=$(id -u)
+die() { echo "scratch-dir: $1" >&2; exit 1; }
+
+# Make `$1` (0700) if absent, then require a real directory we own with no group/other bits.
+ensure_private() {
+    local p=$1 why=""
+    # A mkdir that lost a race to a concurrent creator is fine: the checks below judge what is there.
+    [ -e "$p" ] || [ -L "$p" ] || mkdir -m 700 -- "$p" 2>/dev/null
+    [ -e "$p" ] || [ -L "$p" ] || why="cannot create it"
+    if [ -z "$why" ]; then
+        if [ -L "$p" ]; then why="it is a symlink"
+        elif [ ! -d "$p" ]; then why="not a directory"
+        elif [ "$(stat -c %u -- "$p")" != "$uid" ]; then why="not owned by you"
+        elif [ "$(stat -c %a -- "$p")" != 700 ]; then why="mode is not 700"
+        fi
+    fi
+    [ -z "$why" ] || die "refusing $p: $why"
+}
+
+if [ -n "${CLAUDE_JOB_DIR:-}" ] && [ -d "$CLAUDE_JOB_DIR/tmp" ]; then
+    base=$CLAUDE_JOB_DIR/tmp
+else
+    sid=${CLAUDE_CODE_SESSION_ID:-}
+    [[ $sid =~ ^[A-Za-z0-9_-]{1,128}$ ]] || die "no usable session id (CLAUDE_CODE_SESSION_ID)"
+    root=${SYG_SCRATCH_ROOT:-/tmp/seyag-scratch-$uid}
+    [[ $root = /* ]] || die "refusing $root: SYG_SCRATCH_ROOT is not an absolute path"
+    ensure_private "$root"
+    ensure_private "$root/$sid"
+    base=$root/$sid
+fi
+
+if ! $have_name; then
+    printf '%s\n' "$base"
+    exit 0
+fi
+
+path=$base/$NAME
+ensure_private "$path"
+printf '%s\n' "$path"

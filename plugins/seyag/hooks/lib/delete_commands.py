@@ -40,7 +40,69 @@ STDIN = "(paths from stdin)"
 _DIR_CHANGERS = ("cd", "pushd", "popd")
 # Commands that can make a path under the job dir point somewhere else.
 _RELINKERS = ("ln", "mv", "install")
-_JOB_DIR_WORD = re.compile(r"^(?:\$CLAUDE_JOB_DIR|\$\{CLAUDE_JOB_DIR\})(?=/|$)")
+_EXEMPT_NAMES = ("CLAUDE_JOB_DIR", "SYG_SCRATCH_ROOT")
+_PLAIN_CHARS = r"[A-Za-z0-9_./*?+,:=@%^\[\]-]*"
+_PLAIN_WORD = re.compile(r"[A-Za-z0-9_./*?+,:=@%^\[\]-]+")
+_JOB_WORD = re.compile(r"\$(?:CLAUDE_JOB_DIR|\{CLAUDE_JOB_DIR\})" + _PLAIN_CHARS)
+_PLAIN_SEPARATORS = ("&&", "||", ";", "|", "{}", "\\;")
+
+
+def plain_command(text):
+    """True when every whitespace-separated word of the whole command is one the
+    exemption can judge from its text alone: a bare word of `A-Za-z0-9_./*?+,:=@%^-`
+    (and `[]` for a glob class), a word starting with a literal `$CLAUDE_JOB_DIR` or
+    `${CLAUDE_JOB_DIR}`, either of those inside one pair of double quotes, a `&&` `||`
+    `;` `|` separator, or find's `{}` / `\\;`. Anything else (a quote, `$(`, a redirection,
+    `~`, a backtick, a brace list, an unbalanced word) means the splitter's words may not be
+    the shell's, so the command gets no exemption."""
+    def ok(w):
+        if len(w) >= 2 and w[0] == w[-1] == '"':
+            w = w[1:-1]
+        return bool(_PLAIN_WORD.fullmatch(w) or _JOB_WORD.fullmatch(w))
+    return all(w in _PLAIN_SEPARATORS or ok(w) for w in text.split())
+
+
+def tampers_with_exempt_vars(text):
+    """True when CLAUDE_JOB_DIR or SYG_SCRATCH_ROOT appears in `text` other than as
+    `$NAME` or `${NAME}` (assignment, subscript, `declare -n`, read, printf -v, unset,
+    export, an env argument)."""
+    for name in _EXEMPT_NAMES:
+        if name in re.sub(r"\$(?:\{%s\}|%s(?![A-Za-z0-9_]))" % (name, name), "", text):
+            return True
+    return False
+
+
+_ENV_OPT_TAMPER = re.compile(r"^(?:-[A-Za-z]*[SC]|--(?:c|s)[a-z-]*(?:=.*)?$)")  # `-iC<dir>` glues its value
+
+
+def raw_tampers(raw):
+    """True when this command's raw words can change what a scratch path means: env
+    -S/-C (split-string, chdir), parallel :::: / --workdir, ln/mv/install, cp -s,
+    shopt, `set -o`/`set +o`, `bash -O`/`+O`; found at any word position, so also
+    inside a find -exec."""
+    for i, w in enumerate(raw):
+        base, rest = os.path.basename(w), raw[i + 1:]
+        if base in _RELINKERS or base == "shopt":
+            return True
+        if base == "cp" and any(a == "--symbolic-link" or re.match(r"^-[A-Za-z]*s", a)
+                                for a in rest):
+            return True
+        if w == "set" and any(re.match(r"^[-+][A-Za-z]*o", a) for a in rest):
+            return True
+        if base in ("bash", "sh", "zsh", "dash") and any(re.match(r"^[-+][A-Za-z]*O", a)
+                                                         for a in rest):
+            return True
+        if base == "parallel" and any(a == "::::" or a.startswith(("--workdir", "--wd"))
+                                      for a in rest):
+            return True
+        if base == "env":
+            j = 0
+            while j < len(rest) and (rest[j].startswith("-") or "=" in rest[j]):
+                if _ENV_OPT_TAMPER.match(rest[j]):
+                    return True
+                j += 2 if rest[j] in ("-u", "--unset") else 1
+    return False
+_JOB_DIR_WORD =re.compile(r"^(?:\$CLAUDE_JOB_DIR|\$\{CLAUDE_JOB_DIR\})(?=/|$)")
 
 
 def is_cache(path):
@@ -68,7 +130,8 @@ def rm_args(args):
 def find_args(args):
     """(roots, -name values, deletes) for find's arguments. A find deletes with
     -delete, or with -exec/-execdir/-ok/-okdir running rm (any flags, also
-    behind a runner: `-exec env rm -rf {} +`)."""
+    behind a runner: `-exec env rm -rf {} +`). Detection only: whether a delete
+    may be exempt is find_scratch_shape's call."""
     i = 0
     while i < len(args) and args[i] in ("-H", "-L", "-P"):
         i += 1
@@ -91,6 +154,51 @@ def find_args(args):
     return roots or ["."], names, deletes
 
 
+_FIND_VALUE_TESTS = {
+    "-name": r".*", "-iname": r".*", "-path": r".*", "-ipath": r".*", "-type": r"[bcdflps]",
+    "-mindepth": r"[0-9]+", "-maxdepth": r"[0-9]+", "-mtime": r"[+-]?[0-9]+",
+    "-mmin": r"[+-]?[0-9]+", "-newer": r".*",
+}
+_FIND_FLAG_TESTS = ("-empty", "-print")
+_RM_WORD = re.compile(r"^(?:rm|.*/rm)$")
+_RM_OPT = re.compile(r"^(?:-[rRfvdI]+|--recursive|--force|--verbose|--dir)$")
+
+
+def find_scratch_shape(args):
+    """The paths a find must keep inside the scratch dir, or None when its
+    arguments (everything after `find`) are not EXACTLY the one shape that may
+    be exempt: start paths (none starting with `-`, `!`, `(`, `)` or being `,`),
+    then tests from -name/-iname/-path/-ipath/-type/-mindepth/-maxdepth/-mtime/
+    -mmin/-newer/-empty/-print, then one action: -delete, `-exec rm [-rRfvdI
+    opts] {} +` or `{} ;`. No other option, operator, runner or action."""
+    args = strip_redirections(args)
+    i, paths = 0, []
+    while i < len(args) and args[i] and args[i][0] not in "-!()" and args[i] != ",":
+        paths.append(args[i])
+        i += 1
+    if not paths:
+        return None
+    while i < len(args):
+        a = args[i]
+        if a in _FIND_FLAG_TESTS:
+            i += 1
+        elif a in _FIND_VALUE_TESTS and i + 1 < len(args) \
+                and re.fullmatch(_FIND_VALUE_TESTS[a], args[i + 1]):
+            if a == "-newer":
+                paths.append(args[i + 1])
+            i += 2
+        else:
+            break
+    rest = args[i:]
+    if rest == ["-delete"]:
+        return paths
+    if len(rest) >= 4 and rest[0] == "-exec" and _RM_WORD.match(rest[1]) \
+            and rest[-2] == "{}" and rest[-1] in (";", "\\;", "+") \
+            and all(_RM_OPT.match(w) for w in rest[2:-2]):
+        return paths
+    return None
+
+
 def analyze(text):
     """Return `(hits, dir_changed, relinked)` for a raw Bash command.
 
@@ -100,32 +208,41 @@ def analyze(text):
       arg file: xargs/parallel), `stdin_cache` (that stdin is the output of the
       find DIRECTLY upstream in the same pipeline, which selects only cache
       names and deletes nothing);
-    - find: `names` (its -name/-iname values), `roots` (its start paths).
+    - find: `names` (its -name/-iname values), `roots` (its start paths),
+      `scratch_paths` (the paths find_scratch_shape says must stay in scratch, or
+      None when the find is not in the one shape that may be exempt).
     An rm is a hit when it is recursive or runs under xargs/parallel (a mass
     delete);
     a single `rm file` / `rm -f file` is not. A find is a hit when it deletes.
 
     `dir_changed`: some command changes directory (cd/pushd/popd, `env -C`,
     `sudo -D`), so a relative target cannot be resolved against the payload's
-    cwd. `relinked`: the command runs ln/mv/install/`cp -s`, or assigns,
-    exports or unsets CLAUDE_JOB_DIR, so a job-dir path may not be what it
-    looks like.
+    cwd. `relinked` (no scratch exemption for this command): the text is not
+    all plain words (`plain_command`), holds an extglob opener, mentions
+    CLAUDE_JOB_DIR / SYG_SCRATCH_ROOT other than as `$NAME`
+    (`tampers_with_exempt_vars`), or some command changes what a scratch path
+    means (`raw_tampers`: env -S/-C, parallel ::::/--workdir, ln/mv/install,
+    `cp -s`, shopt, `set -o`, `bash -O`).
     """
     hits = []
-    dir_changed = relinked = False
+    dir_changed = False
+    # An extglob (`@(..)`, `+(..)`, `!(..)`, `*(..)`, `?(..)`) reaches the splitter cut at the `(`,
+    # so the word it hands back is not what the shell would expand: no exemption for the command.
+    # The whole command text must be plain words (the splitter has no spans to judge one delete's
+    # own words, so a quote or `$(` in an unrelated command also costs the exemption: an accepted
+    # over-block) and must not touch the exemption variables.
+    relinked = bool(re.search(r"[@!+*?]\(", text)) or not plain_command(text) \
+        or tampers_with_exempt_vars(text)
     for pipeline in command_pipelines(text):
         upstream = None
         for raw in pipeline:
-            if any(w.startswith("CLAUDE_JOB_DIR=") or w == "CLAUDE_JOB_DIR" for w in raw):
+            if raw_tampers(raw):
                 relinked = True
             argv, info = unwrap_runners(raw)
             dir_changed = dir_changed or info["chdir"]
             prog = os.path.basename(argv[0]) if argv else ""
             if prog in _DIR_CHANGERS:
                 dir_changed = True
-            if prog in _RELINKERS or (prog == "cp" and any(
-                    a == "--symbolic-link" or re.match(r"^-[a-zA-Z]*s", a) for a in argv[1:])):
-                relinked = True
             if prog == "rm":
                 recursive, targets = rm_args(argv[1:])
                 from_stdin = info["stdin"] or info["arg_file"]
@@ -146,7 +263,8 @@ def analyze(text):
                 roots, names, deletes = find_args(argv[1:])
                 if deletes:
                     hits.append({"kind": "find", "line": " ".join(argv),
-                                 "names": names, "roots": roots})
+                                 "names": names, "roots": roots,
+                                 "scratch_paths": find_scratch_shape(argv[1:])})
             upstream = raw
     return hits, dir_changed, relinked
 
@@ -180,38 +298,46 @@ def cache_only(hit):
     return bool(hit["names"]) and all(n in CACHES for n in hit["names"])
 
 
-def in_job_tmp(target, job_dir, cwd, dir_changed):
-    """True when `target` resolves strictly below `<job_dir>/tmp` (never the dir
-    itself). A literal $CLAUDE_JOB_DIR prefix is expanded; any other `$`, a
-    backtick, `~` or a brace expansion is unresolvable. A relative path resolves
-    against `cwd`, and only when nothing in the command changed directory.
-    realpath folds `..` and follows symlinks that exist. A glob is judged by the
-    folder it expands in, which must be tmp itself or below it."""
-    if not job_dir or not os.path.isdir(job_dir) or target == STDIN:
+def in_scratch(target, root, cwd, dir_changed, job_dir=""):
+    """True when `target` resolves strictly below `root` (never the dir itself),
+    the already-realpath'd scratch dir that bounds the exemption. A literal
+    $CLAUDE_JOB_DIR prefix is expanded with `job_dir` (only that prefix); any
+    other `$`, a backtick, `~` or a brace expansion is unresolvable. A relative
+    path resolves against `cwd`, and only when nothing in the command changed
+    directory. realpath folds `..` and follows symlinks that exist. A glob is
+    judged by the folder it expands in, which must be root itself or below it;
+    it may sit only in the last path component, which must not start with `.`
+    or `[`."""
+    if not root or target == STDIN:
         return False
-    job_tmp = os.path.realpath(os.path.join(job_dir, "tmp"))
-    path = _JOB_DIR_WORD.sub(lambda m: job_dir, target)
-    if any(c in path for c in "$`{") or path.startswith("~"):
+    path = _JOB_DIR_WORD.sub(lambda m: job_dir, target) if job_dir else target
+    # `(` `)` cover extglob (`@(..)`, `!(..)`, `+(..)`, `*(..)`, `?(..)`); a backslash escapes.
+    if any(c in path for c in "$`{()\\") or path.startswith("~"):
         return False
     if not os.path.isabs(path):
         if not cwd or dir_changed:
             return False
         path = os.path.join(cwd, path)
-    glob = min((path.find(c) for c in "*?[" if c in path), default=-1)
-    if glob >= 0:
-        rest = path[glob:]
-        if "/.." in rest or rest.startswith(".."):
+    if any(c in path for c in "*?["):
+        head, _, last = path.rpartition("/")
+        # A glob only in the last component, which cannot start with `.` (it could match `.`/`..`
+        # or a dotfile) or `[` (`[.]`); a glob earlier, or a `/` after one, is not judged.
+        if any(c in head for c in "*?[") or last[:1] in ("", ".", "["):
             return False
-        base = os.path.realpath(os.path.dirname(path[:glob]))
-        return base == job_tmp or base.startswith(job_tmp + "/")
-    return os.path.realpath(path).startswith(job_tmp + "/")
+        base = os.path.realpath(head or "/")
+        return base == root or base.startswith(root + "/")
+    return os.path.realpath(path).startswith(root + "/")
 
 
-def job_scratch(hit, job_dir, cwd, dir_changed):
-    """True when this hit deletes only inside the job scratch dir: an rm whose
-    every target is in there (cache targets are cache-rm-redirect's), a find
-    whose every start path is. Stdin targets are never exempt."""
+def scratch_target(hit, roots, cwd, dir_changed, job_dir=""):
+    """True when this hit deletes only inside the scratch dirs `roots` (each
+    already realpath'd): an rm whose every target is in one of them (cache
+    targets are cache-rm-redirect's), a find whose every start path is. Stdin
+    targets are never exempt. A find is exempt only in find_scratch_shape's
+    allowlisted shape, with every path it names inside."""
+    def inside(t):
+        return any(in_scratch(t, r, cwd, dir_changed, job_dir) for r in roots)
     if hit["kind"] == "rm":
-        return all(in_job_tmp(t, job_dir, cwd, dir_changed) or is_cache(t)
-                   for t in hit["targets"])
-    return all(in_job_tmp(r, job_dir, cwd, dir_changed) for r in hit["roots"])
+        return bool(hit["targets"]) and all(inside(t) or is_cache(t) for t in hit["targets"])
+    paths = hit["scratch_paths"]
+    return paths is not None and all(inside(p) for p in paths)
