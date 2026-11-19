@@ -66,6 +66,15 @@ Ensure `example-app` bounds retry intervals when downstream endpoints return 503
 - **Done and archive flow**: Transition finished or retired entries through the project's CLI so the task moves into `completed/` or `archive/` per the store's workflow. Never delete an entry merely for age, and never reuse an existing `TASK-N` identifier.
 - **Reading the store for the "raised this before" search order** (core rules § *"I've raised this before" is a search order*): Before replying to a prior-art question or filing a new entry, search `tasks/`, `completed/`, `archive/`, `drafts/` and `decisions/` across at least three vocabulary variants. Name the matching entry, its current state and its blocker, and leave parked entries for the owner to promote rather than silently re-filing them.
 
+### Claiming across sessions
+
+When several driver sessions share one store, a session claims a task before starting it: set
+`assignee` to that session's name (e.g. `assignee: [project-a]`) and move `status` to
+`In Progress` in the same CLI pass that starts the work, and move it off `In Progress` when the
+unit ends. A session never edits another session's in-progress task body; coordination notes go
+in the task's own description or the project's session role files. Role files keep each
+session's handoff and progress; the store keeps the queue.
+
 ## 6. Guardrails
 
 - **Stale opt-in check:** If `SYG_TRACKING_SURFACE=backlog-md` is pinned in settings but `backlog/` or `backlog/config.yml` is missing, the opt-in is stale — report the missing store and do not initialize or create one.
