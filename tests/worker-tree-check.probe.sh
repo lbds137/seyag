@@ -151,6 +151,30 @@ git -C "$T/nul" status --short >/dev/null 2>&1
 [ -e "$T/PWNED" ] && ok || bad "control: git did not follow the gitfile up to the NUL"
 rm -f "$T/PWNED"
 expect 1 "a NUL in the gitfile" "$C" --linked --repo "$T/main" "$T/nul"
+git -C "$T/main" worktree repair "$T/nul" >/dev/null 2>&1
+printf '%s\0/../main/.git\n' "$T/nulcommon" >"$T/main/.git/worktrees/nul/commondir"
+out=$("$C" --linked --repo "$T/main" "$T/nul" 2>&1); rc=$?
+[ "$rc" = 1 ] && [[ $out == *"the entry's commondir holds a NUL byte"* ]] && ok || bad "T1 NUL in the entry's commondir: rc $rc: $out"
+echo ../.. >"$T/main/.git/worktrees/nul/commondir"
+printf '%s\0/../nul/.git\n' "$T/nowhere" >"$T/main/.git/worktrees/nul/gitdir"
+out=$("$C" --linked --repo "$T/main" "$T/nul" 2>&1); rc=$?
+[ "$rc" = 1 ] && [[ $out == *"the entry's gitdir holds a NUL byte"* ]] && ok || bad "T2 NUL in the entry's gitdir: rc $rc: $out"
+git -C "$T/main" worktree repair "$T/nul" >/dev/null 2>&1
+# mode-000 cases mean nothing to root, who reads through them
+if [ "$(id -u)" != 0 ]; then
+chmod 000 "$T/main/.git/worktrees/nul/gitdir"
+out=$("$C" --linked --repo "$T/main" "$T/nul" 2>&1); rc=$?
+chmod 644 "$T/main/.git/worktrees/nul/gitdir"
+[ "$rc" = 1 ] && [[ $out == *"the entry's gitdir is unreadable"* ]] && ok || bad "T3 unreadable entry gitdir: rc $rc: $out"
+chmod 000 "$T/main/.git/worktrees/nul/commondir"
+out=$("$C" --linked --repo "$T/main" "$T/nul" 2>&1); rc=$?
+chmod 644 "$T/main/.git/worktrees/nul/commondir"
+[ "$rc" = 1 ] && [[ $out == *"the entry's commondir is unreadable"* ]] && ok || bad "T3b unreadable entry commondir: rc $rc: $out"
+fi
+{ printf '.'; head -c 4969 /dev/zero | tr '\0' /; printf '../../nulcommon\0/../main/.git\n'; } >"$T/main/.git/worktrees/nul/commondir"
+out=$("$C" --linked --repo "$T/main" "$T/nul" 2>&1); rc=$?
+echo ../.. >"$T/main/.git/worktrees/nul/commondir"
+[ "$rc" = 1 ] && [[ $out == *"the entry's commondir is over 4096 bytes"* ]] && ok || bad "T4 oversized entry commondir with late NUL: rc $rc: $out"
 # Each back-pointer alone, in a gitdir outside the location rule's reach: only that pointer can refuse
 newtree ptr
 mkdir -p "$T/ptrcommon/worktrees/x"

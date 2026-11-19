@@ -45,6 +45,67 @@ out=$(cd "$BT" && SYG_WORKER_SANDBOX_CLAUDE=$T/fake-claude "$B/worker-sandbox" -
   && ok "a tree with a forged gitfile refuses (125) via worker-tree-check; nothing ran" \
   || bad "forged gitfile: rc=$rc out=[$out] ran=$([ -e "$T/bad-ran" ] && echo yes || echo no)"
 
+# W1-W2c. SYG_WORKER_SANDBOX_REPO anchors worker-tree-check to the main checkout before host git runs
+SW=$T/swapped; N=$T/other-main
+git -C "$M" worktree add -q "$SW" -b swapped
+git init -q "$N"; git -C "$N" -c user.email=t@t -c user.name=t commit -q --allow-empty -m i
+rm -f "$SW/.git"; git init -q "$SW"
+printf '#!/bin/sh\n: >"%s/w1-fsm"\nexit 1\n' "$T" >"$T/w1-fsm.sh"; chmod +x "$T/w1-fsm.sh"
+git -C "$SW" config core.fsmonitor "$T/w1-fsm.sh"
+echo x >"$SW/.env"; git -C "$SW" -c core.fsmonitor=false add .env
+"$B/worker-tree-check" "$SW" >/dev/null 2>&1; w1_wtc=$?
+rm -f "$T/w1-fsm"
+git -C "$SW" status --short >/dev/null 2>&1
+if [ "$w1_wtc" != 0 ] || [ ! -e "$T/w1-fsm" ]; then
+  bad "W1 control failed: wtc=$w1_wtc marker=$([ -e "$T/w1-fsm" ] && echo yes || echo no)"
+  exit 1
+fi
+ok "W1 control: no-flag worker-tree-check passes swapped sibling and git status runs its fsmonitor"
+rm -f "$T/w1-fsm"
+stubdir=$T/w1-gitstub; stublog=$T/w1-git.log; mkdir -p "$stubdir"; : >"$stublog"
+printf '#!/bin/sh\nprintf "%%s\\n" "$*" >>"%s"\nexit 127\n' "$stublog" >"$stubdir/git"; chmod +x "$stubdir/git"
+fake ': >"'"$T"'/w1-ran"; exit 0'
+out=$(cd "$SW" && PATH="$stubdir:$PATH" SYG_WORKER_SANDBOX_REPO="$M" SYG_WORKER_SANDBOX_CLAUDE=$T/fake-claude "$B/worker-sandbox" --settings "$T/overlay.json" 2>&1); rc=$?
+[ "$rc" = 125 ] && [[ $out == *"worker-sandbox: worker-tree-check refused"* ]] && [ ! -e "$T/w1-ran" ] && [ ! -e "$T/w1-fsm" ] && [ ! -s "$stublog" ] \
+  && ok "W1: SYG_WORKER_SANDBOX_REPO refuses swapped sibling (125), fake claude never starts" \
+  || bad "W1 swapped sibling: rc=$rc ran=$([ -e "$T/w1-ran" ] && echo yes || echo no) fsm=$([ -e "$T/w1-fsm" ] && echo yes || echo no) gitlog=[$(cat "$stublog")] out=[$out]"
+
+out=$(cd "$W" && SYG_WORKER_SANDBOX_REPO="$T/no-such-repo" SYG_WORKER_SANDBOX_CLAUDE=$T/fake-claude "$B/worker-sandbox" --settings "$T/overlay.json" 2>&1); rc=$?
+[ "$rc" = 125 ] && [[ $out == *"SYG_WORKER_SANDBOX_REPO is not a directory: $T/no-such-repo"* ]] \
+  && ok "W2: SYG_WORKER_SANDBOX_REPO naming a missing directory refuses (125)" \
+  || bad "W2 missing repo dir: rc=$rc out=[$out]"
+
+fake 'exit 0'
+out=$(cd "$W" && SYG_WORKER_SANDBOX_REPO="$M" SYG_WORKER_SANDBOX_CLAUDE=$T/fake-claude "$B/worker-sandbox" --settings "$T/overlay.json" 2>&1); rc=$?
+[[ $out != *"worker-tree-check refused"* ]] && [[ $out != *"SYG_WORKER_SANDBOX_REPO is not a directory"* ]] \
+  && ok "W2b: legitimate linked worktree passes SYG_WORKER_SANDBOX_REPO=\$M tree check" \
+  || bad "W2b legit worktree: rc=$rc out=[$out]"
+
+fake ': >"'"$T"'/w2c-ran"; exit 0'
+out=$(cd "$W" && SYG_WORKER_SANDBOX_REPO="$N" SYG_WORKER_SANDBOX_CLAUDE=$T/fake-claude "$B/worker-sandbox" --settings "$T/overlay.json" 2>&1); rc=$?
+[ "$rc" = 125 ] && [[ $out == *"worker-sandbox: worker-tree-check refused"* ]] && [ ! -e "$T/w2c-ran" ] \
+  && ok "W2c: linked worktree of M refused when SYG_WORKER_SANDBOX_REPO names another repo (125)" \
+  || bad "W2c wrong repo anchor: rc=$rc ran=$([ -e "$T/w2c-ran" ] && echo yes || echo no) out=[$out]"
+
+: >"$stublog"; rm -f "$T/w1-fsm"
+fake ': >"'"$T"'/w2d-ran"; exit 0'
+out=$(cd "$SW" && PATH="$stubdir:$PATH" SYG_GATE_SANDBOX_REPO="$M" SYG_WORKER_SANDBOX_CLAUDE=$T/fake-claude "$B/worker-sandbox" --settings "$T/overlay.json" 2>&1); rc=$?
+[ "$rc" = 125 ] && [[ $out == *"worker-sandbox: worker-tree-check refused"* ]] && [ ! -e "$T/w2d-ran" ] && [ ! -e "$T/w1-fsm" ] && [ ! -s "$stublog" ] \
+  && ok "W2d: inherited SYG_GATE_SANDBOX_REPO refuses swapped sibling before host git runs (125)" \
+  || bad "W2d inherited gate repo anchor: rc=$rc ran=$([ -e "$T/w2d-ran" ] && echo yes || echo no) fsm=$([ -e "$T/w1-fsm" ] && echo yes || echo no) gitlog=[$(cat "$stublog")] out=[$out]"
+
+out=$(cd "$W" && SYG_GATE_SANDBOX_REPO="$T/no-such-repo" SYG_WORKER_SANDBOX_CLAUDE=$T/fake-claude "$B/worker-sandbox" --settings "$T/overlay.json" 2>&1); rc=$?
+[ "$rc" = 125 ] && [[ $out == *"SYG_GATE_SANDBOX_REPO is not a directory: $T/no-such-repo"* ]] \
+  && ok "W2e: inherited SYG_GATE_SANDBOX_REPO naming a missing directory refuses (125) naming SYG_GATE_SANDBOX_REPO" \
+  || bad "W2e missing inherited gate repo dir: rc=$rc out=[$out]"
+
+# W3. A path containing '->' cannot be bound in SYG_GATE_SANDBOX_RO_BINDS
+cp "$T/overlay.json" "$T/a->b.json"
+out=$(cd "$W" && SYG_WORKER_SANDBOX_CLAUDE=$T/fake-claude "$B/worker-sandbox" --settings "$T/a->b.json" 2>&1); rc=$?
+[ "$rc" = 125 ] && [[ $out == *"colon or '->'"* ]] \
+  && ok "W3: --settings path containing '->' refuses (125) naming colon or '->'" \
+  || bad "W3 arrow path: rc=$rc out=[$out]"
+
 # 8. No pasta: refuses rather than run with another network (or none of the walls)
 mkdir -p "$T/nopasta"
 for t in bash env git realpath dirname basename id mkdir bwrap; do ln -s "$(command -v "$t")" "$T/nopasta/$t"; done
@@ -242,6 +303,13 @@ fake 'exit 0'
 [ "$rc" = 0 ] && ! grep -q "Couldn't get any nameserver" "$T/err" \
   && ok "a worker run prints no pasta nameserver warning" \
   || bad "pasta dns warning: rc=$rc err=[$(cat "$T/err")]"
+
+# 1c (W4). The legitimate worktree $W with SYG_WORKER_SANDBOX_REPO=$M runs the fake claude normally (rc 0)
+fake 'echo repo-anchor-ok; exit 0'
+out=$(cd "$W" && SYG_WORKER_SANDBOX_REPO="$M" SYG_WORKER_SANDBOX_CLAUDE=$T/fake-claude "$B/worker-sandbox" --settings "$T/overlay.json" 2>"$T/err"); rc=$?
+[ "$rc" = 0 ] && [ "$out" = repo-anchor-ok ] \
+  && ok "W4: legitimate worktree with SYG_WORKER_SANDBOX_REPO=\$M runs fake claude normally (rc 0)" \
+  || bad "W4 legit worktree with repo anchor: rc=$rc out=[$out] err=[$(cat "$T/err")]"
 
 # 2. Exit code and argv come through; the overlay is a bound path, not a key in argv
 fake 'printf "%s\n" "$@"; exit 7'
