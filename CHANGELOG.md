@@ -2,6 +2,16 @@
 
 All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY-MM-DD>` section per released version; under it, `###` categories in fixed order — Breaking Changes, Features, Bug Fixes, Improvements, Chores, Tests — empty ones omitted; items are `- **scope:** description (#PR)`, written from the version's merged commit subjects.
 
+## 0.3.190 - 2026-11-19
+
+### Features
+
+- **tracking:** the repo adopts a backlog.md task store: `backlog/` at the repo root (`config.yml` with statuses To Do/In Progress/Done/Deferred and the label list, 30 migrated tasks created through the pinned CLI), `package.json` pinning `backlog.md@1.55.3`, and the tracked `.claude/settings.json` opt-in `SYG_TRACKING_SURFACE=backlog-md` (pin and store land together per the skill's stale-opt-in guardrail). The multi-session claim convention — claim via `assignee` plus `status: In Progress` in one CLI pass, never edit another session's in-progress task — is documented in the backlog-md skill. (#345)
+
+### Improvements
+
+- **bin:** safe-worktree-clean's restore hint recreates per-worktree refs under neutral `refs/seyag-restored/<plan-id>/` names. (#344)
+
 ## 0.3.189 - 2026-11-19
 
 ### Bug Fixes
