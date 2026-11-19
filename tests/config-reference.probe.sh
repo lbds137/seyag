@@ -36,8 +36,10 @@ cat >"$TMP/plugins/seyag/bin/sample-tool" <<'EOF'
 import os
 a = os.environ.get("SYG_ALPHA", "1")
 d = os.environ.get("SYG_DELTA", "60")
+dc = os.environ.get("SYG_DELTA_CMD", "")
 e = os.environ.get("CLAUDE_USAGE_ECHO", "75")
 p = os.environ.get("CLAUDE_PROJECTS_DIR", "~/.claude/projects")
+z = os.environ.get("SYG_STATUSLINE_ZAI_USAGE", "")
 EOF
 
 # Excluded files: .md and *.probe.sh must not be scanned.
@@ -60,6 +62,8 @@ SYG_ALPHA	user	guards	1	Controls alpha guard mode (0|1).	-
 SYG_BRAVO	user	guards	unset	Opt-in bravo flag.	envonly
 SYG_CHARLIE	internal	guards	unset	Internal charlie test seam.	-
 SYG_DELTA	user	usage	60	Delta window in seconds.	path
+SYG_DELTA_CMD	user	usage	unset	Delta command override.	-
+SYG_STATUSLINE_ZAI_USAGE	user	statusline	<script_dir>/zai-usage	Override path to the zai-usage binary invoked by statusline.	-
 EOF
 }
 
@@ -380,11 +384,13 @@ fi
 if grep -qF '| Name | Default | What it does | Found in | Config |' "$TMP/docs/config.md" \
   && grep -qF '| `SYG_ALPHA` | `1` | Controls alpha guard mode (0\|1). | `bin/sample-tool`, `hooks/sample.sh` | user + project |' "$TMP/docs/config.md" \
   && grep -qF '| `SYG_DELTA` | `60` | Delta window in seconds. | `bin/sample-tool` | user only |' "$TMP/docs/config.md" \
+  && grep -qF '| `SYG_DELTA_CMD` | unset | Delta command override. | `bin/sample-tool` | user only |' "$TMP/docs/config.md" \
+  && grep -qF '| `SYG_STATUSLINE_ZAI_USAGE` | `<script_dir>/zai-usage` | Override path to the zai-usage binary invoked by statusline. | `bin/sample-tool` | user only |' "$TMP/docs/config.md" \
   && grep -qF '| `SYG_BRAVO` | unset | Opt-in bravo flag. | `hooks/sample.sh` | env only |' "$TMP/docs/config.md" \
   && grep -qF '| `CLAUDE_PROJECTS_DIR` | `~/.claude/projects` | Directory of per-project transcripts. | `bin/sample-tool` | env only |' "$TMP/docs/config.md"; then
-  ok "(x3) Config column renders user + project, user only (path), and env only (envonly and SCAN_EXACT_NAMES)"
+  ok "(x3) Config column renders user + project, user only (path and exec), and env only (envonly and SCAN_EXACT_NAMES)"
 else
-  fail "(x3) Config column rendering mismatch in $TMP/docs/config.md"
+  fail "(x3) Config column rendering mismatch in $TMP/docs/config.md: $(grep -E 'SYG_DELTA_CMD|SYG_STATUSLINE_ZAI_USAGE' "$TMP/docs/config.md" || true)"
 fi
 
 # Live check against the repository root.

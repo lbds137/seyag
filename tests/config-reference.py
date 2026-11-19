@@ -39,6 +39,8 @@ SCAN_EXACT_NAMES = (
     "ANTHROPIC_ADMIN_API_KEY",
     "CLAUDE_CONFIG_DIR",
 )
+# Mirrors config-env.sh's _SYG_CFG_PROJECT_EXEC alongside the _CMD suffix class (pinned by tests/config-env.probe.sh case (o5)).
+EXEC_REFUSED_EXTRA = ("SYG_STATUSLINE_ZAI_USAGE",)
 
 GROUPS = (
     "guards",
@@ -227,7 +229,11 @@ def format_config_col(row: dict[str, str]) -> str:
     flag_tokens = set(row["flags"].split()) if row["flags"] != "-" else set()
     if row["name"] in SCAN_EXACT_NAMES or "envonly" in flag_tokens:
         return "env only"
-    if "path" in flag_tokens:
+    if (
+        row["name"].endswith("_CMD")
+        or row["name"] in EXEC_REFUSED_EXTRA
+        or "path" in flag_tokens
+    ):
         return "user only"
     return "user + project"
 
