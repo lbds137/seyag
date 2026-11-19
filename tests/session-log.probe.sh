@@ -529,6 +529,9 @@ AUQ_B=aaaaaaaa-d00a-4000-8000-00000000000a
 AUQ_ERR=aaaaaaaa-d011-4000-8000-000000000011
 AUQ4=aaaaaaaa-d00b-4000-8000-00000000000b
 AUQ6=aaaaaaaa-d010-4000-8000-000000000010
+DENY_RL=aaaaaaaa-d021-4000-8000-000000000021
+PROSE_C1=aaaaaaaa-d022-4000-8000-000000000022
+PROSE_C2=aaaaaaaa-d023-4000-8000-000000000023
 PAD620=$(printf 'x%.0s' $(seq 1 620))
 PAD390=$(printf 'context %.0s' $(seq 1 50))
 cat > "$A_ALPHA/$A_ID.jsonl" <<EOF
@@ -567,6 +570,19 @@ cat > "$A_BETA/$C_ID.jsonl" <<EOF
 {"type":"assistant","timestamp":"2026-09-25T07:05:00Z","uuid":"$PROSE3","message":{"content":[{"type":"text","text":"History rewritten. Ok to force-push now?"}]}}
 {"type":"user","timestamp":"2026-09-25T07:05:30Z","message":{"content":"yes"}}
 EOF
+cat > "$A_ALPHA/aaaaaaaa-d020-4000-8000-000000000020.jsonl" <<EOF
+{"type":"user","timestamp":"2026-09-25T23:00:00Z","uuid":"$DENY_RL","message":{"content":[{"type":"tool_result","tool_use_id":"tu_rl","is_error":true,"content":"Permission to use Bash was denied for: gh api /rate-limited-endpoint"}]}}
+{"type":"user","timestamp":"2026-09-25T23:05:00Z","message":{"content":"go on"}}
+{"type":"assistant","timestamp":"2026-09-25T23:10:00Z","uuid":"$PROSE_C1","message":{"content":[{"type":"text","text":"Shall I clean up the temp dir?"}]}}
+{"type":"user","timestamp":"2026-09-25T23:15:00Z","isCompactSummary":true,"message":{"content":"Summary of the session so far for context"}}
+{"type":"user","timestamp":"2026-09-25T23:16:00Z","message":{"content":"yes go ahead"}}
+{"type":"assistant","timestamp":"2026-09-25T23:20:00Z","uuid":"$PROSE_C2","message":{"content":[{"type":"text","text":"Ok to force-push the fix branch?"}]}}
+{"type":"user","timestamp":"2026-09-25T23:25:00Z","isCompactSummary":true,"message":{"content":"Summary after compaction, kept for the record"}}
+{"type":"assistant","timestamp":"2026-09-25T23:30:00Z","uuid":"aaaaaaaa-d024-4000-8000-000000000024","message":{"content":[{"type":"text","text":"Can you confirm the plan?"}]}}
+{"type":"assistant","timestamp":"2026-09-25T23:31:00Z","uuid":"aaaaaaaa-d025-4000-8000-000000000025","message":{"content":[{"type":"text","text":"Should I perform the migration?"}]}}
+{"type":"assistant","timestamp":"2026-09-25T23:32:00Z","uuid":"aaaaaaaa-d026-4000-8000-000000000026","message":{"content":[{"type":"text","text":"Is this an emergency?"}]}}
+{"type":"assistant","timestamp":"2026-09-25T23:33:00Z","uuid":"aaaaaaaa-d027-4000-8000-000000000027","message":{"content":[{"type":"text","text":"Want me to inform the team?"}]}}
+EOF
 cat > "$ASKS_ARCH/$BRIDGE.jsonl" <<EOF
 {"type":"assistant","timestamp":"2026-09-24T04:32:00Z","uuid":"$BANG1","message":{"content":[{"type":"text","text":"Run this command:\n\`! safe-worktree-clean --apply-hold plan-1\`\nShould I delete it?"}]},"_session":"$BRIDGE","_title":"Archive Asks"}
 {"type":"assistant","_created_at":"2026-09-25T08:00:00Z","uuid":"$AUQ2","message":{"content":[{"type":"tool_use","id":"tu_auq2","name":"AskUserQuestion","input":{"questions":[{"question":"Ship it to prod env?"}]}}]},"_session":"$BRIDGE","_title":"Archive Asks"}
@@ -578,16 +594,16 @@ cat > "$ASKS_ARCH/$BRIDGE.jsonl" <<EOF
 EOF
 arun() { CLAUDE_PROJECTS_DIR="$ASKS_DIR" CLAUDE_SESSION_ARCHIVE="$ASKS_ARCH" run "$@"; }
 
-arun asks && [ "$(wc -l < "$T/out")" = 12 ] && ok "asks exits 0 and emits 12 deduped rows across local + archive" || bad "asks rows: rc=$rc $(cat "$T/out" "$T/err")"
-arun asks --rows && [ "$(wc -l < "$T/out")" = 12 ] && ok "asks --rows matches default row output" || bad "asks --rows: rc=$rc $(cat "$T/out")"
+arun asks && [ "$(wc -l < "$T/out")" = 15 ] && ok "asks exits 0 and emits 15 deduped rows across local + archive" || bad "asks rows: rc=$rc $(cat "$T/out" "$T/err")"
+arun asks --rows && [ "$(wc -l < "$T/out")" = 15 ] && ok "asks --rows matches default row output" || bad "asks --rows: rc=$rc $(cat "$T/out")"
 [ "$(sed -n 1p "$T/out")" = "$(printf 'Projects-alpha\taaaaaaaa\t2026-09-24 00:30\tauq\tprod-deploy\t60\t0\ttext\tDeploy to production now? | Target railway service?')" ] \
   && ok "asks auq row: joins questions with ' | ', classifies prod-deploy, skips non-owner entries for wait_s=60" \
   || bad "asks row 1: $(sed -n 1p "$T/out")"
 [ "$(sed -n 2p "$T/out")" = "$(printf 'Projects-alpha\taaaaaaaa\t2026-09-24 00:32\tbang\tworktree-removal\t45\t0\ttext\tRun this command: `! safe-worktree-clean --apply-hold plan-1` Should I delete it?')" ] \
   && ok "asks bang row: bang takes precedence over proseask on same block, pairs with mid-turn enqueue (wait_s=45)" \
   || bad "asks row 2: $(sed -n 2p "$T/out")"
-[ "$(sed -n 3p "$T/out")" = "$(printf 'Projects-alpha\taaaaaaaa\t2026-09-24 00:35\tdeny\tscratch-delete\t90000\t1\ttext\tPermission to use Bash was denied by classifier: rm -rf /tmp/scratch/aaaaaaaa…/cse_01AAAAAAAA…')" ] \
-  && ok "asks deny row: strips reminder, masks ids, classifies scratch-delete, wait_s=90000 sets expired=1" \
+[ "$(sed -n 3p "$T/out")" = "$(printf 'Projects-alpha\taaaaaaaa\t2026-09-24 00:35\tdeny\tscratch-delete\t\t0\ttext\tPermission to use Bash was denied by classifier: rm -rf /tmp/scratch/aaaaaaaa…/cse_01AAAAAAAA…')" ] \
+  && ok "asks deny row: strips reminder, masks ids, classifies scratch-delete; a deny is a block event, not a waiting ask - even followed by an owner turn it carries no wait_s and expired=0" \
   || bad "asks row 3: $(sed -n 3p "$T/out")"
 [ "$(sed -n 4p "$T/out")" = "$(printf 'Projects-alpha\taaaaaaaa\t2026-09-25 01:36\tproseask\tforce-push\t\t1\ttext\tRebase complete. Shall I force-push the branch?')" ] \
   && ok "asks proseask row: unanswered in same transcript has empty wait_s and expired=1 (no cross-transcript pairing)" \
@@ -618,40 +634,62 @@ _r8=$(sed -n 8p "$T/out") && _r8_pre=$(printf '%s' "$_r8" | cut -f1-8) && _r8_tx
 [ "$(sed -n 12p "$T/out")" = "$(printf 'claude.ai\tcse_01AAAAAAAA\t2026-09-25 07:00\tauq\tprod-deploy\t\t1\ttext\tDeploy docs now?')" ] \
   && ok "asks archive row answered by a _created_at-only owner entry: no real clock on the answer, the ask stays pending with no later real-clock event to pair (empty wait_s, expired=1; not the clock-mixed 30)" \
   || bad "asks row 12: $(sed -n 12p "$T/out")"
+[ "$(sed -n 13p "$T/out")" = "$(printf 'Projects-alpha\taaaaaaaa\t2026-09-25 19:00\tdeny\tother\t\t0\ttext\tPermission to use Bash was denied for: gh api /rate-limited-endpoint')" ] \
+  && ok "asks deny row: a genuine denial whose text mentions 'rate limited' in the COMMAND still emits (the availability guard needs 'temporarily unavailable' first) and stays wait-less even with an owner turn right after" \
+  || bad "asks row 13: $(sed -n 13p "$T/out")"
+[ "$(sed -n 14p "$T/out")" = "$(printf 'Projects-alpha\taaaaaaaa\t2026-09-25 19:10\tproseask\tother\t360\t0\ttext\tShall I clean up the temp dir?')" ] \
+  && ok "asks proseask row: an isCompactSummary user entry between ask and owner turn is not an owner turn - the wait resolves at the real turn (360), not at the summary (would be 300)" \
+  || bad "asks row 14: $(sed -n 14p "$T/out")"
+[ "$(sed -n 15p "$T/out")" = "$(printf 'Projects-alpha\taaaaaaaa\t2026-09-25 19:20\tproseask\tforce-push\t\t1\ttext\tOk to force-push the fix branch?')" ] \
+  && ok "asks proseask row: an ask followed only by a compaction summary never resolves (empty wait_s, expired=1)" \
+  || bad "asks row 15: $(sed -n 15p "$T/out")"
 ! grep -q -e "scratch-thinking" -e "delete thinking" -e "past 600 chars" -e "subagent worktree" -e "non-error result" "$T/out" \
   && ok "asks ignores thinking blocks, >600-char deny tail, non-error tool_result, and subagent files" \
   || bad "asks false positive: $(cat "$T/out")"
 arun asks && ! grep -q "reword the paragraph" "$T/out" \
   && ok "asks proseask needs a destructive/cleanup/merge keyword: 'Shall I reword the paragraph?' is an ordinary question and emits no row" \
   || bad "asks proseask false positive: $(grep 'reword' "$T/out")"
+arun asks && ! grep -q "Can you confirm the plan?" "$T/out" \
+  && ok "asks proseask word boundaries: 'Can you confirm the plan?' matches no keyword ('rm' inside 'confirm' has no word boundary) and emits no row" \
+  || bad "asks proseask false positive: $(grep 'confirm the plan' "$T/out")"
+arun asks && ! grep -q "Should I perform the migration?" "$T/out" \
+  && ok "asks proseask word boundaries: 'Should I perform the migration?' matches no keyword ('rm' inside 'perform') and emits no row" \
+  || bad "asks proseask false positive: $(grep 'perform the migration' "$T/out")"
+arun asks && ! grep -q "Is this an emergency?" "$T/out" \
+  && ok "asks proseask word boundaries: 'Is this an emergency?' matches no keyword ('merge' inside 'emergency') and emits no row" \
+  || bad "asks proseask false positive: $(grep 'emergency' "$T/out")"
+arun asks && ! grep -q "Want me to inform the team?" "$T/out" \
+  && ok "asks proseask word boundaries: 'Want me to inform the team?' matches no keyword ('rm' inside 'inform') and emits no row" \
+  || bad "asks proseask false positive: $(grep 'inform the team' "$T/out")"
 arun asks && ! grep -q -e "temporarily unavailable" -e "mentioned classifier" "$T/out" \
   && ok "asks deny skips classifier-availability retry noise and bare-classifier echo text" \
   || bad "asks deny false positive: $(grep -e 'unavailable' -e 'classifier twice' "$T/out")"
 
 arun asks --raw --kinds deny && grep -q "<system-reminder>remword</system-reminder>Permission" "$T/out" \
   && ok "asks --raw keeps <system-reminder> text while still masking ids" || bad "asks --raw: $(cat "$T/out")"
-arun asks --no-text && [ "$(wc -l < "$T/out")" = 12 ] \
+arun asks --no-text && [ "$(wc -l < "$T/out")" = 15 ] \
   && [ "$(sed -n 1p "$T/out")" = "$(printf 'Projects-alpha\taaaaaaaa\t2026-09-24 00:30\tauq\tprod-deploy\t60\t0\tstructural\t')" ] \
   && [ "$(cut -f8 "$T/out" | sort -u)" = "structural" ] && [ -z "$(cut -f9 "$T/out" | tr -d '\n')" ] \
   && ok "asks --no-text sets privacy=structural, empties text column, preserves categories" \
   || bad "asks --no-text: $(cat "$T/out")"
-arun asks --no-archive && [ "$(wc -l < "$T/out")" = 9 ] && ! grep -q "^claude\.ai" "$T/out" \
+arun asks --no-archive && [ "$(wc -l < "$T/out")" = 12 ] && ! grep -q "^claude\.ai" "$T/out" \
   && ok "asks --no-archive drops archive rows" || bad "asks --no-archive: $(cat "$T/out")"
 arun asks --project claude && [ "$(wc -l < "$T/out")" = 3 ] && grep -q "^claude\.ai	cse_01AAAAAAAA" "$T/out" \
   && ok "asks --project claude keeps archive rows only and still dedups against full local uuid set" \
   || bad "asks --project claude: $(cat "$T/out")"
 
-arun asks --summary && [ "$(wc -l < "$T/out")" = 9 ] \
+arun asks --summary && [ "$(wc -l < "$T/out")" = 10 ] \
   && [ "$(sed -n 1p "$T/out")" = "$(printf 'kind\tcategory\tcount\tunanswered\texpired\tmedian_wait\tmax_wait')" ] \
   && [ "$(sed -n 2p "$T/out")" = "$(printf 'auq\tprod-deploy\t5\t3\t3\t50\t60')" ] \
-  && [ "$(sed -n 3p "$T/out")" = "$(printf 'proseask\tforce-push\t2\t1\t1\t30\t30')" ] \
-  && [ "$(sed -n 4p "$T/out")" = "$(printf 'auq\tother\t1\t1\t1\t\t')" ] \
-  && [ "$(sed -n 5p "$T/out")" = "$(printf 'auq\tscratch-delete\t1\t0\t0\t30\t30')" ] \
-  && [ "$(sed -n 6p "$T/out")" = "$(printf 'bang\tworktree-removal\t1\t0\t0\t45\t45')" ] \
-  && [ "$(sed -n 7p "$T/out")" = "$(printf 'deny\tscratch-delete\t1\t0\t1\t90000\t90000')" ] \
-  && [ "$(sed -n 8p "$T/out")" = "$(printf 'proseask\tother\t1\t0\t0\t120\t120')" ] \
-  && [ "$(sed -n 9p "$T/out")" = "$(printf 'TOTAL\t\t12\t5\t6\t45\t90000')" ] \
-  && ok "asks --summary prints sorted kind*category aggregate table plus TOTAL instead of rows" \
+  && [ "$(sed -n 3p "$T/out")" = "$(printf 'proseask\tforce-push\t3\t2\t2\t30\t30')" ] \
+  && [ "$(sed -n 4p "$T/out")" = "$(printf 'proseask\tother\t2\t0\t0\t240\t360')" ] \
+  && [ "$(sed -n 5p "$T/out")" = "$(printf 'auq\tother\t1\t1\t1\t\t')" ] \
+  && [ "$(sed -n 6p "$T/out")" = "$(printf 'auq\tscratch-delete\t1\t0\t0\t30\t30')" ] \
+  && [ "$(sed -n 7p "$T/out")" = "$(printf 'bang\tworktree-removal\t1\t0\t0\t45\t45')" ] \
+  && [ "$(sed -n 8p "$T/out")" = "$(printf 'deny\tother\t1\t0\t0\t\t')" ] \
+  && [ "$(sed -n 9p "$T/out")" = "$(printf 'deny\tscratch-delete\t1\t0\t0\t\t')" ] \
+  && [ "$(sed -n 10p "$T/out")" = "$(printf 'TOTAL\t\t15\t6\t6\t45\t360')" ] \
+  && ok "asks --summary prints sorted kind*category aggregate table plus TOTAL instead of rows; deny rows carry no wait so they sit out unanswered/expired/median/max entirely" \
   || bad "asks --summary: $(cat "$T/out")"
 
 arun asks --summary --kinds proseask --category force-push --until 2026-09-25T02:00 \
@@ -663,13 +701,15 @@ arun asks --summary --kinds proseask --category force-push --until 2026-09-25T02
 arun asks --json && python3 -c '
 import json, sys
 d = json.load(sys.stdin)
-assert d["total"] == 12 and len(d["rows"]) == 12 and len(d["summary"]) == 7, d
-r0, r3 = d["rows"][0], d["rows"][3]
+assert d["total"] == 15 and len(d["rows"]) == 15 and len(d["summary"]) == 8, d
+r0, r2, r3 = d["rows"][0], d["rows"][2], d["rows"][3]
 assert r0["kind"] == "auq" and r0["category"] == "prod-deploy" and r0["wait_s"] == 60 and r0["expired"] == 0 and r0["privacy"] == "text", r0
-assert r3["wait_s"] is None and r3["expired"] == 1, r3
+assert r2["kind"] == "deny" and r2["wait_s"] is None and r2["expired"] == 0, r2
+assert r3["kind"] == "proseask" and r3["wait_s"] is None and r3["expired"] == 1, r3
+assert all("_nowait" not in r and "_ts" not in r and "_uuid" not in r for r in d["rows"]), "private keys leak"
 s0, s1 = d["summary"][0], d["summary"][1]
 assert s0 == {"kind": "auq", "category": "prod-deploy", "count": 5, "unanswered": 3, "expired": 3, "median_wait": 50, "max_wait": 60}, s0
-assert s1 == {"kind": "proseask", "category": "force-push", "count": 2, "unanswered": 1, "expired": 1, "median_wait": 30, "max_wait": 30}, s1
+assert s1 == {"kind": "proseask", "category": "force-push", "count": 3, "unanswered": 2, "expired": 2, "median_wait": 30, "max_wait": 30}, s1
 ' < "$T/out" && ok "asks --json emits rows, summary and total with null for unknown wait_s" || bad "asks --json: $(cat "$T/out" "$T/err")"
 
 arun asks --json --no-text --kinds proseask --category force-push --until 2026-09-25T02:00 && python3 -c '
@@ -684,20 +724,23 @@ assert s["median_wait"] is None and s["max_wait"] is None and s["unanswered"] ==
 
 arun asks --kinds auq,bang && [ "$(wc -l < "$T/out")" = 8 ] && ok "asks --kinds filters comma-separated kinds" || bad "asks --kinds: $(cat "$T/out")"
 arun asks --category prod-deploy,scratch-delete && [ "$(wc -l < "$T/out")" = 7 ] && ok "asks --category filters comma-separated categories" || bad "asks --category: $(cat "$T/out")"
-arun asks --max 2 && [ "$(wc -l < "$T/out")" = 2 ] && [ "$(cat "$T/err")" = "session-log: 10 more suppressed" ] \
+arun asks --max 2 && [ "$(wc -l < "$T/out")" = 2 ] && [ "$(cat "$T/err")" = "session-log: 13 more suppressed" ] \
   && ok "asks --max caps printed rows and warns 'N more suppressed' to stderr" || bad "asks --max: out=$(wc -l < "$T/out") err=$(cat "$T/err")"
-arun asks --max 2 --summary && [ "$(wc -l < "$T/out")" = 9 ] && [ ! -s "$T/err" ] \
+arun asks --max 2 --summary && [ "$(wc -l < "$T/out")" = 10 ] && [ ! -s "$T/err" ] \
   && ok "asks --max never caps --summary and emits no suppression warning" || bad "asks --max --summary: $(cat "$T/out" "$T/err")"
 arun asks --max 2 --json && python3 -c '
 import json, sys
 d = json.load(sys.stdin)
-assert len(d["rows"]) == 2 and d["total"] == 12 and len(d["summary"]) == 7, d
-' < "$T/out" && [ "$(cat "$T/err")" = "session-log: 10 more suppressed" ] \
+assert len(d["rows"]) == 2 and d["total"] == 15 and len(d["summary"]) == 8, d
+' < "$T/out" && [ "$(cat "$T/err")" = "session-log: 13 more suppressed" ] \
   && ok "asks --max --json caps rows only, leaving summary and total uncapped" || bad "asks --max --json: $(cat "$T/out" "$T/err")"
 
 arun asks --since 2026-09-26; [ $rc = 1 ] && [ ! -s "$T/out" ] && ok "asks with no matching rows exits 1" || bad "asks empty: rc=$rc $(cat "$T/out")"
 arun asks --kinds bogus; [ $rc = 2 ] && grep -q "unknown kind" "$T/err" && ok "asks unknown --kinds exits 2" || bad "asks bogus kind: rc=$rc $(cat "$T/err")"
 arun asks --category bogus; [ $rc = 2 ] && grep -q "unknown category" "$T/err" && ok "asks unknown --category exits 2" || bad "asks bogus category: rc=$rc $(cat "$T/err")"
+arun asks --summary --json; [ $rc = 2 ] && [ ! -s "$T/out" ] && grep -q "not allowed with" "$T/err" \
+  && ok "asks --summary --json conflict: the output flags are mutually exclusive, exit 2" || bad "asks mutex: rc=$rc $(cat "$T/out" "$T/err")"
+arun asks --rows; [ $rc = 0 ] && ok "asks --rows alone stays valid (the explicit default form)" || bad "asks --rows alone: rc=$rc $(cat "$T/out" "$T/err")"
 arun asks --max 0; [ $rc = 2 ] && grep -q -- "--max must be at least 1" "$T/err" && ok "asks --max 0 exits 2" || bad "asks --max 0: rc=$rc $(cat "$T/err")"
 
 # 6. no full ids anywhere
@@ -709,7 +752,8 @@ grep -q "cse_01BBBBBBBB" "$ALL" && ok "(leak check positive control: the short a
 
 # 7. help / usage
 run --help; [ $rc = 0 ] && grep -q "^Usage:" "$T/out" && grep -q -- "--extract-due" "$T/out" && grep -q "mtime-approximated" "$T/out" && grep -q "session-log asks" "$T/out" \
-  && ok "--help exits 0 with Usage, asks and --extract-due notes" || bad "--help rc=$rc"
+  && grep -q -- "--rows|--summary|--json" "$T/out" \
+  && ok "--help exits 0 with Usage, asks and --extract-due notes, mutually exclusive asks output flags" || bad "--help rc=$rc"
 run grep -h; [ $rc = 0 ] && grep -q "^Usage:" "$T/out" && ok "verb -h exits 0 with Usage" || bad "grep -h rc=$rc"
 run bogus; [ $rc = 2 ] && ok "unknown verb exits 2" || bad "unknown verb rc=$rc"
 run grep; [ $rc = 2 ] && ok "grep without a pattern exits 2" || bad "grep no pattern rc=$rc"
