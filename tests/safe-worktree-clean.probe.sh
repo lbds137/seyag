@@ -1945,16 +1945,20 @@ shopt -s nullglob
 bk31_dirs=("$T/bk31"/*/"sweep31--wt31k--$sha_sw31")
 shopt -u nullglob
 BK31=${bk31_dirs[0]:-}
+restore_p31=''
 git clone -q "$T/sweep31-origin.git" "$T/p31-clone" 2>/dev/null && [ -d "$T/p31-clone" ] || bad "P31 setup: clone p31-clone"
 if [ "$rc_p31a" -eq 0 ] && [ ! -e "$SW31W/wt31k" ] && [ ! -e "$SW31W/wt31s" ] && [ -f "$BK31/reflog.pack" ] \
   && _pipe_out=$(sed -n '/^=== Commits only in reflogs or per-worktree refs (in reflog\.pack) ===$/,/^===/p' "$BK31/changes.txt") && grep -q "^$C_P31 " <<<"$_pipe_out" \
   && _pipe_out=$(sed -n '/^=== Per-worktree refs (refs\/worktree\/\*, refs\/bisect\/\*, refs\/rewritten\/\*) ===$/,/^===/p' "$BK31/changes.txt") && grep -qx "$C_P31 refs/worktree/keep" <<<"$_pipe_out" \
-  && grep -q 'update-ref <refname> <sha from changes\.txt>' "$BK31/README.txt" \
+  && restore_p31=$(grep '^  git -C .* update-ref refs/seyag-restored/' "$BK31/README.txt") \
+  && eval "$restore_p31" \
+  && [ "$(git -C "$SW31" rev-parse -q --verify "refs/seyag-restored/$PLAN_P31/worktree/keep" 2>/dev/null)" = "$C_P31" ] \
+  && ! git -C "$SW31" rev-parse -q --verify refs/worktree/keep >/dev/null 2>&1 \
   && git -C "$T/p31-clone" index-pack --stdin --fix-thin < "$BK31/reflog.pack" >/dev/null 2>&1 \
   && git -C "$T/p31-clone" cat-file -e "$C_P31^{commit}" 2>/dev/null; then
-  ok "P31(ii): --apply-hold packs refs/worktree/keep commit in reflog.pack, lists it in changes.txt and README.txt, and restores into a scratch clone"
+  ok "P31(ii): --apply-hold packs refs/worktree/keep commit in reflog.pack, lists it in changes.txt, and the README's update-ref line restores it as refs/seyag-restored/<plan>/worktree/keep (no verbatim refs/worktree/keep)"
 else
-  bad "P31(ii): worktree-refs backup (rc=$rc_p31a, dir='$BK31')"
+  bad "P31(ii): worktree-refs backup (rc=$rc_p31a, dir='$BK31', cmd='$restore_p31', got='$(git -C "$SW31" rev-parse -q --verify "refs/seyag-restored/$PLAN_P31/worktree/keep" 2>/dev/null)', want='$C_P31')"
 fi
 
 # P31(iv)/(v) non-commit refs/worktree/* tips: a ref at a blob and a ref at an annotated tag object (on an otherwise-unreferenced commit-tree commit) HOLD as worktree-refs-object and are never approvable (the backup packs commits only).
@@ -2255,17 +2259,21 @@ bk37_dirs=("$T/bk37"/*/"sweep37--wt37done--$sha_sw37")
 shopt -u nullglob
 BK37=${bk37_dirs[0]:-}
 GOOD37=$(sed -n 's/^\([0-9a-f]*\) refs\/bisect\/good-.*$/\1/p' "$BK37/changes.txt" 2>/dev/null)
+restore_p37=''
 git clone -q "$T/sweep37-origin.git" "$T/p37-clone" 2>/dev/null && [ -d "$T/p37-clone" ] || bad "P37 setup: clone p37-clone"
 if [ "$rc_p37a" -eq 0 ] && [ ! -e "$SW37W/wt37done" ] && [ -f "$BK37/reflog.pack" ] \
   && _pipe_out=$(sed -n '/^=== Per-worktree refs (refs\/worktree\/\*, refs\/bisect\/\*, refs\/rewritten\/\*) ===$/,/^===/p' "$BK37/changes.txt") \
   && grep -qx "$DONE37 refs/bisect/bad" <<<"$_pipe_out" \
   && grep -q "^$GOOD37 refs/bisect/good-" <<<"$_pipe_out" \
-  && grep -q '^  # refs/worktree/\*, refs/bisect/\* and refs/rewritten/\* die with the tree; recreate each: git -C .* update-ref <refname> <sha from changes.txt>$' "$BK37/README.txt" \
+  && restore_p37=$(grep '^  git -C .* update-ref refs/seyag-restored/.*bisect/bad ' "$BK37/README.txt") \
+  && eval "$restore_p37" \
+  && [ "$(git -C "$SW37" rev-parse -q --verify "refs/seyag-restored/$PLAN_P37/bisect/bad" 2>/dev/null)" = "$DONE37" ] \
+  && ! git -C "$SW37" rev-parse -q --verify refs/bisect/bad >/dev/null 2>&1 \
   && git -C "$T/p37-clone" index-pack --stdin --fix-thin < "$BK37/reflog.pack" >/dev/null 2>&1 \
   && git -C "$T/p37-clone" cat-file -e "$DONE37^{commit}" 2>/dev/null; then
-  ok "P37(iv): --apply-hold backs up wt37done, lists both refs/bisect refs in changes.txt, hints update-ref in README.txt, and the bad tip restores into a scratch clone"
+  ok "P37(iv): --apply-hold backs up wt37done, lists both refs/bisect refs in changes.txt, and the README's update-ref line restores refs/bisect/bad as refs/seyag-restored/<plan>/bisect/bad (no verbatim refs/bisect/bad), the bad tip into a scratch clone"
 else
-  bad "P37(iv): bisect backup (rc=$rc_p37a, dir='$BK37', good='$GOOD37')"
+  bad "P37(iv): bisect backup (rc=$rc_p37a, dir='$BK37', good='$GOOD37', cmd='$restore_p37', got='$(git -C "$SW37" rev-parse -q --verify "refs/seyag-restored/$PLAN_P37/bisect/bad" 2>/dev/null)', want='$DONE37')"
 fi
 
 # P38 batch-fallback seam: SYG_WORKTREE_STATE_BATCH_FAIL=1 skips tree_state_sha's hash-object
