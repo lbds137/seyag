@@ -8,7 +8,8 @@
 # refusals, the envonly refusal in both scopes, SYG_CONFIG=0, the accepted TOML
 # subset (one warning per offending line, fail-open, multiline-string body skip,
 # warnings name file and line; file content is never echoed; name text is
-# truncated to 40 characters, invalid-section reset, unsupported number-form
+# truncated to 40 characters on regular files and omitted on symlinked project
+# files, invalid-section reset, unsupported number-form
 # message, malformed tab-less knobs.tsv row warning), the skip-list and
 # flags-coverage parity with tests/config-reference.py and knobs.tsv, and both
 # integrations. The (o1)-(o6) battery pins the round-2 behaviours and (p)-(v)
@@ -193,7 +194,9 @@ syg_clock_stamp_hint = "unreached-at-eof"
 EOF
 OUT_F2B=$("${CFG_ENV[@]}" XDG_CONFIG_HOME="$U3f2b" CLAUDE_PROJECT_DIR="$TMP/proj-none" \
   bash "$TMP/report" "$LIB" SYG_EVENT_HOOK_TIMEOUT SYG_ENABLE SYG_CLOCK_STAMP_HINT 2>"$TMP/err.f2b")
-WANT_ERR_F2B="seyag config: $U3f2b/seyag/config.toml: line 1: syg_event_hook_timeout: unsupported value: multiline strings are not supported"
+WANT_ERR_F2B=$(printf '%s' \
+"seyag config: $U3f2b/seyag/config.toml: line 1: syg_event_hook_timeout: unsupported value: multiline strings are not supported
+seyag config: $U3f2b/seyag/config.toml: line 3: unterminated multiline string: rest of file skipped")
 
 U3f2c="$TMP/xdg3-f2c"
 mkdir -p "$U3f2c/seyag"
@@ -724,6 +727,75 @@ if [ "$OUT_S2" = $'CLAUDE_USAGE_TTL=[60]\nCLAUDE_USAGE_WEEK_RESERVE=UNSET\nCLAUD
   ok "(s2) M4 invalid section header resets the section so subsequent keys do not inherit it"
 else
   fail "(s2) M4 section reset: out '$OUT_S2', err '$(cat "$TMP/err.s2")' (want '$WANT_ERR_S2')"
+fi
+
+# (s3) Symlinked (foreign) project config gets content-free warnings everywhere:
+# padded-base64, JWT, known-typo, harness-owned, envonly, path-knob, exec-knob,
+# multiline opener, duplicate section/key, and malformed value lines emit zero
+# bytes of file content on stderr while rc stays 0.
+PS3="$TMP/proj-s3"
+mkdir -p "$PS3/.claude"
+B64_KEY="ZmFrZV9iYXNlNjRfcGF5bG9hZF9mb3JfcHJvYmVfc2VjcmV0X3Rlc3Rpbmc"
+JWT_KEY="eyJhbGciOiJub25lIn0.eyJzdWIiOiJmYWtlX2p3dF9wcm9iZV9jbGFpbSJ9.ZmFrZV9zaWduYXR1cmU"
+cat >"$TMP/foreign-s3.toml" <<EOF
+${B64_KEY}==
+${JWT_KEY}=
+syg_clock_stamp_hintt = "x"
+claude_config_dir = "/pwned"
+syg_owner_name = "spoof-foreign"
+syg_launch_record_dir = "/tmp/foreign-lr"
+syg_mem_gate_cmd = "echo foreign-cmd"
+syg_event_hook_timeout = """foreign_ml"""
+syg_clock_stamp_hint = unquoted_foreign_val
+[claude_usage]
+week_reserve = 55
+[claude_usage]
+week_reserve = 66
+EOF
+ln -s "$TMP/foreign-s3.toml" "$PS3/.claude/seyag.toml"
+OUT_S3=$("${CFG_ENV[@]}" XDG_CONFIG_HOME="$TMP/no-xdg" CLAUDE_PROJECT_DIR="$PS3" \
+  bash "$TMP/report" "$LIB" SYG_CLOCK_STAMP_HINT SYG_OWNER_NAME SYG_LAUNCH_RECORD_DIR SYG_MEM_GATE_CMD CLAUDE_USAGE_WEEK_RESERVE 2>"$TMP/err.s3")
+RC_S3=$?
+WANT_ERR_S3=$(printf '%s' \
+"seyag config: $PS3/.claude/seyag.toml: line 1: unknown key (not a settable seyag knob; see docs/config.md)
+seyag config: $PS3/.claude/seyag.toml: line 2: unknown key (not a settable seyag knob; see docs/config.md)
+seyag config: $PS3/.claude/seyag.toml: line 3: unknown key (not a settable seyag knob; see docs/config.md)
+seyag config: $PS3/.claude/seyag.toml: line 4: unknown key (not a settable seyag knob; see docs/config.md)
+seyag config: $PS3/.claude/seyag.toml: line 5: a knob is environment only (not settable from a config file)
+seyag config: $PS3/.claude/seyag.toml: line 6: a knob cannot be set from project scope (path knob)
+seyag config: $PS3/.claude/seyag.toml: line 7: a knob cannot be set from project scope (command-execution knob)
+seyag config: $PS3/.claude/seyag.toml: line 8: unsupported value: multiline strings are not supported
+seyag config: $PS3/.claude/seyag.toml: line 9: key: malformed value: strings and paths must be quoted
+seyag config: $PS3/.claude/seyag.toml: line 12: duplicate section: keys merge, first value per key wins
+seyag config: $PS3/.claude/seyag.toml: line 13: duplicate key: first value wins")
+LEAK_S3=$(grep -E 'ZmFrZV9iYXNlNjRf|eyJhbGciOiJub25lIn0|syg_clock_stamp_hintt|claude_config_dir|syg_owner_name|SYG_OWNER_NAME|spoof-foreign|syg_launch_record_dir|SYG_LAUNCH_RECORD_DIR|foreign-lr|syg_mem_gate_cmd|SYG_MEM_GATE_CMD|foreign-cmd|syg_event_hook_timeout|foreign_ml|claude_usage|week_reserve|syg_clock_stamp_hint|unquoted_foreign_val' "$TMP/err.s3" || true)
+if [ "$RC_S3" = 0 ] \
+  && [ "$OUT_S3" = $'SYG_CLOCK_STAMP_HINT=UNSET\nSYG_OWNER_NAME=UNSET\nSYG_LAUNCH_RECORD_DIR=UNSET\nSYG_MEM_GATE_CMD=UNSET\nCLAUDE_USAGE_WEEK_RESERVE=[55]' ] \
+  && [ -z "$LEAK_S3" ] \
+  && [ "$(cat "$TMP/err.s3")" = "$WANT_ERR_S3" ]; then
+  ok "(s3) symlinked project config emits content-free warnings (zero file bytes on stderr, rc 0)"
+else
+  fail "(s3) symlinked project config: rc $RC_S3, out '$OUT_S3', leak '$LEAK_S3', err '$(cat "$TMP/err.s3")' (want '$WANT_ERR_S3')"
+fi
+
+# (s4) Negative control for (s3): a REGULAR project file with the same
+# padded-base64 and JWT lines keeps today's 40-char bounded name echo.
+PS4="$TMP/proj-s4"
+mkdir -p "$PS4/.claude"
+cat >"$PS4/.claude/seyag.toml" <<EOF
+${B64_KEY}==
+${JWT_KEY}=
+EOF
+OUT_S4=$("${CFG_ENV[@]}" XDG_CONFIG_HOME="$TMP/no-xdg" CLAUDE_PROJECT_DIR="$PS4" \
+  bash "$TMP/report" "$LIB" SYG_CLOCK_STAMP_HINT 2>"$TMP/err.s4")
+RC_S4=$?
+WANT_ERR_S4=$(printf '%s' \
+"seyag config: $PS4/.claude/seyag.toml: line 1: unknown key '${B64_KEY:0:40}...' (not a settable seyag knob; see docs/config.md)
+seyag config: $PS4/.claude/seyag.toml: line 2: unknown key '${JWT_KEY:0:40}...' (not a settable seyag knob; see docs/config.md)")
+if [ "$RC_S4" = 0 ] && [ "$OUT_S4" = "SYG_CLOCK_STAMP_HINT=UNSET" ] && [ "$(cat "$TMP/err.s4")" = "$WANT_ERR_S4" ]; then
+  ok "(s4) regular project file keeps the 40-char bounded unknown-key echo for padded-base64 and JWT lines"
+else
+  fail "(s4) regular project file control: rc $RC_S4, out '$OUT_S4', err '$(cat "$TMP/err.s4")' (want '$WANT_ERR_S4')"
 fi
 
 # (u) L4 number-form message: numeric-shaped non-int/float bare tokens (+5, 1e3)
