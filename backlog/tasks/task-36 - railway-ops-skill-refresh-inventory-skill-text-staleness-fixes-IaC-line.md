@@ -1,9 +1,11 @@
 ---
 id: TASK-36
 title: 'railway-ops skill refresh: inventory skill text, staleness fixes, IaC line'
-status: To Do
-assignee: []
+status: Done
+assignee:
+  - seyag
 created_date: '2026-11-19T21:19:00Z'
+updated_date: '2026-11-19T23:13:00Z'
 labels:
   - skills
   - bin
