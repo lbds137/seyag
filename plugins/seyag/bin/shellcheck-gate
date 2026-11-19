@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+# bin/shellcheck-gate runs shellcheck over the repo's shell files (tests/shell-files.sh) in
+# sequential chunks under the machine-wide gate lock (gate-lock), so one invocation never holds
+# every file in memory at once and shellcheck never overlaps another gate run.
+# Knobs: SYG_SHELLCHECK_CHUNK (default 20), SYG_SHELLCHECK_BIN (default shellcheck, uvx fallback).
+# Exit: 0 clean; 1 findings or an invocation that died (the pipeline's xargs 123/125 mapped to 1);
+# 128+N on a forwarded TERM/INT/HUP; other codes propagate; 125 for own errors (bad knob, no
+# binary, a missing or failing file enumerator, gate-lock not found).
+set -u
+if [ $# = 0 ] || [ "$1" = -h ] || [ "$1" = --help ]; then
+  echo "usage: shellcheck-gate SHELLCHECK_ARG...   run shellcheck in chunks under gate-lock" >&2
+  if [ $# = 0 ]; then exit 125; fi
+  exit 0
+fi
+
+chunk=${SYG_SHELLCHECK_CHUNK-20}
+if ! [[ $chunk =~ ^[1-9][0-9]*$ ]]; then
+  echo "shellcheck-gate: invalid SYG_SHELLCHECK_CHUNK '$chunk' (must be a positive integer)" >&2
+  exit 125
+fi
+
+sc_bin=${SYG_SHELLCHECK_BIN:-shellcheck}
+sc_cmd=()
+case $sc_bin in
+  */*)
+    if [ -f "$sc_bin" ] && [ -x "$sc_bin" ]; then
+      sc_cmd=("$sc_bin")
+    elif [ -e "$sc_bin" ]; then
+      echo "shellcheck-gate: SYG_SHELLCHECK_BIN '$sc_bin' is not an executable file" >&2
+      exit 125
+    fi
+    ;;
+  *)
+    if resolved=$(command -v -- "$sc_bin" 2>/dev/null) && [ -n "$resolved" ]; then
+      sc_cmd=("$resolved")
+    fi
+    ;;
+esac
+if [ ${#sc_cmd[@]} = 0 ]; then
+  if uvx_bin=$(command -v uvx 2>/dev/null) && [ -n "$uvx_bin" ]; then
+    sc_cmd=("$uvx_bin" --from shellcheck-py shellcheck)
+  else
+    echo "shellcheck-gate: no shellcheck found (install shellcheck or set SYG_SHELLCHECK_BIN)" >&2
+    exit 125
+  fi
+fi
+
+SCRIPT_DIR=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")
+REPO="$SCRIPT_DIR/../../.."
+
+if [ -z "${SYG_SHELLCHECK_GATE_INNER:-}" ]; then
+  if gl=$(command -v gate-lock 2>/dev/null) && [ -n "$gl" ]; then
+    :
+  elif [ -x "$SCRIPT_DIR/gate-lock" ]; then
+    gl="$SCRIPT_DIR/gate-lock"
+  else
+    echo "shellcheck-gate: gate-lock not found" >&2
+    exit 125
+  fi
+  export SYG_SHELLCHECK_GATE_INNER=1
+  exec "$gl" bash "$0" "$@"
+fi
+
+enum="$REPO/tests/shell-files.sh"
+if [ -n "${ROOT:-}" ]; then
+  if [ ! -f "$ROOT/tests/shell-files.sh" ]; then
+    echo "shellcheck-gate: ROOT is set but '$ROOT/tests/shell-files.sh' does not exist" >&2
+    exit 125
+  fi
+  enum="$ROOT/tests/shell-files.sh"
+fi
+
+list=$(mktemp 2>/dev/null) || { echo "shellcheck-gate: mktemp failed" >&2; exit 125; }
+trap 'rm -f "$list"' EXIT
+
+bash "$enum" >"$list"
+erc=$?
+if [ "$erc" != 0 ]; then
+  echo "shellcheck-gate: file enumeration failed (exit $erc)" >&2
+  exit 125
+fi
+
+# The pipeline runs as a background job under set -m (its own process group) so a TERM/INT/HUP to
+# this script (typically from gate-lock's own forwarding, which TERMs and waits out its child) is
+# forwarded to the whole group — xargs alone would orphan a running shellcheck — and waited out
+# before exit: the gate lock never releases while a shellcheck still runs. 128+N is the
+# conventional signal exit; without a signal, xargs 123 (findings) and 125 (an invocation killed
+# by a signal) both map to 1 so either verdict stays plain-shellcheck red.
+sig=0 child=''
+fwd() { sig=$1; [ -z "$child" ] || kill -TERM -- "-$child" 2>/dev/null; }
+trap 'fwd 15' TERM
+trap 'fwd 2' INT
+trap 'fwd 1' HUP
+set -m
+xargs -r -n "$chunk" -P 1 "${sc_cmd[@]}" "$@" <"$list" &
+child=$!
+[ "$sig" = 0 ] || kill -TERM -- "-$child" 2>/dev/null   # a signal that landed before $child was known
+while :; do
+  wait "$child"; rc=$?
+  kill -0 "$child" 2>/dev/null || break  # wait returned for a trapped signal; the child still runs
+done
+trap '' TERM INT HUP  # the child is gone: a signal must not interrupt the final wait into 128+N
+set +m
+r0=$rc; wait "$child"; rc=$?; [ "$rc" != 127 ] || rc=$r0
+if [ "$sig" != 0 ]; then
+  exit $((128 + sig))
+fi
+if [ "$rc" = 123 ] || [ "$rc" = 125 ]; then rc=1; fi
+exit "$rc"
