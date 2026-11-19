@@ -30,7 +30,8 @@
 # until a line containing the closing delimiter. An invalid `[section]` header
 # warns and closes the active section (resetting it to top-level); warnings name
 # file and line; file content is never echoed; name text is bounded (40
-# characters). Each offending
+# characters). A symlinked project file gets content-free warnings (its bytes
+# are not the repo author's). Each offending
 # line warns once on stderr and is skipped: a bad file never blocks a hook or a
 # bin, and because the loader runs per call, a bad file warns on every call (loud
 # beats silent). Duplicate keys warn (first value wins); duplicate sections
@@ -233,12 +234,12 @@ _syg_cfg_parse_value() {
   return 0
 }
 
-# _syg_cfg_parse_file <file> <user|project>: one file into _SYG_CFG_MAP (name ->
-# value), consulting _SYG_CFG_SETTABLE, _SYG_CFG_ENVONLY and _SYG_CFG_PATH.
-# Warns per offending line and skips it; never returns non-zero, never blocks
-# the caller.
+# _syg_cfg_parse_file <file> <user|project> [foreign]: one file into
+# _SYG_CFG_MAP (name -> value), consulting _SYG_CFG_SETTABLE, _SYG_CFG_ENVONLY
+# and _SYG_CFG_PATH. Warns per offending line and skips it; never returns
+# non-zero, never blocks the caller.
 _syg_cfg_parse_file() {
-  local file=$1 scope=$2
+  local file=$1 scope=$2 foreign=${3:-0}
   local -a lines=()
   if ! [ -r "$file" ] || ! mapfile -t lines 2>/dev/null <"$file"; then
     echo "seyag config: cannot read $file: skipped" >&2
@@ -246,7 +247,7 @@ _syg_cfg_parse_file() {
   fi
   local -A seen=()
   local -i n=0
-  local raw line key val name path secpath="" disp execknob skip_delim="" vstrip vrest
+  local raw line key dkey val name path secpath="" disp execknob skip_delim="" vstrip vrest
   for raw in "${lines[@]}"; do
     n+=1
     line=${raw%$'\r'}
@@ -269,8 +270,12 @@ _syg_cfg_parse_file() {
           continue
         fi
         if [ -n "${seen["s:$key"]+x}" ]; then
-          _syg_cfg_disp "$key"
-          echo "seyag config: $file: line $n: [$disp]: duplicate section: keys merge, first value per key wins" >&2
+          if [ "$foreign" != 0 ]; then
+            echo "seyag config: $file: line $n: duplicate section: keys merge, first value per key wins" >&2
+          else
+            _syg_cfg_disp "$key"
+            echo "seyag config: $file: line $n: [$disp]: duplicate section: keys merge, first value per key wins" >&2
+          fi
         fi
         seen["s:$key"]=1
         secpath=$key
@@ -293,8 +298,12 @@ _syg_cfg_parse_file() {
         skip_delim=${vstrip:0:3}
         vrest=${vstrip:3}
         case $vrest in *"$skip_delim"*) skip_delim="" ;; esac
-        _syg_cfg_disp "$key"
-        echo "seyag config: $file: line $n: $disp: unsupported value: multiline strings are not supported" >&2
+        if [ "$foreign" != 0 ]; then
+          echo "seyag config: $file: line $n: unsupported value: multiline strings are not supported" >&2
+        else
+          _syg_cfg_disp "$key"
+          echo "seyag config: $file: line $n: $disp: unsupported value: multiline strings are not supported" >&2
+        fi
         continue
         ;;
     esac
@@ -307,18 +316,30 @@ _syg_cfg_parse_file() {
     name=${path//./_}
     name=${name^^}
     if _syg_cfg_is_harness "$name"; then
-      _syg_cfg_disp "$path"
-      echo "seyag config: $file: line $n: unknown key '$disp' (not a settable seyag knob; see docs/config.md)" >&2
+      if [ "$foreign" != 0 ]; then
+        echo "seyag config: $file: line $n: unknown key (not a settable seyag knob; see docs/config.md)" >&2
+      else
+        _syg_cfg_disp "$path"
+        echo "seyag config: $file: line $n: unknown key '$disp' (not a settable seyag knob; see docs/config.md)" >&2
+      fi
       continue
     fi
     if [ -n "${_SYG_CFG_ENVONLY[$name]+x}" ]; then
-      _syg_cfg_disp "$name"
-      echo "seyag config: $file: line $n: '$disp' is environment only (not settable from a config file)" >&2
+      if [ "$foreign" != 0 ]; then
+        echo "seyag config: $file: line $n: a knob is environment only (not settable from a config file)" >&2
+      else
+        _syg_cfg_disp "$name"
+        echo "seyag config: $file: line $n: '$disp' is environment only (not settable from a config file)" >&2
+      fi
       continue
     fi
     if [ -z "${_SYG_CFG_SETTABLE[$name]+x}" ]; then
-      _syg_cfg_disp "$path"
-      echo "seyag config: $file: line $n: unknown key '$disp' (not a settable seyag knob; see docs/config.md)" >&2
+      if [ "$foreign" != 0 ]; then
+        echo "seyag config: $file: line $n: unknown key (not a settable seyag knob; see docs/config.md)" >&2
+      else
+        _syg_cfg_disp "$path"
+        echo "seyag config: $file: line $n: unknown key '$disp' (not a settable seyag knob; see docs/config.md)" >&2
+      fi
       continue
     fi
     # Project scope refuses every knob that picks a binary to run: the _CMD
@@ -328,26 +349,43 @@ _syg_cfg_parse_file() {
     case $name in *_CMD) execknob=1 ;; esac
     [ "$execknob" = 0 ] && _syg_cfg_in_project_exec "$name" && execknob=1
     if [ "$scope" = project ] && [ "$execknob" = 1 ]; then
-      _syg_cfg_disp "$name"
-      echo "seyag config: $file: line $n: '$disp' cannot be set from project scope (command-execution knob)" >&2
+      if [ "$foreign" != 0 ]; then
+        echo "seyag config: $file: line $n: a knob cannot be set from project scope (command-execution knob)" >&2
+      else
+        _syg_cfg_disp "$name"
+        echo "seyag config: $file: line $n: '$disp' cannot be set from project scope (command-execution knob)" >&2
+      fi
       continue
     fi
     if [ "$scope" = project ] && [ -n "${_SYG_CFG_PATH[$name]+x}" ]; then
-      _syg_cfg_disp "$name"
-      echo "seyag config: $file: line $n: '$disp' cannot be set from project scope (path knob)" >&2
+      if [ "$foreign" != 0 ]; then
+        echo "seyag config: $file: line $n: a knob cannot be set from project scope (path knob)" >&2
+      else
+        _syg_cfg_disp "$name"
+        echo "seyag config: $file: line $n: '$disp' cannot be set from project scope (path knob)" >&2
+      fi
       continue
     fi
     if [ -n "${seen["n:$name"]+x}" ]; then
-      _syg_cfg_disp "$key"
-      echo "seyag config: $file: line $n: $disp: duplicate key: first value wins" >&2
+      if [ "$foreign" != 0 ]; then
+        echo "seyag config: $file: line $n: duplicate key: first value wins" >&2
+      else
+        _syg_cfg_disp "$key"
+        echo "seyag config: $file: line $n: $disp: duplicate key: first value wins" >&2
+      fi
       continue
     fi
-    if ! _syg_cfg_parse_value "$val" "$key" "$file" "$n"; then
+    dkey=$key
+    [ "$foreign" != 0 ] && dkey=key
+    if ! _syg_cfg_parse_value "$val" "$dkey" "$file" "$n"; then
       continue
     fi
     seen["n:$name"]=1
     _SYG_CFG_MAP[$name]=$_SYG_CFG_VAL
   done
+  if [ -n "$skip_delim" ]; then
+    echo "seyag config: $file: line $n: unterminated multiline string: rest of file skipped" >&2
+  fi
   return 0
 }
 
@@ -412,9 +450,11 @@ syg_config_env() {
     esac
   done
 
+  local foreign=0
+  [ -L "$pfile" ] && foreign=1
   declare -gA _SYG_CFG_MAP=()
-  [ -f "$ufile" ] && _syg_cfg_parse_file "$ufile" user
-  [ -f "$pfile" ] && _syg_cfg_parse_file "$pfile" project
+  [ -f "$ufile" ] && _syg_cfg_parse_file "$ufile" user 0
+  [ -f "$pfile" ] && _syg_cfg_parse_file "$pfile" project "$foreign"
   for name in "${!_SYG_CFG_MAP[@]}"; do
     if [[ -z ${!name+x} ]]; then
       export "$name=${_SYG_CFG_MAP[$name]}"
