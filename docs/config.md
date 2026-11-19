@@ -190,11 +190,12 @@ An optional TOML file fills in knobs the environment left unset: user `${XDG_CON
 | `SYG_MERGE_REVIEW_RELEASE_REMINDER` | This PR merges into the repository's default branch — run this project's post-merge steps (version bump, release, deploy) before starting other work. | Custom reminder text shown once when merging a PR into the repository's default branch. | `hooks/pr-merge-review-check.sh` |
 | `SYG_MERGE_REVIEW_WORKFLOW` | `.github/workflows/claude-code-review.yml` | Review workflow file path whose self-edit in a PR explains a missing review comment in pr-merge-review-check. | `hooks/pr-merge-review-check.sh` |
 | `SYG_PR_BODY_BASE_REF` | `origin/main` | Git ref on which TASK-N and doc-N references in a PR body must resolve in pr-body-ref-gate. | `bin/pr-open`, `hooks/pr-body-ref-gate.sh` |
-| `SYG_PR_BODY_CLAIM_SCAN` | `1` | Set to 0 to disable pr-body-ref-gate rule 2 (uncited claim-shaped lines) while keeping tracker-reference checks. | `hooks/pr-body-ref-gate.sh` |
+| `SYG_PR_BODY_CLAIM_SCAN` | `1` | Set to 0 to disable pr-body-ref-gate rule 2 (uncited claim-shaped lines) while keeping tracker-reference checks. | `bin/pr-open`, `hooks/pr-body-ref-gate.sh` |
 | `SYG_PR_BODY_DOC_PATHS` | `tracker/docs tracker/archive/docs` | Whitespace-separated repo paths searched on SYG_PR_BODY_BASE_REF for doc-N references in pr-body-ref-gate. | `hooks/pr-body-ref-gate.sh` |
 | `SYG_PR_BODY_EXTRA_COMMANDS` | unset | Extended regex of extra command families treated like gh pr create/edit by pr-body-ref-gate. | `hooks/pr-body-ref-gate.sh` |
 | `SYG_PR_BODY_RULE_REF` | unset | Optional project rule citation printed in pr-body-ref-gate block banners. | `hooks/pr-body-ref-gate.sh` |
 | `SYG_PR_BODY_TASK_PATHS` | `tracker/tasks tracker/archive/tasks` | Whitespace-separated repo paths searched on SYG_PR_BODY_BASE_REF for TASK-N references in pr-body-ref-gate. | `hooks/pr-body-ref-gate.sh` |
+| `SYG_PR_OPEN_UPSTREAM_CHECK` | `1` | Set to 0 to skip pr-open's upstream-submission-guard --check preflight; the default judges the publish target first (PASS proceeds; BLOCK or UNKNOWN exits before gh runs). | `bin/pr-open` |
 
 ## worktrees
 
