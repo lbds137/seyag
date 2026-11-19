@@ -514,6 +514,192 @@ rm -f "$BETA/$UNKNOWN.jsonl" "$BETA/mined-corpus/corpus/$UNKNOWN.txt" "$BETA/min
 run ledger && cmp -s "$T/ledger.before" "$T/out" \
   && ok "claim canary: default ledger output is byte-identical" || bad "default ledger drifted"
 
+# 5e. asks (own projects root and archive dir, so earlier counts stay untouched)
+ASKS_DIR="$T/asks-projects"; ASKS_ARCH="$T/asks-archive"
+A_ALPHA="$ASKS_DIR/-home-deck-Projects-alpha"; A_BETA="$ASKS_DIR/-home-deck-Projects-beta"
+mkdir -p "$A_ALPHA/$A_ID/subagents" "$A_BETA" "$ASKS_ARCH"
+AUQ1=aaaaaaaa-d001-4000-8000-000000000001
+BANG1=aaaaaaaa-d002-4000-8000-000000000002
+DENY1=aaaaaaaa-d003-4000-8000-000000000003
+PROSE1=aaaaaaaa-d004-4000-8000-000000000004
+PROSE2=cccccccc-d005-4000-8000-000000000005
+PROSE3=cccccccc-d006-4000-8000-000000000006
+AUQ2=aaaaaaaa-d007-4000-8000-000000000007
+AUQ_B=aaaaaaaa-d00a-4000-8000-00000000000a
+AUQ_ERR=aaaaaaaa-d011-4000-8000-000000000011
+AUQ4=aaaaaaaa-d00b-4000-8000-00000000000b
+AUQ6=aaaaaaaa-d010-4000-8000-000000000010
+PAD620=$(printf 'x%.0s' $(seq 1 620))
+PAD390=$(printf 'context %.0s' $(seq 1 50))
+cat > "$A_ALPHA/$A_ID.jsonl" <<EOF
+{"type":"bridge-session","sessionId":"$A_ID","bridgeSessionId":"$BRIDGE"}
+{"type":"assistant","timestamp":"2026-09-24T04:30:00Z","uuid":"$AUQ1","message":{"content":[{"type":"thinking","thinking":"! rm -rf /tmp/scratch-thinking\nShould I delete thinking?"},{"type":"tool_use","id":"tu_auq1","name":"AskUserQuestion","input":{"questions":[{"question":"Deploy to production now?"},{"question":"Target railway service?"}]}}]}}
+{"type":"user","timestamp":"2026-09-24T04:30:10Z","isMeta":true,"message":{"content":"meta entry"}}
+{"type":"user","timestamp":"2026-09-24T04:30:20Z","message":{"content":"<task-notification>worker done</task-notification>"}}
+{"type":"queue-operation","operation":"enqueue","timestamp":"2026-09-24T04:30:25Z","content":"<local-command-stdout>ok</local-command-stdout>"}
+{"type":"user","timestamp":"2026-09-24T04:30:30Z","message":{"content":[{"type":"tool_result","tool_use_id":"tu_ok","content":"Permission denied by classifier in non-error result"},{"type":"tool_result","tool_use_id":"tu_err_non_deny","is_error":true,"content":"Exit code 1\nnormal failure"}]}}
+{"type":"user","timestamp":"2026-09-24T04:31:00Z","message":{"content":"yes, deploy to api"}}
+{"type":"assistant","timestamp":"2026-09-24T04:32:00Z","uuid":"$BANG1","message":{"content":[{"type":"text","text":"Run this command:\n\`! safe-worktree-clean --apply-hold plan-1\`\nShould I delete it?"}]}}
+{"type":"queue-operation","operation":"enqueue","timestamp":"2026-09-24T04:32:45Z","content":"ran it, all clean"}
+{"type":"user","timestamp":"2026-09-24T04:35:00Z","uuid":"$DENY1","message":{"content":[{"type":"tool_result","tool_use_id":"tu_d1","is_error":true,"content":"<system-reminder>remword</system-reminder>Permission to use Bash was denied by classifier: rm -rf /tmp/scratch/$A_ID/$BRIDGE"}]}}
+{"type":"user","timestamp":"2026-09-24T04:35:30Z","uuid":"aaaaaaaa-d03b-4000-8000-00000000003b","message":{"content":[{"type":"tool_result","tool_use_id":"tu_d2","is_error":true,"content":"${PAD620}Permission denied by classifier past 600 chars"}]}}
+{"type":"user","timestamp":"2026-09-24T04:36:00Z","uuid":"aaaaaaaa-d00e-4000-8000-00000000000e","message":{"content":[{"type":"tool_result","tool_use_id":"tu_av","is_error":true,"content":"Permission to use Bash was denied: classifier temporarily unavailable (rate-limited), retry"}]}}
+{"type":"user","timestamp":"2026-09-24T04:36:30Z","uuid":"aaaaaaaa-d00f-4000-8000-00000000000f","message":{"content":[{"type":"tool_result","tool_use_id":"tu_ec","is_error":true,"content":"Exit code 1\noutput mentioned classifier twice but no denial here"}]}}
+{"type":"user","timestamp":"2026-09-25T05:35:00Z","message":{"content":"back the next day"}}
+{"type":"assistant","timestamp":"2026-09-25T05:36:00Z","uuid":"$PROSE1","message":{"content":[{"type":"text","text":"Rebase complete. Shall I force-push the branch?"}]}}
+{"type":"assistant","timestamp":"2026-09-25T05:37:00Z","uuid":"aaaaaaaa-d00d-4000-8000-00000000000d","message":{"content":[{"type":"text","text":"Shall I reword the paragraph?"}]}}
+{"type":"assistant","timestamp":"2026-09-25T05:38:00Z","uuid":"aaaaaaaa-d00c-4000-8000-00000000000c","message":{"content":[{"type":"tool_use","id":"tu_auq5","name":"AskUserQuestion","input":{"question":"Deploy now?"}}]}}
+EOF
+cat > "$A_ALPHA/$A_ID/subagents/agent-sub1.jsonl" <<EOF
+{"type":"assistant","timestamp":"2026-09-24T04:40:00Z","uuid":"aaaaaaaa-d999-4000-8000-000000000999","message":{"content":[{"type":"text","text":"Can I delete the subagent worktree?"}]}}
+EOF
+cat > "$A_ALPHA/$B_ID.jsonl" <<EOF
+{"type":"bridge-session","sessionId":"$B_ID","bridgeSessionId":"$BRIDGE"}
+{"type":"assistant","timestamp":"2026-09-25T06:00:00Z","uuid":"$AUQ_B","message":{"content":[{"type":"tool_use","id":"tu_auqb","name":"AskUserQuestion","input":{"questions":[{"question":"Deploy to production now?"},{"question":"Target railway service?"}]}}]}}
+{"type":"user","timestamp":"2026-09-25T06:00:40Z","message":{"content":[{"type":"tool_result","tool_use_id":"tu_auqb","content":[{"type":"text","text":"api service"}]}]}}
+{"type":"user","timestamp":"2026-09-25T06:01:00Z","message":{"content":"continuing in new transcript"}}
+{"type":"assistant","timestamp":"2026-09-25T06:05:00Z","uuid":"$AUQ_ERR","message":{"content":[{"type":"tool_use","id":"tu_auqe","name":"AskUserQuestion","input":{"questions":[{"question":"Proceed with the retry?"}]}}]}}
+{"type":"user","timestamp":"2026-09-25T06:05:30Z","message":{"content":[{"type":"tool_result","tool_use_id":"tu_auqe","is_error":true,"content":"tool errored out"}]}}
+EOF
+cat > "$A_BETA/$C_ID.jsonl" <<EOF
+{"type":"assistant","timestamp":"2026-09-25T07:00:00Z","uuid":"$PROSE2","message":{"content":[{"type":"text","text":"${PAD390}Can I merge the docs update?"}]}}
+{"type":"user","timestamp":"2026-09-25T07:02:00Z","message":{"content":"go ahead"}}
+{"type":"assistant","timestamp":"2026-09-25T07:05:00Z","uuid":"$PROSE3","message":{"content":[{"type":"text","text":"History rewritten. Ok to force-push now?"}]}}
+{"type":"user","timestamp":"2026-09-25T07:05:30Z","message":{"content":"yes"}}
+EOF
+cat > "$ASKS_ARCH/$BRIDGE.jsonl" <<EOF
+{"type":"assistant","timestamp":"2026-09-24T04:32:00Z","uuid":"$BANG1","message":{"content":[{"type":"text","text":"Run this command:\n\`! safe-worktree-clean --apply-hold plan-1\`\nShould I delete it?"}]},"_session":"$BRIDGE","_title":"Archive Asks"}
+{"type":"assistant","_created_at":"2026-09-25T08:00:00Z","uuid":"$AUQ2","message":{"content":[{"type":"tool_use","id":"tu_auq2","name":"AskUserQuestion","input":{"questions":[{"question":"Ship it to prod env?"}]}}]},"_session":"$BRIDGE","_title":"Archive Asks"}
+{"type":"user","timestamp":"2026-09-25T08:03:00Z","uuid":"aaaaaaaa-d008-4000-8000-000000000008","message":{"content":"ship it"},"_session":"$BRIDGE","_title":"Archive Asks"}
+{"type":"assistant","timestamp":"2026-09-25T10:00:00Z","uuid":"$AUQ6","message":{"content":[{"type":"tool_use","id":"tu_auq6","name":"AskUserQuestion","input":{"questions":[{"question":"Clean the scratch dir?"}]}}]},"_session":"$BRIDGE","_title":"Archive Asks"}
+{"type":"user","timestamp":"2026-09-25T10:00:30Z","uuid":"aaaaaaaa-d03b-4000-8000-00000000003b","message":{"content":"done"},"_session":"$BRIDGE","_title":"Archive Asks"}
+{"type":"assistant","timestamp":"2026-09-25T11:00:00Z","uuid":"$AUQ4","message":{"content":[{"type":"tool_use","id":"tu_auq4","name":"AskUserQuestion","input":{"questions":[{"question":"Deploy docs now?"}]}}]},"_session":"$BRIDGE","_title":"Archive Asks"}
+{"type":"user","_created_at":"2026-09-25T11:00:30Z","message":{"content":"on it"},"_session":"$BRIDGE","_title":"Archive Asks"}
+EOF
+arun() { CLAUDE_PROJECTS_DIR="$ASKS_DIR" CLAUDE_SESSION_ARCHIVE="$ASKS_ARCH" run "$@"; }
+
+arun asks && [ "$(wc -l < "$T/out")" = 12 ] && ok "asks exits 0 and emits 12 deduped rows across local + archive" || bad "asks rows: rc=$rc $(cat "$T/out" "$T/err")"
+arun asks --rows && [ "$(wc -l < "$T/out")" = 12 ] && ok "asks --rows matches default row output" || bad "asks --rows: rc=$rc $(cat "$T/out")"
+[ "$(sed -n 1p "$T/out")" = "$(printf 'Projects-alpha\taaaaaaaa\t2026-09-24 00:30\tauq\tprod-deploy\t60\t0\ttext\tDeploy to production now? | Target railway service?')" ] \
+  && ok "asks auq row: joins questions with ' | ', classifies prod-deploy, skips non-owner entries for wait_s=60" \
+  || bad "asks row 1: $(sed -n 1p "$T/out")"
+[ "$(sed -n 2p "$T/out")" = "$(printf 'Projects-alpha\taaaaaaaa\t2026-09-24 00:32\tbang\tworktree-removal\t45\t0\ttext\tRun this command: `! safe-worktree-clean --apply-hold plan-1` Should I delete it?')" ] \
+  && ok "asks bang row: bang takes precedence over proseask on same block, pairs with mid-turn enqueue (wait_s=45)" \
+  || bad "asks row 2: $(sed -n 2p "$T/out")"
+[ "$(sed -n 3p "$T/out")" = "$(printf 'Projects-alpha\taaaaaaaa\t2026-09-24 00:35\tdeny\tscratch-delete\t90000\t1\ttext\tPermission to use Bash was denied by classifier: rm -rf /tmp/scratch/aaaaaaaa…/cse_01AAAAAAAA…')" ] \
+  && ok "asks deny row: strips reminder, masks ids, classifies scratch-delete, wait_s=90000 sets expired=1" \
+  || bad "asks row 3: $(sed -n 3p "$T/out")"
+[ "$(sed -n 4p "$T/out")" = "$(printf 'Projects-alpha\taaaaaaaa\t2026-09-25 01:36\tproseask\tforce-push\t\t1\ttext\tRebase complete. Shall I force-push the branch?')" ] \
+  && ok "asks proseask row: unanswered in same transcript has empty wait_s and expired=1 (no cross-transcript pairing)" \
+  || bad "asks row 4: $(sed -n 4p "$T/out")"
+[ "$(sed -n 5p "$T/out")" = "$(printf 'Projects-alpha\taaaaaaaa\t2026-09-25 01:38\tauq\tprod-deploy\t\t1\ttext\tDeploy now?')" ] \
+  && ok "asks auq row: input.question fallback (no questions list) emits one row with the question text" \
+  || bad "asks row 5: $(sed -n 5p "$T/out")"
+[ "$(sed -n 6p "$T/out")" = "$(printf 'Projects-alpha\taaaaaaaa\t2026-09-25 02:00\tauq\tprod-deploy\t40\t0\ttext\tDeploy to production now? | Target railway service?')" ] \
+  && ok "asks auq row: tool_result answer with the matching tool_use id resolves at the answer (wait_s=40), not the later plain owner turn (would be 60)" \
+  || bad "asks row 6: $(sed -n 6p "$T/out")"
+[ "$(sed -n 7p "$T/out")" = "$(printf 'Projects-alpha\taaaaaaaa\t2026-09-25 02:05\tauq\tother\t\t1\ttext\tProceed with the retry?')" ] \
+  && ok "asks auq row: ERROR tool_result for the same tool_use id does not resolve - the owner never answered (empty wait_s, expired=1)" \
+  || bad "asks row 7: $(sed -n 7p "$T/out")"
+_r8=$(sed -n 8p "$T/out") && _r8_pre=$(printf '%s' "$_r8" | cut -f1-8) && _r8_txt=$(printf '%s' "$_r8" | cut -f9) \
+  && [ "$_r8_pre" = "$(printf 'Projects-beta\tcccccccc\t2026-09-25 03:00\tproseask\tother\t120\t0\ttext')" ] \
+  && [ "${#_r8_txt}" = 400 ] && [ "${_r8_txt:399:1}" = "…" ] \
+  && ok "asks other category and 400-char text cut with ellipsis" \
+  || bad "asks row 8: pre=$_r8_pre len=${#_r8_txt}"
+[ "$(sed -n 9p "$T/out")" = "$(printf 'Projects-beta\tcccccccc\t2026-09-25 03:05\tproseask\tforce-push\t30\t0\ttext\tHistory rewritten. Ok to force-push now?')" ] \
+  && ok "asks second force-push proseask row (wait_s=30)" \
+  || bad "asks row 9: $(sed -n 9p "$T/out")"
+[ "$(sed -n 10p "$T/out")" = "$(printf 'claude.ai\tcse_01AAAAAAAA\t2026-09-25 04:00\tauq\tprod-deploy\t\t1\ttext\tShip it to prod env?')" ] \
+  && ok "asks archive row: _created_at-only ask carries no real clock, is never paired (empty wait_s, expired=1); archive dup of a local uuid stays suppressed" \
+  || bad "asks row 10: $(sed -n 10p "$T/out")"
+[ "$(sed -n 11p "$T/out")" = "$(printf 'claude.ai\tcse_01AAAAAAAA\t2026-09-25 06:00\tauq\tscratch-delete\t30\t0\ttext\tClean the scratch dir?')" ] \
+  && ok "asks archive row: locally-duplicated owner turn still resolves the ask (wait_s=30) while the duplicate event itself stays suppressed" \
+  || bad "asks row 11: $(sed -n 11p "$T/out")"
+[ "$(sed -n 12p "$T/out")" = "$(printf 'claude.ai\tcse_01AAAAAAAA\t2026-09-25 07:00\tauq\tprod-deploy\t\t1\ttext\tDeploy docs now?')" ] \
+  && ok "asks archive row answered by a _created_at-only owner entry: no real clock on the answer, the ask stays pending with no later real-clock event to pair (empty wait_s, expired=1; not the clock-mixed 30)" \
+  || bad "asks row 12: $(sed -n 12p "$T/out")"
+! grep -q -e "scratch-thinking" -e "delete thinking" -e "past 600 chars" -e "subagent worktree" -e "non-error result" "$T/out" \
+  && ok "asks ignores thinking blocks, >600-char deny tail, non-error tool_result, and subagent files" \
+  || bad "asks false positive: $(cat "$T/out")"
+arun asks && ! grep -q "reword the paragraph" "$T/out" \
+  && ok "asks proseask needs a destructive/cleanup/merge keyword: 'Shall I reword the paragraph?' is an ordinary question and emits no row" \
+  || bad "asks proseask false positive: $(grep 'reword' "$T/out")"
+arun asks && ! grep -q -e "temporarily unavailable" -e "mentioned classifier" "$T/out" \
+  && ok "asks deny skips classifier-availability retry noise and bare-classifier echo text" \
+  || bad "asks deny false positive: $(grep -e 'unavailable' -e 'classifier twice' "$T/out")"
+
+arun asks --raw --kinds deny && grep -q "<system-reminder>remword</system-reminder>Permission" "$T/out" \
+  && ok "asks --raw keeps <system-reminder> text while still masking ids" || bad "asks --raw: $(cat "$T/out")"
+arun asks --no-text && [ "$(wc -l < "$T/out")" = 12 ] \
+  && [ "$(sed -n 1p "$T/out")" = "$(printf 'Projects-alpha\taaaaaaaa\t2026-09-24 00:30\tauq\tprod-deploy\t60\t0\tstructural\t')" ] \
+  && [ "$(cut -f8 "$T/out" | sort -u)" = "structural" ] && [ -z "$(cut -f9 "$T/out" | tr -d '\n')" ] \
+  && ok "asks --no-text sets privacy=structural, empties text column, preserves categories" \
+  || bad "asks --no-text: $(cat "$T/out")"
+arun asks --no-archive && [ "$(wc -l < "$T/out")" = 9 ] && ! grep -q "^claude\.ai" "$T/out" \
+  && ok "asks --no-archive drops archive rows" || bad "asks --no-archive: $(cat "$T/out")"
+arun asks --project claude && [ "$(wc -l < "$T/out")" = 3 ] && grep -q "^claude\.ai	cse_01AAAAAAAA" "$T/out" \
+  && ok "asks --project claude keeps archive rows only and still dedups against full local uuid set" \
+  || bad "asks --project claude: $(cat "$T/out")"
+
+arun asks --summary && [ "$(wc -l < "$T/out")" = 9 ] \
+  && [ "$(sed -n 1p "$T/out")" = "$(printf 'kind\tcategory\tcount\tunanswered\texpired\tmedian_wait\tmax_wait')" ] \
+  && [ "$(sed -n 2p "$T/out")" = "$(printf 'auq\tprod-deploy\t5\t3\t3\t50\t60')" ] \
+  && [ "$(sed -n 3p "$T/out")" = "$(printf 'proseask\tforce-push\t2\t1\t1\t30\t30')" ] \
+  && [ "$(sed -n 4p "$T/out")" = "$(printf 'auq\tother\t1\t1\t1\t\t')" ] \
+  && [ "$(sed -n 5p "$T/out")" = "$(printf 'auq\tscratch-delete\t1\t0\t0\t30\t30')" ] \
+  && [ "$(sed -n 6p "$T/out")" = "$(printf 'bang\tworktree-removal\t1\t0\t0\t45\t45')" ] \
+  && [ "$(sed -n 7p "$T/out")" = "$(printf 'deny\tscratch-delete\t1\t0\t1\t90000\t90000')" ] \
+  && [ "$(sed -n 8p "$T/out")" = "$(printf 'proseask\tother\t1\t0\t0\t120\t120')" ] \
+  && [ "$(sed -n 9p "$T/out")" = "$(printf 'TOTAL\t\t12\t5\t6\t45\t90000')" ] \
+  && ok "asks --summary prints sorted kind*category aggregate table plus TOTAL instead of rows" \
+  || bad "asks --summary: $(cat "$T/out")"
+
+arun asks --summary --kinds proseask --category force-push --until 2026-09-25T02:00 \
+  && [ "$(sed -n 2p "$T/out")" = "$(printf 'proseask\tforce-push\t1\t1\t1\t\t')" ] \
+  && [ "$(sed -n 3p "$T/out")" = "$(printf 'TOTAL\t\t1\t1\t1\t\t')" ] \
+  && ok "asks --summary with only unanswered rows leaves median_wait/max_wait empty" \
+  || bad "asks --summary unanswered: $(cat "$T/out")"
+
+arun asks --json && python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+assert d["total"] == 12 and len(d["rows"]) == 12 and len(d["summary"]) == 7, d
+r0, r3 = d["rows"][0], d["rows"][3]
+assert r0["kind"] == "auq" and r0["category"] == "prod-deploy" and r0["wait_s"] == 60 and r0["expired"] == 0 and r0["privacy"] == "text", r0
+assert r3["wait_s"] is None and r3["expired"] == 1, r3
+s0, s1 = d["summary"][0], d["summary"][1]
+assert s0 == {"kind": "auq", "category": "prod-deploy", "count": 5, "unanswered": 3, "expired": 3, "median_wait": 50, "max_wait": 60}, s0
+assert s1 == {"kind": "proseask", "category": "force-push", "count": 2, "unanswered": 1, "expired": 1, "median_wait": 30, "max_wait": 30}, s1
+' < "$T/out" && ok "asks --json emits rows, summary and total with null for unknown wait_s" || bad "asks --json: $(cat "$T/out" "$T/err")"
+
+arun asks --json --no-text --kinds proseask --category force-push --until 2026-09-25T02:00 && python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+assert d["total"] == 1 and len(d["rows"]) == 1, d
+r = d["rows"][0]
+assert r["privacy"] == "structural" and r["text"] is None and r["wait_s"] is None, r
+s = d["summary"][0]
+assert s["median_wait"] is None and s["max_wait"] is None and s["unanswered"] == 1, s
+' < "$T/out" && ok "asks --json --no-text sets text=null and unknown median_wait/max_wait=null" || bad "asks --json --no-text: $(cat "$T/out" "$T/err")"
+
+arun asks --kinds auq,bang && [ "$(wc -l < "$T/out")" = 8 ] && ok "asks --kinds filters comma-separated kinds" || bad "asks --kinds: $(cat "$T/out")"
+arun asks --category prod-deploy,scratch-delete && [ "$(wc -l < "$T/out")" = 7 ] && ok "asks --category filters comma-separated categories" || bad "asks --category: $(cat "$T/out")"
+arun asks --max 2 && [ "$(wc -l < "$T/out")" = 2 ] && [ "$(cat "$T/err")" = "session-log: 10 more suppressed" ] \
+  && ok "asks --max caps printed rows and warns 'N more suppressed' to stderr" || bad "asks --max: out=$(wc -l < "$T/out") err=$(cat "$T/err")"
+arun asks --max 2 --summary && [ "$(wc -l < "$T/out")" = 9 ] && [ ! -s "$T/err" ] \
+  && ok "asks --max never caps --summary and emits no suppression warning" || bad "asks --max --summary: $(cat "$T/out" "$T/err")"
+arun asks --max 2 --json && python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+assert len(d["rows"]) == 2 and d["total"] == 12 and len(d["summary"]) == 7, d
+' < "$T/out" && [ "$(cat "$T/err")" = "session-log: 10 more suppressed" ] \
+  && ok "asks --max --json caps rows only, leaving summary and total uncapped" || bad "asks --max --json: $(cat "$T/out" "$T/err")"
+
+arun asks --since 2026-09-26; [ $rc = 1 ] && [ ! -s "$T/out" ] && ok "asks with no matching rows exits 1" || bad "asks empty: rc=$rc $(cat "$T/out")"
+arun asks --kinds bogus; [ $rc = 2 ] && grep -q "unknown kind" "$T/err" && ok "asks unknown --kinds exits 2" || bad "asks bogus kind: rc=$rc $(cat "$T/err")"
+arun asks --category bogus; [ $rc = 2 ] && grep -q "unknown category" "$T/err" && ok "asks unknown --category exits 2" || bad "asks bogus category: rc=$rc $(cat "$T/err")"
+arun asks --max 0; [ $rc = 2 ] && grep -q -- "--max must be at least 1" "$T/err" && ok "asks --max 0 exits 2" || bad "asks --max 0: rc=$rc $(cat "$T/err")"
+
 # 6. no full ids anywhere
 grep -q -e "$A_ID" -e "$B_ID" -e "$C_ID" -e "$D_ID" -e "$UNKNOWN" -e "$BRIDGE" -e "$CLOUD" -e "$ARCH_CLOUD" -e "$SKEW" "$ALL" \
   && bad "a full transcript or bridge id leaked: $(grep -m1 -e "$A_ID" -e "$B_ID" -e "$C_ID" -e "$D_ID" -e "$UNKNOWN" -e "$BRIDGE" -e "$CLOUD" -e "$ARCH_CLOUD" -e "$SKEW" "$ALL")" \
@@ -522,8 +708,8 @@ grep -q "cse_01AAAAAAAA" "$ALL" && ok "(leak check positive control: the short a
 grep -q "cse_01BBBBBBBB" "$ALL" && ok "(leak check positive control: the short archive cse id does appear)" || bad "archive leak check positive control"
 
 # 7. help / usage
-run --help; [ $rc = 0 ] && grep -q "^Usage:" "$T/out" && grep -q -- "--extract-due" "$T/out" && grep -q "mtime-approximated" "$T/out" \
-  && ok "--help exits 0 with Usage and --extract-due notes" || bad "--help rc=$rc"
+run --help; [ $rc = 0 ] && grep -q "^Usage:" "$T/out" && grep -q -- "--extract-due" "$T/out" && grep -q "mtime-approximated" "$T/out" && grep -q "session-log asks" "$T/out" \
+  && ok "--help exits 0 with Usage, asks and --extract-due notes" || bad "--help rc=$rc"
 run grep -h; [ $rc = 0 ] && grep -q "^Usage:" "$T/out" && ok "verb -h exits 0 with Usage" || bad "grep -h rc=$rc"
 run bogus; [ $rc = 2 ] && ok "unknown verb exits 2" || bad "unknown verb rc=$rc"
 run grep; [ $rc = 2 ] && ok "grep without a pattern exits 2" || bad "grep no pattern rc=$rc"
