@@ -117,9 +117,10 @@ SYG_GATE_LOCK_FILE	user	worktrees	/tmp/gate.lock	Lock file gate-lock holds while
 SYG_GATE_SANDBOX_ENV	user	worktrees	unset	Space-separated variable names gate-sandbox passes into the sandbox's otherwise cleared environment. Each must be a variable name, or the launch refuses with 125.
 SYG_GATE_SANDBOX_PATH	user	worktrees	prose:the caller's PATH	PATH inside gate-sandbox.
 SYG_GATE_SANDBOX_PROFILE	user	worktrees	unset	gate-sandbox profile: unset for a one-gate sandbox, worker for a whole headless worker (set by worker-sandbox).
+SYG_GATE_SANDBOX_REPO	user	worktrees	unset	Main checkout top directory CWD's tree belongs to; when set, gate-sandbox runs worker-tree-check --repo on CWD before its first host git call; worker-sandbox inherits it when its own knob is unset.
 SYG_GATE_SANDBOX_RO_BINDS	user	worktrees	unset	Colon-separated SRC or SRC->DST read-only binds added to gate-sandbox; entries resolving inside the worktree are refused.
 SYG_GATE_SANDBOX_SCRATCH	user	worktrees	unset	Worker profile only: host directory bound writable at ~/.claude inside the sandbox (required).
-SYG_GATE_SANDBOX_TOOLCHAIN	user	worktrees	$HOME/.local/bin/mise:$HOME/.local/share/mise:$HOME/.local/state/mise:$HOME/.config/mise:$HOME/.local/share/pnpm	Colon-separated toolchain paths bound read-only (absent ones skipped; one inside the worktree refuses, 125); empty for none. Each widens what the sandbox reads ($HOME undoes the hidden home).
+SYG_GATE_SANDBOX_TOOLCHAIN	user	worktrees	$HOME/.local/bin/mise:$HOME/.local/share/mise:$HOME/.local/state/mise:$HOME/.config/mise:$HOME/.local/share/pnpm	Colon-separated read-only toolchain paths; entries or non-hidden child symlinks (prefix inside or resolving in/through the worktree or cyclic/unresolvable) refuse 125; absent-outside skips. $HOME widens; empty: none.
 SYG_GATE_SANDBOX_TREE	user	worktrees	rw	Worker profile only: rw or ro mount of the worktree.
 SYG_GATE_SANDBOX_WALL	user	worktrees	unset	Worker profile only: extra space-separated CIDRs or addresses gate-sandbox walls off with unreachable routes, on top of every host address and every route (any routing table) through an interface with no default route.
 SYG_GH_WRAPPERS	user	guards	unset	Whitespace-separated wrapper command prefix tokens scanned as gh invocations by session-url-gate and private-term-guard.
@@ -224,6 +225,7 @@ SYG_WEEK_BURN_RATE	user	usage	unset	Override burn rate in %/h (number > 0) for w
 SYG_WORKER_SANDBOX_CLAUDE	internal	worktrees	prose:claude on PATH	Test seam naming the program worker-sandbox binds and runs as claude.
 SYG_WORKER_SANDBOX_ENV	user	worktrees	unset	Extra space-separated variable names worker-sandbox passes into the worker (DISABLE_AUTOUPDATER always passes).
 SYG_WORKER_SANDBOX_PATH	user	worktrees	$HOME/.local/bin:$HOME/.local/share/mise/shims:/usr/bin:/bin	Inner PATH tail worker-sandbox appends after its bin directory; empty means the default.
+SYG_WORKER_SANDBOX_REPO	user	worktrees	unset	Main checkout top directory the worker's tree belongs to; when set, worker-sandbox passes --repo to worker-tree-check and exports SYG_GATE_SANDBOX_REPO (refusal or missing directory exits 125).
 SYG_WORKER_SANDBOX_RO_BINDS	user	worktrees	unset	More read-only binds for the worker, in SYG_GATE_SANDBOX_RO_BINDS' format.
 SYG_WORKER_SANDBOX_SCRATCH	user	worktrees	unset	Host directory worker-sandbox binds writable at ~/.claude, where claude keeps its transcripts (required; the caller copies out what it wants and deletes it).
 SYG_WORKER_SANDBOX_TREE	user	worktrees	rw	rw or ro mount of the worker's tree.

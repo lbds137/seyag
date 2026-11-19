@@ -15,8 +15,11 @@ Usage: worker-sandbox --settings FILE [CLAUDE ARG...]   (what a launcher runs in
 Runs from the current directory, which must be in a git tree. worker-tree-check vets that tree's
 .git first (refusal = 125): without --repo it refuses a linked worktree holding any nested .git
 (submodules, editable git checkouts) and a gitdir under SYG_WORKER_TREE_CHECK_UNTRUSTED (default
-/tmp:/var/tmp:/dev/shm; set it for hermetic fixtures under /tmp). FILE (the launcher's settings overlay) is bound read-only at
-/run/worker/settings.json, so the key never appears in an argv.
+/tmp:/var/tmp:/dev/shm; set it for hermetic fixtures under /tmp). Without SYG_WORKER_SANDBOX_REPO,
+a sibling worktree whose .git was replaced by a repo of its own passes that check, so a launcher
+that knows the main checkout sets it (passed as --repo and exported as SYG_GATE_SANDBOX_REPO).
+FILE (the launcher's settings overlay) is bound read-only at /run/worker/settings.json, so the key
+never appears in an argv.
 
 Inside, claude runs in bypass mode with: / read-only; /run and $HOME empty; the toolchain, claude
 and gate-lock read-only; the tree per SYG_WORKER_SANDBOX_TREE, its untracked .env-style and key
@@ -37,6 +40,13 @@ Environment:
   SYG_WORKER_SANDBOX_TREE     rw (default) or ro
   SYG_WORKER_SANDBOX_SCRATCH  host dir bound writable at ~/.claude, where claude keeps its transcripts
                           (required; the caller copies out what it wants and deletes it)
+  SYG_WORKER_SANDBOX_REPO     main checkout top directory this tree belongs to (anchors worker-tree-check
+                          with --repo and exports SYG_GATE_SANDBOX_REPO; default unset). The value must
+                          come from the launcher's own record of the main checkout, not from running git
+                          on the tree (git on a swapped sibling answers with the sibling itself, so
+                          tree == repo and the check passes); with the knob unset, an inherited
+                          SYG_GATE_SANDBOX_REPO anchors worker-sandbox's own check too (so no host git
+                          runs unanchored)
   SYG_WORKER_SANDBOX_CLAUDE   the program bound as claude (test seam; default: claude on PATH)
   SYG_WORKER_SANDBOX_RO_BINDS more read-only binds, in SYG_GATE_SANDBOX_RO_BINDS' format
   SYG_WORKER_SANDBOX_ENV  extra space-separated variable names passed into the worker (default none;
@@ -70,9 +80,10 @@ scratch=${SYG_WORKER_SANDBOX_SCRATCH:-}
 claude_src=${SYG_WORKER_SANDBOX_CLAUDE:-$(command -v claude)}
 claude_real=$(realpath -e -- "$claude_src" 2>/dev/null) \
   || { echo "$me: claude not found (${claude_src:-not on PATH})" >&2; exit 125; }
-# SYG_GATE_SANDBOX_RO_BINDS splits on colons, so a path holding one would bind the wrong thing
+# SYG_GATE_SANDBOX_RO_BINDS splits on colons and on the first '->', so a path holding either would
+# bind the wrong thing
 for p in "$settings" "$claude_real" "$bindir"; do
-  case $p in *:*) echo "$me: a path with a colon can't be bound: $p" >&2; exit 125 ;; esac
+  case $p in *:*|*'->'*) echo "$me: a path with a colon or '->' can't be bound: $p" >&2; exit 125 ;; esac
 done
 
 # At its real path: gate-sandbox resolves a bind's destination on the host, so ~/.local/bin/claude
@@ -83,8 +94,22 @@ binds=$claude_real
 # bind from inside the tree
 worker_bin=/run/worker/bin
 # A worker wrote this tree: vet its .git before any host git runs on it (here, and in gate-sandbox)
-"$bindir/worker-tree-check" "$PWD" \
-  || { echo "$me: worker-tree-check refused $PWD; not running git on it" >&2; exit 125; }
+if [ -n "${SYG_WORKER_SANDBOX_REPO:-}" ]; then
+  anchor=$SYG_WORKER_SANDBOX_REPO anchor_src=SYG_WORKER_SANDBOX_REPO
+else
+  anchor=${SYG_GATE_SANDBOX_REPO:-} anchor_src=SYG_GATE_SANDBOX_REPO
+fi
+if [ -n "$anchor" ]; then
+  anchor_dir=$(realpath -e -- "$anchor" 2>/dev/null) && [ -d "$anchor_dir" ] \
+    || { echo "$me: $anchor_src is not a directory: $anchor" >&2; exit 125; }
+  anchor=$anchor_dir
+  "$bindir/worker-tree-check" --repo "$anchor" "$PWD" \
+    || { echo "$me: worker-tree-check refused $PWD; not running git on it" >&2; exit 125; }
+  export SYG_GATE_SANDBOX_REPO=$anchor
+else
+  "$bindir/worker-tree-check" "$PWD" \
+    || { echo "$me: worker-tree-check refused $PWD; not running git on it" >&2; exit 125; }
+fi
 top=$(git rev-parse --show-toplevel 2>/dev/null) \
   || { echo "$me: $PWD is not in a git tree" >&2; exit 125; }
 case $bindir/ in

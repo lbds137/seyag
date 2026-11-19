@@ -89,11 +89,13 @@ refuse() { # REASON [WHAT TO LOOK AT AND HOW TO RESTORE, default: the tree's own
   } >&2
   exit 1
 }
-# A pointer file's value resolved against the directory holding it; fails on a symlink, a non-file
-# or an empty file. Fails rather than refuses: it runs in a command substitution, and a refuse in
-# there would print and exit only the subshell.
+# A pointer file's value resolved against the directory holding it; fails on a symlink, a non-file,
+# an unreadable, oversized or empty file, or a NUL byte. Fails rather than refuses: it runs in a
+# command substitution, and a refuse in there would print and exit only the subshell.
 pointer() { # FILE
-  [ -f "$1" ] && [ ! -L "$1" ] || return 1
+  [ -f "$1" ] && [ ! -L "$1" ] && [ -r "$1" ] || return 1
+  [ "$(wc -c <"$1")" -le 4096 ] || return 1
+  [ "$(head -c 4096 -- "$1" | tr -d '\0' | wc -c)" = "$(head -c 4096 -- "$1" | wc -c)" ] || return 1
   local v
   IFS= read -r v <"$1" || [ -n "$v" ] || return 1
   case $v in /*) ;; *) v=$(dirname -- "$1")/$v ;; esac
@@ -173,6 +175,15 @@ case $p in */.|*/..|.|..) refuse "its gitdir path ends in . or .." ;; esac
 wgit=$(realpath -e -- "$p" 2>/dev/null) && [ -d "$wgit" ] || refuse "its gitdir does not exist"
 [ "$(basename -- "$(dirname -- "$wgit")")" = worktrees ] || refuse "its gitdir is not a worktrees/ entry"
 common=$(dirname -- "$(dirname -- "$wgit")")
+for pf in commondir gitdir; do
+  if [ -f "$wgit/$pf" ] && [ ! -L "$wgit/$pf" ]; then
+    [ -r "$wgit/$pf" ] || refuse "the entry's $pf is unreadable"
+    [ "$(wc -c <"$wgit/$pf")" -le 4096 ] || refuse "the entry's $pf is over 4096 bytes"
+    if [ "$(head -c 4096 -- "$wgit/$pf" | tr -d '\0' | wc -c)" != "$(head -c 4096 -- "$wgit/$pf" | wc -c)" ]; then
+      refuse "the entry's $pf holds a NUL byte"
+    fi
+  fi
+done
 v=$(pointer "$wgit/commondir") && [ "$v" = "$common" ] || refuse "the entry's commondir does not point back at $common"
 v=$(pointer "$wgit/gitdir") && [ "$v" = "$gf" ] || refuse "the entry's gitdir does not point back at this tree"
 ! under "$common" "$tree" || refuse "its gitdir is inside the tree"

@@ -16,8 +16,11 @@
 # mounts, untracked secret-shaped files masked (by name only, at any depth; node_modules, .git,
 # site-packages, dist-packages, .tox, .nox and target pruned), SYG_GATE_SANDBOX_PATH as the inner
 # PATH.
-# gate-sandbox runs host git on CWD's tree; for a tree a worker wrote, run `worker-tree-check`
-# first (worker-sandbox does).
+# gate-sandbox runs host git on CWD's tree; set SYG_GATE_SANDBOX_REPO to the main checkout's top to
+# make it run `worker-tree-check --repo` before git (without it, a sibling worktree whose .git was
+# replaced by a repo of its own passes a no-flag worker-tree-check; worker-sandbox forwards
+# SYG_WORKER_SANDBOX_REPO here). A bare-repo-plus-worktrees layout cannot be anchored (--repo
+# requires the common dir to be MAIN_TOP/.git).
 set -u
 me=gate-sandbox
 
@@ -70,8 +73,8 @@ compute_wall() {
       for (k = 1; k <= c; k++) if (!(P[k] in lan)) print P[k]
     }') || { echo "$me: can't read the host's routes (parsing failed); refusing" >&2; exit 125; }
   read -r -a extra <<<"${SYG_GATE_SANDBOX_WALL:-}"
-  # a keyword like `default` would route-replace everything unreachable: only addresses and CIDRs
-  # pass (the prefix length's range is the kernel's to judge)
+  # a keyword like `default` would route-replace everything unreachable: only address/CIDR-shaped
+  # tokens pass here (the kernel judges prefix length and malformed addresses when adding the route)
   for e in ${extra[@]+"${extra[@]}"}; do
     if [[ $e == *:* ]]; then
       [[ $e =~ ^[0-9A-Fa-f:.]+(/[0-9]{1,3})?$ ]]
@@ -95,6 +98,13 @@ esac
 [ $# -ge 3 ] && [ "$2" = -- ] || { echo "usage: $me CWD -- CMD [ARG...]" >&2; exit 125; }
 cwd=$(realpath -e -- "$1") || { echo "$me: no such directory: $1" >&2; exit 125; }
 shift 2
+if [ -n "${SYG_GATE_SANDBOX_REPO:-}" ]; then
+  repo=$(realpath -e -- "$SYG_GATE_SANDBOX_REPO" 2>/dev/null) && [ -d "$repo" ] \
+    || { echo "$me: SYG_GATE_SANDBOX_REPO is not a directory: $SYG_GATE_SANDBOX_REPO" >&2; exit 125; }
+  bindir=$(dirname "$(realpath "$0")")
+  "$bindir/worker-tree-check" --repo "$repo" "$cwd" \
+    || { echo "$me: worker-tree-check refused $cwd; not running git on it" >&2; exit 125; }
+fi
 wt=$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null) \
   || { echo "$me: $cwd is not in a git worktree" >&2; exit 125; }
 common=$(git -C "$cwd" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) \
@@ -128,17 +138,19 @@ case $profile in
     # A host whose routes can't be read refuses (125) rather than launch with a smaller wall.
     # Not walled: the default interface's own routes (the LAN, and a full-tunnel VPN's own subnet
     # when the VPN carries the default route; a subnet a default interface is also connected to
-    # counts as the LAN), a userspace VPN with no interface, AF_VSOCK, IPv6 link-local (fe80::/10,
-    # measured unreachable through pasta; IPv4 169.254/16 on a non-default interface is walled like
-    # any other route) and anything the host gains after launch.
+    # counts as the LAN), a userspace VPN with no interface, AF_VSOCK, IPv6 link-local routes
+    # (fe80::/10, measured unreachable through pasta; the host's own link-local addresses are
+    # walled as /128 like every other host address, and IPv4 169.254/16 on a non-default interface
+    # is walled like any other route) and anything the host gains after launch.
     # A dev with a default route in ANY table counts as a default interface (its routes stay open),
     # which is broader than full-tunnel: a split-tunnel client whose default sits only in a policy
     # table reached by marked traffic stays open too. Deliberate: which table a packet uses depends
     # on marks and rules the host can't evaluate statically.
     # Pasta picks its interface itself, so a default route that changes between this query and
     # pasta's start can shift which subnet counts as the LAN. Routes go in with replace, so a
-    # duplicate entry is harmless; a failed one (kernel-invalid, say /33) fails the launch with 125;
-    # an entry that isn't an address or CIDR is refused before that.
+    # duplicate entry is harmless; a keyword or non-address is refused before launch, while a
+    # malformed address or prefix length (say `:::` or `/33`) that passes the shape check fails the
+    # launch with 125 when its route is added (`--print-wall` prints it as given).
     wall=()
     wall_out=$(compute_wall) || exit 125
     while IFS= read -r pfx; do
@@ -175,12 +187,57 @@ for v in ${envnames[@]+"${envnames[@]}"}; do
 done
 # the toolchain, read-only (a symlinked config is bound at its target too)
 # SYG_GATE_SANDBOX_TOOLCHAIN: colon-separated paths; unset = mise and the pnpm store, empty = none.
-# A missing entry is skipped (the default list names optional paths); one resolving inside the
-# worktree is refused (the wt stays the only writable tree). The source is bound at its resolved
+# A missing entry is skipped (the default list names optional paths); one inside or resolving inside
+# the worktree is refused (the wt stays the only writable tree). The source is bound at its resolved
 # path, the destination is the configured one, so a symlinked entry is reachable where it is named.
+# Walk PATH_TO_CHECK hop by hop (no realpath in the loop) and refuse with 125 naming ENTRY if any
+# lexical or symlink-hop prefix enters $wt, or if a prefix cannot be resolved (cycle or non-ENOENT
+# readlink/traversal failure). An absent component drains the remaining suffix lexically.
+walk_toolchain_path() { # PATH_TO_CHECK ENTRY
+  local rest=$1 entry=$2 acc='' part target parent resolved=0 absent=0 hops=0
+  case $rest in /*) ;; *) rest=$PWD/$rest ;; esac
+  while [ -n "$rest" ]; do
+    part=${rest%%/*}
+    if [ "$part" = "$rest" ]; then rest=; else rest=${rest#*/}; fi
+    [ -n "$part" ] || continue
+    if [ "$absent" = 0 ]; then
+      parent=${acc:-/}
+      [ -d "$parent" ] && [ -x "$parent" ] \
+        || { echo "$me: SYG_GATE_SANDBOX_TOOLCHAIN: refused: unreadable: $entry" >&2; exit 125; }
+    fi
+    case $part in
+      .)  resolved=1; continue ;;
+      ..) resolved=1; acc=${acc%/*}; continue ;;
+    esac
+    acc=$acc/$part
+    case $acc in "$wt"|"$wt"/*)
+      if [ "$resolved" = 0 ]; then
+        echo "$me: SYG_GATE_SANDBOX_TOOLCHAIN: refused: inside the worktree: $entry" >&2
+      else
+        echo "$me: SYG_GATE_SANDBOX_TOOLCHAIN: refused: resolves inside the worktree: $entry" >&2
+      fi
+      exit 125 ;;
+    esac
+    [ "$absent" = 0 ] || continue
+    if [ -L "$acc" ]; then
+      hops=$((hops + 1))
+      [ "$hops" -le 40 ] && target=$(readlink -- "$acc" 2>/dev/null) && [ -n "$target" ] \
+        || { echo "$me: SYG_GATE_SANDBOX_TOOLCHAIN: refused: unreadable: $entry" >&2; exit 125; }
+      resolved=1
+      case $target in
+        /*) acc=; rest="$target${rest:+/$rest}" ;;
+        *)  acc=${acc%/*}; rest="$target${rest:+/$rest}" ;;
+      esac
+    elif [ ! -e "$acc" ]; then
+      absent=1
+    fi
+  done
+}
 IFS=: read -r -a toolchain <<<"${SYG_GATE_SANDBOX_TOOLCHAIN-$HOME/.local/bin/mise:$HOME/.local/share/mise:$HOME/.local/state/mise:$HOME/.config/mise:$HOME/.local/share/pnpm}"
 for p in "${toolchain[@]}"; do
   [ -n "$p" ] || continue
+  # every prefix of the entry, lexical or through a symlink hop, must stay out of the worktree
+  walk_toolchain_path "$p" "$p"
   rp=$(realpath -e -- "$p" 2>/dev/null) || continue
   case $rp in "$wt"|"$wt"/*)
     echo "$me: SYG_GATE_SANDBOX_TOOLCHAIN: refused: resolves inside the worktree: $p" >&2; exit 125 ;;
@@ -188,8 +245,13 @@ for p in "${toolchain[@]}"; do
   args+=(--ro-bind "$rp" "$p")
   for f in "$p"/*; do
     [ -L "$f" ] || continue
+    walk_toolchain_path "$f" "$p"
     t=$(realpath -e -- "$f" 2>/dev/null) || continue
-    case $t in "$wt"|"$wt"/*) ;; "$HOME"/*) args+=(--ro-bind "$t" "$t") ;; esac
+    case $t in
+      "$wt"|"$wt"/*)
+        echo "$me: SYG_GATE_SANDBOX_TOOLCHAIN: refused: resolves inside the worktree: $p" >&2; exit 125 ;;
+      "$HOME"/*) args+=(--ro-bind "$t" "$t") ;;
+    esac
   done
 done
 # the worktree first, then .git read-only over it: bwrap mounts in order, so the reverse would
@@ -250,6 +312,7 @@ if [ -L "$nm" ] && t=$(realpath -e -- "$nm" 2>/dev/null) \
          # changes.
          if mkdir -p -- "$t/.vite-temp" 2>/dev/null \
             && vite_tmp=$(mktemp -d "${TMPDIR:-/tmp}/gate-sandbox-vitetemp.XXXXXX"); then
+           trap 'rm -rf -- "$vite_tmp"' EXIT
            args+=(--bind "$vite_tmp" "$t/.vite-temp")
            have_vite_tmp=1
          fi
@@ -289,7 +352,6 @@ for v in LC_ALL LANGUAGE SYG_GATE_SANDBOX_RO_BINDS ${envnames[@]+"${envnames[@]}
 done
 [ "$profile" != worker ] || args+=(--setenv SYG_GATE_LOCK_FILE /run/worker/gate.lock)
 if [ "${have_vite_tmp:-}" = 1 ]; then
-  trap 'rm -rf -- "$vite_tmp"' EXIT
   "${launcher[@]}" bwrap "${args[@]}" -- "$@"
 else
   exec "${launcher[@]}" bwrap "${args[@]}" -- "$@"
