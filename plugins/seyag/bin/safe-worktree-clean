@@ -1629,7 +1629,10 @@ backup_tree() {
   # The per-worktree ref namespaces die with the tree; the hint stands alone (reflog.pack is
   # omitted when every tip sits on <base>, yet the refs still need recreating).
   if [ -n "$wt_refs" ]; then
-    restore_git+=$'\n'"  # refs/worktree/*, refs/bisect/* and refs/rewritten/* die with the tree; each is recreated below under refs/seyag-restored/<plan-id>/, a neutral namespace — the original names are live git state (a verbatim refs/bisect/* reads as an in-progress bisect; refs/rewritten/* feed rebase internals), and the mapping is lossless: re-prefix refs/ to a restored name (refs/seyag-restored/<plan-id>/worktree/keep came from refs/worktree/keep); changes.txt (=== Per-worktree refs ===) records the original <sha> <refname> pairs."
+    restore_git+=$'\n'"  # refs/worktree/*, refs/bisect/* and refs/rewritten/* die with the tree; each is recreated below"
+    restore_git+=$'\n'"  # under refs/seyag-restored/$APPLY_HOLD/<refname minus refs/> — a neutral namespace: the original"
+    restore_git+=$'\n'"  # names are live git state (restoring verbatim could hijack bisect or rebase internals). Re-prefix"
+    restore_git+=$'\n'"  # refs/ for the original name; changes.txt (=== Per-worktree refs ===) records the <sha> <refname>."
     while IFS=' ' read -r wt_sha wt_ref; do
       [ -n "$wt_sha" ] || continue
       printf -v q_restored '%q' "refs/seyag-restored/$APPLY_HOLD/${wt_ref#refs/}"

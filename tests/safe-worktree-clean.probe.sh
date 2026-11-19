@@ -1954,9 +1954,10 @@ if [ "$rc_p31a" -eq 0 ] && [ ! -e "$SW31W/wt31k" ] && [ ! -e "$SW31W/wt31s" ] &&
   && eval "$restore_p31" \
   && [ "$(git -C "$SW31" rev-parse -q --verify "refs/seyag-restored/$PLAN_P31/worktree/keep" 2>/dev/null)" = "$C_P31" ] \
   && ! git -C "$SW31" rev-parse -q --verify refs/worktree/keep >/dev/null 2>&1 \
+  && ! grep -qE 'update-ref refs/(worktree|bisect|rewritten)/' "$BK31/README.txt" \
   && git -C "$T/p31-clone" index-pack --stdin --fix-thin < "$BK31/reflog.pack" >/dev/null 2>&1 \
   && git -C "$T/p31-clone" cat-file -e "$C_P31^{commit}" 2>/dev/null; then
-  ok "P31(ii): --apply-hold packs refs/worktree/keep commit in reflog.pack, lists it in changes.txt, and the README's update-ref line restores it as refs/seyag-restored/<plan>/worktree/keep (no verbatim refs/worktree/keep)"
+  ok "P31(ii): --apply-hold packs refs/worktree/keep commit in reflog.pack, lists it in changes.txt, and the README's update-ref line restores it as refs/seyag-restored/<plan>/worktree/keep (no verbatim refs/worktree/keep, and no update-ref line names a verbatim per-worktree ref)"
 else
   bad "P31(ii): worktree-refs backup (rc=$rc_p31a, dir='$BK31', cmd='$restore_p31', got='$(git -C "$SW31" rev-parse -q --verify "refs/seyag-restored/$PLAN_P31/worktree/keep" 2>/dev/null)', want='$C_P31')"
 fi
@@ -2269,9 +2270,10 @@ if [ "$rc_p37a" -eq 0 ] && [ ! -e "$SW37W/wt37done" ] && [ -f "$BK37/reflog.pack
   && eval "$restore_p37" \
   && [ "$(git -C "$SW37" rev-parse -q --verify "refs/seyag-restored/$PLAN_P37/bisect/bad" 2>/dev/null)" = "$DONE37" ] \
   && ! git -C "$SW37" rev-parse -q --verify refs/bisect/bad >/dev/null 2>&1 \
+  && ! grep -qE 'update-ref refs/(worktree|bisect|rewritten)/' "$BK37/README.txt" \
   && git -C "$T/p37-clone" index-pack --stdin --fix-thin < "$BK37/reflog.pack" >/dev/null 2>&1 \
   && git -C "$T/p37-clone" cat-file -e "$DONE37^{commit}" 2>/dev/null; then
-  ok "P37(iv): --apply-hold backs up wt37done, lists both refs/bisect refs in changes.txt, and the README's update-ref line restores refs/bisect/bad as refs/seyag-restored/<plan>/bisect/bad (no verbatim refs/bisect/bad), the bad tip into a scratch clone"
+  ok "P37(iv): --apply-hold backs up wt37done, lists both refs/bisect refs in changes.txt, and the README's update-ref line restores refs/bisect/bad as refs/seyag-restored/<plan>/bisect/bad (no verbatim refs/bisect/bad, and no update-ref line names a verbatim per-worktree ref), the bad tip into a scratch clone"
 else
   bad "P37(iv): bisect backup (rc=$rc_p37a, dir='$BK37', good='$GOOD37', cmd='$restore_p37', got='$(git -C "$SW37" rev-parse -q --verify "refs/seyag-restored/$PLAN_P37/bisect/bad" 2>/dev/null)', want='$DONE37')"
 fi
