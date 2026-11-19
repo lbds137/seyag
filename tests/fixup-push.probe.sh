@@ -118,6 +118,17 @@ case $CMD in
     fi
     printf '%s\n' "$pr_count" > "$WORK/pr_view.count"
 
+    if [ "$pr_count" -ge 2 ] && [ -n "${FAKE_DIRTY_ON2:-}" ]; then
+      case $FAKE_DIRTY_ON2 in
+        staged)
+          printf 'race-dirty\n' >> "$WORK/clone/f1.txt"
+          git -C "$WORK/clone" add f1.txt ;;
+        unstaged)
+          printf 'race-dirty\n' >> "$WORK/clone/f1.txt" ;;
+        *) echo "gh shim: bad FAKE_DIRTY_ON2 value: $FAKE_DIRTY_ON2" >&2; exit 64 ;;
+      esac
+    fi
+
     effective_state="${FAKE_PR_STATE:-OPEN}"
     if [ -n "${FAKE_PR_CLOSE_ON:-}" ] && [ "$pr_count" -ge "$FAKE_PR_CLOSE_ON" ]; then
       effective_state="CLOSED"
@@ -254,7 +265,7 @@ git -C "$CLONE" push -q -u origin feat
 FEAT_INIT=$(git -C "$CLONE" rev-parse HEAD)
 
 reset_fixture() {
-  unset FAKE_DEFAULT FAKE_PR_STATE FAKE_PR_HEAD FAKE_CROSS FAKE_PROTECTED FAKE_RULES FAKE_GH_FAIL FAKE_HEAD_REPO FAKE_EXPECT_BRANCH FAKE_NWO FAKE_PR_CLOSE_ON FAKE_PR_COUNTER_FILE FAKE_PR_BASE FAKE_PR_BASE_ON2 FAKE_PROTECTED_ON2 FAKE_CHILD_PRS
+  unset FAKE_DEFAULT FAKE_PR_STATE FAKE_PR_HEAD FAKE_CROSS FAKE_PROTECTED FAKE_RULES FAKE_GH_FAIL FAKE_HEAD_REPO FAKE_EXPECT_BRANCH FAKE_NWO FAKE_PR_CLOSE_ON FAKE_PR_COUNTER_FILE FAKE_PR_BASE FAKE_PR_BASE_ON2 FAKE_PROTECTED_ON2 FAKE_CHILD_PRS FAKE_DIRTY_ON2
   rm -f "$CLONE/.git/hooks/pre-push" "$CLONE/.git/hooks/reference-transaction" "$WORK/race.sentinel" "$WORK/pr_counter" "$WORK/pr_view.count" "$WORK/branches_api.count"
   git -C "$CLONE" update-index --no-skip-worktree f1.txt 2>/dev/null || true
   git -C "$CLONE" update-index --no-assume-unchanged f1.txt 2>/dev/null || true
@@ -1221,5 +1232,51 @@ git -C "$CLONE" worktree remove --force "$aq_wt" >/dev/null 2>&1 || true
   || bad "aq. premise failed (stable: $pre_stable vs $post_stable, verbatim: $pre_verb vs $post_verb)"
 
 assert_refusal "aq. whitespace change across rebase" "rebase proof failed" run_fp --onto-base
+
+# --- Round 7 new cases ar-au ---
+
+# ar. Staged change lands on the second pr view: refuse "worktree changed during the run".
+reset_fixture
+export FAKE_DIRTY_ON2=staged
+assert_refusal "ar. staged change on 2nd pr view" "worktree changed during the run" run_fp
+unset FAKE_DIRTY_ON2
+
+# as. Unstaged change lands on the second pr view: refuse "worktree changed during the run".
+reset_fixture
+export FAKE_DIRTY_ON2=unstaged
+assert_refusal "as. unstaged change on 2nd pr view" "worktree changed during the run" run_fp
+unset FAKE_DIRTY_ON2
+
+# at. Empty commit in range: refuse "rebase proof failed".
+reset_fixture
+git -C "$CLONE" reset -q --hard HEAD~1
+git -C "$CLONE" push -q --force origin feat
+git -C "$CLONE" commit -q --allow-empty -m "empty commit in range"
+git -C "$CLONE" push -q origin feat
+at_empty_pid=$(git -C "$CLONE" -c diff.noprefix=false -c diff.mnemonicPrefix=false -c diff.relative=false show --ignore-submodules=none --no-ext-diff --no-color --no-textconv --no-renames -U3 --binary --full-index --format= HEAD | git patch-id --verbatim | cut -d' ' -f1)
+[ -z "$at_empty_pid" ] \
+  && ok "at. premise: empty commit has empty verbatim patch-id" \
+  || bad "at. premise failed (patch-id: $at_empty_pid)"
+git -C "$CLONE" checkout -q main
+printf 'at-main\n' > "$CLONE/at-main.txt"
+git -C "$CLONE" add at-main.txt
+git -C "$CLONE" commit -qm "main advance at"
+git -C "$CLONE" push -q origin main
+git -C "$CLONE" checkout -q feat
+assert_refusal "at. empty commit in range" "rebase proof failed" run_fp --onto-base
+
+# au. Untracked-file collision across --onto-base checkout: refuse with collision hint and leave untracked file intact.
+reset_fixture
+git -C "$CLONE" checkout -q main
+printf 'from-main\n' > "$CLONE/collide.txt"
+git -C "$CLONE" add collide.txt
+git -C "$CLONE" commit -qm "main adds collide.txt"
+git -C "$CLONE" push -q origin main
+git -C "$CLONE" checkout -q feat
+printf 'collide-local\n' > "$CLONE/collide.txt"
+assert_refusal "au. untracked collision" "checkout of the rewritten branch failed (an untracked file colliding with the rewritten tree is the usual cause)" run_fp --onto-base
+[ "$(cat "$CLONE/collide.txt")" = "collide-local" ] \
+  && ok "au. untracked collide.txt survived untouched" \
+  || bad "au. collide.txt altered or missing"
 
 exit $fail
