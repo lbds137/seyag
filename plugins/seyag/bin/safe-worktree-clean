@@ -112,7 +112,10 @@
 # reflogs or tips not in the bundle or on <base>, omitted when none), `uncommitted.patch`
 # (`git diff --binary HEAD`), `staged.patch` (`git diff --binary --cached HEAD`), `changes.txt`
 # (including reflog/per-worktree-ref-only commits, the per-worktree refs, and ignored entries
-# excluded as cache/regenerable), and `README.txt`,
+# excluded as cache/regenerable), and `README.txt`, whose restore hint recreates each
+# backed-up per-worktree ref (`refs/worktree/*`, `refs/bisect/*`, `refs/rewritten/*`) under
+# `refs/seyag-restored/<plan id>/<refname minus refs/>` (a neutral namespace; the originals
+# stay recorded in `changes.txt`),
 # verified with `tar --quoting-style=literal -tzf`, `git bundle verify`, and `git index-pack` and
 # re-checked for cwd, state, and lock changes before unlock / `git worktree remove --force` /
 # `git branch -D`.
@@ -1387,7 +1390,7 @@ BK_DIR=""
 backup_tree() {
   local k=$2 t=${WT_PATH[$1]} b=${WT_BRANCH[$1]} head=${WT_HEAD[$1]}
   local repo_base tree_base main_sha err entry p q rv commits_out status_txt head_sha bundle_ref
-  local q_main q_bundle q_ref q_reflog q_tgz q_staged restore_git tar_list t_entry reflog_tips="" reflog_only="" reflog_lines="" wt_refs="" wt_sha wt_ref
+  local q_main q_bundle q_ref q_reflog q_tgz q_staged q_restored restore_git tar_list t_entry reflog_tips="" reflog_only="" reflog_lines="" wt_refs="" wt_sha wt_ref
   local -a ig_status=() tar_excludes=() excluded_entries=() top_entries=() expected_in_tar=() diff_head=()
   local -A in_tar=()
   repo_base=$(basename -- "$MAIN")
@@ -1626,7 +1629,12 @@ backup_tree() {
   # The per-worktree ref namespaces die with the tree; the hint stands alone (reflog.pack is
   # omitted when every tip sits on <base>, yet the refs still need recreating).
   if [ -n "$wt_refs" ]; then
-    restore_git+=$'\n'"  # refs/worktree/*, refs/bisect/* and refs/rewritten/* die with the tree; recreate each: git -C $q_main update-ref <refname> <sha from changes.txt>"
+    restore_git+=$'\n'"  # refs/worktree/*, refs/bisect/* and refs/rewritten/* die with the tree; each is recreated below under refs/seyag-restored/<plan-id>/, a neutral namespace — the original names are live git state (a verbatim refs/bisect/* reads as an in-progress bisect; refs/rewritten/* feed rebase internals), and the mapping is lossless: re-prefix refs/ to a restored name (refs/seyag-restored/<plan-id>/worktree/keep came from refs/worktree/keep); changes.txt (=== Per-worktree refs ===) records the original <sha> <refname> pairs."
+    while IFS=' ' read -r wt_sha wt_ref; do
+      [ -n "$wt_sha" ] || continue
+      printf -v q_restored '%q' "refs/seyag-restored/$APPLY_HOLD/${wt_ref#refs/}"
+      restore_git+=$'\n'"  git -C $q_main update-ref $q_restored $wt_sha"
+    done <<<"$wt_refs"
   fi
   if ! (
     umask 077
