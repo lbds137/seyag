@@ -32,7 +32,7 @@ wait_for_1s() {
 exists() { [ -e "$1" ]; }
 
 mkdir -p "$t/minbin"
-for cmd in bash dirname readlink mktemp xargs flock cat seq sleep grep rm kill; do
+for cmd in bash dirname readlink mktemp xargs flock cat seq sleep grep rm kill git; do
   if p=$(command -v "$cmd" 2>/dev/null) && [ -n "$p" ]; then
     ln -s "$p" "$t/minbin/$cmd"
   fi
@@ -44,13 +44,20 @@ cat >"$STUB" <<'EOF'
 n=0
 rc=0
 skip=0
+out=()
 for a in "$@"; do
-  if [ "$skip" = 1 ]; then skip=0; continue; fi
+  if [ "$skip" = 1 ]; then skip=0; out+=("$a"); continue; fi
   case $a in
-    -S) skip=1 ;;
-    -*) ;;
+    -S) skip=1; out+=("$a") ;;
+    -*) out+=("$a") ;;
     *)
       n=$((n + 1))
+      if [ ! -f "$a" ]; then
+        rc=1
+      else
+        a=$(readlink -f "$a")
+      fi
+      out+=("$a")
       if [ -n "${STUB_FAIL_ON:-}" ] && [[ $a == *"$STUB_FAIL_ON"* ]]; then
         rc=1
       fi
@@ -58,7 +65,7 @@ for a in "$@"; do
   esac
 done
 if [ -n "${STUB_LOG:-}" ]; then
-  printf 'nargs=%d args=%s\n' "$n" "$*" >>"$STUB_LOG"
+  printf 'nargs=%d args=%s\n' "$n" "${out[*]}" >>"$STUB_LOG"
 fi
 exit "$rc"
 EOF
@@ -261,7 +268,7 @@ if wait_for test -s "$mark"; then
   n13a=0; [ -s "$mark" ] && n13a=$(wc -l <"$mark")
   sleep 1
   n13b=0; [ -s "$mark" ] && n13b=$(wc -l <"$mark")
-  if [ "$a_gone" = 1 ] && [ "$a_lock" = 1 ] && [ "$n13a" = "$n13b" ]; then
+  if [ "$a_gone" = 1 ] && [ "$a_lock" = 1 ] && [ "$n13a" = "$n13b" ] && [ "$rc13" = 143 ]; then
     ok "signal forwarding: TERM reached runner -> runner gone (rc=$rc13), lock freed, no stub completed after the signal"
   else
     bad "signal forwarding (gone=$a_gone lockfree=$a_lock markers=$n13a->$n13b rc=$rc13 err=$(cat "$t/case13.err" 2>/dev/null))"
@@ -293,6 +300,50 @@ if [ "$rc14" = 1 ]; then
   ok "invocation killed by signal: stub self-TERM -> xargs 125 mapped to exit 1"
 else
   bad "invocation killed by signal (rc=$rc14)"
+fi
+
+# (15) caller git toplevel run-root: from a subdir with no ROOT, enumerates and runs in toplevel so relative paths resolve
+mkdir -p "$t/fxgit/tests" "$t/fxgit/plugins/seyag/bin" "$t/fxgit/sub"
+git -C "$t/fxgit" init -q
+printf "printf '%%s\\n' plugins/seyag/bin/tool0{1..7}\n" >"$t/fxgit/tests/shell-files.sh"
+for i in 1 2 3 4 5 6 7; do printf '#!/usr/bin/env bash\n' >"$t/fxgit/plugins/seyag/bin/tool0$i"; done
+log15="$t/case15.log"
+( cd "$t/fxgit/sub" && PATH="$t/minbin" SYG_SHELLCHECK_BIN="$STUB" STUB_LOG="$log15" "$SG" -S warning )
+rc15=$?
+exp15="nargs=7 args=-S warning"
+for i in 1 2 3 4 5 6 7; do exp15+=" $t/fxgit/plugins/seyag/bin/tool0$i"; done
+mapfile -t lines15 <"$log15" 2>/dev/null
+if [ "$rc15" = 0 ] && [ "${#lines15[@]}" = 1 ] && [ "${lines15[0]}" = "$exp15" ]; then
+  ok "git toplevel run-root: from subdir without ROOT, enumerated and ran in git toplevel (7 relative paths resolved to absolute fixture paths)"
+else
+  bad "git toplevel run-root (rc=$rc15 lines=${#lines15[@]} got='${lines15[0]:-}' want='$exp15')"
+fi
+
+# (16) exported SYG_SHELLCHECK_GATE_INNER=1 in the environment must not bypass gate-lock
+lock16="$t/case16.lock"
+log16="$t/case16.log"
+mkfifo "$t/release16"
+( exec 8>>"$lock16"; flock 8; : >"$t/held16"; read -r _ <"$t/release16" ) &
+holder16=$!; bg+=("$holder16")
+if wait_for exists "$t/held16"; then
+  SYG_SHELLCHECK_GATE_INNER=1 SYG_GATE_LOCK_FILE="$lock16" ROOT="$t/fx" SYG_SHELLCHECK_BIN="$STUB" \
+    SYG_SHELLCHECK_CHUNK=3 STUB_LOG="$log16" STUB_FAIL_ON=tool02 "$SG" -S warning 2>"$t/lock16.err" &
+  sg16=$!; bg+=("$sg16")
+  waited16=0
+  wait_for grep -q "waiting for" "$t/lock16.err" && waited16=1
+  early16=0
+  wait_for_1s exists "$log16" && early16=1
+  echo go >"$t/release16"
+  wait "$holder16" 2>/dev/null
+  wait "$sg16"; rc16=$?
+  if [ "$waited16" = 1 ] && [ "$early16" = 0 ] && [ -s "$log16" ] && [ "$rc16" = 1 ]; then
+    ok "inner env ignored: exported SYG_SHELLCHECK_GATE_INNER=1 still waited on gate-lock, then ran and exited with stub code 1"
+  else
+    bad "inner env ignored (waited=$waited16 early=$early16 rc=$rc16 log=$(cat "$log16" 2>/dev/null) err=$(cat "$t/lock16.err" 2>/dev/null))"
+  fi
+else
+  bad "inner env ignored: background holder never acquired lock"
+  echo go >"$t/release16" 2>/dev/null
 fi
 
 exit "$fail"

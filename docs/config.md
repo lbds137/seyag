@@ -318,7 +318,6 @@ An optional TOML file fills in knobs the environment left unset: user `${XDG_CON
 | `SYG_ROLE_NOW_EPOCH` | `bin/claude-role` | Test seam overriding the clock (epoch seconds) claude-role uses to decide which Next items are due. |
 | `SYG_ROLE_TASK` | `bin/claude-role` | Set by a launcher of a named task session: claude-role hook mode then prints the task name and a "not a role session" line and never the role file. |
 | `SYG_ROUTE_CHECK_TIMEOUT` | `hooks/route-check.sh` | Test seam overriding the timeout in seconds (positive integer) for SYG_ROUTE_CHECK_CMD in route-check. |
-| `SYG_SHELLCHECK_GATE_INNER` | `bin/shellcheck-gate` | Internal marker set to 1 when bin/shellcheck-gate re-execs itself under gate-lock. |
 | `SYG_STALLED_NOW` | `bin/session-stalled` | Test seam: ISO-8601 timestamp with a UTC offset that session-stalled uses as the current time; a value without an offset is a usage error. |
 | `SYG_STATE_DIR` | `hooks/context-block-gate.sh`, `hooks/context-size-reminder.sh`, `hooks/queued-message-receipt.sh`, `hooks/session-start.sh` | Test seam overriding the directory session-start prunes and the prompt hooks (queued-message-receipt, context-size-reminder, context-block-gate) write their per-session state into. |
 | `SYG_SWEEP_FRAG` | `bin/removed-identifier-sweep` | Internal env variable passing one fragment to awk for regex validation inside removed-identifier-sweep. |
