@@ -5,7 +5,7 @@ status: Done
 assignee:
   - seyag
 created_date: '2026-11-19T14:22:00Z'
-updated_date: '2026-11-19T19:33:00Z'
+updated_date: '2026-11-19T21:19:00Z'
 labels:
   - mining
   - skills
@@ -22,5 +22,5 @@ Five items, owner-directed 2026-11-17. Aim: fewer owner interventions, more work
 3. Waiting-cost columns (latency, unanswered/expired, blocked time).
 4. Privacy classification for miner agents and generic read-lane routing.
 5. Weekly delta runs plus periodic full synthesis.
-Headline metric RULED 2026-11-19 (AUQ, Lila): owner asks per merged PR, corrections/reverts paired; weekly per-category counts printed as context.
+Headline metric RULED 2026-11-19 (owner AUQ): owner asks per merged PR, corrections/reverts paired; weekly per-category counts printed as context.
 <!-- SECTION:DESCRIPTION:END -->

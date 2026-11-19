@@ -4,6 +4,7 @@ title: 'split-scout: rank directories as split candidates'
 status: To Do
 assignee: []
 created_date: '2026-11-19T14:23:00Z'
+updated_date: '2026-11-19T21:21:00Z'
 labels:
   - bin
   - skills
@@ -22,3 +23,15 @@ optional import fan-in/fan-out adapter (e.g. dependency-cruiser JSON), junk-draw
 Top candidate goes to the owning repo's design session, never straight to a refactor.
 Slot: after the mining asks-lens hands off. Design notes live in a private planning doc.
 <!-- SECTION:DESCRIPTION:END -->
+
+## Comments
+
+<!-- COMMENTS:BEGIN -->
+created: 2026-11-19T21:21:00Z
+
+---
+
+Design notes from the stood-down parallel session (2026-11-19, unclaimed-overlap run): no reusable churn/co-change code exists in the repo yet. Advisor spec items: nesting rule (show the deepest dir that explains the mass); unmeasured vs cohesive coupling (min support, longer coupling window); mass-commit cap; renames; a --now clock seam for the probe; flags only, no env knobs (python bins do not load config.toml, per TASK-4); positive-control against the 2026-11-17 baseline in dev-docs docs/vendor-agnostic-factory-2026-11-14.md section 5; a trigger line in design-boulder; leave TASK-30 (Seyag B in-progress) and the TASK-33 node_modules/pnpm-lock residue out of that unit PR.
+
+---
+<!-- COMMENTS:END -->
