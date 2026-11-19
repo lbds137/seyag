@@ -2,6 +2,13 @@
 
 All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY-MM-DD>` section per released version; under it, `###` categories in fixed order — Breaking Changes, Features, Bug Fixes, Improvements, Chores, Tests — empty ones omitted; items are `- **scope:** description (#PR)`, written from the version's merged commit subjects.
 
+## 0.3.192 - 2026-11-19
+
+### Chores
+
+- **backlog:** TASK-7 (railway-ops coverage inventory) closed Done, inventory only, nothing built: the tracked disposition records the ranked gap list — P0 deploy-path and service-layout skill text plus post-redeploy health verification (6 of 7 reference services carry no healthcheck; `wait <env> <svc>` verb candidate deferred with a trigger), P1 generic dev/prod environment-split skill text, a names-only `vars diff <A> <B>` verb candidate (the one CLI gap recommended for building, deferred with the same trigger), volumes and managed-DB skill text, P2 dashboard-side alerting/usage one-liners — and CLI 4.11.2 staleness findings for the railway-ops skill (`railway variables --set --skip-deploys` exists, `railway deployment list --json` supplies deployment ids, `railway down` gained `-e`, the linked-env `redeploy` trap re-verified current). Full inventory report lives in the private dispatch dir; tracked text stays generic. (#349)
+- **backlog:** store batch riding the same PR: TASK-6 flipped Done with the owner-ruled headline metric (owner asks per merged PR, corrections/reverts paired; weekly per-category counts as context), TASK-30 reopened In Progress with the one-probe-spike profile and bisect plan (Lane B), and TASK-31 (bin SCRIPT_DIR resolution), TASK-32 (asks-lens round-3 follow-ups) and TASK-33 (commit or gitignore pnpm-lock.yaml, gitignore node_modules) filed. (#349)
+
 ## 0.3.191 - 2026-11-19
 
 ### Features
