@@ -1,10 +1,11 @@
 #!/bin/bash
 # Single enumeration of the repo's shell and Python files, shared by
-# tests/shell-syntax.probe.sh and the CI shellcheck step.
+# tests/shell-syntax.probe.sh, bin/shellcheck-gate, and the CI shellcheck step.
 #
 # Usage: tests/shell-files.sh            shell files, one path per line
 #        tests/shell-files.sh --python   Python files, one path per line
-# Paths are relative to the repo root (or to ROOT when set).
+# Output contract: paths are relative to the enumerated root (the repo root, or
+# ROOT when set); the caller must run them from that root.
 
 set -uo pipefail
 

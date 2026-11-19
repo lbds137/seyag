@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
-# bin/shellcheck-gate runs shellcheck over the repo's shell files (tests/shell-files.sh) in
-# sequential chunks under the machine-wide gate lock (gate-lock), so one invocation never holds
-# every file in memory at once and shellcheck never overlaps another gate run.
+# bin/shellcheck-gate runs shellcheck over the run root's shell files (tests/shell-files.sh) in
+# sequential chunks under the machine-wide gate lock (gate-lock, re-entering itself in an
+# argv-authenticated inner mode "--inner=$$" checked against $PPID), so one invocation never holds
+# every file in memory at once and shellcheck never overlaps another gate run. Run root: ROOT when
+# set (must contain tests/shell-files.sh), else the caller's git toplevel when it has
+# tests/shell-files.sh, else this script's own repo; the pipeline cds to the run root so the
+# enumerator's relative paths resolve.
 # Knobs: SYG_SHELLCHECK_CHUNK (default 20), SYG_SHELLCHECK_BIN (default shellcheck, uvx fallback).
 # Exit: 0 clean; 1 findings or an invocation that died (the pipeline's xargs 123/125 mapped to 1);
 # 128+N on a forwarded TERM/INT/HUP; other codes propagate; 125 for own errors (bad knob, no
@@ -48,7 +52,9 @@ fi
 SCRIPT_DIR=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")
 REPO="$SCRIPT_DIR/../../.."
 
-if [ -z "${SYG_SHELLCHECK_GATE_INNER:-}" ]; then
+if [ "${1:-}" = "--inner=$PPID" ]; then
+  shift
+else
   if gl=$(command -v gate-lock 2>/dev/null) && [ -n "$gl" ]; then
     :
   elif [ -x "$SCRIPT_DIR/gate-lock" ]; then
@@ -57,18 +63,26 @@ if [ -z "${SYG_SHELLCHECK_GATE_INNER:-}" ]; then
     echo "shellcheck-gate: gate-lock not found" >&2
     exit 125
   fi
-  export SYG_SHELLCHECK_GATE_INNER=1
-  exec "$gl" bash "$0" "$@"
+  exec "$gl" bash "$0" "--inner=$$" "$@"
 fi
 
-enum="$REPO/tests/shell-files.sh"
 if [ -n "${ROOT:-}" ]; then
   if [ ! -f "$ROOT/tests/shell-files.sh" ]; then
     echo "shellcheck-gate: ROOT is set but '$ROOT/tests/shell-files.sh' does not exist" >&2
     exit 125
   fi
-  enum="$ROOT/tests/shell-files.sh"
+  root=$ROOT
+elif top=$(git rev-parse --show-toplevel 2>/dev/null) && [ -n "$top" ]; then
+  if [ -f "$top/tests/shell-files.sh" ]; then
+    root=$top
+  else
+    echo "shellcheck-gate: no enumerator at $top/tests/shell-files.sh; using $REPO's" >&2
+    root=$REPO
+  fi
+else
+  root=$REPO
 fi
+enum="$root/tests/shell-files.sh"
 
 list=$(mktemp 2>/dev/null) || { echo "shellcheck-gate: mktemp failed" >&2; exit 125; }
 trap 'rm -f "$list"' EXIT
@@ -79,6 +93,7 @@ if [ "$erc" != 0 ]; then
   echo "shellcheck-gate: file enumeration failed (exit $erc)" >&2
   exit 125
 fi
+cd "$root" || { echo "shellcheck-gate: cannot cd to '$root'" >&2; exit 125; }
 
 # The pipeline runs as a background job under set -m (its own process group) so a TERM/INT/HUP to
 # this script (typically from gate-lock's own forwarding, which TERMs and waits out its child) is
