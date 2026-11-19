@@ -2,6 +2,31 @@
 
 All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY-MM-DD>` section per released version; under it, `###` categories in fixed order — Breaking Changes, Features, Bug Fixes, Improvements, Chores, Tests — empty ones omitted; items are `- **scope:** description (#PR)`, written from the version's merged commit subjects.
 
+## 0.3.188 - 2026-11-18
+
+### Features
+
+- **bin:** `pr-open` runs `upstream-submission-guard.sh --check` as step 1 of its chain: PASS proceeds, BLOCK/UNKNOWN exit before `gh` with the verdict line re-printed and BLOCK's stance guidance passing through; a missing `python3` skips it with the scans (fail-open parity, the skip note names all three); `SYG_PR_OPEN_UPSTREAM_CHECK=0` skips it, the 0-disables vocabulary of `SYG_PR_BODY_CLAIM_SCAN`. (#341)
+
+### Bug Fixes
+
+- **config-env:** a project `.claude/seyag.toml` can no longer set path-valued knobs. A cloned repo could aim `SYG_LAUNCH_RECORD_DIR` at any directory (launch-record then wrote and 14-day-pruned files there), append JSONL through `SYG_CLASSIFIER_LEDGER` into an arbitrary file (a `$( )` in a recorded command executed when the file was sourced), redirect `SYG_ROLE_PREAMBLE_FILE`/`SYG_ROLE_DIR`/`SYG_PROJECT_NAMES_FILE`/`SYG_DRIVER_CLONE_PROJECTS` writes and reads, and read an arbitrary file into session context through the role preamble. `knobs.tsv` gains a sixth `flags` column; `path` rows (51) are refused from project scope like `_CMD` knobs (`'$name' cannot be set from project scope (path knob)`) while staying settable from user config and the environment. (#342)
+- **config-env:** environment-only rows are no longer accepted by the loader. `SYG_OWNER_NAME`, `SYG_AGY_BRAIN_DIR` and `SYG_AGY_SUMMARIES_DB` carry the new `envonly` flag and are refused from every config file with `'name' is environment only (not settable from a config file)` instead of being accepted and silently ignored by their readers. (#342)
+- **config-env:** warnings never echo file content. A `.claude/seyag.toml` symlinked to a secrets file previously had whole `=`-less lines (secret values included) echoed to stderr via the malformed-line, invalid-section and malformed-key warnings; those three now print file, line and rule only, and every name-derived echo (unknown key, duplicates, refusals, value errors) is truncated to 40 characters. (#342)
+- **config-env:** an invalid `[section]` header now closes the active section, so its followers can no longer land on the previous section's knob names (`[ claude_usage.zai ]` used to leave `week_reserve = 40` exported as `CLAUDE_USAGE_WEEK_RESERVE`); the followers warn as unknown keys. (#342)
+- **config-env:** multiline-string bodies are skipped, not parsed as keys. The `"""`/`'''` opener still warns once, but the body lines (previously applied as ordinary knobs when the opener's key was settable, and still applied when it was unknown, refused or duplicate) are consumed to the closing delimiter; the sniff runs before key-name resolution, so every opener behaves the same. (#342)
+- **config-env:** a bare token that is numeric-shaped but not a plain integer or float (`+5`, `1e3`, `1_000`, `0x1f`) warns with `unsupported value: number form not supported (use plain digits or a quoted string)` instead of the misleading strings-and-paths message, and a tab-less `knobs.tsv` row warns (`malformed row: skipped`) instead of being skipped silently; comment and blank rows stay silent. (#342)
+
+### Improvements
+
+- **config-env:** long values no longer stall every hook call. The basic-string decode is chunk-wise with a regex split (a bracket-glob split cost ~1 s per call on a 200 KB value), the key-validity check and env-name build are single-pass (`${path//./_}` + one regex), and the edge-whitespace trims only run when the edge actually holds whitespace. A 200 KB plain value loads in ~2 s (was >17 s); escape-dense values remain quadratic (a 200 KB `\t`-run exceeds 30 s) — hostile-input-only, filed for a follow-up (index-loop rewrite or a max-value-length cap). (#342)
+- **bin:** `pr-open`'s `--repo` refusal reason is reworded (the guard can judge via `--check`; the wrapper stays own-repo-scoped by the owner ruling) and the header fork-base-gap paragraph is replaced — the default path's publish target is judged from the `GH_REPO` env, else cwd remotes, the same env the later `gh` call runs in. (#341)
+
+### Tests
+
+- **probes:** `tests/config-env.probe.sh` pins the path-knob refusals (top-level and sectioned forms, user-scope control), the envonly refusal in both scopes, the flags-coverage pins over the real registry (path heuristic with an 18-entry reasoned allowlist, envonly↔description parity, a required-list for bind/glob/db rows the heuristic cannot see), the content-free raw echoes and 40-char name bound, the invalid-header section reset, the multiline skip (mid-file, EOF, single-line, unknown-key opener, refused-key opener), the number-form message and the tab-less-row warn; the (f) battery is re-pinned byte-exact for the new message shapes. `tests/config-reference.probe.sh` moves its fixtures to the 6-field schema and pins flags validation, the `Config` column (`user + project` / `user only` / `env only`) and flags-on-internal refusals. Red-first: the new config-env cases (8) and the re-pinned batteries failed against the unfixed tree and pass after. (#342)
+- **probes:** `tests/pr-open.probe.sh` gains fixture own-owner remotes with a `SYG_OWN_OWNERS` base env, a BASE_ENV hoist, a stale-comment fix, the pr-monitoring SKILL.md chain sentence synced, and cases 25-28 (whole-line-anchored BLOCK passthrough, UNKNOWN no-basis, toggle-off, python3-free skip), red-first at `d26a087`. (#341)
+
 ## 0.3.187 - 2026-11-18
 
 ### Bug Fixes
