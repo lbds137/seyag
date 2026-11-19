@@ -91,7 +91,7 @@ An optional TOML file fills in knobs the environment left unset: user `${XDG_CON
 | `SYG_CONTEXT_COOLDOWN_MIN` | `30` | Cooldown in minutes between context-size-reminder banners in a session. | `hooks/context-size-reminder.sh` | user + project |
 | `SYG_CONTEXT_THRESHOLD` | `500000` | Context token threshold at which context-size-reminder fires on non-Fable models. | `hooks/context-size-reminder.sh` | user + project |
 | `SYG_CONTEXT_THRESHOLD_FABLE` | `200000` | Context token threshold at which context-size-reminder fires when the model starts with claude-fable. | `hooks/context-size-reminder.sh` | user + project |
-| `SYG_CROSS_REVIEW_CMD` | unset | Single-line command advertised at SessionStart that names the route to a reviewer from a different model family than the author's. | `hooks/session-start.sh` | user + project |
+| `SYG_CROSS_REVIEW_CMD` | unset | Single-line command advertised at SessionStart that names the route to a reviewer from a different model family than the author's. | `hooks/session-start.sh` | user only |
 | `SYG_DISABLE` | unset | Whitespace- or comma-separated components or hook names to disable; wins over SYG_ENABLE. | `hooks/components.tsv`, `hooks/context-size-reminder.sh`, `hooks/handoff-pick-check.sh`, `hooks/lib/components.sh`, `hooks/pr-merge-review-check.sh`, `hooks/run.sh`, `hooks/session-start.sh` | user + project |
 | `SYG_DRIVER_CLONE_PROJECTS` | ``$HOME/Projects`` | Directory holding the base checkout and the new lane clone driver-clone creates. | `bin/driver-clone` | user only |
 | `SYG_DRIVER_CLONE_START_HINT` | start a session in the clone | Text driver-clone prints after "then:" as the last step once the lane exists. | `bin/driver-clone` | user + project |
@@ -101,21 +101,21 @@ An optional TOML file fills in knobs the environment left unset: user `${XDG_CON
 | `SYG_LAUNCH_RECORD_DIR` | unset | Directory path opting in launch-record to write <session_id>.json launch metadata at SessionStart. | `hooks/launch-record.sh` | user only |
 | `SYG_LAUNCH_RECORD_ENV` | unset | Space-separated environment variable names recorded under extra in launch-record JSON files. | `hooks/launch-record.sh` | user + project |
 | `SYG_LAUNCH_RECORD_HYBRID_OK` | unset | Set to 1 to suppress launch-record's warning when model slots mix provider families. | `hooks/launch-record.sh` | user + project |
-| `SYG_LONG_JOB_CMD` | unset | Single-line runner prefix advertised at SessionStart for running >10-minute jobs outside the session tree. | `bin/mem-gate`, `hooks/session-start.sh` | user + project |
-| `SYG_MEM_GATE_CMD` | unset | Single-line command advertised at SessionStart to check free memory before launching workers or test suites. The plugin's own mem-gate (`mem-gate --ok`) is one such command. | `hooks/session-start.sh` | user + project |
+| `SYG_LONG_JOB_CMD` | unset | Single-line runner prefix advertised at SessionStart for running >10-minute jobs outside the session tree. | `bin/mem-gate`, `hooks/session-start.sh` | user only |
+| `SYG_MEM_GATE_CMD` | unset | Single-line command advertised at SessionStart to check free memory before launching workers or test suites. The plugin's own mem-gate (`mem-gate --ok`) is one such command. | `hooks/session-start.sh` | user only |
 | `SYG_NEEDS_OWNER_SECTION` | `Needs Owner` | Heading (without the ##) of the role file section claude-role --need writes and --json reads as .needs: what waits on the owner; relay-ruling names it in its destructive-step line and reads it from the environment only. | `bin/claude-role`, `bin/driver-clone`, `bin/relay-ruling` | user + project |
 | `SYG_OWNER_NAME` | `The owner` | Name relay-ruling prints in the relay header the recipient reads (`<name> said (...)`, `<name> picked (...)`); an empty value falls back to the default. Environment only (not config.toml). | `bin/relay-ruling` | env only |
 | `SYG_PROFILE` | `full` | Base component profile (full, guards, or none) before SYG_ENABLE and SYG_DISABLE are applied. | `hooks/components.tsv`, `hooks/context-size-reminder.sh`, `hooks/lib/components.sh`, `hooks/run.sh`, `hooks/session-start.sh` | user + project |
 | `SYG_PROJECT_NAMES_FILE` | unset | Optional tab-separated table of folder and short name that driver-clone reads for the base short name and appends the new lane to. Unset means the base role file role: field is the short name and no row is written. | `bin/driver-clone` | user only |
-| `SYG_ROLE_CONTEXT_CMD` | unset | Command (bash -c) claude-role --board runs for session context sizes: prints a JSON array of {folder, tokens, flagged, flag_at}. Unset means no context lines; a failing one prints an unavailable line. | `bin/claude-role` | user + project |
+| `SYG_ROLE_CONTEXT_CMD` | unset | Command (bash -c) claude-role --board runs for session context sizes: prints a JSON array of {folder, tokens, flagged, flag_at}. Unset means no context lines; a failing one prints an unavailable line. | `bin/claude-role` | user only |
 | `SYG_ROLE_CONTEXT_LINE` | unset | One line claude-role prints first at session start (hook mode), before the role file and even for a headless or task run. Empty prints nothing. | `bin/claude-role` | user + project |
 | `SYG_ROLE_DIR` | ``${XDG_DATA_HOME:-$HOME/.local/share}/seyag/roles`` | Directory of role files (one <project folder>.md each) read and written by claude-role and driver-clone. | `bin/claude-role`, `bin/driver-clone` | user only |
 | `SYG_ROLE_HEADLESS_ROUTES` | unset | Whitespace- or comma-separated route preset names that only headless runs may use; claude-role --set route=NAME refuses them for a role session. | `bin/claude-role` | user + project |
 | `SYG_ROLE_PREAMBLE_FILE` | unset | Template file for the instruction block claude-role prints at session start; the placeholders {role}, {path}, {needs} and {in_person} are replaced literally. Unset, empty or unreadable means the built-in text. | `bin/claude-role` | user only |
-| `SYG_ROUTE_SHOW_CMD` | unset | Command (bash -c, the name as its argument) claude-role --set route=NAME runs to check a route preset exists; nonzero refuses the route. Unset means only the name shape is checked. | `bin/claude-role` | user + project |
+| `SYG_ROUTE_SHOW_CMD` | unset | Command (bash -c, the name as its argument) claude-role --set route=NAME runs to check a route preset exists; nonzero refuses the route. Unset means only the name shape is checked. | `bin/claude-role` | user only |
 | `SYG_SECURITY_SWEEP` | unset | Set to 1 to run security-sweep --session-line --cap 2 at SessionStart (startup and clear). | `hooks/session-start.sh` | user + project |
 | `SYG_SECURITY_SWEEP_REPOS` | unset | Whitespace-separated owner/name repos opting in and scoping security-sweep at SessionStart and in security-sweep. | `hooks/session-start.sh` | user + project |
-| `SYG_SESSION_CONTEXT_EXTRA_CMD` | unset | Command session-context runs (bash -c, stdin closed) to add another harness's sessions: a JSON array of {name, folder, sessionId, status, tokens}. Unset adds none; a failure warns on stderr and keeps the Claude rows. | `bin/session-context` | user + project |
+| `SYG_SESSION_CONTEXT_EXTRA_CMD` | unset | Command session-context runs (bash -c, stdin closed) to add another harness's sessions: a JSON array of {name, folder, sessionId, status, tokens}. Unset adds none; a failure warns on stderr and keeps the Claude rows. | `bin/session-context` | user only |
 | `SYG_SESSION_CONTEXT_EXTRA_MODEL` | `other` | Model label session-context gives the rows from SYG_SESSION_CONTEXT_EXTRA_CMD. | `bin/session-context` | user + project |
 | `SYG_SESSION_CONTEXT_EXTRA_THRESHOLD` | `150000` | Context token threshold at which session-context flags a row from SYG_SESSION_CONTEXT_EXTRA_CMD. | `bin/session-context` | user + project |
 | `SYG_SESSION_CONTEXT_THRESHOLD` | `500000` | Context token threshold at which session-context flags a session on non-Fable models (a whole number of at most 15 digits; separate from the in-session reminder's SYG_CONTEXT_THRESHOLD). | `bin/session-context` | user + project |
@@ -145,13 +145,13 @@ An optional TOML file fills in knobs the environment left unset: user `${XDG_CON
 | `CLAUDE_USAGE_MODEL` | unset | Model name override for claude-usage --ok per-model weekly cap checks when not reading a session transcript. | `bin/claude-usage` | user + project |
 | `CLAUDE_USAGE_TTL` | `120` | Refresh TTL in seconds (integer >= 30) for the OAuth usage cache in claude-usage. | `bin/claude-usage`, `bin/usage-sweep` | user + project |
 | `CLAUDE_USAGE_WEEK_RESERVE` | `75` | Weekly usage percentage threshold (integer 1-99) at which claude-usage --ok blocks new work; week-burn-window also uses it as its hold threshold. | `bin/claude-usage`, `bin/week-burn-window`, `hooks/lib/config-env.sh` | user + project |
-| `CLAUDE_USAGE_WEEK_RESERVE_CMD` | unset | Shell command (5s timeout) printing a dynamic weekly reserve integer 1-99 for claude-usage --ok and --posture. | `bin/claude-usage`, `bin/week-burn-window` | user + project |
+| `CLAUDE_USAGE_WEEK_RESERVE_CMD` | unset | Shell command (5s timeout) printing a dynamic weekly reserve integer 1-99 for claude-usage --ok and --posture. | `bin/claude-usage`, `bin/week-burn-window` | user only |
 | `CLAUDE_USAGE_WEEK_STOP` | `80` | Hard-stop weekly usage percentage (integer 1-99) reported by claude-usage --posture. | `bin/claude-usage` | user + project |
 | `CLAUDE_USAGE_ZAI_FIVE_CAP` | `80` | Maximum 5-hour quota threshold percentage (non-negative integer) allowed by claude-usage --ok on the z.ai lane. | `bin/claude-usage` | user + project |
 | `CLAUDE_USAGE_ZAI_WEEK_RESERVE` | `<CLAUDE_USAGE_WEEK_RESERVE>` | Static weekly quota reserve percentage (integer 1-99) for claude-usage --ok and --posture on the z.ai lane. | `bin/claude-usage` | user + project |
-| `CLAUDE_USAGE_ZAI_WEEK_RESERVE_CMD` | unset | Shell command (5s timeout) printing a dynamic weekly reserve integer 1-99 for the z.ai lane in claude-usage. | `bin/claude-usage` | user + project |
+| `CLAUDE_USAGE_ZAI_WEEK_RESERVE_CMD` | unset | Shell command (5s timeout) printing a dynamic weekly reserve integer 1-99 for the z.ai lane in claude-usage. | `bin/claude-usage` | user only |
 | `SEYAG_KEYS_BIN` | `<script_dir>/keys` | Override path to the keys binary invoked by zai-usage to read ZAI_AUTH_TOKEN from the encrypted credential store. | `bin/zai-usage` | env only |
-| `SYG_EXTRA_USAGE_BUDGET_CMD` | unset | Shell command printing the extra-usage USD budget as a non-negative decimal for claude-usage. | `bin/claude-usage`, `bin/statusline` | user + project |
+| `SYG_EXTRA_USAGE_BUDGET_CMD` | unset | Shell command printing the extra-usage USD budget as a non-negative decimal for claude-usage. | `bin/claude-usage`, `bin/statusline` | user only |
 | `SYG_EXTRA_USAGE_BUDGET_CMD_TIMEOUT` | `10` | Timeout in seconds (positive integer) for SYG_EXTRA_USAGE_BUDGET_CMD in claude-usage. | `bin/claude-usage` | user + project |
 | `SYG_EXTRA_USAGE_BUDGET_USD` | unset | Static extra-usage budget in USD (non-negative decimal) for claude-usage and statusline. | `bin/claude-usage`, `bin/statusline` | user + project |
 | `SYG_WEEK_BURN_MARGIN_MIN` | `30` | Margin in minutes (integer >= 0) added to the computed burn window in week-burn-window. | `bin/week-burn-window` | user + project |
@@ -164,7 +164,7 @@ An optional TOML file fills in knobs the environment left unset: user `${XDG_CON
 | Name | Default | What it does | Found in | Config |
 | --- | --- | --- | --- | --- |
 | `ANTHROPIC_ADMIN_API_KEY` | unset | Organization Admin API key enabling provider cost_report balance queries in api-credit and statusline (takes precedence over SYG_CREDIT_ADMIN_KEY_CMD). | `bin/api-credit`, `bin/statusline` | env only |
-| `SYG_CREDIT_ADMIN_KEY_CMD` | unset | Command run on a cache miss (when ANTHROPIC_ADMIN_API_KEY is unset, empty or contains a newline) to print the organization Admin API key on stdout. | `bin/api-credit`, `bin/statusline` | user + project |
+| `SYG_CREDIT_ADMIN_KEY_CMD` | unset | Command run on a cache miss (when ANTHROPIC_ADMIN_API_KEY is unset, empty or contains a newline) to print the organization Admin API key on stdout. | `bin/api-credit`, `bin/statusline` | user only |
 | `SYG_CREDIT_ANCHOR` | `<SYG_CREDIT_LEDGER>.anchor.json` | Path to the JSON file storing api-credit calibrate balance anchors. | `bin/api-credit`, `bin/statusline` | user only |
 | `SYG_CREDIT_DUST_FLOOR_USD` | `0.15` | Minimum USD balance shown by the statusline fleet credit display on non-API lanes, which shows only when SYG_CREDIT_LEDGER and SYG_CREDIT_GRANTS are both set and the week is urgent (week >= 75% or <= 7 days left). | `bin/statusline` | user + project |
 | `SYG_CREDIT_GRANTS` | unset | Path to the JSON file listing prepaid credit grants, expiries, timezones, and kinds for api-credit and statusline. | `bin/api-credit`, `bin/statusline` | user only |
@@ -231,7 +231,7 @@ An optional TOML file fills in knobs the environment left unset: user `${XDG_CON
 
 | Name | Default | What it does | Found in | Config |
 | --- | --- | --- | --- | --- |
-| `PLUGIN_RELEASE_AGENTS_CMD` | `claude agents --json` | Command run by plugin-release-check to list live Claude Code sessions as a JSON array. | `bin/plugin-release-check` | user + project |
+| `PLUGIN_RELEASE_AGENTS_CMD` | `claude agents --json` | Command run by plugin-release-check to list live Claude Code sessions as a JSON array. | `bin/plugin-release-check` | user only |
 | `PLUGIN_RELEASE_FETCH` | `1` | Set to 0 to skip git fetch --all before comparing the checkout version against upstream in plugin-release-check. | `bin/plugin-release-check` | user + project |
 | `PLUGIN_RELEASE_PROJECTS` | `$HOME/.claude/projects` | Projects transcript root searched by plugin-release-check for /reload-plugins and /clear refresh lines. | `bin/plugin-release-check` | user only |
 | `PLUGIN_RELEASE_UPSTREAM_REF` | `@{upstream}` | Git ref compared against the local plugin.json version in plugin-release-check. | `bin/plugin-release-check` | user + project |
@@ -243,7 +243,7 @@ An optional TOML file fills in knobs the environment left unset: user `${XDG_CON
 | `CC_ROUTE_KEYS` | `~/.claude/lane-keys.env` | Path to the lane key file where zai-usage looks up ZAI_AUTH_TOKEN first. | `bin/zai-usage` | user only |
 | `CC_ROUTE_PRESET` | unset | Route preset name; set to anthropic-api so claude-usage treats a first-party endpoint as the Console API-key lane. | `bin/claude-usage` | user + project |
 | `PRICE_TABLE_MANAGED_FILE` | `/etc/claude-code/managed-settings.json` | Managed settings JSON path that price-table --merge and --apply read; --apply prints a sudo install command targeting it (the tool never writes it). | `bin/price-table` | user only |
-| `SYG_ROUTE_CHECK_CMD` | unset | Shell command run by route-check at SessionStart when a session requires an approved model route. | `hooks/route-check.sh` | user + project |
+| `SYG_ROUTE_CHECK_CMD` | unset | Shell command run by route-check at SessionStart when a session requires an approved model route. | `hooks/route-check.sh` | user only |
 | `SYG_ROUTE_CHECK_OK` | unset | Exact first word that SYG_ROUTE_CHECK_CMD's first stdout line must match for route-check to pass. | `hooks/route-check.sh` | user + project |
 | `SYG_ROUTE_MARKER_FIELD` | unset | YAML frontmatter field name in SYG_ROUTE_MARKER_FILE whose non-empty value requires an approved route. | `hooks/route-check.sh` | user + project |
 | `SYG_ROUTE_MARKER_FILE` | unset | Path template ({project} expanded) checked with SYG_ROUTE_MARKER_FIELD to require an approved route. | `hooks/route-check.sh` | user only |

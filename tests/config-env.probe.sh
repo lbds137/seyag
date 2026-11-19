@@ -735,8 +735,8 @@ fi
 # bytes of file content on stderr while rc stays 0.
 PS3="$TMP/proj-s3"
 mkdir -p "$PS3/.claude"
-B64_KEY="ZmFrZV9iYXNlNjRfcGF5bG9hZF9mb3JfcHJvYmVfc2VjcmV0X3Rlc3Rpbmc"
-JWT_KEY="eyJhbGciOiJub25lIn0.eyJzdWIiOiJmYWtlX2p3dF9wcm9iZV9jbGFpbSJ9.ZmFrZV9zaWduYXR1cmU"
+B64_KEY="canary00canary00canary00canary00canary00canary00"
+JWT_KEY="ey0canary0canary0.ey0canary0canary0.s0canary0"
 cat >"$TMP/foreign-s3.toml" <<EOF
 ${B64_KEY}==
 ${JWT_KEY}=
@@ -768,7 +768,7 @@ seyag config: $PS3/.claude/seyag.toml: line 8: unsupported value: multiline stri
 seyag config: $PS3/.claude/seyag.toml: line 9: key: malformed value: strings and paths must be quoted
 seyag config: $PS3/.claude/seyag.toml: line 12: duplicate section: keys merge, first value per key wins
 seyag config: $PS3/.claude/seyag.toml: line 13: duplicate key: first value wins")
-LEAK_S3=$(grep -E 'ZmFrZV9iYXNlNjRf|eyJhbGciOiJub25lIn0|syg_clock_stamp_hintt|claude_config_dir|syg_owner_name|SYG_OWNER_NAME|spoof-foreign|syg_launch_record_dir|SYG_LAUNCH_RECORD_DIR|foreign-lr|syg_mem_gate_cmd|SYG_MEM_GATE_CMD|foreign-cmd|syg_event_hook_timeout|foreign_ml|claude_usage|week_reserve|syg_clock_stamp_hint|unquoted_foreign_val' "$TMP/err.s3" || true)
+LEAK_S3=$(grep -E 'canary00|ey0canary0|syg_clock_stamp_hintt|claude_config_dir|syg_owner_name|SYG_OWNER_NAME|spoof-foreign|syg_launch_record_dir|SYG_LAUNCH_RECORD_DIR|foreign-lr|syg_mem_gate_cmd|SYG_MEM_GATE_CMD|foreign-cmd|syg_event_hook_timeout|foreign_ml|claude_usage|week_reserve|syg_clock_stamp_hint|unquoted_foreign_val' "$TMP/err.s3" || true)
 if [ "$RC_S3" = 0 ] \
   && [ "$OUT_S3" = $'SYG_CLOCK_STAMP_HINT=UNSET\nSYG_OWNER_NAME=UNSET\nSYG_LAUNCH_RECORD_DIR=UNSET\nSYG_MEM_GATE_CMD=UNSET\nCLAUDE_USAGE_WEEK_RESERVE=[55]' ] \
   && [ -z "$LEAK_S3" ] \
@@ -776,6 +776,24 @@ if [ "$RC_S3" = 0 ] \
   ok "(s3) symlinked project config emits content-free warnings (zero file bytes on stderr, rc 0)"
 else
   fail "(s3) symlinked project config: rc $RC_S3, out '$OUT_S3', leak '$LEAK_S3', err '$(cat "$TMP/err.s3")' (want '$WANT_ERR_S3')"
+fi
+
+PS3B="$TMP/proj-s3b"
+mkdir -p "$PS3B" "$TMP/foreign-s3-dir"
+cp "$TMP/foreign-s3.toml" "$TMP/foreign-s3-dir/seyag.toml"
+ln -s "$TMP/foreign-s3-dir" "$PS3B/.claude"
+OUT_S3B=$("${CFG_ENV[@]}" XDG_CONFIG_HOME="$TMP/no-xdg" CLAUDE_PROJECT_DIR="$PS3B" \
+  bash "$TMP/report" "$LIB" SYG_CLOCK_STAMP_HINT SYG_OWNER_NAME SYG_LAUNCH_RECORD_DIR SYG_MEM_GATE_CMD CLAUDE_USAGE_WEEK_RESERVE 2>"$TMP/err.s3b")
+RC_S3B=$?
+WANT_ERR_S3B=${WANT_ERR_S3//"$PS3"/"$PS3B"}
+LEAK_S3B=$(grep -E 'canary00|ey0canary0|syg_clock_stamp_hintt|claude_config_dir|syg_owner_name|SYG_OWNER_NAME|spoof-foreign|syg_launch_record_dir|SYG_LAUNCH_RECORD_DIR|foreign-lr|syg_mem_gate_cmd|SYG_MEM_GATE_CMD|foreign-cmd|syg_event_hook_timeout|foreign_ml|claude_usage|week_reserve|syg_clock_stamp_hint|unquoted_foreign_val' "$TMP/err.s3b" || true)
+if [ "$RC_S3B" = 0 ] \
+  && [ "$OUT_S3B" = $'SYG_CLOCK_STAMP_HINT=UNSET\nSYG_OWNER_NAME=UNSET\nSYG_LAUNCH_RECORD_DIR=UNSET\nSYG_MEM_GATE_CMD=UNSET\nCLAUDE_USAGE_WEEK_RESERVE=[55]' ] \
+  && [ -z "$LEAK_S3B" ] \
+  && [ "$(cat "$TMP/err.s3b")" = "$WANT_ERR_S3B" ]; then
+  ok "(s3b) symlinked .claude directory resolving outside the project emits content-free warnings (zero file bytes on stderr, rc 0)"
+else
+  fail "(s3b) symlinked .claude directory: rc $RC_S3B, out '$OUT_S3B', leak '$LEAK_S3B', err '$(cat "$TMP/err.s3b")' (want '$WANT_ERR_S3B')"
 fi
 
 # (s4) Negative control for (s3): a REGULAR project file with the same
@@ -814,8 +832,9 @@ else
   fail "(u) L4 number-form: out '$OUT_U', err '$(cat "$TMP/err.u")' (want '$WANT_ERR_U')"
 fi
 
-# (v) L3b tab-less row in knobs.tsv warns once and is skipped; comment and blank
-# rows stay silent.
+# (v) L3b tab-less row in knobs.tsv warns once and is skipped; a 5-field
+# user row warns once that no flags column disables path/envonly refusals;
+# 6-field rows, 5-field internal rows, and comment/blank rows stay silent.
 KNV="$TMP/knobsplug-v"
 mkdir -p "$KNV/config"
 cat >"$KNV/config/knobs.tsv" <<'EOF'
@@ -823,15 +842,18 @@ cat >"$KNV/config/knobs.tsv" <<'EOF'
 
 malformed_tabless_row_here
 SYG_CLOCK_STAMP_HINT	user	guards	unset	Optional line appended to clock-stamp-guard block messages.	-
-CLAUDE_USAGE_WEEK_RESERVE	user	usage	75	Weekly usage percentage threshold.	-
+CLAUDE_USAGE_WEEK_RESERVE	user	usage	75	Weekly usage percentage threshold.
+SYG_INTERNAL_NOFLAGS	internal	guards	unset	Internal 5-field row stays silent.
 EOF
 OUT_V=$("${CFG_ENV[@]}" XDG_CONFIG_HOME="$U1" SYG_TEST_PLUGIN_DIR="$KNV" CLAUDE_PROJECT_DIR="$TMP/proj-none" \
-  bash "$TMP/report" "$LIB" SYG_CLOCK_STAMP_HINT 2>"$TMP/err.v")
-WANT_ERR_V="seyag config: $KNV/config/knobs.tsv: line 3: malformed row: skipped"
-if [ "$OUT_V" = "SYG_CLOCK_STAMP_HINT=[from-user]" ] && [ "$(cat "$TMP/err.v")" = "$WANT_ERR_V" ]; then
-  ok "(v) L3b tab-less row in knobs.tsv warns once and is skipped; comment and blank rows stay silent"
+  bash "$TMP/report" "$LIB" SYG_CLOCK_STAMP_HINT CLAUDE_USAGE_WEEK_RESERVE 2>"$TMP/err.v")
+WANT_ERR_V=$(printf '%s' \
+"seyag config: $KNV/config/knobs.tsv: line 3: malformed row: skipped
+seyag config: $KNV/config/knobs.tsv: line 5: CLAUDE_USAGE_WEEK_RESERVE: no flags column: path/envonly refusals disabled for this row")
+if [ "$OUT_V" = $'SYG_CLOCK_STAMP_HINT=[from-user]\nCLAUDE_USAGE_WEEK_RESERVE=[61]' ] && [ "$(cat "$TMP/err.v")" = "$WANT_ERR_V" ]; then
+  ok "(v) L3b tab-less row and 5-field user row warn once; 6-field, 5-field internal, comment and blank rows stay silent"
 else
-  fail "(v) L3b tab-less knobs row: out '$OUT_V', err '$(cat "$TMP/err.v")' (want '$WANT_ERR_V')"
+  fail "(v) L3b/5-field knobs rows: out '$OUT_V', err '$(cat "$TMP/err.v")' (want '$WANT_ERR_V')"
 fi
 
 echo ""

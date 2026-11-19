@@ -400,7 +400,8 @@ syg_config_env() {
   local ufile=""
   if [ -n "${XDG_CONFIG_HOME:-}" ]; then ufile=$XDG_CONFIG_HOME/seyag/config.toml
   elif [ -n "${HOME:-}" ]; then ufile=$HOME/.config/seyag/config.toml; fi
-  local pfile=${CLAUDE_PROJECT_DIR:-$PWD}/.claude/seyag.toml
+  local pdir=${CLAUDE_PROJECT_DIR:-$PWD}
+  local pfile=$pdir/.claude/seyag.toml
   # The hot path: with neither file present nothing is read and nothing printed.
   { [ -f "$ufile" ] || [ -f "$pfile" ]; } || return 0
 
@@ -442,6 +443,9 @@ syg_config_env() {
         flags=${rest#*$'\t'}
         flags=${flags%%$'\t'*}
         ;;
+      *$'\t'*$'\t'*$'\t'*)
+        echo "seyag config: $knobs: line $n: $name: no flags column: path/envonly refusals disabled for this row" >&2
+        ;;
     esac
     case " $flags " in *" path "*) _SYG_CFG_PATH[$name]=1 ;; esac
     case " $flags " in
@@ -450,8 +454,18 @@ syg_config_env() {
     esac
   done
 
-  local foreign=0
+  local foreign=0 rpfile rpdir
   [ -L "$pfile" ] && foreign=1
+  if [ "$foreign" = 0 ] && [ -f "$pfile" ]; then
+    if ! rpfile=$(realpath "$pfile" 2>/dev/null) || ! rpdir=$(realpath "$pdir" 2>/dev/null); then
+      foreign=1
+    else
+      case $rpfile in
+        "$rpdir"/*) ;;
+        *) foreign=1 ;;
+      esac
+    fi
+  fi
   declare -gA _SYG_CFG_MAP=()
   [ -f "$ufile" ] && _syg_cfg_parse_file "$ufile" user 0
   [ -f "$pfile" ] && _syg_cfg_parse_file "$pfile" project "$foreign"
