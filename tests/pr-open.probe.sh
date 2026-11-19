@@ -2,7 +2,10 @@
 # Fixture check for plugins/seyag/bin/pr-open — run after ANY edit to it.
 #
 # The real pr-body-ref-gate and the real hook libs (session_link.py,
-# private_terms.py) run in every case — no fakes for them. Only `gh` is
+# private_terms.py) run in every case — no fakes for them. The real
+# upstream-submission-guard runs in every case too (called by pr-open's
+# preflight; the fixture's own-owner remote + SYG_OWN_OWNERS make it
+# PASS), no fake for it. Only `gh` is
 # faked: a shim on PATH that logs its args to a file and prints one canned
 # PR URL (the fake-gh shim shape of tests/pr-ci-wait.probe.sh). A failed
 # preflight must exit before gh is called once, so every failing case
@@ -49,10 +52,19 @@ git -C "$R" config user.email t@t
 git -C "$R" config user.name t
 echo base > "$R/f.txt" && git -C "$R" add f.txt
 git -C "$R" commit -qm base
+git -C "$R" remote add origin https://github.com/fixowner/fixrepo.git
 
 TERMS="$T/terms"
-printf 'lumina-vault\n' > "$TERMS"   # an invented term nothing matches
+printf 'lumina-vault\n' > "$TERMS"   # an invented term; this file's fixtures are the only text that matches it (cases 4, 10, 13, 22, 23)
 mkdir "$T/home"
+
+# The base env every case runs under: isolated HOME (no hosts.yml, no
+# ambient SYG_*), the terms fixture, an own owner for the upstream
+# preflight (the guard lib unions SYG_OWN_OWNERS with hosts.yml; under
+# env -i only the env can supply the basis).
+BASE_ENV=(HOME="$T/home" PATH="$T/bin:$PATH" TERM=dumb FAKE_GH_LOG="$GH_LOG"
+  SYG_PRIVATE_TERMS_FILE="$TERMS" SYG_PR_BODY_BASE_REF=no-such-ref
+  SYG_OWN_OWNERS=fixowner)
 
 # run_open TITLE BODYFILE [REPO-DIR] — env tuned via OPEN_ENV (array) and
 # OPEN_ARGS (array); captures combined output in `out`, rc in `rc`, resets
@@ -63,10 +75,9 @@ OPEN_ARGS=()
 run_open() {
   : > "$GH_LOG"
   out=$(cd "${3:-$R}" && env -i \
-    HOME="$T/home" PATH="$T/bin:$PATH" TERM=dumb \
-    FAKE_GH_LOG="$GH_LOG" ${FAKE_GH_EXIT:+FAKE_GH_EXIT=$FAKE_GH_EXIT} \
+    "${BASE_ENV[@]+"${BASE_ENV[@]}"}" \
+    ${FAKE_GH_EXIT:+FAKE_GH_EXIT=$FAKE_GH_EXIT} \
     ${FAKE_GH_NO_URL:+FAKE_GH_NO_URL=$FAKE_GH_NO_URL} \
-    SYG_PRIVATE_TERMS_FILE="$TERMS" SYG_PR_BODY_BASE_REF=no-such-ref \
     "${OPEN_ENV[@]+"${OPEN_ENV[@]}"}" "$BIN" --title "$1" --body-file "$2" \
     "${OPEN_ARGS[@]+"${OPEN_ARGS[@]}"}" 2>&1)
   rc=$?
@@ -211,6 +222,7 @@ mkdir -p "$R2"
 git -C "$R2" init -q -b main
 git -C "$R2" config user.email t@t && git -C "$R2" config user.name t
 echo base > "$R2/f.txt" && git -C "$R2" add f.txt && git -C "$R2" commit -qm base
+git -C "$R2" remote add origin https://github.com/fixowner/fixrepo.git
 git -C "$R2" config seyag.publicRepo false
 printf 'Clean body.\n' > "$T/b12.md"
 run_open "Clean title" "$T/b12.md" "$R2"
@@ -337,15 +349,16 @@ if [ -e "$NOPY/bash" ] && [ -e "$NOPY/git" ] && [ -e "$NOPY/sed" ] \
   OPEN_ENV=()
   [ "$rc" -eq 0 ] && ok "case20: no python3 -> scans skipped, rc 0" \
     || bad "case20: rc $rc: $out"
-  [[ "$out" == *"pr-open: python3 missing; the session-link and private-term scans were skipped"* ]] \
+  [[ "$out" == *"pr-open: python3 missing; the upstream check and the session-link and private-term scans were skipped"* ]] \
     && ok "case20: the skip named on stderr" || bad "case20: no skip note: $out"
   [ -s "$GH_LOG" ] && ok "case20: PR created" || bad "case20: gh not called"
 else
   bad "case20: could not build a python3-free PATH on this machine"
 fi
 
-# Case 21 — --repo refused outright (owner ruling): upstream-submission-guard
-# cannot check a foreign repo through this wrapper; gh log stays empty.
+# Case 21 — --repo refused outright (owner ruling): this wrapper stays
+# own-repo-scoped (the guard judges the checkout's default path via --check);
+# gh log stays empty.
 printf 'Clean body.\n' > "$T/b21.md"
 git -C "$R" config seyag.publicRepo false
 OPEN_ARGS=(--repo example/other)
@@ -403,9 +416,7 @@ arm_line=$(printf '%s\n' "$out" | grep -Fx "cd '$R' && pr-ci-wait 42")
 # apart and checks both sides (stdout = exactly the two parseable lines).
 : > "$GH_LOG"
 (cd "$R" && env -i \
-  HOME="$T/home" PATH="$T/bin:$PATH" TERM=dumb \
-  FAKE_GH_LOG="$GH_LOG" \
-  SYG_PRIVATE_TERMS_FILE="$TERMS" SYG_PR_BODY_BASE_REF=no-such-ref \
+  "${BASE_ENV[@]}" \
   "$BIN" --title "Clean title" --body-file "$T/b24.md" --head fixt-branch \
   > "$T/case24.out" 2> "$T/case24.err")
 printf '%s\n' "PR #42: https://github.com/example/example/pull/42" \
@@ -415,6 +426,66 @@ cmp -s "$T/case24.out" "$T/case24.want" \
   || bad "case24: stdout: $(cat "$T/case24.out")"
 [ "$(cat "$T/case24.err")" = "pr-open: refs/heads/fixt-branch not found locally; arming without --sha (pr-ci-wait watches the PR head)" ] \
   && ok "case24: note on stderr only" || bad "case24: stderr: $(cat "$T/case24.err")"
+
+# Case 25 — the upstream preflight blocks a non-own origin: the guard's
+# verdict line and stance banner pass through, pr-open names the failure,
+# gh never called. (publicRepo is false from case 24; the remote flip is
+# restored after case 28.)
+git -C "$R" remote set-url origin https://github.com/nonown/fixrepo.git
+run_open "Clean title" "$T/b15.md"
+[ "$rc" -eq 1 ] && ok "case25: rc 1" || bad "case25: rc $rc: $out"
+grep -qxF "BLOCK nonown/fixrepo" <<<"$out" \
+  && ok "case25: the guard's verdict line passes through" \
+  || bad "case25: verdict missing: $out"
+grep -qF "Hostile to AI contributions" <<<"$out" \
+  && ok "case25: the stance banner passes through" \
+  || bad "case25: stance banner missing: $out"
+grep -qF "pr-open: BLOCK: upstream-submission-guard --check failed (rc 1)" <<<"$out" \
+  && ok "case25: pr-open names the failure" \
+  || bad "case25: naming line missing: $out"
+[ ! -s "$GH_LOG" ] && ok "case25: gh never called" || bad "case25: gh called"
+
+# Case 26 — no own-owner basis is UNKNOWN and blocks (fail-closed --check):
+# an empty SYG_OWN_OWNERS override empties the basis (no hosts.yml under
+# the isolated HOME), whatever the remotes say.
+OPEN_ENV=(SYG_OWN_OWNERS=)
+run_open "Clean title" "$T/b15.md"
+OPEN_ENV=()
+[ "$rc" -eq 1 ] && ok "case26: rc 1" || bad "case26: rc $rc: $out"
+grep -qF "UNKNOWN no own-owner basis" <<<"$out" \
+  && ok "case26: UNKNOWN no-basis verdict passes through" \
+  || bad "case26: verdict missing: $out"
+[ ! -s "$GH_LOG" ] && ok "case26: gh never called" || bad "case26: gh called"
+
+# Case 27 — SYG_PR_OPEN_UPSTREAM_CHECK=0 skips the preflight entirely:
+# the non-own origin from case 25 no longer blocks, the PR creates.
+OPEN_ENV=(SYG_PR_OPEN_UPSTREAM_CHECK=0)
+run_open "Clean title" "$T/b15.md"
+OPEN_ENV=()
+[ "$rc" -eq 0 ] && ok "case27: toggle off skips the check, rc 0" \
+  || bad "case27: rc $rc: $out"
+[ "$(wc -l < "$GH_LOG")" -eq 1 ] && ok "case27: PR created" \
+  || bad "case27: gh calls: $(wc -l < "$GH_LOG")"
+
+# Case 28 — python3 missing skips the upstream check with the scans
+# (fail-open parity: the guard's hook mode fails open without python3
+# too), so the non-own origin still creates.
+# ($NOPY's python3-free property is case 20's build guard, not re-proven
+# here; the created-PR + skip-note asserts below fail if python3 ran.)
+if [ -e "$NOPY/bash" ]; then
+  OPEN_ENV=(PATH="$T/bin:$NOPY")
+  run_open "Clean title" "$T/b15.md"
+  OPEN_ENV=()
+  [ "$rc" -eq 0 ] && ok "case28: no python3 -> upstream check skipped too, rc 0" \
+    || bad "case28: rc $rc: $out"
+  grep -qF "pr-open: python3 missing; the upstream check and the session-link and private-term scans were skipped" <<<"$out" \
+    && ok "case28: the skip note names the upstream check" \
+    || bad "case28: note missing: $out"
+  [ -s "$GH_LOG" ] && ok "case28: PR created" || bad "case28: gh not called"
+else
+  bad "case28: no python3-free PATH available (case20 built none)"
+fi
+git -C "$R" remote set-url origin https://github.com/fixowner/fixrepo.git
 
 echo "---"
 if [ "$fail" -eq 0 ]; then

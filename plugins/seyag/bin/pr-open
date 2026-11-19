@@ -6,14 +6,19 @@
 # wrapper gap: a wrapper script's command text holds no `gh` token, so
 # private-term-guard and session-url-gate never fire on
 # `pr-open --title ... --body-file F` — the scans below ARE the hook scans
-# (the same libs and rules), run by the script itself. One scan pr-open
-# does NOT run: upstream-submission-guard. --repo is refused outright (a
-# foreign repo cannot be stance-checked through this wrapper); a checkout
-# whose default base is a fork is not detectable without the guard's
-# ownership config, so that shape stays an accepted gap — open upstream
-# PRs with `gh pr create` directly.
+# (the same libs and rules), run by the script itself. The same holds for
+# upstream-submission-guard: it runs here via its own `--check` preflight
+# (the mode built for exactly this wrapper shape). PASS proceeds; BLOCK or
+# UNKNOWN exits before gh — the verdict line on stderr, with the guard's
+# stance guidance for BLOCK. --repo stays refused (owner ruling): this
+# wrapper opens PRs in its own checkout's repo only; fork/upstream PRs go
+# through `gh pr create` directly, where the PreToolUse hook judges the
+# command.
 #
-# Env it reads (existing knobs only, no new name):
+# Env it reads:
+#   SYG_PR_OPEN_UPSTREAM_CHECK  set to 0 to skip the upstream preflight
+#                              (the same 0-disables vocabulary as
+#                              SYG_PR_BODY_CLAIM_SCAN)
 #   SYG_PRIVATE_TERMS_FILE   the terms list; when unset and the repo is
 #                            public, the pre-push fallback to global git
 #                            config seyag.privateTermsFile applies
@@ -26,21 +31,27 @@
 #                            pr-open does not read them
 #
 # Order (every failed preflight exits before gh is called once):
-#   1. session-link scan — always, both --title and the body file
+#   1. upstream-submission-guard --check — default on;
+#      SYG_PR_OPEN_UPSTREAM_CHECK=0 skips
+#   2. session-link scan — always, both --title and the body file
 #      (session-url-gate's rule: a session link must not enter a PR in any
 #      project, not gated on the public flag)
-#   2. private-term scan — title + body, ONLY under a public
+#   3. private-term scan — title + body, ONLY under a public
 #      seyag.publicRepo (hook parity); set-but-not-boolean fails closed
 #      (stricter than the hook, which treats the value as public and scans)
-#   3. pr-body-ref-gate --check
-#   4. `gh pr create` (gh via PATH)
-#   5. the canonical pr-ci-wait arm line, substitution left unresolved
+#   4. pr-body-ref-gate --check
+#   5. `gh pr create` (gh via PATH)
+#   6. the canonical pr-ci-wait arm line, substitution left unresolved
 #
-# The python scans fail open, like the hooks they mirror: no python3 or a
-# lib import failure never blocks. Two documented exceptions to the parity
-# claim: (1) a body with a UTF-8 BOM is scanned with the BOM stripped
-# (utf-8-sig), so a start-anchored term can block here where the hook passes
-# — over-blocking only, never under; (2) matching is time-boxed at 5 s like
+# The session-link and private-term scans fail open, like the hooks they
+# mirror: no python3 or a lib import failure never blocks. The
+# upstream-submission-guard preflight is the exception: it is fail-closed
+# once python3 exists (the guard's own internal errors block with exit 1),
+# and only a missing python3 skips it, alongside the scans, in the stderr
+# note. Two documented exceptions to the parity claim: (1) a body with a
+# UTF-8 BOM is scanned with the BOM stripped (utf-8-sig), so a
+# start-anchored term can block here where the hook passes —
+# over-blocking only, never under; (2) matching is time-boxed at 5 s like
 # private-term-guard's: a pathological terms pattern blocks with a
 # "took over 5 s" message instead of hanging.
 #
@@ -55,9 +66,10 @@ usage() {
 usage: pr-open --title TITLE --body-file FILE [--base BRANCH] [--head BRANCH]
                [--draft]
 
-Runs the PR-open preflight chain (session-link scan, private-term scan,
-pr-body-ref-gate --check), then creates the PR with `gh pr create` and
-prints the pr-ci-wait arm line. A failed preflight exits before gh runs.
+Runs the PR-open preflight chain (upstream-submission-guard --check,
+session-link scan, private-term scan, pr-body-ref-gate --check), then
+creates the PR with `gh pr create` and prints the pr-ci-wait arm line.
+A failed preflight exits before gh runs.
 
 Push the branch first: on an unpushed branch gh pr create prompts interactively for where to push.
 For upstream PRs (forks, --repo), use gh pr create directly so upstream-submission-guard fires.
@@ -91,7 +103,7 @@ while [ "$#" -gt 0 ]; do
       shift 2
       ;;
     --repo)
-      echo "pr-open: --repo is not supported: upstream-submission-guard cannot check a foreign repo through this wrapper; open that PR with gh pr create directly" >&2
+      echo "pr-open: --repo is not supported: this wrapper opens PRs in its own checkout's repo only; for another repository (a fork's upstream) run gh pr create directly so upstream-submission-guard judges the publish" >&2
       usage
       exit 2
       ;;
@@ -146,7 +158,27 @@ case $HEAD_ARG in
 esac
 
 if command -v python3 >/dev/null 2>&1; then
-  # 1. Session-link scan: the same SECRET/mask pair session-url-gate uses.
+  # 1. Upstream-submission preflight — the wrapper gap for the guard: a
+  #    wrapper's command text holds no `gh` token, so the PreToolUse hook
+  #    never fires on this publish. The guard's own --check mode is the
+  #    same judgment for exactly this shape: the inherited GH_REPO env,
+  #    else the cwd remotes, judged against the own-owner basis,
+  #    fail-closed. PASS proceeds; BLOCK/UNKNOWN exits before gh runs —
+  #    the guard's one verdict line is re-printed to stderr beside
+  #    pr-open's naming line, and its stance guidance (BLOCK only) passed
+  #    through live. SYG_PR_OPEN_UPSTREAM_CHECK=0 skips (the same
+  #    0-disables vocabulary as pr-body-ref-gate's SYG_PR_BODY_CLAIM_SCAN).
+  if [ "${SYG_PR_OPEN_UPSTREAM_CHECK:-1}" != "0" ]; then
+    up_verdict=$(bash "$PLUGIN_ROOT/hooks/upstream-submission-guard.sh" --check)
+    up_rc=$?
+    if [ "$up_rc" -ne 0 ]; then
+      [ -n "$up_verdict" ] && printf '%s\n' "$up_verdict" >&2
+      echo "pr-open: BLOCK: upstream-submission-guard --check failed (rc $up_rc)" >&2
+      exit "$up_rc"
+    fi
+  fi
+
+  # 2. Session-link scan: the same SECRET/mask pair session-url-gate uses.
   # rc 0 = a hit was printed, 1 = clean (a scan failure also reads clean —
   # fail open, hook parity).
   # stderr discarded, hook parity: a scan crash fails open quietly.
@@ -176,7 +208,7 @@ PYEOF
     exit 1
   fi
 
-  # 2. Private-term scan: only in a repo seyag.publicRepo marks public.
+  # 3. Private-term scan: only in a repo seyag.publicRepo marks public.
   # `git config --type=bool --get` exits 1 with no output when unset; a
   # bad value fails the call with a higher rc — fail closed on it.
   pub=$(git -C "$TOP" config --type=bool --get seyag.publicRepo 2>/dev/null)
@@ -253,10 +285,10 @@ PYEOF
     fi
   fi
 else
-  echo "pr-open: python3 missing; the session-link and private-term scans were skipped" >&2
+  echo "pr-open: python3 missing; the upstream check and the session-link and private-term scans were skipped" >&2
 fi
 
-# 3. Ref-gate preflight: its own output (a block banner on stderr) passes
+# 4. Ref-gate preflight: its own output (a block banner on stderr) passes
 # through, then pr-open names the failure and exits with the gate's rc.
 # The gate blocks with rc 2, which shares the usage-error class above —
 # distinguishable only by this BLOCK line being on stderr (spec-mandated
@@ -268,7 +300,7 @@ if [ "$gate_rc" -ne 0 ]; then
   exit "$gate_rc"
 fi
 
-# 4. Create. gh comes from PATH.
+# 5. Create. gh comes from PATH.
 create_cmd=(gh pr create --title "$TITLE" --body-file "$BODY_FILE")
 [ -n "$BASE" ] && create_cmd+=(--base "$BASE")
 [ -n "$HEAD_ARG" ] && create_cmd+=(--head "$HEAD_ARG")
@@ -289,7 +321,7 @@ if [ -z "$pr_url" ]; then
 fi
 pr_num=${pr_url##*/}
 
-# 5. The arm line, pr-monitor-reminder's canonical template with the
+# 6. The arm line, pr-monitor-reminder's canonical template with the
 # substitution left as literal text — it resolves when the watcher runs.
 # The toplevel and the ref are single-quoted with embedded quotes escaped
 # the reminder's way, so the printed command pastes cleanly for any path
@@ -299,7 +331,7 @@ pr_num=${pr_url##*/}
 # head) and say so on stderr; stdout stays the parseable arm line.
 Q_TOP="'$(printf '%s' "$TOP" | sed "s/'/'\\\\''/g")'"
 printf 'PR #%s: %s\n' "$pr_num" "$pr_url"
-if git show-ref --verify --quiet "refs/heads/$BRANCH"; then
+if git -C "$TOP" show-ref --verify --quiet "refs/heads/$BRANCH"; then
   Q_BRANCH="'$(printf '%s' "refs/heads/$BRANCH" | sed "s/'/'\\\\''/g")'"
   printf 'cd %s && pr-ci-wait %s --sha $(git rev-parse %s)\n' \
     "$Q_TOP" "$pr_num" "$Q_BRANCH"

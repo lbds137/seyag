@@ -178,6 +178,7 @@ SYG_PR_BODY_EXTRA_COMMANDS	user	pr	unset	Extended regex of extra command familie
 SYG_PR_BODY_RULE_REF	user	pr	unset	Optional project rule citation printed in pr-body-ref-gate block banners.
 SYG_PR_BODY_TASK_PATHS	user	pr	tracker/tasks tracker/archive/tasks	Whitespace-separated repo paths searched on SYG_PR_BODY_BASE_REF for TASK-N references in pr-body-ref-gate.
 SYG_PR_MERGE_LIB_DIR	internal	pr	<hooks_dir>/lib	Test seam overriding the hooks/lib directory passed to pr-merge-review-check's Python parser.
+SYG_PR_OPEN_UPSTREAM_CHECK	user	pr	1	Set to 0 to skip pr-open's upstream-submission-guard --check preflight; the default judges the publish target first (PASS proceeds; BLOCK or UNKNOWN exits before gh runs).
 SYG_PR_MONITOR_SEEN_FILE	internal	pr	${XDG_RUNTIME_DIR:-/tmp}/.claude_pr_monitor_seen.<uid>	Test seam overriding the deduplication state file for pr-monitor-reminder.
 SYG_PUBLISH_CHECKED	user	guards	unset	Colon-separated <owner/repo> list (or any non-empty value for a gist) in the session env unblocking publish-gate.
 SYG_PY_CACHE_ARG	internal	guards	unset	Python flag run.sh exports (`-Xpycache_prefix=<dir>`, or `-B`) for hooks' `python3 -I`, which ignores PYTHONPYCACHEPREFIX; unset on a direct run, where hooks fall back to `-B`; a relative caller prefix gives `-B`.
