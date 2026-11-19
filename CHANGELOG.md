@@ -2,6 +2,20 @@
 
 All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY-MM-DD>` section per released version; under it, `###` categories in fixed order — Breaking Changes, Features, Bug Fixes, Improvements, Chores, Tests — empty ones omitted; items are `- **scope:** description (#PR)`, written from the version's merged commit subjects.
 
+## 0.3.193 - 2026-11-19
+
+### Improvements
+
+- **skills:** railway-ops skill refresh operationalizing the TASK-7 inventory: a deploy-path and service-layout section (`railway up` and the GitHub-integration branch-to-environment mapping with per-service `watchPatterns` that skip untouched services, `railway deployment list --json` as the deployment-id source, `railway status --json` `serviceManifest` as the pre-touch readout, Config-as-Code hard cutoff 2026-12-01 with the IaC `.railway/railway.ts` migration pointer and the CLI-4.11.2-may-lack-`config` caveat), a dev/prod split section (two environments as the default with per-environment tokens, shared-tier secrets versus per-service overrides, PRs deploy nowhere unless PR environments are enabled, promotion as a dashboard-only operation, compare variable names never values), and an ops-edges section (deploy-time healthchecks with `healthcheck.railway.app` as the probe host, pre-deploy command semantics for migrations, volume-backed redeploy downtime, dashboard-side alerting and usage), plus staleness fixes for CLI 4.11.2 (`railway variables --set` exists but cannot delete or manage shared ones and prints values; the `railway down` warning). (#350)
+
+### Chores
+
+- **backlog:** TASK-36 flipped Done; TASK-37 filed (widen the coupling-lint token list toward the CLAUDE.md private-name rule; trigger: next lint touch or de-naming incident). The release also carries the store follow-ups that landed on main after the 0.3.192 release commit: the peer-session fold (TASK-34/35, TASK-36, TASK-8 notes) and review-round-1 de-naming of store text to local-only pointers. (#350)
+
+### Tests
+
+- **probes:** railway-ops probe gains block 18: six presence greps pin the refreshed skill text (the cutoff date, the deployment-list id source, the PR-deploy rule, the pre-deploy no-default-timeout, the healthcheck host, the IaC init verb). (#350)
+
 ## 0.3.192 - 2026-11-19
 
 ### Chores
