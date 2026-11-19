@@ -15,22 +15,31 @@
 # -> CLAUDE_USAGE_WEEK_RESERVE, and `[claude_usage]` + `week_reserve` -> the same
 # name, a dotted key `a.b` joining the path like a section. Config keys thus build
 # SYG_-prefixed (and other registry) names at runtime; a key applies iff its env
-# name is a scope=user row of <plugin_dir>/config/knobs.tsv and not one of the
-# harness-owned names below (Claude Code or the machine reads those before seyag
-# runs; a config file must not fake them). Everything else is an unknown key.
+# name is a scope=user row of <plugin_dir>/config/knobs.tsv, does not carry the
+# `envonly` flag in the 6th `flags` column (refused from both user and project
+# config files), and is not one of the harness-owned names below (Claude Code
+# or the machine reads those before seyag runs; a config file must not fake
+# them). Everything else is an unknown key.
 #
 # Accepted subset, per line: blank, full-line `#` comment, `[section]` / `[a.b]`
 # header, or `key = value` with a quoted string (basic `"`, escapes \\ \" \t \n
 # only, or literal `'`, no escapes), an integer, a float, or true/false (exported
 # as 1/0). Strings and paths must be quoted; arrays, inline tables, multiline
-# strings and trailing content after the value are unsupported. Each offending
+# strings and trailing content after the value are unsupported. After a
+# multiline-string (`"""`/`'''`) opener warning, the body lines are skipped
+# until a line containing the closing delimiter. An invalid `[section]` header
+# warns and closes the active section (resetting it to top-level); warnings name
+# file and line; file content is never echoed; name text is bounded (40
+# characters). Each offending
 # line warns once on stderr and is skipped: a bad file never blocks a hook or a
 # bin, and because the loader runs per call, a bad file warns on every call (loud
 # beats silent). Duplicate keys warn (first value wins); duplicate sections
 # warn too, and their keys merge (again first value per key). Names ending
 # _CMD, and the binary-path knobs in _SYG_CFG_PROJECT_EXEC below, cannot be
-# set from the project file: a repo must not choose the executables this
-# machine runs. SYG_CONFIG=0 disables the loader entirely.
+# set from the project file (a repo must not choose the executables this
+# machine runs), and rows carrying `path` in knobs.tsv's 6th `flags` column
+# cannot be set from the project file (a repo must not aim seyag at arbitrary
+# filesystem paths). SYG_CONFIG=0 disables the loader entirely.
 
 # Harness-owned names (see the header): never settable from a config file. Kept
 # equal to the user-scope rows of SCAN_EXACT_NAMES in tests/config-reference.py
@@ -75,19 +84,23 @@ _syg_cfg_in_project_exec() {
 }
 
 # _syg_cfg_valid_path <path>: every dot-separated component is [A-Za-z0-9_-]+
-# and non-empty (the accepted bare-key charset; a stray space or quote fails,
-# and a trailing dot leaves an empty final component — rejected here).
+# and non-empty (the accepted bare-key charset; rejects empty, leading/trailing
+# dot, and bad chars such as a stray space or quote in one O(n) match).
 _syg_cfg_valid_path() {
-  local path=$1 comp
-  [ -n "$path" ] || return 1
-  while [ -n "$path" ]; do
-    comp=${path%%.*}
-    [[ $comp =~ ^[A-Za-z0-9_-]+$ ]] || return 1
-    [ "$comp" = "$path" ] && return 0
-    path=${path#*.}
-  done
-  # Only a trailing dot reaches here (the last component returns above).
-  return 1
+  [[ $1 =~ ^[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)*$ ]]
+}
+
+# _syg_cfg_disp <text>: sanitize name text for stderr warnings into $disp —
+# truncate to the first 40 characters (appending "..." when truncated), then
+# strip control characters.
+# Echoed names are chosen by the file's author and leak nothing new; echoed content may come from a symlinked foreign file, so it is never echoed.
+_syg_cfg_disp() {
+  if [ "${#1}" -gt 40 ]; then
+    disp="${1:0:40}..."
+  else
+    disp=$1
+  fi
+  disp=${disp//[[:cntrl:]]/}
 }
 
 # _syg_cfg_trailing <rest> <key> <file> <lineno>: what follows a complete value
@@ -110,16 +123,17 @@ _syg_cfg_trailing() {
 # any other escape is malformed. Bare values must be one int, float or boolean
 # token (true/false export as 1/0); anything else must be quoted.
 _syg_cfg_parse_value() {
-  local val=$1 key=$2 file=$3 n=$4 c
+  local val=$1 key=$2 file=$3 n=$4 c chunk disp
+  _syg_cfg_disp "$key"
+  key=$disp
   _SYG_CFG_VAL=""
-  val=${val#"${val%%[![:space:]]*}"}
+  # Leading whitespace matters (after "key =" the value usually starts with a
+  # space); gate the glob on the first character so long values pay it only
+  # when an edge is actually whitespace.
+  case ${1:0:1} in [[:space:]]*) val=${val#"${val%%[![:space:]]*}"} ;; esac
   case $val in
     '')
       echo "seyag config: $file: line $n: $key: malformed value: missing value" >&2
-      return 1
-      ;;
-    \'\'\'* | \"\"\"*)
-      echo "seyag config: $file: line $n: $key: unsupported value: multiline strings are not supported" >&2
       return 1
       ;;
     \{*)
@@ -132,29 +146,40 @@ _syg_cfg_parse_value() {
       ;;
     \"*)
       val=${val#\"}
+      # Chunk-wise decode: split at the next quote or backslash. A regex finds
+      # it and the literal-strip cuts at it; the bracket-glob form
+      # (${val%%[\"\\]*}) costs O(n) per call with a brutal constant
+      # (973 ms on a 200 KB value, vs 4 ms here) and made every hook call
+      # seconds slow on one long value.
+      local __re='"|\\'
       while [ -n "$val" ]; do
+        if ! [[ $val =~ $__re ]]; then
+          _SYG_CFG_VAL+=$val
+          break
+        fi
+        chunk=${val%%"${BASH_REMATCH[0]}"*}
+        if [ -n "$chunk" ]; then
+          _SYG_CFG_VAL+=$chunk
+          val=${val:${#chunk}}
+          [ -n "$val" ] || break
+        fi
         c=${val:0:1}
         if [ "$c" = '"' ]; then
           val=${val:1}
           _syg_cfg_trailing "$val" "$key" "$file" "$n" || return 1
           return 0
         fi
-        if [ "$c" = '\' ]; then
-          case ${val:1:1} in
-            \\) _SYG_CFG_VAL+='\' ;;
-            '"') _SYG_CFG_VAL+='"' ;;
-            t) _SYG_CFG_VAL+=$'\t' ;;
-            n) _SYG_CFG_VAL+=$'\n' ;;
-            *)
-              echo "seyag config: $file: line $n: $key: malformed value: unsupported escape" >&2
-              return 1
-              ;;
-          esac
-          val=${val:2}
-        else
-          _SYG_CFG_VAL+=$c
-          val=${val:1}
-        fi
+        case ${val:1:1} in
+          \\) _SYG_CFG_VAL+='\' ;;
+          '"') _SYG_CFG_VAL+='"' ;;
+          t) _SYG_CFG_VAL+=$'\t' ;;
+          n) _SYG_CFG_VAL+=$'\n' ;;
+          *)
+            echo "seyag config: $file: line $n: $key: malformed value: unsupported escape" >&2
+            return 1
+            ;;
+        esac
+        val=${val:2}
       done
       echo "seyag config: $file: line $n: $key: malformed value: unterminated string" >&2
       return 1
@@ -194,6 +219,9 @@ _syg_cfg_parse_value() {
         *)
           if [[ $tok =~ ^-?[0-9]+$ ]] || [[ $tok =~ ^-?[0-9]+\.[0-9]+$ ]]; then
             _SYG_CFG_VAL=$tok
+          elif [[ $tok =~ ^[+-]?[0-9][0-9a-zA-Z_.+-]*$ ]]; then
+            echo "seyag config: $file: line $n: $key: unsupported value: number form not supported (use plain digits or a quoted string)" >&2
+            return 1
           else
             echo "seyag config: $file: line $n: $key: malformed value: strings and paths must be quoted" >&2
             return 1
@@ -206,8 +234,9 @@ _syg_cfg_parse_value() {
 }
 
 # _syg_cfg_parse_file <file> <user|project>: one file into _SYG_CFG_MAP (name ->
-# value), consulting _SYG_CFG_SETTABLE. Warns per offending line and skips it;
-# never returns non-zero, never blocks the caller.
+# value), consulting _SYG_CFG_SETTABLE, _SYG_CFG_ENVONLY and _SYG_CFG_PATH.
+# Warns per offending line and skips it; never returns non-zero, never blocks
+# the caller.
 _syg_cfg_parse_file() {
   local file=$1 scope=$2
   local -a lines=()
@@ -217,23 +246,31 @@ _syg_cfg_parse_file() {
   fi
   local -A seen=()
   local -i n=0
-  local raw line key val name path comp secpath="" sep disp execknob
+  local raw line key val name path secpath="" disp execknob skip_delim="" vstrip vrest
   for raw in "${lines[@]}"; do
     n+=1
     line=${raw%$'\r'}
-    line=${line#"${line%%[![:space:]]*}"}
-    line=${line%"${line##*[![:space:]]}"}
+    if [ -n "$skip_delim" ]; then
+      case $line in *"$skip_delim"*) skip_delim="" ;; esac
+      continue
+    fi
+    # Trim edge whitespace only when the edge actually has some: the trim globs
+    # cost milliseconds on a very long line even when nothing is trimmed.
+    case ${line:0:1} in [[:space:]]*) line=${line#"${line%%[![:space:]]*}"} ;; esac
+    case ${line: -1} in [[:space:]]) line=${line%"${line##*[![:space:]]}"} ;; esac
     case $line in
       '' | '#'*) continue ;;
       \[*\])
         key=${line#\[}
         key=${key%\]}
         if ! _syg_cfg_valid_path "$key"; then
-          echo "seyag config: $file: line $n: [$key]: malformed section: invalid name" >&2
+          echo "seyag config: $file: line $n: malformed section: invalid name" >&2
+          secpath=""
           continue
         fi
         if [ -n "${seen["s:$key"]+x}" ]; then
-          echo "seyag config: $file: line $n: [$key]: duplicate section: keys merge, first value per key wins" >&2
+          _syg_cfg_disp "$key"
+          echo "seyag config: $file: line $n: [$disp]: duplicate section: keys merge, first value per key wins" >&2
         fi
         seen["s:$key"]=1
         secpath=$key
@@ -243,43 +280,66 @@ _syg_cfg_parse_file() {
     case $line in
       *=*) ;;
       *)
-        echo "seyag config: $file: line $n: $line: malformed line: expected 'key = value' or a [section] header" >&2
+        echo "seyag config: $file: line $n: malformed line: expected 'key = value' or a [section] header" >&2
         continue
         ;;
     esac
     key=${line%%=*}
-    val=${line#*=}
     key=${key%"${key##*[![:space:]]}"}
+    val=${line#*=}
+    vstrip=${val#"${val%%[![:space:]]*}"}
+    case $vstrip in
+      \"\"\"* | \'\'\'*)
+        skip_delim=${vstrip:0:3}
+        vrest=${vstrip:3}
+        case $vrest in *"$skip_delim"*) skip_delim="" ;; esac
+        _syg_cfg_disp "$key"
+        echo "seyag config: $file: line $n: $disp: unsupported value: multiline strings are not supported" >&2
+        continue
+        ;;
+    esac
     if [ -z "$key" ] || ! _syg_cfg_valid_path "$key"; then
-      echo "seyag config: $file: line $n: $key: malformed key: invalid name" >&2
+      echo "seyag config: $file: line $n: malformed key: invalid name" >&2
       continue
     fi
     # Env name: the whole path (section + dotted key) uppercased, '.' -> '_'.
     path="$secpath${secpath:+.}$key"
-    name="" sep=""
-    while [ -n "$path" ]; do
-      comp=${path%%.*}
-      if [ "$comp" = "$path" ]; then path=""; else path=${path#*.}; fi
-      name="$name$sep${comp^^}"
-      sep=_
-    done
-    if [ -z "${_SYG_CFG_SETTABLE[$name]+x}" ] || _syg_cfg_is_harness "$name"; then
-      disp=$key
-      [ -n "$secpath" ] && disp=$secpath.$key
+    name=${path//./_}
+    name=${name^^}
+    if _syg_cfg_is_harness "$name"; then
+      _syg_cfg_disp "$path"
+      echo "seyag config: $file: line $n: unknown key '$disp' (not a settable seyag knob; see docs/config.md)" >&2
+      continue
+    fi
+    if [ -n "${_SYG_CFG_ENVONLY[$name]+x}" ]; then
+      _syg_cfg_disp "$name"
+      echo "seyag config: $file: line $n: '$disp' is environment only (not settable from a config file)" >&2
+      continue
+    fi
+    if [ -z "${_SYG_CFG_SETTABLE[$name]+x}" ]; then
+      _syg_cfg_disp "$path"
       echo "seyag config: $file: line $n: unknown key '$disp' (not a settable seyag knob; see docs/config.md)" >&2
       continue
     fi
     # Project scope refuses every knob that picks a binary to run: the _CMD
-    # suffix class plus the explicit list at the top of this file.
+    # suffix class plus the explicit list at the top of this file, followed by
+    # any knob carrying the 'path' flag in knobs.tsv.
     execknob=0
     case $name in *_CMD) execknob=1 ;; esac
     [ "$execknob" = 0 ] && _syg_cfg_in_project_exec "$name" && execknob=1
     if [ "$scope" = project ] && [ "$execknob" = 1 ]; then
-      echo "seyag config: $file: line $n: '$name' cannot be set from project scope (command-execution knob)" >&2
+      _syg_cfg_disp "$name"
+      echo "seyag config: $file: line $n: '$disp' cannot be set from project scope (command-execution knob)" >&2
+      continue
+    fi
+    if [ "$scope" = project ] && [ -n "${_SYG_CFG_PATH[$name]+x}" ]; then
+      _syg_cfg_disp "$name"
+      echo "seyag config: $file: line $n: '$disp' cannot be set from project scope (path knob)" >&2
       continue
     fi
     if [ -n "${seen["n:$name"]+x}" ]; then
-      echo "seyag config: $file: line $n: $key: duplicate key: first value wins" >&2
+      _syg_cfg_disp "$key"
+      echo "seyag config: $file: line $n: $disp: duplicate key: first value wins" >&2
       continue
     fi
     if ! _syg_cfg_parse_value "$val" "$key" "$file" "$n"; then
@@ -313,19 +373,43 @@ syg_config_env() {
     return 0
   fi
   declare -gA _SYG_CFG_SETTABLE=()
-  local row name scope rest
+  declare -gA _SYG_CFG_ENVONLY=()
+  declare -gA _SYG_CFG_PATH=()
+  local -i n=0
+  local row stripped name scope rest flags
   for row in "${rows[@]}"; do
+    n+=1
     row=${row%$'\r'}
+    stripped=${row#"${row%%[![:space:]]*}"}
+    case $stripped in '' | '#'*) continue ;; esac
     # Split by expansion, not a here-string read: one per row, per hook call.
-    # A tab-less row keeps its whole text as the scope (never "user" alone,
-    # guarded below), so it stays skipped exactly as before.
-    case $row in *$'\t'*) ;; *) continue ;; esac
+    case $row in
+      *$'\t'*) ;;
+      *)
+        echo "seyag config: $knobs: line $n: malformed row: skipped" >&2
+        continue
+        ;;
+    esac
     name=${row%%$'\t'*}
     rest=${row#*$'\t'}
     scope=${rest%%$'\t'*}
     [ "$scope" = user ] || continue
     case $name in '' | '#'*) continue ;; esac
-    _SYG_CFG_SETTABLE[$name]=1
+    flags=""
+    case $rest in
+      *$'\t'*$'\t'*$'\t'*$'\t'*)
+        rest=${rest#*$'\t'}
+        rest=${rest#*$'\t'}
+        rest=${rest#*$'\t'}
+        flags=${rest#*$'\t'}
+        flags=${flags%%$'\t'*}
+        ;;
+    esac
+    case " $flags " in *" path "*) _SYG_CFG_PATH[$name]=1 ;; esac
+    case " $flags " in
+      *" envonly "*) _SYG_CFG_ENVONLY[$name]=1 ;;
+      *) _SYG_CFG_SETTABLE[$name]=1 ;;
+    esac
   done
 
   declare -gA _SYG_CFG_MAP=()
