@@ -205,6 +205,9 @@ SYG_SECURITY_SWEEP_REPOS	user	session	unset	Whitespace-separated owner/name repo
 SYG_SESSION_CONTEXT_EXTRA_CMD	user	session	unset	Command session-context runs (bash -c, stdin closed) to add another harness's sessions: a JSON array of {name, folder, sessionId, status, tokens}. Unset adds none; a failure warns on stderr and keeps the Claude rows.	-
 SYG_SESSION_CONTEXT_EXTRA_MODEL	user	session	other	Model label session-context gives the rows from SYG_SESSION_CONTEXT_EXTRA_CMD.	-
 SYG_SESSION_CONTEXT_EXTRA_THRESHOLD	user	session	150000	Context token threshold at which session-context flags a row from SYG_SESSION_CONTEXT_EXTRA_CMD.	-
+SYG_SHELLCHECK_BIN	user	worktrees	shellcheck	Binary bin/shellcheck-gate invokes; a name on PATH or a path, with a `uvx --from shellcheck-py shellcheck` fallback.	path
+SYG_SHELLCHECK_CHUNK	user	worktrees	20	Scripts per shellcheck invocation in bin/shellcheck-gate; bounds one invocation's memory (shellcheck follows sources), chunks run sequentially under the gate lock.	-
+SYG_SHELLCHECK_GATE_INNER	internal	worktrees	unset	Internal marker set to 1 when bin/shellcheck-gate re-execs itself under gate-lock.	-
 SYG_STALLED_NOW	internal	misc	unset	Test seam: ISO-8601 timestamp with a UTC offset that session-stalled uses as the current time; a value without an offset is a usage error.	-
 SYG_STALLED_ZAI_TZ	user	session	Asia/Shanghai	IANA time zone in which session-stalled reads the z.ai quota-reset stamp (`Your limit will reset at YYYY-MM-DD HH:MM:SS`); an unknown zone leaves the reset unparsed.	-
 SYG_STATE_DIR	internal	session	/tmp/claude-<uid>	Test seam overriding the directory session-start prunes and the prompt hooks (queued-message-receipt, context-size-reminder, context-block-gate) write their per-session state into.	-
