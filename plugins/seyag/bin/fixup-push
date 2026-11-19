@@ -369,7 +369,7 @@ if [ "$cur_b" != "$b" ] || [ "$cur_head" != "$OLD" ] || ! git diff --ignore-subm
 fi
 
 if $did_onto; then
-  git -c submodule.recurse=false checkout -q --no-overwrite-ignore -B "$b" "$NEW" 2>/dev/null || refuse "checkout of the rewritten branch failed"
+  git -c submodule.recurse=false checkout -q --no-overwrite-ignore -B "$b" "$NEW" 2>/dev/null || refuse "checkout of the rewritten branch failed (an untracked file colliding with the rewritten tree is the usual cause)"
 else
   git update-ref -m fixup-push "refs/heads/$b" "$NEW" "$OLD" 2>/dev/null || refuse "local branch moved during the run"
 fi
