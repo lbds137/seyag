@@ -432,6 +432,15 @@ grep -qF fake-dev-token "$REQ.all" && grep -qF fake-prod-token "$REQ.all" \
 [ $hrc = 0 ] && grep -q RAILWAY_OPS_ENDPOINT "$T/help" && grep -q RAILWAY_OPS_CLI "$T/help" \
   && ok "--help exits 0 and documents both test seams" || bad "--help: rc=$hrc"
 
+# 18. the skill pins the refreshed facts (presence greps on SKILL.md)
+n=0
+for pin in '2026-12-01' 'railway deployment list --json' 'PRs deploy NOWHERE' 'no default timeout' \
+  'healthcheck.railway.app' 'railway config init'; do
+  grep -qF -- "$pin" "$REPO/plugins/seyag/skills/railway-ops/SKILL.md" && n=$((n + 1)) || echo "18 miss: $pin"
+done
+[ $n = 6 ] && ok "18 the skill pins the IaC cutoff, the deployment-list id source, the PR-deploy rule, the pre-deploy and healthcheck semantics and the IaC init verb (6 of 6)" \
+  || bad "18 SKILL.md pins: $n of 6 present"
+
 kill "$SRV_PID" 2>/dev/null; wait "$SRV_PID" 2>/dev/null; SRV_PID=""
 echo "---"
 [ "$fail" -eq 0 ] && echo "railway-ops: all checks passed" || echo "railway-ops: FAILURES above"
