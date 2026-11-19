@@ -15,6 +15,10 @@ Usage:
                                                     per-driver process metrics, local transcripts only
   session-log grep   [FILTERS] [--no-archive] [--role user|agent|tool|all] [-i] [--raw]
                      [--subagents] [--max N] PATTERN         search decoded text, one line per hit
+  session-log asks   [FILTERS] [--no-archive] [--rows] [--summary] [--json] [--no-text]
+                     [--raw] [--kinds K1,K2] [--category C] [--max N]
+                                                    owner-directed asks (auq, bang, deny, proseask) with
+                                                    category, waiting cost and privacy class
   session-log ledger [FILTERS] [--no-archive] [--lens L] [--unmined]
                      [--extract-due [--within N]]   mined / unmined per transcript and lens, UTC;
                                                     --extract-due lists local owner/agent extracts missing or
@@ -990,6 +994,19 @@ def result_text(p):
     return c if isinstance(c, str) else " ".join(x.get("text", "") for x in (c or []) if isinstance(x, dict))
 
 
+def is_owner_turn(t, e, sub=False, enqueue=False):
+    if sub or e.get("isMeta"):
+        return False
+    if t == "user":
+        raw = user_text(e)
+    elif enqueue and t == "queue-operation" and e.get("operation") == "enqueue" and isinstance(e.get("content"), str):
+        raw = e["content"]
+    else:
+        return False
+    text = clean(raw)
+    return bool(text and not text.startswith(NOT_OWNER))
+
+
 def new_group():
     return {"ids": set(), "anon": 0, "tool_calls": 0, "tool_errors": 0, "owner": 0, "tagged": 0, "plain": 0,
             "tags": Counter(), "classes": Counter(), "bypass": Counter()}
@@ -1042,8 +1059,7 @@ def stats_file(path, sub, gk, since, until, st):
             for p in c if isinstance(c, list) else []:
                 if isinstance(p, dict) and p.get("type") == "tool_result" and p.get("is_error"):
                     seq.append(("e", p.get("tool_use_id"), result_text(p)))
-            text = clean(user_text(e))
-            if not sub and not e.get("isMeta") and text and not text.startswith(NOT_OWNER):
+            if is_owner_turn(t, e, sub):
                 seq.append(("o",))
         elif t == "queue-operation" and e.get("operation") == "enqueue" and isinstance(e.get("content"), str):
             seq.append(("m", e["content"]))
@@ -1148,6 +1164,221 @@ def cmd_stats(a):
     sys.exit(0 if st["groups"] else 1)
 
 
+# ---- asks ------------------------------------------------------------------------------
+
+ASK_KINDS = ("auq", "bang", "deny", "proseask")
+BANG = re.compile(r"(?m)^\s*`?!\s?[a-zA-Z~./][^`\n]{2,200}")
+DENY = re.compile(
+    r"(Permission to use .*(was )?denied|\[Destructive|blocked by .*hook|The user doesn't want to proceed|user rejected|tool use was rejected|denied by the (auto-mode )?classifier)",
+    re.I,
+)
+DENY_AVAIL = re.compile(r"(temporarily unavailable|rate.?limited|capacity)", re.I)  # retry noise, not an ask
+PROSE_MODAL = re.compile(r"(delete|remove|clean ?up|rm |force.?push|merge)[^?\n]{0,120}(can I|shall I|should I|ok to|may I)[^?\n]{0,60}\?\s*$", re.I)
+PROSE = re.compile(r"(delete|remove|clean ?up|rm |force.?push|merge)[^?\n]{0,160}\?\s*$", re.I)
+ASK_CATEGORIES = {
+    "prod-deploy": re.compile(r"railway|deploy|production|prod env|ship it|push to (prod|production)|redeploy", re.I),
+    "worktree-removal": re.compile(r"worktree|safe-worktree-clean|branch (cleanup|sweep)|prune.*branch", re.I),
+    "scratch-delete": re.compile(r"scratch|rm -r|delete.*(tmp|temp|scratch)|safe-clean", re.I),
+    "force-push": re.compile(r"force.?push|--force-with-lease|rewrite (history|the branch)", re.I),
+}
+
+
+def ask_category(text):
+    return next((name for name, rx in ASK_CATEGORIES.items() if rx.search(text)), "other")
+
+
+def detect_ask(t, e, raw=False):
+    """(kind, auq tool_use id, body) for an ask-carrying entry, else (None, None, None)."""
+    m = e.get("message")
+    content = m.get("content") if isinstance(m, dict) else None
+    if not isinstance(content, list):
+        return None, None, None
+    if t == "assistant":
+        for c in content:
+            if isinstance(c, dict) and c.get("type") == "tool_use" and c.get("name") == "AskUserQuestion":
+                inp = c.get("input")
+                qs = (inp.get("questions") if isinstance(inp, dict) else None) or []
+                qtexts = [str(q["question"]) for q in qs if isinstance(q, dict) and q.get("question")]
+                if not qtexts and isinstance(inp, dict) and inp.get("question"):
+                    qtexts = [str(inp["question"])]
+                return "auq", c.get("id"), " | ".join(qtexts)
+        for c in content:
+            if isinstance(c, dict) and c.get("type") == "text":
+                txt = c.get("text") or ""
+                body = txt if raw else REMINDER_RE.sub("", txt)
+                if BANG.search(body):
+                    return "bang", None, body
+                if PROSE_MODAL.search(body) or PROSE.search(body):
+                    return "proseask", None, body
+    elif t == "user":
+        for c in content:
+            if isinstance(c, dict) and c.get("type") == "tool_result" and c.get("is_error"):
+                txt = result_text(c)
+                body = txt if raw else REMINDER_RE.sub("", txt)
+                if DENY_AVAIL.search(body[:600]):
+                    continue  # classifier unavailability is harness retry noise, not owner-directed
+                if DENY.search(body[:600]):
+                    return "deny", None, body
+    return None, None, None
+
+
+def asks_file(path, proj, sess, app, dropped, tsfn, a, since, until, seen_uuids):
+    pending, file_asks, auq_pending = [], [], {}  # auq_pending: tool_use id -> pending auq item
+    for t, ts, e in Reader(path).scan(fast=True, ts=tsfn):
+        if t == "bridge-session":
+            app = app or e.get("bridgeSessionId")
+            continue
+        if t not in MINEABLE or not ts:
+            continue
+        real = log_ts(e.get("timestamp")) is not None  # wait_s needs a real clock on BOTH ends; a
+        u = e.get("uuid")                              # _created_at-only event resolves nothing
+        if is_owner_turn(t, e, enqueue=True):
+            if real:
+                for item in pending:
+                    item["wait_s"] = max(0, int((ts - item["_ts"]).total_seconds()))
+                pending.clear()
+                auq_pending.clear()
+        elif t == "user" and auq_pending:
+            m = e.get("message")
+            content = m.get("content") if isinstance(m, dict) else None
+            # An AskUserQuestion is answered by a non-error tool_result carrying its tool_use id
+            # (usually the entry's only part, so it is not an owner turn); that answer ends every
+            # pending ask's wait. An ERROR result is no answer.
+            if real and isinstance(content, list) and any(
+                isinstance(p, dict) and p.get("type") == "tool_result" and not p.get("is_error")
+                and p.get("tool_use_id") in auq_pending for p in content
+            ):
+                for item in pending:
+                    item["wait_s"] = max(0, int((ts - item["_ts"]).total_seconds()))
+                pending.clear()
+                auq_pending.clear()
+        if u and u in dropped:  # archive only: suppress EMITTING the duplicate, not its pairing
+            continue
+        if not (since <= ts < until):
+            continue
+        kind, auq_id, body = detect_ask(t, e, a.raw)
+        if kind:
+            cleaned = clean(body, a.raw)
+            cat = ask_category(cleaned)
+            item = {
+                "_ts": ts,
+                "_uuid": u,
+                "project": proj,
+                "session": sess,
+                "ts": ts.astimezone().strftime("%Y-%m-%d %H:%M"),
+                "kind": kind,
+                "category": cat,
+                "wait_s": None,
+                "expired": 1,
+                "privacy": "structural" if a.no_text else "text",
+                "text": None if a.no_text else cut(mask(cleaned), 400),
+            }
+            file_asks.append(item)
+            if real:  # a _created_at-only ask has no real clock to subtract from: never paired
+                pending.append(item)
+                if auq_id:
+                    auq_pending[auq_id] = item
+    if not app_ok(app, a):
+        return []
+    out = []
+    for item in file_asks:
+        u = item.pop("_uuid")
+        if u and u in seen_uuids:
+            continue
+        if u:
+            seen_uuids.add(u)
+        w = item["wait_s"]
+        item["expired"] = 1 if (w is None or w > 86400) else 0
+        out.append(item)
+    return out
+
+
+def wait_stats(items):
+    waits = sorted(r["wait_s"] for r in items if r["wait_s"] is not None)
+    if not waits:
+        return None, None
+    n = len(waits)
+    return (waits[(n - 1) // 2] + waits[n // 2]) // 2, waits[-1]
+
+
+def build_asks_summary(rows):
+    buckets = {}
+    for r in rows:
+        buckets.setdefault((r["kind"], r["category"]), []).append(r)
+    summary = []
+    for (kind, cat), items in buckets.items():
+        med, mx = wait_stats(items)
+        summary.append({
+            "kind": kind,
+            "category": cat,
+            "count": len(items),
+            "unanswered": sum(1 for r in items if r["wait_s"] is None),
+            "expired": sum(r["expired"] for r in items),
+            "median_wait": med,
+            "max_wait": mx,
+        })
+    summary.sort(key=lambda s: (-s["count"], s["kind"], s["category"]))
+    return summary
+
+
+def cmd_asks(a):
+    since, until = bounds(a)
+    if a.max < 1:
+        die("--max must be at least 1")
+    want_kinds = set(ASK_KINDS)
+    if a.kinds is not None:
+        ks = a.kinds.split(",")
+        bad = [k for k in ks if k not in ASK_KINDS]
+        if bad:
+            die(f"unknown kind {bad[0]!r}; kinds: {', '.join(ASK_KINDS)}")
+        want_kinds = set(ks)
+    valid_cats = (*ASK_CATEGORIES, "other")
+    want_cats = set(valid_cats)
+    if a.category is not None:
+        cs = a.category.split(",")
+        bad = [c for c in cs if c not in valid_cats]
+        if bad:
+            die(f"unknown category {bad[0]!r}; categories: {', '.join(valid_cats)}")
+        want_cats = set(cs)
+    seen_uuids, rows = set(), []
+    for slug, path, _ in transcripts():
+        if not file_ok(slug, path, a, since):
+            continue
+        rows.extend(asks_file(path, project(slug), id8(path.stem), None, set(), None, a, since, until, seen_uuids))
+    if not a.no_archive and ARCHIVE_DIR.is_dir():
+        index = load_archive_index()
+        candidates = list(scoped_archive_files(a, since, until, index))
+        uuid_index = local_uuid_index({p.stem for p in candidates})
+        for path in candidates:
+            cse = path.stem
+            rows.extend(asks_file(path, "claude.ai", app_short(cse), cse, uuid_index.get(cse, set()), archive_ts, a, since, until, seen_uuids))
+    rows.sort(key=lambda r: r.pop("_ts"))
+    rows = [r for r in rows if r["kind"] in want_kinds and r["category"] in want_cats]
+    summary = build_asks_summary(rows)
+    if a.json:
+        if len(rows) > a.max:
+            warn(f"{len(rows) - a.max} more suppressed")
+        print(json.dumps({"rows": rows[: a.max], "summary": summary, "total": len(rows)}, ensure_ascii=False))
+    elif a.summary:
+        print("kind\tcategory\tcount\tunanswered\texpired\tmedian_wait\tmax_wait")
+        for s in summary:
+            med = "" if s["median_wait"] is None else str(s["median_wait"])
+            mx = "" if s["max_wait"] is None else str(s["max_wait"])
+            print(f"{s['kind']}\t{s['category']}\t{s['count']}\t{s['unanswered']}\t{s['expired']}\t{med}\t{mx}")
+        t_med, t_mx = wait_stats(rows)
+        t_unans = sum(1 for r in rows if r["wait_s"] is None)
+        t_exp = sum(r["expired"] for r in rows)
+        print(f"TOTAL\t\t{len(rows)}\t{t_unans}\t{t_exp}\t{'' if t_med is None else t_med}\t{'' if t_mx is None else t_mx}")
+    else:
+        for r in rows[: a.max]:
+            w = "" if r["wait_s"] is None else str(r["wait_s"])
+            txt = "" if r["text"] is None else r["text"]
+            print(f"{r['project']}\t{r['session']}\t{r['ts']}\t{r['kind']}\t{r['category']}\t{w}\t{r['expired']}\t{r['privacy']}\t{txt}")
+        if len(rows) > a.max:
+            warn(f"{len(rows) - a.max} more suppressed")
+    sys.exit(0 if rows else 1)
+
+
 # ---- entry -----------------------------------------------------------------------------
 
 class Parser(argparse.ArgumentParser):
@@ -1181,6 +1412,16 @@ def main(argv):
     g.add_argument("--max", type=int, default=200)
     g.add_argument("pattern")
     g.set_defaults(fn=cmd_grep)
+    ak = sub.add_parser("asks", parents=[filters], add_help=False)
+    ak.add_argument("--rows", action="store_true")
+    ak.add_argument("--summary", action="store_true")
+    ak.add_argument("--json", action="store_true")
+    ak.add_argument("--no-text", action="store_true")
+    ak.add_argument("--raw", action="store_true")
+    ak.add_argument("--kinds")
+    ak.add_argument("--category")
+    ak.add_argument("--max", type=int, default=200)
+    ak.set_defaults(fn=cmd_asks)
     ld = sub.add_parser("ledger", parents=[filters], add_help=False)
     ld.add_argument("--lens", choices=LENSES)
     ld.add_argument("--unmined", action="store_true")
