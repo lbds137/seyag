@@ -31,7 +31,7 @@ created: 2026-11-19T21:21:00Z
 
 ---
 
-Design notes from the stood-down parallel session (2026-11-19, unclaimed-overlap run): no reusable churn/co-change code exists in the repo yet. Advisor spec items: nesting rule (show the deepest dir that explains the mass); unmeasured vs cohesive coupling (min support, longer coupling window); mass-commit cap; renames; a --now clock seam for the probe; flags only, no env knobs (python bins do not load config.toml, per TASK-4); positive-control against the 2026-11-17 baseline in dev-docs docs/vendor-agnostic-factory-2026-11-14.md section 5; a trigger line in design-boulder; leave TASK-30 (Seyag B in-progress) and the TASK-33 node_modules/pnpm-lock residue out of that unit PR.
+Design notes from the stood-down parallel session (2026-11-19, unclaimed-overlap run): no reusable churn/co-change code exists in the repo yet. Advisor spec items: nesting rule (show the deepest dir that explains the mass); unmeasured vs cohesive coupling (min support, longer coupling window); mass-commit cap; renames; a --now clock seam for the probe; flags only, no env knobs (python bins do not load config.toml, per TASK-4); positive-control against the 2026-11-17 baseline measurement in the machine's private planning doc (vendor-agnostic factory plan, section 5); a trigger line in design-boulder; leave TASK-30 (another session's in-progress claim) and the TASK-33 node_modules/pnpm-lock residue out of that unit PR.
 
 ---
 <!-- COMMENTS:END -->
