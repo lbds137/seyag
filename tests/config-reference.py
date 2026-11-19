@@ -54,6 +54,7 @@ GROUPS = (
     "misc",
 )
 SCOPES = ("user", "internal")
+VALID_FLAGS = ("-", "envonly", "path", "envonly path")
 MAX_DESCRIPTION_LEN = 220
 # A knobs.tsv default with this prefix is plain prose: rendered unbackticked, prefix dropped.
 PROSE_PREFIX = "prose:"
@@ -143,13 +144,13 @@ def load_and_validate_knobs(
         if not stripped or stripped.startswith("#"):
             continue
         parts = raw.split("\t")
-        if len(parts) != 5:
+        if len(parts) != 6:
             row_id = parts[0].strip() if parts and parts[0].strip() else f"line {lineno}"
             errors.append(
-                f"config-reference: {row_id} in knobs.tsv:{lineno} has {len(parts)} fields (expected 5)"
+                f"config-reference: {row_id} in knobs.tsv:{lineno} has {len(parts)} fields (expected 6)"
             )
             continue
-        name, scope, group, default, description = (p.strip() for p in parts)
+        name, scope, group, default, description, flags = (p.strip() for p in parts)
         if not name:
             errors.append(f"config-reference: line {lineno} in knobs.tsv has empty name")
             continue
@@ -174,6 +175,14 @@ def load_and_validate_knobs(
             errors.append(
                 f"config-reference: {name} in knobs.tsv:{lineno} description is {len(description)} chars (max {MAX_DESCRIPTION_LEN})"
             )
+        if flags not in VALID_FLAGS:
+            errors.append(
+                f"config-reference: {name} in knobs.tsv:{lineno} has invalid flags {flags!r} (expected '-', 'envonly', 'path', or 'envonly path')"
+            )
+        elif scope != "user" and flags != "-":
+            errors.append(
+                f"config-reference: {name} in knobs.tsv:{lineno} has flags {flags!r} on scope={scope!r} row (non-'-' flags are only valid on scope='user' rows)"
+            )
 
         rows[name] = {
             "name": name,
@@ -181,6 +190,7 @@ def load_and_validate_knobs(
             "group": group,
             "default": default,
             "description": description,
+            "flags": flags,
         }
 
     for name in sorted(scanned):
@@ -213,6 +223,15 @@ def format_readers(paths: set[str]) -> str:
     return ", ".join(f"`{escape_cell(p)}`" for p in sorted(paths))
 
 
+def format_config_col(row: dict[str, str]) -> str:
+    flag_tokens = set(row["flags"].split()) if row["flags"] != "-" else set()
+    if row["name"] in SCAN_EXACT_NAMES or "envonly" in flag_tokens:
+        return "env only"
+    if "path" in flag_tokens:
+        return "user only"
+    return "user + project"
+
+
 def render_doc(rows: dict[str, dict[str, str]], scanned: dict[str, set[str]]) -> str:
     prefixes_list = ", ".join(f"`{p}*`" for p in SCAN_PREFIXES)
     exact_list = ", ".join(f"`{n}`" for n in SCAN_EXACT_NAMES)
@@ -242,7 +261,7 @@ def render_doc(rows: dict[str, dict[str, str]], scanned: dict[str, set[str]]) ->
         "",
         "## Config files (config.toml)",
         "",
-        "An optional TOML file fills in knobs the environment left unset: user `${XDG_CONFIG_HOME:-$HOME/.config}/seyag/config.toml`, then project `${CLAUDE_PROJECT_DIR:-$PWD}/.claude/seyag.toml` (project keys overwrite user keys). The environment wins over both, even when set to the empty string. Keys map mechanically to env names, the key path uppercased with the separators turned into underscores: `claude_usage_week_reserve = 61` and `[claude_usage]` + `week_reserve = 61` both set `CLAUDE_USAGE_WEEK_RESERVE`. A key applies iff its env name is a user-scope row of this registry and not harness-owned; command-execution knobs — names ending `_CMD` and the binary-path knobs the loader lists beside them — cannot be set from the project file. Subset per line: blank, full-line comment, `[section]` header, or `key = value` with a quoted string (basic `\"`, escapes `\\\\` `\\\"` `\\t` `\\n` only, or literal `'`), an integer, a float, or `true`/`false` (exported as `1`/`0`); strings and paths must be quoted, and arrays, inline tables, multiline strings and trailing content are unsupported; a comment may follow a value but not a section header. `SYG_CONFIG=0` disables the loader. A bad file warns on stderr and is skipped, never blocks a hook — and warns again on every hook call. The project file has the same trust level as the project's `settings.json` `env` block: a cloned repo can set any knob it names, guard bypasses included, so trust a repo before letting its `.claude/seyag.toml` load.",
+        "An optional TOML file fills in knobs the environment left unset: user `${XDG_CONFIG_HOME:-$HOME/.config}/seyag/config.toml`, then project `${CLAUDE_PROJECT_DIR:-$PWD}/.claude/seyag.toml` (project keys overwrite user keys). The environment wins over both, even when set to the empty string. Keys map mechanically to env names, the key path uppercased with the separators turned into underscores: `claude_usage_week_reserve = 61` and `[claude_usage]` + `week_reserve = 61` both set `CLAUDE_USAGE_WEEK_RESERVE`. A key applies iff its env name is a user-scope row of this registry, does not carry `envonly` (environment-only rows, rendered `env only` in the `Config` column alongside the harness-owned names, cannot be set from any config file), and is not harness-owned; command-execution knobs — names ending `_CMD` and the binary-path knobs the loader lists beside them — and path-valued knobs (registry `path` flag, rendered `user only`) cannot be set from the project file. Subset per line: blank, full-line comment, `[section]` header, or `key = value` with a quoted string (basic `\"`, escapes `\\\\` `\\\"` `\\t` `\\n` only, or literal `'`), an integer, a float, or `true`/`false` (exported as `1`/`0`); strings and paths must be quoted, and arrays, inline tables, multiline strings and trailing content are unsupported (after a multiline-string opener warning, the string body is skipped to its closing delimiter); a comment may follow a value but not a section header. `SYG_CONFIG=0` disables the loader. A bad file warns on stderr (warnings name file and line; file content is never echoed; name text is bounded (40 characters)) and is skipped, never blocks a hook — and warns again on every hook call. The project file has the same trust level as the project's `settings.json` `env` block: a cloned repo can set any project-allowed knob it names, guard bypasses included, so trust a repo before letting its `.claude/seyag.toml` load.",
     ]
 
     for group in GROUPS:
@@ -258,8 +277,8 @@ def render_doc(rows: dict[str, dict[str, str]], scanned: dict[str, set[str]]) ->
                 "",
                 f"## {group}",
                 "",
-                "| Name | Default | What it does | Found in |",
-                "| --- | --- | --- | --- |",
+                "| Name | Default | What it does | Found in | Config |",
+                "| --- | --- | --- | --- | --- |",
             ]
         )
         for r in group_rows:
@@ -267,7 +286,8 @@ def render_doc(rows: dict[str, dict[str, str]], scanned: dict[str, set[str]]) ->
             default_cell = format_default(r["default"])
             desc_cell = escape_cell(r["description"])
             read_by_cell = format_readers(scanned[r["name"]])
-            out.append(f"| {name_cell} | {default_cell} | {desc_cell} | {read_by_cell} |")
+            config_cell = format_config_col(r)
+            out.append(f"| {name_cell} | {default_cell} | {desc_cell} | {read_by_cell} | {config_cell} |")
 
     internal_rows = [
         rows[name] for name in sorted(rows) if rows[name]["scope"] == "internal"

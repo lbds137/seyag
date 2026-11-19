@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # tests/config-reference.probe.sh — hermetic probe for tests/config-reference.py
-# and live check of plugins/seyag/config/knobs.tsv + docs/config.md.
+# (6-field knobs.tsv schema with flags validation, Config column rendering, and
+# prose/table checks) and live check of plugins/seyag/config/knobs.tsv +
+# docs/config.md.
 
 set -uo pipefail
 
@@ -50,14 +52,14 @@ EOF
 
 write_valid_tsv() {
   cat >"$TMP/plugins/seyag/config/knobs.tsv" <<'EOF'
-# Format: name<TAB>scope<TAB>group<TAB>default<TAB>description
+# Format: name<TAB>scope<TAB>group<TAB>default<TAB>description<TAB>flags
 # Rule: every env name the scan finds has exactly one row; regenerate docs/config.md after any edit.
-CLAUDE_PROJECTS_DIR	user	session	~/.claude/projects	Directory of per-project transcripts.
-CLAUDE_USAGE_ECHO	user	usage	75	Echo reserve percentage (1-99).
-SYG_ALPHA	user	guards	1	Controls alpha guard mode (0|1).
-SYG_BRAVO	user	guards	unset	Opt-in bravo flag.
-SYG_CHARLIE	internal	guards	unset	Internal charlie test seam.
-SYG_DELTA	user	usage	60	Delta window in seconds.
+CLAUDE_PROJECTS_DIR	user	session	~/.claude/projects	Directory of per-project transcripts.	path
+CLAUDE_USAGE_ECHO	user	usage	75	Echo reserve percentage (1-99).	-
+SYG_ALPHA	user	guards	1	Controls alpha guard mode (0|1).	-
+SYG_BRAVO	user	guards	unset	Opt-in bravo flag.	envonly
+SYG_CHARLIE	internal	guards	unset	Internal charlie test seam.	-
+SYG_DELTA	user	usage	60	Delta window in seconds.	path
 EOF
 }
 
@@ -124,7 +126,7 @@ fi
 sed -i '/SYG_UNDOCUMENTED/d' "$TMP/plugins/seyag/hooks/sample.sh"
 
 # (c) Stale row in knobs.tsv -> --check fails naming stale variable.
-printf 'SYG_STALE_ROW\tuser\tguards\tunset\tStale row.\n' >>"$TMP/plugins/seyag/config/knobs.tsv"
+printf 'SYG_STALE_ROW\tuser\tguards\tunset\tStale row.\t-\n' >>"$TMP/plugins/seyag/config/knobs.tsv"
 if python3 "$SCRIPT" --root "$TMP" --check 2>"$TMP/err.c"; then
   fail "(c) --check passed despite stale row SYG_STALE_ROW"
 elif grep -q 'SYG_STALE_ROW' "$TMP/err.c"; then
@@ -169,7 +171,7 @@ fi
 write_valid_tsv
 
 # (f) Duplicate row in knobs.tsv -> --check fails naming duplicate variable.
-printf 'SYG_ALPHA\tuser\tguards\t1\tDuplicate row.\n' >>"$TMP/plugins/seyag/config/knobs.tsv"
+printf 'SYG_ALPHA\tuser\tguards\t1\tDuplicate row.\t-\n' >>"$TMP/plugins/seyag/config/knobs.tsv"
 if python3 "$SCRIPT" --root "$TMP" --check 2>"$TMP/err.f"; then
   fail "(f) --check passed despite duplicate SYG_ALPHA row"
 elif grep -q 'SYG_ALPHA' "$TMP/err.f" && grep -qi 'duplicate' "$TMP/err.f"; then
@@ -181,7 +183,7 @@ write_valid_tsv
 
 # (g) Bare $SYG_INDIA in a fixture file -> passes with a row, fails naming SYG_INDIA without it.
 echo 'echo "$SYG_INDIA"' >>"$TMP/plugins/seyag/hooks/sample.sh"
-printf 'SYG_INDIA\tuser\tguards\tunset\tBare variable reference.\n' >>"$TMP/plugins/seyag/config/knobs.tsv"
+printf 'SYG_INDIA\tuser\tguards\tunset\tBare variable reference.\t-\n' >>"$TMP/plugins/seyag/config/knobs.tsv"
 if ! python3 "$SCRIPT" --root "$TMP" --write 2>"$TMP/err.g.w"; then
   fail "(g) --write failed with bare \$SYG_INDIA row: $(cat "$TMP/err.g.w")"
 elif ! python3 "$SCRIPT" --root "$TMP" --check 2>"$TMP/err.g.c1"; then
@@ -204,7 +206,7 @@ fi
 
 # (h) awk ENVIRON["SYG_JULIET"] in a fixture file -> passes with a row, fails naming SYG_JULIET without it.
 echo 'awk '\''BEGIN { print ENVIRON["SYG_JULIET"] }'\''' >>"$TMP/plugins/seyag/hooks/sample.sh"
-printf 'SYG_JULIET\tuser\tguards\tunset\tAwk ENVIRON reference.\n' >>"$TMP/plugins/seyag/config/knobs.tsv"
+printf 'SYG_JULIET\tuser\tguards\tunset\tAwk ENVIRON reference.\t-\n' >>"$TMP/plugins/seyag/config/knobs.tsv"
 if ! python3 "$SCRIPT" --root "$TMP" --write 2>"$TMP/err.h.w"; then
   fail "(h) --write failed with SYG_JULIET row: $(cat "$TMP/err.h.w")"
 elif ! python3 "$SCRIPT" --root "$TMP" --check 2>"$TMP/err.h.c1"; then
@@ -226,7 +228,7 @@ if ! python3 "$SCRIPT" --root "$TMP" --write 2>"$TMP/err.h.restore"; then
 fi
 
 # (i) User row with an empty description -> --check fails.
-sed -i $'s/^SYG_ALPHA\t.*/SYG_ALPHA\tuser\tguards\t1\t/' "$TMP/plugins/seyag/config/knobs.tsv"
+sed -i $'s/^SYG_ALPHA\t.*/SYG_ALPHA\tuser\tguards\t1\t\t-/' "$TMP/plugins/seyag/config/knobs.tsv"
 if python3 "$SCRIPT" --root "$TMP" --check 2>"$TMP/err.i"; then
   fail "(i) --check passed despite empty description on SYG_ALPHA"
 elif grep -q 'SYG_ALPHA' "$TMP/err.i" && grep -qi 'empty description' "$TMP/err.i"; then
@@ -260,7 +262,7 @@ write_valid_tsv
 
 # (l) Description of 221 characters -> --check fails.
 DESC_221="$(printf '%*s' 221 '' | tr ' ' 'x')"
-sed -i $'s/^SYG_ALPHA\t.*/SYG_ALPHA\tuser\tguards\t1\t'"$DESC_221"$'/' "$TMP/plugins/seyag/config/knobs.tsv"
+sed -i $'s/^SYG_ALPHA\t.*/SYG_ALPHA\tuser\tguards\t1\t'"$DESC_221"$'\t-/' "$TMP/plugins/seyag/config/knobs.tsv"
 if python3 "$SCRIPT" --root "$TMP" --check 2>"$TMP/err.l"; then
   fail "(l) --check passed despite 221-character description on SYG_ALPHA"
 elif grep -q 'SYG_ALPHA' "$TMP/err.l" && grep -q '221 chars' "$TMP/err.l"; then
@@ -271,7 +273,7 @@ fi
 write_valid_tsv
 
 # (m) knobs.tsv itself is not scanned when a row description mentions SYG_KILO.
-sed -i $'s/^SYG_ALPHA\t.*/SYG_ALPHA\tuser\tguards\t1\tControls alpha guard alongside SYG_KILO./' "$TMP/plugins/seyag/config/knobs.tsv"
+sed -i $'s/^SYG_ALPHA\t.*/SYG_ALPHA\tuser\tguards\t1\tControls alpha guard alongside SYG_KILO.\t-/' "$TMP/plugins/seyag/config/knobs.tsv"
 if ! python3 "$SCRIPT" --root "$TMP" --write 2>"$TMP/err.m.w"; then
   fail "(m) --write failed when knobs.tsv description mentioned SYG_KILO: $(cat "$TMP/err.m.w")"
 elif python3 "$SCRIPT" --root "$TMP" --check 2>"$TMP/err.m"; then
@@ -294,7 +296,7 @@ elif grep -q 'SYG_LIMA read by' "$TMP/err.n1" && grep -q 'bin/non-utf8-bin is no
 else
   fail "(n) stderr did not name SYG_LIMA with its warning: $(cat "$TMP/err.n1")"
 fi
-printf 'SYG_LIMA\tuser\tmisc\tunset\tFixture row for a name in a non-UTF-8 file.\n' >>"$TMP/plugins/seyag/config/knobs.tsv"
+printf 'SYG_LIMA\tuser\tmisc\tunset\tFixture row for a name in a non-UTF-8 file.\t-\n' >>"$TMP/plugins/seyag/config/knobs.tsv"
 if python3 "$SCRIPT" --root "$TMP" --write 2>"$TMP/err.n2" && python3 "$SCRIPT" --root "$TMP" --check 2>"$TMP/err.n3"; then
   if grep -q 'bin/non-utf8-bin is not valid UTF-8' "$TMP/err.n3"; then
     ok "(n) with a knobs row for SYG_LIMA the check passes and the warning still prints"
@@ -324,7 +326,7 @@ if ! python3 "$SCRIPT" --root "$TMP" --write 2>"$TMP/err.o.restore"; then
 fi
 
 # (p) A prose: default renders as plain text: no backticks, no prefix, its | escaped.
-sed -i $'s/^SYG_ALPHA\t.*/SYG_ALPHA\tuser\tguards\tprose:Plain a|b words\tControls alpha guard mode (0|1)./' "$TMP/plugins/seyag/config/knobs.tsv"
+sed -i $'s/^SYG_ALPHA\t.*/SYG_ALPHA\tuser\tguards\tprose:Plain a|b words\tControls alpha guard mode (0|1).\t-/' "$TMP/plugins/seyag/config/knobs.tsv"
 if python3 "$SCRIPT" --root "$TMP" --write 2>"$TMP/err.p" && grep -qF '| `SYG_ALPHA` | Plain a\|b words |' "$TMP/docs/config.md" && ! grep -qF '`Plain a' "$TMP/docs/config.md"; then
   ok "(p) prose: default renders as plain text without backticks or the prefix, | escaped"
 else
@@ -336,7 +338,7 @@ if ! python3 "$SCRIPT" --root "$TMP" --write 2>"$TMP/err.p.restore"; then
 fi
 
 # (q) A bare prose: default (empty remainder after the prefix) fails validation.
-sed -i $'s/^SYG_ALPHA\t.*/SYG_ALPHA\tuser\tguards\tprose:\tControls alpha guard mode (0|1)./' "$TMP/plugins/seyag/config/knobs.tsv"
+sed -i $'s/^SYG_ALPHA\t.*/SYG_ALPHA\tuser\tguards\tprose:\tControls alpha guard mode (0|1).\t-/' "$TMP/plugins/seyag/config/knobs.tsv"
 if python3 "$SCRIPT" --root "$TMP" --check 2>"$TMP/err.q"; then
   fail "(q) --check passed with a bare prose: default"
 elif grep -q 'SYG_ALPHA in knobs.tsv' "$TMP/err.q" && grep -q 'has empty prose default' "$TMP/err.q"; then
@@ -347,6 +349,42 @@ fi
 write_valid_tsv
 if ! python3 "$SCRIPT" --root "$TMP" --write 2>"$TMP/err.q.restore"; then
   fail "(q) restoring docs/config.md with --write failed: $(cat "$TMP/err.q.restore")"
+fi
+
+# (x1) A flags value with an unknown token fails --check naming the row.
+sed -i $'s/^SYG_ALPHA\t.*/SYG_ALPHA\tuser\tguards\t1\tControls alpha guard mode (0|1).\tbogus_flag/' "$TMP/plugins/seyag/config/knobs.tsv"
+if python3 "$SCRIPT" --root "$TMP" --check 2>"$TMP/err.x1"; then
+  fail "(x1) --check passed despite unknown flags token bogus_flag on SYG_ALPHA"
+elif grep -q 'SYG_ALPHA' "$TMP/err.x1" && grep -q 'bogus_flag' "$TMP/err.x1"; then
+  ok "(x1) unknown flags token fails --check naming SYG_ALPHA and bogus_flag"
+else
+  fail "(x1) stderr did not name SYG_ALPHA and bogus_flag: $(cat "$TMP/err.x1")"
+fi
+write_valid_tsv
+
+# (x2) path on an internal row fails --check naming the row.
+sed -i $'s/^SYG_CHARLIE\t.*/SYG_CHARLIE\tinternal\tguards\tunset\tInternal charlie test seam.\tpath/' "$TMP/plugins/seyag/config/knobs.tsv"
+if python3 "$SCRIPT" --root "$TMP" --check 2>"$TMP/err.x2"; then
+  fail "(x2) --check passed despite path flag on internal row SYG_CHARLIE"
+elif grep -q 'SYG_CHARLIE' "$TMP/err.x2" && grep -q 'internal' "$TMP/err.x2"; then
+  ok "(x2) path flag on internal row fails --check naming SYG_CHARLIE"
+else
+  fail "(x2) stderr did not name SYG_CHARLIE internal flags error: $(cat "$TMP/err.x2")"
+fi
+write_valid_tsv
+if ! python3 "$SCRIPT" --root "$TMP" --write 2>"$TMP/err.x2.restore"; then
+  fail "(x2) restoring docs/config.md with --write failed: $(cat "$TMP/err.x2.restore")"
+fi
+
+# (x3) The Config column renders user only / env only / user + project per §10.
+if grep -qF '| Name | Default | What it does | Found in | Config |' "$TMP/docs/config.md" \
+  && grep -qF '| `SYG_ALPHA` | `1` | Controls alpha guard mode (0\|1). | `bin/sample-tool`, `hooks/sample.sh` | user + project |' "$TMP/docs/config.md" \
+  && grep -qF '| `SYG_DELTA` | `60` | Delta window in seconds. | `bin/sample-tool` | user only |' "$TMP/docs/config.md" \
+  && grep -qF '| `SYG_BRAVO` | unset | Opt-in bravo flag. | `hooks/sample.sh` | env only |' "$TMP/docs/config.md" \
+  && grep -qF '| `CLAUDE_PROJECTS_DIR` | `~/.claude/projects` | Directory of per-project transcripts. | `bin/sample-tool` | env only |' "$TMP/docs/config.md"; then
+  ok "(x3) Config column renders user + project, user only (path), and env only (envonly and SCAN_EXACT_NAMES)"
+else
+  fail "(x3) Config column rendering mismatch in $TMP/docs/config.md"
 fi
 
 # Live check against the repository root.

@@ -1,252 +1,253 @@
-# Format: name<TAB>scope<TAB>group<TAB>default<TAB>description
+# Format: name<TAB>scope<TAB>group<TAB>default<TAB>description<TAB>flags
 # Rule: every env name the scan finds has exactly one row; regenerate docs/config.md after any edit.
 # scope: user | internal
 # group: guards | stop-gates | session | statusline | usage | credit | pr | worktrees | release | routing | misc
 # default: a value (rendered in backticks), unset, or prose:<text> (rendered as plain escaped text with the prefix dropped; use it for a sentence, not a value; only | is escaped, so keep <, backticks, * and _ out of it).
-ANTHROPIC_ADMIN_API_KEY	user	credit	unset	Organization Admin API key enabling provider cost_report balance queries in api-credit and statusline (takes precedence over SYG_CREDIT_ADMIN_KEY_CMD).
-CC_ROUTE_KEYS	user	routing	~/.claude/lane-keys.env	Path to the lane key file where zai-usage looks up ZAI_AUTH_TOKEN first.
-CC_ROUTE_PRESET	user	routing	unset	Route preset name; set to anthropic-api so claude-usage treats a first-party endpoint as the Console API-key lane.
-CLAUDE_CONFIG_DIR	user	session	~/.claude	Claude Code config directory: context-audit (CLAUDE.md, rules, settings, memory, skills, plugins), session-log, and the projects folder the session tools use when CLAUDE_PROJECTS_DIR is unset; statusline ignores it.
-CLAUDE_PLUGIN_REGISTRY	user	statusline	$HOME/.claude/plugins/installed_plugins.json	Path to installed_plugins.json read by statusline to compare the installed seyag version against the checkout manifest.
-CLAUDE_PROJECTS_DIR	user	session	~/.claude/projects	Per-project transcript folders, read by session-log, usage-sweep, price-table, classifier-denials, session-stalled, session-context, chrome-loss-scan, relay-ruling, driver-busy-hours; unset: CLAUDE_CONFIG_DIR/projects.
-CLAUDE_SESSION_ARCHIVE	user	session	~/Documents/claude-session-archive	Directory holding exported cse_*.jsonl claude.ai session archives read by session-log.
-CLAUDE_USAGE_API_CREDIT	internal	usage	<script_dir>/api-credit	Test seam overriding the sibling api-credit binary path in claude-usage.
-CLAUDE_USAGE_EXTRA_OK	user	usage	unset	Set to 1 to let claude-usage --ok and --wait pass past the weekly reserve while extra usage is enabled and under budget.
-CLAUDE_USAGE_GATE_MAX_AGE	user	usage	21600	Maximum age in seconds (integer >= TTL) of the OAuth usage cache before claude-usage --ok fails with meter=cache.
-CLAUDE_USAGE_MODEL	user	usage	unset	Model name override for claude-usage --ok per-model weekly cap checks when not reading a session transcript.
-CLAUDE_USAGE_TTL	user	usage	120	Refresh TTL in seconds (integer >= 30) for the OAuth usage cache in claude-usage.
-CLAUDE_USAGE_WEEK_RESERVE	user	usage	75	Weekly usage percentage threshold (integer 1-99) at which claude-usage --ok blocks new work; week-burn-window also uses it as its hold threshold.
-CLAUDE_USAGE_WEEK_RESERVE_CMD	user	usage	unset	Shell command (5s timeout) printing a dynamic weekly reserve integer 1-99 for claude-usage --ok and --posture.
-CLAUDE_USAGE_WEEK_STOP	user	usage	80	Hard-stop weekly usage percentage (integer 1-99) reported by claude-usage --posture.
-CLAUDE_USAGE_ZAI_FIVE_CAP	user	usage	80	Maximum 5-hour quota threshold percentage (non-negative integer) allowed by claude-usage --ok on the z.ai lane.
-CLAUDE_USAGE_ZAI_USAGE	internal	usage	<script_dir>/zai-usage	Test seam overriding the sibling zai-usage binary path in claude-usage.
-CLAUDE_USAGE_ZAI_WEEK_RESERVE	user	usage	<CLAUDE_USAGE_WEEK_RESERVE>	Static weekly quota reserve percentage (integer 1-99) for claude-usage --ok and --posture on the z.ai lane.
-CLAUDE_USAGE_ZAI_WEEK_RESERVE_CMD	user	usage	unset	Shell command (5s timeout) printing a dynamic weekly reserve integer 1-99 for the z.ai lane in claude-usage.
-CLAUDE_VERSIONS_DIR	user	statusline	$HOME/.local/share/claude/versions	Directory of staged native Claude Code version downloads checked by statusline for the CC update nudge.
-CONTEXT_AUDIT_MOUNTS	internal	misc	/proc/self/mounts	Test seam overriding the mount table path read by context-audit to skip fuse.rclone mounts.
-LINES_CHECK_CONTEXT_AUDIT	internal	misc	<script_dir>/context-audit	Test seam overriding the context-audit binary path in lines-check.
-LINES_CHECK_IMPL_VERSION	internal	misc	1	Test seam overriding the implementation version compared against the baseline in lines-check.
-OPENROUTER_API_KEY	internal	misc	unset	Example key name mentioned in keys validation error text; not read directly from the environment by keys.
-OPENROUTER_CREDITS_URL	internal	statusline	https://openrouter.ai/api/v1/credits	Test seam overriding the OpenRouter credits endpoint URL in statusline.
-PLUGIN_RELEASE_AGENTS_CMD	user	release	claude agents --json	Command run by plugin-release-check to list live Claude Code sessions as a JSON array.
-PLUGIN_RELEASE_FETCH	user	release	1	Set to 0 to skip git fetch --all before comparing the checkout version against upstream in plugin-release-check.
-PLUGIN_RELEASE_PROJECTS	user	release	$HOME/.claude/projects	Projects transcript root searched by plugin-release-check for /reload-plugins and /clear refresh lines.
-PLUGIN_RELEASE_UPSTREAM_REF	user	release	@{upstream}	Git ref compared against the local plugin.json version in plugin-release-check.
-PRICE_TABLE_MANAGED_FILE	user	routing	/etc/claude-code/managed-settings.json	Managed settings JSON path that price-table --merge and --apply read; --apply prints a sudo install command targeting it (the tool never writes it).
-PRICE_TABLE_MODELS_URL	internal	routing	https://openrouter.ai/api/v1/models	Test seam overriding the OpenRouter models endpoint URL for price-table --sync.
-PR_CI_WAIT_FAKE_TICK_S	internal	pr	0	Test seam advancing the quiet-window clock by a fixed number of seconds per poll instead of wall time in pr-ci-wait (0 uses wall time).
-PR_CI_WAIT_GRACE_S	user	pr	300	Review-run grace window in seconds after CI settles before pr-ci-wait fails with CI_GATE_REVIEW_MISSING.
-PR_CI_WAIT_HEARTBEAT_S	user	pr	600	Interval in seconds between progress heartbeat log lines while pr-ci-wait is polling.
-PR_CI_WAIT_MAX_S	user	pr	1500	Maximum total wait time in seconds before pr-ci-wait gives up with CI_GATE_TIMEOUT.
-PR_CI_WAIT_POLL_S	user	pr	30	Interval in seconds between workflow-run polls in pr-ci-wait.
-PR_CI_WAIT_QUIET_S	user	pr	90	Quiet-window duration in seconds with an unchanged, all-completed run set required to settle pr-ci-wait when SYG_CI_ANCHOR is unset.
-PR_CI_WAIT_SETTLE_S	user	pr	5	Pause in seconds after gh pr checks --watch finishes and before pr-ci-wait prints CI_COMPLETE (only when CI is releasable).
-RAILWAY_OPS_CLI	internal	misc	railway	Test seam overriding the railway CLI binary path in railway-ops.
-RAILWAY_OPS_ENDPOINT	internal	misc	https://backboard.railway.app/graphql/v2	Test seam overriding the Railway GraphQL endpoint URL in railway-ops.
-SECURITY_SWEEP_GH	internal	misc	gh	Test seam overriding the gh binary path in security-sweep.
-SECURITY_SWEEP_GH_TIMEOUT	internal	misc	60	Test seam overriding the per-call gh timeout in seconds (positive integer) in security-sweep.
-SESSION_LEDGER	user	session	~/.claude/mined-corpus/ledger.tsv	Path to the TSV ledger where session-log ledger and session-log mark read and record mined transcript spans.
-SEYAG_KEYS_BIN	user	usage	<script_dir>/keys	Override path to the keys binary invoked by zai-usage to read ZAI_AUTH_TOKEN from the encrypted credential store.
-SYG_AGY_BRAIN_DIR	user	session	~/.gemini/antigravity-cli/brain	Antigravity (agy) CLI transcript folders (<id>/.system_generated/logs) merged by driver-busy-hours; with CLAUDE_PROJECTS_DIR set, read only if this or SYG_AGY_SUMMARIES_DB is. Environment only (not config.toml).
-SYG_AGY_CONVERSATIONS_DIR	user	session	~/.gemini/antigravity-cli/conversations	Directory of *.db conversation databases read by agy-extract when no database paths are passed.
-SYG_AGY_SUMMARIES_DB	user	session	~/.gemini/antigravity-cli/conversation_summaries.db	SQLite conversation_summaries database of the Antigravity (agy) CLI that driver-busy-hours reads to find root conversations and their workspaces; read together with SYG_AGY_BRAIN_DIR. Environment only (not config.toml).
-SYG_ALLOW_BROAD_WALK	user	guards	unset	Set to 1 in the command text to bypass broad-walk-guard for an intentional broad filesystem walk.
-SYG_ALLOW_CACHE_RM	user	guards	unset	Set to 1 in the command text to bypass cache-rm-redirect for an owner-approved cache deletion.
-SYG_ALLOW_COMMIT_BRANCH	internal	guards	unset	Example per-command bypass assignment in the command text mentioned in lib/branch_switch.py docstring; not read by a hook.
-SYG_ALLOW_ENV_PRINT	user	guards	unset	Set to 1 in a pipeline segment's words in the command text to bypass env-print-guard for an owner-approved dump.
-SYG_ALLOW_GREP_DOLLAR	user	guards	unset	Set to 1 in the command text to bypass grep-escaped-dollar-guard.
-SYG_ALLOW_HEREDOC_EDIT	user	guards	unset	Set to 1 in the command text to bypass python-heredoc-edit-guard.
-SYG_ALLOW_LIVE_CHECKOUT	user	guards	unset	Set to 1 in the command text (git prefix or export) or in the environment to bypass live-checkout-guard.
-SYG_ALLOW_PRIVATE_TERM	user	guards	unset	Set to 1 in the command's own prefix in the command text to bypass private-term-guard on the owner's word.
-SYG_ALLOW_RM	user	guards	unset	Set to 1 in the command text to bypass recursive-rm-guard for an owner-approved deletion.
-SYG_ALLOW_SESSION_URL	user	guards	unset	Set to 1 in the command's own prefix in the command text to bypass session-url-gate on the owner's word.
-SYG_ALLOW_TEMPORAL	user	guards	unset	Set to 1 in the git commit command's own prefix in the command text to bypass temporal-marker-guard.
-SYG_BQ_NO_RC_LANES	user	stop-gates	unset	Extended regex matched against ANTHROPIC_BASE_URL for lanes without Remote Control, routing asks to SendMessage.
-SYG_BQ_PENDING_MARKERS	user	stop-gates	say the word\b|waiting on you\b|needs? your (yes|go|call|input)\b|for you to (decide|test|check)\b	Case-insensitive Python regex matching pending-ask phrases in the final paragraph; empty disables the pass.
-SYG_CHECK_LIB	internal	guards	unset	The hooks/lib directory the hook passes to its python child for shared target/owner resolution in the --check preflight.
-SYG_CHECK_TARGET	internal	guards	unset	The target argument the hook passes to its python child in the --check preflight.
-SYG_CI_ANCHOR	user	pr	unset	Workflow name whose completion (with nothing pending) settles pr-ci-wait; unset uses the quiet-window rule.
-SYG_CI_AUTOMERGE_JOB	user	pr	unset	Automerge job name in the review workflow run checked by pr-ci-wait: if skipped on a green, open, non-draft PR authored by the authenticated gh user, reports CI_GATE_AUTOMERGE_SKIPPED; unset or empty disables the check.
-SYG_CI_REVIEW	user	pr	prose:auto-detected: the workflow named Claude Code Review if one exists, otherwise no review check	Review workflow name that must complete before pr-ci-wait releases; set empty to disable.
-SYG_CLASSIFIER_LEDGER	user	session	unset	JSONL file path opting in classifier-ledger to record PostToolUseFailure events.
-SYG_CLOCK_STAMP_HINT	user	guards	unset	Optional line appended to clock-stamp-guard block messages (for example naming a project stamping tool).
-SYG_CLOCK_STAMP_NOW	internal	guards	unset	Test clock (integer epoch seconds) overriding current time in clock-stamp-guard.
-SYG_CLOCK_STAMP_PATHS_FILE	user	guards	${XDG_CONFIG_HOME:-$HOME/.config}/seyag/clock-stamp-paths	Config file of path globs and section: lines arming clock-stamp-guard.
-SYG_COMPONENTS_TSV	internal	session	<hooks_dir>/components.tsv	Internal variable holding the resolved path to hooks/components.tsv in lib/components.sh.
-SYG_CONFIG	user	misc	unset	Set to 0 to disable the config.toml loader entirely (hooks and wired bins ignore config files; any other value or unset: enabled).
-SYG_CONTEXT_BLOCK	user	session	unset	Token count for the hard context tier: at or above it context-size-reminder arms context-block-gate (handoff-write-only tool use) instead of the soft banner; unset or non-numeric keeps the tier off.
-SYG_CONTEXT_BLOCK_CMDS	user	session	unset	Colon-separated Bash command prefixes that clear an armed context block; literal prefix, no word boundary — a matching compound command clears and runs whole (operator-config trust); unset or empty: no command can clear.
-SYG_CONTEXT_BLOCK_PATHS	user	session	unset	Colon-separated path globs matched literally (no tilde or variable expansion) against a Write, Edit, MultiEdit or NotebookEdit file path to lift an armed context block; unset or empty means no file write can clear it.
-SYG_CONTEXT_COOLDOWN_MIN	user	session	30	Cooldown in minutes between context-size-reminder banners in a session.
-SYG_CONTEXT_THRESHOLD	user	session	500000	Context token threshold at which context-size-reminder fires on non-Fable models.
-SYG_CONTEXT_THRESHOLD_FABLE	user	session	200000	Context token threshold at which context-size-reminder fires when the model starts with claude-fable.
-SYG_SESSION_CONTEXT_THRESHOLD	user	session	500000	Context token threshold at which session-context flags a session on non-Fable models (a whole number of at most 15 digits; separate from the in-session reminder's SYG_CONTEXT_THRESHOLD).
-SYG_SESSION_CONTEXT_THRESHOLD_FABLE	user	session	200000	Context token threshold at which session-context flags a session whose model id contains fable (a whole number of at most 15 digits).
-SYG_CREDIT_ADMIN_KEY_CMD	user	credit	unset	Command run on a cache miss (when ANTHROPIC_ADMIN_API_KEY is unset, empty or contains a newline) to print the organization Admin API key on stdout.
-SYG_CREDIT_ADMIN_URL	internal	credit	https://api.anthropic.com	Test seam overriding the Anthropic Admin API origin URL in api-credit and statusline.
-SYG_CREDIT_ANCHOR	user	credit	<SYG_CREDIT_LEDGER>.anchor.json	Path to the JSON file storing api-credit calibrate balance anchors.
-SYG_CREDIT_DUST_FLOOR_USD	user	credit	0.15	Minimum USD balance shown by the statusline fleet credit display on non-API lanes, which shows only when SYG_CREDIT_LEDGER and SYG_CREDIT_GRANTS are both set and the week is urgent (week >= 75% or <= 7 days left).
-SYG_CREDIT_FORCE	internal	credit	unset	Test seam (set to 1) forcing api-credit to record regardless of the route rule.
-SYG_CREDIT_GRANTS	user	credit	unset	Path to the JSON file listing prepaid credit grants, expiries, timezones, and kinds for api-credit and statusline.
-SYG_CREDIT_KEY_CMD_TIMEOUT	internal	credit	15	Test seam overriding the timeout in seconds (positive number) for SYG_CREDIT_ADMIN_KEY_CMD in api-credit.
-SYG_CREDIT_LEDGER	user	credit	unset	Path to the JSONL spend ledger file opting in api-credit-ledger, api-credit, and statusline credit display.
-SYG_CREDIT_NOW	internal	credit	unset	Test clock (ISO-8601 UTC timestamp) overriding current time in api-credit and statusline.
-SYG_CREDIT_PRICE_TABLE_CMD	internal	credit	<script_dir>/price-table	Test seam overriding the price-table command run by api-credit.
-SYG_CREDIT_ROUTE	user	credit	anthropic-api	Route label written into each ledger entry by api-credit hook.
-SYG_CREDIT_SETTLE_DAYS	user	credit	2	Number of recent closed UTC days (non-negative integer; 0 disables) taking max(provider, ledger) spend in api-credit.
-SYG_CREDIT_WHEN	user	credit	unset	Env match rule (NAME=value) deciding when a session is on the metered API-key route instead of ANTHROPIC_API_KEY.
-SYG_CROSS_REVIEW_CMD	user	session	unset	Single-line command advertised at SessionStart that names the route to a reviewer from a different model family than the author's.
-SYG_CWD_DRIFT_WORKTREE	user	guards	unset	Set to 0 to disable cwd-drift-guard's once-per-arrival warning for state-changing git commands in linked worktrees.
-SYG_DISABLE	user	session	unset	Whitespace- or comma-separated components or hook names to disable; wins over SYG_ENABLE.
-SYG_DISPATCH_ACK_FILE	internal	guards	/tmp/claude-<uid>/dispatch-posture-ack	Test seam overriding the path to dispatch-posture-gate's per-commit acknowledgement and cumulative line ledger file.
-SYG_DISPATCH_SPEC_INLINE	user	guards	0	Set to 1 to require a ## Premise ledger section on inline isolation: "worktree" Agent prompts.
-SYG_DISPATCH_SPEC_RE	user	guards	[A-Za-z0-9._~/-]*\.claude/dispatch/[A-Za-z0-9._-]+\.md	Extended regex extracting the spec file path from Agent prompts in dispatch-spec-ledger-gate.
-SYG_DISPATCH_SRC_RE	user	guards	unset	Extended regex of source paths opting in dispatch-posture-gate to block >5-line inline edits.
-SYG_DRIVER_CLONE_PROJECTS	user	session	`$HOME/Projects`	Directory holding the base checkout and the new lane clone driver-clone creates.
-SYG_DRIVER_CLONE_ROLE_BIN	internal	misc	prose:the claude-role beside driver-clone	Test seam: the claude-role binary driver-clone calls to file the folder-trust bullet.
-SYG_DRIVER_CLONE_START_HINT	user	session	prose:start a session in the clone	Text driver-clone prints after "then:" as the last step once the lane exists.
-SYG_ENABLE	user	session	unset	Whitespace- or comma-separated components or hook names to enable on top of SYG_PROFILE.
-SYG_EPG_CWD	internal	guards	unset	Internal env variable passing the payload cwd from env-print-guard.sh to its embedded Python helper.
-SYG_EPG_TRUSTED_VARS	user	guards	unset	Space-separated variable names trusted as $VAR prefixes on file-sink redirection targets in env-print-guard.
-SYG_EVENT_HOOK_TIMEOUT	user	session	45	Per-hook timeout in seconds when run.sh --event runs hooks in parallel.
-SYG_EXTRA_USAGE_BUDGET_CMD	user	usage	unset	Shell command printing the extra-usage USD budget as a non-negative decimal for claude-usage.
-SYG_EXTRA_USAGE_BUDGET_CMD_TIMEOUT	user	usage	10	Timeout in seconds (positive integer) for SYG_EXTRA_USAGE_BUDGET_CMD in claude-usage.
-SYG_EXTRA_USAGE_BUDGET_USD	user	usage	unset	Static extra-usage budget in USD (non-negative decimal) for claude-usage and statusline.
-SYG_EXTRA_USAGE_TOML	user	statusline	unset	Path to a TOML file with bought_usd and optional used_usd_at_anchor read on each statusline render.
-SYG_GATE_LOCK_FILE	user	worktrees	/tmp/gate.lock	Lock file gate-lock holds while a gate runs; one gate at a time machine-wide (keep it on a path every sandbox shares). Default is shared /tmp, so another user can hold it on a multi-user host; set a private path.
-SYG_GATE_SANDBOX_ENV	user	worktrees	unset	Space-separated variable names gate-sandbox passes into the sandbox's otherwise cleared environment. Each must be a variable name, or the launch refuses with 125.
-SYG_GATE_SANDBOX_PATH	user	worktrees	prose:the caller's PATH	PATH inside gate-sandbox.
-SYG_GATE_SANDBOX_PROFILE	user	worktrees	unset	gate-sandbox profile: unset for a one-gate sandbox, worker for a whole headless worker (set by worker-sandbox).
-SYG_GATE_SANDBOX_REPO	user	worktrees	unset	Main checkout top directory CWD's tree belongs to; when set, gate-sandbox runs worker-tree-check --repo on CWD before its first host git call; worker-sandbox inherits it when its own knob is unset.
-SYG_GATE_SANDBOX_RO_BINDS	user	worktrees	unset	Colon-separated SRC or SRC->DST read-only binds added to gate-sandbox; entries resolving inside the worktree are refused.
-SYG_GATE_SANDBOX_SCRATCH	user	worktrees	unset	Worker profile only: host directory bound writable at ~/.claude inside the sandbox (required).
-SYG_GATE_SANDBOX_TOOLCHAIN	user	worktrees	$HOME/.local/bin/mise:$HOME/.local/share/mise:$HOME/.local/state/mise:$HOME/.config/mise:$HOME/.local/share/pnpm	Colon-separated read-only toolchain paths; entries or non-hidden child symlinks (prefix inside or resolving in/through the worktree or cyclic/unresolvable) refuse 125; absent-outside skips. $HOME widens; empty: none.
-SYG_GATE_SANDBOX_TREE	user	worktrees	rw	Worker profile only: rw or ro mount of the worktree.
-SYG_GATE_SANDBOX_WALL	user	worktrees	unset	Worker profile only: extra space-separated CIDRs or addresses gate-sandbox walls off with unreachable routes, on top of every host address and every route (any routing table) through an interface with no default route.
-SYG_GH_WRAPPERS	user	guards	unset	Whitespace-separated wrapper command prefix tokens scanned as gh invocations by session-url-gate and private-term-guard.
-SYG_HANDOFF_CMDS	user	stop-gates	unset	Python regex matching Bash commands that write a handoff (replaces built-in HANDOFF.md/handoff.md path defaults).
-SYG_HANDOFF_PATHS	user	stop-gates	(^|/)(?:HANDOFF\.md|handoff\.md)$	Python regex matching file paths whose Edit/Write counts as a handoff write (replaces built-in defaults when set).
-SYG_HANDOFF_SECTIONS	user	stop-gates	^##[ \t]*(?:Handoff|Next)\b	Multiline Python regex narrowing wired SYG_HANDOFF_PATHS writes to matching markdown sections; empty disables narrowing.
-SYG_HEADLESS_OFF	internal	session	turn-shape context handoff-pick-check security	Internal constant listing components disabled automatically in headless (sdk-*) runs.
-SYG_HEADLESS_OFF_HOOKS	internal	session	blocking-question-channel-check turn-end-shape-gate promise-ledger-check queued-message-receipt bare-token-binding-reminder handoff-pick-check context-size-reminder	Internal fallback list of hooks disabled in headless runs when components.tsv cannot be read.
-SYG_HOOK	internal	session	unset	Internal variable holding the resolved hook script path inside run.sh.
-SYG_IN_PERSON_SECTION	user	session	In Person	Heading (without the ##) of the role file section claude-role --need --in-person writes and --json reads as .deck: what needs the owner physically present.
-SYG_KEYS_CREDS_CMD	internal	misc	systemd-creds	Test seam replacing the systemd-creds command in keys.
-SYG_KEYS_LEGACY_FILE	user	misc	unset	Optional read-only plaintext NAME=value fallback file consulted by keys get after the encrypted store.
-SYG_KEYS_LOCK_WAIT_S	user	misc	15	Seconds keys waits for the store lock or the TPM lock before failing (finite number >= 0).
-SYG_KEYS_NAME	user	misc	keys	Credential --name passed to systemd-creds when encrypting and decrypting the key store.
-SYG_KEYS_STALL_S	user	misc	300	Seconds a systemd-creds timeout marker keeps later keys calls failing fast instead of touching the TPM (finite number >= 0).
-SYG_KEYS_STORE	user	misc	${XDG_DATA_HOME:-~/.local/share}/keys/keys.cred	Path to the encrypted systemd-creds key store file used by keys.
-SYG_KEYS_TIMEOUT_S	user	misc	20	Seconds one systemd-creds call in keys may take before it is killed (finite number >= 0; an invalid value is a usage error).
-SYG_KEYS_WITH_KEY	user	misc	host+tpm2	Value passed to systemd-creds encrypt --with-key= in keys (for example host on a machine without a TPM).
-SYG_LAUNCH_RECORD_DIR	user	session	unset	Directory path opting in launch-record to write <session_id>.json launch metadata at SessionStart.
-SYG_LAUNCH_RECORD_ENV	user	session	unset	Space-separated environment variable names recorded under extra in launch-record JSON files.
-SYG_LAUNCH_RECORD_HYBRID_OK	user	session	unset	Set to 1 to suppress launch-record's warning when model slots mix provider families.
-SYG_LEDGER_PATH_RE	user	stop-gates	(^|/)(backlog/|tracker/|CURRENT\.md|BACKLOG\.md|TODO\.md|claude-memory/roles/)	Python regex replacing the default file paths that count as a same-turn filing in promise-ledger-check.
-SYG_LIB	internal	session	unset	Internal run.sh flag: 1 once lib/components.sh is sourced and defines syg_enabled, 0 if it cannot be loaded; set by the script, not read from the environment.
-SYG_LIB_DIR	internal	guards	<hooks_dir>/lib	Internal env variable passing the hooks/lib directory path to embedded Python helpers.
-SYG_LIVE_CHECKOUT_AUTO	user	guards	1	Set to 0 to disable auto-detecting the plugin's own marketplace checkout as a protected live root.
-SYG_LIVE_CHECKOUTS	user	guards	unset	Colon-separated absolute paths whose main git working trees are protected by live-checkout-guard.
-SYG_LONG_JOB_CMD	user	session	unset	Single-line runner prefix advertised at SessionStart for running >10-minute jobs outside the session tree.
-SYG_LOSSY_PIPE_GH_WRAPPERS	user	guards	unset	Whitespace-separated read-wrapper command tokens guarded against head/tail/sed truncation in lossy-pipe-guard.
-SYG_LOSSY_PIPE_SUITES	user	guards	1	Set to 0 to disable lossy-pipe-guard on test and probe suite commands piped into head/tail/sed.
-SYG_MEM_GATE_CMD	user	session	unset	Single-line command advertised at SessionStart to check free memory before launching workers or test suites. The plugin's own mem-gate (`mem-gate --ok`) is one such command.
-SYG_MEM_GATE_MEMINFO	internal	misc	/proc/meminfo	Test seam overriding the meminfo file mem-gate reads.
-SYG_MEM_GATE_MIN_MB	user	misc	2048	Default MemAvailable floor in MB for mem-gate --ok/--wait; an explicit MB argument wins.
-SYG_MEM_PRESSURE_MAX_BYTES	user	misc	5242880	Size in bytes past which mem-pressure-log rotates log.jsonl to log.jsonl.1 (one generation kept).
-SYG_MEM_PRESSURE_MEMINFO	internal	misc	/proc/meminfo	Test seam overriding the meminfo file mem-pressure-log reads.
-SYG_MEM_PRESSURE_PSI	internal	misc	/proc/pressure/memory	Test seam overriding the PSI memory file mem-pressure-log reads.
-SYG_MEM_PRESSURE_STATE_DIR	user	misc	$HOME/.local/state/mem-pressure	Directory holding mem-pressure-log's log.jsonl.
-SYG_MEM_WATCH_CGROUP_ROOT	user	misc	/sys/fs/cgroup/user.slice	Directory mem-watch searches, up to four levels deep, for this user's app.slice/memory.events oom_kill counter (user-<uid>.slice preferred; a root below the user slice also works; another uid's slice never).
-SYG_MEM_WATCH_MEMINFO	internal	misc	/proc/meminfo	Test seam overriding the meminfo file mem-watch reads.
-SYG_MERGE_REVIEW_LOGIN	user	pr	claude[bot]	GitHub login whose latest PR comment must be surfaced before pr-merge-review-check allows gh pr merge.
-SYG_MERGE_REVIEW_RELEASE_REMINDER	user	pr	prose:This PR merges into the repository's default branch — run this project's post-merge steps (version bump, release, deploy) before starting other work.	Custom reminder text shown once when merging a PR into the repository's default branch.
-SYG_MERGE_REVIEW_WORKFLOW	user	pr	.github/workflows/claude-code-review.yml	Review workflow file path whose self-edit in a PR explains a missing review comment in pr-merge-review-check.
-SYG_NEEDS_OWNER_SECTION	user	session	Needs Owner	Heading (without the ##) of the role file section claude-role --need writes and --json reads as .needs: what waits on the owner; relay-ruling names it in its destructive-step line and reads it from the environment only.
-SYG_OWNER_NAME	user	session	The owner	Name relay-ruling prints in the relay header the recipient reads (`<name> said (...)`, `<name> picked (...)`); an empty value falls back to the default. Environment only (not config.toml).
-SYG_OWN_OWNERS	user	guards	unset	Whitespace- or comma-separated GitHub owner names unioned with hosts.yml user: as own repos in upstream-submission-guard.
-SYG_PIN_ACTIONS_GH	internal	misc	gh	Test seam naming the gh binary pin-actions calls for commit and tag lookups.
-SYG_PLUGIN_MANIFEST	internal	statusline	<script_dir>/../.claude-plugin/plugin.json	Test seam overriding the plugin.json path read by statusline for the SYG version segment.
-SYG_PRIVATE_TERMS_FILE	user	guards	unset	Path to a local file of Python regexes, one per line, blocked from public repos by private-term-guard and pre-push; pre-push also falls back to global git config seyag.privateTermsFile.
-SYG_PROFILE	user	session	full	Base component profile (full, guards, or none) before SYG_ENABLE and SYG_DISABLE are applied.
-SYG_PROJECT_NAMES_FILE	user	session	unset	Optional tab-separated table of folder and short name that driver-clone reads for the base short name and appends the new lane to. Unset means the base role file role: field is the short name and no row is written.
-SYG_PR_BODY_ACK_FILE	internal	pr	${XDG_STATE_HOME:-$HOME/.local/state}/seyag/pr-body-claim-ack	Test seam overriding the path to pr-body-ref-gate's per-UTC-day claim-scan acknowledgement file.
-SYG_PR_BODY_BASE_REF	user	pr	origin/main	Git ref on which TASK-N and doc-N references in a PR body must resolve in pr-body-ref-gate.
-SYG_PR_BODY_CLAIM_SCAN	user	pr	1	Set to 0 to disable pr-body-ref-gate rule 2 (uncited claim-shaped lines) while keeping tracker-reference checks.
-SYG_PR_BODY_DOC_PATHS	user	pr	tracker/docs tracker/archive/docs	Whitespace-separated repo paths searched on SYG_PR_BODY_BASE_REF for doc-N references in pr-body-ref-gate.
-SYG_PR_BODY_EXTRA_COMMANDS	user	pr	unset	Extended regex of extra command families treated like gh pr create/edit by pr-body-ref-gate.
-SYG_PR_BODY_RULE_REF	user	pr	unset	Optional project rule citation printed in pr-body-ref-gate block banners.
-SYG_PR_BODY_TASK_PATHS	user	pr	tracker/tasks tracker/archive/tasks	Whitespace-separated repo paths searched on SYG_PR_BODY_BASE_REF for TASK-N references in pr-body-ref-gate.
-SYG_PR_MERGE_LIB_DIR	internal	pr	<hooks_dir>/lib	Test seam overriding the hooks/lib directory passed to pr-merge-review-check's Python parser.
-SYG_PR_OPEN_UPSTREAM_CHECK	user	pr	1	Set to 0 to skip pr-open's upstream-submission-guard --check preflight; the default judges the publish target first (PASS proceeds; BLOCK or UNKNOWN exits before gh runs).
-SYG_PR_MONITOR_SEEN_FILE	internal	pr	${XDG_RUNTIME_DIR:-/tmp}/.claude_pr_monitor_seen.<uid>	Test seam overriding the deduplication state file for pr-monitor-reminder.
-SYG_PUBLISH_CHECKED	user	guards	unset	Colon-separated <owner/repo> list (or any non-empty value for a gist) in the session env unblocking publish-gate.
-SYG_PY_CACHE_ARG	internal	guards	unset	Python flag run.sh exports (`-Xpycache_prefix=<dir>`, or `-B`) for hooks' `python3 -I`, which ignores PYTHONPYCACHEPREFIX; unset on a direct run, where hooks fall back to `-B`; a relative caller prefix gives `-B`.
-SYG_ROLE_CONTEXT_CMD	user	session	unset	Command (bash -c) claude-role --board runs for session context sizes: prints a JSON array of {folder, tokens, flagged, flag_at}. Unset means no context lines; a failing one prints an unavailable line.
-SYG_ROLE_CONTEXT_LINE	user	session	unset	One line claude-role prints first at session start (hook mode), before the role file and even for a headless or task run. Empty prints nothing.
-SYG_ROLE_DIR	user	session	`${XDG_DATA_HOME:-$HOME/.local/share}/seyag/roles`	Directory of role files (one <project folder>.md each) read and written by claude-role and driver-clone.
-SYG_ROLE_HEADLESS	internal	misc	unset	Set to 1 by a launcher of headless runs: claude-role hook mode then prints a "not a role session" line and never the role file.
-SYG_ROLE_HEADLESS_ROUTES	user	session	unset	Whitespace- or comma-separated route preset names that only headless runs may use; claude-role --set route=NAME refuses them for a role session.
-SYG_ROLE_NOW_EPOCH	internal	misc	unset	Test seam overriding the clock (epoch seconds) claude-role uses to decide which Next items are due.
-SYG_ROLE_PREAMBLE_FILE	user	session	unset	Template file for the instruction block claude-role prints at session start; the placeholders {role}, {path}, {needs} and {in_person} are replaced literally. Unset, empty or unreadable means the built-in text.
-SYG_ROLE_TASK	internal	misc	unset	Set by a launcher of a named task session: claude-role hook mode then prints the task name and a "not a role session" line and never the role file.
-SYG_ROUTE_CHECK_CMD	user	routing	unset	Shell command run by route-check at SessionStart when a session requires an approved model route.
-SYG_ROUTE_CHECK_OK	user	routing	unset	Exact first word that SYG_ROUTE_CHECK_CMD's first stdout line must match for route-check to pass.
-SYG_ROUTE_CHECK_TIMEOUT	internal	routing	10	Test seam overriding the timeout in seconds (positive integer) for SYG_ROUTE_CHECK_CMD in route-check.
-SYG_ROUTE_MARKER_FIELD	user	routing	unset	YAML frontmatter field name in SYG_ROUTE_MARKER_FILE whose non-empty value requires an approved route.
-SYG_ROUTE_MARKER_FILE	user	routing	unset	Path template ({project} expanded) checked with SYG_ROUTE_MARKER_FIELD to require an approved route.
-SYG_ROUTE_REQUIRED	user	routing	unset	Boolean (1/true/yes/on vs 0/false/no/off) requiring an approved model route in route-check.
-SYG_ROUTE_SHOW_CMD	user	session	unset	Command (bash -c, the name as its argument) claude-role --set route=NAME runs to check a route preset exists; nonzero refuses the route. Unset means only the name shape is checked.
-SYG_SCRATCH_RM_EXEMPT	user	guards	1	Set to 0 to make recursive-rm-guard block deletes inside the session scratch dir too (the job tmp exemption is unaffected).
-SYG_SCRATCH_ROOT	user	guards	prose:/tmp/seyag-scratch-UID	Parent of the per-session scratch dirs scratch-dir makes and recursive-rm-guard exempts.
-SYG_SECURITY_SWEEP	user	session	unset	Set to 1 to run security-sweep --session-line --cap 2 at SessionStart (startup and clear).
-SYG_SECURITY_SWEEP_REPOS	user	session	unset	Whitespace-separated owner/name repos opting in and scoping security-sweep at SessionStart and in security-sweep.
-SYG_SESSION_CONTEXT_EXTRA_CMD	user	session	unset	Command session-context runs (bash -c, stdin closed) to add another harness's sessions: a JSON array of {name, folder, sessionId, status, tokens}. Unset adds none; a failure warns on stderr and keeps the Claude rows.
-SYG_SESSION_CONTEXT_EXTRA_MODEL	user	session	other	Model label session-context gives the rows from SYG_SESSION_CONTEXT_EXTRA_CMD.
-SYG_SESSION_CONTEXT_EXTRA_THRESHOLD	user	session	150000	Context token threshold at which session-context flags a row from SYG_SESSION_CONTEXT_EXTRA_CMD.
-SYG_STALLED_NOW	internal	misc	unset	Test seam: ISO-8601 timestamp with a UTC offset that session-stalled uses as the current time; a value without an offset is a usage error.
-SYG_STALLED_ZAI_TZ	user	session	Asia/Shanghai	IANA time zone in which session-stalled reads the z.ai quota-reset stamp (`Your limit will reset at YYYY-MM-DD HH:MM:SS`); an unknown zone leaves the reset unparsed.
-SYG_STATE_DIR	internal	session	/tmp/claude-<uid>	Test seam overriding the directory session-start prunes and the prompt hooks (queued-message-receipt, context-size-reminder, context-block-gate) write their per-session state into.
-SYG_STATE_MAX_DAYS	user	session	7	Age in whole days after which session-start deletes stale prompt-hook state files in SYG_STATE_DIR.
-SYG_STATUSLINE_DEBUG	user	statusline	unset	Set to 1 to append terminal column, fit budget, and wrap diagnostics to the statusline.
-SYG_STATUSLINE_EXTRA_USAGE	user	statusline	unset	Set to 0 to hide the plan extra-usage segment on the statusline.
-SYG_STATUSLINE_FIT_MARGIN	user	statusline	5	Columns subtracted from COLUMNS (non-negative integer) when fitting wrapped statusline rows.
-SYG_STATUSLINE_WRAP_COLUMNS	user	statusline	unset	Positive integer column threshold opting in multi-row segment wrapping on the statusline.
-SYG_STATUSLINE_ZAI_USAGE	user	statusline	<script_dir>/zai-usage	Override path to the zai-usage binary invoked by statusline on the z.ai lane.
-SYG_STATUS_CLAIM_MARKERS	user	guards	unset	Pipe-separated (|) regex alternatives appended to status-claim-cite's default completion and causality markers.
-SYG_SWEEP	user	guards	1	Set to 0 to silence removed-identifier-sweep without editing pre-commit hook wiring.
-SYG_SWEEP_EXCLUDE_PATHS	user	guards	unset	Whitespace-separated awk regex fragments added to removed-identifier-sweep's path exclusions.
-SYG_SWEEP_FRAG	internal	guards	unset	Internal env variable passing one fragment to awk for regex validation inside removed-identifier-sweep.
-SYG_SWEEP_VALID_FRAGMENTS	internal	guards	unset	Internal env variable exporting validated SYG_SWEEP_EXCLUDE_PATHS fragments to awk in removed-identifier-sweep.
-SYG_UPSTREAM_CHECKED	user	guards	unset	Per-command prefix assignment <owner/repo> bypassing upstream-submission-guard after the AI-stance check.
-SYG_USER_RULES_DIR	internal	session	$HOME/.claude/rules	Test seam overriding the user rules directory checked by session-start against rules/core.md.
-SYG_WEEK_BURN_MARGIN_MIN	user	usage	30	Margin in minutes (integer >= 0) added to the computed burn window in week-burn-window.
-SYG_WEEK_BURN_NOW	internal	usage	unset	Test clock (epoch seconds) overriding current time in week-burn-window.
-SYG_WEEK_BURN_RATE	user	usage	unset	Override burn rate in %/h (number > 0) for week-burn-window, replacing the 6-hour log slope.
-SYG_WORKER_SANDBOX_CLAUDE	internal	worktrees	prose:claude on PATH	Test seam naming the program worker-sandbox binds and runs as claude.
-SYG_WORKER_SANDBOX_ENV	user	worktrees	unset	Extra space-separated variable names worker-sandbox passes into the worker (DISABLE_AUTOUPDATER always passes).
-SYG_WORKER_SANDBOX_PATH	user	worktrees	$HOME/.local/bin:$HOME/.local/share/mise/shims:/usr/bin:/bin	Inner PATH tail worker-sandbox appends after its bin directory; empty means the default.
-SYG_WORKER_SANDBOX_REPO	user	worktrees	unset	Main checkout top directory the worker's tree belongs to; when set, worker-sandbox passes --repo to worker-tree-check and exports SYG_GATE_SANDBOX_REPO (refusal or missing directory exits 125).
-SYG_WORKER_SANDBOX_RO_BINDS	user	worktrees	unset	More read-only binds for the worker, in SYG_GATE_SANDBOX_RO_BINDS' format.
-SYG_WORKER_SANDBOX_SCRATCH	user	worktrees	unset	Host directory worker-sandbox binds writable at ~/.claude, where claude keeps its transcripts (required; the caller copies out what it wants and deletes it).
-SYG_WORKER_SANDBOX_TREE	user	worktrees	rw	rw or ro mount of the worker's tree.
-SYG_WORKER_SANDBOX_WALL	user	worktrees	unset	Extra space-separated CIDRs or addresses worker-sandbox walls off (passed as SYG_GATE_SANDBOX_WALL); a bad entry fails the launch.
-SYG_WORKER_TREE_CHECK_UNTRUSTED	user	worktrees	/tmp:/var/tmp:/dev/shm	Colon-separated directories a worker can write; worker-tree-check refuses a gitdir under them when no --repo anchor is given.
-SYG_WORKTREE_BACKUP_ALLOW_VOLATILE	user	worktrees	unset	Set to 1 to allow safe-worktree-clean --apply-hold backups on tmpfs or ramfs.
-SYG_WORKTREE_BACKUP_DIR	user	worktrees	${XDG_STATE_HOME:-$HOME/.local/state}/seyag/worktree-backups	Directory where safe-worktree-clean --apply-hold writes HOLD worktree backup bundles.
-SYG_WORKTREE_BASE	user	worktrees	origin/<default branch>	Base git ref against which safe-worktree-clean judges worktrees when --base is not passed.
-SYG_WORKTREE_BRANCH_RE	user	worktrees	^worktree-agent-	Extended regex that agent worktree branch names must match in safe-worktree-clean and worktree-transfer.
-SYG_WORKTREE_LOCK_AGE_MIN	user	worktrees	10	Age in minutes (integer) after which a 0-byte index.lock with no live git process counts as stale.
-SYG_WORKTREE_REGENERABLE	user	worktrees	unset	Whitespace-separated path globs treated as safe-to-delete regenerable ignored paths in safe-worktree-clean.
-SYG_WORKTREE_RUN_STAMP	internal	worktrees	<YYYY-MM-DDTHHMMSS>	Internal timestamp directory name exported from a multi-repo safe-worktree-clean --apply-hold parent to child runs; a value that is empty or not a plain name ([0-9A-Za-z][0-9A-Za-z._-]*) exits 2.
-SYG_WORKTREE_STATE_BATCH_FAIL	internal	worktrees	unset	Internal test seam in safe-worktree-clean: set to exactly 1 it skips tree_state_sha's hash-object batch child (batch_ok=false, rc_batch=1) so probes exercise the per-file hash fallback; any other value is ignored.
-SYG_WORKTREE_SWEEP_CHILD	internal	worktrees	unset	Internal marker set to 1 when safe-worktree-clean invokes itself per repo in a multi-repo sweep.
-SYG_WSDIFF_LENIENT_NAMES	user	worktrees	unset	Whitespace-separated basenames or .ext suffixes treated as whitespace-lenient by whitespace-only-diff.
-TZUROT_ALLOW_GREP_DOLLAR	user	guards	unset	Legacy alias of SYG_ALLOW_GREP_DOLLAR; set to 1 in the command text the same way.
-TZUROT_ALLOW_HEREDOC_EDIT	user	guards	unset	Legacy alias of SYG_ALLOW_HEREDOC_EDIT; set to 1 in the command text the same way.
-ZAI_AUTH_TOKEN	user	usage	unset	z.ai API bearer token for zai-usage. Lookup order: lane key file, then keys get (which prefers this env var over the store), then session env or settings.json when routed to z.ai.
-ZAI_SPEND_MODELS_URL	internal	usage	https://api.z.ai/api/monitor/usage/model-usage	Test seam overriding the z.ai model-usage API URL in zai-usage.
-ZAI_SPEND_PEAK_UTC	internal	usage	14-18	Test seam overriding peak hours (interpreted in UTC+8) for local transcript weighting in zai-usage.
-ZAI_SPEND_PROJECTS	internal	usage	~/.claude/projects	Test seam overriding the transcript directory scanned by zai-usage in local fallback mode.
-ZAI_SPEND_QUOTA_URL	internal	usage	https://api.z.ai/api/monitor/usage/quota/limit	Test seam overriding the z.ai quota API URL in zai-usage.
-ZAI_USAGE_KEYS_KILL_S	user	usage	30	Kill timeout in seconds (positive finite number; an invalid value falls back to 30) for the keys get ZAI_AUTH_TOKEN subprocess in zai-usage.
+# flags: - (none) or space-separated tokens, canonical order envonly path; path = the value selects a filesystem path on this machine (refused from project scope, allowed from user config and env); envonly = environment only, refused from every config file.
+ANTHROPIC_ADMIN_API_KEY	user	credit	unset	Organization Admin API key enabling provider cost_report balance queries in api-credit and statusline (takes precedence over SYG_CREDIT_ADMIN_KEY_CMD).	-
+CC_ROUTE_KEYS	user	routing	~/.claude/lane-keys.env	Path to the lane key file where zai-usage looks up ZAI_AUTH_TOKEN first.	path
+CC_ROUTE_PRESET	user	routing	unset	Route preset name; set to anthropic-api so claude-usage treats a first-party endpoint as the Console API-key lane.	-
+CLAUDE_CONFIG_DIR	user	session	~/.claude	Claude Code config directory: context-audit (CLAUDE.md, rules, settings, memory, skills, plugins), session-log, and the projects folder the session tools use when CLAUDE_PROJECTS_DIR is unset; statusline ignores it.	path
+CLAUDE_PLUGIN_REGISTRY	user	statusline	$HOME/.claude/plugins/installed_plugins.json	Path to installed_plugins.json read by statusline to compare the installed seyag version against the checkout manifest.	path
+CLAUDE_PROJECTS_DIR	user	session	~/.claude/projects	Per-project transcript folders, read by session-log, usage-sweep, price-table, classifier-denials, session-stalled, session-context, chrome-loss-scan, relay-ruling, driver-busy-hours; unset: CLAUDE_CONFIG_DIR/projects.	path
+CLAUDE_SESSION_ARCHIVE	user	session	~/Documents/claude-session-archive	Directory holding exported cse_*.jsonl claude.ai session archives read by session-log.	path
+CLAUDE_USAGE_API_CREDIT	internal	usage	<script_dir>/api-credit	Test seam overriding the sibling api-credit binary path in claude-usage.	-
+CLAUDE_USAGE_EXTRA_OK	user	usage	unset	Set to 1 to let claude-usage --ok and --wait pass past the weekly reserve while extra usage is enabled and under budget.	-
+CLAUDE_USAGE_GATE_MAX_AGE	user	usage	21600	Maximum age in seconds (integer >= TTL) of the OAuth usage cache before claude-usage --ok fails with meter=cache.	-
+CLAUDE_USAGE_MODEL	user	usage	unset	Model name override for claude-usage --ok per-model weekly cap checks when not reading a session transcript.	-
+CLAUDE_USAGE_TTL	user	usage	120	Refresh TTL in seconds (integer >= 30) for the OAuth usage cache in claude-usage.	-
+CLAUDE_USAGE_WEEK_RESERVE	user	usage	75	Weekly usage percentage threshold (integer 1-99) at which claude-usage --ok blocks new work; week-burn-window also uses it as its hold threshold.	-
+CLAUDE_USAGE_WEEK_RESERVE_CMD	user	usage	unset	Shell command (5s timeout) printing a dynamic weekly reserve integer 1-99 for claude-usage --ok and --posture.	-
+CLAUDE_USAGE_WEEK_STOP	user	usage	80	Hard-stop weekly usage percentage (integer 1-99) reported by claude-usage --posture.	-
+CLAUDE_USAGE_ZAI_FIVE_CAP	user	usage	80	Maximum 5-hour quota threshold percentage (non-negative integer) allowed by claude-usage --ok on the z.ai lane.	-
+CLAUDE_USAGE_ZAI_USAGE	internal	usage	<script_dir>/zai-usage	Test seam overriding the sibling zai-usage binary path in claude-usage.	-
+CLAUDE_USAGE_ZAI_WEEK_RESERVE	user	usage	<CLAUDE_USAGE_WEEK_RESERVE>	Static weekly quota reserve percentage (integer 1-99) for claude-usage --ok and --posture on the z.ai lane.	-
+CLAUDE_USAGE_ZAI_WEEK_RESERVE_CMD	user	usage	unset	Shell command (5s timeout) printing a dynamic weekly reserve integer 1-99 for the z.ai lane in claude-usage.	-
+CLAUDE_VERSIONS_DIR	user	statusline	$HOME/.local/share/claude/versions	Directory of staged native Claude Code version downloads checked by statusline for the CC update nudge.	path
+CONTEXT_AUDIT_MOUNTS	internal	misc	/proc/self/mounts	Test seam overriding the mount table path read by context-audit to skip fuse.rclone mounts.	-
+LINES_CHECK_CONTEXT_AUDIT	internal	misc	<script_dir>/context-audit	Test seam overriding the context-audit binary path in lines-check.	-
+LINES_CHECK_IMPL_VERSION	internal	misc	1	Test seam overriding the implementation version compared against the baseline in lines-check.	-
+OPENROUTER_API_KEY	internal	misc	unset	Example key name mentioned in keys validation error text; not read directly from the environment by keys.	-
+OPENROUTER_CREDITS_URL	internal	statusline	https://openrouter.ai/api/v1/credits	Test seam overriding the OpenRouter credits endpoint URL in statusline.	-
+PLUGIN_RELEASE_AGENTS_CMD	user	release	claude agents --json	Command run by plugin-release-check to list live Claude Code sessions as a JSON array.	-
+PLUGIN_RELEASE_FETCH	user	release	1	Set to 0 to skip git fetch --all before comparing the checkout version against upstream in plugin-release-check.	-
+PLUGIN_RELEASE_PROJECTS	user	release	$HOME/.claude/projects	Projects transcript root searched by plugin-release-check for /reload-plugins and /clear refresh lines.	path
+PLUGIN_RELEASE_UPSTREAM_REF	user	release	@{upstream}	Git ref compared against the local plugin.json version in plugin-release-check.	-
+PRICE_TABLE_MANAGED_FILE	user	routing	/etc/claude-code/managed-settings.json	Managed settings JSON path that price-table --merge and --apply read; --apply prints a sudo install command targeting it (the tool never writes it).	path
+PRICE_TABLE_MODELS_URL	internal	routing	https://openrouter.ai/api/v1/models	Test seam overriding the OpenRouter models endpoint URL for price-table --sync.	-
+PR_CI_WAIT_FAKE_TICK_S	internal	pr	0	Test seam advancing the quiet-window clock by a fixed number of seconds per poll instead of wall time in pr-ci-wait (0 uses wall time).	-
+PR_CI_WAIT_GRACE_S	user	pr	300	Review-run grace window in seconds after CI settles before pr-ci-wait fails with CI_GATE_REVIEW_MISSING.	-
+PR_CI_WAIT_HEARTBEAT_S	user	pr	600	Interval in seconds between progress heartbeat log lines while pr-ci-wait is polling.	-
+PR_CI_WAIT_MAX_S	user	pr	1500	Maximum total wait time in seconds before pr-ci-wait gives up with CI_GATE_TIMEOUT.	-
+PR_CI_WAIT_POLL_S	user	pr	30	Interval in seconds between workflow-run polls in pr-ci-wait.	-
+PR_CI_WAIT_QUIET_S	user	pr	90	Quiet-window duration in seconds with an unchanged, all-completed run set required to settle pr-ci-wait when SYG_CI_ANCHOR is unset.	-
+PR_CI_WAIT_SETTLE_S	user	pr	5	Pause in seconds after gh pr checks --watch finishes and before pr-ci-wait prints CI_COMPLETE (only when CI is releasable).	-
+RAILWAY_OPS_CLI	internal	misc	railway	Test seam overriding the railway CLI binary path in railway-ops.	-
+RAILWAY_OPS_ENDPOINT	internal	misc	https://backboard.railway.app/graphql/v2	Test seam overriding the Railway GraphQL endpoint URL in railway-ops.	-
+SECURITY_SWEEP_GH	internal	misc	gh	Test seam overriding the gh binary path in security-sweep.	-
+SECURITY_SWEEP_GH_TIMEOUT	internal	misc	60	Test seam overriding the per-call gh timeout in seconds (positive integer) in security-sweep.	-
+SESSION_LEDGER	user	session	~/.claude/mined-corpus/ledger.tsv	Path to the TSV ledger where session-log ledger and session-log mark read and record mined transcript spans.	path
+SEYAG_KEYS_BIN	user	usage	<script_dir>/keys	Override path to the keys binary invoked by zai-usage to read ZAI_AUTH_TOKEN from the encrypted credential store.	path
+SYG_AGY_BRAIN_DIR	user	session	~/.gemini/antigravity-cli/brain	Antigravity (agy) CLI transcript folders (<id>/.system_generated/logs) merged by driver-busy-hours; with CLAUDE_PROJECTS_DIR set, read only if this or SYG_AGY_SUMMARIES_DB is. Environment only (not config.toml).	envonly path
+SYG_AGY_CONVERSATIONS_DIR	user	session	~/.gemini/antigravity-cli/conversations	Directory of *.db conversation databases read by agy-extract when no database paths are passed.	path
+SYG_AGY_SUMMARIES_DB	user	session	~/.gemini/antigravity-cli/conversation_summaries.db	SQLite conversation_summaries database of the Antigravity (agy) CLI that driver-busy-hours reads to find root conversations and their workspaces; read together with SYG_AGY_BRAIN_DIR. Environment only (not config.toml).	envonly path
+SYG_ALLOW_BROAD_WALK	user	guards	unset	Set to 1 in the command text to bypass broad-walk-guard for an intentional broad filesystem walk.	-
+SYG_ALLOW_CACHE_RM	user	guards	unset	Set to 1 in the command text to bypass cache-rm-redirect for an owner-approved cache deletion.	-
+SYG_ALLOW_COMMIT_BRANCH	internal	guards	unset	Example per-command bypass assignment in the command text mentioned in lib/branch_switch.py docstring; not read by a hook.	-
+SYG_ALLOW_ENV_PRINT	user	guards	unset	Set to 1 in a pipeline segment's words in the command text to bypass env-print-guard for an owner-approved dump.	-
+SYG_ALLOW_GREP_DOLLAR	user	guards	unset	Set to 1 in the command text to bypass grep-escaped-dollar-guard.	-
+SYG_ALLOW_HEREDOC_EDIT	user	guards	unset	Set to 1 in the command text to bypass python-heredoc-edit-guard.	-
+SYG_ALLOW_LIVE_CHECKOUT	user	guards	unset	Set to 1 in the command text (git prefix or export) or in the environment to bypass live-checkout-guard.	-
+SYG_ALLOW_PRIVATE_TERM	user	guards	unset	Set to 1 in the command's own prefix in the command text to bypass private-term-guard on the owner's word.	-
+SYG_ALLOW_RM	user	guards	unset	Set to 1 in the command text to bypass recursive-rm-guard for an owner-approved deletion.	-
+SYG_ALLOW_SESSION_URL	user	guards	unset	Set to 1 in the command's own prefix in the command text to bypass session-url-gate on the owner's word.	-
+SYG_ALLOW_TEMPORAL	user	guards	unset	Set to 1 in the git commit command's own prefix in the command text to bypass temporal-marker-guard.	-
+SYG_BQ_NO_RC_LANES	user	stop-gates	unset	Extended regex matched against ANTHROPIC_BASE_URL for lanes without Remote Control, routing asks to SendMessage.	-
+SYG_BQ_PENDING_MARKERS	user	stop-gates	say the word\b|waiting on you\b|needs? your (yes|go|call|input)\b|for you to (decide|test|check)\b	Case-insensitive Python regex matching pending-ask phrases in the final paragraph; empty disables the pass.	-
+SYG_CHECK_LIB	internal	guards	unset	The hooks/lib directory the hook passes to its python child for shared target/owner resolution in the --check preflight.	-
+SYG_CHECK_TARGET	internal	guards	unset	The target argument the hook passes to its python child in the --check preflight.	-
+SYG_CI_ANCHOR	user	pr	unset	Workflow name whose completion (with nothing pending) settles pr-ci-wait; unset uses the quiet-window rule.	-
+SYG_CI_AUTOMERGE_JOB	user	pr	unset	Automerge job name in the review workflow run checked by pr-ci-wait: if skipped on a green, open, non-draft PR authored by the authenticated gh user, reports CI_GATE_AUTOMERGE_SKIPPED; unset or empty disables the check.	-
+SYG_CI_REVIEW	user	pr	prose:auto-detected: the workflow named Claude Code Review if one exists, otherwise no review check	Review workflow name that must complete before pr-ci-wait releases; set empty to disable.	-
+SYG_CLASSIFIER_LEDGER	user	session	unset	JSONL file path opting in classifier-ledger to record PostToolUseFailure events.	path
+SYG_CLOCK_STAMP_HINT	user	guards	unset	Optional line appended to clock-stamp-guard block messages (for example naming a project stamping tool).	-
+SYG_CLOCK_STAMP_NOW	internal	guards	unset	Test clock (integer epoch seconds) overriding current time in clock-stamp-guard.	-
+SYG_CLOCK_STAMP_PATHS_FILE	user	guards	${XDG_CONFIG_HOME:-$HOME/.config}/seyag/clock-stamp-paths	Config file of path globs and section: lines arming clock-stamp-guard.	path
+SYG_COMPONENTS_TSV	internal	session	<hooks_dir>/components.tsv	Internal variable holding the resolved path to hooks/components.tsv in lib/components.sh.	-
+SYG_CONFIG	user	misc	unset	Set to 0 to disable the config.toml loader entirely (hooks and wired bins ignore config files; any other value or unset: enabled).	-
+SYG_CONTEXT_BLOCK	user	session	unset	Token count for the hard context tier: at or above it context-size-reminder arms context-block-gate (handoff-write-only tool use) instead of the soft banner; unset or non-numeric keeps the tier off.	-
+SYG_CONTEXT_BLOCK_CMDS	user	session	unset	Colon-separated Bash command prefixes that clear an armed context block; literal prefix, no word boundary — a matching compound command clears and runs whole (operator-config trust); unset or empty: no command can clear.	-
+SYG_CONTEXT_BLOCK_PATHS	user	session	unset	Colon-separated path globs matched literally (no tilde or variable expansion) against a Write, Edit, MultiEdit or NotebookEdit file path to lift an armed context block; unset or empty means no file write can clear it.	path
+SYG_CONTEXT_COOLDOWN_MIN	user	session	30	Cooldown in minutes between context-size-reminder banners in a session.	-
+SYG_CONTEXT_THRESHOLD	user	session	500000	Context token threshold at which context-size-reminder fires on non-Fable models.	-
+SYG_CONTEXT_THRESHOLD_FABLE	user	session	200000	Context token threshold at which context-size-reminder fires when the model starts with claude-fable.	-
+SYG_SESSION_CONTEXT_THRESHOLD	user	session	500000	Context token threshold at which session-context flags a session on non-Fable models (a whole number of at most 15 digits; separate from the in-session reminder's SYG_CONTEXT_THRESHOLD).	-
+SYG_SESSION_CONTEXT_THRESHOLD_FABLE	user	session	200000	Context token threshold at which session-context flags a session whose model id contains fable (a whole number of at most 15 digits).	-
+SYG_CREDIT_ADMIN_KEY_CMD	user	credit	unset	Command run on a cache miss (when ANTHROPIC_ADMIN_API_KEY is unset, empty or contains a newline) to print the organization Admin API key on stdout.	-
+SYG_CREDIT_ADMIN_URL	internal	credit	https://api.anthropic.com	Test seam overriding the Anthropic Admin API origin URL in api-credit and statusline.	-
+SYG_CREDIT_ANCHOR	user	credit	<SYG_CREDIT_LEDGER>.anchor.json	Path to the JSON file storing api-credit calibrate balance anchors.	path
+SYG_CREDIT_DUST_FLOOR_USD	user	credit	0.15	Minimum USD balance shown by the statusline fleet credit display on non-API lanes, which shows only when SYG_CREDIT_LEDGER and SYG_CREDIT_GRANTS are both set and the week is urgent (week >= 75% or <= 7 days left).	-
+SYG_CREDIT_FORCE	internal	credit	unset	Test seam (set to 1) forcing api-credit to record regardless of the route rule.	-
+SYG_CREDIT_GRANTS	user	credit	unset	Path to the JSON file listing prepaid credit grants, expiries, timezones, and kinds for api-credit and statusline.	path
+SYG_CREDIT_KEY_CMD_TIMEOUT	internal	credit	15	Test seam overriding the timeout in seconds (positive number) for SYG_CREDIT_ADMIN_KEY_CMD in api-credit.	-
+SYG_CREDIT_LEDGER	user	credit	unset	Path to the JSONL spend ledger file opting in api-credit-ledger, api-credit, and statusline credit display.	path
+SYG_CREDIT_NOW	internal	credit	unset	Test clock (ISO-8601 UTC timestamp) overriding current time in api-credit and statusline.	-
+SYG_CREDIT_PRICE_TABLE_CMD	internal	credit	<script_dir>/price-table	Test seam overriding the price-table command run by api-credit.	-
+SYG_CREDIT_ROUTE	user	credit	anthropic-api	Route label written into each ledger entry by api-credit hook.	-
+SYG_CREDIT_SETTLE_DAYS	user	credit	2	Number of recent closed UTC days (non-negative integer; 0 disables) taking max(provider, ledger) spend in api-credit.	-
+SYG_CREDIT_WHEN	user	credit	unset	Env match rule (NAME=value) deciding when a session is on the metered API-key route instead of ANTHROPIC_API_KEY.	-
+SYG_CROSS_REVIEW_CMD	user	session	unset	Single-line command advertised at SessionStart that names the route to a reviewer from a different model family than the author's.	-
+SYG_CWD_DRIFT_WORKTREE	user	guards	unset	Set to 0 to disable cwd-drift-guard's once-per-arrival warning for state-changing git commands in linked worktrees.	-
+SYG_DISABLE	user	session	unset	Whitespace- or comma-separated components or hook names to disable; wins over SYG_ENABLE.	-
+SYG_DISPATCH_ACK_FILE	internal	guards	/tmp/claude-<uid>/dispatch-posture-ack	Test seam overriding the path to dispatch-posture-gate's per-commit acknowledgement and cumulative line ledger file.	-
+SYG_DISPATCH_SPEC_INLINE	user	guards	0	Set to 1 to require a ## Premise ledger section on inline isolation: "worktree" Agent prompts.	-
+SYG_DISPATCH_SPEC_RE	user	guards	[A-Za-z0-9._~/-]*\.claude/dispatch/[A-Za-z0-9._-]+\.md	Extended regex extracting the spec file path from Agent prompts in dispatch-spec-ledger-gate.	-
+SYG_DISPATCH_SRC_RE	user	guards	unset	Extended regex of source paths opting in dispatch-posture-gate to block >5-line inline edits.	-
+SYG_DRIVER_CLONE_PROJECTS	user	session	`$HOME/Projects`	Directory holding the base checkout and the new lane clone driver-clone creates.	path
+SYG_DRIVER_CLONE_ROLE_BIN	internal	misc	prose:the claude-role beside driver-clone	Test seam: the claude-role binary driver-clone calls to file the folder-trust bullet.	-
+SYG_DRIVER_CLONE_START_HINT	user	session	prose:start a session in the clone	Text driver-clone prints after "then:" as the last step once the lane exists.	-
+SYG_ENABLE	user	session	unset	Whitespace- or comma-separated components or hook names to enable on top of SYG_PROFILE.	-
+SYG_EPG_CWD	internal	guards	unset	Internal env variable passing the payload cwd from env-print-guard.sh to its embedded Python helper.	-
+SYG_EPG_TRUSTED_VARS	user	guards	unset	Space-separated variable names trusted as $VAR prefixes on file-sink redirection targets in env-print-guard.	-
+SYG_EVENT_HOOK_TIMEOUT	user	session	45	Per-hook timeout in seconds when run.sh --event runs hooks in parallel.	-
+SYG_EXTRA_USAGE_BUDGET_CMD	user	usage	unset	Shell command printing the extra-usage USD budget as a non-negative decimal for claude-usage.	-
+SYG_EXTRA_USAGE_BUDGET_CMD_TIMEOUT	user	usage	10	Timeout in seconds (positive integer) for SYG_EXTRA_USAGE_BUDGET_CMD in claude-usage.	-
+SYG_EXTRA_USAGE_BUDGET_USD	user	usage	unset	Static extra-usage budget in USD (non-negative decimal) for claude-usage and statusline.	-
+SYG_EXTRA_USAGE_TOML	user	statusline	unset	Path to a TOML file with bought_usd and optional used_usd_at_anchor read on each statusline render.	path
+SYG_GATE_LOCK_FILE	user	worktrees	/tmp/gate.lock	Lock file gate-lock holds while a gate runs; one gate at a time machine-wide (keep it on a path every sandbox shares). Default is shared /tmp, so another user can hold it on a multi-user host; set a private path.	path
+SYG_GATE_SANDBOX_ENV	user	worktrees	unset	Space-separated variable names gate-sandbox passes into the sandbox's otherwise cleared environment. Each must be a variable name, or the launch refuses with 125.	-
+SYG_GATE_SANDBOX_PATH	user	worktrees	prose:the caller's PATH	PATH inside gate-sandbox.	path
+SYG_GATE_SANDBOX_PROFILE	user	worktrees	unset	gate-sandbox profile: unset for a one-gate sandbox, worker for a whole headless worker (set by worker-sandbox).	-
+SYG_GATE_SANDBOX_REPO	user	worktrees	unset	Main checkout top directory CWD's tree belongs to; when set, gate-sandbox runs worker-tree-check --repo on CWD before its first host git call; worker-sandbox inherits it when its own knob is unset.	path
+SYG_GATE_SANDBOX_RO_BINDS	user	worktrees	unset	Colon-separated SRC or SRC->DST read-only binds added to gate-sandbox; entries resolving inside the worktree are refused.	path
+SYG_GATE_SANDBOX_SCRATCH	user	worktrees	unset	Worker profile only: host directory bound writable at ~/.claude inside the sandbox (required).	path
+SYG_GATE_SANDBOX_TOOLCHAIN	user	worktrees	$HOME/.local/bin/mise:$HOME/.local/share/mise:$HOME/.local/state/mise:$HOME/.config/mise:$HOME/.local/share/pnpm	Colon-separated read-only toolchain paths; entries or non-hidden child symlinks (prefix inside or resolving in/through the worktree or cyclic/unresolvable) refuse 125; absent-outside skips. $HOME widens; empty: none.	path
+SYG_GATE_SANDBOX_TREE	user	worktrees	rw	Worker profile only: rw or ro mount of the worktree.	-
+SYG_GATE_SANDBOX_WALL	user	worktrees	unset	Worker profile only: extra space-separated CIDRs or addresses gate-sandbox walls off with unreachable routes, on top of every host address and every route (any routing table) through an interface with no default route.	-
+SYG_GH_WRAPPERS	user	guards	unset	Whitespace-separated wrapper command prefix tokens scanned as gh invocations by session-url-gate and private-term-guard.	-
+SYG_HANDOFF_CMDS	user	stop-gates	unset	Python regex matching Bash commands that write a handoff (replaces built-in HANDOFF.md/handoff.md path defaults).	-
+SYG_HANDOFF_PATHS	user	stop-gates	(^|/)(?:HANDOFF\.md|handoff\.md)$	Python regex matching file paths whose Edit/Write counts as a handoff write (replaces built-in defaults when set).	-
+SYG_HANDOFF_SECTIONS	user	stop-gates	^##[ \t]*(?:Handoff|Next)\b	Multiline Python regex narrowing wired SYG_HANDOFF_PATHS writes to matching markdown sections; empty disables narrowing.	-
+SYG_HEADLESS_OFF	internal	session	turn-shape context handoff-pick-check security	Internal constant listing components disabled automatically in headless (sdk-*) runs.	-
+SYG_HEADLESS_OFF_HOOKS	internal	session	blocking-question-channel-check turn-end-shape-gate promise-ledger-check queued-message-receipt bare-token-binding-reminder handoff-pick-check context-size-reminder	Internal fallback list of hooks disabled in headless runs when components.tsv cannot be read.	-
+SYG_HOOK	internal	session	unset	Internal variable holding the resolved hook script path inside run.sh.	-
+SYG_IN_PERSON_SECTION	user	session	In Person	Heading (without the ##) of the role file section claude-role --need --in-person writes and --json reads as .deck: what needs the owner physically present.	-
+SYG_KEYS_CREDS_CMD	internal	misc	systemd-creds	Test seam replacing the systemd-creds command in keys.	-
+SYG_KEYS_LEGACY_FILE	user	misc	unset	Optional read-only plaintext NAME=value fallback file consulted by keys get after the encrypted store.	path
+SYG_KEYS_LOCK_WAIT_S	user	misc	15	Seconds keys waits for the store lock or the TPM lock before failing (finite number >= 0).	-
+SYG_KEYS_NAME	user	misc	keys	Credential --name passed to systemd-creds when encrypting and decrypting the key store.	-
+SYG_KEYS_STALL_S	user	misc	300	Seconds a systemd-creds timeout marker keeps later keys calls failing fast instead of touching the TPM (finite number >= 0).	-
+SYG_KEYS_STORE	user	misc	${XDG_DATA_HOME:-~/.local/share}/keys/keys.cred	Path to the encrypted systemd-creds key store file used by keys.	path
+SYG_KEYS_TIMEOUT_S	user	misc	20	Seconds one systemd-creds call in keys may take before it is killed (finite number >= 0; an invalid value is a usage error).	-
+SYG_KEYS_WITH_KEY	user	misc	host+tpm2	Value passed to systemd-creds encrypt --with-key= in keys (for example host on a machine without a TPM).	-
+SYG_LAUNCH_RECORD_DIR	user	session	unset	Directory path opting in launch-record to write <session_id>.json launch metadata at SessionStart.	path
+SYG_LAUNCH_RECORD_ENV	user	session	unset	Space-separated environment variable names recorded under extra in launch-record JSON files.	-
+SYG_LAUNCH_RECORD_HYBRID_OK	user	session	unset	Set to 1 to suppress launch-record's warning when model slots mix provider families.	-
+SYG_LEDGER_PATH_RE	user	stop-gates	(^|/)(backlog/|tracker/|CURRENT\.md|BACKLOG\.md|TODO\.md|claude-memory/roles/)	Python regex replacing the default file paths that count as a same-turn filing in promise-ledger-check.	-
+SYG_LIB	internal	session	unset	Internal run.sh flag: 1 once lib/components.sh is sourced and defines syg_enabled, 0 if it cannot be loaded; set by the script, not read from the environment.	-
+SYG_LIB_DIR	internal	guards	<hooks_dir>/lib	Internal env variable passing the hooks/lib directory path to embedded Python helpers.	-
+SYG_LIVE_CHECKOUT_AUTO	user	guards	1	Set to 0 to disable auto-detecting the plugin's own marketplace checkout as a protected live root.	-
+SYG_LIVE_CHECKOUTS	user	guards	unset	Colon-separated absolute paths whose main git working trees are protected by live-checkout-guard.	path
+SYG_LONG_JOB_CMD	user	session	unset	Single-line runner prefix advertised at SessionStart for running >10-minute jobs outside the session tree.	-
+SYG_LOSSY_PIPE_GH_WRAPPERS	user	guards	unset	Whitespace-separated read-wrapper command tokens guarded against head/tail/sed truncation in lossy-pipe-guard.	-
+SYG_LOSSY_PIPE_SUITES	user	guards	1	Set to 0 to disable lossy-pipe-guard on test and probe suite commands piped into head/tail/sed.	-
+SYG_MEM_GATE_CMD	user	session	unset	Single-line command advertised at SessionStart to check free memory before launching workers or test suites. The plugin's own mem-gate (`mem-gate --ok`) is one such command.	-
+SYG_MEM_GATE_MEMINFO	internal	misc	/proc/meminfo	Test seam overriding the meminfo file mem-gate reads.	-
+SYG_MEM_GATE_MIN_MB	user	misc	2048	Default MemAvailable floor in MB for mem-gate --ok/--wait; an explicit MB argument wins.	-
+SYG_MEM_PRESSURE_MAX_BYTES	user	misc	5242880	Size in bytes past which mem-pressure-log rotates log.jsonl to log.jsonl.1 (one generation kept).	-
+SYG_MEM_PRESSURE_MEMINFO	internal	misc	/proc/meminfo	Test seam overriding the meminfo file mem-pressure-log reads.	-
+SYG_MEM_PRESSURE_PSI	internal	misc	/proc/pressure/memory	Test seam overriding the PSI memory file mem-pressure-log reads.	-
+SYG_MEM_PRESSURE_STATE_DIR	user	misc	$HOME/.local/state/mem-pressure	Directory holding mem-pressure-log's log.jsonl.	path
+SYG_MEM_WATCH_CGROUP_ROOT	user	misc	/sys/fs/cgroup/user.slice	Directory mem-watch searches, up to four levels deep, for this user's app.slice/memory.events oom_kill counter (user-<uid>.slice preferred; a root below the user slice also works; another uid's slice never).	path
+SYG_MEM_WATCH_MEMINFO	internal	misc	/proc/meminfo	Test seam overriding the meminfo file mem-watch reads.	-
+SYG_MERGE_REVIEW_LOGIN	user	pr	claude[bot]	GitHub login whose latest PR comment must be surfaced before pr-merge-review-check allows gh pr merge.	-
+SYG_MERGE_REVIEW_RELEASE_REMINDER	user	pr	prose:This PR merges into the repository's default branch — run this project's post-merge steps (version bump, release, deploy) before starting other work.	Custom reminder text shown once when merging a PR into the repository's default branch.	-
+SYG_MERGE_REVIEW_WORKFLOW	user	pr	.github/workflows/claude-code-review.yml	Review workflow file path whose self-edit in a PR explains a missing review comment in pr-merge-review-check.	path
+SYG_NEEDS_OWNER_SECTION	user	session	Needs Owner	Heading (without the ##) of the role file section claude-role --need writes and --json reads as .needs: what waits on the owner; relay-ruling names it in its destructive-step line and reads it from the environment only.	-
+SYG_OWNER_NAME	user	session	The owner	Name relay-ruling prints in the relay header the recipient reads (`<name> said (...)`, `<name> picked (...)`); an empty value falls back to the default. Environment only (not config.toml).	envonly
+SYG_OWN_OWNERS	user	guards	unset	Whitespace- or comma-separated GitHub owner names unioned with hosts.yml user: as own repos in upstream-submission-guard.	-
+SYG_PIN_ACTIONS_GH	internal	misc	gh	Test seam naming the gh binary pin-actions calls for commit and tag lookups.	-
+SYG_PLUGIN_MANIFEST	internal	statusline	<script_dir>/../.claude-plugin/plugin.json	Test seam overriding the plugin.json path read by statusline for the SYG version segment.	-
+SYG_PRIVATE_TERMS_FILE	user	guards	unset	Path to a local file of Python regexes, one per line, blocked from public repos by private-term-guard and pre-push; pre-push also falls back to global git config seyag.privateTermsFile.	path
+SYG_PROFILE	user	session	full	Base component profile (full, guards, or none) before SYG_ENABLE and SYG_DISABLE are applied.	-
+SYG_PROJECT_NAMES_FILE	user	session	unset	Optional tab-separated table of folder and short name that driver-clone reads for the base short name and appends the new lane to. Unset means the base role file role: field is the short name and no row is written.	path
+SYG_PR_BODY_ACK_FILE	internal	pr	${XDG_STATE_HOME:-$HOME/.local/state}/seyag/pr-body-claim-ack	Test seam overriding the path to pr-body-ref-gate's per-UTC-day claim-scan acknowledgement file.	-
+SYG_PR_BODY_BASE_REF	user	pr	origin/main	Git ref on which TASK-N and doc-N references in a PR body must resolve in pr-body-ref-gate.	-
+SYG_PR_BODY_CLAIM_SCAN	user	pr	1	Set to 0 to disable pr-body-ref-gate rule 2 (uncited claim-shaped lines) while keeping tracker-reference checks.	-
+SYG_PR_BODY_DOC_PATHS	user	pr	tracker/docs tracker/archive/docs	Whitespace-separated repo paths searched on SYG_PR_BODY_BASE_REF for doc-N references in pr-body-ref-gate.	path
+SYG_PR_BODY_EXTRA_COMMANDS	user	pr	unset	Extended regex of extra command families treated like gh pr create/edit by pr-body-ref-gate.	-
+SYG_PR_BODY_RULE_REF	user	pr	unset	Optional project rule citation printed in pr-body-ref-gate block banners.	-
+SYG_PR_BODY_TASK_PATHS	user	pr	tracker/tasks tracker/archive/tasks	Whitespace-separated repo paths searched on SYG_PR_BODY_BASE_REF for TASK-N references in pr-body-ref-gate.	path
+SYG_PR_MERGE_LIB_DIR	internal	pr	<hooks_dir>/lib	Test seam overriding the hooks/lib directory passed to pr-merge-review-check's Python parser.	-
+SYG_PR_OPEN_UPSTREAM_CHECK	user	pr	1	Set to 0 to skip pr-open's upstream-submission-guard --check preflight; the default judges the publish target first (PASS proceeds; BLOCK or UNKNOWN exits before gh runs).	-
+SYG_PR_MONITOR_SEEN_FILE	internal	pr	${XDG_RUNTIME_DIR:-/tmp}/.claude_pr_monitor_seen.<uid>	Test seam overriding the deduplication state file for pr-monitor-reminder.	-
+SYG_PUBLISH_CHECKED	user	guards	unset	Colon-separated <owner/repo> list (or any non-empty value for a gist) in the session env unblocking publish-gate.	-
+SYG_PY_CACHE_ARG	internal	guards	unset	Python flag run.sh exports (`-Xpycache_prefix=<dir>`, or `-B`) for hooks' `python3 -I`, which ignores PYTHONPYCACHEPREFIX; unset on a direct run, where hooks fall back to `-B`; a relative caller prefix gives `-B`.	-
+SYG_ROLE_CONTEXT_CMD	user	session	unset	Command (bash -c) claude-role --board runs for session context sizes: prints a JSON array of {folder, tokens, flagged, flag_at}. Unset means no context lines; a failing one prints an unavailable line.	-
+SYG_ROLE_CONTEXT_LINE	user	session	unset	One line claude-role prints first at session start (hook mode), before the role file and even for a headless or task run. Empty prints nothing.	-
+SYG_ROLE_DIR	user	session	`${XDG_DATA_HOME:-$HOME/.local/share}/seyag/roles`	Directory of role files (one <project folder>.md each) read and written by claude-role and driver-clone.	path
+SYG_ROLE_HEADLESS	internal	misc	unset	Set to 1 by a launcher of headless runs: claude-role hook mode then prints a "not a role session" line and never the role file.	-
+SYG_ROLE_HEADLESS_ROUTES	user	session	unset	Whitespace- or comma-separated route preset names that only headless runs may use; claude-role --set route=NAME refuses them for a role session.	-
+SYG_ROLE_NOW_EPOCH	internal	misc	unset	Test seam overriding the clock (epoch seconds) claude-role uses to decide which Next items are due.	-
+SYG_ROLE_PREAMBLE_FILE	user	session	unset	Template file for the instruction block claude-role prints at session start; the placeholders {role}, {path}, {needs} and {in_person} are replaced literally. Unset, empty or unreadable means the built-in text.	path
+SYG_ROLE_TASK	internal	misc	unset	Set by a launcher of a named task session: claude-role hook mode then prints the task name and a "not a role session" line and never the role file.	-
+SYG_ROUTE_CHECK_CMD	user	routing	unset	Shell command run by route-check at SessionStart when a session requires an approved model route.	-
+SYG_ROUTE_CHECK_OK	user	routing	unset	Exact first word that SYG_ROUTE_CHECK_CMD's first stdout line must match for route-check to pass.	-
+SYG_ROUTE_CHECK_TIMEOUT	internal	routing	10	Test seam overriding the timeout in seconds (positive integer) for SYG_ROUTE_CHECK_CMD in route-check.	-
+SYG_ROUTE_MARKER_FIELD	user	routing	unset	YAML frontmatter field name in SYG_ROUTE_MARKER_FILE whose non-empty value requires an approved route.	-
+SYG_ROUTE_MARKER_FILE	user	routing	unset	Path template ({project} expanded) checked with SYG_ROUTE_MARKER_FIELD to require an approved route.	path
+SYG_ROUTE_REQUIRED	user	routing	unset	Boolean (1/true/yes/on vs 0/false/no/off) requiring an approved model route in route-check.	-
+SYG_ROUTE_SHOW_CMD	user	session	unset	Command (bash -c, the name as its argument) claude-role --set route=NAME runs to check a route preset exists; nonzero refuses the route. Unset means only the name shape is checked.	-
+SYG_SCRATCH_RM_EXEMPT	user	guards	1	Set to 0 to make recursive-rm-guard block deletes inside the session scratch dir too (the job tmp exemption is unaffected).	-
+SYG_SCRATCH_ROOT	user	guards	prose:/tmp/seyag-scratch-UID	Parent of the per-session scratch dirs scratch-dir makes and recursive-rm-guard exempts.	path
+SYG_SECURITY_SWEEP	user	session	unset	Set to 1 to run security-sweep --session-line --cap 2 at SessionStart (startup and clear).	-
+SYG_SECURITY_SWEEP_REPOS	user	session	unset	Whitespace-separated owner/name repos opting in and scoping security-sweep at SessionStart and in security-sweep.	-
+SYG_SESSION_CONTEXT_EXTRA_CMD	user	session	unset	Command session-context runs (bash -c, stdin closed) to add another harness's sessions: a JSON array of {name, folder, sessionId, status, tokens}. Unset adds none; a failure warns on stderr and keeps the Claude rows.	-
+SYG_SESSION_CONTEXT_EXTRA_MODEL	user	session	other	Model label session-context gives the rows from SYG_SESSION_CONTEXT_EXTRA_CMD.	-
+SYG_SESSION_CONTEXT_EXTRA_THRESHOLD	user	session	150000	Context token threshold at which session-context flags a row from SYG_SESSION_CONTEXT_EXTRA_CMD.	-
+SYG_STALLED_NOW	internal	misc	unset	Test seam: ISO-8601 timestamp with a UTC offset that session-stalled uses as the current time; a value without an offset is a usage error.	-
+SYG_STALLED_ZAI_TZ	user	session	Asia/Shanghai	IANA time zone in which session-stalled reads the z.ai quota-reset stamp (`Your limit will reset at YYYY-MM-DD HH:MM:SS`); an unknown zone leaves the reset unparsed.	-
+SYG_STATE_DIR	internal	session	/tmp/claude-<uid>	Test seam overriding the directory session-start prunes and the prompt hooks (queued-message-receipt, context-size-reminder, context-block-gate) write their per-session state into.	-
+SYG_STATE_MAX_DAYS	user	session	7	Age in whole days after which session-start deletes stale prompt-hook state files in SYG_STATE_DIR.	-
+SYG_STATUSLINE_DEBUG	user	statusline	unset	Set to 1 to append terminal column, fit budget, and wrap diagnostics to the statusline.	-
+SYG_STATUSLINE_EXTRA_USAGE	user	statusline	unset	Set to 0 to hide the plan extra-usage segment on the statusline.	-
+SYG_STATUSLINE_FIT_MARGIN	user	statusline	5	Columns subtracted from COLUMNS (non-negative integer) when fitting wrapped statusline rows.	-
+SYG_STATUSLINE_WRAP_COLUMNS	user	statusline	unset	Positive integer column threshold opting in multi-row segment wrapping on the statusline.	-
+SYG_STATUSLINE_ZAI_USAGE	user	statusline	<script_dir>/zai-usage	Override path to the zai-usage binary invoked by statusline on the z.ai lane.	path
+SYG_STATUS_CLAIM_MARKERS	user	guards	unset	Pipe-separated (|) regex alternatives appended to status-claim-cite's default completion and causality markers.	-
+SYG_SWEEP	user	guards	1	Set to 0 to silence removed-identifier-sweep without editing pre-commit hook wiring.	-
+SYG_SWEEP_EXCLUDE_PATHS	user	guards	unset	Whitespace-separated awk regex fragments added to removed-identifier-sweep's path exclusions.	path
+SYG_SWEEP_FRAG	internal	guards	unset	Internal env variable passing one fragment to awk for regex validation inside removed-identifier-sweep.	-
+SYG_SWEEP_VALID_FRAGMENTS	internal	guards	unset	Internal env variable exporting validated SYG_SWEEP_EXCLUDE_PATHS fragments to awk in removed-identifier-sweep.	-
+SYG_UPSTREAM_CHECKED	user	guards	unset	Per-command prefix assignment <owner/repo> bypassing upstream-submission-guard after the AI-stance check.	-
+SYG_USER_RULES_DIR	internal	session	$HOME/.claude/rules	Test seam overriding the user rules directory checked by session-start against rules/core.md.	-
+SYG_WEEK_BURN_MARGIN_MIN	user	usage	30	Margin in minutes (integer >= 0) added to the computed burn window in week-burn-window.	-
+SYG_WEEK_BURN_NOW	internal	usage	unset	Test clock (epoch seconds) overriding current time in week-burn-window.	-
+SYG_WEEK_BURN_RATE	user	usage	unset	Override burn rate in %/h (number > 0) for week-burn-window, replacing the 6-hour log slope.	-
+SYG_WORKER_SANDBOX_CLAUDE	internal	worktrees	prose:claude on PATH	Test seam naming the program worker-sandbox binds and runs as claude.	-
+SYG_WORKER_SANDBOX_ENV	user	worktrees	unset	Extra space-separated variable names worker-sandbox passes into the worker (DISABLE_AUTOUPDATER always passes).	-
+SYG_WORKER_SANDBOX_PATH	user	worktrees	$HOME/.local/bin:$HOME/.local/share/mise/shims:/usr/bin:/bin	Inner PATH tail worker-sandbox appends after its bin directory; empty means the default.	path
+SYG_WORKER_SANDBOX_REPO	user	worktrees	unset	Main checkout top directory the worker's tree belongs to; when set, worker-sandbox passes --repo to worker-tree-check and exports SYG_GATE_SANDBOX_REPO (refusal or missing directory exits 125).	path
+SYG_WORKER_SANDBOX_RO_BINDS	user	worktrees	unset	More read-only binds for the worker, in SYG_GATE_SANDBOX_RO_BINDS' format.	path
+SYG_WORKER_SANDBOX_SCRATCH	user	worktrees	unset	Host directory worker-sandbox binds writable at ~/.claude, where claude keeps its transcripts (required; the caller copies out what it wants and deletes it).	path
+SYG_WORKER_SANDBOX_TREE	user	worktrees	rw	rw or ro mount of the worker's tree.	-
+SYG_WORKER_SANDBOX_WALL	user	worktrees	unset	Extra space-separated CIDRs or addresses worker-sandbox walls off (passed as SYG_GATE_SANDBOX_WALL); a bad entry fails the launch.	-
+SYG_WORKER_TREE_CHECK_UNTRUSTED	user	worktrees	/tmp:/var/tmp:/dev/shm	Colon-separated directories a worker can write; worker-tree-check refuses a gitdir under them when no --repo anchor is given.	path
+SYG_WORKTREE_BACKUP_ALLOW_VOLATILE	user	worktrees	unset	Set to 1 to allow safe-worktree-clean --apply-hold backups on tmpfs or ramfs.	-
+SYG_WORKTREE_BACKUP_DIR	user	worktrees	${XDG_STATE_HOME:-$HOME/.local/state}/seyag/worktree-backups	Directory where safe-worktree-clean --apply-hold writes HOLD worktree backup bundles.	path
+SYG_WORKTREE_BASE	user	worktrees	origin/<default branch>	Base git ref against which safe-worktree-clean judges worktrees when --base is not passed.	-
+SYG_WORKTREE_BRANCH_RE	user	worktrees	^worktree-agent-	Extended regex that agent worktree branch names must match in safe-worktree-clean and worktree-transfer.	-
+SYG_WORKTREE_LOCK_AGE_MIN	user	worktrees	10	Age in minutes (integer) after which a 0-byte index.lock with no live git process counts as stale.	-
+SYG_WORKTREE_REGENERABLE	user	worktrees	unset	Whitespace-separated path globs treated as safe-to-delete regenerable ignored paths in safe-worktree-clean.	path
+SYG_WORKTREE_RUN_STAMP	internal	worktrees	<YYYY-MM-DDTHHMMSS>	Internal timestamp directory name exported from a multi-repo safe-worktree-clean --apply-hold parent to child runs; a value that is empty or not a plain name ([0-9A-Za-z][0-9A-Za-z._-]*) exits 2.	-
+SYG_WORKTREE_STATE_BATCH_FAIL	internal	worktrees	unset	Internal test seam in safe-worktree-clean: set to exactly 1 it skips tree_state_sha's hash-object batch child (batch_ok=false, rc_batch=1) so probes exercise the per-file hash fallback; any other value is ignored.	-
+SYG_WORKTREE_SWEEP_CHILD	internal	worktrees	unset	Internal marker set to 1 when safe-worktree-clean invokes itself per repo in a multi-repo sweep.	-
+SYG_WSDIFF_LENIENT_NAMES	user	worktrees	unset	Whitespace-separated basenames or .ext suffixes treated as whitespace-lenient by whitespace-only-diff.	-
+TZUROT_ALLOW_GREP_DOLLAR	user	guards	unset	Legacy alias of SYG_ALLOW_GREP_DOLLAR; set to 1 in the command text the same way.	-
+TZUROT_ALLOW_HEREDOC_EDIT	user	guards	unset	Legacy alias of SYG_ALLOW_HEREDOC_EDIT; set to 1 in the command text the same way.	-
+ZAI_AUTH_TOKEN	user	usage	unset	z.ai API bearer token for zai-usage. Lookup order: lane key file, then keys get (which prefers this env var over the store), then session env or settings.json when routed to z.ai.	-
+ZAI_SPEND_MODELS_URL	internal	usage	https://api.z.ai/api/monitor/usage/model-usage	Test seam overriding the z.ai model-usage API URL in zai-usage.	-
+ZAI_SPEND_PEAK_UTC	internal	usage	14-18	Test seam overriding peak hours (interpreted in UTC+8) for local transcript weighting in zai-usage.	-
+ZAI_SPEND_PROJECTS	internal	usage	~/.claude/projects	Test seam overriding the transcript directory scanned by zai-usage in local fallback mode.	-
+ZAI_SPEND_QUOTA_URL	internal	usage	https://api.z.ai/api/monitor/usage/quota/limit	Test seam overriding the z.ai quota API URL in zai-usage.	-
+ZAI_USAGE_KEYS_KILL_S	user	usage	30	Kill timeout in seconds (positive finite number; an invalid value falls back to 30) for the keys get ZAI_AUTH_TOKEN subprocess in zai-usage.	-

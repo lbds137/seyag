@@ -4,13 +4,15 @@
 # bin/claude-usage): scope and precedence (the environment wins, even when set
 # empty; the project file overwrites the user file between the two), the key
 # rule in both forms, the settable set (knobs.tsv user rows minus the
-# harness-owned names), the _CMD project-scope refusal, SYG_CONFIG=0, the
-# accepted TOML subset (one warning per offending line, fail-open), the
-# skip-list parity with tests/config-reference.py, and both integrations. The
-# (o1)-(o6) battery pins the round-2 behaviours: a config-set event timeout,
-# config-set profile through run.sh, the duplicate-section message, the
-# top-level dotted key form, the project-exec refusal list and its knobs.tsv
-# coverage.
+# harness-owned and envonly names), the _CMD/exec and path project-scope
+# refusals, the envonly refusal in both scopes, SYG_CONFIG=0, the accepted TOML
+# subset (one warning per offending line, fail-open, multiline-string body skip,
+# warnings name file and line; file content is never echoed; name text is
+# truncated to 40 characters, invalid-section reset, unsupported number-form
+# message, malformed tab-less knobs.tsv row warning), the skip-list and
+# flags-coverage parity with tests/config-reference.py and knobs.tsv, and both
+# integrations. The (o1)-(o6) battery pins the round-2 behaviours and (p)-(v)
+# pin the cfg2 security refusals and parser hardenings.
 
 set -uo pipefail
 
@@ -52,7 +54,8 @@ CFG_ENV=(env
   -u SYG_STATUS_CLAIM_MARKERS -u SYG_BQ_PENDING_MARKERS -u SYG_STATUSLINE_ZAI_USAGE
   -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_ENTRYPOINT -u ANTHROPIC_BASE_URL -u ANTHROPIC_AUTH_TOKEN
   -u ANTHROPIC_API_KEY -u CC_ROUTE_PRESET -u CLAUDE_USAGE_MODEL -u CLAUDE_USAGE_TTL -u CLAUDE_USAGE_WEEK_STOP
-  -u CLAUDE_USAGE_WEEK_RESERVE_CMD -u CLAUDE_USAGE_EXTRA_OK
+  -u CLAUDE_USAGE_WEEK_RESERVE_CMD -u CLAUDE_USAGE_EXTRA_OK -u CLAUDE_USAGE_ZAI_WEEK_RESERVE
+  -u SYG_ENABLE -u SYG_LAUNCH_RECORD_DIR -u SYG_CLASSIFIER_LEDGER -u SYG_ROLE_PREAMBLE_FILE -u SYG_OWNER_NAME
   HOME="$TMP/home" SYG_TEST_PLUGIN_DIR="$PLUGIN")
 
 # (a) no files: exit 0, empty stderr, nothing exported.
@@ -138,7 +141,6 @@ syg_profile = [1, 2]
 syg_profile = { a = 1 }
 syg_profile. = 1
 [claude_usage.]
-syg_event_hook_timeout = """abc
 syg_private_terms_file = hello
 syg_route_marker_field = "a\qb"
 syg_status_claim_markers = "x" y
@@ -151,19 +153,108 @@ RC=$?
 WANT_ERR=$(printf '%s' \
 "seyag config: $U3/seyag/config.toml: line 2: syg_profile: unsupported value: arrays are not supported
 seyag config: $U3/seyag/config.toml: line 3: syg_profile: unsupported value: inline tables are not supported
-seyag config: $U3/seyag/config.toml: line 4: syg_profile.: malformed key: invalid name
-seyag config: $U3/seyag/config.toml: line 5: [claude_usage.]: malformed section: invalid name
-seyag config: $U3/seyag/config.toml: line 6: syg_event_hook_timeout: unsupported value: multiline strings are not supported
-seyag config: $U3/seyag/config.toml: line 7: syg_private_terms_file: malformed value: strings and paths must be quoted
-seyag config: $U3/seyag/config.toml: line 8: syg_route_marker_field: malformed value: unsupported escape
-seyag config: $U3/seyag/config.toml: line 9: syg_status_claim_markers: unsupported value: trailing content after the value
-seyag config: $U3/seyag/config.toml: line 10: syg_bq_pending_markers: malformed value: unterminated string
-seyag config: $U3/seyag/config.toml: line 11: syg_clock_stamp_hint: duplicate key: first value wins")
+seyag config: $U3/seyag/config.toml: line 4: malformed key: invalid name
+seyag config: $U3/seyag/config.toml: line 5: malformed section: invalid name
+seyag config: $U3/seyag/config.toml: line 6: syg_private_terms_file: malformed value: strings and paths must be quoted
+seyag config: $U3/seyag/config.toml: line 7: syg_route_marker_field: malformed value: unsupported escape
+seyag config: $U3/seyag/config.toml: line 8: syg_status_claim_markers: unsupported value: trailing content after the value
+seyag config: $U3/seyag/config.toml: line 9: syg_bq_pending_markers: malformed value: unterminated string
+seyag config: $U3/seyag/config.toml: line 10: syg_clock_stamp_hint: duplicate key: first value wins")
 if [ "$RC" = 0 ] && [ "$OUT" = "SYG_CLOCK_STAMP_HINT=[applied]" ] && [ "$(cat "$TMP/err")" = "$WANT_ERR" ]; then
   ok "(f) malformed/unsupported battery: one warning per line, exit 0, good lines applied"
 else
   fail "(f) battery: rc $RC, out '$OUT', err:
 $(cat "$TMP/err")"
+fi
+
+# (f2) L1 multiline-string skip: mid-file opener warns once and skips body lines
+# (valid-looking and malformed alike) until the closing delimiter, after which
+# normal parsing resumes; an opener unterminated at EOF warns once and skips the
+# rest of the file; a single-line """abc""" opener warns once and skips nothing.
+U3f2a="$TMP/xdg3-f2a"
+mkdir -p "$U3f2a/seyag"
+cat >"$U3f2a/seyag/config.toml" <<'EOF'
+syg_event_hook_timeout = """abc
+syg_enable = 1
+malformed body line with no equals
+closing delimiter line """
+syg_clock_stamp_hint = "after-close"
+EOF
+OUT_F2A=$("${CFG_ENV[@]}" XDG_CONFIG_HOME="$U3f2a" CLAUDE_PROJECT_DIR="$TMP/proj-none" \
+  bash "$TMP/report" "$LIB" SYG_EVENT_HOOK_TIMEOUT SYG_ENABLE SYG_CLOCK_STAMP_HINT 2>"$TMP/err.f2a")
+WANT_ERR_F2A="seyag config: $U3f2a/seyag/config.toml: line 1: syg_event_hook_timeout: unsupported value: multiline strings are not supported"
+
+U3f2b="$TMP/xdg3-f2b"
+mkdir -p "$U3f2b/seyag"
+cat >"$U3f2b/seyag/config.toml" <<'EOF'
+syg_event_hook_timeout = """abc
+syg_enable = 1
+syg_clock_stamp_hint = "unreached-at-eof"
+EOF
+OUT_F2B=$("${CFG_ENV[@]}" XDG_CONFIG_HOME="$U3f2b" CLAUDE_PROJECT_DIR="$TMP/proj-none" \
+  bash "$TMP/report" "$LIB" SYG_EVENT_HOOK_TIMEOUT SYG_ENABLE SYG_CLOCK_STAMP_HINT 2>"$TMP/err.f2b")
+WANT_ERR_F2B="seyag config: $U3f2b/seyag/config.toml: line 1: syg_event_hook_timeout: unsupported value: multiline strings are not supported"
+
+U3f2c="$TMP/xdg3-f2c"
+mkdir -p "$U3f2c/seyag"
+cat >"$U3f2c/seyag/config.toml" <<'EOF'
+syg_event_hook_timeout = """abc"""
+syg_clock_stamp_hint = "not-skipped"
+EOF
+OUT_F2C=$("${CFG_ENV[@]}" XDG_CONFIG_HOME="$U3f2c" CLAUDE_PROJECT_DIR="$TMP/proj-none" \
+  bash "$TMP/report" "$LIB" SYG_EVENT_HOOK_TIMEOUT SYG_CLOCK_STAMP_HINT 2>"$TMP/err.f2c")
+WANT_ERR_F2C="seyag config: $U3f2c/seyag/config.toml: line 1: syg_event_hook_timeout: unsupported value: multiline strings are not supported"
+
+if [ "$OUT_F2A" = $'SYG_EVENT_HOOK_TIMEOUT=UNSET\nSYG_ENABLE=UNSET\nSYG_CLOCK_STAMP_HINT=[after-close]' ] \
+  && [ "$(cat "$TMP/err.f2a")" = "$WANT_ERR_F2A" ] \
+  && [ "$OUT_F2B" = $'SYG_EVENT_HOOK_TIMEOUT=UNSET\nSYG_ENABLE=UNSET\nSYG_CLOCK_STAMP_HINT=UNSET' ] \
+  && [ "$(cat "$TMP/err.f2b")" = "$WANT_ERR_F2B" ] \
+  && [ "$OUT_F2C" = $'SYG_EVENT_HOOK_TIMEOUT=UNSET\nSYG_CLOCK_STAMP_HINT=[not-skipped]' ] \
+  && [ "$(cat "$TMP/err.f2c")" = "$WANT_ERR_F2C" ]; then
+  ok "(f2) L1 multiline-string opener skips body lines to closing delimiter (mid-file, EOF, single-line)"
+else
+  fail "(f2) L1 multiline skip: f2a=($OUT_F2A / $(cat "$TMP/err.f2a")) f2b=($OUT_F2B / $(cat "$TMP/err.f2b")) f2c=($OUT_F2C / $(cat "$TMP/err.f2c"))"
+fi
+
+# (f2d) unknown-key multiline opener warns multiline-unsupported once, skips its
+# body (so syg_enable = 1 and a malformed line inside do not run), and resumes
+# after the closer.
+U3f2d="$TMP/xdg3-f2d"
+mkdir -p "$U3f2d/seyag"
+cat >"$U3f2d/seyag/config.toml" <<'EOF'
+totally_made_up = """abc
+syg_enable = 1
+malformed body line with no equals
+closing delimiter line """
+syg_clock_stamp_hint = "after-unknown-close"
+EOF
+OUT_F2D=$("${CFG_ENV[@]}" XDG_CONFIG_HOME="$U3f2d" CLAUDE_PROJECT_DIR="$TMP/proj-none" \
+  bash "$TMP/report" "$LIB" SYG_ENABLE SYG_CLOCK_STAMP_HINT 2>"$TMP/err.f2d")
+WANT_ERR_F2D="seyag config: $U3f2d/seyag/config.toml: line 1: totally_made_up: unsupported value: multiline strings are not supported"
+if [ "$OUT_F2D" = $'SYG_ENABLE=UNSET\nSYG_CLOCK_STAMP_HINT=[after-unknown-close]' ] \
+  && [ "$(cat "$TMP/err.f2d")" = "$WANT_ERR_F2D" ]; then
+  ok "(f2d) unknown-key multiline opener warns once, skips body (SYG_ENABLE=UNSET), resumes after closer"
+else
+  fail "(f2d) unknown-key multiline skip: out '$OUT_F2D', err '$(cat "$TMP/err.f2d")' (want '$WANT_ERR_F2D')"
+fi
+
+# (f2e) project-scope path-knob multiline opener warns multiline-unsupported (not
+# path refusal) and skips its body so syg_clock_stamp_hint inside does not leak.
+P3f2e="$TMP/proj3-f2e"
+mkdir -p "$P3f2e/.claude"
+cat >"$P3f2e/.claude/seyag.toml" <<'EOF'
+syg_clock_stamp_paths_file = """x
+syg_clock_stamp_hint = "leak"
+"""
+EOF
+OUT_F2E=$("${CFG_ENV[@]}" XDG_CONFIG_HOME="$TMP/no-xdg" CLAUDE_PROJECT_DIR="$P3f2e" \
+  bash "$TMP/report" "$LIB" SYG_CLOCK_STAMP_HINT 2>"$TMP/err.f2e")
+WANT_ERR_F2E="seyag config: $P3f2e/.claude/seyag.toml: line 1: syg_clock_stamp_paths_file: unsupported value: multiline strings are not supported"
+if [ "$OUT_F2E" = "SYG_CLOCK_STAMP_HINT=UNSET" ] \
+  && [ "$(cat "$TMP/err.f2e")" = "$WANT_ERR_F2E" ]; then
+  ok "(f2e) project-scope path-knob multiline opener emits multiline warning and skips body (SYG_CLOCK_STAMP_HINT=UNSET)"
+else
+  fail "(f2e) project-scope path-knob multiline skip: out '$OUT_F2E', err '$(cat "$TMP/err.f2e")' (want '$WANT_ERR_F2E')"
 fi
 
 # (g) SYG_CONFIG=0: files present but ignored, no warnings.
@@ -483,6 +574,192 @@ if [ "$OUT" = "SYG_STATUSLINE_ZAI_USAGE=UNSET" ] && [ "$(cat "$TMP/err")" = "$WA
   ok "(o6) SYG_STATUSLINE_ZAI_USAGE refused from project scope with the exact warning"
 else
   fail "(o6) project exec refusal: out '$OUT', err '$(cat "$TMP/err")' (want '$WANT_ERR')"
+fi
+
+# (p) path refusals: project scope refuses path-flagged knobs (top-level and
+# sectioned forms alike) with the exact message and leaves them unset; user
+# scope still applies the same knob.
+PP="$TMP/proj-p"
+mkdir -p "$PP/.claude"
+cat >"$PP/.claude/seyag.toml" <<'EOF'
+syg_launch_record_dir = "/tmp/evil-lr"
+syg_classifier_ledger = "/tmp/evil-cl"
+syg_role_preamble_file = "/tmp/evil-pre"
+[syg.launch_record]
+dir = "/tmp/evil-lr2"
+EOF
+OUT_P=$("${CFG_ENV[@]}" XDG_CONFIG_HOME="$TMP/no-xdg" CLAUDE_PROJECT_DIR="$PP" \
+  bash "$TMP/report" "$LIB" SYG_LAUNCH_RECORD_DIR SYG_CLASSIFIER_LEDGER SYG_ROLE_PREAMBLE_FILE 2>"$TMP/err.p")
+WANT_ERR_P=$(printf '%s' \
+"seyag config: $PP/.claude/seyag.toml: line 1: 'SYG_LAUNCH_RECORD_DIR' cannot be set from project scope (path knob)
+seyag config: $PP/.claude/seyag.toml: line 2: 'SYG_CLASSIFIER_LEDGER' cannot be set from project scope (path knob)
+seyag config: $PP/.claude/seyag.toml: line 3: 'SYG_ROLE_PREAMBLE_FILE' cannot be set from project scope (path knob)
+seyag config: $PP/.claude/seyag.toml: line 5: 'SYG_LAUNCH_RECORD_DIR' cannot be set from project scope (path knob)")
+UP="$TMP/xdg-p"
+mkdir -p "$UP/seyag"
+printf 'syg_launch_record_dir = "/tmp/user-lr"\n' >"$UP/seyag/config.toml"
+OUT_PU=$("${CFG_ENV[@]}" XDG_CONFIG_HOME="$UP" CLAUDE_PROJECT_DIR="$TMP/proj-none" \
+  bash "$TMP/report" "$LIB" SYG_LAUNCH_RECORD_DIR 2>"$TMP/err.pu")
+if [ "$OUT_P" = $'SYG_LAUNCH_RECORD_DIR=UNSET\nSYG_CLASSIFIER_LEDGER=UNSET\nSYG_ROLE_PREAMBLE_FILE=UNSET' ] \
+  && [ "$(cat "$TMP/err.p")" = "$WANT_ERR_P" ] \
+  && [ "$OUT_PU" = "SYG_LAUNCH_RECORD_DIR=[/tmp/user-lr]" ] \
+  && [ ! -s "$TMP/err.pu" ]; then
+  ok "(p) path knobs refused from project scope (top-level and sectioned) and allowed from user scope"
+else
+  fail "(p) path refusal: proj=($OUT_P / $(cat "$TMP/err.p")) user=($OUT_PU / $(cat "$TMP/err.pu"))"
+fi
+
+# (q) envonly refusal: refused from both user and project files with the exact warning.
+UQ="$TMP/xdg-q"
+mkdir -p "$UQ/seyag"
+printf 'syg_owner_name = "spoof-user"\n' >"$UQ/seyag/config.toml"
+OUT_QU=$("${CFG_ENV[@]}" XDG_CONFIG_HOME="$UQ" CLAUDE_PROJECT_DIR="$TMP/proj-none" \
+  bash "$TMP/report" "$LIB" SYG_OWNER_NAME 2>"$TMP/err.qu")
+WANT_ERR_QU="seyag config: $UQ/seyag/config.toml: line 1: 'SYG_OWNER_NAME' is environment only (not settable from a config file)"
+PQ="$TMP/proj-q"
+mkdir -p "$PQ/.claude"
+printf 'syg_owner_name = "spoof-proj"\n' >"$PQ/.claude/seyag.toml"
+OUT_QP=$("${CFG_ENV[@]}" XDG_CONFIG_HOME="$TMP/no-xdg" CLAUDE_PROJECT_DIR="$PQ" \
+  bash "$TMP/report" "$LIB" SYG_OWNER_NAME 2>"$TMP/err.qp")
+WANT_ERR_QP="seyag config: $PQ/.claude/seyag.toml: line 1: 'SYG_OWNER_NAME' is environment only (not settable from a config file)"
+if [ "$OUT_QU" = "SYG_OWNER_NAME=UNSET" ] && [ "$(cat "$TMP/err.qu")" = "$WANT_ERR_QU" ] \
+  && [ "$OUT_QP" = "SYG_OWNER_NAME=UNSET" ] && [ "$(cat "$TMP/err.qp")" = "$WANT_ERR_QP" ]; then
+  ok "(q) envonly knob refused from both user and project config files"
+else
+  fail "(q) envonly refusal: user=($OUT_QU / $(cat "$TMP/err.qu")) proj=($OUT_QP / $(cat "$TMP/err.qp"))"
+fi
+
+# (r) knobs.tsv flags coverage pins (r1 heuristic + allowlist, r2 envonly parity,
+# r3 required-list pin).
+# Explicit r1 allowlist with one-line reasons:
+#   ZAI_AUTH_TOKEN                — a token value ("lane key file" names where it is looked up)
+#   SYG_HANDOFF_PATHS             — regex value
+#   SYG_LEDGER_PATH_RE            — regex value
+#   SYG_DISPATCH_SPEC_RE          — regex value
+#   SYG_DISPATCH_SRC_RE           — regex value
+#   SYG_HANDOFF_SECTIONS          — description names the knob SYG_HANDOFF_PATHS
+#   SYG_LAUNCH_RECORD_ENV         — env-var names ("files" names the record files)
+#   SYG_NEEDS_OWNER_SECTION       — heading string ("role file" names where it lives)
+#   SYG_IN_PERSON_SECTION         — heading string ("role file" names where it lives)
+#   SYG_ROUTE_MARKER_FIELD        — a field name (names the file knob)
+#   SYG_CONFIG                    — a 0/1 enable value ("config files" names what it disables)
+#   SYG_EPG_TRUSTED_VARS          — variable names ("file-sink" names the guard's sink class)
+#   SYG_HANDOFF_CMDS              — a regex value ("path defaults" names the built-in regex's subject)
+#   SYG_ROLE_CONTEXT_CMD          — _CMD knob ("folder" is a JSON key in its documented output)
+#   SYG_ROLE_CONTEXT_LINE         — a text line ("role file" names where it prints)
+#   SYG_SCRATCH_RM_EXEMPT         — a 0/1 value ("scratch dir" names the guard's scope)
+#   SYG_SESSION_CONTEXT_EXTRA_CMD — _CMD knob ("folder" is a JSON key)
+#   SYG_STATE_MAX_DAYS            — a day count ("state files" names what ages out)
+R1_ALLOWLIST=" ZAI_AUTH_TOKEN SYG_HANDOFF_PATHS SYG_LEDGER_PATH_RE SYG_DISPATCH_SPEC_RE SYG_DISPATCH_SRC_RE SYG_HANDOFF_SECTIONS SYG_LAUNCH_RECORD_ENV SYG_NEEDS_OWNER_SECTION SYG_IN_PERSON_SECTION SYG_ROUTE_MARKER_FIELD SYG_CONFIG SYG_EPG_TRUSTED_VARS SYG_HANDOFF_CMDS SYG_ROLE_CONTEXT_CMD SYG_ROLE_CONTEXT_LINE SYG_SCRATCH_RM_EXEMPT SYG_SESSION_CONTEXT_EXTRA_CMD SYG_STATE_MAX_DAYS "
+R1_BAD=$(awk -F'\t' -v allow="$R1_ALLOWLIST" '
+  $2 == "user" && tolower($5) ~ /(^|[^a-z0-9_])(dir|directory|file|path|glob|folder)s?([^a-z0-9_]|$)/ {
+    has_path = ((" " $6 " ") ~ / path /)
+    in_allow = (index(allow, " " $1 " ") > 0)
+    if (!has_path && !in_allow) print "missing-path:" $1
+    if (has_path && in_allow) print "allowlisted-has-path:" $1
+  }
+' "$KNOBS")
+R2_BAD=$(awk -F'\t' '
+  !/^#/ && NF > 0 {
+    has_desc = ($5 ~ /Environment only/)
+    has_flag = ((" " $6 " ") ~ / envonly /)
+    if ($2 == "user" && has_desc && !has_flag) print "missing-envonly:" $1
+    if (has_flag && ($2 != "user" || !has_desc)) print "unmatched-envonly:" $1
+    if ($1 == "SYG_OWNER_NAME" && has_desc && has_flag) owner_ok = 1
+  }
+  END { if (!owner_ok) print "missing-control:SYG_OWNER_NAME" }
+' "$KNOBS")
+R3_REQ="SYG_GATE_SANDBOX_RO_BINDS SYG_WORKER_SANDBOX_RO_BINDS SYG_AGY_SUMMARIES_DB SYG_CLASSIFIER_LEDGER SYG_CREDIT_LEDGER SYG_WORKTREE_REGENERABLE SYG_SCRATCH_ROOT"
+R3_BAD=$(awk -F'\t' -v req="$R3_REQ" '
+  BEGIN { n = split(req, arr, " "); for (i = 1; i <= n; i++) need[arr[i]] = 1 }
+  $2 == "user" && (" " $6 " ") ~ / path / { delete need[$1] }
+  END { for (k in need) print "missing-r3:" k }
+' "$KNOBS")
+if [ -z "$R1_BAD" ] && [ -z "$R2_BAD" ] && [ -z "$R3_BAD" ]; then
+  ok "(r) knobs.tsv flags coverage pins hold (r1 path heuristic, r2 envonly parity, r3 required list)"
+else
+  fail "(r) flags coverage: r1=[$R1_BAD] r2=[$R2_BAD] r3=[$R3_BAD]"
+fi
+
+# (s) F3 content-free raw warnings and bounded 40-char name echoes: =-less lines,
+# invalid section headers, and invalid key names echo no file content; unknown
+# key names truncate at 40 chars + "..." while short unknown keys show in full.
+US="$TMP/xdg-s"
+mkdir -p "$US/seyag"
+KEY40="a234567890a234567890a234567890a234567890"
+KEY200="${KEY40}${KEY40}${KEY40}${KEY40}${KEY40}"
+cat >"$US/seyag/config.toml" <<EOF
+FAKE_SECRET_20_CHARS
+[spaced header]
+{"a":"b"} = x
+${KEY200}=1
+short_unknown = 1
+EOF
+OUT_S=$("${CFG_ENV[@]}" XDG_CONFIG_HOME="$US" CLAUDE_PROJECT_DIR="$TMP/proj-none" \
+  bash "$TMP/report" "$LIB" SYG_CLOCK_STAMP_HINT 2>"$TMP/err.s")
+WANT_ERR_S=$(printf '%s' \
+"seyag config: $US/seyag/config.toml: line 1: malformed line: expected 'key = value' or a [section] header
+seyag config: $US/seyag/config.toml: line 2: malformed section: invalid name
+seyag config: $US/seyag/config.toml: line 3: malformed key: invalid name
+seyag config: $US/seyag/config.toml: line 4: unknown key '${KEY40}...' (not a settable seyag knob; see docs/config.md)
+seyag config: $US/seyag/config.toml: line 5: unknown key 'short_unknown' (not a settable seyag knob; see docs/config.md)")
+if [ "$OUT_S" = "SYG_CLOCK_STAMP_HINT=UNSET" ] && [ "$(cat "$TMP/err.s")" = "$WANT_ERR_S" ]; then
+  ok "(s) content-free raw warnings (=-less line, invalid section, invalid key) and 40-char bounded unknown-key name echo"
+else
+  fail "(s) content-free/bounded echo: out '$OUT_S', err '$(cat "$TMP/err.s")' (want '$WANT_ERR_S')"
+fi
+
+# (s2) M4 invalid section header closes the active section instead of leaving
+# the previous section open.
+US2="$TMP/xdg-s2"
+mkdir -p "$US2/seyag"
+printf '[claude_usage]\nttl = 60\n[ claude_usage.zai ]\nweek_reserve = 40\n' >"$US2/seyag/config.toml"
+OUT_S2=$("${CFG_ENV[@]}" XDG_CONFIG_HOME="$US2" CLAUDE_PROJECT_DIR="$TMP/proj-none" \
+  bash "$TMP/report" "$LIB" CLAUDE_USAGE_TTL CLAUDE_USAGE_WEEK_RESERVE CLAUDE_USAGE_ZAI_WEEK_RESERVE 2>"$TMP/err.s2")
+WANT_ERR_S2=$(printf '%s' \
+"seyag config: $US2/seyag/config.toml: line 3: malformed section: invalid name
+seyag config: $US2/seyag/config.toml: line 4: unknown key 'week_reserve' (not a settable seyag knob; see docs/config.md)")
+if [ "$OUT_S2" = $'CLAUDE_USAGE_TTL=[60]\nCLAUDE_USAGE_WEEK_RESERVE=UNSET\nCLAUDE_USAGE_ZAI_WEEK_RESERVE=UNSET' ] \
+  && [ "$(cat "$TMP/err.s2")" = "$WANT_ERR_S2" ]; then
+  ok "(s2) M4 invalid section header resets the section so subsequent keys do not inherit it"
+else
+  fail "(s2) M4 section reset: out '$OUT_S2', err '$(cat "$TMP/err.s2")' (want '$WANT_ERR_S2')"
+fi
+
+# (u) L4 number-form message: numeric-shaped non-int/float bare tokens (+5, 1e3)
+# get the dedicated number-form message while plain bare strings keep the old one.
+UU="$TMP/xdg-u"
+mkdir -p "$UU/seyag"
+printf 'syg_clock_stamp_hint = +5\nsyg_clock_stamp_hint = 1e3\n' >"$UU/seyag/config.toml"
+OUT_U=$("${CFG_ENV[@]}" XDG_CONFIG_HOME="$UU" CLAUDE_PROJECT_DIR="$TMP/proj-none" \
+  bash "$TMP/report" "$LIB" SYG_CLOCK_STAMP_HINT 2>"$TMP/err.u")
+WANT_ERR_U=$(printf '%s' \
+"seyag config: $UU/seyag/config.toml: line 1: syg_clock_stamp_hint: unsupported value: number form not supported (use plain digits or a quoted string)
+seyag config: $UU/seyag/config.toml: line 2: syg_clock_stamp_hint: unsupported value: number form not supported (use plain digits or a quoted string)")
+if [ "$OUT_U" = "SYG_CLOCK_STAMP_HINT=UNSET" ] && [ "$(cat "$TMP/err.u")" = "$WANT_ERR_U" ]; then
+  ok "(u) L4 numeric-shaped bare tokens (+5, 1e3) emit the dedicated number-form warning"
+else
+  fail "(u) L4 number-form: out '$OUT_U', err '$(cat "$TMP/err.u")' (want '$WANT_ERR_U')"
+fi
+
+# (v) L3b tab-less row in knobs.tsv warns once and is skipped; comment and blank
+# rows stay silent.
+KNV="$TMP/knobsplug-v"
+mkdir -p "$KNV/config"
+cat >"$KNV/config/knobs.tsv" <<'EOF'
+# comment row stays silent
+
+malformed_tabless_row_here
+SYG_CLOCK_STAMP_HINT	user	guards	unset	Optional line appended to clock-stamp-guard block messages.	-
+CLAUDE_USAGE_WEEK_RESERVE	user	usage	75	Weekly usage percentage threshold.	-
+EOF
+OUT_V=$("${CFG_ENV[@]}" XDG_CONFIG_HOME="$U1" SYG_TEST_PLUGIN_DIR="$KNV" CLAUDE_PROJECT_DIR="$TMP/proj-none" \
+  bash "$TMP/report" "$LIB" SYG_CLOCK_STAMP_HINT 2>"$TMP/err.v")
+WANT_ERR_V="seyag config: $KNV/config/knobs.tsv: line 3: malformed row: skipped"
+if [ "$OUT_V" = "SYG_CLOCK_STAMP_HINT=[from-user]" ] && [ "$(cat "$TMP/err.v")" = "$WANT_ERR_V" ]; then
+  ok "(v) L3b tab-less row in knobs.tsv warns once and is skipped; comment and blank rows stay silent"
+else
+  fail "(v) L3b tab-less knobs row: out '$OUT_V', err '$(cat "$TMP/err.v")' (want '$WANT_ERR_V')"
 fi
 
 echo ""
