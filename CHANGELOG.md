@@ -2,6 +2,16 @@
 
 All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY-MM-DD>` section per released version; under it, `###` categories in fixed order — Breaking Changes, Features, Bug Fixes, Improvements, Chores, Tests — empty ones omitted; items are `- **scope:** description (#PR)`, written from the version's merged commit subjects.
 
+## 0.3.189 - 2026-11-19
+
+### Bug Fixes
+
+- **bin:** fixup-push's `--onto-base` checkout refusal names the untracked-file collision: git's own stderr is discarded at that call, so an untracked file blocking the rewritten tree used to surface only as "checkout of the rewritten branch failed"; the refusal now ends "(an untracked file colliding with the rewritten tree is the usual cause)". (#343)
+
+### Tests
+
+- **probes:** fixup-push probe pins the step-13 "worktree changed during the run" refusal through both diff arms (a gh-shim side effect stages or dirties a tracked file on the second `pr view`; each arm proven load-bearing by its own neutered-guard canary), pins the empty-commit `rebase proof failed` refusal (modern git takes the patch-id proof's exit path; the probe cannot distinguish it from the count check, so a dedicated canary proves the guards load-bearing), and pins the new untracked-collision refusal text (red at base). (#343)
+
 ## 0.3.188 - 2026-11-18
 
 ### Features
