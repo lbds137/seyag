@@ -2,6 +2,12 @@
 
 All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY-MM-DD>` section per released version; under it, `###` categories in fixed order — Breaking Changes, Features, Bug Fixes, Improvements, Chores, Tests — empty ones omitted; items are `- **scope:** description (#PR)`, written from the version's merged commit subjects.
 
+## 0.3.196 - 2026-11-19
+
+### Features
+
+- **skills:** seyag:accessibility — the accessibility floor for any UI, chart, theme or visual work, wherever it lands: colour never the only signal (every colour distinction also carries text, pattern, shape or position, and legends repeat the exact series swatches), WCAG AA contrast in light AND dark themes as separate checks (4.5:1 text, 3:1 UI components and meaningful graphics), the changed visual verified under a colour-vision-deficiency simulation (deuteranopia, protanopia, tritanopia) or luminance reasoning with the method stated in the PR, interactive targets at least 24px, text alternatives on images and charts, nothing carried by hover alone, and the platform-cannot-meet case stated with its best substitute instead of staying silent; rules/core.md gains the always-loaded floor line pointing every visual change at the skill before review. (#357)
+
 ## 0.3.195 - 2026-11-19
 
 ### Improvements
