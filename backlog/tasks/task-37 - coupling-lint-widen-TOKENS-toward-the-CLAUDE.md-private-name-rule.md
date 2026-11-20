@@ -4,10 +4,12 @@ title: 'coupling-lint: widen TOKENS toward the CLAUDE.md private-name rule'
 status: To Do
 assignee: []
 created_date: '2026-11-19T21:46:00Z'
+updated_date: '2026-11-20T02:21:00Z'
 labels:
   - tests
 dependencies: []
-ordinal: 37000
+priority: medium
+ordinal: 50
 ---
 
 ## Description

@@ -4,10 +4,12 @@ title: 'versioning/pr-monitoring: close the draft-then-cite race'
 status: To Do
 assignee: []
 created_date: '2026-11-19T14:23:00Z'
+updated_date: '2026-11-20T02:21:00Z'
 labels:
   - skills
 dependencies: []
-ordinal: 11000
+priority: medium
+ordinal: 40
 ---
 
 ## Description

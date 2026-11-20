@@ -4,10 +4,12 @@ title: 'python bins: shared config loader mirroring hooks/lib/config-env.sh'
 status: To Do
 assignee: []
 created_date: '2026-11-19T14:22:00Z'
+updated_date: '2026-11-20T02:21:00Z'
 labels:
   - bin
   - skills
 dependencies: []
+priority: high
 ordinal: 4000
 ---
 

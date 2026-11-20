@@ -4,11 +4,13 @@ title: 'asks lens follow-up batch: review-r3 lows on #348'
 status: To Do
 assignee: []
 created_date: '2026-11-19T19:33:00Z'
+updated_date: '2026-11-20T02:21:00Z'
 labels:
   - bin
   - mining
 dependencies: []
-ordinal: 32000
+priority: medium
+ordinal: 80
 ---
 
 ## Description
