@@ -34,7 +34,7 @@ All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY
 
 ### Improvements
 
-- **skills:** backlog-md gains the backlog-only direct-commit default (owner ruling 2026-11-19, fleet-wide): a commit touching only `backlog/**` may land straight on the project's integration branch without a PR once the project's store lint passes, a store change made as part of other work still rides that work's branch or PR, and a project's CLAUDE.md can still forbid the direct path; the guardrail bullet names the exception beside its never-commit-outside-your-branch line, and this repo's ship rule carries the same exception for its own `backlog/`. (#354)
+- **skills:** backlog-md gains the backlog-only direct-commit default (owner ruling 2026-11-19, fleet-wide): a commit touching only `backlog/**` may land straight on the project's integration branch without a PR once the project's store lint passes, where the direct path needs a lint to pass and a branch that accepts direct pushes (no lint, a CLAUDE.md forbid, or a technical block such as branch protection or a push ruleset keeps the branch-or-PR path), a store change made as part of other work still rides that work's branch or PR; the guardrail bullet names the exception beside its never-commit-outside-your-branch line, and this repo's ship rule carries the same exception with its mechanism (a short-lived worktree pushed `HEAD:main`) and its current blockers named (no wired store lint, the no-bypass `Repo standard` ruleset). (#354)
 
 ## 0.3.193 - 2026-11-19
 
