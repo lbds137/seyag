@@ -2,6 +2,12 @@
 
 All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY-MM-DD>` section per released version; under it, `###` categories in fixed order — Breaking Changes, Features, Bug Fixes, Improvements, Chores, Tests — empty ones omitted; items are `- **scope:** description (#PR)`, written from the version's merged commit subjects.
 
+## 0.3.195 - 2026-11-19
+
+### Improvements
+
+- **skills:** backlog-md gains the backlog-only direct-commit default (owner ruling 2026-11-19, fleet-wide): a commit touching only `backlog/**` may land straight on the project's integration branch without a PR once the project's store lint passes, where the direct path needs a lint to pass and a branch that accepts direct pushes (no lint, a CLAUDE.md forbid, or a technical block such as branch protection or a push ruleset keeps the branch-or-PR path), a store change made as part of other work still rides that work's branch or PR; the guardrail bullet names the exception beside its never-commit-outside-your-branch line, and this repo's ship rule carries the same exception with its mechanism (a short-lived worktree pushed `HEAD:main`; the ruleset gained an admin-role bypass the same day) and its store-lint condition stated unmet — the pinned backlog.md CLI has no lint verb and none is wired, so the direct path stays closed in this repo until the owner wires one. (#355)
+
 ## 0.3.194 - 2026-11-19
 
 ### Features
@@ -29,12 +35,6 @@ All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY
 ### Chores
 
 - **backlog:** store batch riding the release: TASK-1/9/12 flipped Done with dispositions (shipped #335/#332/#337), TASK-4 claimed, TASK-42 filed (cfg2b: bash consumers wire the loader; renumbered twice — 38 and 39 were taken by parallel merged tasks before this branch landed), TASK-17 carries the owner ruling (net added links: build), the prioritization pass landed separately (#353). (#354)
-
-## 0.3.194 - 2026-11-19
-
-### Improvements
-
-- **skills:** backlog-md gains the backlog-only direct-commit default (owner ruling 2026-11-19, fleet-wide): a commit touching only `backlog/**` may land straight on the project's integration branch without a PR once the project's store lint passes, where the direct path needs a lint to pass and a branch that accepts direct pushes (no lint, a CLAUDE.md forbid, or a technical block such as branch protection or a push ruleset keeps the branch-or-PR path), a store change made as part of other work still rides that work's branch or PR; the guardrail bullet names the exception beside its never-commit-outside-your-branch line, and this repo's ship rule carries the same exception with its mechanism (a short-lived worktree pushed `HEAD:main`; the ruleset gained an admin-role bypass the same day) and its store-lint condition stated unmet — the pinned backlog.md CLI has no lint verb and none is wired, so the direct path stays closed in this repo until the owner wires one. (#355)
 
 ## 0.3.193 - 2026-11-19
 
