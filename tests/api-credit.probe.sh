@@ -66,7 +66,28 @@ D2=2026-10-11
 uline msg-r req-r m-a ${D1}T10:00:00Z $M 0 > "$P/R.jsonl"
 # rt LEDGER-DIR [VAR=value ...]: run the hook for R under exactly these variables (no force).
 rt() { local d=$1; shift; payload R | ac SYG_CREDIT_LEDGER="$T/$d/l.jsonl" "$@" -- hook 2>&1; }
+entry() { printf '{"session_id":"%s","day":"%s","first_ts":"%s","last_ts":"%s","cost_usd":%s,"raw_last":0}\n' "$1" "$2" "$3" "$3" "$4"; }
+bal() { # ledger now [extra env]
+  ac SYG_CREDIT_LEDGER="$1" SYG_CREDIT_GRANTS="$G" SYG_CREDIT_NOW="$2" -- balance --json
+}
+hits() { nlines "$T/cr/hits.log"; }
+lv() {
+  local c=$1; shift
+  local args=()
+  while [ $# -gt 0 ] && [[ "$1" != *=* ]]; do args+=("$1"); shift; done
+  env -i PATH="$T/cbin:$PATH" HOME="$T" XDG_CACHE_HOME="$T/cache-$c" SYG_CREDIT_PRICE_TABLE_CMD="$T/pt.sh" \
+    SYG_CREDIT_LEDGER="$T/lv.jsonl" SYG_CREDIT_GRANTS="$T/g-live.json" SYG_CREDIT_NOW="$LNOW" \
+    ANTHROPIC_ADMIN_API_KEY=fixture-admin-key SYG_CREDIT_ADMIN_URL="$CR" "$@" python3 -B "$AC" "${args[@]}"
+}
+fresh() { touch -d "${AD}T23:00:00Z" "$@"; }
+ab() { ac SYG_CREDIT_LEDGER="$T/anc/$1.jsonl" SYG_CREDIT_GRANTS="$T/g-abs.json" SYG_CREDIT_NOW="$2" -- "${@:3}"; }
+pv() { lv "$1" "${@:2}" SYG_CREDIT_LEDGER="$T/anc/pv.jsonl" SYG_CREDIT_GRANTS="$T/missing.json" SYG_CREDIT_NOW=$PNOW; }
+ce() { ac SYG_CREDIT_LEDGER="$EL" SYG_CREDIT_NOW=${AD}T16:00:00Z -- calibrate "$@" > /dev/null 2>&1; echo $?; }
+ck35d() { ac SYG_CREDIT_LEDGER="$L35D" SYG_CREDIT_GRANTS="$T/g-35b.json" SYG_CREDIT_NOW=2026-10-15T13:00:00Z -- calibrate 12 --at "$NOW35" "$@" > /dev/null 2>&1; echo $?; }
+anc37() { lv "$1" balance --json ANTHROPIC_ADMIN_API_KEY= SYG_CREDIT_ADMIN_KEY_CMD="$T/key-ok.sh" SYG_CREDIT_LEDGER="$T/anc/pv.jsonl" SYG_CREDIT_GRANTS="$T/missing.json" SYG_CREDIT_NOW="$2"; }
 
+phase_01() {
+local unmet
 # 1. Route rules.
 out=$(rt w1 SYG_CREDIT_WHEN=MY_ROUTE=metered MY_ROUTE=metered)
 [ -z "$out" ] && [ -s "$T/w1/l.jsonl" ] && ok "route: SYG_CREDIT_WHEN matches -> ledger written, no output" || bad "WHEN match: '$out'"
@@ -101,6 +122,9 @@ for base in "" https://api.anthropic.com https://user:pw@API.Anthropic.com:443/v
 done
 [ "$n" = 4 ] && ok "metered: empty base URL and first-party hosts all record" || bad "metered control: only $n of 4 recorded"
 
+}
+phase_01
+phase_02() {
 # 2. First entry: the documented fields.
 e=$(head -n 1 "$T/w1/l.jsonl")
 if [ "$(nlines "$T/w1/l.jsonl")" = 1 ] && jq -e --arg d "$D1" --arg tp "$P/R.jsonl" '
@@ -113,6 +137,9 @@ if [ "$(nlines "$T/w1/l.jsonl")" = 1 ] && jq -e --arg d "$D1" --arg tp "$P/R.jso
   ok "entry: one line, cost 1.00, all documented fields"
 else bad "entry fields: $e"; fi
 
+}
+phase_02
+phase_03() {
 # 3. Streaming dedupe: three lines of one reply (output 2, 2, 6) are one request with output 6.
 { uline msg-s req-s m-a ${D1}T10:00:00Z $M 2; uline msg-s req-s m-a ${D1}T10:00:01Z $M 2; uline msg-s req-s m-a ${D1}T10:00:02Z $M 6; } > "$P/S.jsonl"
 hk S "$T/s/l.jsonl"
@@ -122,6 +149,9 @@ if jq -e '.requests==1 and .models["m-a"].output_tokens==6 and .models["m-a"].in
   ok "streaming dedupe: 3 lines, output 2/2/6 -> one request, output 6, cost 1.000012"
 else bad "streaming dedupe: $e"; fi
 
+}
+phase_03
+phase_04() {
 # 4. Subagent transcripts (nested too) are part of the session.
 mkdir -p "$P/SA/subagents/deep"
 uline msg-a1 req-a1 m-a ${D1}T10:00:00Z $M 0 > "$P/SA.jsonl"
@@ -134,6 +164,9 @@ if jq -e '.requests==3 and .request_ids==["req-a1","req-a2","req-a3"] and .last_
   ok "subagent transcripts included: 3 requests, cost 1 + 1 + 3 = 5"
 else bad "subagents: $e"; fi
 
+}
+phase_04
+phase_05() {
 # 5. Per-day split by request timestamp (UTC), fractional seconds accepted.
 { uline msg-d1 req-d1 m-a ${D1}T23:59:00.500Z $M 0; uline msg-d2 req-d2 m-a ${D2}T00:01:00.250Z $((2 * M)) 0; } > "$P/D.jsonl"
 hk D "$T/d/l.jsonl"
@@ -144,6 +177,9 @@ if [ "$(nlines "$T/d/l.jsonl")" = 2 ] \
   ok "day split: one entry per UTC day of the requests (1.00 on $D1, 2.00 on $D2)"
 else bad "day split: $(cat "$T/d/l.jsonl")"; fi
 
+}
+phase_05
+phase_06() {
 # 6. Idempotent: a second call leaves the ledger bytes unchanged.
 cp "$T/d/l.jsonl" "$T/d-before.jsonl"
 hk D "$T/d/l.jsonl" SYG_CREDIT_NOW=2030-01-01T00:00:00Z
@@ -161,6 +197,10 @@ if [ "$(nlines "$T/d/l.jsonl")" = 2 ] && near "$(jq -s '[.[].cost_usd]|add' "$T/
   ok "grown transcript: entries recomputed (total 4.00, not added to 3.00)"
 else bad "grown transcript: $(cat "$T/d/l.jsonl")"; fi
 
+}
+phase_06
+phase_07() {
+local X
 # 7. Cross-session dedupe: B (a resume) repeats one of A's requests; it counts once.
 { uline msg-x1 req-x1 m-a ${D1}T09:00:00Z $M 0; uline msg-x2 req-x2 m-a ${D1}T09:10:00Z $M 0; } > "$P/A.jsonl"
 { uline msg-x1 req-x1 m-a ${D1}T09:00:00Z $M 0; uline msg-y1 req-y1 m-a ${D1}T11:00:00Z $M 0; } > "$P/B.jsonl"
@@ -172,6 +212,9 @@ if near "$(jq -s '[.[].cost_usd]|add' "$X")" 3 && [ "$(jq -s '[.[].requests]|add
   ok "cross-session dedupe: B's copy of A's request skipped; 3 requests, 3.00 total"
 else bad "cross-session: $(cat "$X")"; fi
 
+}
+phase_07
+phase_08() {
 # 8. Pricing: 5m writes at cacheWrite, 1h writes at 2x input, no cache_creation object
 #    -> all writes 5m; cache reads; an [x]-suffixed id resolves to its base row.
 {
@@ -189,6 +232,9 @@ if near "$(jq .cost_usd <<< "$e")" 23 && near "$(jq '.models["m-a"].cost_usd' <<
   ok "pricing: 5m write 1.25 + read 0.50 + 1h write 2.00 (2x input) + legacy write 1.25 + m-b[1m] 18.00 = 23.00"
 else bad "pricing: $e"; fi
 
+}
+phase_08
+phase_09() {
 # 8b. A trailing -YYYYMMDD date resolves to the base row, after a [...] strip too.
 { uline msg-dt1 req-dt1 m-a-20251001 ${D1}T10:00:00Z $M 0; uline msg-dt2 req-dt2 'm-a-20251001[1m]' ${D1}T10:01:00Z $M 0; } > "$P/DT.jsonl"
 hk DT "$T/dt/l.jsonl"
@@ -196,6 +242,9 @@ e=$(cat "$T/dt/l.jsonl")
 near "$(jq .cost_usd <<< "$e")" 2 && jq -e '.unpriced_models==[] and .models["m-a-20251001"].cost_usd==1 and .models["m-a-20251001[1m]"].cost_usd==1' <<< "$e" > /dev/null \
   && ok "pricing: m-a-20251001 and m-a-20251001[1m] priced as m-a" || bad "date suffix: $e"
 
+}
+phase_09
+phase_10() {
 # 8c. Unchanged transcripts: the second call reads nothing and never runs price-table;
 #     a changed transcript runs it again.
 uline msg-c1 req-c1 m-a ${D1}T10:00:00Z $M 0 > "$P/C.jsonl"
@@ -211,6 +260,9 @@ if [ "$n1" = 1 ] && [ "$n2" = 1 ] && [ "$n2b" = 2 ] && [ "$n3" = 3 ] && near "$(
   ok "sources_sig: unchanged files -> price-table not run (1, 1); price stub touched -> run again (2); after an append -> run again (3), cost 2.00"
 else bad "sources_sig: calls $n1/$n2/$n2b/$n3 $(cat "$T/c/l.jsonl")"; fi
 
+}
+phase_10
+phase_11() {
 # 8c2. A multi-token override ("sh SCRIPT"): the script token is watched, not just "sh".
 printf '[ "$1" = --json ] || exit 9\necho x >> %q\ncat %q\n' "$T/pt2-calls" "$T/prices.json" > "$T/pt2.sh"
 : > "$T/pt2-calls"
@@ -224,6 +276,9 @@ if [ "$m1" = 1 ] && [ "$m2" = 1 ] && [ "$m3" = 2 ] \
   ok "sources_sig: override \"sh SCRIPT\" -> script watched: unchanged -> not run (1, 1); touched -> run again (2)"
 else bad "sources_sig multi-token: calls $m1/$m2/$m3 $(cat "$T/mt/l.jsonl")"; fi
 
+}
+phase_11
+phase_12() {
 # 8d. A rewrite keeps the ledger's mode; a new ledger gets 0644 less the umask.
 want=$(printf '%o' $(( 0644 & ~0$(umask) )))
 got_new=$(stat -c %a "$T/c/l.jsonl")
@@ -233,6 +288,9 @@ hk C "$T/c/l.jsonl"
 [ "$got_new" = "$want" ] && [ "$(stat -c %a "$T/c/l.jsonl")" = 640 ] && near "$(jq .cost_usd "$T/c/l.jsonl")" 3 \
   && ok "ledger mode: new ledger $want (0644 & ~umask); chmod 640 survives a rewrite" || bad "mode: new $got_new (want $want), after $(stat -c %a "$T/c/l.jsonl")"
 
+}
+phase_12
+phase_13() {
 # 9. Unpriced model: tokens recorded, cost not added (null), listed.
 { uline msg-u1 req-u1 m-zzz ${D1}T10:00:00Z 500 700; uline msg-u2 req-u2 m-a ${D1}T10:01:00Z $M 0; } > "$P/U.jsonl"
 hk U "$T/un/l.jsonl"
@@ -242,6 +300,9 @@ if near "$(jq .cost_usd <<< "$e")" 1 && jq -e '.unpriced_models==["m-zzz"] and .
   ok "unpriced model: tokens recorded, cost null and not added (1.00), listed in unpriced_models"
 else bad "unpriced: $e"; fi
 
+}
+phase_13
+phase_14() {
 # 10. Skipped and counted-only lines: <synthetic>, zero tokens, a half-written line;
 #     web search/fetch and fast mode are counts, not priced.
 {
@@ -259,6 +320,9 @@ if near "$(jq .cost_usd <<< "$e")" 1 && jq -e '.requests==1 and .request_ids==["
   ok "synthetic and zero-token requests skipped; unparsable line counted on stderr; search/fetch/fast counted, unpriced"
 else bad "skips: $e / '$err'"; fi
 
+}
+phase_14
+phase_15() {
 # 11. A failing price table: no write, one stderr line, exit 0.
 err=$(payload R | ac SYG_CREDIT_FORCE=1 SYG_CREDIT_LEDGER="$T/pf/l.jsonl" SYG_CREDIT_PRICE_TABLE_CMD="$T/pt-fail.sh" -- hook 2>&1); rc=$?
 [ "$rc" = 0 ] && [ ! -e "$T/pf/l.jsonl" ] && [ "$(wc -l <<< "$err" | tr -d ' ')" = 1 ] && grep -q '^api-credit: hook failed:' <<< "$err" \
@@ -266,6 +330,9 @@ err=$(payload R | ac SYG_CREDIT_FORCE=1 SYG_CREDIT_LEDGER="$T/pf/l.jsonl" SYG_CR
 out=$(printf 'not json' | ac SYG_CREDIT_FORCE=1 SYG_CREDIT_LEDGER="$T/pj/l.jsonl" -- hook 2>&1); rc=$?
 [ "$rc" = 0 ] && [ -z "$out" ] && [ ! -e "$T/pj/l.jsonl" ] && ok "unparsable hook input: exit 0, silent, no write" || bad "bad input: rc=$rc '$out'"
 
+}
+phase_15
+phase_16() {
 # 12. Old-format entries (rounds 1-3: raw_last/run, no source) and a garbage line are
 #     kept through a rewrite and summed by balance and daily.
 OLD="$T/old/l.jsonl"; mkdir -p "$T/old"
@@ -285,6 +352,9 @@ _pipe_out=$(ac SYG_CREDIT_LEDGER="$OLD" -- daily) && grep -qE '^2026-10-05  \$2\
 ac -- balance > /dev/null 2> "$T/err.txt"; rc=$?
 [ "$rc" = 2 ] && grep -q SYG_CREDIT_LEDGER "$T/err.txt" && ok "balance without the ledger var: exit 2 naming it" || bad "balance unset: rc=$rc $(cat "$T/err.txt")"
 
+}
+phase_16
+phase_17() {
 # 13. statusline is read-only: it prints the balance with no route test and never writes.
 cp "$OLD" "$T/old-before.jsonl"
 out=$(payload R | ac SYG_CREDIT_LEDGER="$OLD" -- statusline --json)
@@ -296,10 +366,6 @@ if near "$(jq .spent_usd <<< "$out")" 3.5 && cmp -s "$OLD" "$T/old-before.jsonl"
 else bad "statusline read-only: '$out' / '$new' / '$off'"; fi
 
 # Ledger fixture writer for the balance cases: entry SESSION DAY LAST_TS COST.
-entry() { printf '{"session_id":"%s","day":"%s","first_ts":"%s","last_ts":"%s","cost_usd":%s,"raw_last":0}\n' "$1" "$2" "$3" "$3" "$4"; }
-bal() { # ledger now [extra env]
-  ac SYG_CREDIT_LEDGER="$1" SYG_CREDIT_GRANTS="$G" SYG_CREDIT_NOW="$2" -- balance --json
-}
 cat > "$G" <<'EOF'
 {"currency":"USD","grants":[
  {"amount":10,"granted":"2026-10-01","expires":"2026-10-10","kind":"promotional"},
@@ -310,6 +376,9 @@ cat > "$G" <<'EOF'
 ]}
 EOF
 
+}
+phase_17
+phase_18() {
 # 14. Drawdown: soonest expiry first, then the rest; unused remainder lapses.
 entry a 2026-10-05 2026-10-05T12:00:00Z 12 > "$T/b9.jsonl"
 b=$(bal "$T/b9.jsonl" 2026-10-06T00:00:00Z)
@@ -324,6 +393,9 @@ b=$(bal "$T/b9c.jsonl" 2026-10-06T18:00:00Z)
 if near "$(jq .remaining_usd <<< "$b")" 56 && [ "$(jq -r .next_expiry <<< "$b")" = 2026-10-10T00:00:00Z ] && [ "$(jq .days_left <<< "$b")" = 3 ]; then
   ok "balance: next_expiry is the soonest live grant with credit left; days_left floors (3.25 days -> 3)"
 else bad "balance 14c: $b"; fi
+}
+phase_18
+phase_19() {
 # 14d. Grants with no expiry (bought credit): no next_expiry, no days_left.
 echo '{"grants":[{"amount":50,"granted":"2026-10-01"}]}' > "$T/g-noexp.json"
 b=$(ac SYG_CREDIT_LEDGER="$T/b9c.jsonl" SYG_CREDIT_GRANTS="$T/g-noexp.json" SYG_CREDIT_NOW=2026-10-06T00:00:00Z -- balance --json)
@@ -337,6 +409,9 @@ if near "$(jq .lapsed_usd <<< "$b")" 6 && near "$(jq .remaining_usd <<< "$b")" 4
   ok "balance: spend 4 before expiry forfeits 6; later spend 3 leaves 47"
 else bad "balance 14b: $b"; fi
 
+}
+phase_19
+phase_20() {
 # 15. Overage.
 entry a 2026-10-05 2026-10-05T12:00:00Z 70 > "$T/b10.jsonl"
 b=$(bal "$T/b10.jsonl" 2026-10-06T00:00:00Z)
@@ -345,6 +420,9 @@ if near "$(jq .overage_usd <<< "$b")" 10 && near "$(jq .remaining_usd <<< "$b")"
   ok "overage: 70 against 60 granted -> overage 10, text 'api credit over \$10.00 est'"
 else bad "overage: $b / $txt"; fi
 
+}
+phase_20
+phase_21() {
 # 16. No grants file: spend only, never an invented balance.
 txt=$(ac SYG_CREDIT_LEDGER="$T/b9.jsonl" SYG_CREDIT_NOW=2026-10-06T00:00:00Z -- statusline < /dev/null)
 b=$(ac SYG_CREDIT_LEDGER="$T/b9.jsonl" SYG_CREDIT_GRANTS="$T/missing.json" -- balance --json)
@@ -354,6 +432,9 @@ if [ "$txt" = 'api $12.00 spent est' ] && [ "$(jq .remaining_usd <<< "$b")" = nu
   ok "no usable grants file: 'api \$12.00 spent est', remaining null"
 else bad "no grants: '$txt' / $b / $b2"; fi
 
+}
+phase_21
+phase_22() {
 # 17. A date-only expiry lapses at 00:00 of that date in the grant's tz.
 cat > "$G" <<'EOF'
 {"grants":[{"amount":5,"granted":"2026-10-01","expires":"2026-10-10"}]}
@@ -370,6 +451,9 @@ if near "$(jq .lapsed_usd <<< "$b")" 5 && near "$(jq .remaining_usd <<< "$b")" 0
   ok "date-only expiry lapses at 00:00:00 in the grant tz (UTC lapsed, 1s earlier live, New_York still live)"
 else bad "expiry: $b / $b0 / $bz"; fi
 
+}
+phase_22
+phase_23() {
 # 18. Concurrency: 20 parallel hook calls for 20 sessions all land.
 for i in $(seq 1 20); do
   uline "msg-par$i" "req-par$i" m-a 2026-10-12T00:00:00Z $((i * 1000)) 0 > "$P/PAR$i.jsonl"
@@ -385,6 +469,9 @@ else bad "concurrency: $(nlines "$T/par/l.jsonl") lines"; fi
 [ -z "$(find "$T" -name '*.tmp')" ] \
   && ok "no stray *.tmp files after the parallel and sequential writes" || bad "stray tmp files: $(find "$T" -name '*.tmp')"
 
+}
+phase_23
+phase_24() {
 # 19. Provider balance: cost_report from a loopback mock (SYG_CREDIT_ADMIN_URL) with a
 #     fixture admin key. The mock serves $T/cr/<mode>.json (mode read from $T/cr/mode
 #     per request; "401" answers 401; "paged" serves paged1 then, for page=p2, paged2;
@@ -438,7 +525,6 @@ REAL_CURL=$(command -v curl)
 printf '#!/bin/bash\nprintf "%%s\\n" "$*" >> %q\nexec %q "$@"\n' "$T/cr/argv.log" "$REAL_CURL" > "$T/cbin/curl"
 chmod +x "$T/cbin/curl"
 : > "$T/cr/hits.log"; : > "$T/cr/argv.log"
-hits() { nlines "$T/cr/hits.log"; }
 # Closed days 10-05..10-08: USD 370.289 + 1000 cents (= 13.70289), a EUR row ignored,
 # a bucket without results and one with a non-list results skipped.
 cat > "$T/cr/ok.json" <<'EOF'
@@ -467,14 +553,6 @@ echo '{"grants":[{"amount":100,"granted":"2026-10-05","expires":"2026-10-21"}]}'
 entry a 2026-10-06 2026-10-06T12:00:00Z 5 > "$T/lv-notoday.jsonl"
 LNOW=2026-10-09T15:00:00Z
 # lv CACHE-DIR CMD... [VAR=value ...]: balance/statusline with the fixture key against the mock.
-lv() {
-  local c=$1; shift
-  local args=()
-  while [ $# -gt 0 ] && [[ "$1" != *=* ]]; do args+=("$1"); shift; done
-  env -i PATH="$T/cbin:$PATH" HOME="$T" XDG_CACHE_HOME="$T/cache-$c" SYG_CREDIT_PRICE_TABLE_CMD="$T/pt.sh" \
-    SYG_CREDIT_LEDGER="$T/lv.jsonl" SYG_CREDIT_GRANTS="$T/g-live.json" SYG_CREDIT_NOW="$LNOW" \
-    ANTHROPIC_ADMIN_API_KEY=fixture-admin-key SYG_CREDIT_ADMIN_URL="$CR" "$@" python3 -B "$AC" "${args[@]}"
-}
 # The no-key reference: today's ledger estimate (spent 5 + 2.5, remaining 92.50).
 nk=$(ac SYG_CREDIT_LEDGER="$T/lv.jsonl" SYG_CREDIT_GRANTS="$T/g-live.json" SYG_CREDIT_NOW="$LNOW" -- balance --json)
 nkt=$(ac SYG_CREDIT_LEDGER="$T/lv.jsonl" SYG_CREDIT_GRANTS="$T/g-live.json" SYG_CREDIT_NOW="$LNOW" -- statusline < /dev/null)
@@ -487,6 +565,10 @@ if [ "$nk" = '{"currency": "USD", "days_left": 11, "estimate": true, "granted_to
   ok "provider: no key (or an empty one) -> today's ledger output byte for byte, no new fields, no request"
 else bad "provider no-key: '$nk' / '$nkt' / '$nkb' / '$nke' / hits $(hits)"; fi
 
+}
+phase_24
+phase_25() {
+local cf
 # 19a. Live ok: spent and remaining from one family (13.70289 closed days + 2.50 today).
 b=$(lv ok balance --json)
 txt=$(lv ok statusline < /dev/null)
@@ -510,6 +592,9 @@ b=$(lv ok balance)
 [ "$b" = $'api credit $83.80 (exp 10-21, 11d)\nspent $16.20, lapsed $0.00, overage $0.00 (provider through 2026-10-08; today from the ledger)' ] \
   && ok "provider: balance text second line names the provider basis" || bad "provider balance text: '$b'"
 
+}
+phase_25
+phase_26() {
 # 19b. TTL: inside 300 s no second request; past it, a refetch; a corrupt cache is refetched.
 : > "$T/cr/hits.log"
 lv ttl balance --json > /dev/null; lv ttl balance --json SYG_CREDIT_NOW=2026-10-09T15:04:59Z > /dev/null; t1=$(hits)
@@ -520,6 +605,9 @@ b=$(lv ttl balance --json SYG_CREDIT_NOW=2026-10-09T15:05:00Z); t3=$(hits)
   && ok "provider TTL: second call at +299 s -> no request (1); at +300 s -> refetch (2); corrupt cache -> refetch (3)" \
   || bad "provider TTL: hits $t1/$t2/$t3 $b"
 
+}
+phase_26
+phase_27() {
 # 19b2. A failure is cached too: a 401, then +60 s -> no request, still the labeled
 #       fallback; past 300 s -> refetch, and a success overwrites the failed record.
 echo 401 > "$T/cr/mode"; : > "$T/cr/hits.log"
@@ -536,11 +624,17 @@ if [ "$n1" = 1 ] && [ "$n2" = 1 ] && [ "$n3" = 1 ] && [ "$n4" = 2 ] && [ "$n5" =
   ok "provider failure cache: 401 then +60 s -> no request (hits 1), labeled ledger fallback; +300 s -> refetch, success overwrites (hits 2, then reused)"
 else bad "provider failure cache: hits $n1/$n2/$n3/$n4/$n5 / $b / '$txt' / $b2"; fi
 
+}
+phase_27
+phase_28() {
 # 19c. Today bridge: without today's ledger entries, spent is the provider sum alone.
 b=$(lv nobridge balance --json SYG_CREDIT_LEDGER="$T/lv-notoday.jsonl")
 near "$(jq .spent_usd <<< "$b")" 13.70289 && near "$(jq .remaining_usd <<< "$b")" 86.29711 && jq -e '.ledger_bridge_days==0' <<< "$b" > /dev/null \
   && ok "provider bridge: no ledger spend today -> spent 13.70289, bridge days 0 (today's 2.50 is added only when present)" || bad "provider bridge: $b"
 
+}
+phase_28
+phase_29() {
 # 19c2. A lagging provider: every ledger day after the last bucket is bridged.
 { entry a 2026-10-07 2026-10-07T12:00:00Z 4; entry b 2026-10-08 2026-10-08T12:00:00Z 5; entry c 2026-10-09 2026-10-09T12:00:00Z 2.5; } > "$T/lv-lag.jsonl"
 echo lag > "$T/cr/mode"
@@ -555,6 +649,9 @@ near "$(jq .spent_usd <<< "$b")" 7.5 && jq -e '.source=="provider" and .provider
   || bad "provider no-bucket bridge: $b"
 echo ok > "$T/cr/mode"
 
+}
+phase_29
+phase_30() {
 # 19c3. The window starts at the earliest LIVE grant (a lapsed one is skipped), floored
 #       to 00:00 UTC whatever the grant's tz.
 echo '{"grants":[{"amount":50,"granted":"2026-10-01","expires":"2026-10-05"},{"amount":100,"granted":"2026-10-06","expires":"2026-10-21"}]}' > "$T/g-lapse.json"
@@ -573,6 +670,9 @@ case "$(head -n 1 "$T/cr/hits.log")" in
   *'starting_at=2026-10-05T00:00:00Z&'*) ok "provider window: a 2026-10-05 America/New_York grant (04:00Z) -> starting_at floored to 2026-10-05T00:00:00Z" ;;
   *) bad "provider tz floor: $(head -n 1 "$T/cr/hits.log")" ;; esac
 
+}
+phase_30
+phase_31() {
 # 19c4. A key with CR or LF is no usable key: the no-key output, no request.
 : > "$T/cr/hits.log"
 b=$(lv crlf balance --json ANTHROPIC_ADMIN_API_KEY=$'bad\nkey')
@@ -580,6 +680,9 @@ b2=$(lv crlf2 balance --json ANTHROPIC_ADMIN_API_KEY=$'bad\rkey')
 [ "$b" = "$nk" ] && [ "$b2" = "$nk" ] && [ "$(hits)" = 0 ] \
   && ok "provider: a key containing LF or CR -> today's no-key output byte for byte, no request" || bad "provider crlf key: $b / $b2 / hits $(hits)"
 
+}
+phase_31
+phase_32() {
 # 19d. Overage on the provider path: one family, clamped remaining.
 echo big > "$T/cr/mode"
 b=$(lv big balance --json); txt=$(lv big statusline < /dev/null)
@@ -587,6 +690,9 @@ near "$(jq .spent_usd <<< "$b")" 10002.5 && near "$(jq .remaining_usd <<< "$b")"
   && [ "$txt" = 'api credit over $9902.50' ] \
   && ok "provider overage: spent 10002.50 against 100 -> remaining 0, overage 9902.50, labeled text" || bad "provider overage: $b / '$txt'"
 
+}
+phase_32
+phase_33() {
 # 19e. Pages: has_more/next_page followed, both summed.
 echo paged > "$T/cr/mode"; : > "$T/cr/hits.log"
 b=$(lv paged balance --json)
@@ -598,6 +704,9 @@ b=$(lv loop balance --json)
   && ok "provider pages: the same next_page again -> stop after $(hits) requests (not 20), labeled ledger fallback" \
   || bad "provider page loop: hits $(hits) / $b"
 
+}
+phase_33
+phase_34() {
 # 19f. Every failure falls back to the ledger estimate, labeled; never a non-zero exit.
 fb=""
 for m in 401 nonjson nodata badamount inf nostart; do
@@ -614,6 +723,9 @@ b=$(lv fb-down balance --json SYG_CREDIT_ADMIN_URL=http://127.0.0.1:9); rc=$?
 [ -z "$fb" ] && ok "provider fallback: 401, non-JSON, no data array, bad amount, a non-finite sum, a bucket with amounts but no starting_at, refused connection -> ledger estimate (spent 7.50, remaining 92.50), source ledger, exit 0" \
   || bad "provider fallback:$fb"
 
+}
+phase_34
+phase_35() {
 # 19g. No fetch: hook and daily never request; no live grant or no closed day -> unchanged output.
 : > "$T/cr/hits.log"
 payload R | lv hookx hook SYG_CREDIT_FORCE=1 SYG_CREDIT_LEDGER="$T/hookx/l.jsonl" > /dev/null 2>&1
@@ -630,6 +742,9 @@ jq -e 'has("source")' <<< "$nt" > /dev/null; rc_nt=$?
   && ok "provider: hook, daily, no live grant and a grant from today make no request and add no fields" \
   || bad "provider no-fetch: hits $(hits) / nd rc=$rc_nd / nt rc=$rc_nt / $nd / $nt"
 
+}
+phase_35
+phase_36() {
 # 20. calibrate: a mid-day anchor. K's requests at 10:00 ($1) and 14:00 ($2) are in the
 #     ledger; the anchor at 12:00 takes the 10:00 one as the same-day spend before it.
 #     A 15:00 request ($4) lands later; the balance is 50 - (2 + 4) = 44.
@@ -640,7 +755,6 @@ KL="$T/anc/k.jsonl"
 # fresh FILE...: an mtime on the fixture day. calibrate reads a transcript only when it
 # was modified on or after 00:00 UTC of the anchor's day (an older one cannot hold its
 # requests), and the fixture day is later than the wall clock.
-fresh() { touch -d "${AD}T23:00:00Z" "$@"; }
 hk K "$KL" SYG_CREDIT_NOW=${AD}T14:30:00Z
 fresh "$P/K.jsonl"
 cal=$(ac SYG_CREDIT_LEDGER="$KL" SYG_CREDIT_NOW=${AD}T16:00:00Z -- calibrate 50 --at ${AD}T12:00:00Z 2>&1); rc=$?
@@ -668,6 +782,10 @@ near "$(jq .remaining_usd <<< "$bc")" 10 && near "$(jq .remaining_usd <<< "$bd")
   && ok "SYG_CREDIT_ANCHOR: the anchor goes to that path (10 at 15:30, all 7 of the day's spend before it -> 10.00); the default file is untouched" \
   || bad "SYG_CREDIT_ANCHOR: $bc / $bd"
 
+}
+phase_36
+phase_37() {
+local NATL
 # 20b. calibrate without --at defaults to now: records anchor at now, balance line.
 NATL="$T/anc/noat.jsonl"
 { uline msg-nat1 req-nat1 m-a ${AD}T10:00:00Z $M 0; } > "$P/NAT.jsonl"
@@ -682,19 +800,24 @@ if [ "$rc" = 0 ] && [ "$cal" = $'anchored $50.00 at 2026-10-15T12:00:00Z (same-d
   ok "calibrate without --at: defaults to now (records anchor at now, balance line 'api credit \$50.00 est')"
 else bad "calibrate without --at: rc=$rc '$cal' / $b / $(cat "$NATL.anchor.json" 2>&1)"; fi
 
+}
+phase_37
+phase_38() {
 # 21. A top-up granted after the anchor adds its amount: 44 + 20.
 echo '{"grants":[{"amount":20,"granted":"2026-10-15T13:00:00Z"}]}' > "$T/g-topup.json"
 b=$(ac SYG_CREDIT_LEDGER="$KL" SYG_CREDIT_GRANTS="$T/g-topup.json" SYG_CREDIT_NOW=${AD}T16:00:00Z -- balance --json)
 near "$(jq .remaining_usd <<< "$b")" 64 && near "$(jq .granted_total_live <<< "$b")" 70 \
   && ok "anchor + post-anchor grant: 20 granted at 13:00 adds to 44 -> 64 (live total 50 + 20)" || bad "anchor top-up: $b"
 
+}
+phase_38
+phase_39() {
 # 22. Pre-anchor grants are absorbed: grant 100 (expires 10-17), 20 spent before the
 #     anchor day -> replay remainder 80 at the anchor.
 echo '{"grants":[{"amount":100,"granted":"2026-10-10","expires":"2026-10-17"}]}' > "$T/g-abs.json"
 entry p 2026-10-12 2026-10-12T12:00:00Z 20 > "$T/anc/a30.jsonl"
 cp "$T/anc/a30.jsonl" "$T/anc/a120.jsonl"
 entry q 2026-10-17 2026-10-17T12:00:00Z 5 >> "$T/anc/a120.jsonl"
-ab() { ac SYG_CREDIT_LEDGER="$T/anc/$1.jsonl" SYG_CREDIT_GRANTS="$T/g-abs.json" SYG_CREDIT_NOW="$2" -- "${@:3}"; }
 ab a30 ${AD}T13:00:00Z calibrate 30 --at ${AD}T12:00:00Z > /dev/null
 ab a120 ${AD}T13:00:00Z calibrate 120 --at ${AD}T12:00:00Z > /dev/null
 b1=$(ab a30 2026-10-16T00:00:00Z balance --json)
@@ -715,6 +838,9 @@ if near "$(jq .remaining_usd <<< "$b1")" 120 && [ "$(jq -r .next_expiry <<< "$b1
   ok "anchor absorption: A=120 over remainder 80 -> pool 80 expiring 10-17 + cash 40; the pool lapses, 5 spent after it -> 35"
 else bad "anchor absorption A=120: $b1 / $b2"; fi
 
+}
+phase_39
+phase_40() {
 # 23. Provider + anchor: buckets 10-12 (5.00) and 10-13 (3.00); anchor 50 at 10-12 12:00
 #     with 1.00 of the day's ledger spend before it; 10-14's ledger 1.50 is bridged.
 echo '{"data":[{"starting_at":"2026-10-12T00:00:00Z","ending_at":"2026-10-13T00:00:00Z","results":[{"currency":"USD","amount":"500"}]},{"starting_at":"2026-10-13T00:00:00Z","ending_at":"2026-10-14T00:00:00Z","results":[{"currency":"USD","amount":"300"}]}],"has_more":false}' > "$T/cr/anc.json"
@@ -723,7 +849,6 @@ echo '{"data":[{"starting_at":"2026-10-12T00:00:00Z","ending_at":"2026-10-13T00:
 PNOW=2026-10-14T15:00:00Z
 ac SYG_CREDIT_LEDGER="$T/anc/pv.jsonl" SYG_CREDIT_NOW=$PNOW -- calibrate 50 --at 2026-10-12T12:00:00Z > /dev/null
 echo anc > "$T/cr/mode"; : > "$T/cr/hits.log"
-pv() { lv "$1" "${@:2}" SYG_CREDIT_LEDGER="$T/anc/pv.jsonl" SYG_CREDIT_GRANTS="$T/missing.json" SYG_CREDIT_NOW=$PNOW; }
 b=$(pv anc balance --json); txt=$(pv anc statusline < /dev/null)
 req=$(head -n 1 "$T/cr/hits.log" | cut -f1)
 if near "$(jq .remaining_usd <<< "$b")" 41.5 && near "$(jq .spent_usd <<< "$b")" 8.5 \
@@ -747,11 +872,14 @@ near "$(jq .remaining_usd <<< "$b")" 44 && jq -e '.source=="ledger" and .estimat
   && ok "anchor + provider: a dayless bucket with amounts -> labeled ledger fallback (44), not a figure missing its spend" || bad "anchor + provider dayless bucket: $b"
 echo ok > "$T/cr/mode"
 
+}
+phase_40
+phase_41() {
+local UL
 # 24. calibrate errors: usage (exit 2, nothing written), a straddling session whose
 #     transcript is gone (exit 1, file unchanged), an unparsable anchor file.
 EL="$T/anc/e.jsonl"
 printf '{"session_id":"gone","day":"2026-10-15","first_ts":"2026-10-15T10:00:00Z","last_ts":"2026-10-15T14:00:00Z","cost_usd":3,"transcript_path":"%s/GONE.jsonl"}\n' "$P" > "$EL"
-ce() { ac SYG_CREDIT_LEDGER="$EL" SYG_CREDIT_NOW=${AD}T16:00:00Z -- calibrate "$@" > /dev/null 2>&1; echo $?; }
 codes="$(ce 10 --at 2026-10-15) $(ce 10 --at 2026-10-15T12:00:00) $(ce 10 --at 2026-10-15T17:00:00Z) $(ce -5) $(ce nan) $(ce inf)"
 [ "$codes" = "2 2 2 2 2 2" ] && [ ! -e "$EL.anchor.json" ] \
   && ok "calibrate usage: date-only --at, no offset, future --at, negative, nan, inf AMOUNT -> exit 2, no anchor file" || bad "calibrate usage codes: $codes"
@@ -784,6 +912,10 @@ serr=$(ac SYG_CREDIT_LEDGER="$UL" SYG_CREDIT_GRANTS="$T/g-live.json" SYG_CREDIT_
   && ok "unparsable anchor file: calibrate refuses (exit 1, file kept); balance ignores it with one stderr line; statusline silent" \
   || bad "unparsable anchor: rc=$rc '$err' / $b / $(cat "$T/anc/err.txt") / '$serr'"
 
+}
+phase_41
+phase_42() {
+local NL OL XL
 # 25. The current, unhooked turn: the entry holds r1 (10:00, $1); r2 (11:00, $2) is in
 #     the transcript only. Both are before the 12:00 anchor (S = 3); once the hook
 #     records r2 it is not counted again as spend after the anchor.
@@ -833,6 +965,9 @@ cal=$(ac SYG_CREDIT_LEDGER="$XL" SYG_CREDIT_ANCHOR="$T/anc/mx-old.json" SYG_CRED
   && ok "calibrate: a transcript older than the anchor's day is skipped unread (no price-table run); the day's entry counts whole (\$2.00)" \
   || bad "calibrate stale transcript: '$cal' / price-table runs $(nlines "$T/pt-calls")"
 
+}
+phase_42
+phase_43() {
 # 26. Pools fill latest-expiring first: grants 50 (expires 10-17) and 50 (expires 10-20),
 #     nothing spent; A=60 -> pool 50 to 10-20 and 10 to 10-17. After 10-17, 50 remain.
 echo '{"grants":[{"amount":50,"granted":"2026-10-10","expires":"2026-10-17"},{"amount":50,"granted":"2026-10-10","expires":"2026-10-20"}]}' > "$T/g-two.json"
@@ -843,6 +978,9 @@ near "$(jq .remaining_usd <<< "$b")" 50 && near "$(jq .lapsed_usd <<< "$b")" 10 
   && ok "anchor pools: A=60 over 50 (exp 10-17) + 50 (exp 10-20) -> the later grant's pool is filled first; after 10-17: remaining 50, lapsed 10" \
   || bad "anchor pool order: $b"
 
+}
+phase_43
+phase_44() {
 # 27. The governing anchor is the latest "at" no later than now: a backdated record
 #     appended later does not govern; a record dated after now is ignored until then.
 GL="$T/anc/gov.jsonl"; : > "$GL"
@@ -855,12 +993,19 @@ jq -e '.anchor_usd==30 and .remaining_usd==30' <<< "$g1" > /dev/null && jq -e '.
   && ok "governing anchor: the backdated 99 (appended later) and the future 5 lose to 30 at 12:00; once now passes 10-20, the 5 governs" \
   || bad "governing anchor: $g1 / $g2"
 
+}
+phase_44
+phase_45() {
 # 28. calibrate -0 stores and prints 0, never -0.
 ZL="$T/anc/z.jsonl"; : > "$ZL"
 cal=$(ac SYG_CREDIT_LEDGER="$ZL" SYG_CREDIT_NOW=${AD}T13:00:00Z -- calibrate -0 --at ${AD}T12:00:00Z | head -n 1)
 [ "$cal" = 'anchored $0.00 at 2026-10-15T12:00:00Z (same-day spend before it $0.00)' ] && grep -q '"amount": 0.0,' "$ZL.anchor.json" \
   && ok "calibrate -0 -> 'anchored \$0.00', stored 0.0 (no -0)" || bad "calibrate -0: '$cal' / $(cat "$ZL.anchor.json")"
 
+}
+phase_45
+phase_46() {
+local WL
 # 29. A day-D entry whose last_ts does not parse is skipped by the anchor's day event
 #     (as balance() and pre_anchor_spend skip it): not 100 of spend after the anchor.
 WL="$T/anc/w.jsonl"
@@ -870,6 +1015,9 @@ b=$(ac SYG_CREDIT_LEDGER="$WL" SYG_CREDIT_NOW=${AD}T14:00:00Z -- balance --json)
 near "$(jq .remaining_usd <<< "$b")" 20 && near "$(jq .overage_usd <<< "$b")" 0 \
   && ok "anchor day event: an entry with an unparsable last_ts is skipped -> remaining 20, no overage" || bad "anchor unparsable last_ts: $b"
 
+}
+phase_46
+phase_47() {
 # 30. Provider FIFO overlap closure: grant A ($100, 10-01..10-04) overlaps
 #     live grant B ($100, 10-03..12-01); $30 spent on 10-03 is drawn from A before A lapses,
 #     leaving B at 100.00 and 70.00 lapsed, with the request window starting at 10-01 (A's day).
@@ -893,6 +1041,9 @@ if near "$(jq .remaining_usd <<< "$b_ctl")" 100 && jq -e '.source=="provider" an
   && [[ "$req_ctl" == *'starting_at=2026-10-05T00:00:00Z&'* ]]; then
   ok "provider FIFO closure control: non-overlapping grant B (10-05) -> window starts 2026-10-05, remaining 100.00"
 else bad "provider FIFO closure control: $b_ctl / '$req_ctl'"; fi
+}
+phase_47
+phase_48() {
 # 30b. Non-overlapping prior grant A ($100, 01-01..02-01, $90 ledger spend on 01-15) and live
 #      grant B ($100, 03-01, no expiry, $5 provider spend on 03-10): unclamped window starts
 #      at 03-01 with no pre-window events -> remaining 95.00, estimate false.
@@ -908,6 +1059,9 @@ if near "$(jq .remaining_usd <<< "$b_pre")" 95 \
   && [[ "$req_pre" == *'starting_at=2026-03-01T00:00:00Z&'* ]]; then
   ok "provider non-overlapping prior grant: window starts 2026-03-01, remaining 95.00, estimate false"
 else bad "provider non-overlapping prior grant: $b_pre / '$req_pre'"; fi
+}
+phase_48
+phase_49() {
 # 30c. Spend before every grant: one grant ($100, 09-01..12-01), ledger entry $15 on 08-20,
 #      provider bucket $10 on 09-05, now 09-10 -> overage 0, spent 10, remaining 90, estimate false.
 echo '{"grants":[{"amount":100,"granted":"2026-09-01","expires":"2026-12-01"}]}' > "$T/g-pregrant.json"
@@ -919,6 +1073,9 @@ if near "$(jq .overage_usd <<< "$b_pg")" 0 && near "$(jq .spent_usd <<< "$b_pg")
   && jq -e '.source=="provider" and .estimate==false' <<< "$b_pg" > /dev/null; then
   ok "provider unclamped pre-grant ledger entry ignored: overage 0, spent 10.00, remaining 90.00, estimate false"
 else bad "provider pre-grant ledger entry: $b_pg"; fi
+}
+phase_49
+phase_50() {
 # 30d. Clamped overlap chain (> 366 days back): 3 chained $100 grants (01-01..01-10,
 #      12-01..12-10, 11-01..11-10) at now 12-01, ledger $40 on 06-01 -> request window
 #      clamped to now's day minus 366 days, estimate true, source provider, basis names clamp day.
@@ -935,6 +1092,9 @@ if near "$(jq .remaining_usd <<< "$b_ch")" 170 && near "$(jq .lapsed_usd <<< "$b
   && [ "$txt_ch" = $'api credit $170.00 est (exp 12-10, 8d)\nspent $70.00, lapsed $60.00, overage $0.00 (provider through 2026-10-03; today and spend before '"$clamp_day"$', from the ledger)' ]; then
   ok "provider clamped closure: window starts at $clamp_day (now - 366d), pre-clamp \$40 replayed (spent 70, lapsed 60, remaining 170), estimate true, basis names $clamp_day"
 else bad "provider clamped closure: $b_ch / '$txt_ch' / '$req_ch'"; fi
+}
+phase_50
+phase_51() {
 # 30e. Sub-day grant times inside the window: G expires 10-03T06:00:00Z, L granted
 #      10-03T12:00:00Z, provider $30 on 10-03, now 10-09 -> estimate true, source provider.
 echo '{"grants":[{"amount":100,"granted":"2026-10-01","expires":"2026-10-03T06:00:00Z"},{"amount":100,"granted":"2026-10-03T12:00:00Z","expires":"2026-12-01"}]}' > "$T/g-subday.json"
@@ -945,6 +1105,9 @@ if jq -e '.source=="provider" and .estimate==true and .provider_subday==true and
   && [[ "$txt_sd" == *'from the ledger; grant times mid-day)' ]]; then
   ok "provider sub-day grant times in window (06:00Z expiry, 12:00Z grant on 10-03) -> source provider, estimate true, provider_subday true, basis names mid-day"
 else bad "provider sub-day grant times: $b_sd / '$txt_sd'"; fi
+}
+phase_51
+phase_52() {
 # 30f. Fetch failure carries provider_window_start alongside provider_as_of null.
 echo nodata > "$T/cr/mode"
 b_fw=$(lv fb-wstart balance --json)
@@ -952,6 +1115,9 @@ echo ok > "$T/cr/mode"
 if jq -e '.source=="ledger" and .estimate==true and .provider_as_of==null and .provider_window_start=="2026-10-05" and .ledger_bridge_days==null' <<< "$b_fw" > /dev/null; then
   ok "provider fetch failure (nodata): provider_window_start set to 2026-10-05 alongside provider_as_of null"
 else bad "provider fetch failure provider_window_start: $b_fw"; fi
+}
+phase_52
+phase_53() {
 # 30g. Sub-day expiry trigger only (G 10-01..10-03T06:00:00Z, L granted 10-03 date-only) -> estimate true.
 echo '{"grants":[{"amount":100,"granted":"2026-10-01","expires":"2026-10-03T06:00:00Z"},{"amount":100,"granted":"2026-10-03","expires":"2026-12-01"}]}' > "$T/g-subday-exp.json"
 echo f2 > "$T/cr/mode"; : > "$T/cr/hits.log"
@@ -959,6 +1125,9 @@ b_sdg=$(lv subday-exp balance --json SYG_CREDIT_LEDGER="$T/f2-empty.jsonl" SYG_C
 if jq -e '.source=="provider" and .estimate==true and .provider_subday==true' <<< "$b_sdg" > /dev/null; then
   ok "provider sub-day expiry trigger only (G expires 10-03T06:00:00Z, L date-only) -> estimate true"
 else bad "provider sub-day expiry trigger only: $b_sdg"; fi
+}
+phase_53
+phase_54() {
 # 30h. Sub-day grant trigger only (G 10-01..10-03 date-only, L granted 10-03T12:00:00Z) -> estimate true.
 echo '{"grants":[{"amount":100,"granted":"2026-10-01","expires":"2026-10-03"},{"amount":100,"granted":"2026-10-03T12:00:00Z","expires":"2026-12-01"}]}' > "$T/g-subday-gr.json"
 echo f2 > "$T/cr/mode"; : > "$T/cr/hits.log"
@@ -966,6 +1135,9 @@ b_sdh=$(lv subday-gr balance --json SYG_CREDIT_LEDGER="$T/f2-empty.jsonl" SYG_CR
 if jq -e '.source=="provider" and .estimate==true and .provider_subday==true' <<< "$b_sdh" > /dev/null; then
   ok "provider sub-day grant trigger only (G date-only, L granted 10-03T12:00:00Z) -> estimate true"
 else bad "provider sub-day grant trigger only: $b_sdh"; fi
+}
+phase_54
+phase_55() {
 # 30i. Sub-day grant time today (L granted <now's day>T09:00:00Z alongside an older date-only
 #      live grant, no other sub-day time) -> exact on ledger timestamps, estimate false.
 echo '{"grants":[{"amount":100,"granted":"2026-10-01","expires":"2026-12-01"},{"amount":50,"granted":"2026-10-09T09:00:00Z","expires":"2026-12-01"}]}' > "$T/g-subday-today.json"
@@ -974,6 +1146,9 @@ b_sdi=$(lv subday-today balance --json SYG_CREDIT_LEDGER="$T/f2-empty.jsonl" SYG
 if jq -e '.source=="provider" and .estimate==false and .provider_subday==false' <<< "$b_sdi" > /dev/null; then
   ok "provider sub-day grant time today (10-09T09:00:00Z, after provider_as_of) -> estimate false, provider_subday false"
 else bad "provider sub-day grant time today: $b_sdi"; fi
+}
+phase_55
+phase_56() {
 # 30j. Old grant out of the chain (O $50 granted 09-01 expires 09-10, ledger entry $20 on 09-05)
 #      plus the case-30 grants -> lapsed_usd = 30 (O, ledger) + 70 (A, provider) = 100,
 #      ledger_lapsed_usd == 30, basis names lapses before 10-01.
@@ -989,6 +1164,9 @@ if near "$(jq .remaining_usd <<< "$b_30j")" 100 && near "$(jq .lapsed_usd <<< "$
   && [ "$txt_30j" = $'api credit $100.00 (exp 12-01, 52d)\nspent $30.00, lapsed $100.00, overage $0.00 (provider through 2026-10-03; today and lapses before 2026-10-01, from the ledger)' ]; then
   ok "provider per-grant lapse split: O (30 from ledger) + A (70 from provider) = 100 lapsed, ledger_lapsed_usd 30, basis names lapses before 2026-10-01"
 else bad "provider per-grant lapse split: $b_30j / '$txt_30j'"; fi
+}
+phase_56
+phase_57() {
 # 30k. Clamped chain with an older out-of-chain lapsed grant (O $50 granted 11-01..12-01
 #      before the chain, ledger entry $20 on 11-15) plus the case-30d chained grants
 #      and pre-clamp $40 on 06-01 -> lapsed_usd = 30 (O, ledger) + 60 (chain, provider) = 90,
@@ -1007,6 +1185,10 @@ if near "$(jq .remaining_usd <<< "$b_30k")" 170 && near "$(jq .lapsed_usd <<< "$
   ok "provider clamped + pre-chain lapse: lapsed 90 (30 pre-chain + 60 in-chain), provider_chain_start 2025-01-01, three-part basis join"
 else bad "provider clamped + pre-chain lapse: $b_30k / '$txt_30k'"; fi
 
+}
+phase_57
+phase_58() {
+local kcf t0
 # 31. SYG_CREDIT_ADMIN_KEY_CMD: lazy command key source when ANTHROPIC_ADMIN_API_KEY is empty.
 cat > "$T/key-ok.sh" <<EOF
 #!/bin/bash
@@ -1078,6 +1260,9 @@ be=$(lv kenv balance --json ANTHROPIC_ADMIN_API_KEY=fixture-admin-key SYG_CREDIT
 if [ ! -s "$T/key-calls" ] && jq -e '.source=="provider" and .estimate==false' <<< "$be" > /dev/null; then
   ok "SYG_CREDIT_ADMIN_KEY_CMD with ANTHROPIC_ADMIN_API_KEY set: env wins, command never run"
 else bad "SYG_CREDIT_ADMIN_KEY_CMD env precedence: calls=$(nlines "$T/key-calls") / $be"; fi
+}
+phase_58
+phase_59() {
 # 31b. A CR/LF ANTHROPIC_ADMIN_API_KEY alongside a command: the env key is itself
 #      unusable (a CR/LF key could inject a curl -K directive), so the command source
 #      wins -> the provider balance, the command run once. Control: the kenv row above
@@ -1088,6 +1273,9 @@ if [ "$(jq -c '[.remaining_usd, .source, .estimate]' <<< "$b")" = "$(jq -c '[.re
   && [ "$(nlines "$T/key-calls")" = 1 ] && [ "$(hits)" = 1 ]; then
   ok "CR/LF env key + command: the command source wins -> provider balance, command run once"
 else bad "CR/LF env key + command: $b / calls=$(nlines "$T/key-calls") / hits=$(hits)"; fi
+}
+phase_59
+phase_60() {
 # 31c. Cold-fetch lock: the miss path holds a non-blocking flock beside the live cache;
 #      a render finding it held runs neither the key command nor the fetch (the labeled
 #      ledger estimate, nothing cached), and a render after the release fetches.
@@ -1105,6 +1293,9 @@ if [ "$held_calls" = 0 ] && [ "$held_hits" = 0 ] \
   ok "cold-fetch lock: lock held -> no key command, no fetch, ledger estimate, nothing cached; released -> provider fetch"
 else bad "cold-fetch lock: held=$b_held calls=$held_calls hits=$held_hits / free=$b_free"; fi
 
+}
+phase_60
+phase_61() {
 # 32. balance --month: month-to-date spend (provider closed days + ledger bridge, else ledger)
 #     and multi-window cache (up to 4 windows; old 2-line cache treated as a miss).
 cat > "$T/cr/month.json" <<'EOF'
@@ -1122,12 +1313,19 @@ EOF
   entry b 2026-10-09 2026-10-09T12:00:00Z 2.5
 } > "$T/lv-month.jsonl"
 echo month > "$T/cr/mode"; : > "$T/cr/hits.log"
+}
+phase_61
+phase_62() {
 # 32a. Without --month: no month_* keys and no month-window request.
 b_nom=$(lv m-off balance --json SYG_CREDIT_LEDGER="$T/lv-month.jsonl")
 if [ "$(hits)" = 1 ] && ! grep -q 'starting_at=2026-10-01T00:00:00Z' "$T/cr/hits.log" \
   && jq -e '([keys[]|select(startswith("month_"))]|length)==0' <<< "$b_nom" > /dev/null; then
   ok "balance --json without --month: no month_* keys and no month-window request"
 else bad "balance without --month: hits $(hits) / $(cat "$T/cr/hits.log") / $b_nom"; fi
+}
+phase_62
+phase_63() {
+local h_m1 h_m2
 # 32b. Mid-month with admin key + multi-window cache reuse across balance --month and balance.
 : > "$T/cr/hits.log"
 b_m=$(lv m-on balance --month --json SYG_CREDIT_LEDGER="$T/lv-month.jsonl")
@@ -1144,6 +1342,9 @@ if [ "$h_m1" = 2 ] && [ "$h_m2" = 2 ] \
   && [ "$(head -n 1 <<< "$txt_m")" = 'api credit $83.80 (exp 10-21, 11d) · month $20.20' ]; then
   ok "balance --month mid-month with admin key: window [2026-10-01, 2026-10-09), month_spend_usd 20.20289 (17.70289 provider + 2.50 today), both windows cached across follow-up balance call, text appends ' · month \$20.20'"
 else bad "balance --month mid-month: h=$h_m1/$h_m2 req='$m_req' / $b_m / '$txt_m'"; fi
+}
+phase_63
+phase_64() {
 # 32c. Mid-month without admin key: ledger-only, month_source ledger, month_as_of null.
 : > "$T/cr/hits.log"
 b_mnk=$(ac SYG_CREDIT_LEDGER="$T/lv-month.jsonl" SYG_CREDIT_GRANTS="$T/g-live.json" SYG_CREDIT_NOW="$LNOW" -- balance --month --json)
@@ -1153,6 +1354,9 @@ if [ "$(hits)" = 0 ] && near "$(jq .month_spend_usd <<< "$b_mnk")" 14.5 \
   && [ "$txt_mnk" = 'api credit $91.50 est (exp 10-21, 11d) · month $14.50 est' ]; then
   ok "balance --month without admin key: ledger-only (6 + 5 + 1 + 2.5 = 14.50, 09-30 excluded; the 10-08 entry sits on the provider as_of day in 32b and must not be double-counted there), month_source ledger, month_as_of null, text appends ' · month \$14.50 est'"
 else bad "balance --month no-key: hits $(hits) / $b_mnk / '$txt_mnk'"; fi
+}
+phase_64
+phase_65() {
 # 32d. On the 1st of the month: no fetch for the month window, ledger only.
 echo '{"grants":[{"amount":100,"granted":"2026-09-25","expires":"2026-10-21"}]}' > "$T/g-sep.json"
 { entry p 2026-09-30 2026-09-30T12:00:00Z 9; entry r 2026-10-01 2026-10-01T08:00:00Z 3; } > "$T/lv-first.jsonl"
@@ -1163,6 +1367,9 @@ if [ "$(hits)" = 1 ] && ! grep -q 'starting_at=2026-10-01T00:00:00Z' "$T/cr/hits
   && jq -e '.month_start=="2026-10-01" and .month_source=="ledger" and .month_as_of==null and .month_bridge_days==0 and .source=="provider"' <<< "$b_1st" > /dev/null; then
   ok "balance --month on the 1st of the month: no month-window fetch (only balance window fetched), month_spend_usd 3.00 from ledger, month_source ledger"
 else bad "balance --month 1st: hits $(hits) / $(cat "$T/cr/hits.log") / $b_1st"; fi
+}
+phase_65
+phase_66() {
 # 32e. Fetch failure: falls back to ledger, month_source ledger.
 echo 401 > "$T/cr/mode"; : > "$T/cr/hits.log"
 b_mf=$(lv m-fail balance --month --json SYG_CREDIT_LEDGER="$T/lv-month.jsonl")
@@ -1173,6 +1380,9 @@ if near "$(jq .month_spend_usd <<< "$b_mf")" 14.5 \
   && [ "$txt_mf" = 'api credit $91.50 est (exp 10-21, 11d) · month $14.50 est' ]; then
   ok "balance --month fetch failure: falls back to ledger (14.50), month_source ledger, month_as_of null"
 else bad "balance --month failure: $b_mf / '$txt_mf'"; fi
+}
+phase_66
+phase_67() {
 # 32e2. Provider answers with no bucket this month (as_of before month_start): all ledger, labelled ledger.
 echo nobucket > "$T/cr/mode"; : > "$T/cr/hits.log"
 b_mnb=$(lv m-nob balance --month --json SYG_CREDIT_LEDGER="$T/lv-month.jsonl")
@@ -1181,6 +1391,9 @@ if near "$(jq .month_spend_usd <<< "$b_mnb")" 14.5 \
   && jq -e '.month_source=="ledger" and .month_as_of==null and .month_bridge_days==0' <<< "$b_mnb" > /dev/null; then
   ok "balance --month with no provider bucket this month: all-ledger 14.50 labelled month_source ledger, month_as_of null"
 else bad "balance --month no bucket: $b_mnb"; fi
+}
+phase_67
+phase_68() {
 # 32f. Anchored balance with --month: month figure is independent of the anchor.
 echo anc > "$T/cr/mode"; : > "$T/cr/hits.log"
 b_am=$(pv anc-m balance --month --json)
@@ -1189,6 +1402,10 @@ if near "$(jq .remaining_usd <<< "$b_am")" 41.5 && near "$(jq .spent_usd <<< "$b
   && jq -e '.anchor_usd==50 and .month_start=="2026-10-01" and .month_source=="provider" and .month_as_of=="2026-10-13" and .month_bridge_days==1' <<< "$b_am" > /dev/null; then
   ok "balance --month with anchor: remaining 41.50 and spent 8.50 from anchor, month_spend_usd 9.50 (5.00 + 3.00 + 1.50) independent of anchor"
 else bad "balance --month with anchor: $b_am"; fi
+}
+phase_68
+phase_69() {
+local capf
 # 32g. Old 2-line cache format treated as a miss and overwritten; cache caps at 4 windows.
 mkdir -p "$T/cache-oldfmt/claude-statusline"
 printf 'deadbeef %s 2026-10-05T00:00:00Z 2026-10-09T00:00:00Z\n{"as_of":"2026-10-08","days":{},"fetched_at":"2026-10-09T15:00:00Z","spent":"0"}\n' "$CR" > "$T/cache-oldfmt/claude-statusline/api-credit-live.json"
@@ -1208,9 +1425,15 @@ if [ "$(jq 'keys|length' "$capf")" = 4 ] && ! jq -e 'any(keys[]; contains("2026-
   ok "cache cap: 5 windows fetched -> at most 4 kept, oldest evicted"
 else bad "cache cap: $(cat "$capf")"; fi
 
+}
+phase_69
+phase_70() {
 # 33. Recent provider days settle window (SYG_CREDIT_SETTLE_DAYS, default 2):
 #     closed days in [as_of - (N-1), as_of] within the fetch window take max(provider, ledger).
 echo ok > "$T/cr/mode"
+}
+phase_70
+phase_71() {
 # 33a. ledger > provider on as_of (10-08: ledger 9 + 6 = 15 vs provider 10): ledger amount used,
 #      estimate true, provider_unsettled_days 1, statusline text has "est".
 { entry a1 2026-10-08 2026-10-08T10:00:00Z 9; entry a2 2026-10-08 2026-10-08T18:00:00Z 6; entry b 2026-10-09 2026-10-09T12:00:00Z 2.5; } > "$T/lv-s-asof.jsonl"
@@ -1222,6 +1445,9 @@ if near "$(jq .spent_usd <<< "$b_sa")" 21.20289 && near "$(jq .remaining_usd <<<
   ok "settle window: ledger (15.00) > provider (10.00) on as_of -> spent 21.20289, remaining 78.79711, estimate true, unsettled 1, text has est"
 else bad "settle window ledger > provider on as_of: $b_sa / '$txt_sa'"; fi
 
+}
+phase_71
+phase_72() {
 # 33b. provider > ledger on as_of (10-08: provider 10 vs ledger 6): provider amount used,
 #      estimate false, provider_unsettled_days 0.
 { entry a 2026-10-08 2026-10-08T12:00:00Z 6; entry b 2026-10-09 2026-10-09T12:00:00Z 2.5; } > "$T/lv-s-prov.jsonl"
@@ -1233,6 +1459,9 @@ if near "$(jq .spent_usd <<< "$b_sp")" 16.20289 && near "$(jq .remaining_usd <<<
   ok "settle window: provider (10.00) > ledger (6.00) on as_of -> provider amount used, estimate false, unsettled 0"
 else bad "settle window provider > ledger: $b_sp / '$txt_sp'"; fi
 
+}
+phase_72
+phase_73() {
 # 33c. Days older than N (10-05 ledger 20 vs provider 3.70289; 10-06 ledger 5 vs provider 0,
 #      with as_of 10-08 and N=2 -> settle window is 10-07..10-08): provider amount used.
 { entry o1 2026-10-05 2026-10-05T12:00:00Z 20; entry o2 2026-10-06 2026-10-06T12:00:00Z 5; entry b 2026-10-09 2026-10-09T12:00:00Z 2.5; } > "$T/lv-s-old.jsonl"
@@ -1242,6 +1471,9 @@ if near "$(jq .spent_usd <<< "$b_so")" 16.20289 && near "$(jq .remaining_usd <<<
   ok "settle window: ledger > provider on days older than N (10-05, 10-06 with as_of 10-08, N=2) -> provider amount used"
 else bad "settle window older than N: $b_so"; fi
 
+}
+phase_73
+phase_74() {
 # 33d. SYG_CREDIT_SETTLE_DAYS=0: identical to pre-settle provider output for the same fixture.
 b_s0=$(lv s-asof balance --json SYG_CREDIT_LEDGER="$T/lv-s-asof.jsonl" SYG_CREDIT_SETTLE_DAYS=0)
 txt_s0=$(lv s-asof statusline SYG_CREDIT_LEDGER="$T/lv-s-asof.jsonl" SYG_CREDIT_SETTLE_DAYS=0 < /dev/null)
@@ -1250,6 +1482,9 @@ if [ "$b_s0" = "$b_sp" ] && [ "$txt_s0" = 'api credit $83.80 (exp 10-21, 11d)' ]
   ok "SYG_CREDIT_SETTLE_DAYS=0: identical to provider-only output on the ledger > provider fixture"
 else bad "SYG_CREDIT_SETTLE_DAYS=0: $b_s0 / '$txt_s0' vs $b_sp"; fi
 
+}
+phase_74
+phase_75() {
 # 33e. SYG_CREDIT_SETTLE_DAYS=bogus (and empty or negative): behaves as 2.
 { entry o 2026-10-06 2026-10-06T12:00:00Z 5; entry d1 2026-10-07 2026-10-07T12:00:00Z 4; entry d2 2026-10-08 2026-10-08T12:00:00Z 15; entry b 2026-10-09 2026-10-09T12:00:00Z 2.5; } > "$T/lv-s-2d.jsonl"
 b_s2=$(lv s-2d balance --json SYG_CREDIT_LEDGER="$T/lv-s-2d.jsonl")
@@ -1264,6 +1499,9 @@ if near "$(jq .spent_usd <<< "$b_s2")" 25.20289 && near "$(jq .remaining_usd <<<
   ok "SYG_CREDIT_SETTLE_DAYS=bogus (and empty/-1): behaves as 2 (10-07 +4 and 10-08 +5 settled, 10-06 ignored -> unsettled 2; N=1 -> unsettled 1)"
 else bad "SYG_CREDIT_SETTLE_DAYS=bogus: s2=$b_s2 / bog=$b_sbog / s1=$b_s1"; fi
 
+}
+phase_75
+phase_76() {
 # 33f. Anchored path with ledger > provider on the anchor day: max applied before pre-anchor subtraction.
 { entry a 2026-10-12 2026-10-12T10:00:00Z 1; entry b 2026-10-12 2026-10-12T14:00:00Z 7
   entry c 2026-10-13 2026-10-13T12:00:00Z 2.5; entry d 2026-10-14 2026-10-14T12:00:00Z 1.5; } > "$T/anc/pv-settle.jsonl"
@@ -1277,6 +1515,9 @@ if near "$(jq .remaining_usd <<< "$b_as")" 38.5 && near "$(jq .spent_usd <<< "$b
   ok "anchor + settle window: 10-12 ledger 8.00 > provider 5.00 -> (8.00 - 1.00 pre) + 3.00 + 1.50 = 11.50 spent, remaining 38.50, estimate true, unsettled 1"
 else bad "anchor + settle window: $b_as / '$txt_as'"; fi
 
+}
+phase_76
+phase_77() {
 # 33g. balance --month: settle-window excess added to month_spend_usd, month_estimate true, text has "est".
 echo month > "$T/cr/mode"
 b_ms=$(lv m-settle balance --month --json SYG_CREDIT_LEDGER="$T/lv-s-2d.jsonl")
@@ -1290,6 +1531,9 @@ if near "$(jq .month_spend_usd <<< "$b_ms")" 29.20289 \
   ok "balance --month + settle window: provider 17.70289 + excess 9.00 (10-07 +4, 10-08 +5; 10-06 excluded) + 2.50 today = 29.20289, month_source provider, month_estimate true, text ' · month \$29.20 est'"
 else bad "balance --month + settle window: $b_ms / '$txt_ms' / b_m=$b_m"; fi
 
+}
+phase_77
+phase_78() {
 # 34. Per-request long-prompt rate cards (price-table --json .long) and settle-window edge cases.
 cat > "$T/prices-long.json" <<'EOF'
 {"or_keys":[],"table":{
@@ -1304,6 +1548,9 @@ EOF
 printf '#!/bin/bash\n[ "$1" = --json ] || exit 9\ncat %q\n' "$T/prices-long.json" > "$T/pt-long.sh"
 chmod +x "$T/pt-long.sh"
 
+}
+phase_78
+phase_79() {
 # 34a. Long card threshold (above: 1000): prompt = input + cache_read + cache_write_5m + cache_write_1h.
 #      - L1000: prompt = 400 + 300 + 200 + 100 = 1000 (output 500 excluded from prompt) -> base rates:
 #        (400*1 + 500*2 + 300*0.5 + 200*1.25 + 100*2*1) / 1e6 = (400 + 1000 + 150 + 250 + 200) / 1e6 = 0.002
@@ -1321,6 +1568,9 @@ if near "$(jq .cost_usd <<< "$e1000")" 0.002 && near "$(jq .cost_usd <<< "$e1001
   ok "long card: prompt 1000 (== above) -> base rates (0.002); prompt 1001 (> above) -> long rates incl. 2x long input on 1h write (0.02001)"
 else bad "long card 1000 vs 1001: $e1000 / $e1001"; fi
 
+}
+phase_79
+phase_80() {
 # 34b. Orphan long card (m-orphan has no table row) and malformed card (m-bad missing cacheWrite):
 #      both ignored without crash; m-bad prices at base rates (1M input -> 1.00), m-orphan stays unpriced.
 { uline msg-lb1 req-lb1 m-bad ${D1}T10:00:00Z $M 0; uline msg-lb2 req-lb2 m-orphan ${D1}T10:01:00Z 2000 0; } > "$P/LBAD.jsonl"
@@ -1331,6 +1581,9 @@ if near "$(jq .cost_usd <<< "$ebad")" 1 \
   ok "long card validation: orphan long card (no table row) and malformed card (missing cacheWrite) ignored -> base pricing 1.00, no crash"
 else bad "long card validation: $ebad"; fi
 
+}
+phase_80
+phase_81() {
 # 34c. A price-table stub with no "long" key at all ($T/prices.json) prices as before.
 uline msg-lnl req-lnl m-a ${D1}T10:00:00Z $M $((M / 2)) > "$P/LNOLONG.jsonl"
 hk LNOLONG "$T/lnolong/l.jsonl"
@@ -1340,6 +1593,9 @@ if jq -e 'has("long")|not' "$T/prices.json" > /dev/null && near "$(jq .cost_usd 
   ok "long card absent: stub without 'long' key prices m-a (1M in + 0.5M out = 2.00) unchanged"
 else bad "long card absent: $enolong"; fi
 
+}
+phase_81
+phase_82() {
 # 34c2. Float above in long card: integral 1000.0 prices prompt 1001 on the long card (0.02001);
 #       non-integral 1000.5 is ignored -> base rates (0.002001).
 cat > "$T/prices-long-flt.json" <<'EOF'
@@ -1365,6 +1621,9 @@ if near "$(jq .cost_usd <<< "$eflt1")" 0.02001 && near "$(jq .cost_usd <<< "$efl
   ok "long card float above: integral 1000.0 prices prompt 1001 on long card (0.02001); non-integral 1000.5 ignored -> base rates (0.002001)"
 else bad "long card float above: $eflt1 / $eflt2"; fi
 
+}
+phase_82
+phase_83() {
 # 34d. Clamped provider window together with the settle window:
 #      g-chain.json (3x $100 chained grants) at a "now" over a year past the first grant
 #      clamps the window to clamp_day. A pre-clamp ledger entry ($40) draws grant 1 to $60,
@@ -1383,6 +1642,9 @@ if near "$(jq .spent_usd <<< "$b_sc")" 90 && near "$(jq .remaining_usd <<< "$b_s
   ok "settle window + clamped provider window: pre-clamp 40 + settled 45 (vs 30) + bridged 5 = 90 spent, remaining 150, clamped true, unsettled 1 (N=0 -> 75 spent, unsettled 0)"
 else bad "settle window + clamped window: $b_sc / $b_sc0"; fi
 
+}
+phase_83
+phase_84() {
 # 34e. cost_report with no dated bucket (nobucket.json -> as_of is the day before the
 #      window start): settle rows empty, provider_unsettled_days 0 even when the ledger
 #      has an entry on the as_of day; in-window entries are bridged.
@@ -1395,7 +1657,10 @@ if near "$(jq .spent_usd <<< "$b_snb")" 7.5 && near "$(jq .remaining_usd <<< "$b
   ok "settle window + no dated bucket (as_of 2026-10-04 before window 2026-10-05): settle rows empty, provider_unsettled_days 0, estimate false, in-window 7.50 bridged"
 else bad "settle window + no dated bucket: $b_snb"; fi
 
+}
+phase_84
 # 35. Per-kind remaining credit (remaining_by_kind, "by kind:" line, calibrate --kind).
+phase_86() {
 # 35a. No anchor: grants A (kind "promo", $10, expires 10-20), B (kind "paid", $5,
 #      expires 10-25), C (no kind, $3, no expiry).
 #      - Spend $4 on 10-05 draws from soonest-expiring A ("promo"):
@@ -1434,6 +1699,9 @@ if jq -e '.remaining_usd==14 and .remaining_by_kind=={"promo":6,"paid":5,"unspec
   ok "35a: remaining_by_kind and 'by kind:' line (spend 4 -> promo 6, paid 5, unspecified 3; spend 12 -> promo omitted, paid 3, unspecified 3; no-kind grants -> 2 lines)"
 else bad "35a: $b_35a4 / '$t_35a4' / $b_35a12 / '$t_35a12' / '$t_35anok' / $b_35anog"; fi
 
+}
+phase_86
+phase_87() {
 # 35b. Anchor without kinds: calibrate 12 over grants A ("promo", $10, exp 10-20) +
 #      B ("paid", $5, exp 10-25), no pre-anchor spend.
 #      - Anchor record has no "kinds" key.
@@ -1455,6 +1723,10 @@ if [ "$cal_35b" = 'anchored $12.00 at 2026-10-15T12:00:00Z (same-day spend befor
   ok "35b: calibrate 12 without --kind -> no 'kinds' key in record, pools carry kinds (paid 5 latest-first, promo 7)"
 else bad "35b: '$cal_35b' / $(cat "$L35B.anchor.json") / $b_35b"; fi
 
+}
+phase_87
+phase_88() {
+local L35C_PRE
 # 35c. Anchor with kinds: calibrate 12 --kind paid=2 over grants A+B.
 #      - Record has kinds == {"paid": 2}; first printed line includes "(paid $2.00)".
 #      - Stated kind "paid" takes 2 in B (exp 10-25); remaining 12 - 2 = 10 fills unstated
@@ -1492,12 +1764,14 @@ if [ "$cal_35c" = 'anchored $12.00 at 2026-10-15T12:00:00Z (paid $2.00) (same-da
   ok "35c: calibrate 12 --kind paid=2 -> kinds {\"paid\":2}, promo 10 + paid 2; \$3 post-anchor spend -> promo 7, paid 2; stated + unstated uncapped with --kind, replay-capped without --kind (promo 6, paid 5, unspecified 1)"
 else bad "35c: '$cal_35c' / $b_35c1 / $b_35c2 / $b_35c3 / $b_35c4 / $b_35c5"; fi
 
+}
+phase_88
+phase_89() {
 # 35d. calibrate --kind errors, each leaving the anchor file absent (and an existing one unchanged):
 #      --kind paid (no =), --kind paid=-1, --kind =1, --kind paid=1 --kind paid=2,
 #      --kind paid=20 with AMOUNT 12 -> exit 2; --kind nosuch=1 -> exit 1.
 #      Stderr for duplicate kind ("duplicate --kind") and unknown kind ("matches no grant").
 L35D="$T/anc/k35d.jsonl"; : > "$L35D"
-ck35d() { ac SYG_CREDIT_LEDGER="$L35D" SYG_CREDIT_GRANTS="$T/g-35b.json" SYG_CREDIT_NOW=2026-10-15T13:00:00Z -- calibrate 12 --at "$NOW35" "$@" > /dev/null 2>&1; echo $?; }
 codes_35d="$(ck35d --kind paid) $(ck35d --kind paid=-1) $(ck35d --kind =1) $(ck35d --kind paid=1 --kind paid=2) $(ck35d --kind paid=20) $(ck35d --kind nosuch=1)"
 err_35d_dup=$(ac SYG_CREDIT_LEDGER="$L35D" SYG_CREDIT_GRANTS="$T/g-35b.json" SYG_CREDIT_NOW=2026-10-15T13:00:00Z -- calibrate 12 --at "$NOW35" --kind paid=1 --kind paid=2 2>&1 > /dev/null)
 sum_35c=$(cksum < "$L35C.anchor.json")
@@ -1507,6 +1781,9 @@ if [ "$codes_35d" = "2 2 2 2 2 1" ] && [ ! -e "$L35D.anchor.json" ] && [ "$(cksu
   ok "35d: calibrate --kind errors (no '=', negative, empty kind, duplicate 'duplicate --kind', > AMOUNT -> exit 2; unknown kind 'matches no grant' -> exit 1), anchor file absent/unchanged"
 else bad "35d: codes '$codes_35d' / dup='$err_35d_dup' / unk='$err_35d_unk' / exists $(ls "$L35D.anchor.json" 2>&1)"; fi
 
+}
+phase_89
+phase_90() {
 # 35e. Hand-written anchor file with malformed kinds ({"paid":"x"}, and one summing over
 #      amount: {"paid":8,"promo":5} > 12): anchor still governs (anchor_usd == 12) and
 #      falls back to the no-kinds split ({"promo": 7, "paid": 5}).
@@ -1519,6 +1796,9 @@ if jq -e '.anchor_usd==12 and .remaining_usd==12 and .remaining_by_kind=={"promo
   ok "35e: malformed anchor kinds ({paid:'x'} and sum > amount) -> anchor still governs (anchor_usd 12) with the no-kinds split (promo 7, paid 5)"
 else bad "35e: $b_35e1 / $b_35e2"; fi
 
+}
+phase_90
+phase_91() {
 # 35f. Provider path with kinds on grants: ok.json has closed-day spend 3.70289 (10-05) +
 #      10.00 (10-08) = 13.70289; lv.jsonl adds 2.50 bridged today (10-09) = 16.20289 total.
 #      Grants: promo $20 (exp 10-15) + paid $80 (exp 10-21) -> promo takes all 16.20289:
@@ -1538,6 +1818,9 @@ if near "$(jq .remaining_usd <<< "$b_35f")" 83.79711 \
   ok "35f: provider path with kinds -> remaining_by_kind promo 3.79711 (20 - 16.20289), paid 80.00"
 else bad "35f: $b_35f"; fi
 
+}
+phase_91
+phase_92() {
 # 35h. Stated kind larger than its grants: calibrate 14 --kind paid=7 over g-35b
 #      (paid grant $5 exp 10-25, promo grant $10 exp 10-20) -> paid 7 (5 in the grant +
 #      2 excess keeping latest paid expiry 10-25), promo 7; after 10-25 (at 10-26) both
@@ -1552,6 +1835,9 @@ if jq -e '.remaining_usd==14 and .remaining_by_kind=={"promo":7,"paid":7}' <<< "
   ok "35h: stated kind > grant amount (calibrate 14 --kind paid=7 over \$5 paid grant) -> promo 7, paid 7 (2 excess keeps 10-25 expiry); after 10-25 -> paid omitted, lapsed_usd 14 (covering 7 paid + 7 promo)"
 else bad "35h: $b_35h1 / $b_35h2"; fi
 
+}
+phase_92
+phase_93() {
 # 35i. Lapsed-kind refusal: promo grant expired 10-10, paid grant live (exp 10-25);
 #      calibrate 5 --at 10-15T12:00:00Z --kind promo=1 -> exit 1, stderr names the kind,
 #      anchor file absent.
@@ -1568,6 +1854,9 @@ if [ "$rc_35i" = 1 ] && [ ! -e "$L35I.anchor.json" ] \
   ok "35i: lapsed kind refused (calibrate 5 --at 10-15 --kind promo=1 when promo expired 10-10) -> exit 1, stderr names promo, anchor file absent"
 else bad "35i: rc=$rc_35i err='$err_35i' / exists $(ls "$L35I.anchor.json" 2>&1)"; fi
 
+}
+phase_93
+phase_94() {
 # 35j. A grant granted after an anchor with kinds enters unchanged with its kind:
 #      calibrate 12 --kind paid=2 at 10-15T12:00:00Z over g-35b plus a third grant
 #      {"amount":50,"granted":"10-16","kind":"promo"}; balance at 10-16T13:00:00Z ->
@@ -1586,6 +1875,9 @@ if jq -e '.remaining_usd==62 and .remaining_by_kind=={"promo":60,"paid":2}' <<< 
   ok "35j: grant granted after an anchor with kinds (+50 promo on 10-16) enters unchanged -> promo 60, paid 2"
 else bad "35j: $b_35j"; fi
 
+}
+phase_94
+phase_95() {
 # 36. Long-card pricing on suffixed model ids: m-long-20261006 and m-long[1m] at prompt
 #     1001 (401 in + 500 out + 300 read + 200 w5m + 100 w1h, > above 1000) each price
 #     on m-long's long card at 0.02001 (as in 34a), total 0.04002.
@@ -1600,11 +1892,13 @@ if near "$(jq .cost_usd <<< "$elsuf")" 0.04002 \
   ok "36: suffixed ids m-long-20261006 and m-long[1m] at prompt 1001 price on m-long's long card (0.02001 each)"
 else bad "36 long card suffixed ids: $elsuf"; fi
 
+}
+phase_95
+phase_96() {
 # 37. Anchored path with SYG_CREDIT_ADMIN_KEY_CMD (case 23's fixtures, the env key
 #     empty): the command key drives the anchored provider pass; the TTL cache keeps
 #     the second render to one run.
 echo anc > "$T/cr/mode"; : > "$T/cr/hits.log"; : > "$T/key-calls"
-anc37() { lv "$1" balance --json ANTHROPIC_ADMIN_API_KEY= SYG_CREDIT_ADMIN_KEY_CMD="$T/key-ok.sh" SYG_CREDIT_LEDGER="$T/anc/pv.jsonl" SYG_CREDIT_GRANTS="$T/missing.json" SYG_CREDIT_NOW="$2"; }
 b37=$(anc37 anc37 2026-10-14T15:00:00Z)
 b37b=$(anc37 anc37 2026-10-14T15:01:00Z)
 req37=$(head -n 1 "$T/cr/hits.log" | cut -f1)
@@ -1615,6 +1909,9 @@ if near "$(jq .remaining_usd <<< "$b37")" 41.5 \
   ok "anchored SYG_CREDIT_ADMIN_KEY_CMD: command key -> the 41.50 provider figure, window from the anchor's day, run once across the TTL hit"
 else bad "anchored key cmd: $b37 / $b37b / calls=$(nlines "$T/key-calls") / '$req37'"; fi
 
+}
+phase_96
+phase_97() {
 # 38. Anchored provider window clamped: an anchor more than 366 days back fetches from
 #     now's day minus 366 days; the anchor's day through the clamp replays from the
 #     ledger; estimate true, provider_clamped true, the window starts at the clamp day.
@@ -1634,6 +1931,9 @@ if near "$(jq .remaining_usd <<< "$b38")" 30 && near "$(jq .spent_usd <<< "$b38"
   ok "anchored clamp: anchor 100 at 2025-06-01 -> window starts $clamp38 (now - 366d), 40 pre-clamp ledger + 30 provider = spent 70, remaining 30, estimate true, basis names the clamp"
 else bad "anchored clamp: $b38 / '$txt38' / '$req38'"; fi
 
+}
+phase_97
+phase_98() {
 # 39. Anchored sub-day grant boundary: a grant granted mid-UTC-day on a provider bucket
 #     day, after a mid-day anchor whose own instant is exempt (its day's bucket is
 #     pre-corrected through pre_anchor_day_usd) -> estimate true, provider_subday true.
@@ -1648,6 +1948,9 @@ if jq -e '.source=="provider" and .estimate==true and .provider_subday==true and
   ok "anchored sub-day grant: a 10-13T12:00 grant on the 10-13 bucket day -> estimate true, provider_subday true (the anchor's own mid-day instant exempt)"
 else bad "anchored sub-day: $b39"; fi
 
+}
+phase_98
+phase_99() {
 # 40. Truncated cost_report page (has_more true without a non-empty next_page string) -> labeled ledger fallback.
 echo truncnull > "$T/cr/mode"
 b=$(lv truncnull balance --json)
@@ -1661,3 +1964,5 @@ jq -e '.source=="ledger" and .estimate==true and .spent_usd==7.5 and .remaining_
   || bad "provider pages truncempty: $b"
 
 exit $fail
+}
+phase_99
