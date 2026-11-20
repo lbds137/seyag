@@ -4,13 +4,13 @@ title: 'session-link/prepush: net added links per diff instead of per line'
 status: To Do
 assignee: []
 created_date: '2026-11-19T14:23:00Z'
-updated_date: '2026-11-20T02:21:00Z'
+updated_date: '2026-11-20T02:59:00Z'
 labels:
   - hooks
   - probes
   - owner-decision
 dependencies: []
-priority: medium
+priority: high
 ordinal: 17000
 ---
 
@@ -29,4 +29,6 @@ a file move passes via per-commit netting; untouched link plus unrelated edit pa
 This relaxes a secret guard: ask the owner before dispatching the implementation.
 
 Needs owner: may the session-url scanner net added links per diff (a link the same diff removes is not new)? It relaxes a secret guard; the design and probe list in this body are the recommendation.
+
+Owner ruled 2026-11-19 (AUQ, the seyag session): net them - build the unit. Dispatch-ready; the design and probe list in this body are the spec skeleton.
 <!-- SECTION:DESCRIPTION:END -->

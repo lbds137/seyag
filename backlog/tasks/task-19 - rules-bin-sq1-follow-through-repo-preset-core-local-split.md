@@ -4,7 +4,7 @@ title: 'rules/bin: sq1 follow-through, repo-preset, core-local split'
 status: To Do
 assignee: []
 created_date: '2026-11-19T14:23:00Z'
-updated_date: '2026-11-20T02:21:00Z'
+updated_date: '2026-11-20T02:59:00Z'
 labels:
   - rules
   - bin
@@ -23,4 +23,6 @@ ordinal: 19000
   user-level rules file (rules budget: cut before adding).
 
 Needs owner: the repo-preset merge-rules ruling (ask recorded in the private customization ledger, routed via the machine-management session).
+
+Owner ruled 2026-11-19 (AUQ): build the cfg3 repo-preset table next (a named-repo section in USER config presetting knobs before project config; loader refusals respected, probe-pinned like the rest of the config surface). sq1 and core-local ride the same batch when it dispatches.
 <!-- SECTION:DESCRIPTION:END -->
