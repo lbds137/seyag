@@ -30,6 +30,12 @@ All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY
 
 - **backlog:** store batch riding the release: TASK-1/9/12 flipped Done with dispositions (shipped #335/#332/#337), TASK-4 claimed, TASK-42 filed (cfg2b: bash consumers wire the loader; renumbered twice — 38 and 39 were taken by parallel merged tasks before this branch landed), TASK-17 carries the owner ruling (net added links: build), the prioritization pass landed separately (#353). (#354)
 
+## 0.3.194 - 2026-11-19
+
+### Improvements
+
+- **skills:** backlog-md gains the backlog-only direct-commit default (owner ruling 2026-11-19, fleet-wide): a commit touching only `backlog/**` may land straight on the project's integration branch without a PR once the project's store lint passes, a store change made as part of other work still rides that work's branch or PR, and a project's CLAUDE.md can still forbid the direct path; the guardrail bullet names the exception beside its never-commit-outside-your-branch line, and this repo's ship rule carries the same exception for its own `backlog/`. (#354)
+
 ## 0.3.193 - 2026-11-19
 
 ### Improvements
