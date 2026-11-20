@@ -17,7 +17,7 @@ if [ -r "$bin_dir/../hooks/lib/config-env.sh" ] \
     syg_config_env "$(readlink -f "$bin_dir/..")"
 fi
 
-python3 -I - "$@" <<'PY'
+python3 -I -B - "$@" <<'PY'
 import sys, os, re, json, glob, time, datetime, collections
 args = sys.argv[1:]
 if "-h" in args or "--help" in args:

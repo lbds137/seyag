@@ -1,8 +1,9 @@
 ---
 id: TASK-4
 title: 'python bins: shared config loader mirroring hooks/lib/config-env.sh'
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - seyag-a
 created_date: '2026-11-19T14:22:00Z'
 updated_date: '2026-11-20T02:21:00Z'
 labels:

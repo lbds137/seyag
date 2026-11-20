@@ -259,6 +259,10 @@ run 2 "node --print=BODY readFileSync+writeFileSync edit (--print= joined value)
   "node --print=\"const fs=require('fs'); fs.writeFileSync('f.txt', fs.readFileSync('f.txt','utf8'))\""
 run 2 "python3 -I<<'E' heredoc edit (no space before <<)" "Bash" "$(printf "python3 -I<<'E'\n%s\nE" "$BODY")"
 run 2 "python3.12t -c edit (free-threaded name)" "Bash" "python3.12t -c \"$BODY\""
+# -X/-W value joined to the heredoc opener: the value must end at <<, not swallow it.
+run 2 "python3 -X utf8<<'E' heredoc edit (unspaced -X value)" "Bash" "$(printf "python3 -X utf8<<'E'\n%s\nE" "$BODY")"
+run 2 "python3 -W ignore<<'E' heredoc edit (unspaced -W value)" "Bash" "$(printf "python3 -W ignore<<'E'\n%s\nE" "$BODY")"
+run 2 "python3 -X utf8 <<'E' heredoc edit (spaced control)" "Bash" "$(printf "python3 -X utf8 <<'E'\n%s\nE" "$BODY")"
 
 # Exit 0: the option-shaped text is not an inline script, or the write is not
 # in the interpreter's own body.

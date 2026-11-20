@@ -181,4 +181,12 @@ out=$("$BIN" --slug wrongtype --since 2026-10-26T00:00Z --until 2026-10-26T23:59
 "$BIN" --slug demo --since 2026-10-26 --until 2026-10-26 --gap 0 --json > /dev/null 2>&1; rc=$?
 [ $rc = 0 ] && ok "--gap 0 is allowed" || bad "gap 0: rc=$rc"
 
+# A slug names one folder: '/' or '..' is a usage error (exit 2) before any scan. A trailing
+# slash used to resolve to folder "" and merge agy sessions that have no workspace.
+for s in 'odd/' '-home-user-Projects-odd/' 'a..b' '../odd'; do
+  "$BIN" --slug="$s" --since 2026-10-26 --until 2026-10-26 --json > "$tmp/out" 2> "$tmp/err"; rc=$?
+  [ $rc = 2 ] && [ ! -s "$tmp/out" ] && grep -q "may not contain '/' or '..'" "$tmp/err" \
+    && ok "--slug '$s' is a usage error naming the rule" || bad "--slug '$s': rc=$rc out=$(cat "$tmp/out") err=$(cat "$tmp/err")"
+done
+
 exit $fail

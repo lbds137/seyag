@@ -87,9 +87,16 @@ rm "$TMP/agents-fail"
 echo '{"agents": []}' > "$TMP/agents.json"
 err=$("$BIN/session-context" 2>&1 >/dev/null); rc=$?
 [ $rc = 1 ] && grep -q "didn't return a list" <<< "$err" && ok "a non-list agents reply exits 1, not an empty table" || bad "non-list agents: rc $rc, $err"
+# A non-object agents entry is skipped with one warn naming its index; the object beside it keeps its row.
 echo '["x", {"name":"Bad","cwd":"/nowhere","sessionId":"s-big","status":"busy"}]' > "$TMP/agents.json"
-err=$("$BIN/session-context" 2>&1 >/dev/null); rc=$?
-[ $rc = 1 ] && grep -q "built 0 rows for 2 sessions" <<< "$err" && ok "a dropped row exits 1" || bad "dropped row: rc $rc, $err"
+err=$("$BIN/session-context" --json 2>&1 >"$TMP/out.json"); rc=$?
+[ $rc = 0 ] && [ "$err" = "session-context: skipping agents entry 0: not an object" ] && jq -e 'map(.name) == ["Bad"]' "$TMP/out.json" >/dev/null \
+    && ok "a non-object agents entry is skipped with a warn, the object keeps its row" || bad "non-object agents entry: rc $rc, err '$err', out $(cat "$TMP/out.json")"
+# [null] is not a phantom 0-token row: no table row, one warn, exit 0.
+echo '[null]' > "$TMP/agents.json"
+err=$("$BIN/session-context" --json 2>&1 >"$TMP/out.json"); rc=$?
+[ $rc = 0 ] && [ "$err" = "session-context: skipping agents entry 0: not an object" ] && [ "$(jq -c . "$TMP/out.json")" = '[]' ] \
+    && ok "[null] agents entry: no phantom row, one warn, exit 0" || bad "[null] agents entry: rc $rc, err '$err', out $(cat "$TMP/out.json")"
 
 # Two sessions in one folder, one of them in an agent worktree (named after the main checkout).
 jq -c --arg wt "$TMP/wt/agent-x" '. + [{name: "Twin", cwd: $wt, sessionId: "s-twin", status: "busy"}]' \
@@ -136,13 +143,20 @@ printf '#!/bin/sh\necho "{}"\n' > "$TMP/extra-obj.sh"
 printf '#!/bin/sh\necho "not json"\n' > "$TMP/extra-junk.sh"
 printf '#!/bin/sh\necho "[1,2]"\n' > "$TMP/extra-scalars.sh"
 chmod +x "$TMP"/extra-*.sh
-for c in fail obj junk scalars; do
+for c in fail obj junk; do
     err=$(SYG_SESSION_CONTEXT_EXTRA_CMD="$TMP/extra-$c.sh" "$BIN/session-context" --json 2>&1 >"$TMP/out.json"); rc=$?
     [ $rc = 0 ] && [ "$err" = "$msg" ] && [ "$(jq -c 'map(.name)' "$TMP/out.json")" = '["Small"]' ] \
         && ok "EXTRA_CMD '$c': stderr names the knob, Claude rows kept, exit 0" || bad "extra $c: rc $rc, err '$err', out $(cat "$TMP/out.json")"
 done
 err=$(SYG_SESSION_CONTEXT_EXTRA_CMD="$TMP/no-such-command" "$BIN/session-context" 2>&1 >/dev/null); rc=$?
 [ $rc = 0 ] && grep -qF "$msg" <<< "$err" && ok "EXTRA_CMD naming a missing command fails loudly too" || bad "extra missing: rc $rc, $err"
+
+# Scalar entries ([1,2]) are non-object entries: each is skipped with its own warn, no failure line.
+printf '#!/bin/sh\necho "[1,2]"\n' > "$TMP/extra-scalars.sh"; chmod +x "$TMP/extra-scalars.sh"
+err=$(SYG_SESSION_CONTEXT_EXTRA_CMD="$TMP/extra-scalars.sh" "$BIN/session-context" --json 2>&1 >"$TMP/out.json"); rc=$?
+[ $rc = 0 ] && [ "$err" = "$(printf '%s\n%s' "session-context: skipping extra entry 0: not an object" "session-context: skipping extra entry 1: not an object")" ] \
+    && [ "$(jq -c 'map(.name)' "$TMP/out.json")" = '["Small"]' ] \
+    && ok "EXTRA_CMD scalar entries: each skipped with a warn, Claude rows kept, exit 0" || bad "extra scalars: rc $rc, err '$err', out $(cat "$TMP/out.json")"
 
 # A row whose tokens is present but not a number takes the failure path (null counts as 0).
 for tk in '"170000"' 'true' '{"n":1}' '[5]'; do
@@ -160,6 +174,11 @@ printf '#!/bin/sh\necho '"'"'[{"name":7,"folder":[1],"sessionId":null,"status":{
 err=$(SYG_SESSION_CONTEXT_EXTRA_CMD="$TMP/extra-odd.sh" "$BIN/session-context" --json 2>&1 >"$TMP/out.json"); rc=$?
 [ $rc = 0 ] && [ -z "$err" ] && jq -e '.[] | select(.tokens == 10) | (.name == "extra" and .folder == "" and .sessionId == "" and .status == "idle")' "$TMP/out.json" >/dev/null \
     && ok "extra row with non-string name, folder, status: defaults, no failure line" || bad "extra odd fields: rc $rc, err '$err', out $(cat "$TMP/out.json")"
+# A non-object EXTRA_CMD entry is skipped with the same warn shape: no phantom row beside the Claude rows.
+printf '#!/bin/sh\necho "[null]"\n' > "$TMP/extra-null.sh"; chmod +x "$TMP/extra-null.sh"
+err=$(SYG_SESSION_CONTEXT_EXTRA_CMD="$TMP/extra-null.sh" "$BIN/session-context" --json 2>&1 >"$TMP/out.json"); rc=$?
+[ $rc = 0 ] && [ "$err" = "session-context: skipping extra entry 0: not an object" ] && [ "$(jq -c 'map(.name)' "$TMP/out.json")" = '["Small"]' ] \
+    && ok "EXTRA_CMD [null] entry: skipped with a warn, no phantom row, exit 0" || bad "extra [null]: rc $rc, err '$err', out $(cat "$TMP/out.json")"
 
 # Thresholds must be whole numbers: a bad one exits 2 with a message, never an empty table.
 for knob in SYG_SESSION_CONTEXT_THRESHOLD SYG_SESSION_CONTEXT_THRESHOLD_FABLE SYG_SESSION_CONTEXT_EXTRA_THRESHOLD; do

@@ -180,7 +180,7 @@ preamble() {
             echo "claude-role: SYG_ROLE_PREAMBLE_FILE $SYG_ROLE_PREAMBLE_FILE is unreadable; using the built-in text" >&2
         fi
     fi
-    printf '%s' "$tpl" | python3 -I -c '
+    printf '%s' "$tpl" | python3 -I -B -c '
 import re, sys
 v = dict(zip(("role", "path", "needs", "in_person"), sys.argv[1:5]))
 t = sys.stdin.buffer.read().decode("utf-8", "surrogateescape")
@@ -285,7 +285,7 @@ case "${1:-}" in
         done
         [ -f "$file" ] || { echo "claude-role --size: no role file at $file" >&2; exit 1; }
         head=$(head_text "$file"; due_lines "$file"; printf x); head=${head%x}
-        CR_HEAD="$head" python3 -I - "$file" "$SESSION_START_CAP" <<'PYEOF'
+        CR_HEAD="$head" python3 -I -B - "$file" "$SESSION_START_CAP" <<'PYEOF'
 import os, sys
 path, cap = sys.argv[1], int(sys.argv[2])
 raw = open(path, "rb").read().decode("utf-8", "surrogateescape")   # bad bytes are measured, not fatal
@@ -403,7 +403,7 @@ PYEOF
         CR_HAS_NOTE="$has_note" CR_NOTE="$note_text" \
         CR_HAS_NEXT="$has_next" CR_NEXT="$next_text" CR_HEAD="$head" CR_LIB="$CR_LIB" \
         CR_NEEDS_SEC="$NEEDS_SEC" CR_INPERSON_SEC="$INPERSON_SEC" \
-        python3 -I - "$file" "$(date '+%F %H:%M')" "$SESSION_START_CAP" "${pairs[@]}" <<'PYEOF' || exit $?
+        python3 -I -B - "$file" "$(date '+%F %H:%M')" "$SESSION_START_CAP" "${pairs[@]}" <<'PYEOF' || exit $?
 import datetime, json, os, re, sys, time
 sys.path.insert(0, os.environ["CR_LIB"])
 from next_due import due_lines
@@ -866,7 +866,7 @@ file="$ROLES/$(folder_of "${cwd:-$PWD}").md"
 due=$(due_lines "$file"; printf x); due=${due%x}
 rendered=$(
     { head_text "$file"; printf '%s' "$due"; cat "$file"; } \
-    | python3 -I -c 'import sys; print(len(sys.stdin.buffer.read().decode("utf-8", "replace").encode("utf-16-le")) // 2)'
+    | python3 -I -B -c 'import sys; print(len(sys.stdin.buffer.read().decode("utf-8", "replace").encode("utf-16-le")) // 2)'
 )
 if [[ ! $rendered =~ ^[0-9]+$ ]]; then
     # The measure failed: fail open (print the role as before) without a shell error.

@@ -47,17 +47,40 @@ else
 fi
 
 # Positive control: mutated copy (format line cites #330; first heading has 0.0.1).
+# The mutation is GNU sed (`0,/re/`). A sed that rejects it leaves the copy empty,
+# and an empty copy makes both matchers report bad, so the controls would pass
+# without testing anything: a sed failure is a FAIL here, and the controls are skipped.
 MUT="$T/CHANGELOG.md"
-sed -e '/^All notable changes/s/(#PR)/(#330)/' -e '0,/^## /s/^## [^ ]*/## 0.0.1/' "$CHANGELOG" > "$MUT"
-if ! format_ok "$MUT"; then
-  ok "positive control: format matcher flags a (#330) format line"
+mut_err=$(sed -e '/^All notable changes/s/(#PR)/(#330)/' -e '0,/^## /s/^## [^ ]*/## 0.0.1/' "$CHANGELOG" 2>&1 >"$MUT")
+mut_rc=$?
+if [ "$mut_rc" -ne 0 ] || [ ! -s "$MUT" ]; then
+  bad "positive control: the mutation sed failed (rc=$mut_rc, GNU sed needed for 0,/re/): ${mut_err:-empty output}"
 else
-  bad "positive control: format matcher passed a (#330) format line"
+  if ! format_ok "$MUT"; then
+    ok "positive control: format matcher flags a (#330) format line"
+  else
+    bad "positive control: format matcher passed a (#330) format line"
+  fi
+  if ! heading_ok "$MUT" "$VERSION"; then
+    ok "positive control: heading matcher flags a 0.0.1 heading"
+  else
+    bad "positive control: heading matcher passed a 0.0.1 heading"
+  fi
 fi
-if ! heading_ok "$MUT" "$VERSION"; then
-  ok "positive control: heading matcher flags a 0.0.1 heading"
-else
-  bad "positive control: heading matcher passed a 0.0.1 heading"
+
+# Shim case: a sed that rejects `0,/re/` must FAIL this probe, not pass its controls vacuously.
+# The nested run is marked so it does not repeat this case.
+if [ -z "${CHANGELOG_PROBE_NESTED:-}" ]; then
+  mkdir -p "$T/nogsed"
+  printf '#!/bin/sh\ncase "$*" in *0,/*) echo "sed: invalid usage of line address 0" >&2; exit 1 ;; esac\nexec "%s" "$@"\n' \
+    "$(command -v sed)" >"$T/nogsed/sed"
+  chmod +x "$T/nogsed/sed"
+  shim_out=$(CHANGELOG_PROBE_NESTED=1 PATH="$T/nogsed:$PATH" bash "${BASH_SOURCE[0]}" 2>&1); shim_rc=$?
+  if [ "$shim_rc" -ne 0 ] && grep -q "positive control: the mutation sed failed" <<< "$shim_out"; then
+    ok "a sed that rejects 0,/re/ fails the probe (controls not reported as passing)"
+  else
+    bad "a sed that rejects 0,/re/ did not fail the probe (rc=$shim_rc): $shim_out"
+  fi
 fi
 
 exit "$fail"

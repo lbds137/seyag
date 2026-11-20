@@ -77,13 +77,13 @@ An optional TOML file fills in knobs the environment left unset: user `${XDG_CON
 
 | Name | Default | What it does | Found in | Config |
 | --- | --- | --- | --- | --- |
-| `CLAUDE_CONFIG_DIR` | `~/.claude` | Claude Code config directory: context-audit (CLAUDE.md, rules, settings, memory, skills, plugins), session-log, and the projects folder the session tools use when CLAUDE_PROJECTS_DIR is unset; statusline ignores it. | `bin/chrome-loss-scan`, `bin/classifier-denials`, `bin/context-audit`, `bin/driver-busy-hours`, `bin/relay-ruling`, `bin/session-context`, `bin/session-log`, `bin/session-stalled` | env only |
-| `CLAUDE_PROJECTS_DIR` | `~/.claude/projects` | Per-project transcript folders, read by session-log, usage-sweep, price-table, classifier-denials, session-stalled, session-context, chrome-loss-scan, relay-ruling, driver-busy-hours; unset: CLAUDE_CONFIG_DIR/projects. | `bin/chrome-loss-scan`, `bin/classifier-denials`, `bin/driver-busy-hours`, `bin/price-table`, `bin/relay-ruling`, `bin/session-context`, `bin/session-log`, `bin/session-stalled`, `bin/usage-sweep` | env only |
-| `CLAUDE_SESSION_ARCHIVE` | `~/Documents/claude-session-archive` | Directory holding exported cse_*.jsonl claude.ai session archives read by session-log. | `bin/session-log` | env only |
-| `SESSION_LEDGER` | `~/.claude/mined-corpus/ledger.tsv` | Path to the TSV ledger where session-log ledger and session-log mark read and record mined transcript spans. | `bin/session-log` | env only |
-| `SYG_AGY_BRAIN_DIR` | `~/.gemini/antigravity-cli/brain` | Antigravity (agy) CLI transcript folders (<id>/.system_generated/logs) merged by driver-busy-hours; with CLAUDE_PROJECTS_DIR set, read only if this or SYG_AGY_SUMMARIES_DB is. Environment only (not config.toml). | `bin/driver-busy-hours` | env only |
+| `CLAUDE_CONFIG_DIR` | `~/.claude` | Claude Code config directory: context-audit (CLAUDE.md, rules, settings, memory, skills, plugins), session-log, and the projects folder the session tools use when CLAUDE_PROJECTS_DIR is unset; statusline ignores it. | `bin/chrome-loss-scan`, `bin/classifier-denials`, `bin/context-audit`, `bin/driver-busy-hours`, `bin/relay-ruling`, `bin/session-context`, `bin/session-log`, `bin/session-stalled`, `lib/config_env.py` | env only |
+| `CLAUDE_PROJECTS_DIR` | `~/.claude/projects` | Per-project transcript folders, read by session-log, usage-sweep, price-table, classifier-denials, session-stalled, session-context, chrome-loss-scan, relay-ruling, driver-busy-hours; unset: CLAUDE_CONFIG_DIR/projects. | `bin/chrome-loss-scan`, `bin/classifier-denials`, `bin/driver-busy-hours`, `bin/price-table`, `bin/relay-ruling`, `bin/session-context`, `bin/session-log`, `bin/session-stalled`, `bin/usage-sweep`, `lib/config_env.py` | env only |
+| `CLAUDE_SESSION_ARCHIVE` | `~/Documents/claude-session-archive` | Directory holding exported cse_*.jsonl claude.ai session archives read by session-log. | `bin/session-log`, `lib/config_env.py` | env only |
+| `SESSION_LEDGER` | `~/.claude/mined-corpus/ledger.tsv` | Path to the TSV ledger where session-log ledger and session-log mark read and record mined transcript spans. | `bin/session-log`, `lib/config_env.py` | env only |
+| `SYG_AGY_BRAIN_DIR` | `~/.gemini/antigravity-cli/brain` | Antigravity (agy) CLI transcript folders (<id>/.system_generated/logs) merged by driver-busy-hours; with CLAUDE_PROJECTS_DIR set, read only if this or SYG_AGY_SUMMARIES_DB is. | `bin/driver-busy-hours` | user only |
 | `SYG_AGY_CONVERSATIONS_DIR` | `~/.gemini/antigravity-cli/conversations` | Directory of *.db conversation databases read by agy-extract when no database paths are passed. | `bin/agy-extract` | user only |
-| `SYG_AGY_SUMMARIES_DB` | `~/.gemini/antigravity-cli/conversation_summaries.db` | SQLite conversation_summaries database of the Antigravity (agy) CLI that driver-busy-hours reads to find root conversations and their workspaces; read together with SYG_AGY_BRAIN_DIR. Environment only (not config.toml). | `bin/driver-busy-hours` | env only |
+| `SYG_AGY_SUMMARIES_DB` | `~/.gemini/antigravity-cli/conversation_summaries.db` | SQLite conversation_summaries database of the Antigravity (agy) CLI that driver-busy-hours reads to find root conversations and their workspaces; read together with SYG_AGY_BRAIN_DIR. | `bin/driver-busy-hours` | user only |
 | `SYG_CLASSIFIER_LEDGER` | unset | JSONL file path opting in classifier-ledger to record PostToolUseFailure events. | `hooks/classifier-ledger.sh` | user only |
 | `SYG_CONTEXT_BLOCK` | unset | Token count for the hard context tier: at or above it context-size-reminder arms context-block-gate (handoff-write-only tool use) instead of the soft banner; unset or non-numeric keeps the tier off. | `hooks/context-block-gate.sh`, `hooks/context-size-reminder.sh` | user + project |
 | `SYG_CONTEXT_BLOCK_CMDS` | unset | Colon-separated Bash command prefixes that clear an armed context block; literal prefix, no word boundary — a matching compound command clears and runs whole (operator-config trust); unset or empty: no command can clear. | `hooks/context-block-gate.sh`, `hooks/context-size-reminder.sh` | user + project |
@@ -103,7 +103,7 @@ An optional TOML file fills in knobs the environment left unset: user `${XDG_CON
 | `SYG_LAUNCH_RECORD_HYBRID_OK` | unset | Set to 1 to suppress launch-record's warning when model slots mix provider families. | `hooks/launch-record.sh` | user + project |
 | `SYG_LONG_JOB_CMD` | unset | Single-line runner prefix advertised at SessionStart for running >10-minute jobs outside the session tree. | `bin/mem-gate`, `hooks/session-start.sh` | user only |
 | `SYG_MEM_GATE_CMD` | unset | Single-line command advertised at SessionStart to check free memory before launching workers or test suites. The plugin's own mem-gate (`mem-gate --ok`) is one such command. | `hooks/session-start.sh` | user only |
-| `SYG_NEEDS_OWNER_SECTION` | `Needs Owner` | Heading (without the ##) of the role file section claude-role --need writes and --json reads as .needs: what waits on the owner; relay-ruling names it in its destructive-step line and reads it from the environment only. | `bin/claude-role`, `bin/driver-clone`, `bin/relay-ruling` | user + project |
+| `SYG_NEEDS_OWNER_SECTION` | `Needs Owner` | Heading (without the ##) of the role file section claude-role --need writes and --json reads as .needs: what waits on the owner; relay-ruling names it in its destructive-step line. | `bin/claude-role`, `bin/driver-clone`, `bin/relay-ruling` | user + project |
 | `SYG_OWNER_NAME` | `The owner` | Name relay-ruling prints in the relay header the recipient reads (`<name> said (...)`, `<name> picked (...)`); an empty value falls back to the default. Environment only (not config.toml). | `bin/relay-ruling` | env only |
 | `SYG_PROFILE` | `full` | Base component profile (full, guards, or none) before SYG_ENABLE and SYG_DISABLE are applied. | `hooks/components.tsv`, `hooks/context-size-reminder.sh`, `hooks/lib/components.sh`, `hooks/run.sh`, `hooks/session-start.sh` | user + project |
 | `SYG_PROJECT_NAMES_FILE` | unset | Optional tab-separated table of folder and short name that driver-clone reads for the base short name and appends the new lane to. Unset means the base role file role: field is the short name and no row is written. | `bin/driver-clone` | user only |
@@ -127,14 +127,14 @@ An optional TOML file fills in knobs the environment left unset: user `${XDG_CON
 
 | Name | Default | What it does | Found in | Config |
 | --- | --- | --- | --- | --- |
-| `CLAUDE_PLUGIN_REGISTRY` | `$HOME/.claude/plugins/installed_plugins.json` | Path to installed_plugins.json read by statusline to compare the installed seyag version against the checkout manifest. | `bin/statusline` | env only |
-| `CLAUDE_VERSIONS_DIR` | `$HOME/.local/share/claude/versions` | Directory of staged native Claude Code version downloads checked by statusline for the CC update nudge. | `bin/statusline` | env only |
+| `CLAUDE_PLUGIN_REGISTRY` | `$HOME/.claude/plugins/installed_plugins.json` | Path to installed_plugins.json read by statusline to compare the installed seyag version against the checkout manifest. | `bin/statusline`, `lib/config_env.py` | env only |
+| `CLAUDE_VERSIONS_DIR` | `$HOME/.local/share/claude/versions` | Directory of staged native Claude Code version downloads checked by statusline for the CC update nudge. | `bin/statusline`, `lib/config_env.py` | env only |
 | `SYG_EXTRA_USAGE_TOML` | unset | Path to a TOML file with bought_usd and optional used_usd_at_anchor read on each statusline render. | `bin/statusline` | user only |
 | `SYG_STATUSLINE_DEBUG` | unset | Set to 1 to append terminal column, fit budget, and wrap diagnostics to the statusline. | `bin/statusline` | user + project |
 | `SYG_STATUSLINE_EXTRA_USAGE` | unset | Set to 0 to hide the plan extra-usage segment on the statusline. | `bin/statusline` | user + project |
 | `SYG_STATUSLINE_FIT_MARGIN` | `5` | Columns subtracted from COLUMNS (non-negative integer) when fitting wrapped statusline rows. | `bin/statusline` | user + project |
 | `SYG_STATUSLINE_WRAP_COLUMNS` | unset | Positive integer column threshold opting in multi-row segment wrapping on the statusline. | `bin/statusline` | user + project |
-| `SYG_STATUSLINE_ZAI_USAGE` | `<script_dir>/zai-usage` | Override path to the zai-usage binary invoked by statusline on the z.ai lane. | `bin/statusline`, `hooks/lib/config-env.sh` | user only |
+| `SYG_STATUSLINE_ZAI_USAGE` | `<script_dir>/zai-usage` | Override path to the zai-usage binary invoked by statusline on the z.ai lane. | `bin/statusline`, `hooks/lib/config-env.sh`, `lib/config_env.py` | user only |
 
 ## usage
 
@@ -150,7 +150,7 @@ An optional TOML file fills in knobs the environment left unset: user `${XDG_CON
 | `CLAUDE_USAGE_ZAI_FIVE_CAP` | `80` | Maximum 5-hour quota threshold percentage (non-negative integer) allowed by claude-usage --ok on the z.ai lane. | `bin/claude-usage` | user + project |
 | `CLAUDE_USAGE_ZAI_WEEK_RESERVE` | `<CLAUDE_USAGE_WEEK_RESERVE>` | Static weekly quota reserve percentage (integer 1-99) for claude-usage --ok and --posture on the z.ai lane. | `bin/claude-usage` | user + project |
 | `CLAUDE_USAGE_ZAI_WEEK_RESERVE_CMD` | unset | Shell command (5s timeout) printing a dynamic weekly reserve integer 1-99 for the z.ai lane in claude-usage. | `bin/claude-usage` | user only |
-| `SEYAG_KEYS_BIN` | `<script_dir>/keys` | Override path to the keys binary invoked by zai-usage to read ZAI_AUTH_TOKEN from the encrypted credential store. | `bin/zai-usage` | env only |
+| `SEYAG_KEYS_BIN` | `<script_dir>/keys` | Override path to the keys binary invoked by zai-usage to read ZAI_AUTH_TOKEN from the encrypted credential store. | `bin/zai-usage`, `lib/config_env.py` | env only |
 | `SYG_EXTRA_USAGE_BUDGET_CMD` | unset | Shell command printing the extra-usage USD budget as a non-negative decimal for claude-usage. | `bin/claude-usage`, `bin/statusline` | user only |
 | `SYG_EXTRA_USAGE_BUDGET_CMD_TIMEOUT` | `10` | Timeout in seconds (positive integer) for SYG_EXTRA_USAGE_BUDGET_CMD in claude-usage. | `bin/claude-usage` | user + project |
 | `SYG_EXTRA_USAGE_BUDGET_USD` | unset | Static extra-usage budget in USD (non-negative decimal) for claude-usage and statusline. | `bin/claude-usage`, `bin/statusline` | user + project |
@@ -163,7 +163,7 @@ An optional TOML file fills in knobs the environment left unset: user `${XDG_CON
 
 | Name | Default | What it does | Found in | Config |
 | --- | --- | --- | --- | --- |
-| `ANTHROPIC_ADMIN_API_KEY` | unset | Organization Admin API key enabling provider cost_report balance queries in api-credit and statusline (takes precedence over SYG_CREDIT_ADMIN_KEY_CMD). | `bin/api-credit`, `bin/statusline` | env only |
+| `ANTHROPIC_ADMIN_API_KEY` | unset | Organization Admin API key enabling provider cost_report balance queries in api-credit and statusline (takes precedence over SYG_CREDIT_ADMIN_KEY_CMD). | `bin/api-credit`, `bin/statusline`, `lib/config_env.py` | env only |
 | `SYG_CREDIT_ADMIN_KEY_CMD` | unset | Command run on a cache miss (when ANTHROPIC_ADMIN_API_KEY is unset, empty or contains a newline) to print the organization Admin API key on stdout. | `bin/api-credit`, `bin/statusline` | user only |
 | `SYG_CREDIT_ANCHOR` | `<SYG_CREDIT_LEDGER>.anchor.json` | Path to the JSON file storing api-credit calibrate balance anchors. | `bin/api-credit`, `bin/statusline` | user only |
 | `SYG_CREDIT_DUST_FLOOR_USD` | `0.15` | Minimum USD balance shown by the statusline fleet credit display on non-API lanes, which shows only when SYG_CREDIT_LEDGER and SYG_CREDIT_GRANTS are both set and the week is urgent (week >= 75% or <= 7 days left). | `bin/statusline` | user + project |
@@ -255,7 +255,7 @@ An optional TOML file fills in knobs the environment left unset: user `${XDG_CON
 
 | Name | Default | What it does | Found in | Config |
 | --- | --- | --- | --- | --- |
-| `SYG_CONFIG` | unset | Set to 0 to disable the config.toml loader entirely (hooks and wired bins ignore config files; any other value or unset: enabled). | `hooks/lib/config-env.sh` | user + project |
+| `SYG_CONFIG` | unset | Set to 0 to disable the config.toml loader entirely (hooks and wired bins ignore config files; any other value or unset: enabled). | `hooks/lib/config-env.sh`, `lib/config_env.py` | user + project |
 | `SYG_KEYS_LEGACY_FILE` | unset | Optional read-only plaintext NAME=value fallback file consulted by keys get after the encrypted store. | `bin/keys` | user only |
 | `SYG_KEYS_LOCK_WAIT_S` | `15` | Seconds keys waits for the store lock or the TPM lock before failing (finite number >= 0). | `bin/keys`, `bin/zai-usage` | user + project |
 | `SYG_KEYS_NAME` | `keys` | Credential --name passed to systemd-creds when encrypting and decrypting the key store. | `bin/keys` | user + project |

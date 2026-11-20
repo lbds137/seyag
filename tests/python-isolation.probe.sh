@@ -21,7 +21,12 @@ TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 REAL_PY3=$(command -v python3) || { bad "python3 not on PATH"; exit 1; }
 
-PYC_BEFORE=$(find "$REPO/plugins" -name __pycache__ 2>/dev/null | sort)
+# Sorted "relative-path size" lines for every *.pyc under $1. Files, not directory
+# names: a new .pyc in a __pycache__ that already exists is the case to catch.
+pyc_files() {
+  (cd "$1" && find . -name '*.pyc' -printf '%p %s\n' 2>/dev/null | sort)
+}
+PYC_BEFORE=$(pyc_files "$REPO/plugins")
 
 # --- A. Lint ------------------------------------------------------------------
 LINT_OUT=$("$REAL_PY3" -I -B - "$REPO" <<'PYEOF'
@@ -33,46 +38,71 @@ repo = sys.argv[1]
 # Known limit: a call through a variable ("$PY" -c) is not linted.
 PY3 = re.compile(r"(?<![\w.-])python(?:3(?:\.\d+t?)?)?(?![\w.-])")
 SKIP_BEFORE = ("command -v ", "type ", "which ")
-CACHE_TOKEN = '"${SYG_PY_CACHE_ARG:--B}"'
 
 
-def violations(line):
-    """Return True when the line holds an inline python3 call without -I."""
-    if line.lstrip().startswith("#"):
-        return False
-    for m in PY3.finditer(line):
-        before = line[: m.start()]
-        if before.endswith(SKIP_BEFORE):
+CACHE_MARK = "SYG_PY_CACHE_ARG"
+PRE_PREFIX = "pycache_prefix="
+
+
+def call_flags(toks):
+    """Walk python3's argument tokens: (inline, flags). inline is False when a
+    script path runs instead of stdin or -c. flags: I (-I seen), B (-B seen),
+    C (a bytecode prefix: SYG_PY_CACHE_ARG reference or -Xpycache_prefix=)."""
+    flags = set()
+    i = 0
+    while i < len(toks):
+        t = toks[i]
+        i += 1
+        if CACHE_MARK in t:
+            flags.add("C")
             continue
-        toks = line[m.end():].split()
-        saw_i = False
-        i = 0
-        inline = False
-        while True:
-            if i >= len(toks):
-                inline = True
+        if t == "-" or t == "\\" or t.startswith("<") or re.match(r"\d<", t):
+            return True, flags
+        if t == "--":
+            return i >= len(toks), flags
+        if not t.startswith("-"):
+            return False, flags
+        j = 1
+        while j < len(t):
+            ch = t[j]
+            if ch in "c<":
+                return True, flags
+            if ch == "m":
+                return False, flags
+            if ch in "XW":
+                rest = t[j + 1:]
+                if rest == "":
+                    rest = toks[i] if i < len(toks) else ""
+                    i += 1
+                if ch == "X" and rest.startswith(PRE_PREFIX):
+                    flags.add("C")
                 break
-            t = toks[i]
-            if t == "-c":
-                inline = True
-                break
-            if t == CACHE_TOKEN:
-                i += 1
-                continue
-            if t in ("-X", "-W"):
-                i += 2
-                continue
-            if re.fullmatch(r"-[A-Za-z]+", t):
-                if "I" in t:
-                    saw_i = True
-                i += 1
-                continue
-            inline = (t == "-" or t.startswith("<") or t == "\\"
-                      or re.match(r"\d<", t) is not None)
-            break
-        if inline and not saw_i:
-            return True
-    return False
+            if ch == "I":
+                flags.add("I")
+            elif ch == "B":
+                flags.add("B")
+            j += 1
+    return True, flags
+
+
+def problems(line):
+    """Missing guard classes for the first inline python3 call on the line that lacks any; [] when clean."""
+    if line.lstrip().startswith("#"):
+        return []
+    for m in PY3.finditer(line):
+        if line[: m.start()].endswith(SKIP_BEFORE):
+            continue
+        inline, flags = call_flags(line[m.end():].split())
+        if not inline:
+            continue
+        missing = []
+        if "I" not in flags:
+            missing.append("missing -I")
+        if not flags & {"B", "C"}:
+            missing.append("missing bytecode guard (-B, -Xpycache_prefix=, or SYG_PY_CACHE_ARG)")
+        if missing:
+            return missing
+    return []
 
 
 MUST_FLAG = [
@@ -90,22 +120,37 @@ MUST_FLAG = [
     "python3.12 - <<E",
     "python3.12t -c x",
     "env python3 -c x",
+    "python3 -I -c x",
+    "python3 -I - <<E",
+    "python3 -I<<E",
+    "python3 -Bc 'x'",
+    "python3 -B<<E",
+    "python3 -uc 'x'",
+    "python3 -Xutf8 -c 'x'",
+    "python3 -Xpycache_prefix=/t -c x",
+    "python3 -Wignore::DeprecationWarning -c 'x'",
+    "python3 -WI -c x",
+    "python3 -X utf8 -c x",
 ]
 MUST_NOT = [
-    "python3 -I -c x",
-    "/usr/bin/python3 -I -c x",
-    "python3.12 -I -c x",
-    "python3.12t -I -c x",
+    "python3 -I -B -c x",
+    "/usr/bin/python3 -I -B -c x",
+    "python3.12 -I -B -c x",
+    "python3.12t -I -B -c x",
     "python3 -I \"${SYG_PY_CACHE_ARG:--B}\" - <<E",
     "python3 -I -B - <<E",
+    "python3 -I -Xpycache_prefix=/t -c x",
+    "python3 -IBc 'x'",
+    "python3 -IB -c x",
+    "python3 -IB<<E",
     "python3 \"$LIB\"",
     "command -v python3 >/dev/null",
     "exec python3 \"$(dirname x)/y\"",
-    "python3 -IB -c x",
+    "python3 -I -B script.py",
     "# python3 -c in a comment",
 ]
-control_bad = [s for s in MUST_FLAG if not violations(s)]
-control_bad += [s for s in MUST_NOT if violations(s)]
+control_bad = [s for s in MUST_FLAG if not problems(s)]
+control_bad += [s for s in MUST_NOT if problems(s)]
 if control_bad:
     for s in control_bad:
         print("CONTROL " + s)
@@ -127,8 +172,9 @@ for path in files:
         continue
     n_files += 1
     for lineno, line in enumerate(text.split("\n"), 1):
-        if violations(line):
-            found.append(f"{path}:{lineno}: {line.strip()}")
+        missing = problems(line)
+        if missing:
+            found.append(f"{path}:{lineno}: {'; '.join(missing)}: {line.strip()}")
 for v in found:
     print("VIOLATION " + v)
 print(f"SCANNED {n_files}")
@@ -140,10 +186,10 @@ if [ "$LINT_RC" = 3 ]; then
   bad "lint positive control misclassified fixtures:"
   printf '%s\n' "$LINT_OUT" | sed 's/^/        /'
 elif [ "$LINT_RC" != 0 ]; then
-  bad "lint: inline python3 without -I (use python3 -I \"\${SYG_PY_CACHE_ARG:--B}\" in hooks, python3 -I -B in bin):"
+  bad "lint: inline python3 call without -I or without a bytecode guard (use python3 -I \"\${SYG_PY_CACHE_ARG:--B}\" in hooks, python3 -I -B in bin):"
   printf '%s\n' "$LINT_OUT" | grep -v '^SCANNED' | sed 's/^/        /'
 else
-  ok "lint: every inline python3 site passes -I ($(printf '%s' "$LINT_OUT" | sed -n 's/^SCANNED //p') files scanned)"
+  ok "lint: every inline python3 site passes -I and a bytecode guard ($(printf '%s' "$LINT_OUT" | sed -n 's/^SCANNED //p') files scanned)"
 fi
 
 # --- B. Runtime rows ------------------------------------------------------------
@@ -242,11 +288,29 @@ else
 fi
 
 # --- C. No bytecode in the plugin tree ------------------------------------------
-PYC_AFTER=$(find "$REPO/plugins" -name __pycache__ 2>/dev/null | sort)
+PYC_AFTER=$(pyc_files "$REPO/plugins")
 if [ "$PYC_BEFORE" = "$PYC_AFTER" ]; then
-  ok "no new __pycache__ under plugins/"
+  ok "no new *.pyc under plugins/"
 else
-  bad "new __pycache__ under plugins/: $(comm -13 <(printf '%s\n' "$PYC_BEFORE") <(printf '%s\n' "$PYC_AFTER") | tr '\n' ' ')"
+  bad "new *.pyc under plugins/: $(comm -13 <(printf '%s\n' "$PYC_BEFORE") <(printf '%s\n' "$PYC_AFTER") | tr '\n' ' ')"
+fi
+
+# C2. The file-level check catches a new .pyc written into a __pycache__ that
+# already exists (the dir-name check passed this case vacuously). The fixture
+# imports the way claude-role does (-I, sys.path insert, no -B) and must leave
+# a .pyc that the diff reports.
+C2="$TMP/pycfix/plugins/seyag/lib"
+mkdir -p "$C2/__pycache__"
+printf 'VALUE = 1\n' >"$C2/pyc_probe_mod.py"
+C2_BEFORE=$(pyc_files "$TMP/pycfix/plugins")
+(cd "$TMP" && env -u PYTHONDONTWRITEBYTECODE -u PYTHONPYCACHEPREFIX "$REAL_PY3" -I -c \
+  'import sys; sys.path.insert(0, sys.argv[1]); import pyc_probe_mod' "$C2" >/dev/null 2>&1)
+C2_AFTER=$(pyc_files "$TMP/pycfix/plugins")
+C2_NEW=$(comm -13 <(printf '%s\n' "$C2_BEFORE") <(printf '%s\n' "$C2_AFTER"))
+if [ -n "$C2_NEW" ]; then
+  ok "C2: file check reports a new .pyc in a pre-existing __pycache__ ($C2_NEW)"
+else
+  bad "C2: the fixture import left no new .pyc for the file check to report"
 fi
 
 exit "$fail"

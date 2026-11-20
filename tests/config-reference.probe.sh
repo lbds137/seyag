@@ -393,6 +393,17 @@ else
   fail "(x3) Config column rendering mismatch in $TMP/docs/config.md: $(grep -E 'SYG_DELTA_CMD|SYG_STATUSLINE_ZAI_USAGE' "$TMP/docs/config.md" || true)"
 fi
 
+# (x4) The agy path knobs are settable from config.toml: a path row without envonly,
+# and docs/config.md renders them user only (their python readers now load the file).
+for k in SYG_AGY_BRAIN_DIR SYG_AGY_SUMMARIES_DB; do
+  if awk -F'\t' -v k="$k" '$1 == k && $6 == "path" { found = 1 } END { exit !found }' "$REPO_ROOT/plugins/seyag/config/knobs.tsv" \
+    && grep -qE "^\| \`$k\` \|.* \| user only \|\$" "$REPO_ROOT/docs/config.md"; then
+    ok "(x4) $k: path row without envonly, docs/config.md says user only"
+  else
+    fail "(x4) $k: not settable from config.toml (knobs.tsv flags or docs/config.md Config column)"
+  fi
+done
+
 # Live check against the repository root.
 if python3 "$SCRIPT" --root "$REPO_ROOT" --check 2>"$TMP/err.live"; then
   ok "(live) repo knobs.tsv and docs/config.md are valid and in sync"

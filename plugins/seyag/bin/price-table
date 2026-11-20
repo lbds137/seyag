@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S python3 -I -B
 """price-table: the managed modelPricing table for Claude Code on this machine.
 
 CC prices model ids it does not know at the opus-5 fallback list, which inflates
@@ -40,6 +40,16 @@ import tempfile
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+# config.toml knobs (config_env, the Python twin of hooks/lib/config-env.sh); a wiring error proceeds env-only.
+try:
+    _SYG_ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+    sys.path.insert(0, os.path.join(_SYG_ROOT, "lib"))
+    import config_env
+
+    config_env.syg_config_env(_SYG_ROOT)
+except Exception:
+    pass
 
 MANAGED_FILE = "/etc/claude-code/managed-settings.json"
 OR_MODELS_URL = "https://openrouter.ai/api/v1/models"
