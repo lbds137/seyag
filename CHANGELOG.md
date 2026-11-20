@@ -2,6 +2,34 @@
 
 All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY-MM-DD>` section per released version; under it, `###` categories in fixed order — Breaking Changes, Features, Bug Fixes, Improvements, Chores, Tests — empty ones omitted; items are `- **scope:** description (#PR)`, written from the version's merged commit subjects.
 
+## 0.3.194 - 2026-11-19
+
+### Features
+
+- **config_env:** `lib/config_env.py` joins as the python twin of `hooks/lib/config-env.sh`: same config files, precedence (user then project, project overwrites user, the environment wins over both even set-but-empty), mechanical key rule, refusals and warning text byte-for-byte; hand-parsed on purpose, because tomllib accepts a different subset and words its errors differently. Every python bin in `bin/` (17, plus the `zai-spend` link) adopts it before its first knob read and its shebang becomes `env -S python3 -I -B`; hook children keep inheriting `run.sh`'s shell exports. User config now reaches the knobs those bins read: `SYG_CREDIT_{LEDGER,GRANTS,ANCHOR,WHEN,SETTLE_DAYS,ROUTE}`, `SYG_KEYS_{STORE,NAME,WITH_KEY,LEGACY_FILE,TIMEOUT_S,LOCK_WAIT_S,STALL_S}`, `CC_ROUTE_KEYS`, `PRICE_TABLE_MANAGED_FILE`, `SYG_NEEDS_OWNER_SECTION`, `SYG_AGY_{SUMMARIES_DB,BRAIN_DIR,CONVERSATIONS_DIR}`, `CLAUDE_USAGE_TTL`, `SYG_WSDIFF_LENIENT_NAMES`. `SYG_AGY_BRAIN_DIR`/`SYG_AGY_SUMMARIES_DB` drop `envonly` and keep `path`; `SYG_OWNER_NAME` stays `envonly` (a project must not rename the owner in relay headers). (#354)
+- **config_env:** a project `.claude/seyag.toml` can no longer set the security-material knobs — `_SYG_CFG_PROJECT_SECURE` in both loaders, list parity pinned by the (w) battery: `SYG_KEYS_NAME`/`SYG_KEYS_WITH_KEY` (a repo must not weaken the credential store: `--with-key` downgrades TPM binding, `--name` can break decrypt) and `ZAI_AUTH_TOKEN`/`SYG_CREDIT_WHEN`/`SYG_CREDIT_ROUTE` (a repo must not fake the token and route labels its spend is billed and audited by). Refused from project scope as `security-material knob`, settable from user config and the environment; owner ruling 2026-11-19. (#354)
+- **replay-hook:** the replay tools inject a session id (filename stem / parent session dir, one jq pass) so session-gated gates replay non-vacuously, and both scrub the four persist-path env vars from the replayed environment. (#352)
+
+### Bug Fixes
+
+- **config_env:** a NUL byte in a config value truncates its line the way bash's C strings do (both loaders), so a bad value costs its own line instead of silently dropping every later export; the export loop gained a per-name guard, and the (w) battery asserts the line after a truncated one still applies. (#354)
+- **session-stalled:** malformed `claude agents --json` entries (non-dict, missing or null sessionId, null pid) are skipped with one warn naming the index; a null name no longer prints as `None`; a transcript is matched by exact basename so a glob-character sessionId cannot cross-match another session's file; the find runs without `-quit`, making the error path deterministic instead of readdir-order dependent. (#354)
+- **session-context:** non-object entries in the agents list and in `SYG_SESSION_CONTEXT_EXTRA_CMD` output are skipped with a per-entry warn instead of producing a phantom 0-token row or dying mid-list; when EVERY entry is skipped the run is loud again (exit 1, format-change alarm) rather than a clean empty table. (#354)
+- **driver-busy-hours:** `--slug` values containing `/` or `..` are a usage error before any scan — a trailing slash used to resolve to an empty folder name and merge agy sessions that have no workspace. (#354)
+
+### Improvements
+
+- **tests:** the python-isolation lint requires `-I` AND a bytecode guard (`-B`, `-Xpycache_prefix=`, or a `SYG_PY_CACHE_ARG` reference) on every inline python3 site and tokenizes joined flag forms (`-Bc -uc -Xutf8 -Wignore:: -WI`, unspaced `-X/-W <val><<`); `claude-role`'s next_due import runs `python3 -I -B`; the heredoc-edit guard blocks unspaced `-X/-W <val><<'E'` forms; the changelog-format probe fails loudly when its mutation sed errors (a shim case proves a non-GNU sed no longer passes vacuously). (#354)
+- **probes:** cut per-file shellcheck analysis memory via scoped phase functions (measured peaks 3675 MB → 632 MB and 1090 MB → 363 MB). (#351)
+
+### Tests
+
+- **probes:** `tests/config-env.probe.sh` gains the (w) python-parity battery (22 cases running BOTH loaders on identical fixtures, byte-compared env exports and stderr: valid/refusals/malformed/multiline/NUL/secure/CRLF/40-char-bound/foreign-symlink/SYG_CONFIG=0), list-parity pins that both loaders' harness, project-exec and project-secure lists stay equal, and an adoption pin (every python bin carries the `-I -B` shebang and the wiring call); `tests/config-reference.probe.sh` pins the agy rows' new `user only` rendering (x4) and the five security-material rows (x5). Red-first: all seven touched probes failed against the base (probe-red-check, rc=0). (#354)
+
+### Chores
+
+- **backlog:** store batch riding the release: TASK-1/9/12 flipped Done with dispositions (shipped #335/#332/#337), TASK-4 claimed, TASK-42 filed (cfg2b: bash consumers wire the loader; renumbered twice — 38 and 39 were taken by parallel merged tasks before this branch landed), TASK-17 carries the owner ruling (net added links: build), the prioritization pass landed separately (#353). (#354)
+
 ## 0.3.193 - 2026-11-19
 
 ### Improvements
