@@ -123,6 +123,10 @@ On the Anthropic lane she drives from her phone, often by voice (Remote Control)
 - A review finding is a SAMPLE, not an inventory. Fix the whole class in the file.
 - When copying a sibling's guard, copy its whole mechanism, not one line of it.
 
+## Accessibility
+
+- Any UI, chart, theme or other visual output change runs the seyag:accessibility skill before review — colour never carries a signal alone, and contrast meets WCAG AA in both themes.
+
 ## Safety
 
 These add to the global ask-first list in `~/.claude/CLAUDE.md`.
