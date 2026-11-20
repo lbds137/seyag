@@ -19,6 +19,7 @@
 #                        a probe point this at a fixture.
 #
 # Mechanism:
+#   The payload's session_id is the transcript's basename minus .jsonl.
 #   Two modes, decided PER FILE before the turn-end pass: RECORDED if the file
 #   contains any `stop_hook_summary` system entry, else INFERRED.
 #
@@ -84,7 +85,7 @@
 #   Fed to the hook DIRECTLY (`bash plugins/seyag/hooks/<hook>.sh`, not
 #   run.sh — a project's own `.claude/hooks/<name>.sh` override would make
 #   run.sh exit 0 for everything), with `env -u CLAUDE_PROJECT_DIR -u
-#   SYG_LEDGER_PATH_RE -u SYG_PR_MONITOR_SEEN_FILE -u SYG_PR_BODY_ACK_FILE`: the
+#   SYG_LEDGER_PATH_RE -u SYG_PR_MONITOR_SEEN_FILE -u SYG_PR_BODY_ACK_FILE -u SYG_CREDIT_LEDGER`: the
 #   hook runs with ITS OWN defaults, not whatever the recorded project's
 #   environment happened to set. Hooks also run with a fresh
 #   XDG_STATE_HOME, XDG_RUNTIME_DIR and SYG_STATE_DIR (all in the run's scratch
@@ -335,7 +336,7 @@ def run_turn_end(cut_offset, cut_line_display, window_start, stop_hook_active):
     }
     proc = subprocess.run(
         ["env", "-u", "CLAUDE_PROJECT_DIR", "-u", "SYG_LEDGER_PATH_RE", "-u", "SYG_PR_MONITOR_SEEN_FILE",
-         "-u", "SYG_PR_BODY_ACK_FILE", f"SYG_STATE_DIR={hook_state}", f"XDG_STATE_HOME={hook_state}",
+         "-u", "SYG_PR_BODY_ACK_FILE", "-u", "SYG_CREDIT_LEDGER", f"SYG_STATE_DIR={hook_state}", f"XDG_STATE_HOME={hook_state}",
          f"XDG_RUNTIME_DIR={hook_runtime}", "PYTHONDONTWRITEBYTECODE=1", "bash", hook_script],
         input=json.dumps(stdin_obj).encode("utf-8"),
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,

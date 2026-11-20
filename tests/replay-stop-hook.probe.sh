@@ -250,14 +250,22 @@ echo x >>"${SYG_PR_BODY_ACK_FILE:-$fb/ack}"
 d="${SYG_STATE_DIR:-$fb}"
 mkdir -p "$d"
 echo x >>"$d/marker"
+# Ledger override (review round 2): the replay unsets SYG_CREDIT_LEDGER, so a
+# hook that appends to it must append to its fallback, never the caller's file.
+echo x >>"${SYG_CREDIT_LEDGER:-$fb/credit}"
 exit 0
 EOF
 printf '%s\n' '{"hooks":{"Stop":[{"matcher":"","hooks":[{"type":"command","command":"bash \"${CLAUDE_PLUGIN_ROOT}/hooks/run.sh\" fixture-files"}]}]}}' > "$ST2/plugins/seyag/hooks/hooks.json"
+printf '%s\n' seed > "$T/stop-caller-credit"
 SYG_PR_MONITOR_SEEN_FILE="$T/stop-caller-seen" SYG_PR_BODY_ACK_FILE="$T/stop-caller-ack" SYG_STATE_DIR="$T/stop-caller-syg" \
+  SYG_CREDIT_LEDGER="$T/stop-caller-credit" \
   XDG_STATE_HOME="$T/stop-caller-state2" "$ST2/tests/replay-stop-hook.sh" fixture-files --since 1 --slug proj-slug --projects-dir "$T" >/dev/null 2>&1
 [ ! -e "$T/stop-caller-seen" ] && [ ! -e "$T/stop-caller-ack" ] && [ ! -e "$T/stop-caller-syg" ] \
   && ok "stop: caller overrides (SEEN, ACK, SYG_STATE_DIR) never reach a replayed hook" \
   || bad "stop: a caller override reached the hook: $(ls -A "$T" | tr '\n' ' ')"
+[ "$(cat "$T/stop-caller-credit")" = "seed" ] \
+  && ok "stop: caller ledger override (SYG_CREDIT_LEDGER) never reaches a replayed hook" \
+  || bad "stop: caller ledger override (SYG_CREDIT_LEDGER) never reaches a replayed hook: the caller's ledger was written: $(cat "$T/stop-caller-credit")"
 rm -rf "$ST2"
 
 exit $fail

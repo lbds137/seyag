@@ -257,13 +257,98 @@ echo x >>"${SYG_PR_BODY_ACK_FILE:-$fb/ack}"
 d="${SYG_STATE_DIR:-$fb}"
 mkdir -p "$d"
 echo x >>"$d/marker"
+# Persist-path overrides (review round 2): a ledger file, a dispatch ack file
+# and a launch-record dir, each written through when set, else to its fallback.
+echo x >>"${SYG_CREDIT_LEDGER:-$fb/credit}"
+echo x >>"${SYG_CLASSIFIER_LEDGER:-$fb/classifier}"
+echo x >>"${SYG_DISPATCH_ACK_FILE:-$fb/dispatch-ack}"
+rd="${SYG_LAUNCH_RECORD_DIR:-$fb/launch}"
+mkdir -p "$rd"
+echo x >>"$rd/record"
 exit 0
 EOF
 SYG_PR_MONITOR_SEEN_FILE="$T/caller-seen" SYG_PR_BODY_ACK_FILE="$T/caller-ack" SYG_STATE_DIR="$T/caller-syg" \
+  SYG_LAUNCH_RECORD_DIR="$T/caller-launch" SYG_CREDIT_LEDGER="$T/caller-credit" \
+  SYG_CLASSIFIER_LEDGER="$T/caller-classifier" SYG_DISPATCH_ACK_FILE="$T/caller-dispatch-ack" \
   XDG_STATE_HOME="$T/caller-state2" "$ST2_RH" fixture-files --since 1 --slug proj-slug --projects-dir "$T" >/dev/null 2>&1
 [ ! -e "$T/caller-seen" ] && [ ! -e "$T/caller-ack" ] && [ ! -e "$T/caller-syg" ] \
   && ok "caller overrides (SEEN, ACK, SYG_STATE_DIR) never reach a replayed hook" \
   || bad "a caller override reached the hook: $(ls -A "$T" | tr '\n' ' ')"
+[ ! -e "$T/caller-launch" ] && [ ! -e "$T/caller-credit" ] && [ ! -e "$T/caller-classifier" ] && [ ! -e "$T/caller-dispatch-ack" ] \
+  && ok "caller persist-path overrides (LAUNCH_RECORD_DIR, CREDIT_LEDGER, CLASSIFIER_LEDGER, DISPATCH_ACK_FILE) never reach a replayed hook" \
+  || bad "caller persist-path overrides (LAUNCH_RECORD_DIR, CREDIT_LEDGER, CLASSIFIER_LEDGER, DISPATCH_ACK_FILE) never reach a replayed hook: $(ls -A "$T" | tr '\n' ' ')"
 rm -rf "$ST2"
+
+# Session-gated hook in replay (TASK-25): cwd-drift-guard warns once per session
+# and linked worktree, so its first bare `git commit` from a linked worktree
+# blocks and the repeat in the same session passes. The gate keys on the
+# payload's session_id (cwd-drift-guard.sh:236-247, 447-452, 559, 586): without
+# one it fails open and blocks nothing, so this case is red until the replay
+# payload carries the id. Each file is one session, so each file blocks once
+# (2/4 across 2 files) and the repeat in each file passes.
+mkdir -p "$T/wt-main"
+git -C "$T/wt-main" init -q -b main
+git -C "$T/wt-main" -c user.email=fixture@example.invalid -c user.name=fixture commit -q --allow-empty -m init
+git -C "$T/wt-main" worktree add -q -b fixture-wt "$T/wt-linked" 2>/dev/null
+mkdir -p "$T/wt-slug"
+for n in 1 2; do
+  printf '%s\n' \
+    "{\"type\":\"assistant\",\"cwd\":\"$T/wt-linked\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"name\":\"Bash\",\"input\":{\"command\":\"git commit -m one\"}}]}}" \
+    "{\"type\":\"assistant\",\"cwd\":\"$T/wt-linked\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"name\":\"Bash\",\"input\":{\"command\":\"git commit -m two\"}}]}}" \
+    > "$T/wt-slug/replay-fixture-$n.jsonl"
+done
+out_wt=$("$RH" cwd-drift-guard --since 1 --slug wt-slug --projects-dir "$T" 2>&1)
+_pipe_out=$(tail -1 <<<"$out_wt") && grep -qxF "replay-hook: cwd-drift-guard: 2/4 commands blocked across 2 files" <<<"$_pipe_out" \
+  && ok "linked-worktree session gate: each file blocks its first git commit and passes the repeat (2/4 across 2 files)" \
+  || bad "linked-worktree session gate: $(echo "$out_wt" | tail -1)"
+grep -qxF "command: git commit -m one" <<<"$out_wt" \
+  && ! grep -qxF "command: git commit -m two" <<<"$out_wt" \
+  && ok "linked-worktree session gate: the blocked command is the first git commit, and the repeat is not blocked" \
+  || bad "linked-worktree session gate: blocked command text missing, or the repeat was blocked"
+
+# Subagent transcript under the same gate (TASK-25 review round 1). Its payload
+# carries no agent_id, so the gate key is the parent session's id: the first
+# bare git commit blocks and the repeat passes. An empty or dropped id reads
+# as ungated (0/2).
+mkdir -p "$T/wt-sub/replay-fixture-parent/subagents"
+printf '%s\n' \
+  "{\"type\":\"assistant\",\"cwd\":\"$T/wt-linked\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"name\":\"Bash\",\"input\":{\"command\":\"git commit -m one\"}}]}}" \
+  "{\"type\":\"assistant\",\"cwd\":\"$T/wt-linked\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"name\":\"Bash\",\"input\":{\"command\":\"git commit -m two\"}}]}}" \
+  > "$T/wt-sub/replay-fixture-parent/subagents/replay-fixture-agent-1.jsonl"
+out_sub=$("$RH" cwd-drift-guard --since 1 --slug wt-sub --projects-dir "$T" 2>&1)
+_pipe_out=$(tail -1 <<<"$out_sub") && grep -qxF "replay-hook: cwd-drift-guard: 1/2 commands blocked across 1 files" <<<"$_pipe_out" \
+  && grep -qxF "command: git commit -m one" <<<"$out_sub" \
+  && ok "subagent session gate: the subagent's first git commit blocks and its repeat passes (1/2 across 1 file)" \
+  || bad "subagent session gate: $(echo "$out_sub" | tail -1)"
+
+# Derived session_id, pinned by value (TASK-25 review round 1). A fixture hook
+# blocks every call and echoes the session_id it was handed, so these lines pin
+# the derivation: a top-level transcript passes its filename stem, a subagent
+# transcript passes its parent session's directory name.
+SIDT=$(mktemp -d)
+mkdir -p "$SIDT/tests" "$SIDT/plugins/seyag/hooks" "$SIDT/sid-slug/replay-fixture-parent/subagents"
+cp "$RH" "$SIDT/tests/replay-hook.sh"
+SIDT_RH="$SIDT/tests/replay-hook.sh"
+cat > "$SIDT/plugins/seyag/hooks/fixture-sid.sh" <<'EOF'
+#!/bin/bash
+# Blocks every call and echoes the session_id it was handed.
+echo "sid=$(jq -r '.session_id // ""')"
+exit 2
+EOF
+printf '%s\n' '{"type":"assistant","cwd":"/tmp/fixture-project","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"ls"}}]}}' \
+  > "$SIDT/sid-slug/replay-fixture-1.jsonl"
+printf '%s\n' '{"type":"assistant","cwd":"/tmp/fixture-project","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"ls"}}]}}' \
+  > "$SIDT/sid-slug/replay-fixture-parent/subagents/replay-fixture-agent-1.jsonl"
+out_sid=$("$SIDT_RH" fixture-sid --since 1 --slug sid-slug --projects-dir "$SIDT" 2>&1)
+grep -qxF "sid=replay-fixture-1" <<<"$out_sid" \
+  && ok "derived session_id: a top-level transcript passes its filename stem (replay-fixture-1)" \
+  || bad "derived session_id: top-level stem not received: $(echo "$out_sid" | head -3 | tr '\n' ' ')"
+grep -qxF "sid=replay-fixture-parent" <<<"$out_sid" \
+  && ok "derived session_id: a subagent transcript passes its parent directory name (replay-fixture-parent)" \
+  || bad "derived session_id: subagent parent id not received: $(echo "$out_sid" | head -3 | tr '\n' ' ')"
+_pipe_out=$(tail -1 <<<"$out_sid") && grep -qxF "replay-hook: fixture-sid: 2/2 commands blocked across 2 files" <<<"$_pipe_out" \
+  && ok "derived session_id: both fixture transcripts replayed (2/2 across 2 files)" \
+  || bad "derived session_id: summary $(echo "$out_sid" | tail -1)"
+rm -rf "$SIDT"
 
 exit $fail
