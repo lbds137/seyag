@@ -12,6 +12,10 @@ Adopt in a bin, before its first knob read:
 
 syg_config_env never raises and never blocks: a bad config file warns on stderr
 and its bad lines are skipped.
+
+Known divergence limits from the shell loader: whitespace trimming is ASCII-only
+(the shell's [[:space:]] follows the locale), and the 40-character name bound
+counts code points here but bytes in the shell under a single-byte locale.
 """
 
 import os
@@ -35,6 +39,11 @@ _HARNESS = frozenset(
 
 # Mirrors _SYG_CFG_PROJECT_EXEC in hooks/lib/config-env.sh (pinned equal by the probe).
 _PROJECT_EXEC = frozenset(["SYG_STATUSLINE_ZAI_USAGE"])
+
+# Mirrors _SYG_CFG_PROJECT_SECURE in hooks/lib/config-env.sh (pinned equal by the probe).
+_PROJECT_SECURE = frozenset(
+    ["SYG_KEYS_NAME", "SYG_KEYS_WITH_KEY", "ZAI_AUTH_TOKEN", "SYG_CREDIT_WHEN", "SYG_CREDIT_ROUTE"]
+)
 
 _VALID_PATH = re.compile(r"[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)*")
 _INT_TOKEN = re.compile(r"-?[0-9]+")
@@ -172,6 +181,8 @@ def _parse_file(path, scope, foreign, st):
     n = 0
     for raw in lines:
         n += 1
+        if "\x00" in raw:
+            raw = raw[: raw.index("\x00")]
         line = raw[:-1] if raw.endswith("\r") else raw
         if skip_delim:
             if skip_delim in line:
@@ -266,6 +277,18 @@ def _parse_file(path, scope, foreign, st):
                     "(command-execution knob)"
                 )
             continue
+        if scope == "project" and name in _PROJECT_SECURE:
+            if foreign:
+                _warn(
+                    f"seyag config: {path}: line {n}: a knob cannot be set from project scope "
+                    "(security-material knob)"
+                )
+            else:
+                _warn(
+                    f"seyag config: {path}: line {n}: '{_disp(name)}' cannot be set from project scope "
+                    "(security-material knob)"
+                )
+            continue
         if scope == "project" and name in st.path:
             if foreign:
                 _warn(f"seyag config: {path}: line {n}: a knob cannot be set from project scope (path knob)")
@@ -326,6 +349,8 @@ def _load(plugin_dir, st):
     if rows and rows[-1] == "":
         rows.pop()
     for n, row in enumerate(rows, 1):
+        if "\x00" in row:
+            row = row[: row.index("\x00")]
         if row.endswith("\r"):
             row = row[:-1]
         stripped = row.lstrip(_WS)
@@ -382,6 +407,9 @@ def syg_config_env(plugin_dir):
         _load(plugin_dir, st)
         for name, value in st.map.items():
             if name not in os.environ:
-                os.environ[name] = value
+                try:
+                    os.environ[name] = value
+                except Exception:
+                    continue
     except Exception:
         return

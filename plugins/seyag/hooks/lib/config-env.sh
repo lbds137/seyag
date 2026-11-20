@@ -38,9 +38,13 @@
 # warn too, and their keys merge (again first value per key). Names ending
 # _CMD, and the binary-path knobs in _SYG_CFG_PROJECT_EXEC below, cannot be
 # set from the project file (a repo must not choose the executables this
-# machine runs), and rows carrying `path` in knobs.tsv's 6th `flags` column
-# cannot be set from the project file (a repo must not aim seyag at arbitrary
-# filesystem paths). SYG_CONFIG=0 disables the loader entirely.
+# machine runs), the security-material knobs in _SYG_CFG_PROJECT_SECURE below
+# cannot be set from the project file (a repo must not weaken the credential
+# store — --with-key downgrades TPM binding, --name can break decrypt — or fake
+# the token and route labels its spend is billed and audited by), and rows
+# carrying `path` in knobs.tsv's 6th `flags` column cannot be set from the
+# project file (a repo must not aim seyag at arbitrary filesystem paths).
+# SYG_CONFIG=0 disables the loader entirely.
 
 # Harness-owned names (see the header): never settable from a config file. Kept
 # equal to the user-scope rows of SCAN_EXACT_NAMES in tests/config-reference.py
@@ -79,6 +83,31 @@ _SYG_CFG_PROJECT_EXEC=(
 _syg_cfg_in_project_exec() {
   local n
   for n in "${_SYG_CFG_PROJECT_EXEC[@]}"; do
+    [ "$n" = "$1" ] && return 0
+  done
+  return 1
+}
+
+# Credential-store and billing/lane knobs (the keys store's --name and
+# --with-key; the z.ai bearer token; the credit route-match rule and ledger
+# label): refused from project scope, settable from user scope — a repo must
+# not weaken the credential store (--with-key downgrades TPM binding, --name
+# can break decrypt) or fake the token and route labels its spend is billed
+# and audited by. Kept equal to _PROJECT_SECURE in lib/config_env.py by
+# tests/config-env.probe.sh (w).
+_SYG_CFG_PROJECT_SECURE=(
+  SYG_KEYS_NAME
+  SYG_KEYS_WITH_KEY
+  ZAI_AUTH_TOKEN
+  SYG_CREDIT_WHEN
+  SYG_CREDIT_ROUTE
+)
+
+# _syg_cfg_in_project_secure <NAME>: is NAME a security-material knob (refused
+# from project scope, settable from user scope)?
+_syg_cfg_in_project_secure() {
+  local n
+  for n in "${_SYG_CFG_PROJECT_SECURE[@]}"; do
     [ "$n" = "$1" ] && return 0
   done
   return 1
@@ -354,6 +383,15 @@ _syg_cfg_parse_file() {
       else
         _syg_cfg_disp "$name"
         echo "seyag config: $file: line $n: '$disp' cannot be set from project scope (command-execution knob)" >&2
+      fi
+      continue
+    fi
+    if [ "$scope" = project ] && _syg_cfg_in_project_secure "$name"; then
+      if [ "$foreign" != 0 ]; then
+        echo "seyag config: $file: line $n: a knob cannot be set from project scope (security-material knob)" >&2
+      else
+        _syg_cfg_disp "$name"
+        echo "seyag config: $file: line $n: '$disp' cannot be set from project scope (security-material knob)" >&2
       fi
       continue
     fi

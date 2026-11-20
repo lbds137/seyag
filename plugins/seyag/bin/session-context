@@ -23,7 +23,7 @@
 # `bash -c`, stdin closed) that prints a JSON array of {name, folder, sessionId, status, tokens};
 # each becomes a row with model SYG_SESSION_CONTEXT_EXTRA_MODEL (default "other") and flag
 # threshold SYG_SESSION_CONTEXT_EXTRA_THRESHOLD (default 150000). Unset: no extra rows. Set but
-# failing (nonzero exit, not a JSON array, or a row whose tokens is not a number): a stderr line
+# failing (nonzero exit, not a JSON array, only non-object entries, or a row whose tokens is not a number): a stderr line
 # says so and the Claude rows still print.
 
 set -uo pipefail
@@ -67,7 +67,13 @@ jq -e 'type == "array"' <<< "$agents" >/dev/null 2>&1 \
 while IFS= read -r i; do
     [ -n "$i" ] && echo "session-context: skipping agents entry $i: not an object" >&2
 done < <(jq -r 'to_entries[] | select(.value | type != "object") | .key' <<< "$agents")
+agents_n=$(jq 'length' <<< "$agents")
 agents=$(jq -c '[.[] | select(type == "object")]' <<< "$agents")
+# Every entry skipped means the format changed, not an empty session list: loud, not an empty table.
+if [ "$agents_n" -gt 0 ] && [ "$(jq length <<< "$agents")" = 0 ]; then
+    echo "session-context: every agents entry was skipped (format changed?)" >&2
+    exit 1
+fi
 
 # The main checkout's folder name (agent worktrees count as their repo), as claude-role names it.
 folder_of() {
@@ -118,7 +124,9 @@ if [ -n "${SYG_SESSION_CONTEXT_EXTRA_CMD:-}" ]; then
     # Set but failing is loud: a silently dropped harness would hide its flagged sessions.
     if extra_raw=$(bash -c "$SYG_SESSION_CONTEXT_EXTRA_CMD" </dev/null) \
         && jq -e 'type == "array"' <<< "$extra_raw" >/dev/null 2>&1 \
-        && extra_rows=$(jq -c --argjson la "$limit_extra" --arg model "$extra_model" '[.[] | select(type == "object")] | if all(.[]; .tokens == null or (.tokens | type) == "number") then [.[] | {
+        && extra_rows=$(jq -c --argjson la "$limit_extra" --arg model "$extra_model" '. as $all | [.[] | select(type == "object")] as $objs
+            | if ($all | length) > 0 and ($objs | length) == 0 then error("every entry is not an object")
+            elif all($objs[]; .tokens == null or (.tokens | type) == "number") then [$objs[] | {
             name: (.name | if type == "string" then . else "extra" end),
             folder: (.folder | if type == "string" then . else "" end),
             sessionId: (.sessionId | if type == "string" then . else "" end),

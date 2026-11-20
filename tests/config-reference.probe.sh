@@ -404,6 +404,16 @@ for k in SYG_AGY_BRAIN_DIR SYG_AGY_SUMMARIES_DB; do
   fi
 done
 
+# (x5) The security-material knobs are user only in docs/config.md: the loader refuses them from the project file
+# (_SYG_CFG_PROJECT_SECURE), so the Config column must say so.
+for k in SYG_KEYS_NAME SYG_KEYS_WITH_KEY ZAI_AUTH_TOKEN SYG_CREDIT_WHEN SYG_CREDIT_ROUTE; do
+  if grep -qE "^\| \`$k\` \|.* \| user only \|\$" "$REPO_ROOT/docs/config.md"; then
+    ok "(x5) $k: docs/config.md says user only"
+  else
+    fail "(x5) $k: docs/config.md Config column is not user only"
+  fi
+done
+
 # Live check against the repository root.
 if python3 "$SCRIPT" --root "$REPO_ROOT" --check 2>"$TMP/err.live"; then
   ok "(live) repo knobs.tsv and docs/config.md are valid and in sync"

@@ -878,6 +878,12 @@ keep = sorted(i for i in items if i and i.split(b"=", 1)[0].decode("ascii", "rep
 sys.stdout.buffer.write(b"".join(i + b"\n" for i in keep))
 EOF
 
+# write_body BODY FILE: write BODY to FILE, with each <NUL> marker a real NUL byte
+# (a bash string cannot hold one: $'...\x00...' truncates the whole string there).
+write_body() {
+  printf '%s' "$1" | "$PY3" -I -B -c 'import sys; sys.stdout.buffer.write(sys.stdin.buffer.read().replace(b"<NUL>", b"\0"))' >"$2"
+}
+
 # parity_case NAME SCOPE BODY [EXTRA_ENV] [symlink]: BODY goes to the user file
 # (SCOPE=user) or the project file (SCOPE=project; "symlink" makes it a link to a
 # file outside the project, a foreign project file).
@@ -887,12 +893,12 @@ parity_case() {
   mkdir -p "$d/home/.config/seyag" "$d/proj/.claude"
   if [ "$scope" = user ]; then
     f="$d/home/.config/seyag/config.toml"
-    printf '%s' "$body" >"$f"
+    write_body "$body" "$f"
   elif [ "$shape" = symlink ]; then
-    printf '%s' "$body" >"$d/outside.toml"
+    write_body "$body" "$d/outside.toml"
     ln -s "$d/outside.toml" "$d/proj/.claude/seyag.toml"
   else
-    printf '%s' "$body" >"$d/proj/.claude/seyag.toml"
+    write_body "$body" "$d/proj/.claude/seyag.toml"
   fi
   # shellcheck disable=SC2086
   env -i PATH="$PATH" LC_ALL=C.UTF-8 HOME="$d/home" CLAUDE_PROJECT_DIR="$d/proj" $extra \
@@ -981,6 +987,16 @@ syg_enable = ""
 '
   PW_DOTTED='a.b = 1
 '
+  # A NUL byte truncates its line at the NUL, as bash's C strings do; the next line still applies.
+  PW_NUL='syg_clock_stamp_hint = "a<NUL>b"
+syg_enable = 1
+'
+  PW_SECURE='syg_keys_name = "evil"
+syg_keys_with_key = "host"
+zai_auth_token = "tok"
+syg_credit_when = "X=1"
+syg_credit_route = "fake"
+'
   parity_case valid user "$PW_VALID"
   parity_case valid project "$PW_VALID"
   parity_case refuse user "$PW_REFUSE"
@@ -1002,6 +1018,25 @@ syg_enable = ""
   parity_case dotted user "$PW_DOTTED"
   parity_case foreign project "$PW_REFUSE$PW_MALFORMED" "" symlink
   parity_case sys_config_off user "$PW_VALID" "SYG_CONFIG=0"
+  parity_case nul user "$PW_NUL"
+  parity_case secure project "$PW_SECURE"
+  parity_case secure user "$PW_SECURE"
+  # The NUL case must also export the line after the truncated one (parity alone would pass two equal losses).
+  if grep -qx 'SYG_ENABLE=1' "$TMP/par-nul-user/sh.x" && grep -qx 'SYG_ENABLE=1' "$TMP/par-nul-user/py.x" \
+    && grep -q 'unterminated string' "$TMP/par-nul-user/sh.err"; then
+    ok "(w) NUL in a value: both loaders warn unterminated and still export SYG_ENABLE=1"
+  else
+    fail "(w) NUL in a value: SYG_ENABLE not exported by both, or no unterminated warn (sh.x '$(cat "$TMP/par-nul-user/sh.x")', py.x '$(cat "$TMP/par-nul-user/py.x")')"
+  fi
+  # The project-secure knobs are refused from the project file and accepted from the user file.
+  if grep -qx 'SYG_KEYS_NAME=evil' "$TMP/par-secure-user/sh.x" && grep -qx 'SYG_KEYS_WITH_KEY=host' "$TMP/par-secure-user/sh.x" \
+    && grep -qx 'ZAI_AUTH_TOKEN=tok' "$TMP/par-secure-user/sh.x" && grep -qx 'SYG_CREDIT_WHEN=X=1' "$TMP/par-secure-user/sh.x" \
+    && grep -qx 'SYG_CREDIT_ROUTE=fake' "$TMP/par-secure-user/sh.x" \
+    && ! grep -qE 'SYG_KEYS|ZAI_AUTH_TOKEN|CREDIT_WHEN|CREDIT_ROUTE' "$TMP/par-secure-project/sh.x"; then
+    ok "(w) security-material knobs: project file refused, user file exports all five"
+  else
+    fail "(w) security-material knobs: user '$(cat "$TMP/par-secure-user/sh.x")', project '$(cat "$TMP/par-secure-project/sh.x")'"
+  fi
 
   # The harness-owned and project-exec lists: the shell's arrays and the python
   # tuples name the same knobs (both files parsed here, nothing imported).
@@ -1016,6 +1051,8 @@ pairs = {
                 re.search(r"_HARNESS = frozenset\(\s*\[(.*?)\]", py, re.S)),
     "project-exec": (re.search(r"_SYG_CFG_PROJECT_EXEC=\((.*?)\)", sh, re.S),
                      re.search(r"_PROJECT_EXEC = frozenset\(\s*\[(.*?)\]", py, re.S)),
+    "project-secure": (re.search(r"_SYG_CFG_PROJECT_SECURE=\((.*?)\)", sh, re.S),
+                       re.search(r"_PROJECT_SECURE = frozenset\(\s*\[(.*?)\]", py, re.S)),
 }
 bad = []
 for label, (a, b) in pairs.items():
