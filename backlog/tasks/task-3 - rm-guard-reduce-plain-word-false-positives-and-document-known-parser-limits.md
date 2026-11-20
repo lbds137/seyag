@@ -1,13 +1,15 @@
 ---
 id: TASK-3
 title: 'rm-guard: reduce plain-word false positives and document known parser limits'
-status: Deferred
+status: To Do
 assignee: []
 created_date: '2026-11-19T14:22:00Z'
+updated_date: '2026-11-20T02:21:00Z'
 labels:
   - hooks
   - deferred
 dependencies: []
+priority: medium
 ordinal: 3000
 ---
 
@@ -24,4 +26,6 @@ exemption bar is guardrail against careless deletes, not hostile agents.
   `VAR+=`/`VAR[0]=` prefix assignments hiding cd/rm from analysis, abbreviated runner flags
   (`sudo --chd=`/`-nD`, `parallel ::::+`/`--workd`/`--arg-f`, `env -iu`/`--un`, `xargs -0a`,
   `cp --sym`), `parallel rm` plus the cache-dir heuristic.
+
+Promoted 2026-11-19 (prioritization pass): trigger fired - recursive-rm-guard was touched by PR #335.
 <!-- SECTION:DESCRIPTION:END -->

@@ -4,9 +4,11 @@ title: 'implementer/delegation docs: flag the unicode-escape transport hazard'
 status: To Do
 assignee: []
 created_date: '2026-11-19T14:24:00Z'
+updated_date: '2026-11-20T02:22:00Z'
 labels:
   - skills
 dependencies: []
+priority: low
 ordinal: 24000
 ---
 

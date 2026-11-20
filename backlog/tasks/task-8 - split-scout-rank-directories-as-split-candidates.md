@@ -4,11 +4,12 @@ title: 'split-scout: rank directories as split candidates'
 status: To Do
 assignee: []
 created_date: '2026-11-19T14:23:00Z'
-updated_date: '2026-11-19T21:21:00Z'
+updated_date: '2026-11-20T02:22:00Z'
 labels:
   - bin
   - skills
 dependencies: []
+priority: low
 ordinal: 8000
 ---
 
@@ -22,6 +23,8 @@ optional import fan-in/fan-out adapter (e.g. dependency-cruiser JSON), junk-draw
 (utils/helpers/common) over a size threshold. Output: ranked table plus --json for briefing.
 Top candidate goes to the owning repo's design session, never straight to a refactor.
 Slot: after the mining asks-lens hands off. Design notes live in a private planning doc.
+
+Needs owner: promote split-scout to a build unit? (parked since 2026-11-17; design notes in the private planning doc)
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Comments

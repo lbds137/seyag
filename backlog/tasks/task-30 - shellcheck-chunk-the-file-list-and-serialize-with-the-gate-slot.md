@@ -5,11 +5,12 @@ status: In Progress
 assignee:
   - seyag-b
 created_date: '2026-11-19T14:24:00Z'
-updated_date: '2026-11-19T19:42:00Z'
+updated_date: '2026-11-20T02:21:00Z'
 labels:
   - probes
   - perf
 dependencies: []
+priority: medium
 ordinal: 30000
 ---
 

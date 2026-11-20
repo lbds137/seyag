@@ -4,11 +4,13 @@ title: 'relay-ruling: --run accepts more operators than the error text promises'
 status: To Do
 assignee: []
 created_date: '2026-11-19T14:23:00Z'
+updated_date: '2026-11-20T02:21:00Z'
 labels:
   - bin
   - probes
 dependencies: []
-ordinal: 14000
+priority: medium
+ordinal: 70
 ---
 
 ## Description

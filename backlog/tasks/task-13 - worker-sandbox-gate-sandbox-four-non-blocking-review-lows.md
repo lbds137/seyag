@@ -4,10 +4,12 @@ title: 'worker-sandbox/gate-sandbox: four non-blocking review lows'
 status: To Do
 assignee: []
 created_date: '2026-11-19T14:23:00Z'
+updated_date: '2026-11-20T02:21:00Z'
 labels:
   - bin
 dependencies: []
-ordinal: 13000
+priority: medium
+ordinal: 90
 ---
 
 ## Description

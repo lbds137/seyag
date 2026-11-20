@@ -4,11 +4,13 @@ title: 'probes: extract a shared probe preamble lib (~500 duplicated lines)'
 status: To Do
 assignee: []
 created_date: '2026-11-19T14:24:00Z'
+updated_date: '2026-11-20T02:21:00Z'
 labels:
   - probes
   - bin
 dependencies: []
-ordinal: 22000
+priority: medium
+ordinal: 100
 ---
 
 ## Description

@@ -4,9 +4,11 @@ title: 'bin SCRIPT_DIR resolution: readlink -f idiom vs raw dirname'
 status: To Do
 assignee: []
 created_date: '2026-11-19T18:03:00Z'
+updated_date: '2026-11-20T02:17:00Z'
 labels:
   - bin
 dependencies: []
+priority: low
 ordinal: 31000
 ---
 
