@@ -3,8 +3,9 @@ id: TASK-25
 title: >-
   replay-hook: inject a session id so session-gated gates do not replay
   vacuous-green
-status: To Do
-assignee: []
+status: Done
+assignee:
+  - seyag-b
 created_date: '2026-11-19T14:24:00Z'
 labels:
   - probes
