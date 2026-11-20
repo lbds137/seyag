@@ -856,6 +856,199 @@ else
   fail "(v) L3b/5-field knobs rows: out '$OUT_V', err '$(cat "$TMP/err.v")' (want '$WANT_ERR_V')"
 fi
 
+# (w) Python parity: plugins/seyag/lib/config_env.py must export the same names and
+# print the same stderr bytes as the shell loader for the same files. Each case
+# runs both loaders from one scrubbed environment (env -i, LC_ALL pinned) and
+# compares the exported names (sorted, interpreter noise dropped) and stderr with
+# cmp. Fixtures use invented names only.
+PY3=$(command -v python3) || { fail "(w) python3 not on PATH"; PY3=""; }
+PY_LIB="$PLUGIN/lib"
+cat >"$TMP/py-report.py" <<'EOF'
+import os, sys
+sys.path.insert(0, sys.argv[1])
+import config_env
+config_env.syg_config_env(sys.argv[2])
+sys.stdout.buffer.write(b"\0".join(os.fsencode(k) + b"=" + os.fsencode(v) for k, v in os.environ.items()) + b"\0")
+EOF
+cat >"$TMP/env-filter.py" <<'EOF'
+import sys
+SKIP = {"_", "SHLVL", "PWD", "OLDPWD", "LC_CTYPE"}
+items = sys.stdin.buffer.read().split(b"\0")
+keep = sorted(i for i in items if i and i.split(b"=", 1)[0].decode("ascii", "replace") not in SKIP)
+sys.stdout.buffer.write(b"".join(i + b"\n" for i in keep))
+EOF
+
+# parity_case NAME SCOPE BODY [EXTRA_ENV] [symlink]: BODY goes to the user file
+# (SCOPE=user) or the project file (SCOPE=project; "symlink" makes it a link to a
+# file outside the project, a foreign project file).
+parity_case() {
+  local name=$1 scope=$2 body=$3 extra=${4:-} shape=${5:-plain}
+  local d="$TMP/par-$name-$scope" f
+  mkdir -p "$d/home/.config/seyag" "$d/proj/.claude"
+  if [ "$scope" = user ]; then
+    f="$d/home/.config/seyag/config.toml"
+    printf '%s' "$body" >"$f"
+  elif [ "$shape" = symlink ]; then
+    printf '%s' "$body" >"$d/outside.toml"
+    ln -s "$d/outside.toml" "$d/proj/.claude/seyag.toml"
+  else
+    printf '%s' "$body" >"$d/proj/.claude/seyag.toml"
+  fi
+  # shellcheck disable=SC2086
+  env -i PATH="$PATH" LC_ALL=C.UTF-8 HOME="$d/home" CLAUDE_PROJECT_DIR="$d/proj" $extra \
+    bash -c 'source "$1"; syg_config_env "$2"; env -0' _ "$LIB" "$PLUGIN" >"$d/sh.env" 2>"$d/sh.err"
+  # shellcheck disable=SC2086
+  env -i PATH="$PATH" LC_ALL=C.UTF-8 HOME="$d/home" CLAUDE_PROJECT_DIR="$d/proj" $extra \
+    "$PY3" -I -B "$TMP/py-report.py" "$PY_LIB" "$PLUGIN" >"$d/py.env" 2>"$d/py.err"
+  "$PY3" -I -B "$TMP/env-filter.py" <"$d/sh.env" >"$d/sh.x"
+  "$PY3" -I -B "$TMP/env-filter.py" <"$d/py.env" >"$d/py.x"
+  if cmp -s "$d/sh.x" "$d/py.x" && cmp -s "$d/sh.err" "$d/py.err"; then
+    ok "(w) parity $name ($scope): same exports ($(wc -l <"$d/sh.x") names), byte-equal stderr ($(wc -c <"$d/sh.err") bytes)"
+  else
+    fail "(w) parity $name ($scope): exports or stderr differ (diff $d/sh.x $d/py.x; diff $d/sh.err $d/py.err)"
+  fi
+}
+
+if [ -n "$PY3" ]; then
+  PW_VALID='syg_enable = 1
+[statusline]
+zai_timeout = "5"
+'
+  PW_REFUSE='syg_owner_name = "x"
+foo = 1
+syg_statusline_zai_usage = "/bin/x"
+claude_projects_dir = "/x"
+syg_agy_brain_dir = "/tmp/brain"
+'
+  PW_MALFORMED='syg_enable = maybe
+syg_enable = [1]
+syg_enable = {a=1}
+syg_enable = "abc
+syg_enable = "a\q"
+syg_enable = 1 2
+syg_enable = +5
+syg_enable = 1e3
+syg_enable = # c
+no equals here
+[bad section]
+syg_enable = 1
+'
+  PW_MULTI='a = 1
+x = """
+syg_enable = 1
+"""
+syg_enable = 2
+k = """one"""
+z = '"'''"'
+body
+'
+  PW_MULTI_EOF='syg_enable = 1
+k = """abc
+syg_enable = 0
+'
+  PW_DUP='syg_enable = 1
+syg_enable = 0
+[s]
+x = 1
+[s]
+x = 2
+'
+  PW_NUMS='syg_enable = -3
+syg_enable = 1.5
+syg_clock_stamp_hint = true
+syg_enable = false
+'
+  PW_ESC='syg_clock_stamp_hint = "a\tb\nc\\d\"e"
+syg_enable = "x\z"
+'
+  PW_TRAIL='syg_enable = "1" junk
+syg_clock_stamp_hint = "1" # ok
+syg_enable = 1 # ok
+syg_enable = '"'1'"' x
+'
+  PW_BADSEC='[a]
+x = 1
+[bad..x]
+syg_enable = 1
+'
+  PW_CRLF=$'syg_enable = 1\r\n# c\r\nsyg_clock_stamp_hint = "x"\r\n'
+  PW_LONG='syg_this_is_a_really_long_unknown_key_name_that_goes_past_forty_chars = 1
+'
+  PW_CTRL=$'k\x01ey = 1\nsyg_enable = "a\x7fb"\n'
+  PW_NONL='syg_enable = 1'
+  PW_EMPTY='syg_enable =
+syg_enable = ""
+'
+  PW_DOTTED='a.b = 1
+'
+  parity_case valid user "$PW_VALID"
+  parity_case valid project "$PW_VALID"
+  parity_case refuse user "$PW_REFUSE"
+  parity_case refuse project "$PW_REFUSE"
+  parity_case malformed user "$PW_MALFORMED"
+  parity_case malformed project "$PW_MALFORMED"
+  parity_case multiline user "$PW_MULTI"
+  parity_case multiline_eof project "$PW_MULTI_EOF"
+  parity_case duplicates user "$PW_DUP"
+  parity_case numbers project "$PW_NUMS"
+  parity_case escapes user "$PW_ESC"
+  parity_case trailing project "$PW_TRAIL"
+  parity_case bad_section user "$PW_BADSEC"
+  parity_case crlf user "$PW_CRLF"
+  parity_case long_name user "$PW_LONG"
+  parity_case ctrl user "$PW_CTRL"
+  parity_case no_newline user "$PW_NONL"
+  parity_case empty_val project "$PW_EMPTY"
+  parity_case dotted user "$PW_DOTTED"
+  parity_case foreign project "$PW_REFUSE$PW_MALFORMED" "" symlink
+  parity_case sys_config_off user "$PW_VALID" "SYG_CONFIG=0"
+
+  # The harness-owned and project-exec lists: the shell's arrays and the python
+  # tuples name the same knobs (both files parsed here, nothing imported).
+  LISTS_OK=$("$PY3" -I -B - "$LIB" "$PY_LIB/config_env.py" <<'PYEOF'
+import re, sys
+sh = open(sys.argv[1], encoding="utf-8").read()
+py = open(sys.argv[2], encoding="utf-8").read()
+def names(block):
+    return sorted(set(re.findall(r"[A-Z][A-Z0-9_]+", block)))
+pairs = {
+    "harness": (re.search(r"_SYG_CFG_HARNESS=\((.*?)\n\)", sh, re.S),
+                re.search(r"_HARNESS = frozenset\(\s*\[(.*?)\]", py, re.S)),
+    "project-exec": (re.search(r"_SYG_CFG_PROJECT_EXEC=\((.*?)\)", sh, re.S),
+                     re.search(r"_PROJECT_EXEC = frozenset\(\s*\[(.*?)\]", py, re.S)),
+}
+bad = []
+for label, (a, b) in pairs.items():
+    if a is None or b is None:
+        bad.append(f"{label}: list not found (shell {a is not None}, python {b is not None})")
+        continue
+    if names(a.group(1)) != names(b.group(1)) or not names(a.group(1)):
+        bad.append(f"{label}: shell {names(a.group(1))} python {names(b.group(1))}")
+print("ok" if not bad else "; ".join(bad))
+PYEOF
+)
+  if [ "$LISTS_OK" = ok ]; then
+    ok "(w) harness and project-exec lists equal in config-env.sh and config_env.py"
+  else
+    fail "(w) list parity: $LISTS_OK"
+  fi
+
+  # Every python bin adopts the loader (the uniform rule): python shebang in the
+  # shipped form, and the wiring call present. zai-spend is a link to zai-usage.
+  ADOPT_BAD=""
+  for b in "$PLUGIN"/bin/*; do
+    first=$(head -1 "$b" 2>/dev/null)
+    case $first in '#!'*python*) ;; *) continue ;; esac
+    grep -qx '#!/usr/bin/env -S python3 -I -B' "$b" || ADOPT_BAD="$ADOPT_BAD $(basename "$b"):shebang"
+    grep -q 'config_env.syg_config_env(_SYG_ROOT)' "$b" || ADOPT_BAD="$ADOPT_BAD $(basename "$b"):adoption"
+  done
+  if [ -z "$ADOPT_BAD" ]; then
+    ok "(w) every python bin in bin/ has the -I -B shebang and calls config_env.syg_config_env"
+  else
+    fail "(w) python bins not adopting the loader:$ADOPT_BAD"
+  fi
+fi
+
 echo ""
 if [ "$FAILURES" -gt 0 ]; then
   echo "FAILED ($FAILURES failure(s))"

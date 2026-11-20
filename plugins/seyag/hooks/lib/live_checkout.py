@@ -6,7 +6,7 @@ header). The body is top-level code with no main(): it runs on import, and
 its functions read the module globals it assigns, so keep it that way.
 
 Only live-checkout-guard.sh imports this module, and only through
-`python3 -I -c 'import live_checkout'` with hooks/lib first on sys.path. Being
+`python3 -I "${SYG_PY_CACHE_ARG:--B}" -c 'import live_checkout'` with hooks/lib first on sys.path. Being
 imported (not run as a script or piped through a heredoc) is what lets
 CPython cache its bytecode. The caller runs `python3 -I`, which keeps the
 process cwd (a session's repo) off sys.path on every Python version, and

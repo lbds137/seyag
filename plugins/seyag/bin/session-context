@@ -62,6 +62,12 @@ projects="${CLAUDE_PROJECTS_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects}"
 agents=$(claude agents --json) || { echo "session-context: claude agents --json failed" >&2; exit 1; }
 jq -e 'type == "array"' <<< "$agents" >/dev/null 2>&1 \
     || { echo "session-context: claude agents --json didn't return a list (format changed?)" >&2; exit 1; }
+# A non-object entry (null, a string) has no session: skip it with one warn per entry, so it
+# cannot become a phantom 0-token row.
+while IFS= read -r i; do
+    [ -n "$i" ] && echo "session-context: skipping agents entry $i: not an object" >&2
+done < <(jq -r 'to_entries[] | select(.value | type != "object") | .key' <<< "$agents")
+agents=$(jq -c '[.[] | select(type == "object")]' <<< "$agents")
 
 # The main checkout's folder name (agent worktrees count as their repo), as claude-role names it.
 folder_of() {
@@ -112,7 +118,7 @@ if [ -n "${SYG_SESSION_CONTEXT_EXTRA_CMD:-}" ]; then
     # Set but failing is loud: a silently dropped harness would hide its flagged sessions.
     if extra_raw=$(bash -c "$SYG_SESSION_CONTEXT_EXTRA_CMD" </dev/null) \
         && jq -e 'type == "array"' <<< "$extra_raw" >/dev/null 2>&1 \
-        && extra_rows=$(jq -c --argjson la "$limit_extra" --arg model "$extra_model" 'if all(.[]; .tokens == null or (.tokens | type) == "number") then [.[] | {
+        && extra_rows=$(jq -c --argjson la "$limit_extra" --arg model "$extra_model" '[.[] | select(type == "object")] | if all(.[]; .tokens == null or (.tokens | type) == "number") then [.[] | {
             name: (.name | if type == "string" then . else "extra" end),
             folder: (.folder | if type == "string" then . else "" end),
             sessionId: (.sessionId | if type == "string" then . else "" end),
@@ -122,7 +128,9 @@ if [ -n "${SYG_SESSION_CONTEXT_EXTRA_CMD:-}" ]; then
             flag_at: $la,
             flagged: ((.tokens // 0) > $la)
         }] else error("tokens is not a number") end' <<< "$extra_raw" 2>/dev/null); then
-        :
+        while IFS= read -r i; do
+            [ -n "$i" ] && echo "session-context: skipping extra entry $i: not an object" >&2
+        done < <(jq -r 'to_entries[] | select(.value | type != "object") | .key' <<< "$extra_raw")
     else
         extra_rows='[]'
         echo "session-context: SYG_SESSION_CONTEXT_EXTRA_CMD failed; its sessions are missing" >&2

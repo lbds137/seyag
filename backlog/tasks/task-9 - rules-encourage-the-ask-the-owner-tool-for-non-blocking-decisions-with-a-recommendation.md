@@ -3,9 +3,10 @@ id: TASK-9
 title: >-
   rules: encourage the ask-the-owner tool for non-blocking decisions with a
   recommendation
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-11-19T14:23:00Z'
+updated_date: '2026-11-20T00:16:00Z'
 labels:
   - rules
 dependencies: []
@@ -23,4 +24,6 @@ blocking-questions bullet in the always-loaded core rules (cut words elsewhere t
 file has a hard budget). Name the tool generically so other harnesses' drivers are reached
 too (evidence: the ask tool fired once in ~500 transcripts of the other harness, against a
 read-file positive control in the thousands).
+
+**Disposition:** Shipped as PR #332: the core rules ask rule names the harness's ask tool generically (AskUserQuestion; the other harness's ask_question) and covers non-blocking owner decisions that already have a recommendation - they go out at the next turn end with background work left running, instead of waiting for a later batch. Status moved to Done by the store-reconciliation sweep (2026-11-19, changelog evidence; the flip rides the TASK-4 PR).
 <!-- SECTION:DESCRIPTION:END -->

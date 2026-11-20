@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S python3 -I -B
 """security-sweep: surface open GitHub security alerts (code-scanning, dependabot, secret-scanning).
 
 Usage:
@@ -44,6 +44,16 @@ import sys
 import tempfile
 import threading
 import time
+
+# config.toml knobs (config_env, the Python twin of hooks/lib/config-env.sh); a wiring error proceeds env-only.
+try:
+    _SYG_ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+    sys.path.insert(0, os.path.join(_SYG_ROOT, "lib"))
+    import config_env
+
+    config_env.syg_config_env(_SYG_ROOT)
+except Exception:
+    pass
 
 SURFACES = ("code-scanning", "dependabot", "secret-scanning")
 SEVERITIES = ("critical", "high", "medium", "low", "none")

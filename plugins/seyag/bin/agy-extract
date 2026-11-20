@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S python3 -I -B
 """agy-extract: turn Antigravity CLI (agy) conversation DBs into the two session-mining corpora.
 
 Usage: agy-extract [--since ISO-TS] [--thinking] OUTDIR [DB...]
@@ -29,6 +29,16 @@ import shutil
 import sqlite3
 import sys
 import tempfile
+
+# config.toml knobs (config_env, the Python twin of hooks/lib/config-env.sh); a wiring error proceeds env-only.
+try:
+    _SYG_ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+    sys.path.insert(0, os.path.join(_SYG_ROOT, "lib"))
+    import config_env
+
+    config_env.syg_config_env(_SYG_ROOT)
+except Exception:
+    pass
 
 
 def usage(fh=sys.stdout):

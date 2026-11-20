@@ -3,9 +3,10 @@ id: TASK-1
 title: >-
   scratch-dir/scratch-clean: per-session scratch roots so drivers never ask to
   delete worker temp dirs
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-11-19T14:22:00Z'
+updated_date: '2026-11-20T00:16:00Z'
 labels:
   - bin
   - hooks
@@ -41,4 +42,6 @@ scratch-clean need no approval").
 
 Related: same-command variable indirection (`T=$(mktemp -d); rm -rf "$T"`) is a separate
 deferred task; 23 such blocks in 14 days.
+
+**Disposition:** Shipped as PR #335: the scratch-dir bin (per-session scratch root inside job tmp), recursive-rm-guard exempting deletes strictly inside it keyed on the hook payload's session id, SYG_SCRATCH_ROOT / SYG_SCRATCH_RM_EXEMPT knobs, and the implementer + delegation contracts pointing workers at it. Status moved to Done by the store-reconciliation sweep (2026-11-19, changelog evidence; the flip rides the TASK-4 PR).
 <!-- SECTION:DESCRIPTION:END -->

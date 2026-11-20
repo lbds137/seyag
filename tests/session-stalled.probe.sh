@@ -382,14 +382,58 @@ chmod +x "$tmp/stub/claude"
 out=$(PATH="$tmp/stub:$PATH" HOME="$tmp" "$STALLED" 2>&1); rc=$?
 [ "$rc" = 1 ] && [ "$out" = $'tab\tname stalled 30m rate_limit' ] && ok || bad "live path with tab in name (rc=$rc out=$out)"
 
-# live path: a find error elsewhere doesn't drop a transcript it found (exit 1 or 2 by traversal order)
+# live path: a find error elsewhere doesn't drop a transcript it found. The scan visits every
+# folder (no -quit), so the find error always happens: rc 2, the error itself on stderr, and
+# the found transcript still checked. (The old assertion accepted rc 1 too, which a run that
+# never reached the error also gave.)
 if [ "$(id -u)" != 0 ]; then
 chmod 000 "$tmp/.claude/projects/locked"
-out=$(PATH="$tmp/stub:$PATH" HOME="$tmp" "$STALLED" 2>/dev/null); rc=$?
+out=$(PATH="$tmp/stub:$PATH" HOME="$tmp" "$STALLED" 2>"$tmp/f7.err"); rc=$?
 chmod 755 "$tmp/.claude/projects/locked"
-case "$rc" in 1|2) [ "$out" = $'tab\tname stalled 30m rate_limit' ] && ok || bad "found transcript kept beside a find error (rc=$rc out=$out)" ;;
-  *) bad "found transcript kept beside a find error (rc=$rc out=$out)" ;; esac
+if [ "$rc" = 2 ] && [ "$out" = $'tab\tname stalled 30m rate_limit' ] && grep -q "find: .*locked" "$tmp/f7.err"; then
+  ok
+else
+  bad "found transcript kept beside a find error (rc=$rc out=$out err=$(cat "$tmp/f7.err"))"
 fi
+fi
+
+# agents entries that are not usable sessions are skipped with one warn naming the index;
+# the rest of the list is still checked. A name that is null is not printed as None.
+mkdir -p "$tmp/mal/.claude/projects/proj"
+cp "$tmp/err.jsonl" "$tmp/mal/.claude/projects/proj/sid-1.jsonl"
+mal_run() { # $1 agents JSON: sets rc, out (stdout) and err (stderr)
+  printf '%s\n' "$1" >"$tmp/mal.json"
+  printf '#!/bin/sh\ncat "%s"\n' "$tmp/mal.json" >"$tmp/stub/claude"
+  chmod +x "$tmp/stub/claude"
+  out=$(PATH="$tmp/stub:$PATH" HOME="$tmp/mal" "$STALLED" 2>"$tmp/mal.err"); rc=$?
+  err=$(cat "$tmp/mal.err")
+}
+mal_run '[{"sessionId":null},{"name":"ok","sessionId":"sid-1"}]'
+[ "$rc" = 1 ] && [ "$out" = "ok stalled 30m rate_limit" ] && [ "$err" = "session-stalled: skipping agents entry 0: not a dict, no string sessionId, or null pid" ] \
+  && ok || bad "null sessionId skipped with a warn, rest checked (rc=$rc out=$out err=$err)"
+mal_run '[{"name":"nosid"},{"name":"ok","sessionId":"sid-1"}]'
+[ "$rc" = 1 ] && [ "$out" = "ok stalled 30m rate_limit" ] && [[ $err == *"skipping agents entry 0:"* ]] \
+  && ok || bad "missing sessionId skipped with a warn (rc=$rc out=$out err=$err)"
+mal_run '[null]'
+[ "$rc" = 0 ] && [ -z "$out" ] && [[ $err == *"skipping agents entry 0:"* ]] \
+  && ok || bad "[null] entry skipped, rc 0 (rc=$rc out=$out err=$err)"
+mal_run '["x",{"name":"ok","sessionId":"sid-1"}]'
+[ "$rc" = 1 ] && [ "$out" = "ok stalled 30m rate_limit" ] && [[ $err == *"skipping agents entry 0:"* ]] \
+  && ok || bad "non-dict entry skipped with a warn (rc=$rc out=$out err=$err)"
+mal_run '[{"name":"dead","pid":null,"sessionId":"sid-1"}]'
+[ "$rc" = 0 ] && [ -z "$out" ] && [[ $err == *"skipping agents entry 0:"* ]] \
+  && ok || bad "null pid skipped (a dead agent is not stalled) (rc=$rc out=$out err=$err)"
+mal_run '[{"name":null,"sessionId":"sid-1"}]'
+[ "$rc" = 1 ] && [ "$out" = "sid-1 stalled 30m rate_limit" ] && [ -z "$err" ] \
+  && ok || bad "null name falls back to the session prefix, not None (rc=$rc out=$out err=$err)"
+# a sessionId holding glob characters must match only its own transcript
+mkdir -p "$tmp/glob/.claude/projects/proj"
+cp "$tmp/err.jsonl" "$tmp/glob/.claude/projects/proj/sid-1.jsonl"
+printf '[{"name":"g","sessionId":"*"}]\n' >"$tmp/glob.json"
+printf '#!/bin/sh\ncat "%s"\n' "$tmp/glob.json" >"$tmp/stub/claude"
+out=$(PATH="$tmp/stub:$PATH" HOME="$tmp/glob" "$STALLED" 2>&1); rc=$?
+[ "$rc" = 0 ] && [ -z "$out" ] && ok || bad "glob sessionId matches no other transcript (rc=$rc out=$out)"
+
 
 # live path: check_file exit 2 does not abort the scan; stalled lines are still printed and exit is 2
 ln -s "$tmp/nonexistent.jsonl" "$tmp/.claude/projects/proj/sid-bad.jsonl"

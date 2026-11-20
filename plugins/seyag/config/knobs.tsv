@@ -48,9 +48,9 @@ SECURITY_SWEEP_GH	internal	misc	gh	Test seam overriding the gh binary path in se
 SECURITY_SWEEP_GH_TIMEOUT	internal	misc	60	Test seam overriding the per-call gh timeout in seconds (positive integer) in security-sweep.	-
 SESSION_LEDGER	user	session	~/.claude/mined-corpus/ledger.tsv	Path to the TSV ledger where session-log ledger and session-log mark read and record mined transcript spans.	path
 SEYAG_KEYS_BIN	user	usage	<script_dir>/keys	Override path to the keys binary invoked by zai-usage to read ZAI_AUTH_TOKEN from the encrypted credential store.	path
-SYG_AGY_BRAIN_DIR	user	session	~/.gemini/antigravity-cli/brain	Antigravity (agy) CLI transcript folders (<id>/.system_generated/logs) merged by driver-busy-hours; with CLAUDE_PROJECTS_DIR set, read only if this or SYG_AGY_SUMMARIES_DB is. Environment only (not config.toml).	envonly path
+SYG_AGY_BRAIN_DIR	user	session	~/.gemini/antigravity-cli/brain	Antigravity (agy) CLI transcript folders (<id>/.system_generated/logs) merged by driver-busy-hours; with CLAUDE_PROJECTS_DIR set, read only if this or SYG_AGY_SUMMARIES_DB is.	path
 SYG_AGY_CONVERSATIONS_DIR	user	session	~/.gemini/antigravity-cli/conversations	Directory of *.db conversation databases read by agy-extract when no database paths are passed.	path
-SYG_AGY_SUMMARIES_DB	user	session	~/.gemini/antigravity-cli/conversation_summaries.db	SQLite conversation_summaries database of the Antigravity (agy) CLI that driver-busy-hours reads to find root conversations and their workspaces; read together with SYG_AGY_BRAIN_DIR. Environment only (not config.toml).	envonly path
+SYG_AGY_SUMMARIES_DB	user	session	~/.gemini/antigravity-cli/conversation_summaries.db	SQLite conversation_summaries database of the Antigravity (agy) CLI that driver-busy-hours reads to find root conversations and their workspaces; read together with SYG_AGY_BRAIN_DIR.	path
 SYG_ALLOW_BROAD_WALK	user	guards	unset	Set to 1 in the command text to bypass broad-walk-guard for an intentional broad filesystem walk.	-
 SYG_ALLOW_CACHE_RM	user	guards	unset	Set to 1 in the command text to bypass cache-rm-redirect for an owner-approved cache deletion.	-
 SYG_ALLOW_COMMIT_BRANCH	internal	guards	unset	Example per-command bypass assignment in the command text mentioned in lib/branch_switch.py docstring; not read by a hook.	-
@@ -163,7 +163,7 @@ SYG_MEM_WATCH_MEMINFO	internal	misc	/proc/meminfo	Test seam overriding the memin
 SYG_MERGE_REVIEW_LOGIN	user	pr	claude[bot]	GitHub login whose latest PR comment must be surfaced before pr-merge-review-check allows gh pr merge.	-
 SYG_MERGE_REVIEW_RELEASE_REMINDER	user	pr	prose:This PR merges into the repository's default branch — run this project's post-merge steps (version bump, release, deploy) before starting other work.	Custom reminder text shown once when merging a PR into the repository's default branch.	-
 SYG_MERGE_REVIEW_WORKFLOW	user	pr	.github/workflows/claude-code-review.yml	Review workflow file path whose self-edit in a PR explains a missing review comment in pr-merge-review-check.	path
-SYG_NEEDS_OWNER_SECTION	user	session	Needs Owner	Heading (without the ##) of the role file section claude-role --need writes and --json reads as .needs: what waits on the owner; relay-ruling names it in its destructive-step line and reads it from the environment only.	-
+SYG_NEEDS_OWNER_SECTION	user	session	Needs Owner	Heading (without the ##) of the role file section claude-role --need writes and --json reads as .needs: what waits on the owner; relay-ruling names it in its destructive-step line.	-
 SYG_OWNER_NAME	user	session	The owner	Name relay-ruling prints in the relay header the recipient reads (`<name> said (...)`, `<name> picked (...)`); an empty value falls back to the default. Environment only (not config.toml).	envonly
 SYG_OWN_OWNERS	user	guards	unset	Whitespace- or comma-separated GitHub owner names unioned with hosts.yml user: as own repos in upstream-submission-guard.	-
 SYG_PIN_ACTIONS_GH	internal	misc	gh	Test seam naming the gh binary pin-actions calls for commit and tag lookups.	-

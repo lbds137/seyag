@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S python3 -I -B
 """railway-ops: Railway variable, redeploy, secret-rotation and log operations that always
 name their environment explicitly and never print a variable value.
 
@@ -59,6 +59,16 @@ import re
 import subprocess
 import sys
 import urllib.parse
+
+# config.toml knobs (config_env, the Python twin of hooks/lib/config-env.sh); a wiring error proceeds env-only.
+try:
+    _SYG_ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+    sys.path.insert(0, os.path.join(_SYG_ROOT, "lib"))
+    import config_env
+
+    config_env.syg_config_env(_SYG_ROOT)
+except Exception:
+    pass
 
 # urllib.request, urllib.error, http.client and socket are imported inside gql(), and secrets in
 # rotate-secret: together about 60 ms per run, and most runs (dry runs, refusals, ids, logs) need none.

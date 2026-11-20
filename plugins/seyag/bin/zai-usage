@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S python3 -I -B
 """zai-usage: the z.ai coding-plan quota percentages, live from z.ai's quota API.
 
 The quota API is GET https://api.z.ai/api/monitor/usage/quota/limit with a bearer token (the
@@ -36,6 +36,16 @@ import sys
 import tempfile
 import time
 from fcntl import LOCK_EX, LOCK_NB, LOCK_UN, flock
+
+# config.toml knobs (config_env, the Python twin of hooks/lib/config-env.sh); a wiring error proceeds env-only.
+try:
+    _SYG_ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+    sys.path.insert(0, os.path.join(_SYG_ROOT, "lib"))
+    import config_env
+
+    config_env.syg_config_env(_SYG_ROOT)
+except Exception:
+    pass
 
 # The state dir keeps the tool's old name (zai-spend): it holds the --calibrate anchors, which a
 # rename would drop. The cache is regenerable, so it follows the new name.

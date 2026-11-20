@@ -61,7 +61,7 @@ while [ $# -gt 0 ]; do
 done
 
 check_file() { # name file
-  DUE=$due python3 -I - "$1" "$2" <<'PY'
+  DUE=$due python3 -I -B - "$1" "$2" <<'PY'
 import sys
 
 MONTHS = ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec")
@@ -185,15 +185,20 @@ if [ -n "$file" ]; then
 fi
 
 raw=$(claude agents --json) || { echo "session-stalled: claude agents --json failed" >&2; exit 2; }
-agents=$(python3 -I -c '
+agents=$(python3 -I -B -c '
 import sys, json
 try:
     d = json.load(sys.stdin)
     items = d if isinstance(d, list) else (d.get("agents") if isinstance(d, dict) else None)
     if not isinstance(items, list):
         raise ValueError("expected agent list")
-    for x in items:
-        print(x.get("name") or x["sessionId"][:8], x["sessionId"], sep="\037")
+    for i, x in enumerate(items):
+        sid = x.get("sessionId") if isinstance(x, dict) else None
+        if not isinstance(sid, str) or (isinstance(x, dict) and x.get("pid", 0) is None):
+            print(f"session-stalled: skipping agents entry {i}: not a dict, no string sessionId, or null pid", file=sys.stderr)
+            continue
+        name = x.get("name")
+        print(name if isinstance(name, str) and name else sid[:8], sid, sep="\037")
 except Exception as e:
     sys.exit(f"session-stalled: invalid claude agents --json output: {e}")
 ' <<< "$raw") || exit 2
@@ -207,9 +212,15 @@ if [ -n "$agents" ]; then
   fi
   while IFS=$'\037' read -r name sid; do
     [ -n "$sid" ] || continue
-    # a find error (an unreadable folder) is reported, but a transcript it did find is still checked
-    fs=0; f=$(find "$projects_root" -maxdepth 2 -name "$sid.jsonl" -print -quit) || fs=$?
+    # a find error (an unreadable folder) is reported, but a transcript it did find is still checked.
+    # No -quit: find then always visits every folder, so the error does not depend on readdir order.
+    fs=0; cands=$(find "$projects_root" -maxdepth 2 -name "$sid.jsonl" -print) || fs=$?
     [ "$fs" -eq 0 ] || rc=2
+    # -name is a glob: a sessionId holding * or ? matches other transcripts, so keep only the exact name.
+    f=""
+    while IFS= read -r cand; do
+      if [ "$(basename -- "$cand")" = "$sid.jsonl" ]; then f=$cand; break; fi
+    done <<< "$cands"
     [ -n "$f" ] || continue
     if check_file "$name" "$f"; then
       :
