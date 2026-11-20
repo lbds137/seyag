@@ -21,15 +21,16 @@
 # entries (.type=="tool_use", .name=="Bash", .input.command) and builds the
 # PreToolUse JSON Claude Code sends ({"tool_name":"Bash",
 # "tool_input":{"command":...},"cwd":<entry's cwd, else $HOME>,
-# "hook_event_name":"PreToolUse"}) in the SAME jq pass, so a huge command
-# never round-trips through a shell argv. Fed to the hook script DIRECTLY
+# "hook_event_name":"PreToolUse","session_id":<derived per file, see below>})
+# in the SAME jq pass, so a huge command never round-trips through a shell
+# argv. Fed to the hook script DIRECTLY
 # (`bash plugins/seyag/hooks/<hook-name>.sh`, not via run.sh — a project
 # shipping its own `.claude/hooks/<name>.sh` override makes run.sh exit 0 for
 # every command, reading as "nothing blocked").
 #
 # Subagent transcripts (<slug>/<session>/subagents/*.jsonl) are replayed too
 # and labelled "(subagent)"; other nested JSONLs (mined-corpus reports) are
-# not.
+# not. session_id is the filename stem, or the parent dir for a subagent.
 #
 # Hooks run with a fresh per-JSONL-file XDG_STATE_HOME, XDG_RUNTIME_DIR and
 # SYG_STATE_DIR (all in a scratch dir removed on exit), and with
@@ -43,6 +44,8 @@
 # (dispatch-posture-gate) still use the caller's /tmp state;
 # queued-message-receipt, context-size-reminder and context-block-gate honor
 # SYG_STATE_DIR and are isolated by the wipe above.
+# Also unset (they name files outside those dirs): SYG_LAUNCH_RECORD_DIR,
+# SYG_CREDIT_LEDGER, SYG_CLASSIFIER_LEDGER, SYG_DISPATCH_ACK_FILE.
 #
 # A "block" is a non-zero exit from the hook script. Output: one section per
 # blocked command (command, first 200 chars, one line; slug; the hook's
@@ -163,6 +166,10 @@ while IFS= read -r f; do
   case "$rel" in
     */subagents/*) slug_label="$slug_label (subagent)" ;;
   esac
+  case "$rel" in
+    */subagents/*) sess_id=$(basename "$(dirname "$(dirname "$f")")") ;;
+    *) sess_id=$(basename "$f" .jsonl) ;;
+  esac
 
   # Fresh state for this file (see the header): one session's ack must never
   # mask a later session's identical block.
@@ -174,7 +181,7 @@ while IFS= read -r f; do
     [ -z "$payload" ] && continue
     TOTAL=$((TOTAL + 1))
 
-    out=$(printf '%s' "$payload" | env -u CLAUDE_PROJECT_DIR -u SYG_PR_MONITOR_SEEN_FILE -u SYG_PR_BODY_ACK_FILE SYG_STATE_DIR="$REPLAY_STATE/state" XDG_STATE_HOME="$REPLAY_STATE/state" XDG_RUNTIME_DIR="$REPLAY_STATE/runtime" PYTHONDONTWRITEBYTECODE=1 bash "$HOOKS_DIR/$HOOK_NAME.sh" 2>&1)
+    out=$(printf '%s' "$payload" | env -u CLAUDE_PROJECT_DIR -u SYG_PR_MONITOR_SEEN_FILE -u SYG_PR_BODY_ACK_FILE -u SYG_LAUNCH_RECORD_DIR -u SYG_CREDIT_LEDGER -u SYG_CLASSIFIER_LEDGER -u SYG_DISPATCH_ACK_FILE SYG_STATE_DIR="$REPLAY_STATE/state" XDG_STATE_HOME="$REPLAY_STATE/state" XDG_RUNTIME_DIR="$REPLAY_STATE/runtime" PYTHONDONTWRITEBYTECODE=1 bash "$HOOKS_DIR/$HOOK_NAME.sh" 2>&1)
     rc=$?
 
     if [ "$rc" -ne 0 ]; then
@@ -187,11 +194,11 @@ while IFS= read -r f; do
       printf '%s\n' "$out" | head -3
       echo
     fi
-  done < <(jq -Rc --arg home "$HOME" '
+  done < <(jq -Rc --arg home "$HOME" --arg sid "$sess_id" '
       (fromjson? // empty) |
       (.cwd // $home) as $cwd |
       (.message.content // [])[]? | select(.type=="tool_use" and .name=="Bash" and .input.command != null) |
-      {tool_name:"Bash", tool_input:{command:.input.command}, cwd:$cwd, hook_event_name:"PreToolUse"}
+      {tool_name:"Bash", tool_input:{command:.input.command}, cwd:$cwd, hook_event_name:"PreToolUse", session_id:$sid}
     ' "$f")
 done <<<"$FILE_LIST"
 
