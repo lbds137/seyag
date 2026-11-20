@@ -56,6 +56,12 @@ def call_flags(toks):
         if CACHE_MARK in t:
             flags.add("C")
             continue
+        # A long option is value-taking unless it carries '=': skip it and its value, so an
+        # option's letters (--check-hash-based-pycs has a c) never read as python flags.
+        if t.startswith("--") and t != "--":
+            if "=" not in t and i < len(toks):
+                i += 1
+            continue
         if t == "-" or t == "\\" or t.startswith("<") or re.match(r"\d<", t):
             return True, flags
         if t == "--":
@@ -131,6 +137,7 @@ MUST_FLAG = [
     "python3 -Wignore::DeprecationWarning -c 'x'",
     "python3 -WI -c x",
     "python3 -X utf8 -c x",
+    "python3 --check-hash-based-pycs default -I -c x",
 ]
 MUST_NOT = [
     "python3 -I -B -c x",
@@ -147,6 +154,7 @@ MUST_NOT = [
     "command -v python3 >/dev/null",
     "exec python3 \"$(dirname x)/y\"",
     "python3 -I -B script.py",
+    "python3 -I -B --check-hash-based-pycs default -c x",
     "# python3 -c in a comment",
 ]
 control_bad = [s for s in MUST_FLAG if not problems(s)]
@@ -288,6 +296,7 @@ else
 fi
 
 # --- C. No bytecode in the plugin tree ------------------------------------------
+# Known limit: the path+size pair cannot see an in-place same-size pyc overwrite; accepted (hostile-input-only).
 PYC_AFTER=$(pyc_files "$REPO/plugins")
 if [ "$PYC_BEFORE" = "$PYC_AFTER" ]; then
   ok "no new *.pyc under plugins/"

@@ -217,6 +217,7 @@ if [ -n "$agents" ]; then
     fs=0; cands=$(find "$projects_root" -maxdepth 2 -name "$sid.jsonl" -print) || fs=$?
     [ "$fs" -eq 0 ] || rc=2
     # -name is a glob: a sessionId holding * or ? matches other transcripts, so keep only the exact name.
+    # Known limit: a sessionId holding [ can miss its own transcript (a bracket class in the glob); real ids are UUIDs, accepted.
     f=""
     while IFS= read -r cand; do
       if [ "$(basename -- "$cand")" = "$sid.jsonl" ]; then f=$cand; break; fi

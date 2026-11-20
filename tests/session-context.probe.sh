@@ -92,11 +92,21 @@ echo '["x", {"name":"Bad","cwd":"/nowhere","sessionId":"s-big","status":"busy"}]
 err=$("$BIN/session-context" --json 2>&1 >"$TMP/out.json"); rc=$?
 [ $rc = 0 ] && [ "$err" = "session-context: skipping agents entry 0: not an object" ] && jq -e 'map(.name) == ["Bad"]' "$TMP/out.json" >/dev/null \
     && ok "a non-object agents entry is skipped with a warn, the object keeps its row" || bad "non-object agents entry: rc $rc, err '$err', out $(cat "$TMP/out.json")"
-# [null] is not a phantom 0-token row: no table row, one warn, exit 0.
+# [null] is not a phantom 0-token row. Every entry skipped is a format change: the alarm, exit 1, no table.
+alarm="session-context: every agents entry was skipped (format changed?)"
 echo '[null]' > "$TMP/agents.json"
 err=$("$BIN/session-context" --json 2>&1 >"$TMP/out.json"); rc=$?
-[ $rc = 0 ] && [ "$err" = "session-context: skipping agents entry 0: not an object" ] && [ "$(jq -c . "$TMP/out.json")" = '[]' ] \
-    && ok "[null] agents entry: no phantom row, one warn, exit 0" || bad "[null] agents entry: rc $rc, err '$err', out $(cat "$TMP/out.json")"
+[ $rc = 1 ] && grep -qxF "$alarm" <<< "$err" && [ ! -s "$TMP/out.json" ] \
+    && ok "[null] agents entry: no phantom row, the all-skipped alarm, exit 1" || bad "[null] agents entry: rc $rc, err '$err', out $(cat "$TMP/out.json")"
+echo '[null, "x"]' > "$TMP/agents.json"
+err=$("$BIN/session-context" --json 2>&1 >"$TMP/out.json"); rc=$?
+[ $rc = 1 ] && grep -qxF "$alarm" <<< "$err" && [ ! -s "$TMP/out.json" ] \
+    && ok "[null, \"x\"] agents (all non-object): the alarm, no table, exit 1" || bad "[null, x] agents: rc $rc, err '$err', out $(cat "$TMP/out.json")"
+# An empty agents list is not a format change: an empty report, exit 0.
+echo '[]' > "$TMP/agents.json"
+out=$("$BIN/session-context" --json 2>"$TMP/err"); rc=$?
+[ $rc = 0 ] && [ "$out" = '[]' ] && [ ! -s "$TMP/err" ] \
+    && ok "[] agents: empty report, exit 0, no warn" || bad "[] agents: rc $rc, out '$out', err '$(cat "$TMP/err")'"
 
 # Two sessions in one folder, one of them in an agent worktree (named after the main checkout).
 jq -c --arg wt "$TMP/wt/agent-x" '. + [{name: "Twin", cwd: $wt, sessionId: "s-twin", status: "busy"}]' \
@@ -151,12 +161,16 @@ done
 err=$(SYG_SESSION_CONTEXT_EXTRA_CMD="$TMP/no-such-command" "$BIN/session-context" 2>&1 >/dev/null); rc=$?
 [ $rc = 0 ] && grep -qF "$msg" <<< "$err" && ok "EXTRA_CMD naming a missing command fails loudly too" || bad "extra missing: rc $rc, $err"
 
-# Scalar entries ([1,2]) are non-object entries: each is skipped with its own warn, no failure line.
+# Scalar entries ([1,2]) are all non-object: a total format change, so the loud failure line; Claude rows kept.
 printf '#!/bin/sh\necho "[1,2]"\n' > "$TMP/extra-scalars.sh"; chmod +x "$TMP/extra-scalars.sh"
 err=$(SYG_SESSION_CONTEXT_EXTRA_CMD="$TMP/extra-scalars.sh" "$BIN/session-context" --json 2>&1 >"$TMP/out.json"); rc=$?
-[ $rc = 0 ] && [ "$err" = "$(printf '%s\n%s' "session-context: skipping extra entry 0: not an object" "session-context: skipping extra entry 1: not an object")" ] \
-    && [ "$(jq -c 'map(.name)' "$TMP/out.json")" = '["Small"]' ] \
-    && ok "EXTRA_CMD scalar entries: each skipped with a warn, Claude rows kept, exit 0" || bad "extra scalars: rc $rc, err '$err', out $(cat "$TMP/out.json")"
+[ $rc = 0 ] && [ "$err" = "$msg" ] && [ "$(jq -c 'map(.name)' "$TMP/out.json")" = '["Small"]' ] \
+    && ok "EXTRA_CMD all-scalar entries: failure line, Claude rows kept, exit 0" || bad "extra scalars: rc $rc, err '$err', out $(cat "$TMP/out.json")"
+# One object beside a scalar is a partial skip: the warn names the scalar, the object keeps its row, no failure line.
+printf '#!/bin/sh\necho '"'"'[1,{"name":"Xp","sessionId":"x-p","tokens":5}]'"'"'\n' > "$TMP/extra-partial.sh"; chmod +x "$TMP/extra-partial.sh"
+err=$(SYG_SESSION_CONTEXT_EXTRA_CMD="$TMP/extra-partial.sh" "$BIN/session-context" --json 2>&1 >"$TMP/out.json"); rc=$?
+[ $rc = 0 ] && [ "$err" = "session-context: skipping extra entry 0: not an object" ] && jq -e 'any(.[]; .name == "Xp")' "$TMP/out.json" >/dev/null \
+    && ok "EXTRA_CMD partial skip: warn for the scalar, the object keeps its row, exit 0" || bad "extra partial: rc $rc, err '$err', out $(cat "$TMP/out.json")"
 
 # A row whose tokens is present but not a number takes the failure path (null counts as 0).
 for tk in '"170000"' 'true' '{"n":1}' '[5]'; do
@@ -174,11 +188,11 @@ printf '#!/bin/sh\necho '"'"'[{"name":7,"folder":[1],"sessionId":null,"status":{
 err=$(SYG_SESSION_CONTEXT_EXTRA_CMD="$TMP/extra-odd.sh" "$BIN/session-context" --json 2>&1 >"$TMP/out.json"); rc=$?
 [ $rc = 0 ] && [ -z "$err" ] && jq -e '.[] | select(.tokens == 10) | (.name == "extra" and .folder == "" and .sessionId == "" and .status == "idle")' "$TMP/out.json" >/dev/null \
     && ok "extra row with non-string name, folder, status: defaults, no failure line" || bad "extra odd fields: rc $rc, err '$err', out $(cat "$TMP/out.json")"
-# A non-object EXTRA_CMD entry is skipped with the same warn shape: no phantom row beside the Claude rows.
+# An EXTRA_CMD [null] (all entries non-object): the loud failure line, no phantom row beside the Claude rows.
 printf '#!/bin/sh\necho "[null]"\n' > "$TMP/extra-null.sh"; chmod +x "$TMP/extra-null.sh"
 err=$(SYG_SESSION_CONTEXT_EXTRA_CMD="$TMP/extra-null.sh" "$BIN/session-context" --json 2>&1 >"$TMP/out.json"); rc=$?
-[ $rc = 0 ] && [ "$err" = "session-context: skipping extra entry 0: not an object" ] && [ "$(jq -c 'map(.name)' "$TMP/out.json")" = '["Small"]' ] \
-    && ok "EXTRA_CMD [null] entry: skipped with a warn, no phantom row, exit 0" || bad "extra [null]: rc $rc, err '$err', out $(cat "$TMP/out.json")"
+[ $rc = 0 ] && [ "$err" = "$msg" ] && [ "$(jq -c 'map(.name)' "$TMP/out.json")" = '["Small"]' ] \
+    && ok "EXTRA_CMD [null] entry: failure line, no phantom row, exit 0" || bad "extra [null]: rc $rc, err '$err', out $(cat "$TMP/out.json")"
 
 # Thresholds must be whole numbers: a bad one exits 2 with a message, never an empty table.
 for knob in SYG_SESSION_CONTEXT_THRESHOLD SYG_SESSION_CONTEXT_THRESHOLD_FABLE SYG_SESSION_CONTEXT_EXTRA_THRESHOLD; do
