@@ -12,7 +12,8 @@
 # What counts as runnable, per ask (question text, and each option's label,
 # description and preview, scanned field by field, never joined):
 #   - a `!` command: a `!` at a line start or after whitespace, `(` or a
-#     backtick, then a first token that is not prose ("the one ! line"). Inside
+#     backtick, then at least one space (`!flag` is code negation), then a
+#     first token that is not prose ("the one ! line"). Inside
 #     a backtick span the command ends at the closing backtick, else at the end
 #     of the line.
 #   - a URL (http/https), unless it is a placeholder (`/i/<code>`), an RFC 2606
@@ -28,8 +29,17 @@
 #
 # Enforcement geometry mirrors blocking-question-channel-check.sh: a tail read of
 # the transcript, a strict turn boundary (no genuine user entry found → silent),
-# at most one block via the native `stop_hook_active` flag, fail-open on every
-# external failure (no jq, no python3, unreadable or unparseable transcript).
+# fail-open on every external failure (no jq, no python3, unreadable or
+# unparseable transcript).
+#
+# Block-once is per ask, not per stop chain: asks often happen inside a retry that
+# another Stop hook triggered, so the stop that follows them carries
+# `stop_hook_active: true` and a flag-based exit would never judge them. The hook
+# judges every stop and blocks at most once per LAST AskUserQuestion of the turn
+# (its tool_use id, else a hash of its input), remembered in a state file under
+# ${XDG_STATE_HOME:-~/.local/state}/seyag/ask-command-echo-check/<session key>.
+# If that file cannot be written it blocks only when `stop_hook_active` is false.
+# A "Stop hook feedback:" user entry is not a turn boundary.
 #
 # Pinned by ask-command-echo-check.probe.sh.
 
@@ -37,9 +47,7 @@ set -uo pipefail
 
 INPUT=$(cat)
 
-# Already blocked once this turn-end → allow the stop (no infinite loop).
 ACTIVE=$(jq -r '.stop_hook_active // false' <<<"$INPUT" 2>/dev/null || echo "false")
-[ "$ACTIVE" = "true" ] && exit 0
 
 TRANSCRIPT=$(jq -r '.transcript_path // empty' <<<"$INPUT" 2>/dev/null || echo "")
 [ -z "$TRANSCRIPT" ] || [ ! -f "$TRANSCRIPT" ] && exit 0
@@ -47,7 +55,7 @@ TRANSCRIPT=$(jq -r '.transcript_path // empty' <<<"$INPUT" 2>/dev/null || echo "
 LAM=$(jq -r '.last_assistant_message // empty' <<<"$INPUT" 2>/dev/null || echo "")
 
 VERDICT=$(TRANSCRIPT="$TRANSCRIPT" LAM="$LAM" python3 -I "${SYG_PY_CACHE_ARG:--B}" << 'PYEOF'
-import json, os, re, string, sys
+import hashlib, json, os, re, string, sys
 
 
 def judge():
@@ -81,10 +89,13 @@ def judge():
         if entry.get("type") != "user" or entry.get("isMeta"):
             return False
         content = entry.get("message", {}).get("content")
+        fb = "Stop hook feedback:"
         if isinstance(content, str):
-            return len(content.strip()) > 0
+            return len(content.strip()) > 0 and not content.lstrip().startswith(fb)
         if isinstance(content, list):
-            return any(isinstance(b, dict) and b.get("type") == "text" for b in content)
+            for b in content:
+                if isinstance(b, dict) and b.get("type") == "text":
+                    return not str(b.get("text") or "").lstrip().startswith(fb)
         return False
 
     turn_start = None
@@ -98,6 +109,7 @@ def judge():
 
     # Walk the turn's assistant blocks in order: asks, and the last text after the last ask.
     ask_inputs = []
+    last_ask_id = ""
     text_after_ask = ""
     for entry in turn:
         if entry.get("type") != "assistant":
@@ -110,6 +122,7 @@ def judge():
                 continue
             if block.get("type") == "tool_use" and block.get("name") == "AskUserQuestion":
                 ask_inputs.append(block.get("input") or {})
+                last_ask_id = block.get("id") if isinstance(block.get("id"), str) else ""
                 text_after_ask = ""
             elif block.get("type") == "text":
                 text_after_ask = block.get("text", "") or ""
@@ -132,7 +145,9 @@ def judge():
                         yield opt[k]
 
     prose_tokens = {"line", "lines", "command", "commands", "prefix", "prefixed"}
-    cmd_re = re.compile(r"(?:^|(?<=[\s(`]))!\s*([A-Za-z0-9~./$_-][^\s`]*)")
+    # A space after the bang: `!guild_id` is code negation, not a command
+    # (every real `!` line measured carried one).
+    cmd_re = re.compile(r"(?:^|(?<=[\s(`]))!\s+([A-Za-z0-9~./$_-][^\s`]*)")
 
     def commands_in(text):
         out = []
@@ -228,7 +243,13 @@ def judge():
     missing = [(k, key) for k, key in keys if not satisfied(k, key)]
     if not missing:
         return "ok"
-    return "miss\n" + "\n".join(f"{k}\t{key[:200]}" for k, key in missing)
+    ident = last_ask_id.strip()
+    if not ident:
+        ident = "sha1:" + hashlib.sha1(
+            json.dumps(ask_inputs[-1], sort_keys=True).encode("utf-8", "replace")
+        ).hexdigest()
+    ident = re.sub(r"\s+", "", ident)
+    return "miss:" + ident + "\n" + "\n".join(f"{k}\t{key[:200]}" for k, key in missing)
 
 
 try:
@@ -239,9 +260,26 @@ PYEOF
 ) || exit 0
 
 case $VERDICT in
-  miss*) ;;
+  miss:*) ;;
   *) exit 0 ;;
 esac
+IDENT=${VERDICT%%$'\n'*}
+IDENT=${IDENT#miss:}
+BODY=${VERDICT#*$'\n'}
+
+# Block once per ask: skip when the state file already holds this ask's identity.
+SESSION_ID=$(jq -r '.session_id // empty' <<<"$INPUT" 2>/dev/null || echo "")
+SKEY=${SESSION_ID:-$(basename "$TRANSCRIPT")}
+SKEY=$(printf '%s' "$SKEY" | tr -c 'A-Za-z0-9._-' '_')
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/seyag/ask-command-echo-check"
+STATE_FILE="$STATE_DIR/$SKEY"
+if [ -f "$STATE_FILE" ] && [ "$(head -n 1 "$STATE_FILE" 2>/dev/null)" = "$IDENT" ]; then
+  exit 0
+fi
+if ! { mkdir -p "$STATE_DIR" && printf '%s\n' "$IDENT" >"$STATE_FILE"; } 2>/dev/null; then
+  # State unwritable: fall back to the native once-per-stop-chain rule, never fail closed.
+  [ "$ACTIVE" = "true" ] && exit 0
+fi
 
 cat >&2 << 'MSG'
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -258,13 +296,13 @@ while IFS=$'\t' read -r KIND KEY; do
     C) printf >&2 '  ! %s\n' "$KEY" ;;
     U) printf >&2 '  %s\n' "$KEY" ;;
   esac
-done <<<"${VERDICT#miss}"
+done <<<"$BODY"
 cat >&2 << 'MSG'
 
 Repeat each one now in a fenced code block (a link may instead stand
 alone on its own line), then end the turn. If a line was illustrative
 (nothing she runs or opens), say so in one line and stop again (this
-gate fires only once per turn).
+gate fires only once per ask).
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 MSG
 exit 2

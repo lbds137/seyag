@@ -5,7 +5,9 @@
 # description or preview) blocks the stop once unless the closing message repeats
 # it in a fenced code block (a URL may instead stand alone on its own line). Prose
 # "! line", placeholder and example URLs, inline-backtick-only echoes, earlier-turn
-# asks, stop_hook_active, and missing or garbage transcripts are pinned too.
+# asks, block-once-per-ask (including under stop_hook_active), a "Stop hook
+# feedback:" entry not ending the turn, and missing or garbage transcripts are
+# pinned too.
 #
 # Usage: hooks/ask-command-echo-check.probe.sh   (from repo root)
 
@@ -18,22 +20,32 @@ export CLAUDE_PROJECT_DIR
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
+# Hermetic state: the hook remembers the ask it blocked on under XDG_STATE_HOME.
+export XDG_STATE_HOME="$TMP/state"
+
 TICK=$(printf '\140')
 FENCE="${TICK}${TICK}${TICK}"
 
 # Build a transcript: genuine user line, an assistant AskUserQuestion tool_use,
 # the answer as a tool_result, then the closing text.
 # $1=out $2=question $3=closing text $4=options JSON (optional, default [])
+# Env: ASKID = the ask's tool_use id (default t1; empty = omit the field),
+#      FEEDBACK = text of a user entry inserted before the closing text.
 mktx() {
-  OUT="$1" Q="$2" CLOSE="${3:-Done.}" OPTS="${4:-[]}" python3 -I -B - << 'PY'
+  OUT="$1" Q="$2" CLOSE="${3:-Done.}" OPTS="${4:-[]}" ASKID="${ASKID-t1}" FEEDBACK="${FEEDBACK:-}" python3 -I -B - << 'PY'
 import json, os
 inp = {"questions": [{"question": os.environ["Q"], "options": json.loads(os.environ["OPTS"])}]}
+ask = {"type": "tool_use", "name": "AskUserQuestion", "input": inp}
+if os.environ["ASKID"]:
+    ask["id"] = os.environ["ASKID"]
 rows = [
     {"type": "user", "isMeta": None, "message": {"content": "go"}},
-    {"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "AskUserQuestion", "input": inp}]}},
+    {"type": "assistant", "message": {"content": [ask]}},
     {"type": "user", "message": {"content": [{"type": "tool_result", "content": "answered"}]}},
-    {"type": "assistant", "message": {"content": [{"type": "text", "text": os.environ["CLOSE"]}]}},
 ]
+if os.environ["FEEDBACK"]:
+    rows.append({"type": "user", "message": {"content": os.environ["FEEDBACK"]}})
+rows.append({"type": "assistant", "message": {"content": [{"type": "text", "text": os.environ["CLOSE"]}]}})
 with open(os.environ["OUT"], "w") as f:
     for r in rows:
         f.write(json.dumps(r) + "\n")
@@ -41,8 +53,11 @@ PY
 }
 
 fail=0
+NCASE=0
+# SID overrides the per-call session id (default: a fresh one, so state never leaks between cases).
 check() { # $1=expected_exit $2=label $3=transcript $4=stop_active $5+=stderr regexes ("!" prefix = must not match)
-  echo "{\"stop_hook_active\":${4:-false},\"transcript_path\":\"$3\"}" | "$HOOK" >/dev/null 2>"$TMP/stderr.out"
+  NCASE=$((NCASE + 1))
+  echo "{\"session_id\":\"${SID:-case-$NCASE}\",\"stop_hook_active\":${4:-false},\"transcript_path\":\"$3\"}" | "$HOOK" >/dev/null 2>"$TMP/stderr.out"
   local got=$? pat
   if [ "$got" != "$1" ]; then echo "FAIL [$got≠$1]: $2"; fail=1; return; fi
   for pat in "${@:5}"; do
@@ -120,8 +135,20 @@ echo alpha-one
 ${FENCE}"
 check 2 "two commands, one fenced: names only the missing one" "$TMP/11.jsonl" "" 'beta-two' '!alpha-one'
 
-# 12. stop_hook_active
-check 0 "stop_hook_active re-stop allows" "$TMP/1.jsonl" true
+# 12. stop_hook_active no longer exempts (deliberate change: the ask often happens in a
+# retry another Stop hook triggered); block-once is per ask, via the state file.
+SID=sess-ask check 2 "A: stop_hook_active true, first sight of ask t1 → fires (was 0 before per-ask state)" "$TMP/1.jsonl" true
+SID=sess-ask check 0 "B: same ask t1 again → already reminded, allows" "$TMP/1.jsonl" true
+ASKID=t2 mktx "$TMP/12c.jsonl" "$Q1" "Done. Run the line when ready."
+SID=sess-ask check 2 "C: a new last ask t2 in the same session → fires again" "$TMP/12c.jsonl" true
+ASKID='' mktx "$TMP/12d.jsonl" "$Q1" "Done. Run the line when ready."
+SID=sess-hash check 2 "D: ask without an id blocks (hash identity)" "$TMP/12d.jsonl"
+SID=sess-hash check 0 "D: identical rerun of the id-less ask allows" "$TMP/12d.jsonl"
+FEEDBACK='Stop hook feedback: [x] some other hook blocked' mktx "$TMP/12e.jsonl" "$Q1" "Done. Run the line when ready."
+check 2 "E: a 'Stop hook feedback:' user entry is not a turn boundary" "$TMP/12e.jsonl"
+touch "$TMP/not-a-dir"
+XDG_STATE_HOME="$TMP/not-a-dir" check 2 "F: state dir unwritable, stop_hook_active false → still blocks" "$TMP/1.jsonl" false
+XDG_STATE_HOME="$TMP/not-a-dir" check 0 "F: state dir unwritable, stop_hook_active true → allows" "$TMP/1.jsonl" true
 
 # 13. ask in a previous turn
 {
@@ -160,5 +187,9 @@ mktx "$TMP/17a.jsonl" "$QEND" "Run this:
 check 0 "command ending the question, fenced without the ?, passes" "$TMP/17a.jsonl"
 mktx "$TMP/17b.jsonl" "$QEND" "Run the line when ready."
 check 2 "command ending the question, not echoed, fires without the ?" "$TMP/17b.jsonl" "" 'gh pr merge 7 --rebase --admin$'
+
+# Code negation with no space after the bang is not a command.
+mktx "$TMP/18.jsonl" "Suggested shape: refuse !guild_id unless recipient. OK?" "Done."
+check 0 "bang with no following space (code negation) is not a command" "$TMP/18.jsonl"
 
 [ "$fail" = 0 ] && echo "ALL PASS" || { echo "FAILURES"; exit 1; }
