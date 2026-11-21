@@ -209,12 +209,19 @@ default_branch_of() {
 }
 
 emit_block() {
-  local root="$1" def_branch="$2" reason="$3"
+  local root="$1" def_branch="$2" reason="$3" re br
+  re=${SYG_WORKTREE_BRANCH_RE:-}
+  [ -n "$re" ] || re='^worktree-agent-'
+  if [[ worktree-agent-x =~ $re ]] 2>/dev/null; then
+    br='worktree-agent-<name>'
+  else
+    br="<branch matching $re>"
+  fi
   cat >&2 <<EOF
 LIVE-CHECKOUT GUARD — blocked: $reason
 Live root: $root (default branch: $def_branch)
 Why: this checkout's files are the code every session loads; switching branches, stashing, committing, or leaving tracked edits in it makes that state live in every session on the machine.
-Fix: do the work in a linked worktree (git fetch origin && git worktree add -b <branch> $root/.claude/worktrees/<name> origin/$def_branch) and commit/push from there; for Edit/Write, edit the same path inside that worktree.
+Fix: do the work in a linked worktree (git fetch origin && git worktree add -b $br $root/.claude/worktrees/<name> origin/$def_branch) and commit/push from there; for Edit/Write, edit the same path inside that worktree.
 Bypass (only for an action the owner approved): SYG_ALLOW_LIVE_CHECKOUT=1
 EOF
   exit 2

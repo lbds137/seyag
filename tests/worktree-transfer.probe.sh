@@ -89,6 +89,8 @@ export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 T=$(mktemp -d)
 cleanup() { rm -rf "$T"; }
 trap cleanup EXIT
+export XDG_CONFIG_HOME="$T/xdg-config" CLAUDE_PROJECT_DIR="$T/r1"
+mkdir -p "$XDG_CONFIG_HOME"
 
 pass=0
 fail=0
@@ -1507,6 +1509,26 @@ else
       record_case 1 "case 58: empty worker commit hint" "rc_a=$rc_a err_a=$err_a rc_b=$rc_b err_b=$err_b rc_c=$rc_c err_c=$err_c"
     fi
   fi
+fi
+
+# Case 59: config.toml loader — with SYG_WORKTREE_BRANCH_RE unset and
+# $XDG_CONFIG_HOME/seyag/config.toml setting syg_worktree_branch_re = "^feat-",
+# worktree-transfer accepts a tree on branch feat-x at worktree-registered.
+mk_fixture r59
+R59="$T/r59"
+(cd "$R59" && git worktree add -q -b feat-x .wt-feat >/dev/null 2>&1)
+populate_wt "$R59/.wt-feat"
+XDG59="$T/xdg59"
+mkdir -p "$XDG59/seyag"
+printf 'syg_worktree_branch_re = "^feat-"\n' >"$XDG59/seyag/config.toml"
+out59=$(cd "$R59" && env -u SYG_WORKTREE_BRANCH_RE XDG_CONFIG_HOME="$XDG59" CLAUDE_PROJECT_DIR="$R59" bash "$TOOL" .wt-feat 2>&1)
+rc59=$?
+if [ "$rc59" -eq 0 ] \
+  && grep -qF 'worktree-registered' <<<"$out59" \
+  && grep -qF 'branch feat-x deleted' <<<"$out59"; then
+  record_case 0 "case 59: config.toml syg_worktree_branch_re = ^feat- accepted at worktree-registered and transferred"
+else
+  record_case 1 "case 59: config.toml syg_worktree_branch_re = ^feat-" "rc=$rc59 out=$out59"
 fi
 
 [ "$fail" -eq 0 ] || exit 1

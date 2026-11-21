@@ -41,8 +41,19 @@ SCAN_EXACT_NAMES = (
 )
 # Mirrors config-env.sh's _SYG_CFG_PROJECT_EXEC alongside the _CMD suffix class (pinned by tests/config-env.probe.sh case (o5)).
 EXEC_REFUSED_EXTRA = ("SYG_STATUSLINE_ZAI_USAGE",)
-# Mirrors config-env.sh's _SYG_CFG_PROJECT_SECURE (pinned by tests/config-env.probe.sh case (w)): the credential-store and billing/lane knobs.
-SECURE_REFUSED_EXTRA = ("SYG_KEYS_NAME", "SYG_KEYS_WITH_KEY", "ZAI_AUTH_TOKEN", "SYG_CREDIT_WHEN", "SYG_CREDIT_ROUTE")
+# Mirrors config-env.sh's _SYG_CFG_PROJECT_SECURE (pinned by tests/config-env.probe.sh case (w)): the credential-store, billing/lane and worktree-cleanup knobs.
+SECURE_REFUSED_EXTRA = (
+    "SYG_KEYS_NAME",
+    "SYG_KEYS_WITH_KEY",
+    "ZAI_AUTH_TOKEN",
+    "SYG_CREDIT_WHEN",
+    "SYG_CREDIT_ROUTE",
+    "SYG_WORKTREE_BRANCH_RE",
+    "SYG_WORKTREE_LOCK_AGE_MIN",
+    "SYG_WORKTREE_BACKUP_ALLOW_VOLATILE",
+    "SYG_WORKTREE_REGENERABLE",
+    "SYG_WORKTREE_BASE",
+)
 
 GROUPS = (
     "guards",
@@ -270,7 +281,7 @@ def render_doc(rows: dict[str, dict[str, str]], scanned: dict[str, set[str]]) ->
         "",
         "## Config files (config.toml)",
         "",
-        "An optional TOML file fills in knobs the environment left unset: user `${XDG_CONFIG_HOME:-$HOME/.config}/seyag/config.toml`, then project `${CLAUDE_PROJECT_DIR:-$PWD}/.claude/seyag.toml` (project keys overwrite user keys). The environment wins over both, even when set to the empty string. Keys map mechanically to env names, the key path uppercased with the separators turned into underscores: `claude_usage_week_reserve = 61` and `[claude_usage]` + `week_reserve = 61` both set `CLAUDE_USAGE_WEEK_RESERVE`. A key applies iff its env name is a user-scope row of this registry, does not carry `envonly` (environment-only rows, rendered `env only` in the `Config` column alongside the harness-owned names, cannot be set from any config file), and is not harness-owned; command-execution knobs — names ending `_CMD` and the binary-path knobs the loader lists beside them — the security-material knobs in the loader's `_SYG_CFG_PROJECT_SECURE` list (credential-store and billing/lane names, rendered `user only`), and path-valued knobs (registry `path` flag, rendered `user only`) cannot be set from the project file. Subset per line: blank, full-line comment, `[section]` header, or `key = value` with a quoted string (basic `\"`, escapes `\\\\` `\\\"` `\\t` `\\n` only, or literal `'`), an integer, a float, or `true`/`false` (exported as `1`/`0`); strings and paths must be quoted, and arrays, inline tables, multiline strings and trailing content are unsupported (after a multiline-string opener warning, the string body is skipped to its closing delimiter); a comment may follow a value but not a section header. `SYG_CONFIG=0` disables the loader. A bad file warns on stderr (warnings name file and line; file content is never echoed; name text is bounded (40 characters)) and is skipped, never blocks a hook — and warns again on every hook call. The project file has the same trust level as the project's `settings.json` `env` block: a cloned repo can set any project-allowed knob it names, guard bypasses included, so trust a repo before letting its `.claude/seyag.toml` load.",
+        "An optional TOML file fills in knobs the environment left unset: user `${XDG_CONFIG_HOME:-$HOME/.config}/seyag/config.toml`, then project `${CLAUDE_PROJECT_DIR:-$PWD}/.claude/seyag.toml` (project keys overwrite user keys). The environment wins over both, even when set to the empty string. Keys map mechanically to env names, the key path uppercased with the separators turned into underscores: `claude_usage_week_reserve = 61` and `[claude_usage]` + `week_reserve = 61` both set `CLAUDE_USAGE_WEEK_RESERVE`. A key applies iff its env name is a user-scope row of this registry, does not carry `envonly` (environment-only rows, rendered `env only` in the `Config` column alongside the harness-owned names, cannot be set from any config file), and is not harness-owned; command-execution knobs — names ending `_CMD` and the binary-path knobs the loader lists beside them — the security-material knobs in the loader's `_SYG_CFG_PROJECT_SECURE` list (credential-store, billing/lane and worktree-cleanup names, rendered `user only`), and path-valued knobs (registry `path` flag, rendered `user only`) cannot be set from the project file. Subset per line: blank, full-line comment, `[section]` header, or `key = value` with a quoted string (basic `\"`, escapes `\\\\` `\\\"` `\\t` `\\n` only, or literal `'`), an integer, a float, or `true`/`false` (exported as `1`/`0`); strings and paths must be quoted, and arrays, inline tables, multiline strings and trailing content are unsupported (after a multiline-string opener warning, the string body is skipped to its closing delimiter); a comment may follow a value but not a section header. `SYG_CONFIG=0` disables the loader. A bad file warns on stderr (warnings name file and line; file content is never echoed; name text is bounded (40 characters)) and is skipped, never blocks a hook — and warns again on every hook call. The project file has the same trust level as the project's `settings.json` `env` block: a cloned repo can set any project-allowed knob it names, guard bypasses included, so trust a repo before letting its `.claude/seyag.toml` load.",
     ]
 
     for group in GROUPS:

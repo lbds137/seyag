@@ -42,7 +42,18 @@ _PROJECT_EXEC = frozenset(["SYG_STATUSLINE_ZAI_USAGE"])
 
 # Mirrors _SYG_CFG_PROJECT_SECURE in hooks/lib/config-env.sh (pinned equal by the probe).
 _PROJECT_SECURE = frozenset(
-    ["SYG_KEYS_NAME", "SYG_KEYS_WITH_KEY", "ZAI_AUTH_TOKEN", "SYG_CREDIT_WHEN", "SYG_CREDIT_ROUTE"]
+    [
+        "SYG_KEYS_NAME",
+        "SYG_KEYS_WITH_KEY",
+        "ZAI_AUTH_TOKEN",
+        "SYG_CREDIT_WHEN",
+        "SYG_CREDIT_ROUTE",
+        "SYG_WORKTREE_BRANCH_RE",
+        "SYG_WORKTREE_LOCK_AGE_MIN",
+        "SYG_WORKTREE_BACKUP_ALLOW_VOLATILE",
+        "SYG_WORKTREE_REGENERABLE",
+        "SYG_WORKTREE_BASE",
+    ]
 )
 
 _VALID_PATH = re.compile(r"[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)*")

@@ -88,19 +88,26 @@ _syg_cfg_in_project_exec() {
   return 1
 }
 
-# Credential-store and billing/lane knobs (the keys store's --name and
-# --with-key; the z.ai bearer token; the credit route-match rule and ledger
-# label): refused from project scope, settable from user scope — a repo must
-# not weaken the credential store (--with-key downgrades TPM binding, --name
-# can break decrypt) or fake the token and route labels its spend is billed
-# and audited by. Kept equal to _PROJECT_SECURE in lib/config_env.py by
-# tests/config-env.probe.sh (w).
+# Credential-store, billing/lane and worktree-cleanup judgment knobs (the keys
+# store's --name and --with-key; the z.ai bearer token; the credit route-match
+# rule and ledger label; worktree-cleanup judgment knobs, because a repo must
+# not decide what the cleaner deletes without approval): refused from project
+# scope, settable from user scope — a repo must not weaken the credential store
+# (--with-key downgrades TPM binding, --name can break decrypt), fake the token
+# and route labels its spend is billed and audited by, or decide what the
+# cleaner deletes without approval. Kept equal to _PROJECT_SECURE in
+# lib/config_env.py by tests/config-env.probe.sh (w).
 _SYG_CFG_PROJECT_SECURE=(
   SYG_KEYS_NAME
   SYG_KEYS_WITH_KEY
   ZAI_AUTH_TOKEN
   SYG_CREDIT_WHEN
   SYG_CREDIT_ROUTE
+  SYG_WORKTREE_BRANCH_RE
+  SYG_WORKTREE_LOCK_AGE_MIN
+  SYG_WORKTREE_BACKUP_ALLOW_VOLATILE
+  SYG_WORKTREE_REGENERABLE
+  SYG_WORKTREE_BASE
 )
 
 # _syg_cfg_in_project_secure <NAME>: is NAME a security-material knob (refused
