@@ -6,7 +6,7 @@ All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY
 
 ### Improvements
 
-- **rules:** core § Fix recurring failures structurally chooses the fix by fit instead of in order: a hook when the trigger is mechanical, a skill for a procedure, and a rule only for a hard constraint neither can carry, since a rule is paid on every turn (owner ruling; closes TASK-48). (#361)
+- **rules:** core § Fix recurring failures structurally chooses the fix by fit instead of in order: a hook when the trigger is mechanical, a skill for a procedure, and a rule only for a hard constraint neither can carry, since a rule is paid on every turn (owner ruling; closes TASK-48); the next bullet's "usually one rule line" follows suit. (#361)
 
 ## 0.3.198 - 2026-11-20
 

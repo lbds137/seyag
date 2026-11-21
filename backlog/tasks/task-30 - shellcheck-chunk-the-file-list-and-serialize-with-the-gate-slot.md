@@ -30,5 +30,5 @@ NEXT (bisect the cliff, then fix the construct — do not gate-dodge):
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Released 2026-11-20 (Seyag B retired under the one-lane ruling; no branch carries the work). Prior work, gitignored in the main checkout: .claude/dispatch/seyag-b-archive/b-t30sc-* (spec, apply/blocks/namecheck/verify scripts, blocks.tsv/txt, 11-19) and the profile table .claude/dispatch/b-t30-profile.tsv. The 3.7 GB outlier, tests/safe-worktree-clean.probe.sh, is the probe TASK-49 saw time out under suite load.
+Released 2026-11-20 (the claimant session was retired; no branch carries the work). Prior work, gitignored in the main checkout: .claude/dispatch/seyag-b-archive/b-t30sc-* (spec, apply/blocks/namecheck/verify scripts, blocks.tsv/txt, 11-19) and the profile table .claude/dispatch/b-t30-profile.tsv. The 3.7 GB outlier, tests/safe-worktree-clean.probe.sh, is the probe TASK-49 saw time out under suite load.
 <!-- SECTION:NOTES:END -->
