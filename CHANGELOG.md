@@ -2,6 +2,20 @@
 
 All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY-MM-DD>` section per released version; under it, `###` categories in fixed order — Breaking Changes, Features, Bug Fixes, Improvements, Chores, Tests — empty ones omitted; items are `- **scope:** description (#PR)`, written from the version's merged commit subjects.
 
+## 0.3.201 - 2026-11-21
+
+### Features
+
+- **hooks:** `ask-command-echo-check` (component `ask-command-echo`, on in `full`, off headless): blocks a turn end once when an `AskUserQuestion` this turn carried a `!` command or a URL (question text, option label, description or preview) that the closing message does not repeat in a fenced code block (a URL may stand alone on its own line), since dialog text can't be copied on a phone (TASK-53). (#PR)
+
+### Chores
+
+- **backlog:** filed TASK-59 to TASK-62 (`safe-worktree-clean --apply-eligible`, worktree byproducts to scratch, wrong-worktree push warning, chrome-loss-scan review lows); TASK-54 and TASK-55 cite workflow steps by name. (#PR)
+
+### Tests
+
+- **hooks:** `ask-command-echo-check.probe.sh` pins the fire and silent table: question, description and preview triggers, fenced and tilde-fenced echoes, inline-backtick and prose non-echoes, a command closing the question (no trailing `?` in its key), example and placeholder URLs, earlier-turn asks, `stop_hook_active`, `last_assistant_message`, and fail-open. (#PR)
+
 ## 0.3.200 - 2026-11-21
 
 ### Bug Fixes

@@ -129,8 +129,8 @@ SYG_GH_WRAPPERS	user	guards	unset	Whitespace-separated wrapper command prefix to
 SYG_HANDOFF_CMDS	user	stop-gates	unset	Python regex matching Bash commands that write a handoff (replaces built-in HANDOFF.md/handoff.md path defaults).	-
 SYG_HANDOFF_PATHS	user	stop-gates	(^|/)(?:HANDOFF\.md|handoff\.md)$	Python regex matching file paths whose Edit/Write counts as a handoff write (replaces built-in defaults when set).	-
 SYG_HANDOFF_SECTIONS	user	stop-gates	^##[ \t]*(?:Handoff|Next)\b	Multiline Python regex narrowing wired SYG_HANDOFF_PATHS writes to matching markdown sections; empty disables narrowing.	-
-SYG_HEADLESS_OFF	internal	session	turn-shape context handoff-pick-check security	Internal constant listing components disabled automatically in headless (sdk-*) runs.	-
-SYG_HEADLESS_OFF_HOOKS	internal	session	blocking-question-channel-check turn-end-shape-gate promise-ledger-check queued-message-receipt bare-token-binding-reminder handoff-pick-check context-size-reminder	Internal fallback list of hooks disabled in headless runs when components.tsv cannot be read.	-
+SYG_HEADLESS_OFF	internal	session	turn-shape context handoff-pick-check ask-command-echo security	Internal constant listing components disabled automatically in headless (sdk-*) runs.	-
+SYG_HEADLESS_OFF_HOOKS	internal	session	blocking-question-channel-check turn-end-shape-gate promise-ledger-check queued-message-receipt bare-token-binding-reminder handoff-pick-check ask-command-echo-check context-size-reminder	Internal fallback list of hooks disabled in headless runs when components.tsv cannot be read.	-
 SYG_HOOK	internal	session	unset	Internal variable holding the resolved hook script path inside run.sh.	-
 SYG_IN_PERSON_SECTION	user	session	In Person	Heading (without the ##) of the role file section claude-role --need --in-person writes and --json reads as .deck: what needs the owner physically present.	-
 SYG_KEYS_CREDS_CMD	internal	misc	systemd-creds	Test seam replacing the systemd-creds command in keys.	-
