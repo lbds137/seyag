@@ -13,7 +13,7 @@ The portable Claude Code process layer for every project on Lila's Steam Deck: h
 - The marketplace installs from this local checkout's working tree, so keep the main checkout on `main` (`live-checkout-guard` enforces this); unit and release branches live in their own worktrees.
 
 ## Ceilings and landmines
-- `plugins/seyag/rules/core.md` is always-loaded in every session on the machine (22.0 KB at 0.3.197): every added line is paid on every turn everywhere. Cut before adding.
+- `plugins/seyag/rules/core.md` is always-loaded in every session on the machine (22.1 KB at 0.3.199): every added line is paid on every turn everywhere. Cut before adding.
 - Probes pin message text and output shapes; a wording change usually needs its probe changed in the same diff.
 - `hooks/session-start.sh` prints `seyag plugin <version>` as its first line on every start; `deck-sessions` (dev-docs) reads it from session logs. Keep the prefix.
 - Session-mining corpora and reports under `~/.claude/projects/*/mined-corpus/` are private working material; only operationalized outcomes (a rule line, a skill step, a hook) enter this repo.
