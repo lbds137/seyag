@@ -44,7 +44,7 @@ It also fires at the **first** fix of a bug on one of several parallel flows (a 
 
 ## 6. Structural guard
 
-- Ask the three questions from core rules § Fix recurring failures structurally: a rule, a skill step, or a hook/CI check? For code classes, prefer an invariant the build enforces (a manifest test, a budget constant, a lint or guard check, a parity test) over documentation.
+- Pick the form by fit, per core rules § Fix recurring failures structurally: a hook or CI check when the trigger is mechanical, a skill step for a procedure, a rule only for a hard constraint neither can carry. For code classes, prefer an invariant the build enforces (a manifest test, a budget constant, a lint or guard check, a parity test) over documentation.
 - A remediation with no recurrence blocker is incomplete. If nothing structural fits, record why in the PR or commit body.
 - A new or changed hook is replayed against local session logs (`tests/replay-hook.sh <hook> [--since N]` for a Bash-matching hook, `tests/replay-stop-hook.sh` for a Stop hook) and the blocked set sampled before it ships; a false-positive rate you can't state is one you haven't measured.
 
