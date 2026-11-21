@@ -255,7 +255,7 @@ An optional TOML file fills in knobs the environment left unset: user `${XDG_CON
 
 | Name | Default | What it does | Found in | Config |
 | --- | --- | --- | --- | --- |
-| `CONTEXT_AUDIT_BUDGET` | unset | Byte budget for context-audit weigh's TOTAL (rules, CLAUDE.md, memory index, skill descriptions, role file, SessionStart hook output); over it, weigh exits 1. Unset: no budget. | `bin/context-audit` | user + project |
+| `CONTEXT_AUDIT_BUDGET` | unset | Byte budget for context-audit weigh's TOTAL (rules, CLAUDE.md, memory index, skill descriptions, role text, SessionStart hook output); over it, weigh exits 1. Unset: no budget. | `bin/context-audit` | user + project |
 | `SYG_CONFIG` | unset | Set to 0 to disable the config.toml loader entirely (hooks and wired bins ignore config files; any other value or unset: enabled). | `hooks/lib/config-env.sh`, `lib/config_env.py` | user + project |
 | `SYG_KEYS_LEGACY_FILE` | unset | Optional read-only plaintext NAME=value fallback file consulted by keys get after the encrypted store. | `bin/keys` | user only |
 | `SYG_KEYS_LOCK_WAIT_S` | `15` | Seconds keys waits for the store lock or the TPM lock before failing (finite number >= 0). | `bin/keys`, `bin/zai-usage` | user + project |
