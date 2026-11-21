@@ -1,20 +1,20 @@
 # Changelog
 
-All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY-MM-DD>` section per released version; under it, `###` categories in fixed order — Breaking Changes, Features, Bug Fixes, Improvements, Chores, Tests — empty ones omitted; items are `- **scope:** description (#PR)`, written from the version's merged commit subjects.
+All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY-MM-DD>` section per released version; under it, `###` categories in fixed order — Breaking Changes, Features, Bug Fixes, Improvements, Chores, Tests — empty ones omitted; items are `- **scope:** description (#365)`, written from the version's merged commit subjects.
 
 ## 0.3.201 - 2026-11-21
 
 ### Features
 
-- **hooks:** `ask-command-echo-check` (component `ask-command-echo`, on in `full`, off headless): blocks a turn end once per ask when an `AskUserQuestion` this turn carried a `!` command or a URL (question text, option label, description or preview) that the closing message does not repeat in a fenced code block (a URL may stand alone on its own line), since dialog text can't be copied on a phone (TASK-53). (#PR)
+- **hooks:** `ask-command-echo-check` (component `ask-command-echo`, on in `full`, off headless): blocks a turn end once per ask when an `AskUserQuestion` this turn carried a `!` command or a URL (question text, option label, description or preview) that the closing message does not repeat in a fenced code block (a URL may stand alone on its own line), since dialog text can't be copied on a phone (TASK-53). (#365)
 
 ### Chores
 
-- **backlog:** filed TASK-59 to TASK-62 (`safe-worktree-clean --apply-eligible`, worktree byproducts to scratch, wrong-worktree push warning, chrome-loss-scan review lows); TASK-54 and TASK-55 cite workflow steps by name. (#PR)
+- **backlog:** filed TASK-59 to TASK-62 (`safe-worktree-clean --apply-eligible`, worktree byproducts to scratch, wrong-worktree push warning, chrome-loss-scan review lows); TASK-54 and TASK-55 cite workflow steps by name. (#365)
 
 ### Tests
 
-- **hooks:** `ask-command-echo-check.probe.sh` pins the fire and silent table: question, description and preview triggers, fenced and tilde-fenced echoes, inline-backtick and prose non-echoes, a command closing the question (no trailing `?` in its key), example and placeholder URLs, earlier-turn asks, block-once-per-ask (including inside a `stop_hook_active` retry), `last_assistant_message`, and fail-open. (#PR)
+- **hooks:** `ask-command-echo-check.probe.sh` pins the fire and silent table: question, description and preview triggers, fenced and tilde-fenced echoes, inline-backtick and prose non-echoes, a command closing the question (no trailing `?` in its key), example and placeholder URLs, earlier-turn asks, block-once-per-ask (including inside a `stop_hook_active` retry), `last_assistant_message`, and fail-open. (#365)
 
 ## 0.3.200 - 2026-11-21
 
@@ -438,7 +438,7 @@ All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY
 ### Chores
 
 - **bin:** `safe-worktree-clean` re-wraps the ragged header/`--help` lines the holdscope batch left behind and comments the display-only `", "` split that builds the sweep tree names (`--json`'s `sweep_plan_trees` is unaffected) (#313).
-- **docs:** restores the `(#PR)` placeholder on the format line, which a cite-fill replace_all had clobbered to `(#310)` (#313).
+- **docs:** restores the `(#365)` placeholder on the format line, which a cite-fill replace_all had clobbered to `(#310)` (#313).
 - **hooks:** the pending-marker-pass header re-flowed: the scan sentence runs to `SYG_BQ_PENDING_MARKERS (...)`, the paragraph-filter and banner notes sit after the negator paragraph, and the banner note names the conditional placeholder (#314).
 - **docs:** the 0.3.166 bq-fp bullets shortened to commit-subject length; details stay in the hook header (authoritative) (#314).
 
