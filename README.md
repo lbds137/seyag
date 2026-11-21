@@ -96,7 +96,7 @@ claude plugin install seyag@lbds137 --scope user
 mkdir -p ~/.claude/rules && ln -s ~/Projects/seyag/plugins/seyag/rules/core.md ~/.claude/rules/seyag-core.md
 ```
 
-**Why a rules link and not a hook:** Claude Code shows a hook's output to the session in full only up to about 10 KB (measured 2026-09-25: 9.5 KB arrived whole, 12 KB became a 2 KB preview). `core.md` is about 21 KB. Files in `~/.claude/rules/` load into every session in full. If the link is missing, the SessionStart hook says so in one line.
+**Why a rules link and not a hook:** Claude Code shows a hook's output to the session in full only up to about 10 KB (measured 2026-09-25: 9.5 KB arrived whole, 12 KB became a 2 KB preview). `core.md` is about 22 KB. Files in `~/.claude/rules/` load into every session in full. If the link is missing, the SessionStart hook says so in one line.
 
 **What loads from where.** Claude Code keeps an install record and a cached copy under `~/.claude/plugins/cache/<marketplace>/seyag/<version>/`, but for this directory marketplace every part of the plugin (`hooks.json` and the hook scripts, agents, skills, `bin/`) loads from the source checkout (`~/Projects/seyag/plugins/seyag`) when a session starts or runs `/reload-plugins`, whatever version the record names. A running session keeps the hooks it started with until `/reload-plugins`; `/clear` does not reload hooks. So a merge to the checkout goes live in a session at its next start or `/reload-plugins`.
 
