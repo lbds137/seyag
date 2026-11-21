@@ -192,4 +192,61 @@ check 2 "command ending the question, not echoed, fires without the ?" "$TMP/17b
 mktx "$TMP/18.jsonl" "Suggested shape: refuse !guild_id unless recipient. OK?" "Done."
 check 0 "bang with no following space (code negation) is not a command" "$TMP/18.jsonl"
 
+# URL echoed inside a fenced block, not alone on its line.
+PURL='https://github.com/o/r/pull/1'
+mktx "$TMP/19a.jsonl" "Open $PURL and tell me." "Run:
+${FENCE}
+curl -sI $PURL
+${FENCE}"
+check 0 "URL inside a fenced line (not alone) passes" "$TMP/19a.jsonl"
+
+# Bare-URL line wrappers: list bullet with angle brackets, and backticks alone on the line.
+mktx "$TMP/19b.jsonl" "Open $PURL and tell me." "Link:
+- <$PURL>"
+check 0 "URL as a '- <url>' line passes" "$TMP/19b.jsonl"
+mktx "$TMP/19c.jsonl" "Open $PURL and tell me." "Link:
+${TICK}$PURL${TICK}"
+check 0 "URL in backticks alone on its line passes" "$TMP/19c.jsonl"
+
+# Host skipping reads past userinfo and port.
+mktx "$TMP/20a.jsonl" "Try https://user@example.com:8443/x ok?" "Done."
+check 0 "example host with userinfo and port is skipped" "$TMP/20a.jsonl"
+mktx "$TMP/20b.jsonl" "Try https://user@github.com:443/o/r ok?" "Done."
+check 2 "real host with userinfo and port fires" "$TMP/20b.jsonl" "" 'github\.com:443/o/r'
+
+# Two asks in one turn: text written before the second ask must not satisfy it.
+OUT="$TMP/21.jsonl" CMD="$CMD" FENCE="$FENCE" python3 -I -B - << 'PY'
+import json, os
+def ask(i, q):
+    return {"type": "assistant", "message": {"content": [{"type": "tool_use", "id": i, "name": "AskUserQuestion", "input": {"questions": [{"question": q, "options": []}]}}]}}
+def result():
+    return {"type": "user", "message": {"content": [{"type": "tool_result", "content": "answered"}]}}
+def text(t):
+    return {"type": "assistant", "message": {"content": [{"type": "text", "text": t}]}}
+f = os.environ["FENCE"]
+c = os.environ["CMD"]
+rows = [
+    {"type": "user", "isMeta": None, "message": {"content": "go"}},
+    ask("a1", "Which way?"), result(),
+    text(f"Here it is:\n{f}\n! {c}\n{f}"),
+    ask("a2", f"Run: ! {c}"), result(),
+    text("Done."),
+]
+with open(os.environ["OUT"], "w") as fh:
+    for r in rows:
+        fh.write(json.dumps(r) + "\n")
+PY
+check 2 "text before the second ask does not satisfy its command" "$TMP/21.jsonl" "" "$CMD"
+
+# State files older than 7 days are pruned on write; fresh ones stay.
+PDIR="$XDG_STATE_HOME/seyag/ask-command-echo-check"
+mkdir -p "$PDIR"
+touch -d '8 days ago' "$PDIR/stale-sess"
+touch -d '2 days ago' "$PDIR/fresh-sess"
+mktx "$TMP/22.jsonl" "$Q1" "Done. Run the line when ready."
+check 2 "prune case: blocking write runs" "$TMP/22.jsonl"
+NCASE=$((NCASE + 1))
+if [ ! -e "$PDIR/stale-sess" ] && [ -e "$PDIR/fresh-sess" ]; then echo "ok   [prune]: stale state file pruned, fresh kept"
+else echo "FAIL [prune]: stale present=$([ -e "$PDIR/stale-sess" ] && echo y || echo n) fresh present=$([ -e "$PDIR/fresh-sess" ] && echo y || echo n)"; fail=1; fi
+
 [ "$fail" = 0 ] && echo "ALL PASS" || { echo "FAILURES"; exit 1; }
