@@ -18,6 +18,7 @@ plugins/seyag/hooks/handoff-pick-check.probe.sh	9.6
 plugins/seyag/hooks/launch-record.probe.sh	1.0
 plugins/seyag/hooks/live-checkout-guard.probe.sh	37.0
 plugins/seyag/hooks/lossy-pipe-guard.probe.sh	14.9
+plugins/seyag/hooks/memory-route-gate.probe.sh	3.5
 plugins/seyag/hooks/pr-body-ref-gate.probe.sh	38.7
 plugins/seyag/hooks/private-term-guard.probe.sh	49.4
 plugins/seyag/hooks/pr-merge-review-check.probe.sh	50.3

@@ -89,9 +89,9 @@ block_case "4d: frontmatter never closed" "$(jq_write "$MEM/a.md" "$FM_UNCLOSED"
 block_case "4e: why-memory sits after the frontmatter, not in it" "$(jq_write "$MEM/a.md" "$FM_OUTSIDE")"
 # A glob value must not expand against the hook's working directory into 3+ "words".
 mkdir -p "$TMP/globdir" && touch "$TMP/globdir/f1" "$TMP/globdir/f2" "$TMP/globdir/f3"
-cd "$TMP/globdir" || exit 1
+pushd "$TMP/globdir" >/dev/null || exit 1
 block_case "4f: why-memory: * is one word, not a glob" "$(jq_write "$MEM/a.md" $'---\nwhy-memory: *\n---\n')"
-cd "$HERE" || exit 1
+popd >/dev/null || exit 1
 # A large body after a valid block must not change the verdict (no SIGPIPE under pipefail).
 { printf '%s' "$FM_OK"; head -c 3000000 /dev/zero | tr '\0' 'x'; } >"$TMP/big.md"
 BIG_PAYLOAD=$(jq -cn --arg f "$MEM/a.md" --rawfile n "$TMP/big.md" --arg c "$CWD" \
@@ -125,6 +125,17 @@ mkdir -p "$TMP/localmem"
 block_case "8f: settings.local.json override is honoured" \
   "$(jq_write "$TMP/localmem/l.md" "$PLAIN")"
 rm -f "$CWD/.claude/settings.local.json" "$CONF/settings.json"
+# A symlinked memory dir matches through either name.
+mkdir -p "$TMP/realmem" && ln -s "$TMP/realmem" "$TMP/linkmem"
+printf '{"autoMemoryDirectory": "%s"}\n' "$TMP/linkmem" >"$CONF/settings.json"
+block_case "8g: write through the real path of a symlinked memory dir" \
+  "$(jq_write "$TMP/realmem/s.md" "$PLAIN")"
+block_case "8h: write through the symlink itself" "$(jq_write "$TMP/linkmem/t.md" "$PLAIN")"
+# A relative autoMemoryDirectory is ignored (only absolute and ~/ forms are honoured).
+printf '{"autoMemoryDirectory": "relmem"}\n' >"$CONF/settings.json"
+mkdir -p "$CWD/relmem"
+pass_case "8i: relative autoMemoryDirectory is ignored" "$(jq_write "$CWD/relmem/r.md" "$PLAIN")"
+rm -f "$CONF/settings.json"
 
 # --- 9-11. Out-of-scope files and tools ---------------------------------------------
 pass_case "9: non-.md file in the memory dir" "$(jq_write "$MEM/data.txt" "$PLAIN")"
@@ -164,10 +175,14 @@ if [ "$big_ok" = 1 ]; then ok; else bad "15: large payload" "writer=${pst[0]} ho
 if [ -z "${MRG_PROBE_HOOK:-}" ]; then
   mkdir -p "$TMP/stub"
   printf '#!/bin/bash\ncat >/dev/null\nexit 0\n' >"$TMP/stub/memory-route-gate.sh"
-  if MRG_PROBE_HOOK="$TMP/stub/memory-route-gate.sh" bash "$0" >/dev/null 2>&1; then
-    bad "14: purpose canary" "an always-allow stub hook passed this probe"
-  else
+  # Absolute self path, and the stub run must fail on an assertion (FAIL [), not on
+  # a launch error such as an unresolvable relative $0.
+  canary_out=$(MRG_PROBE_HOOK="$TMP/stub/memory-route-gate.sh" bash "$HERE/$(basename "$0")" 2>&1)
+  canary_rc=$?
+  if [ "$canary_rc" -ne 0 ] && grep -qF 'FAIL [' <<<"$canary_out"; then
     ok
+  else
+    bad "14: purpose canary" "always-allow stub: rc=$canary_rc, no 'FAIL [' assertion line"
   fi
 fi
 

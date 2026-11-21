@@ -9,7 +9,7 @@ CC_ROUTE_KEYS	user	routing	~/.claude/lane-keys.env	Path to the lane key file whe
 CC_ROUTE_PRESET	user	routing	unset	Route preset name; set to anthropic-api so claude-usage treats a first-party endpoint as the Console API-key lane.	-
 CLAUDE_CONFIG_DIR	user	session	~/.claude	Claude Code config directory: context-audit (CLAUDE.md, rules, settings, memory, skills, plugins), session-log, and the projects folder the session tools use when CLAUDE_PROJECTS_DIR is unset; statusline ignores it.	path
 CLAUDE_PLUGIN_REGISTRY	user	statusline	$HOME/.claude/plugins/installed_plugins.json	Path to installed_plugins.json read by statusline to compare the installed seyag version against the checkout manifest.	path
-CLAUDE_PROJECTS_DIR	user	session	~/.claude/projects	Per-project transcript folders, read by session-log, usage-sweep, price-table, classifier-denials, session-stalled, session-context, chrome-loss-scan, relay-ruling, driver-busy-hours; unset: CLAUDE_CONFIG_DIR/projects.	path
+CLAUDE_PROJECTS_DIR	user	session	~/.claude/projects	Transcript folders read by session-log, usage-sweep, price-table, classifier-denials, session-stalled, session-context, chrome-loss-scan, relay-ruling, driver-busy-hours, context-audit; unset: CLAUDE_CONFIG_DIR/projects.	path
 CLAUDE_SESSION_ARCHIVE	user	session	~/Documents/claude-session-archive	Directory holding exported cse_*.jsonl claude.ai session archives read by session-log.	path
 CLAUDE_USAGE_API_CREDIT	internal	usage	<script_dir>/api-credit	Test seam overriding the sibling api-credit binary path in claude-usage.	-
 CLAUDE_USAGE_EXTRA_OK	user	usage	unset	Set to 1 to let claude-usage --ok and --wait pass past the weekly reserve while extra usage is enabled and under budget.	-
@@ -24,6 +24,7 @@ CLAUDE_USAGE_ZAI_USAGE	internal	usage	<script_dir>/zai-usage	Test seam overridin
 CLAUDE_USAGE_ZAI_WEEK_RESERVE	user	usage	<CLAUDE_USAGE_WEEK_RESERVE>	Static weekly quota reserve percentage (integer 1-99) for claude-usage --ok and --posture on the z.ai lane.	-
 CLAUDE_USAGE_ZAI_WEEK_RESERVE_CMD	user	usage	unset	Shell command (5s timeout) printing a dynamic weekly reserve integer 1-99 for the z.ai lane in claude-usage.	-
 CLAUDE_VERSIONS_DIR	user	statusline	$HOME/.local/share/claude/versions	Directory of staged native Claude Code version downloads checked by statusline for the CC update nudge.	path
+CONTEXT_AUDIT_BUDGET	user	misc	unset	Byte budget for context-audit weigh's TOTAL (rules, CLAUDE.md, memory index, skill descriptions, role file, SessionStart hook output); over it, weigh exits 1. Unset: no budget.	-
 CONTEXT_AUDIT_MOUNTS	internal	misc	/proc/self/mounts	Test seam overriding the mount table path read by context-audit to skip fuse.rclone mounts.	-
 LINES_CHECK_CONTEXT_AUDIT	internal	misc	<script_dir>/context-audit	Test seam overriding the context-audit binary path in lines-check.	-
 LINES_CHECK_IMPL_VERSION	internal	misc	1	Test seam overriding the implementation version compared against the baseline in lines-check.	-
