@@ -1,7 +1,8 @@
 #!/usr/bin/env -S python3 -I -B
 """context-audit: measurements for the doc-audit skill.
 
-  context-audit weigh [DIR]     what a session started in DIR loads up front, largest first:
+  context-audit weigh [DIR] [--budget BYTES]
+                                what a session started in DIR loads up front, largest first:
                                 ~/.claude/CLAUDE.md, ~/.claude/rules/**, the managed policy
                                 CLAUDE.md, the auto-memory index (to its load cap), CLAUDE.md /
                                 CLAUDE.local.md / .claude/CLAUDE.md from DIR up to /, DIR's
@@ -12,8 +13,10 @@
                                 longer exist, [[links]] to no memory, non-slug `name:` fields,
                                 index lines whose file is missing, memory files the index skips
 
-Token counts are bytes / 4, a rough estimate, labelled "~". Output from other SessionStart hooks
-isn't counted. No path under a fuse.rclone mount (the ~/gdrive Drive mount) is ever stat-ed:
+Token counts are bytes / 4, a rough estimate, labelled "~". SessionStart hook output is counted
+from the newest transcript for the folder (CLAUDE_PROJECTS_DIR, else CLAUDE_CONFIG_DIR/projects);
+--budget BYTES (or CONTEXT_AUDIT_BUDGET) makes weigh exit 1 when TOTAL exceeds it.
+No path under a fuse.rclone mount (the ~/gdrive Drive mount) is ever stat-ed:
 paths are resolved by a lexical walk that stops at a mount point, symlinks included.
 HOME and CLAUDE_CONFIG_DIR are honoured (for tests); CONTEXT_AUDIT_MOUNTS overrides the mount
 table path (default /proc/self/mounts).
@@ -135,7 +138,102 @@ def frontmatter(text):
 IMPORT_RE = re.compile(r"(?<![\w`])@((?:~|\.{1,2}|/)[^\s`)]+|[\w.-]+/[^\s`)]+|[\w-]+\.md)")
 
 
-def weigh(start):
+def parse_budget(raw, explicit=False):
+    """None for unset (env: empty too); else a positive int, or exit with the message.
+
+    An explicit --budget value is strict: empty is an error, not "unset".
+    """
+    if raw is None or (raw == "" and not explicit):
+        return None
+    if not re.fullmatch(r"[0-9]+", raw) or int(raw) < 1:
+        sys.exit("context-audit: --budget needs a positive integer")
+    return int(raw)
+
+
+def slug_of(path):
+    return re.sub(r"[^A-Za-z0-9]", "-", str(path))
+
+
+def session_start_rows(start):
+    """(rows, note): SessionStart hook output sizes from the newest transcript for the folder.
+
+    Only the startup batch counts (records before the first user/assistant turn); sizes and
+    command strings are returned, never hook content.
+    """
+    projects = Path(os.environ.get("CLAUDE_PROJECTS_DIR") or CONF / "projects")
+    folders = []
+    for cand in (start, repo_root(start)):
+        d = projects / slug_of(cand.resolve())
+        if d.is_dir() and d not in folders:
+            folders.append(d)
+    none_note = "no session transcript found for this folder; SessionStart hook output not counted"
+    dated = []
+    for d in folders:
+        try:
+            candidates = list(d.glob("*.jsonl"))
+        except OSError:
+            continue
+        for f in candidates:
+            try:
+                dated.append((f.stat().st_mtime, f))
+            except OSError:
+                continue
+    files = [f for _, f in sorted(dated, key=lambda t: t[0], reverse=True)[:20]]
+    if not files:
+        return [], none_note
+    home = str(HOME) + "/"
+    for f in files:
+        found, rows = False, []
+        try:
+            with open(f, encoding="utf-8", errors="replace") as fh:
+                for line in fh:
+                    try:
+                        rec = json.loads(line)
+                    except ValueError:
+                        continue
+                    if not isinstance(rec, dict):
+                        continue
+                    if rec.get("type") in ("user", "assistant"):
+                        break
+                    att = rec.get("attachment")
+                    if rec.get("type") != "attachment" or not isinstance(att, dict):
+                        continue
+                    if att.get("hookEvent") != "SessionStart":
+                        continue
+                    content = att.get("content")
+                    if att.get("type") == "hook_success":
+                        found = True
+                        size = len(content.encode("utf-8", errors="replace")) if isinstance(content, str) else 0
+                        if size:
+                            cmd = str(att.get("command", ""))
+                            if cmd.startswith(home):
+                                cmd = "~" + cmd[len(home) - 1:]
+                            cmd = "".join(ch if ch.isprintable() else "?" for ch in cmd)
+                            if len(cmd) > 70:
+                                cmd = cmd[:69] + "…"
+                            rows.append((size, "SessionStart hook", cmd))
+                    elif att.get("type") == "hook_additional_context":
+                        found = True
+                        if isinstance(content, list):
+                            text = "\n".join(c for c in content if isinstance(c, str))
+                        elif isinstance(content, str):
+                            text = content
+                        else:
+                            text = ""
+                        rows.append((len(text.encode("utf-8", errors="replace")), "SessionStart additionalContext",
+                                     "(hookSpecificOutput.additionalContext)"))
+        except OSError:
+            continue
+        if found:
+            shown = str(f)
+            if shown.startswith(home):
+                shown = "~" + shown[len(home) - 1:]
+            return rows, (f"SessionStart output measured from {shown} (the newest transcript with "
+                          "startup hook records for this folder); it can differ per start")
+    return [], none_note
+
+
+def weigh(start, budget=None):
     start = start.resolve()
     rows, on_demand, seen = [], [], set()
     notes = []
@@ -211,6 +309,10 @@ def weigh(start):
         except (OSError, subprocess.SubprocessError):
             pass
 
+    ss_rows, ss_note = session_start_rows(start)
+    rows.extend(ss_rows)
+    notes.append(ss_note)
+
     total = sum(r[0] for r in rows)
     print(f"loaded up front for a session in {start}:")
     for size, label, p in sorted(rows, key=lambda r: -r[0]):
@@ -220,6 +322,13 @@ def weigh(start):
         print(f"  on demand (paths: rule) {size:>7} B  {str(p).replace(str(HOME), '~', 1)}")
     for n_ in notes:
         print(f"  note: {n_}")
+    if budget is not None:
+        if total <= budget:
+            print(f"  budget: TOTAL {total} B <= {budget} B (gap {budget - total} B)")
+        else:
+            print(f"  OVER BUDGET: TOTAL {total} B > {budget} B by {total - budget} B; cut "
+                  "always-loaded text or hook output before adding (doc-audit skill)")
+            sys.exit(1)
 
 
 # --- refs ----------------------------------------------------------------------------------------
@@ -682,7 +791,28 @@ def main():
         return
     cmd, rest = args[0], args[1:]
     if cmd == "weigh":
-        weigh(Path(rest[0]) if rest else Path.cwd())
+        budget_raw, dirs, i = None, [], 0
+        while i < len(rest):
+            if rest[i] == "--budget":
+                if i + 1 >= len(rest):
+                    sys.exit("context-audit: --budget needs a positive integer")
+                budget_raw = rest[i + 1]
+                i += 2
+            elif rest[i].startswith("--budget="):
+                budget_raw = rest[i].split("=", 1)[1]
+                i += 1
+            elif rest[i].startswith("-"):
+                sys.exit(f"context-audit: weigh: unknown option {rest[i]}")
+            else:
+                dirs.append(rest[i])
+                i += 1
+        if len(dirs) > 1:
+            sys.exit("context-audit: weigh: one DIR at most")
+        if budget_raw is not None:
+            budget = parse_budget(budget_raw, explicit=True)
+        else:
+            budget = parse_budget(os.environ.get("CONTEXT_AUDIT_BUDGET"))
+        weigh(Path(dirs[0]) if dirs else Path.cwd(), budget)
     elif cmd == "refs":
         refs(Path(rest[0]) if rest else memory_dir(Path.cwd()))
     elif cmd == "measure":

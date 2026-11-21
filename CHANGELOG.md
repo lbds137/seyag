@@ -2,6 +2,16 @@
 
 All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY-MM-DD>` section per released version; under it, `###` categories in fixed order — Breaking Changes, Features, Bug Fixes, Improvements, Chores, Tests — empty ones omitted; items are `- **scope:** description (#PR)`, written from the version's merged commit subjects.
 
+## 0.3.198 - 2026-11-20
+
+### Features
+
+- **context-audit:** `weigh` counts SessionStart hook output (each hook's text and `additionalContext`, from the newest transcript for the folder, startup batch only) in its TOTAL, and `--budget BYTES` / `CONTEXT_AUDIT_BUDGET` exits 1 when TOTAL is over; the doc-audit skill names the trigger (after any change that adds to the up-front set, before the PR). (#359)
+
+### Tests
+
+- **memory-route-gate:** the purpose canary re-runs the probe by its absolute path and requires a `FAIL [` assertion line (run by a relative path it used to pass without exercising the stub); new cases for a symlinked memory dir and an ignored relative `autoMemoryDirectory`; `probe-durations.tsv` row. (#359)
+
 ## 0.3.197 - 2026-11-20
 
 ### Features

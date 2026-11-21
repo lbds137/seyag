@@ -52,6 +52,67 @@ grep -q 'memory index .*~/mem/MEMORY.md' <<<"$W" && grep -q 'note: MEMORY.md is 
 sizes=$(grep -E '^ +[0-9]+ B ' <<<"$W" | grep -v TOTAL | awk '{print $1}')
 [ "$sizes" = "$(sort -rn <<<"$sizes")" ] && [ "$(wc -l <<<"$sizes")" -ge 5 ] && ok "sorts largest first" || bad "sort order" "$W"
 
+# SessionStart hook output from the newest transcript, and the budget gate.
+run_env() {  # run_env [VAR=V ...] -- args
+  local ev=(); while [ "$1" != -- ]; do ev+=("$1"); shift; done; shift
+  env -i HOME="$T" PATH=/usr/bin:/bin CONTEXT_AUDIT_MOUNTS="$T/mounts" "${ev[@]}" "$CA" "$@" 2>&1
+}
+SLUG=$(cd "$T/work/proj" && pwd -P | sed 's/[^A-Za-z0-9]/-/g')
+PD="$T/.claude/projects/$SLUG"; mkdir -p "$PD" "$T/emptyprojects"
+python3 -I - "$PD" <<'PY'
+import json, sys
+d = sys.argv[1]
+def rec(kind, **kw):
+    return {"type": "attachment", "attachment": {"type": kind, "hookEvent": "SessionStart", **kw}}
+def line(o):
+    return json.dumps(o) + "\n"
+open(d + "/old.jsonl", "w").write(line(rec("hook_success", command="old-hook", content="o" * 5000)))
+with open(d + "/new.jsonl", "w") as f:
+    f.write(line(rec("hook_success", command="/home/x/hooks/start.sh", content="SECRET-TOKEN-XYZ" + "s" * 284)))
+    f.write(line(rec("hook_success", command="json-hook", content="", stdout='{"hookSpecificOutput":{}}')))
+    f.write(line(rec("hook_additional_context", content=["abc", "defg"])))
+    f.write(line({"type": "user"}))
+    f.write(line(rec("hook_success", command="late-hook", content="l" * 9999)))
+PY
+touch -d '2 hours ago' "$PD/old.jsonl"; touch -d '1 hour ago' "$PD/new.jsonl"
+S=$(run_env CLAUDE_PROJECTS_DIR="$T/.claude/projects" -- weigh "$T/work/proj")
+grep -Eq '^ +300 B .*SessionStart hook ' <<<"$S" && grep -Eq '^ +8 B .*SessionStart additionalContext ' <<<"$S" \
+  && ok "weigh counts SessionStart hook and additionalContext rows" || bad "SessionStart rows" "$S"
+grep -Eq '^ +(9999|5000) B ' <<<"$S" && bad "counted a post-turn or older-transcript record" "$S" || ok "ignores post-turn records and older transcripts"
+grep -q "SessionStart output measured from .*$SLUG/new.jsonl" <<<"$S" && ok "names the transcript it measured" || bad "transcript note" "$S"
+grep -q 'SECRET-TOKEN-XYZ' <<<"$S" && bad "printed hook content" "$S" || ok "never prints hook content"
+total_of() { grep -E '^ +[0-9]+ B .*TOTAL' <<<"$1" | awk '{print $1}'; }
+N=$(run_env CLAUDE_PROJECTS_DIR="$T/emptyprojects" -- weigh "$T/work/proj")
+grep -q 'no session transcript found for this folder; SessionStart hook output not counted' <<<"$N" && ok "notes a missing transcript" || bad "no-transcript note" "$N"
+TOT=$(total_of "$S"); BASE=$(total_of "$N")
+[ -n "$TOT" ] && [ -n "$BASE" ] && [ $((TOT - BASE)) = 308 ] && ok "TOTAL includes the SessionStart rows (+308 B)" || bad "TOTAL delta (got $TOT vs $BASE)" "$S"
+B=$(run_env CLAUDE_PROJECTS_DIR="$T/.claude/projects" -- weigh "$T/work/proj" --budget "$TOT"); rc=$?
+[ $rc = 0 ] && grep -q "budget: TOTAL $TOT B <= $TOT B (gap 0 B)" <<<"$B" && ok "--budget at TOTAL passes" || bad "budget at TOTAL (rc $rc)" "$B"
+B=$(run_env CLAUDE_PROJECTS_DIR="$T/.claude/projects" -- weigh --budget $((TOT - 1)) "$T/work/proj"); rc=$?
+[ $rc = 1 ] && grep -q "OVER BUDGET: TOTAL $TOT B > $((TOT - 1)) B by 1 B" <<<"$B" && ok "--budget below TOTAL exits 1 (flag before DIR)" || bad "budget below TOTAL (rc $rc)" "$B"
+B=$(run_env CLAUDE_PROJECTS_DIR="$T/.claude/projects" CONTEXT_AUDIT_BUDGET=$((TOT - 1)) -- weigh "$T/work/proj"); rc=$?
+[ $rc = 1 ] && grep -q 'OVER BUDGET' <<<"$B" && ok "CONTEXT_AUDIT_BUDGET applies without the flag" || bad "env budget (rc $rc)" "$B"
+B=$(run_env -- weigh "$T/work/proj" --budget abc); rc=$?
+[ $rc != 0 ] && grep -q 'needs a positive integer' <<<"$B" && ok "--budget abc is refused" || bad "bad budget (rc $rc)" "$B"
+B=$(run_env CONTEXT_AUDIT_BUDGET=999999 -- weigh "$T/work/proj" --budget=); rc=$?
+[ $rc != 0 ] && grep -q 'needs a positive integer' <<<"$B" && ok "--budget= (empty) is refused even with a valid env budget" || bad "empty --budget= (rc $rc)" "$B"
+B=$(run_env CONTEXT_AUDIT_BUDGET=999999 -- weigh "$T/work/proj" --budget ""); rc=$?
+[ $rc != 0 ] && grep -q 'needs a positive integer' <<<"$B" && ok "--budget '' (empty) is refused even with a valid env budget" || bad "empty --budget '' (rc $rc)" "$B"
+B=$(run_env -- weigh "$T/work/proj" --bogus); rc=$?
+[ $rc != 0 ] && grep -q 'unknown option' <<<"$B" && ok "an unknown weigh option is refused" || bad "unknown option (rc $rc)" "$B"
+B=$(run_env -- weigh "$T/work/proj" "$T/work"); rc=$?
+[ $rc != 0 ] && grep -q 'one DIR at most' <<<"$B" && ok "a second DIR is refused" || bad "second DIR (rc $rc)" "$B"
+mkdir -p "$T/ctlprojects/$SLUG"
+python3 -I - "$T/ctlprojects/$SLUG" <<'PY'
+import json, sys
+rec = {"type": "attachment", "attachment": {"type": "hook_success", "hookEvent": "SessionStart",
+       "command": "/bin/hook\u001b[31m-red", "content": "x" * 10}}
+open(sys.argv[1] + "/c.jsonl", "w").write(json.dumps(rec) + "\n")
+PY
+C=$(run_env CLAUDE_PROJECTS_DIR="$T/ctlprojects" -- weigh "$T/work/proj")
+grep -q 'SessionStart hook ' <<<"$C" && [ "$(grep -c $'\x1b' <<<"$C")" = 0 ] \
+  && ok "a control character in a hook command is not printed" || bad "ESC byte in output" "$(cat -v <<<"$C")"
+
 R=$(run refs)
 # shellcheck disable=SC2088 # the tilde is literal text in the output under test
 grep -q 'missing path .*other_thing.md: ~/nope/file.txt' <<<"$R" && ok "reports a missing path" || bad "missing path" "$R"

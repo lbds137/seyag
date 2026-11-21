@@ -18,7 +18,7 @@ Checks that what every session loads is accurate and worth its cost, and that th
 | a project's `CLAUDE.md` and `.claude/rules/` | sessions in that project | that project's session (send it the proposal) |
 | plugin skills, project skills | their descriptions every session, the body on invoke | their repo |
 | role files `claude-memory/roles/<folder>.md` | every session in that folder (the `claude-role` SessionStart hook) | that role's session; checkpoints via `claude-role --set` |
-| other SessionStart hook output | every session | the hook's repo (`context-audit` can't measure it) |
+| other SessionStart hook output | every session | the hook's repo (`context-audit weigh` counts it from the newest transcript) |
 | `~/Documents/dev-docs` env doc | on purpose | Deck management role |
 
 Pick a destination by audience: every session on the machine (seyag rule, skill or env doc), one project's contributors (that project's rules), one person's context (memory).
@@ -34,6 +34,8 @@ Run `weigh` for each project with an active session (the up-front set differs pe
 - a missing path is stale (fix or delete the claim), moved (point it at the new place, found by grep, not by memory), or deliberately recorded as gone (keep it);
 - a dangling `[[link]]` is a misspelling (the hint suggests the target), or a memory worth writing;
 - a non-slug `name:` gets rewritten as kebab-case, and every `[[link]]` to the old name updated in the same change.
+
+**Trigger:** after any change that adds to the up-front set (a rule, CLAUDE.md, the memory index, a skill description, a SessionStart hook's output), run `context-audit weigh <project> --budget <bytes>` (or set `CONTEXT_AUDIT_BUDGET`) before the PR; exit 1 means the set grew past the budget, so cut before adding.
 
 ## Step 2: memory audit
 
