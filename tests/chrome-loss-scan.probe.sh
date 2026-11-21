@@ -1,6 +1,6 @@
 #!/bin/bash
 # Fixture check for bin/chrome-loss-scan: fake `claude agents --json` output plus fake transcripts
-# covering each state (on, lost, off, re-added, no transcript, a non-Chrome delta), the exit code,
+# covering each state (on, lost, off, re-added, n/a, no transcript, a non-Chrome delta), the exit code,
 # and that the newest transcript copy wins. Usage: tests/chrome-loss-scan.probe.sh (from anywhere)
 
 set -uo pipefail
@@ -119,6 +119,46 @@ got=$("$CLS" --agents "$t/agents-num.json" --projects "$P" --json 2>"$t/err" | s
 out=$("$CLS" --agents "$t/agents-num.json" --projects "$P" 2>"$t/err"); rc=$?
 [ "$rc" = 1 ] && grep -qF "unknown: nm [num] has no transcript under the projects dir" <<<"$out" && ! grep -q Traceback "$t/err" \
   && ok "a non-string session id exits 1 with the unknown line" || bad "numeric session id text: rc $rc out '$out' err '$(cat "$t/err")'"
+
+# n/a: a headless -p child (entrypoint sdk-cli) or a non-Claude backend (last non-synthetic assistant model not claude-*)
+# can never carry Chrome, so a loss there is not a loss. An "on" session is never n/a.
+ent() { printf '{"type":"user","entrypoint":"%s","timestamp":"T0"}\n' "$1"; }
+mdl() { printf '{"type":"assistant","entrypoint":"cli","message":{"model":"%s"}}\n' "$1"; }
+{ ent sdk-cli; delta T1 "Read" ""; } > "$P/-a/s-hl.jsonl"
+{ ent cli; mdl glm-5.3; delta T1 "Read" ""; } > "$P/-a/s-glm.jsonl"
+{ ent cli; mdl claude-opus-5-5; delta T1 "$C1" ""; delta T2 "" "$C1"; mdl glm-5.3-flash; } > "$P/-a/s-sw.jsonl"
+{ ent cli; mdl glm-5.3; mdl "<synthetic>"; delta T1 "Read" ""; } > "$P/-a/s-syn.jsonl"
+{ ent cli; mdl anthropic/claude-opus-5.5; delta T1 "Read" ""; } > "$P/-a/s-or.jsonl"
+{ ent cli; mdl claude-opus-5-5; delta T1 "Read" ""; } > "$P/-a/s-real.jsonl"
+{ ent sdk-cli; delta T1 "$C1" ""; } > "$P/-a/s-hlon.jsonl"
+{ ent cli; delta T1 "Read" ""; } > "$P/-a/s-nomdl.jsonl"
+agents s-hl s-glm s-sw s-syn s-or s-real s-hlon s-nomdl
+got=$("$CLS" --agents "$t/agents.json" --projects "$P" --json | python3 -c 'import json,sys
+for r in json.load(sys.stdin): print(r["id"]+"="+r["state"]+"|"+str(r["reason"]))')
+chk() { grep -qxF "$1" <<<"$got" && ok "n/a case $1" || bad "n/a case: want '$1' in: $got"; }
+chk "s-hl=n/a|headless"
+chk "s-glm=n/a|model glm-5.3"
+chk "s-sw=n/a|model glm-5.3-flash"
+chk "s-syn=n/a|model glm-5.3"
+chk "s-or=n/a|model anthropic/claude-opus-5.5"
+chk "s-real=off|None"
+chk "s-hlon=on|None"
+chk "s-nomdl=off|None"
+
+# Text mode: n/a rows never print a "no Chrome" line and never turn the exit red; a real loss still does.
+agents s-hl s-glm s-on
+out=$("$CLS" --agents "$t/agents.json" --projects "$P"); rc=$?
+[ "$rc" = 0 ] && [ "$out" = "chrome-loss-scan: 3 live session(s), all that can carry Chrome have it; 2 n/a (headless or non-Claude backend)" ] \
+  && ok "n/a + on rows: exit 0 with the n/a summary line" || bad "n/a summary: rc $rc out '$out'"
+agents s-hl s-glm s-real
+out=$("$CLS" --agents "$t/agents.json" --projects "$P"); rc=$?
+[ "$rc" = 1 ] && grep -q '^no Chrome (off): s-real' <<<"$out" && ! grep -q 's-hl\|s-glm' <<<"$out" && ! grep -q 'n/a' <<<"$out" \
+  && ok "n/a rows beside a real loss: exit 1, only the loss is listed" || bad "n/a mixed: rc $rc out '$out'"
+
+# Every --json row carries a "reason" key (null unless n/a).
+agents s-on s-lost s-off s-none
+got=$("$CLS" --agents "$t/agents.json" --projects "$P" --json | python3 -c 'import json,sys; rows=json.load(sys.stdin); print(all("reason" in r and r["reason"] is None for r in rows) and len(rows)==4)')
+[ "$got" = "True" ] && ok "every --json row has a null reason key when not n/a" || bad "reason key: got '$got'"
 
 # Usage errors exit 2 with a message and the usage line, never a traceback or a silent ignore.
 for args in "--agents" "--projects" "--json --agents" "--bogus" "--json extra"; do
