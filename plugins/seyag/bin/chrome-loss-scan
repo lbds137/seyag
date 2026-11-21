@@ -8,10 +8,13 @@ Usage:
                               # --projects defaults to CLAUDE_PROJECTS_DIR, else ${CLAUDE_CONFIG_DIR:-~/.claude}/projects
 
 Reads each live session's current transcript (`claude agents --json` lists
-real sessions, not headless -p children) and replays its deferred_tools_delta
+headless -p children too, as kind interactive) and replays its deferred_tools_delta
 records for mcp__claude-in-chrome__* tools. States: "on"; "lost" (added, then
 all removed); "off" (this process never listed them, e.g. it resumed while
-logged out); "unreadable" (the transcript is there but can't be opened or read).
+logged out); "unreadable" (the transcript is there but can't be opened or read);
+"n/a" (a would-be lost/off session that can never carry Chrome: a headless -p
+child, entrypoint sdk-cli, or a non-Claude backend, last assistant model not
+claude-*; not counted toward exit 1; --json rows carry the "reason").
 A logged-out restart comes up with Chrome off and /login doesn't restore it;
 a fresh start does.
 Exit 1 when any session is lost or off, has no transcript or an unreadable one,
@@ -95,6 +98,37 @@ def chrome_state(path):
     return ("lost" if had else "off"), last_ts
 
 
+def na_reason(path):
+    """Why this session can never carry Chrome, or None: 'headless' (last entrypoint sdk-cli, a -p child) or
+    'model M' (last non-synthetic assistant model M is not claude-*). An unreadable file returns None."""
+    entry = None
+    model = None
+    try:
+        with open(path, errors="replace") as fh:
+            for line in fh:
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(rec, dict):
+                    continue
+                ep = rec.get("entrypoint")
+                if isinstance(ep, str):
+                    entry = ep
+                if rec.get("type") == "assistant":
+                    msg = rec.get("message")
+                    m = msg.get("model") if isinstance(msg, dict) else None
+                    if isinstance(m, str) and m and m != "<synthetic>":
+                        model = m
+    except OSError:
+        return None
+    if entry == "sdk-cli":
+        return "headless"
+    if model is not None and not model.startswith("claude-"):
+        return f"model {model}"
+    return None
+
+
 def mtime_or_old(path):
     """The file's mtime; a file that vanished since the glob sorts oldest instead of raising."""
     try:
@@ -144,8 +178,12 @@ def main(argv):
         # a session id that isn't a string can't name a transcript: it stays a row, reported as no-transcript
         path = transcript_for(projects_dir, sid) if isinstance(sid, str) else None
         state, ts = chrome_state(path) if path else ("no-transcript", None)
+        reason = na_reason(path) if state in ("lost", "off") else None
+        if reason:
+            state = "n/a"
         rows.append({"name": a.get("name") or "", "id": a.get("id") or str(sid)[:8], "pid": a.get("pid"),
-                     "cwd": a.get("cwd") or "", "state": state, "since": ts})
+                     "cwd": a.get("cwd") or "", "state": state, "since": ts, "reason": reason})
+    na = [r for r in rows if r["state"] == "n/a"]
     missing = [r for r in rows if r["state"] in ("lost", "off")]
     unread = [r for r in rows if r["state"] in ("no-transcript", "unreadable")]
     if as_json:
@@ -161,7 +199,11 @@ def main(argv):
             else:
                 print(f"unknown: {r['name'] or '(unnamed)'} [{r['id']}] has no transcript under the projects dir")
         if not missing and not unread:
-            print(f"chrome-loss-scan: {len(rows)} live session(s), all have Chrome")
+            if na:
+                print(f"chrome-loss-scan: {len(rows)} live session(s), all that can carry Chrome have it; "
+                      f"{len(na)} n/a (headless or non-Claude backend)")
+            else:
+                print(f"chrome-loss-scan: {len(rows)} live session(s), all have Chrome")
     # An unreadable transcript is not evidence of Chrome: a layout change must go red, not green.
     return 1 if missing or unread else 0
 
