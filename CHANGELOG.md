@@ -2,6 +2,21 @@
 
 All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY-MM-DD>` section per released version; under it, `###` categories in fixed order — Breaking Changes, Features, Bug Fixes, Improvements, Chores, Tests — empty ones omitted; items are `- **scope:** description (#PR)`, written from the version's merged commit subjects.
 
+## 0.3.200 - 2026-11-21
+
+### Bug Fixes
+
+- **chrome-loss-scan:** a lost/off session that can never carry Claude in Chrome (a headless `-p` child, entrypoint `sdk-cli`, or a non-Claude backend, last non-synthetic assistant model not `claude-*`) is reported `n/a` instead of turning the scan red; `--json` rows gain `reason`; the docstring no longer claims `claude agents --json` leaves headless children out (TASK-52). (#363)
+- **ci:** automerge gates on the PR's live draft state, not the event payload (TASK-10). (#362)
+
+### Improvements
+
+- **session-mining:** positives "route by the same fit" (the old "mirror ladder" wording predated choose-by-fit). (#364)
+
+### Chores
+
+- **backlog:** filed TASK-53 to TASK-58 (ask-dialog commands in reply text, automerge follow-ups, worktree-add branch-name guard, session-log grep speed and sources, lesson-claim Stop check). (#363, #364)
+
 ## 0.3.199 - 2026-11-20
 
 ### Improvements
