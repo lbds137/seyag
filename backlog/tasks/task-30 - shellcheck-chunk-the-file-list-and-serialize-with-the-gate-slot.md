@@ -1,11 +1,10 @@
 ---
 id: TASK-30
 title: 'shellcheck: chunk the file list and serialize with the gate slot'
-status: In Progress
-assignee:
-  - seyag-b
+status: To Do
+assignee: []
 created_date: '2026-11-19T14:24:00Z'
-updated_date: '2026-11-20T02:21:00Z'
+updated_date: '2026-11-21T03:21:00Z'
 labels:
   - probes
   - perf
@@ -27,3 +26,9 @@ NEXT (bisect the cliff, then fix the construct — do not gate-dodge):
 3. PREMISE SWEEP (same unit): knobs.tsv SYG_SHELLCHECK_CHUNK description ('bounds one invocation's memory') over-claims — chunking bounds overlap/serialization, not per-invocation footprint; correct durable prose (knobs row + README row phrasing + any spike-fix claim).
 4. Re-gate, push as follow-up PR, then the machine-management session re-measures; WATCH closes only on a flattened spike (target: no process over ~1 GB during the documented recipe run; state the target measured, not promised).
 <!-- SECTION:DESCRIPTION:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Released 2026-11-20 (Seyag B retired under the one-lane ruling; no branch carries the work). Prior work, gitignored in the main checkout: .claude/dispatch/seyag-b-archive/b-t30sc-* (spec, apply/blocks/namecheck/verify scripts, blocks.tsv/txt, 11-19) and the profile table .claude/dispatch/b-t30-profile.tsv. The 3.7 GB outlier, tests/safe-worktree-clean.probe.sh, is the probe TASK-49 saw time out under suite load.
+<!-- SECTION:NOTES:END -->

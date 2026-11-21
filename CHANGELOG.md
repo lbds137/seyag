@@ -2,6 +2,12 @@
 
 All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY-MM-DD>` section per released version; under it, `###` categories in fixed order — Breaking Changes, Features, Bug Fixes, Improvements, Chores, Tests — empty ones omitted; items are `- **scope:** description (#PR)`, written from the version's merged commit subjects.
 
+## 0.3.199 - 2026-11-20
+
+### Improvements
+
+- **rules:** core § Fix recurring failures structurally chooses the fix by fit instead of in order: a hook when the trigger is mechanical, a skill for a procedure, and a rule only for a hard constraint neither can carry, since a rule is paid on every turn (owner ruling; closes TASK-48). (#361)
+
 ## 0.3.198 - 2026-11-20
 
 ### Features
