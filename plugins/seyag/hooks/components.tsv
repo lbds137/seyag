@@ -14,6 +14,8 @@ promise-ledger-check	turn-shape
 queued-message-receipt	turn-shape
 bare-token-binding-reminder	turn-shape
 ask-command-echo-check	ask-command-echo
+ask-pretext-guard	ask-pretext
+ask-pretext-reminder	ask-pretext-reminder
 context-size-reminder	context
 context-block-gate	context-block
 self-matching-pattern-guard	guards-shell
@@ -45,6 +47,6 @@ clock-stamp-guard	clock-stamp
 live-checkout-guard	live-checkout
 worktree-branch-guard	worktree-branch
 memory-route-gate	memory-route
-@profile	full	session rules route turn-shape context context-block guards-shell guards-outbound guards-commit guards-pr pr-watch dispatch api-credit launch-record classifier-ledger handoff-pick-check ask-command-echo status-claim-cite clock-stamp dispatch-spec live-checkout worktree-branch memory-route security
+@profile	full	session rules route turn-shape context context-block guards-shell guards-outbound guards-commit guards-pr pr-watch dispatch api-credit launch-record classifier-ledger handoff-pick-check ask-command-echo ask-pretext ask-pretext-reminder status-claim-cite clock-stamp dispatch-spec live-checkout worktree-branch memory-route security
 @profile	guards	guards-shell guards-outbound guards-commit guards-pr context context-block dispatch route session api-credit launch-record classifier-ledger live-checkout worktree-branch
 @profile	none	session api-credit launch-record classifier-ledger

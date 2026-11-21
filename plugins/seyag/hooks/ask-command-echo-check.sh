@@ -60,8 +60,14 @@ TRANSCRIPT=$(jq -r '.transcript_path // empty' <<<"$INPUT" 2>/dev/null || echo "
 # Stop envelope's last_assistant_message: closing text before the async transcript catches up.
 LAM=$(jq -r '.last_assistant_message // empty' <<<"$INPUT" 2>/dev/null || echo "")
 
-VERDICT=$(TRANSCRIPT="$TRANSCRIPT" LAM="$LAM" python3 -I "${SYG_PY_CACHE_ARG:--B}" << 'PYEOF'
-import hashlib, json, os, re, string, sys
+HOOKS_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+HOOK_LIB="$HOOKS_DIR/lib"
+
+VERDICT=$(HOOK_LIB="$HOOK_LIB" TRANSCRIPT="$TRANSCRIPT" LAM="$LAM" python3 -I "${SYG_PY_CACHE_ARG:--B}" << 'PYEOF'
+import hashlib, json, os, re, sys
+
+sys.path.insert(0, os.environ["HOOK_LIB"])
+from ask_detect import ask_fields, commands_in  # noqa: E402
 
 
 def judge():
@@ -135,50 +141,6 @@ def judge():
     if not ask_inputs:
         return "ok"
 
-    def fields(inp):
-        if not isinstance(inp, dict):
-            return
-        for q in inp.get("questions") or []:
-            if not isinstance(q, dict):
-                continue
-            if isinstance(q.get("question"), str):
-                yield q["question"]
-            for opt in q.get("options") or []:
-                if not isinstance(opt, dict):
-                    continue
-                for k in ("label", "description", "preview"):
-                    if isinstance(opt.get(k), str):
-                        yield opt[k]
-
-    prose_tokens = {"line", "lines", "command", "commands", "prefix", "prefixed"}
-    # A space after the bang: `!guild_id` is code negation, not a command
-    # (every real `!` line measured carried one).
-    cmd_re = re.compile(r"(?:^|(?<=[\s(`]))!\s+([A-Za-z0-9~./$_-][^\s`]*)")
-
-    def commands_in(text):
-        out = []
-        for line in text.splitlines():
-            pos = 0
-            while True:
-                m = cmd_re.search(line, pos)
-                if not m:
-                    break
-                bang = m.start()
-                if bang > 0 and line[bang - 1] == "`":
-                    close = line.find("`", bang)
-                    end = len(line) if close == -1 else close
-                else:
-                    end = len(line)
-                pos = max(end, m.end())
-                first = m.group(1).lower().rstrip(string.punctuation)
-                if first in prose_tokens:
-                    continue
-                # A command closing a question or a parenthesis keeps none of it.
-                key = re.sub(r"\s+", " ", line[bang + 1:end].lstrip()).rstrip(" .,;:?!)")
-                if len(key) >= 2:
-                    out.append(key)
-        return out
-
     url_re = re.compile(r"https?://[^\s<>`\"'\])]+")
     skip_hosts = ("example.com", "example.net", "example.org")
     skip_suffixes = (".example", ".test", ".invalid", ".localhost")
@@ -204,7 +166,7 @@ def judge():
     keys = []  # (kind, key), deduped, first-seen order
     seen = set()
     for inp in ask_inputs:
-        for text in fields(inp):
+        for text in ask_fields(inp):
             for kind, found in (("C", commands_in(text)), ("U", urls_in(text))):
                 for key in found:
                     if (kind, key) not in seen:
