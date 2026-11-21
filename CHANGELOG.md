@@ -2,6 +2,12 @@
 
 All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY-MM-DD>` section per released version; under it, `###` categories in fixed order — Breaking Changes, Features, Bug Fixes, Improvements, Chores, Tests — empty ones omitted; items are `- **scope:** description (#PR)`, written from the version's merged commit subjects.
 
+## 0.3.197 - 2026-11-20
+
+### Improvements
+
+- **rules:** core § Fix recurring failures structurally gains the owner's two design principles (a systematic fix over an ad hoc one when reuse repays the upfront cost; complexity must serve a purpose, and a piece that serves none is a question to raise before building on it) and the progressive-disclosure rule (always-loaded text holds only hard constraints, safety included, and pointers; procedures go to skills, domain detail to `paths:`-scoped rules); paid for by moving two procedural lines (resuming pre-`/clear` worktree agents, `claude -p --strict-mcp-config`) from § Sessions and handoffs into the delegation skill, so core.md shrinks. (#358)
+
 ## 0.3.196 - 2026-11-19
 
 ### Features
