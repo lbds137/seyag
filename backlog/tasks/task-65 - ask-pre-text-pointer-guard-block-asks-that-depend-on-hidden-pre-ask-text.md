@@ -1,7 +1,7 @@
 ---
 id: TASK-65
 title: 'ask-pre-text-pointer guard: block asks that depend on text the ask dialog hides'
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-11-21T14:00:00Z'
 labels:

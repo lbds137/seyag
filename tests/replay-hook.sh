@@ -8,7 +8,7 @@
 # output is local working material only — never paste it into a commit, PR,
 # or tracked doc (same boundary as the session-mining corpus).
 #
-# Usage: tests/replay-hook.sh <hook-name> [--since N] [--slug SLUG] [--projects-dir DIR]
+# Usage: tests/replay-hook.sh <hook-name> [--since N] [--slug SLUG] [--projects-dir DIR] [--tool NAME] [--event PreToolUse|PostToolUse]
 #   <hook-name>          a hook under plugins/seyag/hooks/ (e.g. lossy-pipe-guard);
 #                        an unknown name is refused with a one-line error, exit 2.
 #   --since N            only JSONLs modified in the last N days (default 7).
@@ -16,14 +16,22 @@
 #                        SLUG/*/subagents/*.jsonl (default: every slug).
 #   --projects-dir DIR   the projects root (default $HOME/.claude/projects); lets
 #                        a probe point this at a fixture instead of real logs.
+#   --tool NAME          tool_use name to replay (default Bash; e.g. AskUserQuestion).
+#   --event EVENT        PreToolUse or PostToolUse (default PreToolUse).
 #
-# Mechanism: pulls every Bash tool_use command from .message.content[]
-# entries (.type=="tool_use", .name=="Bash", .input.command) and builds the
-# PreToolUse JSON Claude Code sends ({"tool_name":"Bash",
+# Mechanism: with the default --tool Bash, pulls every Bash tool_use command from
+# .message.content[] entries (.type=="tool_use", .name=="Bash", .input.command)
+# and builds the hook JSON Claude Code sends ({"tool_name":"Bash",
 # "tool_input":{"command":...},"cwd":<entry's cwd, else $HOME>,
-# "hook_event_name":"PreToolUse","session_id":<derived per file, see below>})
-# in the SAME jq pass, so a huge command never round-trips through a shell
-# argv. Fed to the hook script DIRECTLY
+# "hook_event_name":<event>,"session_id":<derived per file, see below>}) in the
+# SAME jq pass, so a huge command never round-trips through a shell argv.
+# With --tool AskUserQuestion (or any non-Bash tool), every main-lane tool_use
+# of that name is replayed with {tool_name, tool_input:.input, tool_use_id:.id,
+# cwd, hook_event_name:<event>, session_id, transcript_path:<prefix file>},
+# plus tool_response:null for PostToolUse, where the prefix file in the
+# per-file scratch state dir is cut before the FIRST line whose record carries
+# the ask's message.id for PreToolUse, and up to and including the line holding
+# the ask's tool_use for PostToolUse. Fed to the hook script DIRECTLY
 # (`bash plugins/seyag/hooks/<hook-name>.sh`, not via run.sh — a project
 # shipping its own `.claude/hooks/<name>.sh` override makes run.sh exit 0 for
 # every command, reading as "nothing blocked").
@@ -47,10 +55,11 @@
 # Also unset (they name files outside those dirs): SYG_LAUNCH_RECORD_DIR,
 # SYG_CREDIT_LEDGER, SYG_CLASSIFIER_LEDGER, SYG_DISPATCH_ACK_FILE.
 #
-# A "block" is a non-zero exit from the hook script. Output: one section per
-# blocked command (command, first 200 chars, one line; slug; the hook's
-# stderr/stdout, first 3 lines), then a summary line:
-#   replay-hook: <hook-name>: <blocked>/<total> commands blocked across <files> files
+# A hit ("block") is a non-zero exit from the hook script, OR, for PostToolUse,
+# a non-empty stdout. Output: one section per hit (`command: <first 200 chars>`
+# for Bash, `ask: <first question text, 200 chars, one line>` otherwise; slug;
+# the hook's stderr/stdout, first 3 lines), then a summary line:
+#   replay-hook: <hook-name>: <blocked>/<total> commands|asks blocked across <files> files
 # A hook that exits 0 unless a switch is set blocks nothing in a run without
 # it, so its header may carry `# REPLAY-ARMED-BY: VAR [VAR...]`. The field
 # names only the variables, not every condition: a gate may also need its
@@ -78,7 +87,7 @@ HOOKS_DIR="$REPO/plugins/seyag/hooks"
 
 HOOK_NAME="${1:-}"
 if [ -z "$HOOK_NAME" ] || [[ "$HOOK_NAME" == --* ]]; then
-  echo "replay-hook: usage: replay-hook.sh <hook-name> [--since N] [--slug SLUG] [--projects-dir DIR]" >&2
+  echo "replay-hook: usage: replay-hook.sh <hook-name> [--since N] [--slug SLUG] [--projects-dir DIR] [--tool NAME] [--event PreToolUse|PostToolUse]" >&2
   exit 2
 fi
 shift
@@ -91,6 +100,8 @@ fi
 SINCE=7
 SLUG=""
 PROJECTS_DIR="$HOME/.claude/projects"
+TOOL="Bash"
+EVENT="PreToolUse"
 
 need_value() { [ $# -ge 2 ] || { echo "replay-hook: $1 needs a value" >&2; exit 2; }; }
 while [ $# -gt 0 ]; do
@@ -98,11 +109,18 @@ while [ $# -gt 0 ]; do
     --since) need_value "$@"; SINCE="$2"; shift 2 ;;
     --slug) need_value "$@"; SLUG="$2"; shift 2 ;;
     --projects-dir) need_value "$@"; PROJECTS_DIR="$2"; shift 2 ;;
+    --tool) need_value "$@"; TOOL="$2"; shift 2 ;;
+    --event) need_value "$@"; EVENT="$2"; shift 2 ;;
     *) echo "replay-hook: unknown argument '$1'" >&2; exit 2 ;;
   esac
 done
 
 [[ "$SINCE" =~ ^[0-9]+$ ]] || { echo "replay-hook: --since needs a whole number of days" >&2; exit 2; }
+[ -n "$TOOL" ] || { echo "replay-hook: --tool needs a tool name" >&2; exit 2; }
+case "$EVENT" in
+  PreToolUse | PostToolUse) ;;
+  *) echo "replay-hook: --event must be PreToolUse or PostToolUse" >&2; exit 2 ;;
+esac
 
 # Strip a trailing slash: otherwise ${f#"$PROJECTS_DIR"/} below fails to
 # strip (double slash mismatch) and slug_name comes out empty.
@@ -177,30 +195,100 @@ while IFS= read -r f; do
   mkdir -p "$REPLAY_STATE/state" "$REPLAY_STATE/runtime"
   chmod 700 "$REPLAY_STATE/runtime"
 
-  while IFS= read -r payload; do
-    [ -z "$payload" ] && continue
-    TOTAL=$((TOTAL + 1))
+  if [ "$TOOL" = "Bash" ]; then
+    while IFS= read -r payload; do
+      [ -z "$payload" ] && continue
+      TOTAL=$((TOTAL + 1))
 
-    out=$(printf '%s' "$payload" | env -u CLAUDE_PROJECT_DIR -u SYG_PR_MONITOR_SEEN_FILE -u SYG_PR_BODY_ACK_FILE -u SYG_LAUNCH_RECORD_DIR -u SYG_CREDIT_LEDGER -u SYG_CLASSIFIER_LEDGER -u SYG_DISPATCH_ACK_FILE SYG_STATE_DIR="$REPLAY_STATE/state" XDG_STATE_HOME="$REPLAY_STATE/state" XDG_RUNTIME_DIR="$REPLAY_STATE/runtime" PYTHONDONTWRITEBYTECODE=1 bash "$HOOKS_DIR/$HOOK_NAME.sh" 2>&1)
-    rc=$?
+      if [ "$EVENT" = "PostToolUse" ]; then
+        hout=$(printf '%s' "$payload" | env -u CLAUDE_PROJECT_DIR -u SYG_PR_MONITOR_SEEN_FILE -u SYG_PR_BODY_ACK_FILE -u SYG_LAUNCH_RECORD_DIR -u SYG_CREDIT_LEDGER -u SYG_CLASSIFIER_LEDGER -u SYG_DISPATCH_ACK_FILE SYG_STATE_DIR="$REPLAY_STATE/state" XDG_STATE_HOME="$REPLAY_STATE/state" XDG_RUNTIME_DIR="$REPLAY_STATE/runtime" PYTHONDONTWRITEBYTECODE=1 bash "$HOOKS_DIR/$HOOK_NAME.sh" 2>"$REPLAY_STATE/hook.err")
+        rc=$?
+        herr=$(cat "$REPLAY_STATE/hook.err" 2>/dev/null || true)
+        out="${herr}${herr:+${hout:+$'\n'}}${hout}"
+        hit=0
+        if [ "$rc" -ne 0 ] || [ -n "$hout" ]; then hit=1; fi
+      else
+        out=$(printf '%s' "$payload" | env -u CLAUDE_PROJECT_DIR -u SYG_PR_MONITOR_SEEN_FILE -u SYG_PR_BODY_ACK_FILE -u SYG_LAUNCH_RECORD_DIR -u SYG_CREDIT_LEDGER -u SYG_CLASSIFIER_LEDGER -u SYG_DISPATCH_ACK_FILE SYG_STATE_DIR="$REPLAY_STATE/state" XDG_STATE_HOME="$REPLAY_STATE/state" XDG_RUNTIME_DIR="$REPLAY_STATE/runtime" PYTHONDONTWRITEBYTECODE=1 bash "$HOOKS_DIR/$HOOK_NAME.sh" 2>&1)
+        rc=$?
+        hit=0
+        [ "$rc" -ne 0 ] && hit=1
+      fi
 
-    if [ "$rc" -ne 0 ]; then
-      BLOCKED=$((BLOCKED + 1))
-      cmd=$(jq -r '.tool_input.command' <<<"$payload")
-      cmd="${cmd//$'\n'/ }"; cmd="${cmd//$'\r'/ }"; cmd="${cmd//$'\t'/ }"
-      echo "--- blocked ---"
-      echo "command: ${cmd:0:200}"
-      echo "$slug_label"
-      printf '%s\n' "$out" | head -3
-      echo
-    fi
-  done < <(jq -Rc --arg home "$HOME" --arg sid "$sess_id" '
-      (fromjson? // empty) |
-      (.cwd // $home) as $cwd |
-      (.message.content // [])[]? | select(.type=="tool_use" and .name=="Bash" and .input.command != null) |
-      {tool_name:"Bash", tool_input:{command:.input.command}, cwd:$cwd, hook_event_name:"PreToolUse", session_id:$sid}
-    ' "$f")
+      if [ "$hit" -eq 1 ]; then
+        BLOCKED=$((BLOCKED + 1))
+        cmd=$(jq -r '.tool_input.command' <<<"$payload")
+        cmd="${cmd//$'\n'/ }"; cmd="${cmd//$'\r'/ }"; cmd="${cmd//$'\t'/ }"
+        echo "--- blocked ---"
+        echo "command: ${cmd:0:200}"
+        echo "$slug_label"
+        printf '%s\n' "$out" | head -3
+        echo
+      fi
+    done < <(jq -Rc --arg home "$HOME" --arg sid "$sess_id" --arg ev "$EVENT" '
+        (fromjson? // empty) |
+        (.cwd // $home) as $cwd |
+        (.message.content // [])[]? | select(.type=="tool_use" and .name=="Bash" and .input.command != null) |
+        ({tool_name:"Bash", tool_input:{command:.input.command}, cwd:$cwd, hook_event_name:$ev, session_id:$sid}
+         + (if $ev == "PostToolUse" then {tool_response:null} else {} end))
+      ' "$f")
+  else
+    PREFIX_FILE="$REPLAY_STATE/state/prefix.jsonl"
+    while IFS=$'\t' read -r cut payload; do
+      [ -z "$payload" ] && continue
+      TOTAL=$((TOTAL + 1))
+
+      if [ "${cut:-0}" -gt 0 ]; then
+        head -n "$cut" "$f" > "$PREFIX_FILE"
+      else
+        : > "$PREFIX_FILE"
+      fi
+
+      if [ "$EVENT" = "PostToolUse" ]; then
+        hout=$(printf '%s' "$payload" | env -u CLAUDE_PROJECT_DIR -u SYG_PR_MONITOR_SEEN_FILE -u SYG_PR_BODY_ACK_FILE -u SYG_LAUNCH_RECORD_DIR -u SYG_CREDIT_LEDGER -u SYG_CLASSIFIER_LEDGER -u SYG_DISPATCH_ACK_FILE SYG_STATE_DIR="$REPLAY_STATE/state" XDG_STATE_HOME="$REPLAY_STATE/state" XDG_RUNTIME_DIR="$REPLAY_STATE/runtime" PYTHONDONTWRITEBYTECODE=1 bash "$HOOKS_DIR/$HOOK_NAME.sh" 2>"$REPLAY_STATE/hook.err")
+        rc=$?
+        herr=$(cat "$REPLAY_STATE/hook.err" 2>/dev/null || true)
+        out="${herr}${herr:+${hout:+$'\n'}}${hout}"
+        hit=0
+        if [ "$rc" -ne 0 ] || [ -n "$hout" ]; then hit=1; fi
+      else
+        out=$(printf '%s' "$payload" | env -u CLAUDE_PROJECT_DIR -u SYG_PR_MONITOR_SEEN_FILE -u SYG_PR_BODY_ACK_FILE -u SYG_LAUNCH_RECORD_DIR -u SYG_CREDIT_LEDGER -u SYG_CLASSIFIER_LEDGER -u SYG_DISPATCH_ACK_FILE SYG_STATE_DIR="$REPLAY_STATE/state" XDG_STATE_HOME="$REPLAY_STATE/state" XDG_RUNTIME_DIR="$REPLAY_STATE/runtime" PYTHONDONTWRITEBYTECODE=1 bash "$HOOKS_DIR/$HOOK_NAME.sh" 2>&1)
+        rc=$?
+        hit=0
+        [ "$rc" -ne 0 ] && hit=1
+      fi
+
+      if [ "$hit" -eq 1 ]; then
+        BLOCKED=$((BLOCKED + 1))
+        ask_q=$(jq -r '.tool_input.questions[0].question // ""' <<<"$payload")
+        ask_q="${ask_q//$'\n'/ }"; ask_q="${ask_q//$'\r'/ }"; ask_q="${ask_q//$'\t'/ }"
+        echo "--- blocked ---"
+        echo "ask: ${ask_q:0:200}"
+        echo "$slug_label"
+        printf '%s\n' "$out" | head -3
+        echo
+      fi
+    done < <(jq -Rnr --arg home "$HOME" --arg sid "$sess_id" --arg tool "$TOOL" --arg ev "$EVENT" --arg pfx "$PREFIX_FILE" '
+        [inputs | {line: input_line_number, rec: (fromjson? // null)} | select(.rec != null and (.rec | type) == "object")] as $rows
+        | (reduce $rows[] as $r ({};
+            (($r.rec.message.id? // "") | tostring) as $mid
+            | if $mid != "" and (has($mid) | not) then .[$mid] = $r.line else . end)) as $first_line
+        | $rows[]
+        | .line as $ln
+        | .rec
+        | select((.isSidechain // false) | not)
+        | (.cwd // $home) as $cwd
+        | ((.message.id? // "") | tostring) as $mid
+        | (if $ev == "PreToolUse" then ((if $mid != "" then $first_line[$mid] else $ln end) - 1) else $ln end) as $cut
+        | (.message.content // [])[]?
+        | select((type == "object") and .type == "tool_use" and .name == $tool and (.input != null))
+        | ({tool_name: $tool, tool_input: .input, tool_use_id: (.id // ""), cwd: $cwd, hook_event_name: $ev, session_id: $sid, transcript_path: $pfx}
+           + (if $ev == "PostToolUse" then {tool_response: null} else {} end)) as $p
+        | "\($cut)\t\($p | tojson)"
+      ' "$f")
+  fi
 done <<<"$FILE_LIST"
 
-echo "replay-hook: $HOOK_NAME: $BLOCKED/$TOTAL commands blocked across $FILES files$INERT_SUFFIX"
+UNIT_LABEL="commands"
+[ "$TOOL" != "Bash" ] && UNIT_LABEL="asks"
+echo "replay-hook: $HOOK_NAME: $BLOCKED/$TOTAL $UNIT_LABEL blocked across $FILES files$INERT_SUFFIX"
 exit 0

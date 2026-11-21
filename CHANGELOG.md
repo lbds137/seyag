@@ -2,6 +2,25 @@
 
 All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY-MM-DD>` section per released version; under it, `###` categories in fixed order — Breaking Changes, Features, Bug Fixes, Improvements, Chores, Tests — empty ones omitted; items are `- **scope:** description (#PR)`, written from the version's merged commit subjects.
 
+## 0.3.203 - 2026-11-21
+
+### Features
+
+- **hooks:** `ask-pretext-guard` (component `ask-pretext`, on in `full`, off headless) and `ask-pretext-reminder` (component `ask-pretext-reminder`, on in `full`, off headless): PreToolUse on `AskUserQuestion` denies an ask whose text points outside the dialog ("the command above", "see above", "in my message", "see below", "as I said"), or that follows readable earlier-message `!` commands or fenced code blocks in the same turn that the ask does not carry (blocked once per turn), and PostToolUse on `AskUserQuestion` nudges via `additionalContext` when same-message text before the ask reaches `SYG_ASK_PRETEXT_MIN_CHARS` (default `200`) or carries a `!` command or fenced code block, sharing `hooks/lib/ask_detect.py` with `ask-command-echo-check` (TASK-65). (#PR)
+- **replay-hook:** `--tool NAME` (default `Bash`) and `--event PreToolUse|PostToolUse` (default `PreToolUse`) replay `AskUserQuestion` tool calls against transcript prefixes cut before the ask's message for PreToolUse and through the ask's `tool_use` line for PostToolUse (TASK-65). (#PR)
+
+### Bug Fixes
+
+- **changelog:** 0.3.202 overstated two points of its worktree-cleanup knob protection: a repository's `.claude/settings.json` `env` can still set the worktree-cleanup knobs (`.claude/seyag.toml` is what the refusal covers), and `SYG_WORKTREE_REGENERABLE` was already user-only through its `path` flag (TASK-66 items 2–3). (#PR)
+
+### Chores
+
+- **backlog:** filed TASK-66 (`worktree-branch-guard` #366 PASS-round lows), TASK-67 (transcript readers cannot see assistant prose recorded as signed empty thinking blocks) and TASK-68 (`env-print-guard` `jq` stdout redirected to a file is not a print). (#PR)
+
+### Tests
+
+- **hooks:** `ask-pretext-guard.probe.sh` and `ask-pretext-reminder.probe.sh` pin pointer and uncarried-code blocks, carried-code passes, once-per-turn state, same-message char-threshold and code reminders, knob overrides, headless/disable skips, and fail-open; new `AskUserQuestion` PreToolUse and PostToolUse prefix cases in `tests/replay-hook.probe.sh`. (#PR)
+
 ## 0.3.202 - 2026-11-21
 
 ### Features

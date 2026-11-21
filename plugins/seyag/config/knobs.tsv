@@ -63,6 +63,7 @@ SYG_ALLOW_PRIVATE_TERM	user	guards	unset	Set to 1 in the command's own prefix in
 SYG_ALLOW_RM	user	guards	unset	Set to 1 in the command text to bypass recursive-rm-guard for an owner-approved deletion.	-
 SYG_ALLOW_SESSION_URL	user	guards	unset	Set to 1 in the command's own prefix in the command text to bypass session-url-gate on the owner's word.	-
 SYG_ALLOW_TEMPORAL	user	guards	unset	Set to 1 in the git commit command's own prefix in the command text to bypass temporal-marker-guard.	-
+SYG_ASK_PRETEXT_MIN_CHARS	user	guards	200	Minimum characters of same-message text before an AskUserQuestion that make ask-pretext-reminder fire.	-
 SYG_BQ_NO_RC_LANES	user	stop-gates	unset	Extended regex matched against ANTHROPIC_BASE_URL for lanes without Remote Control, routing asks to SendMessage.	-
 SYG_BQ_PENDING_MARKERS	user	stop-gates	say the word\b|waiting on you\b|needs? your (yes|go|call|input)\b|for you to (decide|test|check)\b	Case-insensitive Python regex matching pending-ask phrases in the final paragraph; empty disables the pass.	-
 SYG_CHECK_LIB	internal	guards	unset	The hooks/lib directory the hook passes to its python child for shared target/owner resolution in the --check preflight.	-
@@ -129,8 +130,8 @@ SYG_GH_WRAPPERS	user	guards	unset	Whitespace-separated wrapper command prefix to
 SYG_HANDOFF_CMDS	user	stop-gates	unset	Python regex matching Bash commands that write a handoff (replaces built-in HANDOFF.md/handoff.md path defaults).	-
 SYG_HANDOFF_PATHS	user	stop-gates	(^|/)(?:HANDOFF\.md|handoff\.md)$	Python regex matching file paths whose Edit/Write counts as a handoff write (replaces built-in defaults when set).	-
 SYG_HANDOFF_SECTIONS	user	stop-gates	^##[ \t]*(?:Handoff|Next)\b	Multiline Python regex narrowing wired SYG_HANDOFF_PATHS writes to matching markdown sections; empty disables narrowing.	-
-SYG_HEADLESS_OFF	internal	session	turn-shape context handoff-pick-check ask-command-echo security	Internal constant listing components disabled automatically in headless (sdk-*) runs.	-
-SYG_HEADLESS_OFF_HOOKS	internal	session	blocking-question-channel-check turn-end-shape-gate promise-ledger-check queued-message-receipt bare-token-binding-reminder handoff-pick-check ask-command-echo-check context-size-reminder	Internal fallback list of hooks disabled in headless runs when components.tsv cannot be read.	-
+SYG_HEADLESS_OFF	internal	session	turn-shape context handoff-pick-check ask-command-echo ask-pretext ask-pretext-reminder security	Internal constant listing components disabled automatically in headless (sdk-*) runs.	-
+SYG_HEADLESS_OFF_HOOKS	internal	session	blocking-question-channel-check turn-end-shape-gate promise-ledger-check queued-message-receipt bare-token-binding-reminder handoff-pick-check ask-command-echo-check ask-pretext-guard ask-pretext-reminder context-size-reminder	Internal fallback list of hooks disabled in headless runs when components.tsv cannot be read.	-
 SYG_HOOK	internal	session	unset	Internal variable holding the resolved hook script path inside run.sh.	-
 SYG_IN_PERSON_SECTION	user	session	In Person	Heading (without the ##) of the role file section claude-role --need --in-person writes and --json reads as .deck: what needs the owner physically present.	-
 SYG_KEYS_CREDS_CMD	internal	misc	systemd-creds	Test seam replacing the systemd-creds command in keys.	-

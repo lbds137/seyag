@@ -351,4 +351,41 @@ _pipe_out=$(tail -1 <<<"$out_sid") && grep -qxF "replay-hook: fixture-sid: 2/2 c
   || bad "derived session_id: summary $(echo "$out_sid" | tail -1)"
 rm -rf "$SIDT"
 
+# AskUserQuestion replay support (TASK-65):
+# - PreToolUse prefix is cut BEFORE the first line whose record carries the
+#   ask's message.id, so same-message pre-ask text (line 2, msg-ask-1) is not
+#   in the prefix handed to ask-pretext-guard (ask 1 passes; ask 2 blocks on its
+#   pointer phrase -> 1/2 asks blocked).
+# - PostToolUse prefix is cut UP TO AND INCLUDING the line holding the ask's
+#   tool_use (line 3, msg-ask-1), so same-message pre-ask text (line 2) IS in
+#   the prefix handed to ask-pretext-reminder (ask 1 fires on stdout -> 1/2
+#   asks blocked; ask 2 has no pre-ask text and stays silent).
+mkdir -p "$T/ask-slug"
+cat > "$T/ask-slug/ask-session.jsonl" <<'EOF'
+{"type":"user","uuid":"u-ask-1","isMeta":null,"message":{"content":"start turn 1"}}
+{"type":"assistant","cwd":"/tmp/fixture-project","message":{"id":"msg-ask-1","content":[{"type":"text","text":"Same-message pre-ask command: ! echo same-msg-only"}]}}
+{"type":"assistant","cwd":"/tmp/fixture-project","message":{"id":"msg-ask-1","content":[{"type":"tool_use","id":"tu-ask-1","name":"AskUserQuestion","input":{"questions":[{"question":"Proceed with turn 1?","options":[]}]}}]}}
+{"type":"user","uuid":"u-ask-2","isMeta":null,"message":{"content":"start turn 2"}}
+{"type":"assistant","cwd":"/tmp/fixture-project","message":{"id":"msg-ask-2","content":[{"type":"tool_use","id":"tu-ask-2","name":"AskUserQuestion","input":{"questions":[{"question":"Run the step in my message above?","options":[]}]}}]}}
+EOF
+
+out_ask_pre=$("$RH" ask-pretext-guard --tool AskUserQuestion --event PreToolUse --since 1 --slug ask-slug --projects-dir "$T" 2>&1)
+_pipe_out=$(tail -1 <<<"$out_ask_pre") && grep -qxF "replay-hook: ask-pretext-guard: 1/2 asks blocked across 1 files" <<<"$_pipe_out" \
+  && ok "AskUserQuestion PreToolUse replay: prefix excludes same-message text (1/2 asks blocked)" \
+  || bad "AskUserQuestion PreToolUse replay summary: $(echo "$out_ask_pre" | tail -1)"
+grep -qxF "ask: Run the step in my message above?" <<<"$out_ask_pre" \
+  && ! grep -qxF "ask: Proceed with turn 1?" <<<"$out_ask_pre" \
+  && ok "AskUserQuestion PreToolUse replay: pointer ask blocked, same-message command ask passed" \
+  || bad "AskUserQuestion PreToolUse replay blocked set wrong: $out_ask_pre"
+
+out_ask_post=$("$RH" ask-pretext-reminder --tool AskUserQuestion --event PostToolUse --since 1 --slug ask-slug --projects-dir "$T" 2>&1)
+_pipe_out=$(tail -1 <<<"$out_ask_post") && grep -qxF "replay-hook: ask-pretext-reminder: 1/2 asks blocked across 1 files" <<<"$_pipe_out" \
+  && ok "AskUserQuestion PostToolUse replay: prefix includes same-message text and non-empty stdout counts as hit (1/2 asks blocked)" \
+  || bad "AskUserQuestion PostToolUse replay summary: $(echo "$out_ask_post" | tail -1)"
+grep -qxF "ask: Proceed with turn 1?" <<<"$out_ask_post" \
+  && grep -qF "ask-pretext-reminder: you wrote" <<<"$out_ask_post" \
+  && ! grep -qxF "ask: Run the step in my message above?" <<<"$out_ask_post" \
+  && ok "AskUserQuestion PostToolUse replay: same-message command ask triggered reminder, pointer-only ask stayed silent" \
+  || bad "AskUserQuestion PostToolUse replay hit set wrong: $out_ask_post"
+
 exit $fail
