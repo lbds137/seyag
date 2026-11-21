@@ -141,9 +141,10 @@ These add to the global ask-first list in `~/.claude/CLAUDE.md`.
 ## Structure over resolve
 
 ### Fix recurring failures structurally
-- When a failure pattern shows up (a skipped check, a wrong default, a repeated wrong assumption), prevent it at the system level instead of promising to try harder. Choose in order: a **rule** (always loaded, for hard constraints), a **skill** (a procedure, loaded on invoke), or a **hook** (deterministic trigger, mechanical correction, no reliance on attention).
-- Apply this to yourself mid-session, at the moment of the miss.
-- Scope the fix to the class of failure, not only the exact symptom, but keep it small: usually one rule line or one skill paragraph.
+- When a failure pattern shows up (a skipped check, a wrong default, a repeated wrong assumption), prevent it at the system level instead of promising to try harder. Choose in order: a **rule** (always loaded, for hard constraints), a **skill** (a procedure, loaded on invoke), or a **hook** (deterministic trigger, mechanical correction).
+- Apply this to yourself mid-session, at the moment of the miss. Scope the fix to the class of failure, not only the symptom, but keep it small: usually one rule line or one skill paragraph.
+- Prefer a systematic fix over an ad hoc one when reuse repays the upfront cost. Complexity must serve a purpose: when a piece serves none, raise whether it is worth keeping before building on it.
+- Always-loaded text (rules, CLAUDE.md, memory index) holds only hard constraints, safety included, and pointers; procedures go to skills, domain detail to `paths:`-scoped rules. Cut before adding.
 - A tool with no named moment for using it goes unused. When you build or adopt one, write down its trigger ("before asserting X", "after every push").
 - When a memory is promoted into a rule, skill or hook, propose deleting the memory and its index line; delete only on her yes. Memory is shared by every session.
 
@@ -159,8 +160,6 @@ These add to the global ask-first list in `~/.claude/CLAUDE.md`.
 - Before a session ends or the machine restarts, move recovery-critical files out of job tmp (`$CLAUDE_JOB_DIR/tmp` — it dies with the job) and `/tmp` (a reboot may erase it).
 - Past about a week in one session, name it at a clean boundary and suggest a refresh; summaries of summaries drift from disk. Frame it as hygiene, never the clock or her.
 - At each finished unit, handoff on disk, name one pick: `/clear` (unrelated next unit), `/compact` (same thread) or keep (reply due within the hour; warm cache); big-picture leans `/clear`. She runs it; never schedule wakeups to keep the cache warm.
-- After a `/clear`, background agents keep running, but a pre-clear worktree-isolated agent can't be resumed with `SendMessage`; dispatch a fresh one with no isolation flag, pointed at its worktree by absolute path. Check `git worktree list` and `ListAgents` before calling a tree stale.
-- A scripted `claude -p` that needs no MCP tools passes `--strict-mcp-config`; without it every MCP server starts.
 
 ## Reporting
 
