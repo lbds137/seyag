@@ -26,6 +26,10 @@
 # AskUserQuestion): a fenced code block line carrying the command (after
 # dropping a leading `!` or `$ `), or for a URL a fenced line holding it or a
 # line that is the URL alone. Inline backticks and prose mentions do not count.
+# The command match is loose: a fenced line that CONTAINS the key satisfies it,
+# and so does a fenced line of at least 6 chars that is a whole-word prefix of
+# the key (the ask's unbackticked line can run on into prose), so a shorter echo
+# can pass; accepted under fail-open.
 #
 # Enforcement geometry mirrors blocking-question-channel-check.sh: a tail read of
 # the transcript, a strict turn boundary (no genuine user entry found → silent),
@@ -39,6 +43,8 @@
 # (its tool_use id, else a hash of its input), remembered in a state file under
 # ${XDG_STATE_HOME:-~/.local/state}/seyag/ask-command-echo-check/<session key>.
 # If that file cannot be written it blocks only when `stop_hook_active` is false.
+# State files older than 7 days are pruned on each write (same convention as
+# cwd-drift-guard).
 # A "Stop hook feedback:" user entry is not a turn boundary.
 #
 # Pinned by ask-command-echo-check.probe.sh.
@@ -276,7 +282,20 @@ STATE_FILE="$STATE_DIR/$SKEY"
 if [ -f "$STATE_FILE" ] && [ "$(head -n 1 "$STATE_FILE" 2>/dev/null)" = "$IDENT" ]; then
   exit 0
 fi
-if ! { mkdir -p "$STATE_DIR" && printf '%s\n' "$IDENT" >"$STATE_FILE"; } 2>/dev/null; then
+write_state() {
+  local tmp
+  mkdir -p "$STATE_DIR" || return 1
+  # Prune regular files (not symlinks) older than 7 days; errors ignored.
+  find "$STATE_DIR" -maxdepth 1 -type f -mtime +7 -exec rm -f -- {} + 2>/dev/null || true
+  # Atomic write: temp file in the state dir, then rename onto the state file.
+  tmp=$(mktemp "$STATE_DIR/.tmp.XXXXXX") || return 1
+  if printf '%s\n' "$IDENT" >"$tmp" && mv -f "$tmp" "$STATE_FILE"; then
+    return 0
+  fi
+  rm -f -- "$tmp"
+  return 1
+}
+if ! write_state 2>/dev/null; then
   # State unwritable: fall back to the native once-per-stop-chain rule, never fail closed.
   [ "$ACTIVE" = "true" ] && exit 0
 fi
@@ -301,7 +320,7 @@ cat >&2 << 'MSG'
 
 Repeat each one now in a fenced code block (a link may instead stand
 alone on its own line), then end the turn. If a line was illustrative
-(nothing she runs or opens), say so in one line and stop again (this
+(nothing the user runs or opens), say so in one line and stop again (this
 gate fires only once per ask).
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 MSG
