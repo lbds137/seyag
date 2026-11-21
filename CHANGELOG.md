@@ -6,20 +6,20 @@ All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY
 
 ### Features
 
-- **hooks:** `worktree-branch-guard` (component `worktree-branch`, on in `full` and `guards`): PreToolUse on `Bash` denies `git worktree add` targeting `.claude/worktrees/<x>` when the branch it creates (`-b`/`-B`, expanded through `shell_state` and skipped when unresolvable, or implied from the directory basename when no `-b`/`-B`, `-d`/`--detach`, `<commit-ish>` or existing local branch is present) fails `SYG_WORKTREE_BRANCH_RE` (default `^worktree-agent-`), and warns via `additionalContext` when the regex is invalid, sharing `hooks/lib/worktree_add.py` with `live-checkout-guard` (TASK-56). (#PR)
+- **hooks:** `worktree-branch-guard` (component `worktree-branch`, on in `full` and `guards`): PreToolUse on `Bash` denies `git worktree add` targeting `.claude/worktrees/<x>` when the branch it creates (`-b`/`-B`, expanded through `shell_state` and skipped when unresolvable, or implied from the directory basename when no `-b`/`-B`, `-d`/`--detach`, `<commit-ish>` or existing local branch is present) fails `SYG_WORKTREE_BRANCH_RE` (default `^worktree-agent-`), and warns via `additionalContext` when the regex is invalid, sharing `hooks/lib/worktree_add.py` with `live-checkout-guard` (TASK-56). (#366)
 
 ### Bug Fixes
 
-- **worktrees:** `safe-worktree-clean` and `worktree-transfer` load the seyag config files (user `config.toml`; project `.claude/seyag.toml`, where the worktree-cleanup knobs `SYG_WORKTREE_BRANCH_RE`, `SYG_WORKTREE_LOCK_AGE_MIN`, `SYG_WORKTREE_BACKUP_ALLOW_VOLATILE`, `SYG_WORKTREE_REGENERABLE` and `SYG_WORKTREE_BASE` are refused from project scope) via `hooks/lib/config-env.sh` before reading knobs, so a user-configured `syg_worktree_branch_re` reaches both tools as well as the hooks while a repository cannot weaken what the cleaner deletes without approval. (#PR)
-- **live-checkout-guard:** `emit_block` renders `-b worktree-agent-<name>` (or `<branch matching $re>` when `SYG_WORKTREE_BRANCH_RE` does not match `worktree-agent-x`) instead of `-b <branch>`, and `record_worktree_add` records a same-command `git worktree add` path only when it does not yet exist or is an empty directory. (#PR)
+- **worktrees:** `safe-worktree-clean` and `worktree-transfer` load the seyag config files (user `config.toml`; project `.claude/seyag.toml`, where the worktree-cleanup knobs `SYG_WORKTREE_BRANCH_RE`, `SYG_WORKTREE_LOCK_AGE_MIN`, `SYG_WORKTREE_BACKUP_ALLOW_VOLATILE`, `SYG_WORKTREE_REGENERABLE` and `SYG_WORKTREE_BASE` are refused from project scope) via `hooks/lib/config-env.sh` before reading knobs, so a user-configured `syg_worktree_branch_re` reaches both tools as well as the hooks while a repository cannot weaken what the cleaner deletes without approval. (#366)
+- **live-checkout-guard:** `emit_block` renders `-b worktree-agent-<name>` (or `<branch matching $re>` when `SYG_WORKTREE_BRANCH_RE` does not match `worktree-agent-x`) instead of `-b <branch>`, and `record_worktree_add` records a same-command `git worktree add` path only when it does not yet exist or is an empty directory. (#366)
 
 ### Chores
 
-- **backlog:** filed TASK-63 (`ask-command-echo-check` #365 PASS-round lows), TASK-64 (`worktree-branch-guard` remote DWIM branch creation) and TASK-65 (a guard for asks that depend on text the ask dialog hides). (#PR)
+- **backlog:** filed TASK-63 (`ask-command-echo-check` #365 PASS-round lows), TASK-64 (`worktree-branch-guard` remote DWIM branch creation) and TASK-65 (a guard for asks that depend on text the ask dialog hides). (#366)
 
 ### Tests
 
-- **hooks:** `worktree-branch-guard.probe.sh` pins explicit, attached, clustered, `-B`, `-C`, `cd`, multi-add, implied-branch and custom-knob denials, pass and fail-open cases, invalid-regex `additionalContext` warnings, and default-pattern drift across the four surfaces; new cases in `live-checkout-guard.probe.sh`, `tests/safe-worktree-clean.probe.sh` and `tests/worktree-transfer.probe.sh`. (#PR)
+- **hooks:** `worktree-branch-guard.probe.sh` pins explicit, attached, clustered, `-B`, `-C`, `cd`, multi-add, implied-branch and custom-knob denials, pass and fail-open cases, invalid-regex `additionalContext` warnings, and default-pattern drift across the four surfaces; new cases in `live-checkout-guard.probe.sh`, `tests/safe-worktree-clean.probe.sh` and `tests/worktree-transfer.probe.sh`. (#366)
 
 ## 0.3.201 - 2026-11-21
 
