@@ -239,7 +239,7 @@ SYG_WORKER_TREE_CHECK_UNTRUSTED	user	worktrees	/tmp:/var/tmp:/dev/shm	Colon-sepa
 SYG_WORKTREE_BACKUP_ALLOW_VOLATILE	user	worktrees	unset	Set to 1 to allow safe-worktree-clean --apply-hold backups on tmpfs or ramfs.	-
 SYG_WORKTREE_BACKUP_DIR	user	worktrees	${XDG_STATE_HOME:-$HOME/.local/state}/seyag/worktree-backups	Directory where safe-worktree-clean --apply-hold writes HOLD worktree backup bundles.	path
 SYG_WORKTREE_BASE	user	worktrees	origin/<default branch>	Base git ref against which safe-worktree-clean judges worktrees when --base is not passed.	-
-SYG_WORKTREE_BRANCH_RE	user	worktrees	^worktree-agent-	Extended regex that agent worktree branch names must match in safe-worktree-clean and worktree-transfer.	-
+SYG_WORKTREE_BRANCH_RE	user	worktrees	^worktree-agent-	Extended regex that agent worktree branch names must match in safe-worktree-clean, worktree-transfer and worktree-branch-guard.	-
 SYG_WORKTREE_LOCK_AGE_MIN	user	worktrees	10	Age in minutes (integer) after which a 0-byte index.lock with no live git process counts as stale.	-
 SYG_WORKTREE_REGENERABLE	user	worktrees	unset	Whitespace-separated path globs treated as safe-to-delete regenerable ignored paths in safe-worktree-clean.	path
 SYG_WORKTREE_RUN_STAMP	internal	worktrees	<YYYY-MM-DDTHHMMSS>	Internal timestamp directory name exported from a multi-repo safe-worktree-clean --apply-hold parent to child runs; a value that is empty or not a plain name ([0-9A-Za-z][0-9A-Za-z._-]*) exits 2.	-

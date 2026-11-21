@@ -11,6 +11,7 @@
 set -uo pipefail
 # Hooks run here directly, not via run.sh: keep bytecode out of hooks/lib.
 export PYTHONDONTWRITEBYTECODE=1
+unset SYG_WORKTREE_BRANCH_RE
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 HOOK="$SCRIPT_DIR/live-checkout-guard.sh"
@@ -227,7 +228,7 @@ LAST_LINE=$(printf '%s\n' "$LAST_ERR" | tail -n 1)
 if grep -qF "$LIVE_REAL" <<<"$LAST_ERR" \
   && grep -qF "default branch: main" <<<"$LAST_ERR" \
   && grep -qF "this checkout's files are the code every session loads" <<<"$LAST_ERR" \
-  && grep -qF "git fetch origin && git worktree add -b <branch> $LIVE_REAL/.claude/worktrees/<name> origin/main" <<<"$LAST_ERR" \
+  && grep -qF "git fetch origin && git worktree add -b worktree-agent-<name> $LIVE_REAL/.claude/worktrees/<name> origin/main" <<<"$LAST_ERR" \
   && grep -qF "edit the same path inside that worktree" <<<"$LAST_ERR" \
   && [[ "$LAST_LINE" == *SYG_ALLOW_LIVE_CHECKOUT=1* ]]; then
   echo "ok   [banner]: block message names live root, default branch, why, worktree fix, and bypass on last line"
@@ -406,6 +407,8 @@ check_bash 2 "cd <non-existent-wt> && git commit with no worktree add still bloc
   "cd .claude/worktrees/never-made && git commit -m x" "$LIVE"
 check_bash 2 "git worktree add ../elsewhere && git commit in live root still blocks" \
   "git worktree add ../elsewhere && git commit -m x" "$LIVE"
+check_bash 2 "git worktree add on existing non-empty tracked dir then git -C <dir> commit still blocks" \
+  "git worktree add plugins; git -C plugins commit -am x" "$LIVE"
 
 # --- 6. Edit / Write / MultiEdit / NotebookEdit & check-ignore 128 ------------
 check_file 2 "Edit of a tracked file in live root blocks" Edit "$LIVE/tracked.txt" "$LIVE"

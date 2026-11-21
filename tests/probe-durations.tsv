@@ -39,6 +39,7 @@ plugins/seyag/hooks/status-claim-cite.probe.sh	10.0
 plugins/seyag/hooks/temporal-marker-guard.probe.sh	12.1
 plugins/seyag/hooks/turn-end-shape-gate.probe.sh	19.8
 plugins/seyag/hooks/upstream-submission-guard.probe.sh	26.0
+plugins/seyag/hooks/worktree-branch-guard.probe.sh	1.8
 tests/advisor-skill.probe.sh	0.1
 tests/agy-extract.probe.sh	3.0
 tests/api-credit.probe.sh	44.7

@@ -43,6 +43,7 @@ from shell_state import (
     unresolvable_cd_target,
     walk,
 )
+from worktree_add import parse_worktree_add
 
 cmd = os.fsdecode(open(3, "rb").read()).removesuffix("\n")
 payload_cwd = os.environ.get("CWD", "")
@@ -740,48 +741,12 @@ def apply_runner_chdirs(prefix_words, cur_dir, uncertain, state, ctx):
 
 def record_worktree_add(rest, eff_dir, state, ctx):
     """When `rest` is `add [options] <path> [<commit-ish>]`, resolve `<path>`
-    against `eff_dir` and record it in `ctx.new_worktrees`."""
-    if "-h" in rest or "--help" in rest:
+    against `eff_dir` and record it in `ctx.new_worktrees` if the path does not
+    yet exist or is an empty directory."""
+    parsed = parse_worktree_add(rest)
+    if not parsed or not parsed["path"]:
         return
-    add_idx = None
-    for idx, w in enumerate(rest):
-        if w == "--":
-            break
-        if w.startswith("-") and w != "-":
-            continue
-        if w == "add":
-            add_idx = idx
-        break
-    if add_idx is None:
-        return
-    wt_raw = None
-    j = add_idx + 1
-    while j < len(rest):
-        w = rest[j]
-        if w == "--":
-            if j + 1 < len(rest):
-                wt_raw = rest[j + 1]
-            break
-        if w.startswith("--"):
-            name, eq, _ = w.partition("=")
-            if name == "--reason" and not eq:
-                j += 2
-            else:
-                j += 1
-            continue
-        if w.startswith("-") and w != "-":
-            shorts = w[1:]
-            for s_idx, ch in enumerate(shorts):
-                if ch in ("b", "B"):
-                    if s_idx == len(shorts) - 1:
-                        j += 1
-                    break
-            j += 1
-            continue
-        wt_raw = w
-        break
-    if not wt_raw:
-        return
+    wt_raw = parsed["path"]
     wt_exp = expand_home(expand_vars(wt_raw, state))
     if not wt_exp or unresolvable_cd_target(wt_exp):
         return
@@ -791,6 +756,12 @@ def record_worktree_add(rest, eff_dir, state, ctx):
         wt_abs = posixpath.normpath(posixpath.join(eff_dir, wt_exp))
     else:
         return
+    if os.path.lexists(wt_abs):
+        try:
+            if not os.path.isdir(wt_abs) or os.listdir(wt_abs):
+                return
+        except OSError:
+            return
     for cand in (wt_abs, posixpath.normpath(os.path.realpath(wt_abs))):
         if not any(r == cand or r.startswith(cand.rstrip("/") + "/") for r in live_roots):
             ctx.new_worktrees.add(cand)

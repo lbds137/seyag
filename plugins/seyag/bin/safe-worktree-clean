@@ -141,6 +141,13 @@
 
 set -uo pipefail
 
+_syg_bin_dir=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")
+if [ -r "$_syg_bin_dir/../hooks/lib/config-env.sh" ] \
+    && source "$_syg_bin_dir/../hooks/lib/config-env.sh" 2>/dev/null \
+    && declare -F syg_config_env >/dev/null; then
+    syg_config_env "$(readlink -f "$_syg_bin_dir/..")"
+fi
+
 usage() { sed -n '2,/^[^#]/s/^# \{0,1\}//p' "$0"; }
 trim() { local s=$1; s=${s#"${s%%[![:space:]]*}"}; printf '%s' "${s%"${s##*[![:space:]]}"}"; }
 

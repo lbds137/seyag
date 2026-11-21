@@ -25,6 +25,8 @@ while read -r v; do unset "$v"; done < <(compgen -v SYG_)
 export SYG_WORKTREE_BACKUP_ALLOW_VOLATILE=1
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@example.invalid GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@example.invalid
+export XDG_CONFIG_HOME="$T/xdg-config" CLAUDE_PROJECT_DIR="$T/judge"
+mkdir -p "$XDG_CONFIG_HOME"
 cd "$T" || exit 1
 
 # A repo with origin/main = c2; c1 is its parent. c1: a.txt=v1. c2: a.txt=v2, b.txt=b.
@@ -3030,6 +3032,25 @@ if [ "$rc_p46r" -eq 2 ] && [ "$err_p46" = "$want_p46" ] \
 else
   bad "P46: sweep-parent ref-only suffix line (rc=$rc_p46r, wt46k=$([ -d "$SW46AW/wt46k" ] && echo ok || echo gone), ub46=$([ -d "$SW46BW/ub46" ] && echo ok || echo gone), bk46='$bk46_left', err='$err_p46')"
 fi
+
+# P47 config.toml loader: with SYG_WORKTREE_BRANCH_RE unset and $XDG_CONFIG_HOME/seyag/config.toml
+# setting syg_worktree_branch_re = "^feat-", a tree on branch feat-x is not held as branch-name.
+local SW47 XDG47 out_p47 out_p47b
+mk_repo cfg47 && [ -d "$T/cfg47" ] || bad "P47 setup: mk_repo cfg47"
+SW47="$T/cfg47"
+add_tree cfg47 fx origin/main feat-x && [ -d "$SW47/.claude/worktrees/fx" ] || bad "P47 setup: add_tree fx"
+XDG47="$T/xdg47"
+mkdir -p "$XDG47/seyag"
+printf 'syg_worktree_branch_re = "^feat-"\n' > "$XDG47/seyag/config.toml"
+out_p47=$(env -u SYG_WORKTREE_BRANCH_RE XDG_CONFIG_HOME="$XDG47" CLAUDE_PROJECT_DIR="$SW47" "$TOOL" --repo "$SW47" --json)
+expect "$out_p47" fx SAFE "P47: config.toml syg_worktree_branch_re = ^feat- accepts feat-x without branch-name HOLD"
+
+# P47b project .claude/seyag.toml refusal: syg_worktree_branch_re in CLAUDE_PROJECT_DIR/.claude/seyag.toml
+# is refused from project scope, so feat-x is still reported branch-name.
+mkdir -p "$SW47/.claude" "$T/xdg47-none"
+printf 'syg_worktree_branch_re = "^feat-"\n' > "$SW47/.claude/seyag.toml"
+out_p47b=$(env -u SYG_WORKTREE_BRANCH_RE XDG_CONFIG_HOME="$T/xdg47-none" CLAUDE_PROJECT_DIR="$SW47" "$TOOL" --repo "$SW47" --json 2>/dev/null)
+expect "$out_p47b" fx HOLD:branch-name "P47b: project .claude/seyag.toml syg_worktree_branch_re refused; feat-x still held as branch-name"
 
 exit $fail
 }

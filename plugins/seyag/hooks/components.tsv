@@ -43,7 +43,8 @@ status-claim-cite	status-claim-cite
 dispatch-spec-ledger-gate	dispatch-spec
 clock-stamp-guard	clock-stamp
 live-checkout-guard	live-checkout
+worktree-branch-guard	worktree-branch
 memory-route-gate	memory-route
-@profile	full	session rules route turn-shape context context-block guards-shell guards-outbound guards-commit guards-pr pr-watch dispatch api-credit launch-record classifier-ledger handoff-pick-check ask-command-echo status-claim-cite clock-stamp dispatch-spec live-checkout memory-route security
-@profile	guards	guards-shell guards-outbound guards-commit guards-pr context context-block dispatch route session api-credit launch-record classifier-ledger live-checkout
+@profile	full	session rules route turn-shape context context-block guards-shell guards-outbound guards-commit guards-pr pr-watch dispatch api-credit launch-record classifier-ledger handoff-pick-check ask-command-echo status-claim-cite clock-stamp dispatch-spec live-checkout worktree-branch memory-route security
+@profile	guards	guards-shell guards-outbound guards-commit guards-pr context context-block dispatch route session api-credit launch-record classifier-ledger live-checkout worktree-branch
 @profile	none	session api-credit launch-record classifier-ledger
