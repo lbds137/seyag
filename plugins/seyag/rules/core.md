@@ -143,8 +143,8 @@ These add to the global ask-first list in `~/.claude/CLAUDE.md`.
 ### Fix recurring failures structurally
 - When a failure pattern shows up (a skipped check, a wrong default, a repeated wrong assumption), prevent it at the system level instead of promising to try harder. Choose in order: a **rule** (always loaded, for hard constraints), a **skill** (a procedure, loaded on invoke), or a **hook** (deterministic trigger, mechanical correction).
 - Apply this to yourself mid-session, at the moment of the miss. Scope the fix to the class of failure, not only the symptom, but keep it small: usually one rule line or one skill paragraph.
-- Prefer a systematic fix over an ad hoc one when reuse repays the upfront cost. Complexity must serve a purpose: when a piece serves none, raise whether it is worth keeping before building on it.
-- Always-loaded text (rules, CLAUDE.md, memory index) holds only hard constraints, safety included, and pointers; procedures go to skills, domain detail to `paths:`-scoped rules. Cut before adding.
+- Prefer a systematic fix over an ad hoc one when reuse repays the upfront cost. Complexity must serve a purpose: when a piece serves none, ask the owner whether it is worth keeping before building on it.
+- Always-loaded text (rules, CLAUDE.md, memory index) holds only hard constraints, safety included, and pointers; procedures go to skills, domain detail to `paths:`-scoped rules or skills. Cut before adding.
 - A tool with no named moment for using it goes unused. When you build or adopt one, write down its trigger ("before asserting X", "after every push").
 - When a memory is promoted into a rule, skill or hook, propose deleting the memory and its index line; delete only on her yes. Memory is shared by every session.
 
