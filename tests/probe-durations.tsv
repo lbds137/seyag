@@ -94,6 +94,7 @@ tests/shell-state.probe.sh	0.1
 tests/shell-syntax.probe.sh	1.6
 tests/skill-name-lint.probe.sh	0.1
 tests/statusline.probe.sh	24.4
+tests/suite-time.probe.sh	4.8
 tests/usage-sweep.probe.sh	7.0
 tests/week-burn-window.probe.sh	1.7
 tests/whitespace-only-diff.probe.sh	8.8

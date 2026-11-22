@@ -275,6 +275,9 @@ An optional TOML file fills in knobs the environment left unset: user `${XDG_CON
 | `SYG_MEM_PRESSURE_MAX_BYTES` | `5242880` | Size in bytes past which mem-pressure-log rotates log.jsonl to log.jsonl.1 (one generation kept). | `bin/mem-pressure-log` | user + project |
 | `SYG_MEM_PRESSURE_STATE_DIR` | `$HOME/.local/state/mem-pressure` | Directory holding mem-pressure-log's log.jsonl. | `bin/mem-pressure-log` | user only |
 | `SYG_MEM_WATCH_CGROUP_ROOT` | `/sys/fs/cgroup/user.slice` | Directory mem-watch searches, up to four levels deep, for this user's app.slice/memory.events oom_kill counter (user-<uid>.slice preferred; a root below the user slice also works; another uid's slice never). | `bin/mem-watch` | user only |
+| `SYG_SUITE_BUDGET_S` | unset | Per-suite wall-time budget in seconds for suite-time run; over it, suite-time prints a pointer to the testing-discipline skill. --budget overrides it. | `bin/suite-time` | user + project |
+| `SYG_SUITE_TIME_LOG` | the seyag state dir's suite-time.tsv (XDG_STATE_HOME, else ~/.local/state) | TSV log suite-time run appends to and suite-time log reads. | `bin/suite-time` | user only |
+| `SYG_SUITE_TIME_TOLERANCE` | `20` | Percent over the median of a suite's last 5 clean runs at which suite-time run reports a regression. | `bin/suite-time` | user + project |
 
 ## Internal names
 
