@@ -2,7 +2,7 @@
 # safe-worktree-clean - judge agent worktrees (--all: every linked one) for safe removal; --apply removes SAFE ones; --apply-hold backs up and removes approved HOLD ones
 #
 # Usage:
-#   safe-worktree-clean [--apply] [--repo DIR]... [--repos-file FILE] [--apply-hold ID] [--base REF] [--all] [--only PATH]... [--locks] [--locks-apply] [--json]
+#   safe-worktree-clean [--apply] [--repo DIR]... [--repos-file FILE] [--apply-hold ID] [--apply-eligible] [--base REF] [--all] [--only PATH]... [--locks] [--locks-apply] [--json]
 #
 # Judges every worktree under <repo>/.claude/worktrees/ (--all: every linked worktree wherever it
 # lives; --repo DIR repeatable, default: the current repo; --repos-file FILE reads one repo path
@@ -119,6 +119,20 @@
 # verified with `tar --quoting-style=literal -tzf`, `git bundle verify`, and `git index-pack` and
 # re-checked for cwd, state, and lock changes before unlock / `git worktree remove --force` /
 # `git branch -D`.
+# --apply-eligible (no value; implies --apply; refuses with --apply-hold, --all, --base or
+# --locks-apply, exit 2, before judging anything; --only, --repo, --repos-file and --json stay
+# allowed, and SYG_WORKTREE_BASE from the environment still applies): removes SAFE trees and,
+# with the same verified backup as --apply-hold, every approvable HOLD tree whose reason codes
+# are all in SYG_WORKTREE_ELIGIBLE_REASONS (whitespace-separated; unset or empty removes no HOLD
+# tree; refused from project .claude/seyag.toml) intersected with the hard universe
+# {branch-name, ignored, untracked-new, untracked-differs} (a constant in this tool, never
+# configurable; commit-carrying codes, dirty, live-cwd, lock and every other code are never
+# eligible and warn once per code on stderr). Demoted trees stay in the HOLD report with a
+# `  not eligible: <rel path> (<codes>)` line (--json adds `"eligible_mode": true`,
+# `"eligible_reasons": [...]` and, on trees whose pre-demotion `"approvable"` is true,
+# `"eligible"`, keeping pre-demotion `"approvable"`).
+# Across several repos, each child applies its own eligibility with no sweep plan. A permission
+# allow rule for auto-removal should name exactly `safe-worktree-clean --apply-eligible`.
 # <base> is --base REF, else SYG_WORKTREE_BASE, else origin/<default branch> (origin/HEAD,
 # else origin/main), compared as the local ref stands (fetch first for a fresh verdict);
 # a configured ref that does not resolve, or no default ref, makes every tree HOLD:no-base;
@@ -134,10 +148,11 @@
 # 10), and no live git process works in the repo. --locks-apply deletes exactly the stale ones.
 # --json prints one JSON object instead of text (`{"repos": [...], "sweep_plan": ...}` when
 # sweeping several repos).
-# Exit: 0 done; 1 --apply found no removable tree (nothing removed); 2 usage, plan mismatch,
-# a refused commit-carrying plan, or not a git repo; 3 a backup, removal, or lock deletion
-# failed. With several repos: 3 if any child exits 3, else 2 if any exits 2, else 1 only if
-# every child exits 1, else 0.
+# Exit: 0 done; 1 --apply found no removable tree (nothing removed; --apply-eligible exits 0
+# when nothing is removed, also in multi-repo form, and does not print the "nothing removed:"
+# line); 2 usage, plan mismatch, a refused commit-carrying plan, or not a git repo; 3 a backup,
+# removal, or lock deletion failed. With several repos: 3 if any child exits 3, else 2 if any
+# exits 2, else 1 only if every child exits 1, else 0.
 
 set -uo pipefail
 
@@ -166,7 +181,8 @@ plan_summary_line() { # $1 "hold plan <id>" | "sweep plan <id>", $2... display t
   printf '%s would remove %d tree(s): %s\n' "$prefix" "$n" "$out"
 }
 
-APPLY=false APPLY_HOLD="" ALL=false LOCKS=false LOCKS_APPLY=false JSON=false BASE_ARG="" BASE_SRC=""
+APPLY=false APPLY_HOLD="" APPLY_ELIGIBLE=false ALL=false LOCKS=false LOCKS_APPLY=false JSON=false BASE_ARG="" BASE_SRC=""
+readonly -a ELIGIBLE_UNIVERSE=(branch-name ignored untracked-new untracked-differs)
 REPOS=() ONLY_RAW=() ONLY_REAL=()
 
 add_repos_file() {
@@ -190,6 +206,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     -h | --help) usage; exit 0 ;;
     --apply) APPLY=true ;;
+    --apply-eligible) APPLY_ELIGIBLE=true; APPLY=true ;;
     --apply-hold)
       [ $# -ge 2 ] || { usage >&2; exit 2; }
       case "$2" in "" | -*) echo "safe-worktree-clean: --apply-hold needs a plan id" >&2; usage >&2; exit 2 ;; esac
@@ -234,6 +251,24 @@ while [ $# -gt 0 ]; do
   shift
 done
 [ ${#REPOS[@]} -gt 0 ] || REPOS=(.)
+if $APPLY_ELIGIBLE; then
+  if [ -n "$APPLY_HOLD" ]; then
+    echo "safe-worktree-clean: --apply-eligible cannot be used with --apply-hold" >&2
+    exit 2
+  fi
+  if $ALL; then
+    echo "safe-worktree-clean: --apply-eligible cannot be used with --all" >&2
+    exit 2
+  fi
+  if [ "$BASE_SRC" = "--base" ]; then
+    echo "safe-worktree-clean: --apply-eligible cannot be used with --base" >&2
+    exit 2
+  fi
+  if $LOCKS_APPLY; then
+    echo "safe-worktree-clean: --apply-eligible cannot be used with --locks-apply" >&2
+    exit 2
+  fi
+fi
 if [ -n "$APPLY_HOLD" ] && $ALL; then
   echo "safe-worktree-clean: --apply-hold cannot be used with --all" >&2
   exit 2
@@ -289,6 +324,29 @@ check_backup_volatile() {
       exit 2
       ;;
   esac
+}
+
+declare -A ELIGIBLE_SET=()
+ELIGIBLE_SORTED=()
+init_eligible_reasons() {
+  ELIGIBLE_SET=()
+  ELIGIBLE_SORTED=()
+  local -A _elig_universe=() _elig_warned=()
+  local -a _raw_elig=()
+  local _u _c
+  for _u in "${ELIGIBLE_UNIVERSE[@]}"; do _elig_universe[$_u]=1; done
+  read -r -d '' -a _raw_elig <<<"${SYG_WORKTREE_ELIGIBLE_REASONS:-}"
+  for _c in "${_raw_elig[@]}"; do
+    if [ -n "${_elig_universe[$_c]+set}" ]; then
+      ELIGIBLE_SET[$_c]=1
+    elif [ "${SYG_WORKTREE_ELIGIBLE_WARNED:-}" != 1 ] && [ -z "${_elig_warned[$_c]+set}" ]; then
+      _elig_warned[$_c]=1
+      echo "safe-worktree-clean: SYG_WORKTREE_ELIGIBLE_REASONS: $_c is never eligible; ignored" >&2
+    fi
+  done
+  if [ ${#ELIGIBLE_SET[@]} -gt 0 ]; then
+    mapfile -t ELIGIBLE_SORTED < <(printf '%s\n' "${!ELIGIBLE_SET[@]}" | LC_ALL=C sort)
+  fi
 }
 
 if [ ${#REPOS[@]} -gt 1 ]; then
@@ -392,6 +450,10 @@ if refused:
     sys.exit(2)
 ' "$APPLY_HOLD" || exit 2
     export SYG_WORKTREE_RUN_STAMP=$RUN_STAMP
+  elif $APPLY_ELIGIBLE; then
+    init_eligible_reasons
+    export SYG_WORKTREE_ELIGIBLE_WARNED=1
+    export SYG_WORKTREE_RUN_STAMP=$RUN_STAMP
   fi
 
   any_3=false any_2=false all_1=true
@@ -409,6 +471,8 @@ if refused:
       else
         child_extra+=(--apply)
       fi
+    elif $APPLY_ELIGIBLE; then
+      child_extra+=(--apply-eligible)
     elif $APPLY; then
       child_extra+=(--apply)
     fi
@@ -474,7 +538,7 @@ if refused:
 
   if [ -z "$APPLY_HOLD" ]; then
     SWEEP_PLAN=""
-    if [ ${#FAILED_REPOS[@]} -eq 0 ] && $has_hold_plan; then
+    if ! $APPLY_ELIGIBLE && [ ${#FAILED_REPOS[@]} -eq 0 ] && $has_hold_plan; then
       SWEEP_PLAN=$(sweep_plan_of)
     fi
   fi
@@ -499,7 +563,7 @@ print(json.dumps({"repos": repos, "sweep_plan": sweep_plan,
                   "sweep_plan_trees": trees, "sweep_plan_commit_carrying": cc}, indent=2))
 '
   else
-    if [ -n "$APPLY_HOLD" ]; then
+    if [ -n "$APPLY_HOLD" ] || $APPLY_ELIGIBLE; then
       shopt -s nullglob
       bk_readmes=("$RUN_DIR"/*/README.txt)
       shopt -u nullglob
@@ -1167,6 +1231,35 @@ for i in "${TREES[@]}"; do
   V_HOLD_REMOVED+=(false)
 done
 
+V_RAW_APPROVABLE=("${V_APPROVABLE[@]}")
+V_DEMOTED=()
+V_INELIGIBLE_CODES=()
+for k in "${!V_IDX[@]}"; do
+  V_DEMOTED[k]=false
+  V_INELIGIBLE_CODES[k]=""
+done
+if $APPLY_ELIGIBLE; then
+  init_eligible_reasons
+  for k in "${!V_IDX[@]}"; do
+    ${V_APPROVABLE[$k]} || continue
+    inelig_codes=""
+    declare -A _seen_inelig=()
+    while IFS=$'\t' read -r r_code _r_detail; do
+      [ -n "$r_code" ] || continue
+      if [ -z "${ELIGIBLE_SET[$r_code]+set}" ] && [ -z "${_seen_inelig[$r_code]+set}" ]; then
+        _seen_inelig[$r_code]=1
+        inelig_codes+="${inelig_codes:+,}$r_code"
+      fi
+    done <<<"${V_REASONS[$k]}"
+    unset _seen_inelig
+    if [ -n "$inelig_codes" ]; then
+      V_APPROVABLE[k]=false
+      V_DEMOTED[k]=true
+      V_INELIGIBLE_CODES[k]=$inelig_codes
+    fi
+  done
+fi
+
 # Populate array $1 with each untracked path and each ignored path not accepted by
 # is_cache_path/regen_verdict in tree $2 (for an ignored directory, every regular file
 # or symlink below it in LC_ALL=C sorted order).
@@ -1363,6 +1456,10 @@ if [ ${#app_lines[@]} -gt 0 ]; then
       printf '%s\0%s\0%s\0%s\0%s\0' "$t" "$b" "${V_HEAD_SHA[$k]}" "$sorted_reasons" "${V_STATE_SHA[$k]}"
     done | sha256sum | cut -c1-12
   )
+fi
+
+if $APPLY_ELIGIBLE && [ -n "$HOLD_PLAN" ]; then
+  APPLY_HOLD=$HOLD_PLAN
 fi
 
 if [ -n "$APPLY_HOLD" ]; then
@@ -1763,7 +1860,7 @@ if $APPLY; then
     done
   fi
   [ "$removed" -eq 0 ] || git -C "$MAIN" worktree prune >/dev/null 2>&1 || rc=3
-  [ "$removed" -gt 0 ] || [ "$rc" -ne 0 ] || rc=1
+  [ "$removed" -gt 0 ] || [ "$rc" -ne 0 ] || $APPLY_ELIGIBLE || rc=1
 fi
 
 # Locks: the main .git and every worktree's git dir.
@@ -1815,13 +1912,15 @@ if $JSON; then
     cc_base=${cc_base%%$'\t'*}
     cc_wire+="$cc_t"$'\x1f'"$cc_n"$'\x1f'"$cc_base"$'\x1e'
   done
+  elig_wire=""
+  for er in "${ELIGIBLE_SORTED[@]}"; do elig_wire+="$er"$'\x1e'; done
   {
-    printf '%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0' "$MAIN" "$BASE" "$APPLY" "$LOCKS" "$HOLD_PLAN" \
-      "$trees_wire" "$cc_wire" "${#V_IDX[@]}"
+    printf '%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0' "$MAIN" "$BASE" "$APPLY" "$LOCKS" "$HOLD_PLAN" \
+      "$trees_wire" "$cc_wire" "$APPLY_ELIGIBLE" "$elig_wire" "${#V_IDX[@]}"
     for k in "${!V_IDX[@]}"; do
       i=${V_IDX[$k]}
-      printf '%s\0%s\0%s\0%s\0%s\0%s\0' "${WT_PATH[$i]}" "${WT_BRANCH[$i]}" "${V_VERDICT[$k]}" \
-        "${V_APPROVABLE[$k]}" "${V_REASONS[$k]}" "${V_ACTION[$k]}"
+      printf '%s\0%s\0%s\0%s\0%s\0%s\0%s\0' "${WT_PATH[$i]}" "${WT_BRANCH[$i]}" "${V_VERDICT[$k]}" \
+        "${V_RAW_APPROVABLE[$k]}" "${V_APPROVABLE[$k]}" "${V_REASONS[$k]}" "${V_ACTION[$k]}"
     done
     for k in "${!L_PATH[@]}"; do
       printf '%s\0%s\0%s\0%s\0' "${L_PATH[$k]}" "${L_VERDICT[$k]}" "${L_DETAIL[$k]}" "${L_ACTION[$k]}"
@@ -1829,8 +1928,8 @@ if $JSON; then
   } | python3 -I -B -c '
 import json, sys
 f = sys.stdin.buffer.read().decode("utf-8", "surrogateescape").split("\0")[:-1]
-repo, base, apply_, locks, hold_plan, trees_raw, cc_raw, n = f[:8]
-f = f[8:]
+repo, base, apply_, locks, hold_plan, trees_raw, cc_raw, elig_mode, elig_raw, n = f[:10]
+f = f[10:]
 hold_plan_trees = [x for x in trees_raw.split("\x1e") if x]
 hold_plan_cc = []
 for e in cc_raw.split("\x1e"):
@@ -1840,18 +1939,24 @@ for e in cc_raw.split("\x1e"):
     hold_plan_cc.append({"path": pth, "commits": int(cnt), "base": bs})
 trees = []
 for k in range(int(n)):
-    path, branch, verdict, approvable, reasons, action = f[6 * k:6 * k + 6]
-    trees.append({"path": path, "branch": branch or None, "verdict": verdict,
-                  "approvable": approvable == "true",
-                  "reasons": [dict(zip(("code", "detail"), r.split("\t", 1)))
-                              for r in reasons.splitlines()],
-                  "action": action or None})
-f = f[6 * int(n):]
+    path, branch, verdict, raw_approvable, eligible, reasons, action = f[7 * k:7 * k + 7]
+    t_obj = {"path": path, "branch": branch or None, "verdict": verdict,
+             "approvable": raw_approvable == "true",
+             "reasons": [dict(zip(("code", "detail"), r.split("\t", 1)))
+                         for r in reasons.splitlines()],
+             "action": action or None}
+    if elig_mode == "true" and raw_approvable == "true":
+        t_obj["eligible"] = eligible == "true"
+    trees.append(t_obj)
+f = f[7 * int(n):]
 lks = [{"path": f[i], "verdict": f[i + 1], "detail": f[i + 2], "action": f[i + 3] or None}
        for i in range(0, len(f), 4)]
 out = {"repo": repo, "base": base or None, "apply": apply_ == "true",
        "hold_plan": hold_plan or None, "hold_plan_trees": hold_plan_trees,
        "hold_plan_commit_carrying": hold_plan_cc, "worktrees": trees}
+if elig_mode == "true":
+    out["eligible_mode"] = True
+    out["eligible_reasons"] = [x for x in elig_raw.split("\x1e") if x]
 if locks == "true":
     out["locks"] = lks
 print(json.dumps(out, indent=2))
@@ -1892,6 +1997,12 @@ if [ "$nhold" -gt 0 ]; then
       printf '    HOLD:%s  %s\n' "$code" "$detail"
     done <<<"${V_REASONS[$k]}"
   done
+  if $APPLY_ELIGIBLE; then
+    for k in "${!V_IDX[@]}"; do
+      ${V_DEMOTED[$k]} || continue
+      printf '  not eligible: %s (%s)\n' "$(rel "${WT_PATH[${V_IDX[$k]}]}")" "${V_INELIGIBLE_CODES[$k]}"
+    done
+  fi
   if [ -n "$HOLD_PLAN" ] && [ -z "$APPLY_HOLD" ]; then
     for k in "${!V_IDX[@]}"; do
       ${V_APPROVABLE[$k]} || continue

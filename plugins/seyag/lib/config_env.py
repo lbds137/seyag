@@ -40,7 +40,7 @@ _HARNESS = frozenset(
 # Mirrors _SYG_CFG_PROJECT_EXEC in hooks/lib/config-env.sh (pinned equal by the probe).
 _PROJECT_EXEC = frozenset(["SYG_STATUSLINE_ZAI_USAGE"])
 
-# Mirrors _SYG_CFG_PROJECT_SECURE in hooks/lib/config-env.sh (pinned equal by the probe).
+# Mirrors _SYG_CFG_PROJECT_SECURE in hooks/lib/config-env.sh (pinned equal by the probe): credential-store, billing/lane, worktree-cleanup judgment knobs and the worktree auto-removal set.
 _PROJECT_SECURE = frozenset(
     [
         "SYG_KEYS_NAME",
@@ -53,6 +53,7 @@ _PROJECT_SECURE = frozenset(
         "SYG_WORKTREE_BACKUP_ALLOW_VOLATILE",
         "SYG_WORKTREE_REGENERABLE",
         "SYG_WORKTREE_BASE",
+        "SYG_WORKTREE_ELIGIBLE_REASONS",
     ]
 )
 

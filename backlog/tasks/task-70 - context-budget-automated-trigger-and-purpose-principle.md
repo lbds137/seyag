@@ -21,6 +21,6 @@ Already shipped (checked against the code): `context-audit weigh` counts Session
 
 Missing: a trigger that fires without anyone remembering it.
 1. A SessionStart warning (its own component, off by default or warn-only) when the folder's up-front set exceeds a configured budget, and/or a CI check for repos that set a budget.
-2. Restate the rule where the budget is enforced: always-loaded text holds hard constraints and pointers; procedures go to skills; domain detail goes to `paths:`-scoped rules.
+2. Restate the rule in the warning or CI message text itself, not as new rule text: always-loaded text holds hard constraints and pointers; procedures go to skills; domain detail goes to `paths:`-scoped rules. core.md:147 and doc-audit already carry it; do not add a third copy or grow core.md.
 3. The owner's principle that complexity must serve a purpose: keep a piece only where it earns its place, and show each piece next to its purpose. core.md:146 already carries the first half. Add "show each piece next to its purpose", for example as a purpose column in weigh's output or doc-audit's table, without growing core.md (see TASK-71).
 <!-- SECTION:DESCRIPTION:END -->

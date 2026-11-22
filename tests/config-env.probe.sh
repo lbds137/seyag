@@ -1050,6 +1050,18 @@ syg_credit_route = "fake"
     fail "(w) worktree project-secure knob: user '$(cat "$TMP/par-wt_secure-user/sh.x")', project '$(cat "$TMP/par-wt_secure-project/sh.x")', err '$(cat "$TMP/par-wt_secure-project/sh.err")'"
   fi
 
+  PW_WT_ELIG_SECURE='syg_worktree_eligible_reasons = "branch-name ignored"
+'
+  parity_case wt_elig_secure project "$PW_WT_ELIG_SECURE"
+  parity_case wt_elig_secure user "$PW_WT_ELIG_SECURE"
+  if grep -qx 'SYG_WORKTREE_ELIGIBLE_REASONS=branch-name ignored' "$TMP/par-wt_elig_secure-user/sh.x" \
+    && ! grep -q '^SYG_WORKTREE_ELIGIBLE_REASONS=' "$TMP/par-wt_elig_secure-project/sh.x" \
+    && grep -q "'SYG_WORKTREE_ELIGIBLE_REASONS' cannot be set from project scope (security-material knob)" "$TMP/par-wt_elig_secure-project/sh.err"; then
+    ok "(w) worktree project-secure knob (syg_worktree_eligible_reasons): project file refused, user file exported"
+  else
+    fail "(w) worktree project-secure knob (syg_worktree_eligible_reasons): user '$(cat "$TMP/par-wt_elig_secure-user/sh.x")', project '$(cat "$TMP/par-wt_elig_secure-project/sh.x")', err '$(cat "$TMP/par-wt_elig_secure-project/sh.err")'"
+  fi
+
   # The harness-owned and project-exec lists: the shell's arrays and the python
   # tuples name the same knobs (both files parsed here, nothing imported).
   LISTS_OK=$("$PY3" -I -B - "$LIB" "$PY_LIB/config_env.py" <<'PYEOF'
