@@ -225,6 +225,9 @@ SYG_STATUSLINE_FIT_MARGIN	user	statusline	5	Columns subtracted from COLUMNS (non
 SYG_STATUSLINE_WRAP_COLUMNS	user	statusline	unset	Positive integer column threshold opting in multi-row segment wrapping on the statusline.	-
 SYG_STATUSLINE_ZAI_USAGE	user	statusline	<script_dir>/zai-usage	Override path to the zai-usage binary invoked by statusline on the z.ai lane.	path
 SYG_STATUS_CLAIM_MARKERS	user	guards	unset	Pipe-separated (|) regex alternatives appended to status-claim-cite's default completion and causality markers.	-
+SYG_SUITE_BUDGET_S	user	misc	unset	Per-suite wall-time budget in seconds for suite-time run; over it, suite-time prints a pointer to the testing-discipline skill. --budget overrides it.	-
+SYG_SUITE_TIME_LOG	user	misc	prose:the seyag state dir's suite-time.tsv (XDG_STATE_HOME, else ~/.local/state)	TSV log suite-time run appends to and suite-time log reads.	path
+SYG_SUITE_TIME_TOLERANCE	user	misc	20	Percent over the median of a suite's last 5 clean runs at which suite-time run reports a regression.	-
 SYG_SWEEP	user	guards	1	Set to 0 to silence removed-identifier-sweep without editing pre-commit hook wiring.	-
 SYG_SWEEP_EXCLUDE_PATHS	user	guards	unset	Whitespace-separated awk regex fragments added to removed-identifier-sweep's path exclusions.	path
 SYG_SWEEP_FRAG	internal	guards	unset	Internal env variable passing one fragment to awk for regex validation inside removed-identifier-sweep.	-

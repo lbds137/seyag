@@ -1,7 +1,7 @@
 ---
 id: TASK-101
 title: 'Testing-discipline skill: measure-then-fix suite performance, plus a test-writing checklist'
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-11-22T20:40:00Z'
 labels:

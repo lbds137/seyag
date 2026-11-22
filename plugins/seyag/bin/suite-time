@@ -1,0 +1,418 @@
+#!/usr/bin/env -S python3 -I -B
+"""suite-time: measure one test-suite run, keep a log of its runs, and rank a run's slowest tests.
+
+  suite-time run [--name NAME] [--budget SECONDS] [--log FILE] [--note TEXT] -- CMD [ARG...]
+      Run CMD (an argv list, no shell; stdio inherited) and exit with its exit code. Prints one
+      summary line to stderr (wall and child CPU seconds, load, CPU count), appends a row to the
+      TSV log, and warns when the run is over budget, mostly waiting rather than computing, or
+      slower than the median of its last clean runs.
+  suite-time slowest [-n N] FILE...
+      Print the N slowest <testcase> elements across JUnit XML files.
+  suite-time log [--name NAME] [-n N] [--log FILE]
+      Print the log header and its last N rows, optionally only the rows of one suite.
+
+Knobs: SYG_SUITE_BUDGET_S (budget, overridden by --budget), SYG_SUITE_TIME_LOG (log path,
+overridden by --log), SYG_SUITE_TIME_TOLERANCE (percent over the median that counts as a
+regression, default 20). The testing-discipline skill says what to do about each warning.
+"""
+import math
+import os
+import resource
+import statistics
+import subprocess
+import sys
+import time
+import xml.etree.ElementTree as ET
+from datetime import datetime
+
+# config.toml knobs (config_env, the Python twin of hooks/lib/config-env.sh); a wiring error proceeds env-only.
+try:
+    _SYG_ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+    sys.path.insert(0, os.path.join(_SYG_ROOT, "lib"))
+    import config_env
+
+    config_env.syg_config_env(_SYG_ROOT)
+except Exception:
+    pass
+
+HEADER = "ts\tname\texit\twall_s\tcpu_s\tload1\tcpus\tmem_avail_mb\tcmd\tnote"
+DEFAULT_TOLERANCE = 20.0
+MEDIAN_OF = 5
+MIN_PRIOR = 3
+WAIT_MIN_WALL_S = 10.0
+WAIT_CPU_FRACTION = 0.5
+DEFAULT_LOG_TAIL = 10
+
+USAGE = """usage:
+  suite-time run [--name NAME] [--budget SECONDS] [--log FILE] [--note TEXT] -- CMD [ARG...]
+  suite-time slowest [-n N] FILE...
+  suite-time log [--name NAME] [-n N] [--log FILE]"""
+
+FLATTEN = str.maketrans({"\t": " ", "\r": " ", "\n": " "})
+
+
+def warn(msg):
+    print(f"suite-time: {msg}", file=sys.stderr)
+
+
+def usage_error(msg=None):
+    if msg:
+        warn(msg)
+    print(USAGE, file=sys.stderr)
+    sys.exit(2)
+
+
+def clean(text):
+    return text.translate(FLATTEN)
+
+
+def positive_number(text):
+    try:
+        value = float(text)
+    except ValueError:
+        return None
+    return value if math.isfinite(value) and value > 0 else None
+
+
+def positive_int(text):
+    try:
+        value = int(text)
+    except ValueError:
+        return None
+    return value if value > 0 else None
+
+
+def default_log_path():
+    state = os.environ.get("XDG_STATE_HOME") or os.path.join(os.path.expanduser("~"), ".local", "state")
+    return os.path.join(state, "seyag", "suite-time.tsv")
+
+
+def resolve_log(flag):
+    if flag:
+        return flag
+    return os.environ.get("SYG_SUITE_TIME_LOG") or default_log_path()
+
+
+def tolerance():
+    raw = os.environ.get("SYG_SUITE_TIME_TOLERANCE", "")
+    if raw == "":
+        return DEFAULT_TOLERANCE
+    value = None
+    try:
+        value = float(raw)
+    except ValueError:
+        pass
+    if value is None or not math.isfinite(value) or value < 0:
+        warn(f"SYG_SUITE_TIME_TOLERANCE={raw!r} is not a non-negative number; using {DEFAULT_TOLERANCE:g}")
+        return DEFAULT_TOLERANCE
+    return value
+
+
+def env_budget():
+    raw = os.environ.get("SYG_SUITE_BUDGET_S", "")
+    if raw == "":
+        return None
+    budget = positive_number(raw)
+    if budget is None:
+        warn(f"SYG_SUITE_BUDGET_S={raw!r} is not a positive number; ignoring it")
+    return budget
+
+
+def loadavg1():
+    try:
+        return os.getloadavg()[0]
+    except OSError:
+        return None
+
+
+def mem_available_mb():
+    try:
+        with open("/proc/meminfo", encoding="utf-8") as handle:
+            for line in handle:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) // 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+
+def read_rows(path):
+    """Data rows of the log, each a list of tab-split fields. Every line equal to HEADER is skipped."""
+    with open(path, encoding="utf-8", errors="replace") as handle:
+        text = handle.read()
+    return [line.split("\t") for line in text.split("\n") if line and line != HEADER]
+
+
+def prior_walls(rows, name, cmd):
+    walls = []
+    for row in rows:
+        if len(row) < 9 or row[1] != name or row[8] != cmd or row[2] != "0":
+            continue
+        try:
+            wall = float(row[3])
+        except ValueError:
+            continue
+        if math.isfinite(wall) and wall >= 0:
+            walls.append(wall)
+    return walls
+
+
+def spawn(cmd):
+    """Run cmd with inherited stdio; return its exit code (128+signum when signal-killed)."""
+    try:
+        proc = subprocess.Popen(cmd)
+    except FileNotFoundError:
+        warn(f"command not found: {cmd[0]}")
+        return 127
+    except OSError as err:
+        warn(f"cannot run {cmd[0]}: {err.strerror or err}")
+        return 126
+    while True:
+        try:
+            rc = proc.wait()
+            break
+        except KeyboardInterrupt:
+            continue  # the child receives the same SIGINT and ends; keep waiting for its status
+    return 128 - rc if rc < 0 else rc
+
+
+def append_row(path, row):
+    """Append one row, writing the header first when the file is new or empty. Returns an error text or None."""
+    try:
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        new = not os.path.exists(path) or os.path.getsize(path) == 0
+        with open(path, "a", encoding="utf-8", errors="backslashreplace") as handle:
+            if new:
+                handle.write(HEADER + "\n")
+            handle.write("\t".join(row) + "\n")
+    except (OSError, UnicodeError) as err:
+        return f"cannot write log {path}: {getattr(err, 'strerror', None) or err}"
+    return None
+
+
+def cmd_run(args):
+    if args[:1] in (["-h"], ["--help"]):
+        print(USAGE)
+        return 0
+    if "--" not in args:
+        usage_error("run needs -- before the command")
+    sep = args.index("--")
+    opts, cmd = args[:sep], args[sep + 1:]
+    if not cmd:
+        usage_error("run needs a command after --")
+
+    name = None
+    budget_flag = None
+    log_flag = None
+    note = ""
+    i = 0
+    while i < len(opts):
+        flag = opts[i]
+        if flag in ("-h", "--help"):
+            print(USAGE)
+            return 0
+        if flag not in ("--name", "--budget", "--log", "--note"):
+            usage_error(f"unknown argument {flag!r} for run")
+        if i + 1 >= len(opts):
+            usage_error(f"{flag} needs a value")
+        value = opts[i + 1]
+        i += 2
+        if flag == "--name":
+            name = value
+        elif flag == "--budget":
+            budget_flag = positive_number(value)
+            if budget_flag is None:
+                usage_error(f"--budget must be a positive number, got {value!r}")
+        elif flag == "--log":
+            log_flag = value
+        else:
+            note = value
+    if name is not None and name == "":
+        usage_error("--name must not be empty")
+    name = clean(name if name is not None else " ".join(cmd))
+    cmd_text = clean(" ".join(cmd))
+    budget = budget_flag if budget_flag is not None else env_budget()
+    tol = tolerance()
+    log_path = resolve_log(log_flag)
+
+    log_error = None
+    try:
+        prior = prior_walls(read_rows(log_path), name, cmd_text)
+    except FileNotFoundError:
+        prior = []
+    except OSError as err:
+        prior = []
+        log_error = f"cannot read log {log_path}: {err.strerror or err}"
+
+    load = loadavg1()
+    cpus = os.cpu_count()
+    mem = mem_available_mb()
+    ru0 = resource.getrusage(resource.RUSAGE_CHILDREN)
+    t0 = time.monotonic()
+    rc = spawn(cmd)
+    wall = time.monotonic() - t0
+    ru1 = resource.getrusage(resource.RUSAGE_CHILDREN)
+    cpu = (ru1.ru_utime - ru0.ru_utime) + (ru1.ru_stime - ru0.ru_stime)
+
+    load_text = f"{load:.2f}" if load is not None else "-"
+    cpus_text = str(cpus) if cpus is not None else "-"
+    warn(f"{name} wall {wall:.1f}s cpu {cpu:.1f}s load {load_text} on {cpus_text} cpus exit {rc}")
+    if budget is not None and wall > budget:
+        warn(f"{name} over budget: {wall:.1f}s > {budget:g}s. Measure, then fix: see the testing-discipline skill.")
+    if wall >= WAIT_MIN_WALL_S and cpu < WAIT_CPU_FRACTION * wall:
+        warn(f"{name} used {cpu:.1f}s of CPU in its own process tree over {wall:.1f}s of wall time: "
+             "it was mostly waiting (locks, IO, swap, sleeps) or its work ran outside that tree "
+             "(a container or a server).")
+    if rc == 0 and len(prior) >= MIN_PRIOR:
+        last = prior[-MEDIAN_OF:]
+        median = statistics.median(last)
+        if median > 0 and wall > median * (1 + tol / 100):
+            slower = round((wall / median - 1) * 100)
+            warn(f"{name} is {slower}% slower than the median of its last {len(last)} runs "
+                 f"({median:.1f}s); compare the load column before blaming the code.")
+
+    row = [
+        datetime.now().astimezone().isoformat(timespec="seconds"),
+        name,
+        str(rc),
+        f"{wall:.3f}",
+        f"{cpu:.3f}",
+        load_text,
+        cpus_text,
+        str(mem) if mem is not None else "-",
+        cmd_text,
+        clean(note),
+    ]
+    write_error = append_row(log_path, row)
+    for message in (log_error, write_error):
+        if message:
+            warn(message)
+    return rc
+
+
+def testcase_time(element):
+    raw = element.get("time")
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if math.isfinite(value) and value >= 0 else None
+
+
+def cmd_slowest(args):
+    n = DEFAULT_LOG_TAIL
+    files = []
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg in ("-h", "--help"):
+            print(USAGE)
+            return 0
+        if arg == "-n":
+            if i + 1 >= len(args):
+                usage_error("-n needs a value")
+            n = positive_int(args[i + 1])
+            if n is None:
+                usage_error(f"-n must be a positive integer, got {args[i + 1]!r}")
+            i += 2
+            continue
+        if arg.startswith("-"):
+            usage_error(f"unknown argument {arg!r} for slowest")
+        files.append(arg)
+        i += 1
+    if not files:
+        usage_error("slowest needs at least one FILE")
+
+    cases = []
+    missing = 0
+    for path in files:
+        try:
+            root = ET.parse(path).getroot()
+        except ET.ParseError as err:
+            warn(f"{path} is malformed XML ({err})")
+            return 1
+        except OSError as err:
+            warn(f"cannot read {path}: {err.strerror or err}")
+            return 1
+        for element in root.iter("testcase"):
+            seconds = testcase_time(element)
+            if seconds is None:
+                missing += 1
+                seconds = 0.0
+            classname = element.get("classname") or ""
+            name = element.get("name") or "(unnamed)"
+            label = f"{classname}::{name}" if classname else name
+            cases.append((seconds, label))
+    if not cases:
+        warn(f"no testcase elements in {', '.join(files)}")
+        return 1
+
+    cases.sort(key=lambda case: -case[0])
+    for seconds, label in cases[:n]:
+        print(f"  {seconds:.3f}s  {label}")
+    total = sum(seconds for seconds, _ in cases)
+    print(f"suite-time: {len(cases)} testcases, {total:.1f}s summed across {len(files)} files")
+    if missing:
+        warn(f"{missing} testcases had a missing or invalid time attribute (counted as 0)")
+    return 0
+
+
+def cmd_log(args):
+    name = None
+    n = DEFAULT_LOG_TAIL
+    log_flag = None
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg in ("-h", "--help"):
+            print(USAGE)
+            return 0
+        if arg not in ("--name", "-n", "--log"):
+            usage_error(f"unknown argument {arg!r} for log")
+        if i + 1 >= len(args):
+            usage_error(f"{arg} needs a value")
+        value = args[i + 1]
+        i += 2
+        if arg == "--name":
+            name = clean(value)
+        elif arg == "--log":
+            log_flag = value
+        else:
+            n = positive_int(value)
+            if n is None:
+                usage_error(f"-n must be a positive integer, got {value!r}")
+    path = resolve_log(log_flag)
+    try:
+        rows = read_rows(path)
+    except FileNotFoundError:
+        warn(f"no log at {path} yet")
+        return 1
+    except OSError as err:
+        warn(f"cannot read log {path}: {err.strerror or err}")
+        return 1
+    if name is not None:
+        rows = [row for row in rows if len(row) > 1 and row[1] == name]
+    print(HEADER)
+    for row in rows[-n:]:
+        print("\t".join(row))
+    return 0
+
+
+def main(argv):
+    if not argv:
+        usage_error()
+    verb, rest = argv[0], argv[1:]
+    if verb in ("-h", "--help", "help"):
+        print(USAGE)
+        return 0
+    if verb == "run":
+        return cmd_run(rest)
+    if verb == "slowest":
+        return cmd_slowest(rest)
+    if verb == "log":
+        return cmd_log(rest)
+    usage_error(f"unknown verb {verb!r}")
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
