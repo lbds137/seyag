@@ -2,7 +2,8 @@
 """session-log: list, grep and mining-ledger view over the local Claude Code session logs.
 
 Reads every top-level transcript under ~/.claude/projects (or CLAUDE_PROJECTS_DIR)
-and the mining ledger at ~/.claude/mined-corpus/ledger.tsv (or SESSION_LEDGER).
+and the mining ledger at ~/.claude/mined-corpus/ledger.tsv (or SESSION_LEDGER); grep also
+reads the prompt history (history.jsonl in the Claude config dir) and the mined-corpus dirs.
 An app session (a phone/web session, keyed by its bridge id) can span several
 transcripts: a /clear keeps the app session and starts a new transcript. A
 transcript without a bridge id is a local (terminal) session.
@@ -13,8 +14,9 @@ Usage:
                                                     full local transcript paths (for session-extract)
   session-log stats  [FILTERS] [--subagents] [--by driver|slug|session] [--json]
                                                     per-driver process metrics, local transcripts only
-  session-log grep   [FILTERS] [--no-archive] [--role user|agent|tool|all] [-i] [--raw]
-                     [--subagents] [--max N] PATTERN         search decoded text, one line per hit
+  session-log grep   [FILTERS] [--no-archive] [--no-history] [--no-corpus] [--role user|agent|tool|all]
+                     [-i] [--raw] [--subagents] [--max N] [--no-prefilter] [--scan-stats] PATTERN
+                                                    search decoded text, one line per hit
   session-log asks   [FILTERS] [--no-archive] [--rows|--summary|--json] [--no-text]
                      [--raw] [--kinds K1,K2] [--category C] [--max N]
                                                     owner-directed asks (auq, bang, deny, proseask) with
@@ -46,6 +48,28 @@ grep:     Python re over decoded text. Roles: user = owner turns and mid-turn qu
           messages (default), agent = assistant text, tool = tool calls and errored tool
           results, all = every role. --raw keeps <system-reminder> blocks in the searched
           text; --subagents also reads subagent transcripts (project shown as .../sub).
+          Sources, merged into one time-sorted list (--max caps the total): local transcripts and
+          the archive (project and id as in list); the prompt history (role "history"; project from
+          the entry's project path, id = its session; searched only for --role user or all; a
+          pasted-content body is searched too; $SYG_SESSION_LOG_HISTORY overrides the file, the value
+          off or --no-history excludes it; a history hit is dropped only when this query's transcript
+          hits include one from the same session within 2 s of it); and the mined-corpus dirs, read
+          line by line as plain text for every --role (role "corpus"; project = the root label,
+          mined-corpus or <project>/mined-corpus; id = <path in root>:<line>; time = the file's
+          mtime; files with a NUL byte in their first 8 KB are skipped; JSON in a corpus file is NOT
+          decoded; $SYG_SESSION_LOG_CORPUS is a colon-separated list of glob entries replacing the
+          default roots, off or --no-corpus excludes it). --app excludes history and corpus. The
+          last line is "N hits in M transcripts" (M counts transcript and archive files), plus ", H
+          history prompts" or ", history: not found", ", C corpus files" or ", corpus: no roots" for
+          each enabled source. Files are scanned in parallel; before JSON-decoding a line, its raw
+          bytes must contain every ASCII alphanumeric run (3+ chars) the pattern requires, so most
+          lines are never decoded (--no-prefilter decodes all; --scan-stats prints "lines read,
+          decoded" to stderr). KNOWN BOUND: JSON writers never escape ASCII letters or digits, and
+          clean() only collapses whitespace and removes reminder blocks (a line with a block end tag
+          followed by an alphanumeric or another block is always decoded); a writer that
+          backslash-u escapes ASCII alphanumerics, or a tool input holding a number written non-canonically
+          (1E5, which the tool-call text shows as 100000.0), could hide a hit. The unparseable-line
+          warning counts only lines that were decoded.
           Exits 0 with hits, 1 with none.
 stats:    reads local transcripts only (--no-archive is accepted and has no effect). A driver is the
           (model, message-id prefix) pair: msg_ + claude-* = anthropic, msg_ + other = zai, gen- =
@@ -65,9 +89,13 @@ message text (a title, a prompt, a grep snippet) is masked the same way. The led
 Usage errors exit 2.
 """
 import argparse
+import glob
+import io
 import json
+import mmap
 import os
 import re
+import stat
 import sys
 from collections import Counter
 from datetime import datetime, timedelta, timezone
@@ -622,66 +650,407 @@ def snippet(text, m):
     return ("…" if lo else "") + mask(text[lo:hi]) + ("…" if hi < len(text) else "")
 
 
+# ---- grep: raw-line prefilter ------------------------------------------------------------
+# No line is JSON-decoded unless its raw bytes could possibly match. Any doubt decodes the line.
+# KNOWN BOUND: JSON writers never escape ASCII letters or digits, and clean() only collapses
+# whitespace and removes reminder blocks (the reminder-join exemption below covers the one case
+# where a removal makes two runs contiguous), so a contiguous alphanumeric run in the decoded,
+# cleaned text is contiguous in the raw line. A writer that backslash-u escapes ASCII alphanumerics
+# would break this; so would a tool input holding a number written non-canonically (1E5), because
+# a tool call is searched as its re-serialised input (100000.0).
+
+try:
+    from re import _parser as sre_parse
+except ImportError:  # a Python without re._parser
+    import sre_parse
+
+FOLD_UTF8 = (b"\xc4\xb0", b"\xc4\xb1", b"\xc5\xbf", b"\xe2\x84\xaa")  # U+0130, U+0131, U+017F, U+212A
+FOLD_ESC = (b"\\u0130", b"\\u0131", b"\\u017f", b"\\u212a")  # matched on the lowered buffer
+JOIN_RE = re.compile(rb"</system-reminder>(?:[A-Za-z0-9]|<system-reminder>)")
+BRIDGE_RE = re.compile(rb'"type": ?"bridge-session"')
+
+
+def required_chunks(pattern, flags=0):
+    """(chunks, icase): the ASCII alphanumeric substrings (3+ chars) every match of the pattern
+    contains, and whether the match may be case-insensitive. Only the top-level sequence, SUBPATTERN
+    bodies and repeats with min >= 1 (body once) are walked; every other op just ends a run."""
+    try:
+        tree = sre_parse.parse(pattern, flags)
+    except Exception:
+        return set(), True
+    icase = bool(tree.state.flags & re.IGNORECASE)
+    chunks, run = set(), []
+
+    def flush():
+        chunks.update(re.findall(r"[A-Za-z0-9]{3,}", "".join(run)))
+        run.clear()
+
+    def walk(seq):
+        nonlocal icase
+        for op, av in seq:
+            if op == sre_parse.LITERAL:
+                run.append(chr(av))
+            elif op == sre_parse.SUBPATTERN:
+                flush()
+                icase = icase or bool(av[1] & re.IGNORECASE)
+                walk(av[3])
+                flush()
+            elif op in (sre_parse.MAX_REPEAT, sre_parse.MIN_REPEAT) and av[0] >= 1:
+                flush()
+                walk(av[2])
+                flush()
+            else:
+                flush()
+        flush()
+
+    walk(tree)
+    return chunks, icase
+
+
+def _chunks_in(buf, q):
+    return all(c in buf for c in q["chunks"])
+
+
+def _forced(buf, low, q):
+    """Raw bytes that make a buffer a candidate whatever the chunks say: under icase, a character
+    Python folds onto an ASCII letter or digit (as UTF-8 or as a JSON escape); without --raw, the end
+    of a reminder block followed by text (or by another block), where clean() joins two runs."""
+    if q["icase"] and any(s in low for s in FOLD_UTF8 + FOLD_ESC):
+        return True
+    return not q["raw"] and JOIN_RE.search(buf) is not None
+
+
+def file_candidate(data, q):
+    low = data.lower() if q["icase"] else data
+    return _chunks_in(low, q) or _forced(data, low, q)
+
+
+def line_candidate(line, q, json_kind):
+    low = line.lower() if q["icase"] else line
+    if _chunks_in(low, q) or _forced(line, low, q):
+        return True
+    return json_kind and b"bridge-session" in line and BRIDGE_RE.search(line) is not None
+
+
+# ---- grep: workers ---------------------------------------------------------------------
+
+def _history_hits(e, n, q, rx, info, res):
+    ms = e.get("timestamp")
+    try:
+        ts = datetime.fromtimestamp(ms / 1000, UTC) if isinstance(ms, (int, float)) and not isinstance(ms, bool) else None
+    except (OverflowError, ValueError, OSError):
+        ts = None
+    if not ts or not (q["since"] <= ts < q["until"]):
+        return
+    slug = re.sub(r"[^A-Za-z0-9]", "-", e["project"] if isinstance(e.get("project"), str) else "")
+    if q["project"] and q["project"].lower() not in slug.lower():
+        return
+    sid = e["sessionId"] if isinstance(e.get("sessionId"), str) else ""
+    texts = [e["display"]] if isinstance(e.get("display"), str) else []
+    pasted = e.get("pastedContents")
+    if isinstance(pasted, dict):
+        texts += [v["content"] for v in pasted.values() if isinstance(v, dict) and isinstance(v.get("content"), str)]
+    for text in texts:
+        text = clean(text, q["raw"])
+        if m := rx.search(text):
+            res["hits"].append((ts, project(slug), id8(sid), "history", snippet(text, m), None, sid, n))
+
+
+def scan_file(task):
+    """Scan one file for a grep query; returns hits (never lines) and counters. Kinds: local and
+    archive (JSON transcripts), history (JSON lines), corpus (plain text)."""
+    kind, path, q, info = task
+    res = {"hits": [], "bridge": None, "scanned": False, "bad": 0, "read": 0, "decoded": 0, "err": None}
+    try:
+        with open(path, "rb") as fh:
+            data = fh.read()
+    except OSError as err:
+        res["err"] = err.strerror or str(err)
+        return res
+    if kind == "corpus" and b"\0" in data[:8192]:
+        return res
+    res["read"] = data.count(b"\n") + (1 if data and not data.endswith(b"\n") else 0)
+    pre = q["prefilter"] and bool(q["chunks"])
+    if pre and not file_candidate(data, q):
+        return res
+    res["scanned"] = True
+    rx = re.compile(q["pattern"], q["flags"])
+    json_kind = kind in ("local", "archive")
+    for n, raw_line in enumerate(io.BytesIO(data), 1):
+        if not raw_line.strip() or (pre and not line_candidate(raw_line, q, json_kind)):
+            continue
+        line = raw_line.decode("utf-8", errors="replace")
+        if kind == "corpus":
+            res["decoded"] += 1
+            text = clean(line, q["raw"])
+            if m := rx.search(text):
+                res["hits"].append((info["ts"], info["proj"], mask(f'{info["rel"]}:{n}'), "corpus", snippet(text, m), None, None, None))
+            continue
+        if json_kind and not TYPE_RE.search(line) and '"type":' in line:
+            continue  # some other entry type: skipped unparsed, as Reader.scan does
+        res["decoded"] += 1
+        try:
+            e = json.loads(line)
+        except ValueError:
+            res["bad"] += 1
+            continue
+        if not isinstance(e, dict):
+            continue
+        if kind == "history":
+            _history_hits(e, n, q, rx, info, res)
+            continue
+        t = e.get("type")
+        ts = archive_ts(e) if kind == "archive" else log_ts(e.get("timestamp"))
+        if kind == "local" and t == "bridge-session":
+            res["bridge"] = res["bridge"] or e.get("bridgeSessionId")
+        if t not in q["want"] or not ts or not (q["since"] <= ts < q["until"]):
+            continue
+        for role, text in parts(e, t):
+            if role.split("[")[0] not in q["roles"]:
+                continue
+            text = clean(text, q["raw"])
+            if m := rx.search(text):
+                res["hits"].append((ts, info["proj"], info["tid"], role, snippet(text, m), e.get("uuid"), info["stem"], None))
+    return res
+
+
+def _pool_min_bytes():
+    try:
+        return int(os.environ.get("SYG_SESSION_LOG_POOL_MIN_BYTES", ""))
+    except ValueError:
+        return 33554432
+
+
+# Total input bytes below which run_scan stays in-process (a fork pool costs about 0.15 s to start),
+# and the worker cap (each worker holds a whole file plus its lowercased copy).
+POOL_MIN_BYTES = _pool_min_bytes()
+POOL_MAX_WORKERS = 4
+
+
+def _scan_outcome(t):
+    """scan_file, with its exception returned rather than raised, so run_scan can tell an error
+    from scan_file apart from a failure of the pool itself."""
+    try:
+        return True, scan_file(t)
+    except Exception as e:
+        return False, e
+
+
+def run_scan(tasks):
+    """scan_file over every task, in task order. Inputs under POOL_MIN_BYTES in total, or a pool that
+    cannot be made or breaks, run in-process; an error raised by scan_file always propagates."""
+    total = 0
+    for t in tasks:
+        try:
+            total += os.path.getsize(t[1])
+        except OSError:
+            pass
+    cpus = (getattr(os, "process_cpu_count", None) or os.cpu_count)() or 1
+    workers = min(len(tasks), cpus, POOL_MAX_WORKERS)
+    if total >= POOL_MIN_BYTES and workers > 1:
+        import multiprocessing  # imported here: about 60 ms that an in-process scan never needs
+        from concurrent.futures import ProcessPoolExecutor
+        from concurrent.futures.process import BrokenProcessPool
+        try:
+            with ProcessPoolExecutor(workers, mp_context=multiprocessing.get_context("fork")) as ex:
+                outcomes = list(ex.map(_scan_outcome, tasks))
+        except (OSError, ValueError, BrokenProcessPool):
+            pass  # the pool could not be made or broke: scan in-process below
+        else:
+            for ok, value in outcomes:
+                if not ok:
+                    raise value
+            return [value for _, value in outcomes]
+    return [scan_file(t) for t in tasks]
+
+
+# ---- grep: sources ---------------------------------------------------------------------
+
+def config_dir():
+    return Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
+
+
+def history_file(a):
+    """(path or None when the source is off, whether the file exists)."""
+    knob = os.environ.get("SYG_SESSION_LOG_HISTORY") or ""
+    if a.no_history or a.app or a.role not in ("user", "all") or knob == "off":
+        return None, False
+    path = Path(knob) if knob else config_dir() / "history.jsonl"
+    return path, path.is_file()
+
+
+def corpus_roots(a):
+    """[(dir, label)] of existing corpus roots, or None when the source is off."""
+    knob = os.environ.get("SYG_SESSION_LOG_CORPUS") or ""
+    if a.no_corpus or a.app or knob == "off":
+        return None
+    found = []
+    if knob:
+        for entry in knob.split(":"):
+            for p in sorted(glob.glob(entry)):
+                found.append((p, "/".join(Path(p).parts[-2:])))
+    else:
+        found.append((str(config_dir() / "mined-corpus"), "mined-corpus"))
+        for p in sorted(glob.glob(os.path.join(glob.escape(str(ROOT)), "*", "mined-corpus"))):
+            found.append((p, f"{project(Path(p).parent.name)}/mined-corpus"))
+    roots, seen = [], set()
+    for p, label in found:
+        if os.path.isdir(p) and p not in seen:
+            seen.add(p)
+            roots.append((p, label))
+    return roots
+
+
+def corpus_files(root):
+    """Every regular file under root, symlinks not followed, in sorted order of path in the root."""
+    rels = []
+    for dirpath, _dirs, names in os.walk(root, followlinks=False):
+        for name in names:
+            full = os.path.join(dirpath, name)
+            if stat.S_ISREG(os.lstat(full).st_mode):
+                rels.append(os.path.relpath(full, root))
+    return sorted(rels, key=lambda r: r.split(os.sep))
+
+
+def raw_bridge_id(path):
+    """bridge_id()'s answer for a top-level transcript, found without decoding the file: locate raw
+    bridge-session lines by bytes and parse only those (the first with a non-empty bridgeSessionId)."""
+    try:
+        with open(path, "rb") as fh, mmap.mmap(fh.fileno(), 0, access=mmap.ACCESS_READ) as mm:
+            pos = 0
+            while (i := mm.find(b'"bridge-session"', pos)) >= 0:
+                start, end = mm.rfind(b"\n", 0, i) + 1, mm.find(b"\n", i)
+                end = len(mm) if end < 0 else end
+                pos = end + 1
+                line = mm[start:end].decode("utf-8", errors="replace")
+                if not TYPE_RE.search(line) and '"type":' in line:
+                    continue
+                try:
+                    e = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(e, dict) and e.get("type") == "bridge-session" and e.get("bridgeSessionId"):
+                    return e["bridgeSessionId"]
+    except (OSError, ValueError):  # unreadable, or empty (cannot be mapped)
+        pass
+    return None
+
+
+def archive_dropped(cse_ids, known):
+    """{cse id: uuids of mineable entries in the local top-level transcripts with that bridge id}, for
+    the given ids only. known = {path: bridge id} for transcripts the local pass already read; any
+    other transcript gets raw_bridge_id(), and only a file whose id is wanted is decoded."""
+    idx = {}
+    if not cse_ids:
+        return idx
+    for _, path, parent in transcripts():
+        if parent:
+            continue
+        bid = known[path] if path in known else raw_bridge_id(path)
+        if bid not in cse_ids:
+            continue
+        idx.setdefault(bid, set()).update(
+            e["uuid"] for t, _, e in Reader(path).scan() if t in MINEABLE and e.get("uuid"))
+    return idx
+
+
+def grep_tasks(a, q, since, until):
+    """(tasks, history state, corpus roots): one (kind, path, query, info) per file to scan."""
+    tasks = []
+    for slug, path, parent in transcripts(a.subagents):
+        if file_ok(slug, path, a, since):
+            tasks.append(("local", str(path), q, {"proj": project(slug) + ("/sub" if parent else ""), "tid": id8(path.stem),
+                                                   "stem": path.stem, "path": path, "parent": parent}))
+    if not a.no_archive and ARCHIVE_DIR.is_dir():
+        for path in scoped_archive_files(a, since, until, load_archive_index()):
+            tasks.append(("archive", str(path), q, {"proj": "claude.ai", "tid": app_short(path.stem), "stem": path.stem,
+                                                    "path": path, "parent": None}))
+    hist, hist_found = history_file(a)
+    if hist_found:
+        tasks.append(("history", str(hist), q, {}))
+    roots = corpus_roots(a)
+    for root, label in roots or ():
+        if a.project and a.project.lower() not in label.lower():
+            continue
+        for rel in corpus_files(root):
+            full = os.path.join(root, rel)
+            ts = datetime.fromtimestamp(os.stat(full).st_mtime, UTC)
+            if since <= ts < until:
+                tasks.append(("corpus", full, q, {"proj": label, "rel": rel, "ts": ts}))
+    return tasks, (hist, hist_found), roots
+
+
+def merge_grep(a, tasks, results):
+    """Merge scan results in task order: --app, archive dedup, history dedup. Returns (hits, files
+    hit, history entries, corpus files, lines read, lines decoded)."""
+    hits, files_hit, known, arch = [], 0, {}, []
+    hist, corpus_hit, read, decoded = [], 0, 0, 0
+    for (kind, path, _q, info), res in zip(tasks, results):
+        read, decoded = read + res["read"], decoded + res["decoded"]
+        if res["err"]:
+            warn(f"cannot read {path}: {res['err']}")
+        if res["bad"]:
+            warn(f"{id8(info['stem']) if kind in ('local', 'archive') else kind}: {res['bad']} unparseable lines skipped")
+        if kind == "local":
+            if res["scanned"] and not info["parent"]:
+                known[info["path"]] = res["bridge"]
+            app = None
+            if a.app and res["hits"]:  # a subagent file carries no bridge line of its own
+                app = (bridge_id(info["parent"]) if info["parent"] else None) or res["bridge"]
+            if res["hits"] and app_ok(app, a):
+                hits.extend(res["hits"])
+                files_hit += 1
+        elif kind == "archive":
+            arch.append((info, res))
+        elif kind == "history":
+            hist = res["hits"]
+        elif res["hits"]:
+            hits.extend(res["hits"])
+            corpus_hit += 1
+    dropped = archive_dropped({i["stem"] for i, r in arch if r["hits"]}, known)
+    for info, res in arch:
+        keep = [h for h in res["hits"] if not (h[5] and h[5] in dropped.get(info["stem"], ()))]
+        if keep:
+            hits.extend(keep)
+            files_hit += 1
+    near = {}
+    for h in hits:
+        if h[6]:
+            near.setdefault(h[6], []).append(h[0])
+    kept = [h for h in hist if not any(abs((h[0] - t).total_seconds()) <= 2 for t in near.get(h[6], ()))]
+    return hits + kept, files_hit, len({h[7] for h in kept}), corpus_hit, read, decoded
+
+
 def cmd_grep(a):
     since, until = bounds(a)
+    flags = re.IGNORECASE if a.ignore_case else 0
     try:
-        rx = re.compile(a.pattern, re.IGNORECASE if a.ignore_case else 0)
+        re.compile(a.pattern, flags)
     except re.error as err:
         die(f"bad pattern: {err}")
     if a.max < 1:
         die("--max must be at least 1")
-    want, roles = WANT_TYPES[a.role], {"user", "agent", "tool"} if a.role == "all" else {a.role}
-    hits, files_hit = [], 0
-    for slug, path, parent in transcripts(a.subagents):
-        if not file_ok(slug, path, a, since):
-            continue
-        r, mine = Reader(path), []
-        app = bridge_id(parent) if parent else None  # a subagent file carries no bridge line of its own
-        proj = project(slug) + ("/sub" if parent else "")
-        for t, ts, e in r.scan():
-            if t == "bridge-session":
-                app = app or e.get("bridgeSessionId")
-            if t not in want or not ts or not (since <= ts < until):
-                continue
-            for role, text in parts(e, t):
-                if role.split("[")[0] not in roles:
-                    continue
-                text = clean(text, a.raw)
-                if m := rx.search(text):
-                    mine.append((ts, proj, id8(path.stem), role, snippet(text, m)))
-        if mine and app_ok(app, a):
-            hits.extend(mine)
-            files_hit += 1
-    if not a.no_archive and ARCHIVE_DIR.is_dir():
-        index = load_archive_index()
-        candidates = list(scoped_archive_files(a, since, until, index))
-        uuid_index = local_uuid_index({p.stem for p in candidates})
-        for path in candidates:
-            cse = path.stem
-            dropped = uuid_index.get(cse, set())
-            mine = []
-            for t, ts, e in Reader(path).scan(fast=True, ts=archive_ts):  # grep never needs _title
-                if t not in want or not ts or not (since <= ts < until):
-                    continue
-                u = e.get("uuid")
-                if u and u in dropped:
-                    continue
-                for role, text in parts(e, t):
-                    if role.split("[")[0] not in roles:
-                        continue
-                    text = clean(text, a.raw)
-                    if m := rx.search(text):
-                        mine.append((ts, "claude.ai", app_short(cse), role, snippet(text, m)))
-            if mine:
-                hits.extend(mine)
-                files_hit += 1
+    chunks, icase = required_chunks(a.pattern, flags)
+    q = {"pattern": a.pattern, "flags": flags, "raw": a.raw, "since": since, "until": until, "project": a.project,
+         "want": WANT_TYPES[a.role], "roles": {"user", "agent", "tool"} if a.role == "all" else {a.role},
+         "prefilter": not a.no_prefilter, "icase": icase,
+         "chunks": sorted(c.lower().encode("ascii") if icase else c.encode("ascii") for c in chunks)}
+    tasks, (hist, hist_found), roots = grep_tasks(a, q, since, until)
+    hits, files_hit, hist_n, corpus_n, read, decoded = merge_grep(a, tasks, run_scan(tasks))
     hits.sort(key=lambda h: h[0])
     print(f"# times local ({datetime.now().astimezone().tzname()})")
-    for ts, proj, tid, role, snip in hits[: a.max]:
+    for ts, proj, tid, role, snip, *_ in hits[: a.max]:
         print(f"{ts.astimezone().strftime('%Y-%m-%d %H:%M')}  {proj}  {tid}  {role}  {snip}")
     if len(hits) > a.max:
         print(f"… {len(hits) - a.max} more hits (raise --max)")
-    print(f"{len(hits)} hits in {files_hit} transcripts")
+    tail = ""
+    if hist:
+        tail += f", {hist_n} history prompts" if hist_found else ", history: not found"
+    if roots is not None:
+        tail += f", {corpus_n} corpus files" if roots else ", corpus: no roots"
+    print(f"{len(hits)} hits in {files_hit} transcripts{tail}")
+    if a.scan_stats:
+        warn(f"scan: {read} lines read, {decoded} decoded")
     sys.exit(0 if hits else 1)
 
 
@@ -1434,6 +1803,10 @@ def main(argv):
     g.add_argument("--raw", action="store_true")
     g.add_argument("--subagents", action="store_true")
     g.add_argument("--max", type=int, default=200)
+    g.add_argument("--no-history", action="store_true")
+    g.add_argument("--no-corpus", action="store_true")
+    g.add_argument("--no-prefilter", action="store_true")
+    g.add_argument("--scan-stats", action="store_true")
     g.add_argument("pattern")
     g.set_defaults(fn=cmd_grep)
     ak = sub.add_parser("asks", parents=[filters], add_help=False)

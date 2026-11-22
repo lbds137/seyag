@@ -33,7 +33,7 @@ The owner's claude.ai export archive (`~/Documents/claude-session-archive/cse_*.
 
 ## Ad-hoc reading
 
-For any question about what happened in past sessions ("what went wrong yesterday with X", "which session decided Y"), reach for `session-log` before writing jq. Find the session with `session-log list --since yesterday --project <substr>`; find the moment with `session-log grep --since <T> <PATTERN>` (default role is owner turns; `--role agent|tool|all` widens it); then read around the hit with `session-extract` or the JSONL directly. `list`/`grep` include the claude.ai export archive alongside local transcripts (`--no-archive` to skip it). Same privacy boundary as mining output applies: results stay in the terminal or private files, never a tracked doc or a PR body.
+For any question about what happened in past sessions ("what went wrong yesterday with X", "which session decided Y"), reach for `session-log` before writing jq. Find the session with `session-log list --since yesterday --project <substr>`; find the moment with `session-log grep --since <T> <PATTERN>` (default role is owner turns; `--role agent|tool|all` widens it); then read around the hit with `session-extract` or the JSONL directly. `list`/`grep` include the claude.ai export archive alongside local transcripts (`--no-archive` to skip it). `grep` also reads the prompt history (`SYG_SESSION_LOG_HISTORY`, `--no-history`) and both mined-corpus roots (`SYG_SESSION_LOG_CORPUS`, `--no-corpus`), so a phrase that was said in a prompt or already mined shows up even when no transcript has it. Same privacy boundary as mining output applies: results stay in the terminal or private files, never a tracked doc or a PR body.
 
 ## Step 0: inventory what's unmined
 

@@ -121,6 +121,8 @@ An optional TOML file fills in knobs the environment left unset: user `${XDG_CON
 | `SYG_SESSION_CONTEXT_EXTRA_THRESHOLD` | `150000` | Context token threshold at which session-context flags a row from SYG_SESSION_CONTEXT_EXTRA_CMD. | `bin/session-context` | user + project |
 | `SYG_SESSION_CONTEXT_THRESHOLD` | `500000` | Context token threshold at which session-context flags a session on non-Fable models (a whole number of at most 15 digits; separate from the in-session reminder's SYG_CONTEXT_THRESHOLD). | `bin/session-context` | user + project |
 | `SYG_SESSION_CONTEXT_THRESHOLD_FABLE` | `200000` | Context token threshold at which session-context flags a session whose model id contains fable (a whole number of at most 15 digits). | `bin/session-context` | user + project |
+| `SYG_SESSION_LOG_CORPUS` | the mined-corpus dir in the Claude config dir plus every project folder's mined-corpus dir | Colon-separated list of corpus roots session-log grep searches line by line as plain text (each entry glob-expanded, every regular file under it read, symlinks not followed); the value off excludes the corpus source. | `bin/session-log` | user only |
+| `SYG_SESSION_LOG_HISTORY` | the history.jsonl in the Claude config dir | Prompt-history file (one JSON object per line) session-log grep searches; the value off excludes it. | `bin/session-log` | user only |
 | `SYG_STALLED_ZAI_TZ` | `Asia/Shanghai` | IANA time zone in which session-stalled reads the z.ai quota-reset stamp (`Your limit will reset at YYYY-MM-DD HH:MM:SS`); an unknown zone leaves the reset unparsed. | `bin/session-stalled` | user + project |
 | `SYG_STATE_MAX_DAYS` | `7` | Age in whole days after which session-start deletes stale prompt-hook state files in SYG_STATE_DIR. | `hooks/dispatch-posture-gate.sh`, `hooks/session-start.sh` | user + project |
 
@@ -321,6 +323,7 @@ An optional TOML file fills in knobs the environment left unset: user `${XDG_CON
 | `SYG_ROLE_NOW_EPOCH` | `bin/claude-role` | Test seam overriding the clock (epoch seconds) claude-role uses to decide which Next items are due. |
 | `SYG_ROLE_TASK` | `bin/claude-role` | Set by a launcher of a named task session: claude-role hook mode then prints the task name and a "not a role session" line and never the role file. |
 | `SYG_ROUTE_CHECK_TIMEOUT` | `hooks/route-check.sh` | Test seam overriding the timeout in seconds (positive integer) for SYG_ROUTE_CHECK_CMD in route-check. |
+| `SYG_SESSION_LOG_POOL_MIN_BYTES` | `bin/session-log` | Test seam and tuning: total input bytes below which session-log grep scans files in-process instead of in a fork pool. |
 | `SYG_STALLED_NOW` | `bin/session-stalled` | Test seam: ISO-8601 timestamp with a UTC offset that session-stalled uses as the current time; a value without an offset is a usage error. |
 | `SYG_STATE_DIR` | `hooks/context-block-gate.sh`, `hooks/context-size-reminder.sh`, `hooks/queued-message-receipt.sh`, `hooks/session-start.sh` | Test seam overriding the directory session-start prunes and the prompt hooks (queued-message-receipt, context-size-reminder, context-block-gate) write their per-session state into. |
 | `SYG_SWEEP_FRAG` | `bin/removed-identifier-sweep` | Internal env variable passing one fragment to awk for regex validation inside removed-identifier-sweep. |

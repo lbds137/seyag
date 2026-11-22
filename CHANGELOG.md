@@ -2,6 +2,16 @@
 
 All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY-MM-DD>` section per released version; under it, `###` categories in fixed order — Breaking Changes, Features, Bug Fixes, Improvements, Chores, Tests — empty ones omitted; items are `- **scope:** description (#PR)`, written from the version's merged commit subjects.
 
+## 0.3.205 - 2026-11-22
+
+### Features
+
+- **session-log:** `grep` scans files in a fork process pool (inputs of 32 MiB or more, at most 4 workers) behind a sound raw-line prefilter (`required_chunks` walks the parsed pattern for the ASCII alphanumeric runs every match contains; a whole-file then per-line byte check decides what is JSON-decoded, with exemptions for case folds onto ASCII letters, reminder-block joins and bridge-session lines; `--no-prefilter` decodes every line, `--scan-stats` prints lines read and decoded), builds its archive dedup lazily for the archive files that produced a hit, and also searches the prompt history (`SYG_SESSION_LOG_HISTORY`, `--no-history`; pasted contents included; a hit within 2 s of a same-session transcript hit is dropped) and the mined-corpus roots as plain text (`SYG_SESSION_LOG_CORPUS`, `--no-corpus`), each labelled in the output and counted on the final line (TASK-57). (#TBD)
+
+### Tests
+
+- **session-log:** `tests/session-log.probe.sh` pins prefilter equivalence over fold, escape, reminder-join, whitespace, alternation and optional-group patterns, the fold self-check, `--scan-stats` decode counts, bridge-line retention under `--app`, history-only, pasted-content, dedup and knob cases, corpus-only, per-project root, binary-skip, symlink and knob cases, and every final-line fragment form. (#TBD)
+
 ## 0.3.204 - 2026-11-22
 
 ### Features
