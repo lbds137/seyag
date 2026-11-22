@@ -1,7 +1,7 @@
 ---
 id: TASK-58
 title: 'Lesson-claim Stop check: a behaviour-change claim needs an enforcing artifact'
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-11-21T05:20:00Z'
 labels:
