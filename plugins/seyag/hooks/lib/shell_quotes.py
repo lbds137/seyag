@@ -78,6 +78,10 @@ In this plugin (hooks/):
     lib/delete_commands.py        command_pipelines, unwrap_runners,
     (for cache-rm-redirect.sh     strip_redirections
      and recursive-rm-guard.sh)
+    lib/turn_scan.py              strip_quoted_indexed, QUOTED_SPAN, ESCAPED_BLANK,
+    (for lesson-claim-check.sh)   simple_commands, unwrap_runners, strip_redirections,
+                                  strip_heredoc_bodies, heredoc_openers,
+                                  substitution_spans, wrapped_command_strings
 Tzurot's own copy of this module also serves its develop-code-commit-guard and
 board-commit-branch-gate (the latter uses strip_quoted_indexed plus
 wrapped_command_strings, deliberately not executed_segments, because it

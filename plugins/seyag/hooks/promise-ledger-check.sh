@@ -61,53 +61,18 @@ TRANSCRIPT=$(jq -r '.transcript_path // empty' <<<"$INPUT" 2>/dev/null || echo "
 # Stop envelope's last_assistant_message: closing text before the async transcript catches up.
 LAM=$(jq -r '.last_assistant_message // empty' <<<"$INPUT" 2>/dev/null || echo "")
 
-VERDICT=$(TRANSCRIPT="$TRANSCRIPT" LAM="$LAM" python3 -I "${SYG_PY_CACHE_ARG:--B}" << 'PYEOF'
-import json, os, re, sys
+HOOKS_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+HOOK_LIB="$HOOKS_DIR/lib"
 
-path = os.environ["TRANSCRIPT"]
-# Read only the tail: a long session's transcript can be hundreds of MB, and this
-# runs at every turn end. Same bound as blocking-question-channel-check.sh.
-TAIL_BYTES = 4_000_000
-try:
-    with open(path, "rb") as f:
-        f.seek(0, os.SEEK_END)
-        size = f.tell()
-        f.seek(max(0, size - TAIL_BYTES))
-        data = f.read()
-except OSError:
+VERDICT=$(HOOK_LIB="$HOOK_LIB" TRANSCRIPT="$TRANSCRIPT" LAM="$LAM" python3 -I "${SYG_PY_CACHE_ARG:--B}" << 'PYEOF'
+import os, re, sys
+
+sys.path.insert(0, os.environ["HOOK_LIB"])
+from turn_scan import closing_text, current_turn, load_records, strip_code, tool_uses  # noqa: E402
+
+records = load_records(os.environ["TRANSCRIPT"])
+if records is None:
     print("ok"); sys.exit()
-truncated = size > TAIL_BYTES
-lines = data.decode("utf-8", "replace").splitlines()
-if truncated and lines:
-    lines = lines[1:]  # the first line is cut mid-record
-
-# Walk from the end to the last GENUINE user message (a user turn carrying real
-# text, not a tool_result envelope) — that bounds the current turn.
-def is_genuine_user(entry):
-    if entry.get("type") != "user" or entry.get("isMeta"):
-        return False
-    content = entry.get("message", {}).get("content")
-    if isinstance(content, str):
-        return len(content.strip()) > 0
-    if isinstance(content, list):
-        return any(b.get("type") == "text" for b in content)
-    return False
-
-records = []
-for ln in lines:
-    ln = ln.strip()
-    if not ln:
-        continue
-    try:
-        records.append(json.loads(ln))
-    except json.JSONDecodeError:
-        continue
-
-turn_start = None
-for i in range(len(records) - 1, -1, -1):
-    if is_genuine_user(records[i]):
-        turn_start = i
-        break
 
 # If the turn boundary can't be found, fail toward STRICT: an empty turn means
 # wrote_ledger stays False, so an unfiled promise still fires (rather than
@@ -117,7 +82,7 @@ for i in range(len(records) - 1, -1, -1):
 # so a write early in that turn is not credited and the turn blocks once. That
 # is the same one-acked-turn cost as every other miss here, and the strict
 # direction is this hook's posture (the inverse of the blocking-question check).
-turn = records[turn_start:] if turn_start is not None else []
+turn = current_turn(records)
 
 DEFAULT_LEDGER_RE = re.compile(
     r"(^|/)(backlog/|tracker/|CURRENT\.md|BACKLOG\.md|TODO\.md|claude-memory/roles/)"
@@ -183,27 +148,12 @@ def is_ledger_write(block):
         return bool(TRACKER_CLI_RE.search(cmd)) or bash_writes_ledger(cmd)
     return False
 
-wrote_ledger = any(
-    is_ledger_write(block)
-    for entry in turn
-    if entry.get("type") == "assistant"
-    for block in (entry.get("message", {}).get("content", []) or [])
-)
+wrote_ledger = any(is_ledger_write(block) for block in tool_uses(turn))
 
 # (b) closing text: the Stop envelope's last_assistant_message when present,
 # else the last text block ANYWHERE (robust to the boundary-not-found case;
 # it's always the closing message we read to end).
-lam = os.environ.get("LAM", "")
-if lam.strip():
-    final_text = lam
-else:
-    final_text = ""
-    for entry in records:
-        if entry.get("type") != "assistant":
-            continue
-        for block in entry.get("message", {}).get("content", []) or []:
-            if block.get("type") == "text":
-                final_text = block.get("text", "")
+final_text = closing_text(records, os.environ.get("LAM", ""))
 
 if wrote_ledger or not final_text.strip():
     print("ok"); sys.exit()
@@ -242,8 +192,7 @@ if wrote_ledger or not final_text.strip():
 # into a line-leading label, trading this rare miss for a likelier misfire.
 # Widen this only on an observed misfire, not on speculation: every previous
 # attempt to pre-empt a shape here made the matcher worse.
-final_text = re.sub(r"```.*?```", "", final_text, flags=re.S)
-final_text = re.sub(r"`[^`\n]*`", "", final_text)
+final_text = strip_code(final_text)
 if not final_text.strip():
     print("ok"); sys.exit()
 

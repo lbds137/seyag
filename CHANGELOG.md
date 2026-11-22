@@ -2,6 +2,21 @@
 
 All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY-MM-DD>` section per released version; under it, `###` categories in fixed order — Breaking Changes, Features, Bug Fixes, Improvements, Chores, Tests — empty ones omitted; items are `- **scope:** description (#PR)`, written from the version's merged commit subjects.
 
+## 0.3.206 - 2026-11-22
+
+### Features
+
+- **hooks:** `lesson-claim-check` (component `lesson-claim`, on in `full`, off headless): Stop hook blocks a turn end once when the closing message claims a lesson or behaviour change (`SYG_LESSON_CLAIM_RE`) without an honest disclaimer or a same-turn write to an enforcement surface (`SYG_LESSON_SURFACE_RE`: `rules/`, `skills/`, `hooks/`, `agents/`, `backlog/`, `tracker/`, `CLAUDE.md`, `CLAUDE.local.md`, `BACKLOG.md`, `TODO.md`, `settings.json`, `settings.local.json`), a tracker CLI filing at command position, or a `SendMessage` that files a task, hook, rule, skill or check (`SYG_LESSON_FILING_RE`), while notes, role files, memory and read-only mentions never credit; a disclaimer clears only its own paragraph; extracts shared transcript turn-scanning (`load_records`, `is_genuine_user`, `current_turn`, `closing_text`, `strip_code`, `tool_uses`) and a strict `bash_write_targets` into `hooks/lib/turn_scan.py` (top-level redirects, `tee`, `sed -i`/`perl -i`, `cp`/`mv`/`install`, interpreter `-c` and heredoc bodies only; no `cd` tracking or recursion; a command with an escape, comment, `$'…'` or unbalanced quote gives no credit), with `promise-ledger-check` moved onto the module at zero behaviour change. A 7-day replay stops 5 of 3,383 turn ends, all real claims (TASK-58). (#TBD)
+- **rules:** core § "Fix recurring failures structurally" adds "never claim a lesson learned unless an artifact named in that message enforces it", net −4 bytes (TASK-58). (#TBD)
+
+### Chores
+
+- **backlog:** filed TASK-96 (`session-log grep` #371 review lows), TASK-97 (`promise-ledger-check` loose Bash crediting counts read-only mentions with stderr redirects) TASK-98 (move the remaining hooks inlining `TAIL_BYTES`/`is_genuine_user` onto `hooks/lib/turn_scan.py`), TASK-99 (filed and closed obsolete in the same batch), TASK-100 (`queued-message-receipt` points at the full text) and TASK-101 (testing-discipline skill); closes TASK-58. (#TBD)
+
+### Tests
+
+- **hooks:** `lesson-claim-check.probe.sh` pins role-file, memory, no-tool, read-only `2>&1`, `/dev/null` redirect, status `SendMessage`, bare claim and `last_assistant_message` blocks, enforcement-surface `Edit`/`Write`, tracker CLI, `cd && sed -i`, `>>`, `cp` and filing `SendMessage` passes, past-tense, mining-heading, quoted, blockquote, honest-disclaimer, inline-code, no-claim, `stop_hook_active` and near-miss cases, knob overrides and invalid-regex fallbacks, `turn_scan.bash_write_targets` unit cases, and the review and replay shapes (quoted `>`, mentioned `open()`, `cd ..`, inert `$(…)`, tracker mentions, peer chatter, stray quotes, third-person "won't … again"). (#TBD)
+
 ## 0.3.205 - 2026-11-22
 
 ### Features

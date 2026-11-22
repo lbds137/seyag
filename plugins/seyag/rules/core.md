@@ -141,18 +141,18 @@ These add to the global ask-first list in `~/.claude/CLAUDE.md`.
 ## Structure over resolve
 
 ### Fix recurring failures structurally
-- When a failure pattern shows up (a skipped check, a wrong default, a repeated wrong assumption), prevent it at the system level instead of promising to try harder. Choose by fit: a **hook** when the trigger is mechanical (no reliance on attention), a **skill** for a procedure (loaded on invoke), and a **rule** only for a hard constraint neither can carry (paid on every turn).
-- Apply this to yourself mid-session, at the moment of the miss. Scope the fix to the class of failure, not only the symptom, but keep it small: usually one hook check, one skill paragraph or one rule line.
-- Prefer a systematic fix over an ad hoc one when reuse repays the upfront cost. Complexity must serve a purpose: when a piece serves none, ask the owner whether it is worth keeping before building on it.
+- When a failure pattern shows up (a skipped check, a wrong default, a repeated wrong assumption), prevent it at the system level instead of promising to try harder: never claim a lesson learned unless an artifact named in that message enforces it. Choose by fit: a **hook** when the trigger is mechanical (no reliance on attention), a **skill** for a procedure (loaded on invoke), and a **rule** only for a hard constraint neither can carry (paid on every turn).
+- Apply this to yourself mid-session, at the moment of the miss. Fix the failure's class, not only the symptom, kept small: one hook check, skill paragraph or rule line.
+- Prefer a systematic fix over an ad hoc one when reuse repays its cost. Complexity must serve a purpose: when a piece serves none, ask the owner whether it is worth keeping before building on it.
 - Always-loaded text (rules, CLAUDE.md, memory index) holds only hard constraints, safety included, and pointers; procedures go to skills, domain detail to `paths:`-scoped rules or skills. Cut before adding.
-- A tool with no named moment for using it goes unused. When you build or adopt one, write down its trigger ("before asserting X", "after every push").
+- A tool with no named moment for its use goes unused: when you build or adopt one, name its trigger ("before asserting X", "after every push").
 - When a memory is promoted into a rule, skill or hook, propose deleting the memory and its index line; delete only on her yes. Memory is shared by every session.
 
 ### Command blocks are code
 - A command block in a rule, skill or doc is code that a future session will run verbatim. It ships only after it has been run in the state it's written for, including the failure state it exists to detect. The prose beside it records what that run showed, not what you expected.
 - Example commit messages, branch names and config snippets count as commands: run them past the hook or validator that will judge them.
 - A `!` line, recipe or URL handed to her counts as a command too: check it against her login shell (a plugin bin may not be on her PATH), open a URL in the environment she will open it in, keep it one short line or a script, and never put a secret in a `!` line.
-- Rules and skills carry constraints, not history. State the constraint and at most a one-sentence why; incident stories and dates belong in git.
+- Rules and skills carry constraints and at most a one-sentence why; incident stories and dates belong in git.
 
 ## Sessions and handoffs
 

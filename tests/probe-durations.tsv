@@ -18,6 +18,7 @@ plugins/seyag/hooks/env-print-guard.probe.sh	54.4
 plugins/seyag/hooks/grep-escaped-dollar-guard.probe.sh	2.0
 plugins/seyag/hooks/handoff-pick-check.probe.sh	9.6
 plugins/seyag/hooks/launch-record.probe.sh	1.0
+plugins/seyag/hooks/lesson-claim-check.probe.sh	5.1
 plugins/seyag/hooks/live-checkout-guard.probe.sh	37.0
 plugins/seyag/hooks/lossy-pipe-guard.probe.sh	14.9
 plugins/seyag/hooks/memory-route-gate.probe.sh	3.5
