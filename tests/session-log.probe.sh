@@ -8,11 +8,21 @@ SL="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/plugins/seyag/bin/session-l
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 # HOME is pinned to $T so cleanup_window reads ~/.claude/settings.json under the temp root (when CLAUDE_CONFIG_DIR is unset), never the runner's real home.
 export TZ=America/New_York HOME="$T" CLAUDE_PROJECTS_DIR="$T/projects" SESSION_LEDGER="$T/ledger.tsv" CLAUDE_SESSION_ARCHIVE="$T/archive" PYTHONDONTWRITEBYTECODE=1
+unset CLAUDE_CONFIG_DIR
+# grep's two extra sources (prompt history, mined corpus) are off for every case below except the ones run through xrun, so the final line keeps its two-source-free form.
+export SYG_SESSION_LOG_HISTORY=off SYG_SESSION_LOG_CORPUS=off
 fail=0
 ok() { echo "ok:   $1"; }
 bad() { echo "FAIL: $1"; fail=1; }
 ALL="$T/all.out"   # every stdout+stderr, for the id-leak check
 run() { "$SL" "$@" > "$T/out" 2> "$T/err"; rc=$?; cat "$T/out" "$T/err" >> "$ALL"; return $rc; }
+# xrun [VAR=value ...] -- ARGS: like run, with both extra sources back to their defaults unless a VAR=value says otherwise.
+xrun() {
+  local envs=(-u SYG_SESSION_LOG_HISTORY -u SYG_SESSION_LOG_CORPUS)
+  while [ "$1" != -- ]; do envs+=("$1"); shift; done
+  shift
+  env "${envs[@]}" "$SL" "$@" > "$T/out" 2> "$T/err"; rc=$?; cat "$T/out" "$T/err" >> "$ALL"; return $rc
+}
 
 A_ID=aaaaaaaa-1111-4000-8000-000000000001; B_ID=aaaaaaaa-2222-4000-8000-000000000002; C_ID=cccccccc-3333-4000-8000-000000000003
 BRIDGE=cse_01AAAAAAAAAAAAAAAAAAAAAA; CLOUD=cse_01ZZZZZZZZZZZZZZZZZZZZZZ
@@ -202,6 +212,141 @@ run list --since 2026-09-24 --until 2026-09-25 && grep -q "cse_01CCCCCCCC" "$T/o
 run list --since 2026-10-03 --until 2026-10-05; grep -q "cse_01CCCCCCCC" "$T/out" \
   && bad "skewed row wrongly shown for a window matching only its skewed index, not its real timestamp" \
   || ok "a window matching only the skewed index (not the real timestamp) correctly excludes it"
+
+# 3d. grep prefilter: the raw-line prefilter must never change the result set. Own projects root (p2) and
+# no archive, so no earlier count moves.
+G_ID=gggggggg-6666-4000-8000-000000000006
+GAMMA="$T/p2/-home-deck-Projects-gamma"; mkdir -p "$GAMMA"
+gl() { printf '{"type":"user","timestamp":"%s","message":{"content":"%s"}}\n' "$1" "$2" >> "$GAMMA/$G_ID.jsonl"; }
+gl 2026-09-24T10:00:00Z 'please fix the parser now'
+gl 2026-09-24T10:01:00Z "$(printf 'dash \\u2014 phrase')"
+gl 2026-09-24T10:01:30Z "$(printf 'dash \342\200\224 phrase')"
+gl 2026-09-24T10:02:00Z 'foo\nbar'
+gl 2026-09-24T10:03:00Z 'alpha  beta'
+gl 2026-09-24T10:04:00Z "$(printf '\342\204\252elvin raw')"
+gl 2026-09-24T10:05:00Z "$(printf '\\u212aelvin esc')"
+gl 2026-09-24T10:06:00Z "$(printf 'r\304\261\305\277k raw')"
+gl 2026-09-24T10:07:00Z "$(printf 'r\\u0131\\u017fk esc')"
+gl 2026-09-24T10:08:00Z 'joined<system-reminder>x</system-reminder>word'
+gl 2026-09-24T10:08:30Z 'multi<system-reminder>a</system-reminder><system-reminder>b</system-reminder>joined'
+gl 2026-09-24T10:09:00Z 'xyzdef marker'
+gl 2026-09-24T10:10:00Z 'jkl alone'
+gl 2026-09-24T10:11:00Z 'mnopqr tail'
+gl 2026-09-24T10:12:00Z '<system-reminder>hiddenword inside</system-reminder> visible text'
+gl 2026-09-24T10:13:00Z 'say \"quoted\" now'
+P2=(CLAUDE_PROJECTS_DIR="$T/p2" CLAUDE_SESSION_ARCHIVE="$T/none")
+# eq N PATTERN-ARGS...: N hits, and stdout byte-identical with and without the prefilter.
+eq() {
+  local n=$1; shift
+  xrun "${P2[@]}" -- grep --role all "$@"; local r1=$rc; cp "$T/out" "$T/o1"
+  xrun "${P2[@]}" -- grep --role all --no-prefilter "$@"; local r2=$rc
+  [ $r1 = 0 ] && [ $r2 = 0 ] && cmp -s "$T/out" "$T/o1" && [ "$(tail -1 "$T/out")" = "$n hits in 1 transcripts, history: not found, corpus: no roots" ] \
+    && ok "prefilter equivalence: $* ($n hits)" || bad "prefilter equivalence: $*: rc=$r1/$r2 $(cat "$T/o1" "$T/out")"
+}
+eq 1 'fix the parser'
+eq 1 -i 'FIX THE PARSER'
+eq 2 "$(printf 'dash \342\200\224 phrase')"
+eq 1 'foo\s+bar'
+eq 1 'alpha beta'
+eq 2 '(?i)kelvin'
+eq 2 -i 'risk'
+eq 1 'joinedword'
+eq 1 'multijoined'
+eq 1 '(?:abc|xyz)def'
+eq 1 '(ghi)?jkl'
+eq 1 'mno(?=pqr)'
+eq 1 'visible text'
+eq 1 '"quoted"'
+# The default root holds several transcripts plus the archive, so with the threshold at 0 the pool really starts (one task stays in-process).
+xrun SYG_SESSION_LOG_POOL_MIN_BYTES=0 -- grep --role all --max 1000 'e'; r1=$rc; cp "$T/out" "$T/o1"
+xrun -- grep --role all --max 1000 'e'; r2=$rc
+[ $r1 = 0 ] && [ $r2 = 0 ] && [ "$(sed -n 's/^\([0-9]*\) hits in \([0-9]*\) transcripts.*/\2/p' "$T/out")" -ge 2 ] && cmp -s "$T/out" "$T/o1" && ok "pool path (POOL_MIN_BYTES=0) gives the same output as the in-process path" || bad "pool path (POOL_MIN_BYTES=0): rc=$r1/$r2 $(cat "$T/o1" "$T/out")"
+xrun "${P2[@]}" -- grep --raw 'joinedword'; [ $rc = 1 ] && ok "--raw keeps the reminder block, so joinedword is not found" || bad "--raw joinedword: rc=$rc $(cat "$T/out")"
+fold=$(python3 -I -c 'import re; rx = re.compile("[A-Za-z0-9]", re.I); print(" ".join("%04X" % c for c in range(0x110000) if c >= 128 and rx.fullmatch(chr(c))))')
+[ "$fold" = "0130 0131 017F 212A" ] && ok "fold self-check: exactly four non-ASCII codepoints fold onto [A-Za-z0-9] under IGNORECASE" || bad "fold self-check: $fold"
+
+run grep --scan-stats --role all 'fix the parser'; rl=$(sed -n 's/^session-log: scan: \([0-9]*\) lines read, \([0-9]*\) decoded$/\1/p' "$T/err"); dl=$(sed -n 's/^session-log: scan: \([0-9]*\) lines read, \([0-9]*\) decoded$/\2/p' "$T/err")
+[ -n "$dl" ] && [ "$dl" -lt "$rl" ] && ok "prefilter: --scan-stats decodes fewer lines ($dl) than it reads ($rl)" || bad "scan-stats: $(cat "$T/err")"
+KNOWN='"type": ?"(user|assistant|queue-operation|bridge-session|custom-title|ai-title|agent-name)"'
+want_dec=$(( $(cat "$ALPHA"/*.jsonl "$BETA"/*.jsonl "$T"/archive/cse_*.jsonl | grep -cE "$KNOWN") + $(cat "$ALPHA"/*.jsonl "$BETA"/*.jsonl "$T"/archive/cse_*.jsonl | grep -vc '"type":') ))
+run grep --scan-stats --no-prefilter --role all 'fix the parser'; nd=$(sed -n 's/^session-log: scan: [0-9]* lines read, \([0-9]*\) decoded$/\1/p' "$T/err")
+[ "$nd" = "$want_dec" ] && ok "--no-prefilter decodes every known-type (and untyped) line: $nd" || bad "--no-prefilter decoded $nd, want $want_dec: $(cat "$T/err")"
+run grep --app cse_01AAAA 'fix the parser' && [ "$(tail -1 "$T/out")" = "1 hits in 1 transcripts" ] \
+  && ok "prefilter keeps the bridge line: --app still finds the hit" || bad "--app with prefilter: rc=$rc $(cat "$T/out")"
+run grep --app cse_01ZZZZ 'fix the parser'; [ $rc = 1 ] && ok "--app with another id finds nothing" || bad "--app other: rc=$rc"
+
+# 3e. prompt history (HOME is $T, so the default file is $T/.claude/history.jsonl)
+mkdir -p "$T/.claude"
+ms() { echo $(( $(date -u -d "$1" +%s) * 1000 + ${2:-0} )); }
+hl() { printf '{"display":"%s","pastedContents":%s,"timestamp":%s,"project":"%s","sessionId":"%s"}\n' "$1" "$2" "$3" "$4" "$5" >> "$HIST"; }
+HIST="$T/.claude/history.jsonl"
+HPROJ=/srv/work/delta/.claude/worktrees/t9
+hl 'uniquehistphrase alpha' '{}' "$(ms 2026-09-24T12:00:00Z)" "$HPROJ" hhhhhhhh-7777-4000-8000-000000000007
+hl 'plain display' '{"1":{"id":1,"type":"text","content":"pastedonlyphrase beta"},"2":{"contentHash":"abc123"}}' "$(ms 2026-09-24T12:01:00Z)" "$HPROJ" hhhhhhhh-7777-4000-8000-000000000007
+hl 'please fix the parser' '{}' "$(ms 2026-09-24T04:30:01Z)" /srv/work/alpha "$A_ID"
+hl 'please fix the parser' '{}' "$(ms 2026-09-24T04:30:10Z)" /srv/work/alpha "$A_ID"
+hl 'please fix the parser' '{}' "$(ms 2026-09-24T05:00:00Z 500)" /srv/work/alpha "$B_ID"
+hl 'please fix the parser' '{}' "$(ms 2026-09-24T04:30:00Z 500)" /srv/work/beta "$C_ID"
+printf 'not json\n' >> "$HIST"
+xrun -- grep uniquehistphrase && grep -q "^2026-09-24 08:00  -srv-work-delta--claude-worktrees-t9  hhhhhhhh  history  uniquehistphrase alpha$" "$T/out" \
+  && [ "$(tail -1 "$T/out")" = "1 hits in 0 transcripts, 1 history prompts, corpus: no roots" ] \
+  && ok "history-only phrase is found (default role), role history, project slug maps every non-alnum char to -" || bad "history only: rc=$rc $(cat "$T/out")"
+xrun -- grep --no-history uniquehistphrase; [ $rc = 1 ] && ok "--no-history finds nothing" || bad "--no-history: rc=$rc $(cat "$T/out")"
+xrun SYG_SESSION_LOG_HISTORY=off -- grep uniquehistphrase; [ $rc = 1 ] && ok "SYG_SESSION_LOG_HISTORY=off finds nothing" || bad "history off: rc=$rc"
+printf '{"display":"otherfilephrase gamma","pastedContents":{},"timestamp":%s,"project":"/srv/work/zeta","sessionId":"hhhhhhhh-8888-4000-8000-000000000008"}\n' "$(ms 2026-09-24T13:00:00Z)" > "$T/h2.jsonl"
+xrun SYG_SESSION_LOG_HISTORY="$T/h2.jsonl" -- grep otherfilephrase && grep -q "  -srv-work-zeta  hhhhhhhh  history  otherfilephrase gamma$" "$T/out" \
+  && ok "SYG_SESSION_LOG_HISTORY reads another file" || bad "history other file: rc=$rc $(cat "$T/out")"
+xrun SYG_SESSION_LOG_HISTORY="$T/h2.jsonl" -- grep uniquehistphrase; [ $rc = 1 ] && ok "the knob replaces the default history file" || bad "history knob replaces: rc=$rc"
+xrun -- grep pastedonlyphrase && grep -q "  history  pastedonlyphrase beta$" "$T/out" && ok "text only in pastedContents.1.content is found (a contentHash-only entry is skipped)" || bad "pasted: rc=$rc $(cat "$T/out")"
+xrun -- grep --role agent uniquehistphrase; [ $rc = 1 ] && ok "history is searched only for --role user or all" || bad "history role agent: rc=$rc"
+xrun -- grep --role all uniquehistphrase && ok "--role all searches history" || bad "history role all: rc=$rc"
+xrun -- grep --app cse_01AAAA uniquehistphrase; [ $rc = 1 ] && ok "--app excludes history" || bad "history --app: rc=$rc"
+xrun -- grep --project delta uniquehistphrase && ok "--project matches the history slug" || bad "history --project: rc=$rc"
+xrun -- grep --project nomatch uniquehistphrase; [ $rc = 1 ] && ok "--project filters history" || bad "history --project none: rc=$rc"
+xrun -- grep --until 2026-09-23 uniquehistphrase; [ $rc = 1 ] && ok "--until uses the history timestamp" || bad "history --until: rc=$rc"
+xrun -- grep 'not json'; grep -q "history: 1 unparseable lines skipped" "$T/err" \
+  && ok "an unparseable history line that passes the prefilter is counted and warned" || bad "history bad line: $(cat "$T/err")"
+xrun -- grep 'uniquehistphrase'; grep -q "unparseable" "$T/err" \
+  && bad "the prefilter should skip the unparseable line without decoding it: $(cat "$T/err")" || ok "an unparseable line the prefilter skips is not counted"
+# dedup: the transcript hit is A's 'please fix the parser' at 04:30:00Z
+xrun -- grep 'fix the parser'; hist_n=$(grep -c "  history  " "$T/out")
+[ "$hist_n" = 3 ] && ! grep -q "04:30:01" "$T/out" && [ "$(tail -1 "$T/out")" = "4 hits in 1 transcripts, 3 history prompts, corpus: no roots" ] \
+  && grep -q "^2026-09-24 00:30  Projects-alpha  aaaaaaaa  user  please fix the parser$" "$T/out" \
+  && grep -q "^2026-09-24 00:30  -srv-work-alpha  aaaaaaaa  history  please fix the parser$" "$T/out" \
+  && grep -q "^2026-09-24 01:00  -srv-work-alpha  aaaaaaaa  history  please fix the parser$" "$T/out" \
+  && grep -q "^2026-09-24 00:30  -srv-work-beta  cccccccc  history  please fix the parser$" "$T/out" \
+  && ok "history dedup: same session 1 s from a transcript hit is dropped; 10 s away, no transcript hit, or another session is reported" \
+  || bad "history dedup: $(cat "$T/out")"
+
+# 3f. mined corpus: plain text, labelled by root; a project root lives in the p2 projects root
+CORP="$T/.claude/mined-corpus"; mkdir -p "$CORP/x" "$GAMMA/mined-corpus"
+printf 'first line\nthe corpusonlyphrase here\n' > "$CORP/x/notes.txt"
+printf 'binaryphrase\0more\n' > "$CORP/bin.dat"
+ln -s "$CORP/x/notes.txt" "$CORP/link.txt"
+printf '# heading\nprojectcorpusphrase there\n' > "$GAMMA/mined-corpus/r.md"
+touch -d "@$(date -u -d 2026-09-24T16:00:00Z +%s)" "$CORP/x/notes.txt" "$CORP/bin.dat" "$GAMMA/mined-corpus/r.md"
+xrun "${P2[@]}" -- grep corpusonlyphrase && grep -q "^2026-09-24 12:00  mined-corpus  x/notes.txt:2  corpus  the corpusonlyphrase here$" "$T/out" \
+  && [ "$(tail -1 "$T/out")" = "1 hits in 0 transcripts, 0 history prompts, 1 corpus files" ] \
+  && ok "corpus-only phrase found, labelled mined-corpus with <path in root>:<line>; a symlinked file is not followed" || bad "corpus: rc=$rc $(cat "$T/out")"
+xrun "${P2[@]}" -- grep projectcorpusphrase && grep -q "^2026-09-24 12:00  Projects-gamma/mined-corpus  r.md:2  corpus  projectcorpusphrase there$" "$T/out" \
+  && ok "a per-project mined-corpus root is labelled <project>/mined-corpus" || bad "project corpus: rc=$rc $(cat "$T/out")"
+xrun "${P2[@]}" -- grep --role agent corpusonlyphrase && ok "corpus is searched for every --role" || bad "corpus role: rc=$rc"
+xrun "${P2[@]}" -- grep --no-corpus corpusonlyphrase; [ $rc = 1 ] && ok "--no-corpus excludes the corpus" || bad "--no-corpus: rc=$rc"
+xrun "${P2[@]}" SYG_SESSION_LOG_CORPUS=off -- grep corpusonlyphrase; [ $rc = 1 ] && ok "SYG_SESSION_LOG_CORPUS=off excludes the corpus" || bad "corpus off: rc=$rc"
+xrun "${P2[@]}" -- grep --app cse_01AAAA corpusonlyphrase; [ $rc = 1 ] && ok "--app excludes the corpus" || bad "corpus --app: rc=$rc"
+xrun "${P2[@]}" -- grep binaryphrase; [ $rc = 1 ] && ok "a corpus file with a NUL byte in its first 8 KB is skipped" || bad "binary: rc=$rc $(cat "$T/out")"
+xrun "${P2[@]}" -- grep --project gamma corpusonlyphrase; [ $rc = 1 ] && ok "--project filters corpus roots by label" || bad "corpus --project: rc=$rc"
+xrun "${P2[@]}" -- grep --until 2026-09-23 corpusonlyphrase; [ $rc = 1 ] && ok "--until uses the corpus file's mtime" || bad "corpus --until: rc=$rc"
+mkdir -p "$T/extra/e1/mined-corpus"; printf 'knobcorpusphrase\n' > "$T/extra/e1/mined-corpus/n.txt"
+xrun "${P2[@]}" SYG_SESSION_LOG_CORPUS="$T/extra/*/mined-corpus:$T/nowhere" -- grep knobcorpusphrase && grep -q "  e1/mined-corpus  n.txt:1  corpus  knobcorpusphrase$" "$T/out" \
+  && ok "SYG_SESSION_LOG_CORPUS: colon-separated glob entries, labelled by their last two path parts" || bad "corpus knob: rc=$rc $(cat "$T/out")"
+xrun "${P2[@]}" SYG_SESSION_LOG_CORPUS="$T/extra/*/mined-corpus" -- grep corpusonlyphrase; [ $rc = 1 ] && ok "the corpus knob replaces the default roots" || bad "corpus knob replaces: rc=$rc"
+
+# 3g. final line: one fragment per enabled source
+xrun "${P2[@]}" SYG_SESSION_LOG_HISTORY="$T/none.jsonl" SYG_SESSION_LOG_CORPUS="$T/none-root" -- grep nonexistentzzz; [ $rc = 1 ] && [ "$(tail -1 "$T/out")" = "0 hits in 0 transcripts, history: not found, corpus: no roots" ] \
+  && ok "final line: history: not found and corpus: no roots" || bad "final line none: $(tail -1 "$T/out")"
+xrun -- grep --no-history --no-corpus 'fix the parser'; [ "$(tail -1 "$T/out")" = "1 hits in 1 transcripts" ] && ok "final line: today's exact form with both sources excluded" || bad "final line excluded: $(tail -1 "$T/out")"
+xrun -- grep --no-corpus nonexistentzzz; [ "$(tail -1 "$T/out")" = "0 hits in 0 transcripts, 0 history prompts" ] && ok "final line: an enabled source with no hits reports 0" || bad "final line zero: $(tail -1 "$T/out")"
 
 # 4. mark
 run mark --lens owner aaaaaaaa 2026-09-24T00:00 2026-09-24T01:00; [ $rc = 2 ] && [ "$(grep -c "^  aaaaaaaa  Projects-alpha$" "$T/err")" = 2 ] \

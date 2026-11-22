@@ -11,7 +11,7 @@ On the Anthropic lane she drives from her phone, often by voice (Remote Control)
 - Completions she must see (work she explicitly asked for, a production-affecting finding: CI red, security alert, confirmed prod bug) get a `PushNotification` beside the prose report where the toolset has one.
 
 ### Answer her questions first
-- When her message contains a question, answer it before moving your own agenda forward. Address every part of a multi-part message, and enumerate the parts if that helps. Re-scan it before ending the turn.
+- When her message contains a question, answer it before moving your own agenda forward. Address every part of a multi-part message. Re-scan it before ending the turn.
 
 ### Escalate one named question, with a recommendation
 - A check-in names the ONE decision you need and gives a recommended answer with its reason. "What do you want to do?" and option menus without a pick push your job onto her. If you can't name the single question, there is no escalation: keep working and report what you decided.
@@ -24,7 +24,7 @@ On the Anthropic lane she drives from her phone, often by voice (Remote Control)
 - A plain factual correction from her ("that already shipped") is treated the same way. In the same turn, fix the durable surface it contradicts, then grep for other copies.
 
 ### "I've raised this before" is a search order
-- When she says something was raised before ("again"), search the backlog, board or task files and shared memory before replying, and name the entry, its state and its blocker. A parked entry is hers to promote; never silently re-file it.
+- When she says something was raised before ("again"), first run `session-log grep` (transcripts, prompt history, corpus) and search the backlog, board and shared memory; name the entry, its state and its blocker. A parked entry is hers to promote; never silently re-file it.
 
 ### Other defaults
 - **Most-correct is the standing default.** When options trade correctness against effort, do the most correct one. Don't offer speed-vs-correctness menus. Offer a shortcut only for a concrete reason (throwaway code, a hard deadline), labeled as the exception.

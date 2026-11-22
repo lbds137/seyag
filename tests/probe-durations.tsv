@@ -85,7 +85,7 @@ tests/scanner-parity.probe.sh	0.2
 tests/security-sweep.probe.sh	149.6
 tests/session-context.probe.sh	2.9
 tests/session-extract.probe.sh	0.2
-tests/session-log.probe.sh	12.7
+tests/session-log.probe.sh	15.6
 tests/session-stalled.probe.sh	5.4
 tests/seyag-git-hooks.probe.sh	8.3
 tests/shell_quotes.probe.sh	9.2
