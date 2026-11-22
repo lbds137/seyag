@@ -41,7 +41,7 @@ SCAN_EXACT_NAMES = (
 )
 # Mirrors config-env.sh's _SYG_CFG_PROJECT_EXEC alongside the _CMD suffix class (pinned by tests/config-env.probe.sh case (o5)).
 EXEC_REFUSED_EXTRA = ("SYG_STATUSLINE_ZAI_USAGE",)
-# Mirrors config-env.sh's _SYG_CFG_PROJECT_SECURE (pinned by tests/config-env.probe.sh case (w)): the credential-store, billing/lane and worktree-cleanup knobs.
+# Mirrors config-env.sh's _SYG_CFG_PROJECT_SECURE (pinned by tests/config-env.probe.sh case (w)): the credential-store, billing/lane and worktree-cleanup knobs (including the worktree auto-removal set).
 SECURE_REFUSED_EXTRA = (
     "SYG_KEYS_NAME",
     "SYG_KEYS_WITH_KEY",
@@ -53,6 +53,7 @@ SECURE_REFUSED_EXTRA = (
     "SYG_WORKTREE_BACKUP_ALLOW_VOLATILE",
     "SYG_WORKTREE_REGENERABLE",
     "SYG_WORKTREE_BASE",
+    "SYG_WORKTREE_ELIGIBLE_REASONS",
 )
 
 GROUPS = (

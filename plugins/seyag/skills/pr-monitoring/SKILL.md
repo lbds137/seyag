@@ -202,7 +202,7 @@ gh api "repos/{owner}/{repo}/actions/runs/<run-id>/jobs?per_page=100" \
       and `--apply-hold <id>` only runs on the owner's yes for the printed
       `hold plan:` id (refusing while a commit-carrying tree in the plan
       is not named with `--only` — dry-run and apply with the same
-      `--only` for those).
+      `--only` for those), unless the owner configured SYG_WORKTREE_ELIGIBLE_REASONS: then `safe-worktree-clean --apply-eligible` removes, with backup, the HOLD trees whose every reason is in that set, and refuses the rest itself.
     - DIFFERS after a rebase or squash merge onto a base that moved is
       expected (branch-sweep matches identical trees only); it does not mean
       unmerged work. Leave it and report it.

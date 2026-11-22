@@ -1,7 +1,7 @@
 ---
 id: TASK-59
 title: 'safe-worktree-clean --apply-eligible: remove HOLD trees whose every reason is in a configured eligible set'
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-11-21T06:30:00Z'
 labels:

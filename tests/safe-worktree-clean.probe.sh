@@ -3052,6 +3052,256 @@ printf 'syg_worktree_branch_re = "^feat-"\n' > "$SW47/.claude/seyag.toml"
 out_p47b=$(env -u SYG_WORKTREE_BRANCH_RE XDG_CONFIG_HOME="$T/xdg47-none" CLAUDE_PROJECT_DIR="$SW47" "$TOOL" --repo "$SW47" --json 2>/dev/null)
 expect "$out_p47b" fx HOLD:branch-name "P47b: project .claude/seyag.toml syg_worktree_branch_re refused; feat-x still held as branch-name"
 
-exit $fail
 }
 phase_73
+
+phase_74() {
+local SW48A SW48B SW48C SW48DU SW48DD SW48E SW48EB SW48F SW48GA SW48GB SW48H
+local out_48a rc_48a bk48a_dirs out_48b rc_48b out_48c1 rc_48c1 out_48c2 rc_48c2
+local out_48du rc_48du err_48du out_48dd rc_48dd err_48dd out_48do rc_48do err_48do
+local out_48e err_48e rc_48e out_48em err_48em rc_48em out_48f rc_48f bk48f_dirs
+local out_48g rc_48g bk48ga_dirs bk48gb_dirs out_48gw rc_48gw err_48gw out_48h rc_48h bk48h_dirs
+
+# P48(a) Knob 'branch-name ignored', tree whose reasons are only branch-name: removed, backup dir exists, exit 0.
+mk_repo elig48a && [ -d "$T/elig48a" ] || bad "P48(a) setup: mk_repo elig48a"
+SW48A="$T/elig48a"
+add_tree elig48a odd origin/main feat-odd && [ -d "$SW48A/.claude/worktrees/odd" ] || bad "P48(a) setup: add_tree odd"
+out_48a=$(SYG_WORKTREE_ELIGIBLE_REASONS="branch-name ignored" SYG_WORKTREE_BACKUP_DIR="$T/bk48a" "$TOOL" --repo "$SW48A" --apply-eligible); rc_48a=$?
+shopt -s nullglob
+bk48a_dirs=("$T/bk48a"/*/elig48a--odd--[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f])
+shopt -u nullglob
+if [ "$rc_48a" -eq 0 ] && [ ! -e "$SW48A/.claude/worktrees/odd" ] \
+  && ! git -C "$SW48A" rev-parse -q --verify refs/heads/feat-odd >/dev/null \
+  && grep -q "^backups: $T/bk48a/" <<<"$out_48a" \
+  && [ "${#bk48a_dirs[@]}" -eq 1 ] && [ -d "${bk48a_dirs[0]}" ] && [ -f "${bk48a_dirs[0]}/tree.tgz" ]; then
+  ok "P48(a): --apply-eligible with knob 'branch-name ignored' removes branch-name-only tree, deletes branch, writes backup dir, exits 0"
+else
+  bad "P48(a): eligible branch-name removal (rc=$rc_48a, dirs=${#bk48a_dirs[@]})"; printf '%s\n' "$out_48a"
+fi
+
+# P48(b) Same knob, tree with branch-name plus untracked-new: kept, prints 'not eligible: … (untracked-new)', exit 0.
+mk_repo elig48b && [ -d "$T/elig48b" ] || bad "P48(b) setup: mk_repo elig48b"
+SW48B="$T/elig48b"
+add_tree elig48b oddnew origin/main feat-oddnew && [ -d "$SW48B/.claude/worktrees/oddnew" ] || bad "P48(b) setup: add_tree oddnew"
+echo u > "$SW48B/.claude/worktrees/oddnew/u.txt" && [ -f "$SW48B/.claude/worktrees/oddnew/u.txt" ] || bad "P48(b) setup: u.txt"
+out_48b=$(SYG_WORKTREE_ELIGIBLE_REASONS="branch-name ignored" SYG_WORKTREE_BACKUP_DIR="$T/bk48b" "$TOOL" --repo "$SW48B" --apply-eligible); rc_48b=$?
+if [ "$rc_48b" -eq 0 ] && [ -d "$SW48B/.claude/worktrees/oddnew" ] && [ -f "$SW48B/.claude/worktrees/oddnew/u.txt" ] \
+  && git -C "$SW48B" rev-parse -q --verify refs/heads/feat-oddnew >/dev/null \
+  && ! grep -q '^backups: ' <<<"$out_48b" && [ ! -e "$T/bk48b" ] \
+  && grep -qx '  not eligible: \.claude/worktrees/oddnew (untracked-new)' <<<"$out_48b"; then
+  ok "P48(b): --apply-eligible keeps tree with branch-name + untracked-new, prints 'not eligible: .claude/worktrees/oddnew (untracked-new)', exits 0"
+else
+  bad "P48(b): ineligible untracked-new (rc=$rc_48b)"; printf '%s\n' "$out_48b"
+fi
+
+# P48(c) Knob empty or unset, a tree with only branch-name: kept, nothing removed.
+mk_repo elig48c && [ -d "$T/elig48c" ] || bad "P48(c) setup: mk_repo elig48c"
+SW48C="$T/elig48c"
+add_tree elig48c odd origin/main feat-odd && [ -d "$SW48C/.claude/worktrees/odd" ] || bad "P48(c) setup: add_tree odd"
+out_48c1=$(SYG_WORKTREE_ELIGIBLE_REASONS="" SYG_WORKTREE_BACKUP_DIR="$T/bk48c" "$TOOL" --repo "$SW48C" --apply-eligible); rc_48c1=$?
+out_48c2=$(env -u SYG_WORKTREE_ELIGIBLE_REASONS SYG_WORKTREE_BACKUP_DIR="$T/bk48c" "$TOOL" --repo "$SW48C" --apply-eligible); rc_48c2=$?
+if [ "$rc_48c1" -eq 0 ] && [ "$rc_48c2" -eq 0 ] \
+  && [ -d "$SW48C/.claude/worktrees/odd" ] \
+  && git -C "$SW48C" rev-parse -q --verify refs/heads/feat-odd >/dev/null \
+  && ! grep -q '^backups: ' <<<"$out_48c1" && ! grep -q '^backups: ' <<<"$out_48c2" \
+  && [ ! -e "$T/bk48c" ] \
+  && grep -qx '  not eligible: \.claude/worktrees/odd (branch-name)' <<<"$out_48c1" \
+  && grep -qx '  not eligible: \.claude/worktrees/odd (branch-name)' <<<"$out_48c2"; then
+  ok "P48(c): --apply-eligible with empty or unset knob keeps branch-name tree, removes nothing, exits 0"
+else
+  bad "P48(c): empty/unset knob (rc1=$rc_48c1, rc2=$rc_48c2)"; printf '%s\n---\n%s\n' "$out_48c1" "$out_48c2"
+fi
+
+# P48(d)(i) Knob 'branch-name unmerged', unmerged tree in its own repo: kept, exit 0, stderr warning, 'not eligible:' line printed.
+mk_repo elig48du && [ -d "$T/elig48du" ] || bad "P48(d)(i) setup: mk_repo elig48du"
+SW48DU="$T/elig48du"
+add_tree elig48du um && [ -d "$SW48DU/.claude/worktrees/um" ] || bad "P48(d)(i) setup: add_tree um"
+echo c48 > "$SW48DU/.claude/worktrees/um/c.txt" && git -C "$SW48DU/.claude/worktrees/um" add c.txt \
+  && git -C "$SW48DU/.claude/worktrees/um" commit -qm "unmerged 48du" || bad "P48(d)(i) setup: um commit"
+out_48du=$(SYG_WORKTREE_ELIGIBLE_REASONS="branch-name unmerged" SYG_WORKTREE_BACKUP_DIR="$T/bk48du" "$TOOL" --repo "$SW48DU" --apply-eligible 2>"$T/p48du.err"); rc_48du=$?
+err_48du=$(cat "$T/p48du.err")
+if [ "$rc_48du" -eq 0 ] \
+  && [ -d "$SW48DU/.claude/worktrees/um" ] \
+  && git -C "$SW48DU" rev-parse -q --verify refs/heads/worktree-agent-um >/dev/null \
+  && ! grep -q '^backups: ' <<<"$out_48du" && [ ! -e "$T/bk48du" ] \
+  && [ "$err_48du" = "safe-worktree-clean: SYG_WORKTREE_ELIGIBLE_REASONS: unmerged is never eligible; ignored" ] \
+  && grep -qx '  not eligible: \.claude/worktrees/um (unmerged)' <<<"$out_48du"; then
+  ok "P48(d)(i): never-eligible code 'unmerged' in its own repo warns on stderr, prints 'not eligible:', and keeps the tree (exit 0)"
+else
+  bad "P48(d)(i): unmerged in knob (rc=$rc_48du, err='$err_48du')"; printf '%s\n' "$out_48du"
+fi
+
+# P48(d)(ii) Knob 'branch-name dirty', dirty tree in its own repo: kept, exit 0, stderr warning, 'not eligible:' line printed.
+mk_repo elig48dd && [ -d "$T/elig48dd" ] || bad "P48(d)(ii) setup: mk_repo elig48dd"
+SW48DD="$T/elig48dd"
+add_tree elig48dd dy && [ -d "$SW48DD/.claude/worktrees/dy" ] || bad "P48(d)(ii) setup: add_tree dy"
+echo dirty48 > "$SW48DD/.claude/worktrees/dy/a.txt" || bad "P48(d)(ii) setup: dy edit"
+out_48dd=$(SYG_WORKTREE_ELIGIBLE_REASONS="branch-name dirty" SYG_WORKTREE_BACKUP_DIR="$T/bk48dd" "$TOOL" --repo "$SW48DD" --apply-eligible 2>"$T/p48dd.err"); rc_48dd=$?
+err_48dd=$(cat "$T/p48dd.err")
+if [ "$rc_48dd" -eq 0 ] \
+  && [ -d "$SW48DD/.claude/worktrees/dy" ] \
+  && git -C "$SW48DD" rev-parse -q --verify refs/heads/worktree-agent-dy >/dev/null \
+  && ! grep -q '^backups: ' <<<"$out_48dd" && [ ! -e "$T/bk48dd" ] \
+  && [ "$err_48dd" = "safe-worktree-clean: SYG_WORKTREE_ELIGIBLE_REASONS: dirty is never eligible; ignored" ] \
+  && grep -qx '  not eligible: \.claude/worktrees/dy (dirty)' <<<"$out_48dd"; then
+  ok "P48(d)(ii): never-eligible code 'dirty' in its own repo warns on stderr, prints 'not eligible:', and keeps the tree (exit 0)"
+else
+  bad "P48(d)(ii): dirty in knob (rc=$rc_48dd, err='$err_48dd')"; printf '%s\n' "$out_48dd"
+fi
+
+# P48(d)(iii) --apply-eligible --only <unmerged tree> with knob 'branch-name': tree is kept, exit 0, no backup written.
+out_48do=$(SYG_WORKTREE_ELIGIBLE_REASONS="branch-name" SYG_WORKTREE_BACKUP_DIR="$T/bk48do" "$TOOL" --repo "$SW48DU" --apply-eligible --only "$SW48DU/.claude/worktrees/um" 2>"$T/p48do.err"); rc_48do=$?
+err_48do=$(cat "$T/p48do.err")
+if [ "$rc_48do" -eq 0 ] && [ -z "$err_48do" ] \
+  && [ -d "$SW48DU/.claude/worktrees/um" ] \
+  && git -C "$SW48DU" rev-parse -q --verify refs/heads/worktree-agent-um >/dev/null \
+  && ! grep -q '^backups: ' <<<"$out_48do" && [ ! -e "$T/bk48do" ] \
+  && grep -qx '  not eligible: \.claude/worktrees/um (unmerged)' <<<"$out_48do"; then
+  ok "P48(d)(iii): --apply-eligible --only <unmerged tree> with knob 'branch-name' keeps the tree, exits 0, and writes no backup"
+else
+  bad "P48(d)(iii): --apply-eligible --only unmerged (rc=$rc_48do, err='$err_48do')"; printf '%s\n' "$out_48do"
+fi
+
+# P48(e) Each of --apply-eligible --apply-hold X, --apply-eligible --all, --apply-eligible --base HEAD, --apply-eligible --base=HEAD, --apply-eligible --locks-apply: exit 2, nothing removed.
+mk_repo elig48e && [ -d "$T/elig48e" ] || bad "P48(e) setup: mk_repo elig48e"
+SW48E="$T/elig48e"
+add_tree elig48e sf && [ -d "$SW48E/.claude/worktrees/sf" ] || bad "P48(e) setup: add_tree sf"
+add_tree elig48e el origin/main feat-el && [ -d "$SW48E/.claude/worktrees/el" ] || bad "P48(e) setup: add_tree el"
+for combo in "--apply-hold 000000000000" "--all" "--base HEAD" "--base=HEAD" "--locks-apply"; do
+  # shellcheck disable=SC2086
+  out_48e=$(SYG_WORKTREE_ELIGIBLE_REASONS="branch-name" SYG_WORKTREE_BACKUP_DIR="$T/bk48e" "$TOOL" --repo "$SW48E" --apply-eligible $combo 2>"$T/p48e.err"); rc_48e=$?
+  err_48e=$(cat "$T/p48e.err")
+  if [ "$rc_48e" -eq 2 ] && [ -z "$out_48e" ] && [ "$(grep -c . <<<"$err_48e")" -eq 1 ] \
+    && [ -d "$SW48E/.claude/worktrees/sf" ] && [ -d "$SW48E/.claude/worktrees/el" ] \
+    && git -C "$SW48E" rev-parse -q --verify refs/heads/worktree-agent-sf >/dev/null \
+    && git -C "$SW48E" rev-parse -q --verify refs/heads/feat-el >/dev/null \
+    && [ ! -e "$T/bk48e" ]; then
+    ok "P48(e): --apply-eligible $combo exits 2 with one stderr line and removes nothing"
+  else
+    bad "P48(e): --apply-eligible $combo (rc=$rc_48e, out='$out_48e', err='$err_48e')"
+  fi
+done
+
+# P48(e)(ii) --repo A --repo B --apply-eligible --all: exit 2, nothing removed in either repo.
+mk_repo elig48eb && [ -d "$T/elig48eb" ] || bad "P48(e)(ii) setup: mk_repo elig48eb"
+SW48EB="$T/elig48eb"
+add_tree elig48eb sfb && [ -d "$SW48EB/.claude/worktrees/sfb" ] || bad "P48(e)(ii) setup: add_tree sfb"
+add_tree elig48eb elb origin/main feat-elb && [ -d "$SW48EB/.claude/worktrees/elb" ] || bad "P48(e)(ii) setup: add_tree elb"
+out_48em=$(SYG_WORKTREE_ELIGIBLE_REASONS="branch-name" SYG_WORKTREE_BACKUP_DIR="$T/bk48em" "$TOOL" --repo "$SW48E" --repo "$SW48EB" --apply-eligible --all 2>"$T/p48em.err"); rc_48em=$?
+err_48em=$(cat "$T/p48em.err")
+if [ "$rc_48em" -eq 2 ] && [ -z "$out_48em" ] && [ "$(grep -c . <<<"$err_48em")" -eq 1 ] \
+  && [ -d "$SW48E/.claude/worktrees/sf" ] && [ -d "$SW48E/.claude/worktrees/el" ] \
+  && [ -d "$SW48EB/.claude/worktrees/sfb" ] && [ -d "$SW48EB/.claude/worktrees/elb" ] \
+  && git -C "$SW48E" rev-parse -q --verify refs/heads/worktree-agent-sf >/dev/null \
+  && git -C "$SW48E" rev-parse -q --verify refs/heads/feat-el >/dev/null \
+  && git -C "$SW48EB" rev-parse -q --verify refs/heads/worktree-agent-sfb >/dev/null \
+  && git -C "$SW48EB" rev-parse -q --verify refs/heads/feat-elb >/dev/null \
+  && [ ! -e "$T/bk48em" ]; then
+  ok "P48(e)(ii): --repo A --repo B --apply-eligible --all exits 2 and removes nothing in either repo"
+else
+  bad "P48(e)(ii): multi-repo --apply-eligible --all (rc=$rc_48em, out='$out_48em', err='$err_48em')"
+fi
+
+# P48(f) A SAFE tree plus an eligible HOLD tree: both removed.
+mk_repo elig48f && [ -d "$T/elig48f" ] || bad "P48(f) setup: mk_repo elig48f"
+SW48F="$T/elig48f"
+add_tree elig48f sf && [ -d "$SW48F/.claude/worktrees/sf" ] || bad "P48(f) setup: add_tree sf"
+add_tree elig48f el origin/main feat-el && [ -d "$SW48F/.claude/worktrees/el" ] || bad "P48(f) setup: add_tree el"
+echo log48f > "$SW48F/.claude/worktrees/el/run.log" && [ -f "$SW48F/.claude/worktrees/el/run.log" ] || bad "P48(f) setup: run.log"
+out_48f=$(SYG_WORKTREE_ELIGIBLE_REASONS="branch-name ignored" SYG_WORKTREE_BACKUP_DIR="$T/bk48f" "$TOOL" --repo "$SW48F" --apply-eligible); rc_48f=$?
+shopt -s nullglob
+bk48f_dirs=("$T/bk48f"/*/elig48f--el--[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f])
+shopt -u nullglob
+if [ "$rc_48f" -eq 0 ] \
+  && [ ! -e "$SW48F/.claude/worktrees/sf" ] && [ ! -e "$SW48F/.claude/worktrees/el" ] \
+  && ! git -C "$SW48F" rev-parse -q --verify refs/heads/worktree-agent-sf >/dev/null \
+  && ! git -C "$SW48F" rev-parse -q --verify refs/heads/feat-el >/dev/null \
+  && grep -q "^backups: $T/bk48f/" <<<"$out_48f" \
+  && [ "${#bk48f_dirs[@]}" -eq 1 ] && [ -d "${bk48f_dirs[0]}" ]; then
+  ok "P48(f): --apply-eligible removes both SAFE tree and eligible HOLD tree (with backup), deletes branches, exits 0"
+else
+  bad "P48(f): SAFE + eligible HOLD (rc=$rc_48f, dirs=${#bk48f_dirs[@]})"; printf '%s\n' "$out_48f"
+fi
+
+# P48(g) Two repos via --repo A --repo B: each repo's eligible tree removed, an ineligible one kept.
+mk_repo elig48ga && mk_repo elig48gb && [ -d "$T/elig48ga" ] && [ -d "$T/elig48gb" ] || bad "P48(g) setup: mk_repo elig48ga/b"
+SW48GA="$T/elig48ga"
+SW48GB="$T/elig48gb"
+add_tree elig48ga ela origin/main feat-ela && [ -d "$SW48GA/.claude/worktrees/ela" ] || bad "P48(g) setup: ela"
+add_tree elig48ga ina && echo u > "$SW48GA/.claude/worktrees/ina/u.txt" || bad "P48(g) setup: ina"
+add_tree elig48gb elb && echo l > "$SW48GB/.claude/worktrees/elb/app.log" || bad "P48(g) setup: elb"
+add_tree elig48gb inb && echo d > "$SW48GB/.claude/worktrees/inb/a.txt" || bad "P48(g) setup: inb"
+out_48g=$(SYG_WORKTREE_ELIGIBLE_REASONS="branch-name ignored" SYG_WORKTREE_BACKUP_DIR="$T/bk48g" "$TOOL" --repo "$SW48GA" --repo "$SW48GB" --apply-eligible); rc_48g=$?
+shopt -s nullglob
+bk48ga_dirs=("$T/bk48g"/*/elig48ga--ela--[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f])
+bk48gb_dirs=("$T/bk48g"/*/elig48gb--elb--[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f])
+shopt -u nullglob
+if [ "$rc_48g" -eq 0 ] \
+  && [ ! -e "$SW48GA/.claude/worktrees/ela" ] && [ -d "$SW48GA/.claude/worktrees/ina" ] \
+  && [ ! -e "$SW48GB/.claude/worktrees/elb" ] && [ -d "$SW48GB/.claude/worktrees/inb" ] \
+  && ! git -C "$SW48GA" rev-parse -q --verify refs/heads/feat-ela >/dev/null \
+  && git -C "$SW48GA" rev-parse -q --verify refs/heads/worktree-agent-ina >/dev/null \
+  && ! git -C "$SW48GB" rev-parse -q --verify refs/heads/worktree-agent-elb >/dev/null \
+  && git -C "$SW48GB" rev-parse -q --verify refs/heads/worktree-agent-inb >/dev/null \
+  && grep -q "^backups: $T/bk48g/" <<<"$out_48g" && ! grep -q '^sweep plan:' <<<"$out_48g" \
+  && [ "${#bk48ga_dirs[@]}" -eq 1 ] && [ "${#bk48gb_dirs[@]}" -eq 1 ] \
+  && grep -qx '  not eligible: \.claude/worktrees/ina (untracked-new)' <<<"$out_48g" \
+  && grep -qx '  not eligible: \.claude/worktrees/inb (dirty)' <<<"$out_48g"; then
+  ok "P48(g): multi-repo --apply-eligible removes each repo's eligible tree with backup and keeps ineligible ones (exit 0)"
+else
+  bad "P48(g): multi-repo --apply-eligible (rc=$rc_48g, bk_a=${#bk48ga_dirs[@]}, bk_b=${#bk48gb_dirs[@]})"; printf '%s\n' "$out_48g"
+fi
+
+# P48(g)(ii) Two repos, knob 'branch-name dirty': the 'dirty is never eligible' warning appears exactly once on stderr.
+out_48gw=$(SYG_WORKTREE_ELIGIBLE_REASONS="branch-name dirty" SYG_WORKTREE_BACKUP_DIR="$T/bk48gw" "$TOOL" --repo "$SW48GA" --repo "$SW48GB" --apply-eligible 2>"$T/p48gw.err"); rc_48gw=$?
+err_48gw=$(cat "$T/p48gw.err")
+if [ "$rc_48gw" -eq 0 ] \
+  && [ "$err_48gw" = "safe-worktree-clean: SYG_WORKTREE_ELIGIBLE_REASONS: dirty is never eligible; ignored" ] \
+  && [ "$(grep -cx 'safe-worktree-clean: SYG_WORKTREE_ELIGIBLE_REASONS: dirty is never eligible; ignored' <<<"$err_48gw")" -eq 1 ] \
+  && [ -d "$SW48GA/.claude/worktrees/ina" ] && [ -d "$SW48GB/.claude/worktrees/inb" ] \
+  && [ ! -e "$T/bk48gw" ]; then
+  ok "P48(g)(ii): multi-repo --apply-eligible with knob 'branch-name dirty' prints the 'dirty is never eligible' warning exactly once on stderr"
+else
+  bad "P48(g)(ii): multi-repo warn once (rc=$rc_48gw, err='$err_48gw')"; printf '%s\n' "$out_48gw"
+fi
+
+# P48(h) --json: eligible_mode true, eligible_reasons sorted, per-tree eligible only on pre-demotion approvable trees (omitted on SAFE and non-approvable trees).
+mk_repo elig48h && [ -d "$T/elig48h" ] || bad "P48(h) setup: mk_repo elig48h"
+SW48H="$T/elig48h"
+add_tree elig48h sfh && [ -d "$SW48H/.claude/worktrees/sfh" ] || bad "P48(h) setup: sfh"
+add_tree elig48h elh origin/main feat-elh && [ -d "$SW48H/.claude/worktrees/elh" ] || bad "P48(h) setup: elh"
+add_tree elig48h inh && echo u > "$SW48H/.claude/worktrees/inh/u.txt" || bad "P48(h) setup: inh"
+add_tree elig48h lkh && git -C "$SW48H" worktree lock "$SW48H/.claude/worktrees/lkh" || bad "P48(h) setup: lkh"
+out_48h=$(SYG_WORKTREE_ELIGIBLE_REASONS="untracked-differs branch-name ignored" SYG_WORKTREE_BACKUP_DIR="$T/bk48h" "$TOOL" --repo "$SW48H" --apply-eligible --json); rc_48h=$?
+shopt -s nullglob
+bk48h_dirs=("$T/bk48h"/*/elig48h--elh--[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f])
+shopt -u nullglob
+if [ "$rc_48h" -eq 0 ] \
+  && [ ! -e "$SW48H/.claude/worktrees/sfh" ] && [ ! -e "$SW48H/.claude/worktrees/elh" ] \
+  && [ -d "$SW48H/.claude/worktrees/inh" ] && [ -d "$SW48H/.claude/worktrees/lkh" ] \
+  && ! git -C "$SW48H" rev-parse -q --verify refs/heads/worktree-agent-sfh >/dev/null \
+  && ! git -C "$SW48H" rev-parse -q --verify refs/heads/feat-elh >/dev/null \
+  && git -C "$SW48H" rev-parse -q --verify refs/heads/worktree-agent-inh >/dev/null \
+  && git -C "$SW48H" rev-parse -q --verify refs/heads/worktree-agent-lkh >/dev/null \
+  && [ "${#bk48h_dirs[@]}" -eq 1 ] && [ -d "${bk48h_dirs[0]}" ] \
+  && python3 -c '
+import json, sys
+d = json.loads(sys.argv[1])
+assert d["eligible_mode"] is True, d.get("eligible_mode")
+assert d["eligible_reasons"] == ["branch-name", "ignored", "untracked-differs"], d.get("eligible_reasons")
+by_name = {t["path"].rsplit("/", 1)[-1]: t for t in d["worktrees"]}
+assert by_name["sfh"]["verdict"] == "SAFE" and by_name["sfh"]["approvable"] is False and "eligible" not in by_name["sfh"]
+assert by_name["sfh"]["action"] == "removed, branch worktree-agent-sfh deleted", by_name["sfh"]["action"]
+assert by_name["elh"]["approvable"] is True and by_name["elh"]["eligible"] is True
+assert by_name["elh"]["action"] and by_name["elh"]["action"].startswith("backed up to " + sys.argv[2] + "/")
+assert by_name["inh"]["approvable"] is True and by_name["inh"]["eligible"] is False
+assert by_name["lkh"]["approvable"] is False and "eligible" not in by_name["lkh"]
+' "$out_48h" "$T/bk48h"; then
+  ok "P48(h): --apply-eligible --json sets eligible_mode=true, sorted eligible_reasons, and eligible only on pre-demotion approvable trees (omitted on removed SAFE and non-approvable trees)"
+else
+  bad "P48(h): --apply-eligible --json (rc=$rc_48h, dirs=${#bk48h_dirs[@]})"; printf '%s\n' "$out_48h"
+fi
+
+exit $fail
+}
+phase_74
