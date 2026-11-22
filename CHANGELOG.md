@@ -6,12 +6,12 @@ All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY
 
 ### Features
 
-- **skills:** `testing-discipline`, a measure-then-fix procedure for slow suites (time the suite and its slowest tests, fix in a fixed order, record before and after under stated conditions) and a checklist for writing tests well; its description names the triggers (TASK-101). (#PR)
-- **bin:** `suite-time`, a runner wrapper that records wall time, child CPU, load and free memory per run to a TSV log, warns on over-budget, mostly-waiting and regressed runs, ranks JUnit testcases (`slowest`) and tails the log (`log`) (TASK-101). (#PR)
+- **skills:** `testing-discipline`, a measure-then-fix procedure for slow suites (time the suite and its slowest tests, fix in a fixed order, record before and after under stated conditions) and a checklist for writing tests well; its description names the triggers (TASK-101). (#373)
+- **bin:** `suite-time`, a runner wrapper that records wall time, child CPU, load and free memory per run to a TSV log, warns on over-budget, mostly-waiting and regressed runs, ranks JUnit testcases (`slowest`) and tails the log (`log`) (TASK-101). (#373)
 
 ### Chores
 
-- **backlog:** file TASK-102 (#372 review lows), TASK-103 (lossy-pipe-guard flags a runner's --help read) and TASK-104 (plugin-release-check counts /clear as a plugin refresh). (#PR)
+- **backlog:** file TASK-102 (#372 review lows), TASK-103 (lossy-pipe-guard flags a runner's --help read) and TASK-104 (plugin-release-check counts /clear as a plugin refresh). (#373)
 
 ## 0.3.206 - 2026-11-22
 
