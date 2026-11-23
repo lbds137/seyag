@@ -43,6 +43,10 @@
 #   - Command-text scope only: a wrapper script that pushes is invisible.
 #   - `git push` with a remote's push refspec config or `push.default=matching`
 #     is judged as tree-dependent when no refspec is given.
+#   - Git aliases (`git ci`, `git -c alias.p=push p`) are not judged, and the
+#     prefilter skips a command whose only commit or push is an alias.
+#   - A bare push in a linked worktree can trip cwd-drift-guard and this guard
+#     in the same call, so it may take two re-runs.
 #
 # FAIL-OPEN:
 #   No session id (or an invalid one), an invalid agent id, unreadable or
@@ -78,7 +82,7 @@ TOOL_NAME='' CMD='' CWD='' SESSION_ID='' AGENT_ID=''
 [ -n "$CWD" ] || exit 0
 
 case "$CMD" in
-  *commit*|*push*|*create*) ;;
+  *commit*|*push*|*pr*create*) ;;
   *) exit 0 ;;
 esac
 
