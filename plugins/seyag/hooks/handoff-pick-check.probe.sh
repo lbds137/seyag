@@ -662,6 +662,14 @@ mktx_bash "$TMP/pick-nl-none.jsonl" "$HANDOFF_CALL" "Unit 3 is landed."
 check 2 "multi-line SYG_PICK_CMD: no pick still blocks with the old title" "$TMP/pick-nl-none.jsonl" "" \
   'handoff written without a next-session pick' '!handoff written without running the pick command'
 
+# Order within one record is not checked (accepted, see the hook header). The
+# multi-line value above is still exported, so restore the single-word command.
+export SYG_PICK_CMD='pick-note'
+f="$TMP/pick-before-handoff-same-record.jsonl"; : > "$f"; tx_user "$f"
+tx_bash "$f" t1 "pick-note keep && $HANDOFF_CALL"; tx_result "$f" t1
+tx_text "$f" "Handoff on disk."
+check 0 "emitter: pick before the handoff inside one record counts (order within a record unchecked, accepted)" "$f"
+
 # Mode agreement with session-start.sh: whitespace-only is unset in both; any
 # other single-line value is emitter mode, even one shlex cannot split.
 export SYG_PICK_CMD='   '

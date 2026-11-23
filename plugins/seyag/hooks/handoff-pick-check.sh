@@ -47,7 +47,11 @@
 # reminder. A matched argv inside a short-circuited chain (`true || <cmd>
 # clear`) counts, `is_error` describes the whole Bash call, the last-call
 # position is not checked, and the emitter's own record (not this gate) is
-# what a machine acts on. A whitespace-only value is unset in both hooks; any
+# what a machine acts on. The basename match is deliberate in both directions:
+# any directory's `<cmd>` counts, and a bare-name call counts when the value is
+# a path. Order inside one record is not checked: `<cmd> keep && <handoff>` and
+# an emitter block placed before the handoff block in the same record both
+# count. A whitespace-only value is unset in both hooks; any
 # other single-line value turns emitter mode on (an unbalanced quote falls back
 # to a whitespace split; an empty first word matches no call).
 #
@@ -364,7 +368,7 @@ PICK_RE = re.compile(r"(?<![\w/])/(?:clear|compact)\b|\bkeep\b", re.I)
 # Emitter mode (SYG_PICK_CMD): the pick is the recorded call, not a text token.
 emitter_words = None
 raw_pick_cmd = os.environ.get("PICK_CMD", "")
-if raw_pick_cmd.strip():
+if raw_pick_cmd.strip(" \t\n\r\v\f"):
     # Any value SessionStart advertises (non-blank, single-line) turns emitter
     # mode on, so the two hooks never disagree on the mode: an unbalanced quote
     # falls back to a whitespace split, and an empty first word (`''`) matches

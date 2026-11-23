@@ -156,8 +156,8 @@ These add to the global ask-first list in `~/.claude/CLAUDE.md`.
 
 ## Sessions and handoffs
 
-- Before any boundary (a refresh, `/clear`, `/compact`, the end of a session), write the handoff to disk (the role file's Handoff and Next, or the project's own status file) and say that it's written. `/clear` keeps nothing, and `/compact` keeps only a lossy summary.
-- Before a session ends or the machine restarts, move recovery-critical files out of job tmp (`$CLAUDE_JOB_DIR/tmp` — it dies with the job) and `/tmp` (a reboot may erase it).
+- Before any boundary (a refresh, `/clear`, `/compact`, the end of a session), write the handoff to disk (the role file's Handoff and Next, or the project's own status file) and say that it's written.
+- Before a session ends or the machine restarts, move recovery-critical files out of job tmp (`$CLAUDE_JOB_DIR/tmp` — it dies with the job) and `/tmp`.
 - Past about a week in one session, name it at a clean boundary and suggest a refresh; summaries of summaries drift from disk. Frame it as hygiene, never the clock or her.
 - At each finished unit, handoff on disk, name one pick: `/clear` (unrelated next unit), `/compact` (same thread) or keep (reply due within the hour; warm cache); big-picture leans `/clear`. She runs it, unless SessionStart names a pick command (then run it last, no pick in the reply). Never schedule wakeups to keep the cache warm.
 
