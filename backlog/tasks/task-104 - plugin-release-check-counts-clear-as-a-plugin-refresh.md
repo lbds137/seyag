@@ -1,9 +1,11 @@
 ---
 id: TASK-104
 title: 'plugin-release-check: /clear is counted as a plugin refresh, but only /reload-plugins or a new process re-reads hook registration'
-status: To Do
-assignee: []
+status: Done
+assignee:
+  - seyag
 created_date: '2026-11-22T22:40:00Z'
+updated_date: '2026-11-23T00:40:00Z'
 labels:
   - peer-ask
   - bug
@@ -34,3 +36,9 @@ Fix:
 
 Open gap: the repro used `--plugin-dir`. A second case on a directory-marketplace install would confirm that loader too.
 <!-- SECTION:DESCRIPTION:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Fix 1 shipped in 0.3.208: only `/reload-plugins` and process start count; probe canaries 10, 15 and 16 pin `/clear` as a non-refresh. Fix 2 (record what the session loaded) is ruled out: `startedAt` already gives the process-start case, and no hook event fires on `/reload-plugins` (one real transcript checked: no hook attachment follows the reload line), so a per-session record would carry nothing the command inference lacks. Promote again if a release adds a hook event that fires on reload. The directory-marketplace loader case is unverified; it doesn't change the fix, since the check now counts fewer refreshes, not more.
+<!-- SECTION:FINAL_SUMMARY:END -->

@@ -32,7 +32,7 @@ OPENROUTER_API_KEY	internal	misc	unset	Example key name mentioned in keys valida
 OPENROUTER_CREDITS_URL	internal	statusline	https://openrouter.ai/api/v1/credits	Test seam overriding the OpenRouter credits endpoint URL in statusline.	-
 PLUGIN_RELEASE_AGENTS_CMD	user	release	claude agents --json	Command run by plugin-release-check to list live Claude Code sessions as a JSON array.	-
 PLUGIN_RELEASE_FETCH	user	release	1	Set to 0 to skip git fetch --all before comparing the checkout version against upstream in plugin-release-check.	-
-PLUGIN_RELEASE_PROJECTS	user	release	$HOME/.claude/projects	Projects transcript root searched by plugin-release-check for /reload-plugins and /clear refresh lines.	path
+PLUGIN_RELEASE_PROJECTS	user	release	$HOME/.claude/projects	Projects transcript root searched by plugin-release-check for /reload-plugins refresh lines.	path
 PLUGIN_RELEASE_UPSTREAM_REF	user	release	@{upstream}	Git ref compared against the local plugin.json version in plugin-release-check.	-
 PRICE_TABLE_MANAGED_FILE	user	routing	/etc/claude-code/managed-settings.json	Managed settings JSON path that price-table --merge and --apply read; --apply prints a sudo install command targeting it (the tool never writes it).	path
 PRICE_TABLE_MODELS_URL	internal	routing	https://openrouter.ai/api/v1/models	Test seam overriding the OpenRouter models endpoint URL for price-table --sync.	-
