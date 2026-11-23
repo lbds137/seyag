@@ -5,10 +5,10 @@ All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY
 ## 0.3.213 - 2026-11-23
 
 ### Improvements
-- **delegation:** the driver runs every command a spec quotes and every must-fail input before dispatch; premise-ledger absence rows cite their sweep and positive control; the reviewer is told to attack the premise ledger; gates over a few minutes are the driver's to run after the report (TASK-109) (#383)
+- **delegation:** the driver runs every command a spec quotes and every must-fail input before dispatch; premise-ledger absence rows cite their sweep and positive control; the reviewer is told to attack the premise ledger; gates over a few minutes are the driver's to run after the report, and the implementer contract skips them (TASK-109) (#383)
 
 ### Chores
-- **backlog:** file TASK-121: handoff-pick-check should block once when a turn names the next unit but neither starts it nor runs the pick command (#383)
+- **backlog:** file TASK-121: handoff-pick-check should block once when a turn names the next unit but neither starts it nor runs the pick command, and on notification-only turns or a claimed-but-unrun pick (#383)
 
 ### Tests
 - **dispatch-spec-ledger-gate:** case 17 fixtures carry the new absence-claim template row (#383)
