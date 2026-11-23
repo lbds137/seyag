@@ -2,15 +2,19 @@
 
 All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY-MM-DD>` section per released version; under it, `###` categories in fixed order — Breaking Changes, Features, Bug Fixes, Improvements, Chores, Tests — empty ones omitted; items are `- **scope:** description (#PR)`, written from the version's merged commit subjects.
 
-## 0.3.210 - 2026-11-22
+## 0.3.210 - 2026-11-23
 
 ### Features
 
-- **push-tree-guard:** blocks once a `git push` that publishes HEAD, or a `gh pr create` without `--head`, that runs in a different worktree of the same repo than the session's last `git commit` (the main checkout counts), naming both trees; the acknowledged (commit tree, push tree) pair then passes; `SYG_DISABLE=push-tree` turns it off (TASK-61). (#PR)
+- **push-tree-guard:** blocks once a `git push` that publishes HEAD, or a `gh pr create` without `--head`, that runs in a different worktree of the same repo than the session's last `git commit` (the main checkout counts), naming both trees; the acknowledged (commit tree, push tree) pair then passes; `SYG_DISABLE=push-tree` turns it off (TASK-61). (#379)
+
+### Chores
+
+- **backlog:** close TASK-61; file TASK-109..117 (re-queued session-mining rows); TASK-20 notes the move. (#379)
 
 ### Tests
 
-- **push-tree-guard:** `hooks/push-tree-guard.probe.sh` pins the block, the pass cases, the acknowledged re-run and the `run.sh` toggle in a hermetic repo with two linked worktrees and an unrelated repo. (#PR)
+- **push-tree-guard:** `hooks/push-tree-guard.probe.sh` pins the block, the pass cases, the acknowledged re-run and the `run.sh` toggle in a hermetic repo with linked worktrees and an unrelated repo. (#379)
 
 ## 0.3.209 - 2026-11-22
 
