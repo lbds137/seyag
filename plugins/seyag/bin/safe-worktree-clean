@@ -58,8 +58,8 @@
 #               tree), and no gitlink path is a symlink or resolves outside the tree
 #               (judge_submodules, before git -C in that path) -> HOLD:gitfile
 # Approvable HOLD trees and plan id: a HOLD tree under <repo>/.claude/worktrees/ whose reason
-# codes are all in {unmerged, dirty, untracked-new, untracked-differs, ignored, branch-name,
-# detached-unreferenced, worktree-refs, bisect-refs, rewritten-refs} and that has no unmerged
+# codes are all in {unmerged, pr-merged, dirty, untracked-new, untracked-differs, ignored,
+# branch-name, detached-unreferenced, worktree-refs, bisect-refs, rewritten-refs} and that has no unmerged
 # index entries
 # (`git ls-files -u`) is approvable ("approvable": true in --json; listed after the HOLD report as
 # `  approvable with --apply-hold: <rel path>`); any other code or an unmerged index entry keeps
@@ -92,7 +92,10 @@
 # SYG_WORKTREE_BACKUP_ALLOW_VOLATILE=1) before removing anything; a plan mismatch, a rejected
 # backup dir, or a refused commit-carrying plan exits 2 and removes nothing (SAFE trees included).
 # A plan containing a commit-carrying tree refuses with one line per offending tree (naming the
-# tree and its commit count beyond <base>) unless the same invocation names that tree with
+# tree and its commit count beyond <base>: `N commit(s) not on <base>`, `? commit(s) not on
+# <base>` when the count failed, or, for a tree held only by per-worktree refs, `N branch
+# commit(s) not on <base>; per-worktree refs hold more` (`?` in place of N when the count
+# failed; --json carries `commits_known: false` then, with `commits: 0` as a placeholder)) unless the same invocation names that tree with
 # --only; with --only, the plan is recomputed over exactly the named trees and must equal the
 # approved id, so a change to an unrelated tree does not invalidate the approval — the flow for
 # such trees is a scoped dry run (--only <tree>...), then --apply-hold <id> with the same --only.
@@ -125,14 +128,35 @@
 # with the same verified backup as --apply-hold, every approvable HOLD tree whose reason codes
 # are all in SYG_WORKTREE_ELIGIBLE_REASONS (whitespace-separated; unset or empty removes no HOLD
 # tree; refused from project .claude/seyag.toml) intersected with the hard universe
-# {branch-name, ignored, untracked-new, untracked-differs} (a constant in this tool, never
-# configurable; commit-carrying codes, dirty, live-cwd, lock and every other code are never
-# eligible and warn once per code on stderr). Demoted trees stay in the HOLD report with a
+# {branch-name, ignored, untracked-new, untracked-differs, pr-merged} (a constant in this tool,
+# never configurable; commit-carrying codes, dirty, live-cwd, lock and every other code are
+# never eligible and warn once per code on stderr). Demoted trees stay in the HOLD report with a
 # `  not eligible: <rel path> (<codes>)` line (--json adds `"eligible_mode": true`,
 # `"eligible_reasons": [...]` and, on trees whose pre-demotion `"approvable"` is true,
 # `"eligible"`, keeping pre-demotion `"approvable"`).
 # Across several repos, each child applies its own eligibility with no sweep plan. A permission
 # allow rule for auto-removal should name exactly `safe-worktree-clean --apply-eligible`.
+# pr-merged (a rebase- or squash-merged PR leaves its branch's commits on no ref of <base>, so
+# the tree is judged unmerged): after judging a tree whose codes are all in {unmerged,
+# detached-unreferenced, worktree-refs, bisect-refs, rewritten-refs, branch-name, untracked-new,
+# untracked-differs, ignored} and include unmerged or detached-unreferenced, one
+# `gh api --hostname <host> repos/<owner/repo>/commits/<HEAD>/pulls` call (20 s timeout, stdin
+# closed, no prompts) asks the forge for the PRs holding the tree's HEAD; <base> must be
+# <remote>/<branch> of a configured remote, whose https, ssh:// or git@host:owner/repo URL names
+# the host and repo. A PR counts only when its head.sha equals the tree's full HEAD (a merged
+# PR's intermediate commits return it too), merged_at is set and base.ref is <branch>. Then
+# unmerged/detached-unreferenced becomes `pr-merged` ("HEAD <sha12> is the head commit of PR
+# #N, merged into <branch>"), and a *-refs code is dropped when every tip in its namespace is
+# an ancestor of that head, <base> or another branch; other codes stay. pr-merged is approvable
+# and joins the --apply-eligible universe (opt-in through SYG_WORKTREE_ELIGIBLE_REASONS) but is
+# not commit-carrying: the forge keeps the PR's head commit and the backup bundles it. Every
+# failure (no gh, timeout, non-zero exit, bad JSON, no match, a remote URL of another shape)
+# leaves the reasons exactly as judged, so a plan id never moves because of the lookup;
+# SYG_WORKTREE_PR_CHECK=0 skips the call, =1 also prints `safe-worktree-clean: pr check:
+# <rel path>: <why>` on stderr for each failure.
+# In a multi-repo sweep one SYG_WORKTREE_BASE applies to every repo and project scope is
+# refused for it, so a repo that integrates on another branch is swept separately with its own
+# env.
 # <base> is --base REF, else SYG_WORKTREE_BASE, else origin/<default branch> (origin/HEAD,
 # else origin/main), compared as the local ref stands (fetch first for a fresh verdict);
 # a configured ref that does not resolve, or no default ref, makes every tree HOLD:no-base;
@@ -182,7 +206,7 @@ plan_summary_line() { # $1 "hold plan <id>" | "sweep plan <id>", $2... display t
 }
 
 APPLY=false APPLY_HOLD="" APPLY_ELIGIBLE=false ALL=false LOCKS=false LOCKS_APPLY=false JSON=false BASE_ARG="" BASE_SRC=""
-readonly -a ELIGIBLE_UNIVERSE=(branch-name ignored untracked-new untracked-differs)
+readonly -a ELIGIBLE_UNIVERSE=(branch-name ignored untracked-new untracked-differs pr-merged)
 REPOS=() ONLY_RAW=() ONLY_REAL=()
 
 add_repos_file() {
@@ -424,7 +448,7 @@ if [ ${#REPOS[@]} -gt 1 ]; then
     {
       printf '%s\0' "${CHILD_JSONS[@]}"
     } | python3 -I -B -c '
-import json, sys
+import json, os, sys
 plan_id = sys.argv[1]
 data = sys.stdin.buffer.read().decode("utf-8", "surrogateescape").split("\0")[:-1]
 REF_ONLY = ("worktree-refs", "bisect-refs", "rewritten-refs")
@@ -432,18 +456,21 @@ HEAD_BASED = ("unmerged", "detached-unreferenced")
 refused = False
 for x in data:
     d = json.loads(x)
-    codes = {w["path"]: [r["code"] for r in w.get("reasons") or []]
+    # Both sides are keyed by real path so a symlinked worktree dir cannot split them.
+    codes = {os.path.realpath(w["path"]): [r["code"] for r in w.get("reasons") or []]
              for w in d.get("worktrees") or []}
     for t in d.get("hold_plan_commit_carrying") or []:
         refused = True
-        rc = codes.get(t["path"], [])
+        rc = codes.get(os.path.realpath(t["path"]), [])
+        # A failed count carries commits: 0 and commits_known: false; print "?", never that 0.
+        n = "%d" % t["commits"] if t.get("commits_known", True) else "?"
         if any(c in REF_ONLY for c in rc) and not any(c in HEAD_BASED for c in rc):
             # The count is branch-commits-beyond-base; the orphan commits of a ref-only tree
             # live in the per-worktree refs, so the line says the count does not cover them.
-            count_part = "%d branch commit(s) not on %s; per-worktree refs hold more" \
-                % (t["commits"], t["base"])
+            count_part = "%s branch commit(s) not on %s; per-worktree refs hold more" \
+                % (n, t["base"])
         else:
-            count_part = "%d commit(s) not on %s" % (t["commits"], t["base"])
+            count_part = "%s commit(s) not on %s" % (n, t["base"])
         print("safe-worktree-clean: --apply-hold refused: plan %s includes commit-carrying tree %s (%s) — only on the owner'\''s yes for that tree: re-run the dry run and apply with --only <tree>"
               % (plan_id, t["path"], count_part), file=sys.stderr)
 if refused:
@@ -863,6 +890,11 @@ z_list() {
 
 REASONS=()
 hold() { REASONS+=("$1"$'\t'"$2"); }
+# What judge_git last saw per tree, read by pr_merged_check: each per-worktree ref namespace's
+# commit tips (space-separated shas) and the rev-list --exclude args that keep the tree's own
+# branch out of the "another branch" set. Reset before every tree.
+declare -A PM_NS_TIPS=()
+PM_WT_EXCL=()
 
 # True when BASE contains the branch $1's net changes (check 3, run only when git cherry
 # reported + commits): no path the branch changed from its merge-base with BASE differs
@@ -975,6 +1007,8 @@ judge_git() {
       [ -n "$first_ns_ref" ] || first_ns_ref=$wt_ref
     done <<<"$wt_refs"
     if [ ${#ns_tips[@]} -gt 0 ]; then
+      PM_NS_TIPS[$ns]="${ns_tips[*]}"
+      PM_WT_EXCL=("${wt_excl[@]}")
       if ! out=$(git -C "$t" rev-list -n 1 "${ns_tips[@]}" --not "$BASE" "${wt_excl[@]}" --branches 2>&1); then
         hold git-error "git rev-list for refs/$ns/ failed: ${out//$'\n'/ }"
       elif [ -n "$out" ]; then
@@ -1174,10 +1208,130 @@ if [ ${#TREES[@]} -gt 0 ]; then
   done <<<"$scan"
 fi
 
+# The forge half of the pr-merged resolution (see the header). PR_NOTE_ON is true only when
+# SYG_WORKTREE_PR_CHECK is exactly 1: a failed lookup then says why on stderr; default runs
+# stay quiet, and a failure never changes a reason (the reason text feeds the plan id).
+PR_NOTE_ON=false
+[ "${SYG_WORKTREE_PR_CHECK:-}" = 1 ] && PR_NOTE_ON=true
+PR_RESOLVED=false PR_HOST="" PR_REPO="" PR_BRANCH="" PR_WHY=""
+pr_note() { # $1 tree, $2 why
+  if $PR_NOTE_ON; then printf 'safe-worktree-clean: pr check: %s: %s\n' "$1" "$2" >&2; fi
+  return 0
+}
+# Once per run: the forge host, owner/repo and branch for BASE (<remote>/<branch>, the longest
+# configured remote that prefixes it) from that remote's URL (https, ssh:// or scp-like).
+# Returns 1 with PR_WHY set when the shape is not one of those.
+pr_resolve_repo() {
+  if $PR_RESOLVED; then [ -z "$PR_WHY" ]; return; fi
+  PR_RESOLVED=true
+  local r best="" url
+  local re_name='[A-Za-z0-9_][A-Za-z0-9._-]*'
+  local re_path="($re_name/$re_name)/?"
+  local re_http="^https?://([^/@]+@)?([A-Za-z0-9.-]+)/$re_path\$"
+  local re_ssh="^ssh://$re_name@([A-Za-z0-9.-]+)/$re_path\$"
+  local re_scp="^$re_name@([A-Za-z0-9.-]+):$re_path\$"
+  if [ -z "$BASE" ]; then PR_WHY="no base"; return 1; fi
+  while IFS= read -r r; do
+    [ -n "$r" ] || continue
+    case $BASE in
+      "$r"/?*) if [ ${#r} -gt ${#best} ]; then best=$r; fi ;;
+    esac
+  done < <(git -C "$MAIN" remote 2>/dev/null)
+  if [ -z "$best" ]; then PR_WHY="base $BASE is not <remote>/<branch> of a configured remote"; return 1; fi
+  PR_BRANCH=${BASE#"$best"/}
+  if ! url=$(git -C "$MAIN" remote get-url "$best" 2>/dev/null) || [ -z "$url" ]; then
+    PR_WHY="remote $best has no URL"; return 1
+  fi
+  if [[ $url =~ $re_http ]]; then
+    PR_HOST=${BASH_REMATCH[2]} PR_REPO=${BASH_REMATCH[3]}
+  elif [[ $url =~ $re_ssh ]]; then
+    PR_HOST=${BASH_REMATCH[1]} PR_REPO=${BASH_REMATCH[2]}
+  elif [[ $url =~ $re_scp ]]; then
+    PR_HOST=${BASH_REMATCH[1]} PR_REPO=${BASH_REMATCH[2]}
+  else
+    PR_WHY="remote $best URL is not an https, ssh:// or git@host:owner/repo form"; return 1
+  fi
+  PR_REPO=${PR_REPO%.git}
+  return 0
+}
+# Tree $1, after judge_git: when its only commit-carrying holds are unmerged or
+# detached-unreferenced (plus ref and approvable-by-eligibility codes) and the forge reports a
+# merged PR into BASE's branch whose head commit is exactly the tree's HEAD, rewrite REASONS:
+# that entry becomes pr-merged, and a *-refs entry is dropped when its tips are all reachable
+# from the merged head, BASE or another branch. Anything else leaves REASONS untouched.
+pr_merged_check() {
+  local i=$1 t=${WT_PATH[$1]} head=${WT_HEAD[$1]} tr e c out rc=0 prc=0 num ns
+  local has_head=false
+  local -a new=() tip_arr=()
+  tr=${t#"$MAIN"/}
+  [ "${SYG_WORKTREE_PR_CHECK:-1}" != 0 ] || return 0
+  for e in "${REASONS[@]}"; do
+    c=${e%%$'\t'*}
+    case $c in
+      unmerged | detached-unreferenced) has_head=true ;;
+      worktree-refs | bisect-refs | rewritten-refs | branch-name | untracked-new | untracked-differs | ignored) ;;
+      *) return 0 ;;
+    esac
+  done
+  $has_head || return 0
+  if ! [[ $head =~ ^[0-9a-f]{40}$ ]]; then pr_note "$tr" "HEAD is not a full 40-hex sha"; return 0; fi
+  if ! command -v gh >/dev/null 2>&1; then pr_note "$tr" "gh not found in PATH"; return 0; fi
+  if ! pr_resolve_repo; then pr_note "$tr" "$PR_WHY"; return 0; fi
+  out=$(GH_PROMPT_DISABLED=1 timeout 20 gh api --hostname "$PR_HOST" "repos/$PR_REPO/commits/$head/pulls" </dev/null 2>/dev/null) || rc=$?
+  if [ "$rc" -eq 124 ]; then pr_note "$tr" "gh api timed out after 20 s"; return 0; fi
+  if [ "$rc" -ne 0 ]; then pr_note "$tr" "gh api failed (exit $rc)"; return 0; fi
+  # A PR matches only on the full head sha (a merged PR's intermediate commits return the PR
+  # too), a non-empty merged_at and the base branch; the first match's number is printed.
+  num=$(printf '%s' "$out" | python3 -I -B -c '
+import json, sys
+sha, branch = sys.argv[1], sys.argv[2]
+try:
+    prs = json.load(sys.stdin)
+except Exception:
+    sys.exit(3)
+if not isinstance(prs, list):
+    sys.exit(3)
+for p in prs:
+    try:
+        if (p["head"]["sha"] == sha and isinstance(p.get("merged_at"), str) and p["merged_at"]
+                and p["base"]["ref"] == branch and isinstance(p["number"], int)):
+            print(p["number"])
+            sys.exit(0)
+    except (KeyError, TypeError):
+        continue
+sys.exit(4)
+' "$head" "$PR_BRANCH") || prc=$?
+  if [ "$prc" -eq 3 ]; then pr_note "$tr" "gh api output is not a JSON array"; return 0; fi
+  if [ "$prc" -ne 0 ] || [ -z "$num" ]; then pr_note "$tr" "no merged PR into $PR_BRANCH has head ${head:0:12}"; return 0; fi
+  for e in "${REASONS[@]}"; do
+    c=${e%%$'\t'*}
+    case $c in
+      unmerged | detached-unreferenced)
+        new+=("pr-merged"$'\t'"HEAD ${head:0:12} is the head commit of PR #$num, merged into $PR_BRANCH")
+        ;;
+      worktree-refs | bisect-refs | rewritten-refs)
+        ns=${c%-refs}
+        read -r -a tip_arr <<<"${PM_NS_TIPS[$ns]:-}"
+        if [ ${#tip_arr[@]} -gt 0 ] &&
+          out=$(git -C "$t" rev-list -n 1 "${tip_arr[@]}" --not "$BASE" "$head" "${PM_WT_EXCL[@]}" --branches 2>&1) &&
+          [ -z "$out" ]; then
+          : # every tip is an ancestor of the merged head, BASE or another branch
+        else
+          new+=("$e")
+        fi
+        ;;
+      *) new+=("$e") ;;
+    esac
+  done
+  REASONS=("${new[@]}")
+}
+
 # Judge every tree; record the verdict.
 V_IDX=() V_VERDICT=() V_REASONS=() V_APPROVABLE=() V_ACTION=() V_HOLD_REMOVED=()
 for i in "${TREES[@]}"; do
   REASONS=()
+  PM_NS_TIPS=()
+  PM_WT_EXCL=()
   t=${WT_PATH[$i]}
   if [ -n "${WT_PRUNABLE[$i]}" ]; then
     hold prunable "${WT_PRUNABLE[$i]}; the tree is gone, its branch is the owner's call"
@@ -1198,6 +1352,7 @@ for i in "${TREES[@]}"; do
       hold live-cwd "pid ${CWD_PID[$(realpath -m -- "$t")]} has its cwd inside the tree"
     fi
     judge_git "$i"
+    pr_merged_check "$i"
   fi
   V_IDX+=("$i")
   if [ ${#REASONS[@]} -eq 0 ]; then
@@ -1214,7 +1369,7 @@ for i in "${TREES[@]}"; do
         approvable=true
         for r_entry in "${REASONS[@]}"; do
           case "${r_entry%%$'\t'*}" in
-            unmerged | dirty | untracked-new | untracked-differs | ignored | branch-name | detached-unreferenced | worktree-refs | bisect-refs | rewritten-refs) ;;
+            unmerged | pr-merged | dirty | untracked-new | untracked-differs | ignored | branch-name | detached-unreferenced | worktree-refs | bisect-refs | rewritten-refs) ;;
             *) approvable=false; break ;;
           esac
         done
@@ -1389,7 +1544,8 @@ tree_state_sha() {
 
 # Plan id over approvable HOLD trees in path order, plus the exact list that id removes
 # (PLAN_TREES, printed by the summary line and the JSON) and its commit-carrying trees
-# (PLAN_CC: path, commit count beyond BASE, BASE, display count line — the --apply-hold
+# (PLAN_CC: path, commit count beyond BASE, whether that count is known (true/false; false
+# means the count failed and 0 is a placeholder), BASE, display count line — the --apply-hold
 # naming-refusal input).
 rel() { local p; p=$(realpath -m -- "$1"); printf '%s' "${p#"$MAIN"/}"; }
 HOLD_PLAN=""
@@ -1413,6 +1569,9 @@ if [ ${#app_lines[@]} -gt 0 ]; then
     cc=false has_ref=false has_head=false
     while IFS=$'\t' read -r cc_code _cc_detail; do
       case $cc_code in
+        # pr-merged is deliberately absent: the forge keeps the PR's head commit at the PR ref
+        # and the backup bundles it, so the tree carries nothing that exists nowhere else. The
+        # sweep parent's REF_ONLY/HEAD_BASED tuples (python, above) stay in step with this case.
         unmerged | detached-unreferenced) cc=true; has_head=true ;;
         worktree-refs | bisect-refs | rewritten-refs) cc=true; has_ref=true ;;
       esac
@@ -1434,6 +1593,7 @@ if [ ${#app_lines[@]} -gt 0 ]; then
       # refs, branch even with BASE) may refuse on a 0 branch count; the line then says so
       # ("branch commit(s) ... ; per-worktree refs hold more"). It names the tree either way.
       if [ -n "$cc_n" ]; then
+        cc_known=true
         if $ref_only; then
           cc_inner="$cc_n branch commit(s) not on $BASE; per-worktree refs hold more"
         else
@@ -1441,9 +1601,14 @@ if [ ${#app_lines[@]} -gt 0 ]; then
         fi
       else
         cc_n=0
-        cc_inner="? commit(s) not on $BASE"
+        cc_known=false
+        if $ref_only; then
+          cc_inner="? branch commit(s) not on $BASE; per-worktree refs hold more"
+        else
+          cc_inner="? commit(s) not on $BASE"
+        fi
       fi
-      PLAN_CC+=("$t"$'\t'"$cc_n"$'\t'"$BASE"$'\t'"$cc_inner")
+      PLAN_CC+=("$t"$'\t'"$cc_n"$'\t'"$cc_known"$'\t'"$BASE"$'\t'"$cc_inner")
     fi
   done
   HOLD_PLAN=$(
@@ -1908,9 +2073,11 @@ if $JSON; then
     cc_t=${cc_entry%%$'\t'*}
     cc_rest=${cc_entry#*$'\t'}
     cc_n=${cc_rest%%$'\t'*}
+    cc_rest=${cc_rest#*$'\t'}
+    cc_known=${cc_rest%%$'\t'*}
     cc_base=${cc_rest#*$'\t'}
     cc_base=${cc_base%%$'\t'*}
-    cc_wire+="$cc_t"$'\x1f'"$cc_n"$'\x1f'"$cc_base"$'\x1e'
+    cc_wire+="$cc_t"$'\x1f'"$cc_n"$'\x1f'"$cc_base"$'\x1f'"$cc_known"$'\x1e'
   done
   elig_wire=""
   for er in "${ELIGIBLE_SORTED[@]}"; do elig_wire+="$er"$'\x1e'; done
@@ -1935,8 +2102,9 @@ hold_plan_cc = []
 for e in cc_raw.split("\x1e"):
     if not e:
         continue
-    pth, cnt, bs = e.split("\x1f")
-    hold_plan_cc.append({"path": pth, "commits": int(cnt), "base": bs})
+    pth, cnt, bs, known = e.split("\x1f")
+    hold_plan_cc.append({"path": pth, "commits": int(cnt), "commits_known": known == "true",
+                         "base": bs})
 trees = []
 for k in range(int(n)):
     path, branch, verdict, raw_approvable, eligible, reasons, action = f[7 * k:7 * k + 7]

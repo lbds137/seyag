@@ -35,3 +35,15 @@ Open design points, for whoever builds it:
 
 Gate it with `tests/replay-stop-hook.sh` and sample its blocked set before it ships.
 <!-- SECTION:DESCRIPTION:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Status 2026-11-23: part 1 shipped in 0.3.214 (#384): handoff-pick-check blocks once when a background-task notification starts a turn that ends without re-running the pick command after an earlier clear/compact pick (the second shape above), toggle `stale-pick`.
+
+Part 2 (text triggers: "X is next" with no start, and a pick claimed as queued but never run) is deferred. Trigger: the next observed idle that part 1 misses, or a free slot after TASK-123. Measure precision on a replay first (`tests/replay-stop-hook.sh --since 7`).
+
+Council deferrals from the #384 review (gpt-6.2-sol), recorded as decided:
+- Pick request with no tool_result, or a non-executed `false && pick keep`, counts as a pick: DEFERRED. This is existing emitter-mode behaviour that both triggers share. Trigger: the next emitter-mode touch, or one observed false pass in a replay.
+- Same-entry pick vs handoff ordering (`off >= newest_write_off` at entry granularity): DEFERRED, existing behaviour, same trigger.
+<!-- SECTION:NOTES:END -->

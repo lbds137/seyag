@@ -2,6 +2,17 @@
 
 All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY-MM-DD>` section per released version; under it, `###` categories in fixed order — Breaking Changes, Features, Bug Fixes, Improvements, Chores, Tests — empty ones omitted; items are `- **scope:** description (#PR)`, written from the version's merged commit subjects.
 
+## Unreleased
+
+### Features
+- **safe-worktree-clean:** `pr-merged` resolution (TASK-122): a tree held as `unmerged` or `detached-unreferenced` whose HEAD is exactly the head commit of a PR the forge reports merged into the base's branch (one `gh api` lookup per tree, exact full-sha match, 20 s timeout, fail-closed with no `gh`, no network or an unparsable remote URL) now reports `pr-merged` instead; it is approvable, not commit-carrying, and opt-in through `SYG_WORKTREE_ELIGIBLE_REASONS`, so `--apply-eligible` can remove it with the usual backup. New user-only knob `SYG_WORKTREE_PR_CHECK` (0 skips the lookup, 1 also reports lookup failures on stderr).
+
+### Bug Fixes
+- **safe-worktree-clean:** the single-repo `?` commit count keeps the ref-only suffix (`? branch commit(s) not on <base>; per-worktree refs hold more`); a sweep's refusal line prints `?` instead of a real-looking `0` when the child's count failed (`commits_known` in `--json`); the sweep parent keys its reason lookup by real path; the header names the count forms; `--only` accepting the repo-relative path printed in the refusal is probed.
+
+### Tests
+- **safe-worktree-clean:** probes PM1-PM8 pin `pr-merged` (match, seven fail-closed negatives, untracked-new demotion, dirty skips the call, plan-id flip, refs re-check, non-forge remote, `--base origin/develop`); P44 drops a redundant assertion and P45 states what its git shim assumes.
+
 ## 0.3.214 - 2026-11-23
 
 ### Bug Fixes
