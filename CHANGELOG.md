@@ -2,6 +2,15 @@
 
 All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY-MM-DD>` section per released version; under it, `###` categories in fixed order — Breaking Changes, Features, Bug Fixes, Improvements, Chores, Tests — empty ones omitted; items are `- **scope:** description (#PR)`, written from the version's merged commit subjects.
 
+## 0.3.217 - 2026-11-23
+
+### Features
+- **change-class:** new stdlib bin that classifies a git tree diff as `exempt` (every changed path an ordinary file in a declared docs or ledger class) or `full` against a per-repo TOML policy (`.github/change-class.toml`, read from the base ref via `--policy-ref`); prints six `key=value` lines for `$GITHUB_OUTPUT` or JSON, fails to `full` on any error, unknown, limit, binary, mode, submodule, encoding, hard-denied control/agent/hook path or unclassed path, and replays historical base/head pairs in report mode (`change-class replay`). Inert until a repo invokes it; `mode = "report"` by default, so nothing skips until a policy says `enforce` (TASK-130 unit A). (#PR)
+- **change-lanes:** new skill: the three lanes for docs-only and bookkeeping changes (closeouts ride the unit's PR, opt-in direct ledger pushes behind a planned lane guard, prose docs by PR with in-run CI classification and the AI review kept), the policy format, trust rules and report-first rollout. (#PR)
+
+### Tests
+- **change-class:** hermetic probe covering renames, deletes, symlinks, gitlinks and hidden submodule bumps, exec bits, hard-denied control files (case-insensitive), limits, binary and non-UTF-8 paths, policy errors, `--policy-ref` vs the working tree, JSON, exit codes and replay. (#PR)
+
 ## 0.3.216 - 2026-11-23
 
 ### Bug Fixes

@@ -3,7 +3,7 @@ id: TASK-130
 title: >-
   Docs-only and bookkeeping change lanes: skill, change-class classifier,
   pre-push lane guard
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-11-23T21:35:00Z'
 labels:
@@ -41,9 +41,15 @@ Decided before the spec (2026-11-23, driver):
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Skill documents the three lanes, the decision table and the per-repo config
-- [ ] #2 change-class bin classifies a diff with the fail-to-full rules above, pinned by a probe including rename, symlink, mode-change, gitlink and control-file cases
+- [x] #1 Skill documents the three lanes, the decision table and the per-repo config
+- [x] #2 change-class bin classifies a diff with the fail-to-full rules above, pinned by a probe including rename, symlink, mode-change, gitlink and control-file cases
 - [ ] #3 pre-push lane guard is opt-in (toggle), chains the repo hook, and its probe covers create/delete/non-FF/merge/revert-hiding/config-widening cases
 - [ ] #4 Report-only replay against each adopting repo's history recorded before skips are enabled
 - [ ] #5 Replacement line for the global push rule's interim clause (a pointer to the skill) handed to the platform session, which owns that file
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Unit A (0.3.217): `change-class` bin, probe and `change-lanes` skill. Fresh-context review (Anthropic family; the author was Gemini) found and the fix round closed: gitlink bumps hidden by `ignore = all` / `diff.ignoreSubmodules` (now `--ignore-submodules=none`), crashes instead of full (deep TOML, huge timeout, non-UTF-8 replay stdin), `$` matching before a trailing newline, no raw/numstat cross-check, no `.`/`..`/empty segment check, unescaped TAB in replay rows, `--help` taken as an option value, and `git show` replaced by `git cat-file blob`. Ruled out: bounding regex and parse time with `--timeout` (polynomial work over a trusted base-ref policy; the git calls are where unbounded time lives). Next: the report-only replay (AC #4) against the five surveyed repos' last 60 days, then the decision on unit B and the CI wiring under the rule above.
+<!-- SECTION:NOTES:END -->
