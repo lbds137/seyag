@@ -28,6 +28,29 @@
 # when wired, and SYG_HANDOFF_CMDS Bash writes are not narrowed).
 # SYG_DISABLE=handoff-pick-check turns the component off.
 #
+# SYG_PICK_CMD (emitter mode): a single-line command the machine names for
+# recording the boundary pick (`<cmd> clear|compact|keep`). When set (non-empty,
+# no newline or carriage return, and shlex-splittable to at least one word), the
+# pick counts only when the turn RAN that command: a Bash tool_use whose
+# command's simple-command argv starts with the command's words, followed by
+# clear, compact or keep (a path form such as `/opt/bin/<cmd>` matches on its
+# basename). The call must sit in the same record as the handoff write or in a
+# later one (`<handoff> && <cmd> clear` passes), and its tool_result must not
+# carry is_error (a result not yet written counts). Pick words in the closing
+# text do not count in this mode; a mention (`grep <cmd>`, `echo <cmd> clear`,
+# `<cmd> --help`) is not a call, because argv[0] must be the command. Unset,
+# empty or multi-line keeps the text-match behaviour above, unchanged. Known
+# residual, accepted: a Bash command turn_scan reads as ambiguous (a backslash,
+# `$'`, a quoted `#`) yields no argv, so an emitter call chained into one is not
+# seen and the gate blocks once (fail-closed); run the pick as its own call.
+# Reminder, not proof, accepted: like the text mode, this is a block-once
+# reminder. A matched argv inside a short-circuited chain (`true || <cmd>
+# clear`) counts, `is_error` describes the whole Bash call, the last-call
+# position is not checked, and the emitter's own record (not this gate) is
+# what a machine acts on. A whitespace-only value is unset in both hooks; any
+# other single-line value turns emitter mode on (an unbalanced quote falls back
+# to a whitespace split; an empty first word matches no call).
+#
 # Known false negative, accepted: a closing using `keep` in an ordinary sense
 # (e.g. "I will keep the old flag") counts as a pick under the word-bounded
 # match; the convention states the pick explicitly ("Pick: keep"), block-once
@@ -91,8 +114,16 @@ TRANSCRIPT=$(jq -r '.transcript_path // empty' <<<"$INPUT" 2>/dev/null || echo "
 # Stop envelope's last_assistant_message: closing text before the async transcript catches up.
 LAM=$(jq -r '.last_assistant_message // empty' <<<"$INPUT" 2>/dev/null || echo "")
 
-VERDICT=$(TRANSCRIPT="$TRANSCRIPT" LAM="$LAM" python3 -I "${SYG_PY_CACHE_ARG:--B}" << 'PYEOF'
-import json, os, re, sys
+# SYG_PICK_CMD (emitter mode, see the header): passed on only when non-empty and
+# free of newlines and carriage returns; otherwise empty, and the text match runs.
+PICK_CMD="${SYG_PICK_CMD:-}"
+case "$PICK_CMD" in *$'\n'* | *$'\r'*) PICK_CMD="" ;; esac
+
+HOOKS_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+HOOK_LIB="$HOOKS_DIR/lib"
+
+VERDICT=$(PICK_CMD="$PICK_CMD" HOOK_LIB="$HOOK_LIB" TRANSCRIPT="$TRANSCRIPT" LAM="$LAM" python3 -I "${SYG_PY_CACHE_ARG:--B}" << 'PYEOF'
+import json, os, re, shlex, sys
 
 
 def compile_opt(var):
@@ -330,7 +361,74 @@ else:
 
 PICK_RE = re.compile(r"(?<![\w/])/(?:clear|compact)\b|\bkeep\b", re.I)
 
-if PICK_RE.search(final_text):
+# Emitter mode (SYG_PICK_CMD): the pick is the recorded call, not a text token.
+emitter_words = None
+raw_pick_cmd = os.environ.get("PICK_CMD", "")
+if raw_pick_cmd.strip():
+    # Any value SessionStart advertises (non-blank, single-line) turns emitter
+    # mode on, so the two hooks never disagree on the mode: an unbalanced quote
+    # falls back to a whitespace split, and an empty first word (`''`) matches
+    # no call, so the gate blocks and names the bad value.
+    try:
+        emitter_words = shlex.split(raw_pick_cmd)
+    except ValueError:
+        emitter_words = raw_pick_cmd.split()
+    if not emitter_words:
+        emitter_words = [""]
+
+if emitter_words is not None:
+    sys.path.insert(0, os.environ["HOOK_LIB"])
+    from turn_scan import command_argvs  # noqa: E402
+
+    E = emitter_words
+    n = len(E)
+
+    def is_emitter_argv(a):
+        return (
+            E[0] != ""
+            and len(a) > n
+            and a[n] in ("clear", "compact", "keep")
+            and a[1:n] == E[1:]
+            and (a[0] == E[0] or os.path.basename(a[0]) == os.path.basename(E[0]))
+        )
+
+    # tool_use id -> whether its tool_result carries is_error: true.
+    tool_errors = {}
+    for _, entry in turn:
+        if entry.get("type") != "user":
+            continue
+        content = entry.get("message", {}).get("content")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "tool_result":
+                tid = block.get("tool_use_id")
+                if isinstance(tid, str):
+                    tool_errors[tid] = block.get("is_error") is True
+
+    def emitter_recorded():
+        for off, entry in turn:
+            if off < newest_write_off or entry.get("type") != "assistant":
+                continue
+            for block in entry.get("message", {}).get("content", []) or []:
+                if not isinstance(block, dict) or block.get("type") != "tool_use":
+                    continue
+                if block.get("name") != "Bash":
+                    continue
+                inp = block.get("input")
+                cmd = inp.get("command") if isinstance(inp, dict) else None
+                if not isinstance(cmd, str):
+                    continue
+                if not any(is_emitter_argv(a) for a in command_argvs(cmd)):
+                    continue
+                tid = block.get("id")
+                if isinstance(tid, str) and tool_errors.get(tid):
+                    continue
+                return True
+        return False
+
+    print("ok" if emitter_recorded() else "missing:emitter")
+elif PICK_RE.search(final_text):
     print("ok")
 elif wired:
     print("missing")
@@ -340,9 +438,35 @@ PYEOF
 ) || exit 0
 
 case "$VERDICT" in
-  missing | missing:unwired) ;;
+  missing | missing:unwired | missing:emitter) ;;
   *) exit 0 ;;
 esac
+
+if [ "$VERDICT" = "missing:emitter" ]; then
+  cat >&2 << 'MSG'
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+HANDOFF PICK — handoff written without running the pick command
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+This turn wrote a handoff, but no call to the pick command was found
+after it (or its only call returned an error). Run it as the turn's
+last Bash call, with one of the three picks:
+MSG
+  printf '  %s clear|compact|keep\n' "$PICK_CMD" >&2
+  cat >&2 << 'MSG2'
+  - clear (unrelated next unit)
+  - compact (same thread)
+  - keep (reply due within the hour; warm cache)
+Leave the pick out of the reply; mention it only if the command fails
+or is missing.
+
+If this write was not a unit-closing handoff, say so in one line and
+stop again (this gate fires only once per turn — the next stop
+proceeds).
+(the seyag rules, rules/core.md § "Sessions and handoffs")
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+MSG2
+  exit 2
+fi
 
 cat >&2 << 'MSG'
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
