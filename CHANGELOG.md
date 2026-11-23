@@ -2,10 +2,21 @@
 
 All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY-MM-DD>` section per released version; under it, `###` categories in fixed order — Breaking Changes, Features, Bug Fixes, Improvements, Chores, Tests — empty ones omitted; items are `- **scope:** description (#PR)`, written from the version's merged commit subjects.
 
+## 0.3.216 - 2026-11-23
+
+### Bug Fixes
+- **safe-worktree-clean:** the `pr-merged` lookup stops calling the forge for the rest of a repo's judging after the first `gh api` timeout (worst case one 20 s wait per repo, was one per tree); the docs gave `SYG_WORKTREE_PR_CHECK`'s default as `1` and now say unset (lookup on, quiet). (#TBD)
+
+### Improvements
+- **safe-worktree-clean:** docs correction: the header, README and the 0.3.215 entry now say the `pr-merged` lookup has been on by default since 0.3.215, and the header names the URL forms that fail closed (`ssh://` with no user, any port, a path deeper than owner/repo). (#TBD)
+
+### Tests
+- **safe-worktree-clean:** L7 no longer reaches a real `gh`; new probes for scp-like and `ssh://` remotes, the fail-closed URL forms and the timeout short-circuit. (#TBD)
+
 ## 0.3.215 - 2026-11-23
 
 ### Features
-- **safe-worktree-clean:** `pr-merged` resolution (TASK-122): a tree held as `unmerged` or `detached-unreferenced` whose HEAD is exactly the head commit of a PR the forge reports merged into the base's branch (one `gh api` lookup per tree, exact full-sha match, 20 s timeout, fail-closed with no `gh`, no network or an unparsable remote URL) now reports `pr-merged` instead; it is approvable, not commit-carrying, and opt-in through `SYG_WORKTREE_ELIGIBLE_REASONS`, so `--apply-eligible` can remove it with the usual backup. New user-only knob `SYG_WORKTREE_PR_CHECK` (0 skips the lookup, 1 also reports lookup failures on stderr). (#385)
+- **safe-worktree-clean:** `pr-merged` resolution (TASK-122): a tree held as `unmerged` or `detached-unreferenced` whose HEAD is exactly the head commit of a PR the forge reports merged into the base's branch (one `gh api` lookup per tree, exact full-sha match, 20 s timeout, fail-closed with no `gh`, no network or an unparsable remote URL) now reports `pr-merged` instead; it is approvable, not commit-carrying, and opt-in through `SYG_WORKTREE_ELIGIBLE_REASONS`, so `--apply-eligible` can remove it with the usual backup. New user-only knob `SYG_WORKTREE_PR_CHECK`: the lookup is on by default (unset), so a tree held as `unmerged` can report `pr-merged` with a new verdict string and plan id; 0 skips it, 1 also reports lookup failures on stderr. (#385)
 
 ### Bug Fixes
 - **safe-worktree-clean:** the single-repo `?` commit count keeps the ref-only suffix (`? branch commit(s) not on <base>; per-worktree refs hold more`); a sweep's refusal line prints `?` instead of a real-looking `0` when the child's count failed (`commits_known` in `--json`); the sweep parent keys its reason lookup by real path; the header names the count forms; `--only` accepting the repo-relative path printed in the refusal is probed. (#385)

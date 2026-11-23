@@ -1,7 +1,7 @@
 ---
 id: TASK-127
 title: 'PR #385 review lows: safe-worktree-clean pr check'
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-11-23'
 labels:
@@ -24,3 +24,9 @@ The claude-review of PR #385 (TASK-122, release 0.3.215) passed with six low fin
 
 Also refresh the `tests/probe-durations.tsv` row for `safe-worktree-clean` (123.9 s) on a quiet machine. The full run on 11-23 took 377 s alone at load ~16 and hit the 600 s per-probe ceiling at `-j 4` under load ~20.
 <!-- SECTION:DESCRIPTION:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Items 1-6 ship in release 0.3.216. Item 4 is a per-repo latch: the first `gh api` timeout (exit 124) makes the rest of that repo's trees skip the call. Probes PM9 cover the URL forms, PM10 the latch, PM10b that only a timeout latches, and L7 runs with the lookup off. Purpose canaries: deleting the latch check fails PM10 (2 gh calls); latching on any failure fails PM10b (1 call). A council review (OpenAI) found more hardening outside this diff, filed as TASK-128. The probe-durations refresh is deferred to TASK-129 because the machine was at load ~50 during this unit.
+<!-- SECTION:FINAL_SUMMARY:END -->

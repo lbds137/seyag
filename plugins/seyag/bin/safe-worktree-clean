@@ -143,17 +143,23 @@
 # `gh api --hostname <host> repos/<owner/repo>/commits/<HEAD>/pulls` call (20 s timeout, stdin
 # closed, no prompts) asks the forge for the PRs holding the tree's HEAD; <base> must be
 # <remote>/<branch> of a configured remote, whose https, ssh:// or git@host:owner/repo URL names
-# the host and repo. A PR counts only when its head.sha equals the tree's full HEAD (a merged
-# PR's intermediate commits return it too), merged_at is set and base.ref is <branch>. Then
+# the host and repo; ssh:// with no user, any port, a path deeper than owner/repo (a GitLab
+# subgroup) and any other shape fail closed. A PR counts only when its head.sha equals the
+# tree's full HEAD (a merged PR's intermediate commits return it too), merged_at is set and
+# base.ref is <branch>. Then
 # unmerged/detached-unreferenced becomes `pr-merged` ("HEAD <sha12> is the head commit of PR
 # #N, merged into <branch>"), and a *-refs code is dropped when every tip in its namespace is
 # an ancestor of that head, <base> or another branch; other codes stay. pr-merged is approvable
 # and joins the --apply-eligible universe (opt-in through SYG_WORKTREE_ELIGIBLE_REASONS) but is
 # not commit-carrying: the forge keeps the PR's head commit and the backup bundles it. Every
 # failure (no gh, timeout, non-zero exit, bad JSON, no match, a remote URL of another shape)
-# leaves the reasons exactly as judged, so a plan id never moves because of the lookup;
-# SYG_WORKTREE_PR_CHECK=0 skips the call, =1 also prints `safe-worktree-clean: pr check:
-# <rel path>: <why>` on stderr for each failure.
+# leaves the reasons exactly as judged, so a plan id never moves because of a failed lookup.
+# After one gh api timeout the rest of that repo's trees skip the call (worst case one 20 s
+# wait per repo; a sweep's children each keep their own flag). SYG_WORKTREE_PR_CHECK unset
+# (the default) runs the lookup and stays quiet, =0 skips it, =1 also prints
+# `safe-worktree-clean: pr check: <rel path>: <why>` on stderr for each failure. Because the
+# lookup is on by default, a tree held as unmerged can report pr-merged instead, which changes
+# its verdict string and plan id; eligibility for removal still needs the opt-in.
 # In a multi-repo sweep one SYG_WORKTREE_BASE applies to every repo and project scope is
 # refused for it, so a repo that integrates on another branch is swept separately with its own
 # env.
@@ -1209,11 +1215,13 @@ if [ ${#TREES[@]} -gt 0 ]; then
 fi
 
 # The forge half of the pr-merged resolution (see the header). PR_NOTE_ON is true only when
-# SYG_WORKTREE_PR_CHECK is exactly 1: a failed lookup then says why on stderr; default runs
-# stay quiet, and a failure never changes a reason (the reason text feeds the plan id).
+# SYG_WORKTREE_PR_CHECK is exactly 1: a failed lookup then says why on stderr; unset runs the
+# lookup quietly (0 skips it), and a failure never changes a reason (the reason text feeds the
+# plan id).
 PR_NOTE_ON=false
 [ "${SYG_WORKTREE_PR_CHECK:-}" = 1 ] && PR_NOTE_ON=true
 PR_RESOLVED=false PR_HOST="" PR_REPO="" PR_BRANCH="" PR_WHY=""
+PR_FORGE_TIMED_OUT=false # set by the first gh api timeout; per repo (each sweep child has its own)
 pr_note() { # $1 tree, $2 why
   if $PR_NOTE_ON; then printf 'safe-worktree-clean: pr check: %s: %s\n' "$1" "$2" >&2; fi
   return 0
@@ -1258,7 +1266,9 @@ pr_resolve_repo() {
 # detached-unreferenced (plus ref and approvable-by-eligibility codes) and the forge reports a
 # merged PR into BASE's branch whose head commit is exactly the tree's HEAD, rewrite REASONS:
 # that entry becomes pr-merged, and a *-refs entry is dropped when its tips are all reachable
-# from the merged head, BASE or another branch. Anything else leaves REASONS untouched.
+# from the merged head, BASE or another branch. Anything else leaves REASONS untouched. The
+# first gh api timeout sets PR_FORGE_TIMED_OUT and every later tree in this repo's run skips
+# the call (a slow forge costs one 20 s wait per repo, not one per tree).
 pr_merged_check() {
   local i=$1 t=${WT_PATH[$1]} head=${WT_HEAD[$1]} tr e c out rc=0 prc=0 num ns
   local has_head=false
@@ -1274,11 +1284,12 @@ pr_merged_check() {
     esac
   done
   $has_head || return 0
+  if $PR_FORGE_TIMED_OUT; then pr_note "$tr" "skipped: an earlier gh api call timed out"; return 0; fi
   if ! [[ $head =~ ^[0-9a-f]{40}$ ]]; then pr_note "$tr" "HEAD is not a full 40-hex sha"; return 0; fi
   if ! command -v gh >/dev/null 2>&1; then pr_note "$tr" "gh not found in PATH"; return 0; fi
   if ! pr_resolve_repo; then pr_note "$tr" "$PR_WHY"; return 0; fi
   out=$(GH_PROMPT_DISABLED=1 timeout 20 gh api --hostname "$PR_HOST" "repos/$PR_REPO/commits/$head/pulls" </dev/null 2>/dev/null) || rc=$?
-  if [ "$rc" -eq 124 ]; then pr_note "$tr" "gh api timed out after 20 s"; return 0; fi
+  if [ "$rc" -eq 124 ]; then PR_FORGE_TIMED_OUT=true; pr_note "$tr" "gh api timed out after 20 s"; return 0; fi
   if [ "$rc" -ne 0 ]; then pr_note "$tr" "gh api failed (exit $rc)"; return 0; fi
   # A PR matches only on the full head sha (a merged PR's intermediate commits return the PR
   # too), a non-empty merged_at and the base branch; the first match's number is printed.
