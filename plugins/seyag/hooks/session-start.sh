@@ -16,9 +16,9 @@
 #   where re-suggested settings, dropped promises and lost work-stack pointers
 #   keep recurring; component `rules`). Adapted from Tzurot's session-start.sh.
 # - startup / clear / compact: appends the memory-gate (SYG_MEM_GATE_CMD),
-#   long-job runner (SYG_LONG_JOB_CMD) and cross-family reviewer route
-#   (SYG_CROSS_REVIEW_CMD) lines when set (single-line values only; not gated
-#   by `rules`).
+#   long-job runner (SYG_LONG_JOB_CMD), cross-family reviewer route
+#   (SYG_CROSS_REVIEW_CMD) and boundary-pick command (SYG_PICK_CMD) lines
+#   when set (single-line values only; not gated by `rules`).
 # - resume: outputs nothing.
 # - every source: deletes prompt-hook state files older than 7 days (below),
 #   and runs `seyag-git-hooks relink` (adds one line only when it rewrote
@@ -177,6 +177,13 @@ case "$SOURCE" in
       *)
         TEXT="${TEXT:+$TEXT
 }Cross-family review: run \`$SYG_CROSS_REVIEW_CMD\` for the reviewer route when a review is due; same-family fresh context is a labelled fallback only when that route is closed."
+        ;;
+    esac
+    case "${SYG_PICK_CMD:-}" in
+      '' | *$'\n'* | *$'\r'*) ;;
+      *[![:space:]]*)
+        TEXT="${TEXT:+$TEXT
+}Pick command: at a finished unit, once the handoff is on disk, run \`$SYG_PICK_CMD clear|compact|keep\` as the last Bash call and leave the pick out of the reply (mention it only if the command fails)."
         ;;
     esac
     ;;

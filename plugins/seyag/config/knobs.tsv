@@ -171,6 +171,7 @@ SYG_MERGE_REVIEW_WORKFLOW	user	pr	.github/workflows/claude-code-review.yml	Revie
 SYG_NEEDS_OWNER_SECTION	user	session	Needs Owner	Heading (without the ##) of the role file section claude-role --need writes and --json reads as .needs: what waits on the owner; relay-ruling names it in its destructive-step line.	-
 SYG_OWNER_NAME	user	session	The owner	Name relay-ruling prints in the relay header the recipient reads (`<name> said (...)`, `<name> picked (...)`); an empty value falls back to the default. Environment only (not config.toml).	envonly
 SYG_OWN_OWNERS	user	guards	unset	Whitespace- or comma-separated GitHub owner names unioned with hosts.yml user: as own repos in upstream-submission-guard.	-
+SYG_PICK_CMD	user	stop-gates	unset	Single-line command a session runs as `<cmd> clear|compact|keep` to record its boundary pick (exit 0 recorded, 2 bad usage); SessionStart advertises it and handoff-pick-check requires that call instead of a pick word.	-
 SYG_PIN_ACTIONS_GH	internal	misc	gh	Test seam naming the gh binary pin-actions calls for commit and tag lookups.	-
 SYG_PLUGIN_MANIFEST	internal	statusline	<script_dir>/../.claude-plugin/plugin.json	Test seam overriding the plugin.json path read by statusline for the SYG version segment.	-
 SYG_PRIVATE_TERMS_FILE	user	guards	unset	Path to a local file of Python regexes, one per line, blocked from public repos by private-term-guard and pre-push; pre-push also falls back to global git config seyag.privateTermsFile.	path

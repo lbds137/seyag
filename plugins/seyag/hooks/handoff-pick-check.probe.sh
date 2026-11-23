@@ -12,6 +12,12 @@
 # a NEW write past the stored offset re-arms, isMeta cron prompts do not bound
 # the turn, and state failures (corrupt content, unwritable dir) fail open.
 #
+# Emitter mode (SYG_PICK_CMD, section 17): when the machine names a pick
+# command, the pick counts only when the turn ran it (`<cmd> clear|compact|keep`)
+# after the handoff write; pick words in the closing text do not count, and a
+# mention (grep, echo, --help), an earlier call, an errored call or a call to
+# another command does not either. Empty or multi-line values keep the text match.
+#
 # Usage: plugins/seyag/hooks/handoff-pick-check.probe.sh   (from repo root)
 
 set -uo pipefail
@@ -70,7 +76,7 @@ check() { # $1=expected_exit $2=label $3=transcript $4=stop_active $5+=stderr re
 
 # Hermetic: ambient machine config must not leak into the probe, and the
 # fire-once memory's state lives under the fixture tmp, never ~/.local/state.
-unset SYG_HANDOFF_PATHS SYG_HANDOFF_CMDS SYG_HANDOFF_SECTIONS
+unset SYG_HANDOFF_PATHS SYG_HANDOFF_CMDS SYG_HANDOFF_SECTIONS SYG_PICK_CMD
 export XDG_STATE_HOME="$TMP/state"
 
 # --- 1. Handoff via Bash matching SYG_HANDOFF_CMDS + no pick → exit 2 ---------
@@ -550,5 +556,128 @@ mktx_file "$TMP/r4-newstring-pass.jsonl" "Edit" "$TMP/r4-roles/newstring-pass.md
 check 0 "r4-newstring-pass: found new_string under ## Needs Owner dominates missing old_string and passes" \
   "$TMP/r4-newstring-pass.jsonl"
 unset SYG_HANDOFF_PATHS
+
+# --- 17. SYG_PICK_CMD emitter mode --------------------------------------------
+# The pick counts only when the turn ran the named command after the handoff
+# write (same record or later). Tool calls are paired with their results by id.
+export SYG_HANDOFF_CMDS='myrole --set' SYG_PICK_CMD='pick-note'
+tx_user() { printf '%s\n' '{"type":"user","isMeta":null,"message":{"content":"go"}}' >> "$1"; }
+tx_bash() { # $1=out $2=tool_use id $3=command
+  printf '{"type":"assistant","message":{"content":[{"type":"tool_use","id":%s,"name":"Bash","input":{"command":%s}}]}}\n' \
+    "$(jsonstr "$2")" "$(jsonstr "$3")" >> "$1"
+}
+tx_result() { # $1=out $2=tool_use id [$3=true marks is_error]
+  local err=""
+  [ "${3:-}" = true ] && err=',"is_error":true'
+  printf '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":%s,"content":"done"%s}]}}\n' \
+    "$(jsonstr "$2")" "$err" >> "$1"
+}
+tx_text() { # $1=out $2=text
+  printf '{"type":"assistant","message":{"content":[{"type":"text","text":%s}]}}\n' "$(jsonstr "$2")" >> "$1"
+}
+HANDOFF_CALL="myrole --set widget --handoff 'unit 3 done'"
+
+f="$TMP/pick-run-later.jsonl"; : > "$f"; tx_user "$f"
+tx_bash "$f" t1 "$HANDOFF_CALL"; tx_result "$f" t1
+tx_bash "$f" t2 "pick-note clear"; tx_result "$f" t2
+tx_text "$f" "Unit 3 is landed and the handoff is on disk."
+check 0 "emitter: handoff write, then 'pick-note clear' run, closing without pick words passes" "$f"
+
+f="$TMP/pick-text-only.jsonl"; : > "$f"; tx_user "$f"
+tx_bash "$f" t1 "$HANDOFF_CALL"; tx_result "$f" t1
+tx_text "$f" "Handoff on disk. Pick: /clear."
+check 2 "emitter: closing 'Pick: /clear' with no emitter call blocks, naming pick-note" "$f" "" \
+  'handoff written without running the pick command' \
+  'pick-note clear\|compact\|keep' \
+  '!without a next-session pick'
+
+f="$TMP/pick-same-record.jsonl"; : > "$f"; tx_user "$f"
+tx_bash "$f" t1 "$HANDOFF_CALL && pick-note keep"; tx_result "$f" t1
+tx_text "$f" "Handoff on disk."
+check 0 "emitter: same record '<handoff> && pick-note keep' passes" "$f"
+
+f="$TMP/pick-cd-later.jsonl"; : > "$f"; tx_user "$f"
+tx_bash "$f" t1 "$HANDOFF_CALL"; tx_result "$f" t1
+tx_bash "$f" t2 "cd /x && pick-note compact"; tx_result "$f" t2
+tx_text "$f" "Handoff on disk."
+check 0 "emitter: later record 'cd /x && pick-note compact' passes" "$f"
+
+# Mentions are not calls: argv[0] must be the command.
+pick_mention_tx() { # $1=out $2=command
+  : > "$1"; tx_user "$1"
+  tx_bash "$1" t1 "$HANDOFF_CALL"; tx_result "$1" t1
+  tx_bash "$1" t2 "$2"; tx_result "$1" t2
+  tx_text "$1" "Handoff on disk."
+}
+pick_mention_tx "$TMP/pick-mention-grep.jsonl" "grep pick-note file"
+check 2 "emitter: 'grep pick-note file' is a mention, not a call" "$TMP/pick-mention-grep.jsonl"
+pick_mention_tx "$TMP/pick-mention-echo.jsonl" "echo pick-note clear"
+check 2 "emitter: 'echo pick-note clear' is a mention, not a call" "$TMP/pick-mention-echo.jsonl"
+pick_mention_tx "$TMP/pick-mention-help.jsonl" "pick-note --help"
+check 2 "emitter: 'pick-note --help' is not a call" "$TMP/pick-mention-help.jsonl"
+
+f="$TMP/pick-before-write.jsonl"; : > "$f"; tx_user "$f"
+tx_bash "$f" t0 "pick-note keep"; tx_result "$f" t0
+tx_bash "$f" t1 "$HANDOFF_CALL"; tx_result "$f" t1
+tx_text "$f" "Handoff on disk."
+check 2 "emitter: call before the handoff write does not count" "$f"
+
+f="$TMP/pick-errored.jsonl"; : > "$f"; tx_user "$f"
+tx_bash "$f" t1 "$HANDOFF_CALL"; tx_result "$f" t1
+tx_bash "$f" t2 "pick-note clear"; tx_result "$f" t2 true
+tx_text "$f" "Handoff on disk."
+check 2 "emitter: call whose tool_result carries is_error does not count" "$f"
+
+export SYG_PICK_CMD='pick-note --fleet'
+f="$TMP/pick-fleet-ok.jsonl"; : > "$f"; tx_user "$f"
+tx_bash "$f" t1 "$HANDOFF_CALL"; tx_result "$f" t1
+tx_bash "$f" t2 "pick-note --fleet clear"; tx_result "$f" t2
+tx_text "$f" "Handoff on disk."
+check 0 "multi-word SYG_PICK_CMD: 'pick-note --fleet clear' passes" "$f"
+
+f="$TMP/pick-fleet-short.jsonl"; : > "$f"; tx_user "$f"
+tx_bash "$f" t1 "$HANDOFF_CALL"; tx_result "$f" t1
+tx_bash "$f" t2 "pick-note clear"; tx_result "$f" t2
+tx_text "$f" "Handoff on disk."
+check 2 "multi-word SYG_PICK_CMD: bare 'pick-note clear' (missing --fleet) does not count" "$f"
+export SYG_PICK_CMD='pick-note'
+
+f="$TMP/pick-path-form.jsonl"; : > "$f"; tx_user "$f"
+tx_bash "$f" t1 "$HANDOFF_CALL"; tx_result "$f" t1
+tx_bash "$f" t2 "/opt/bin/pick-note keep"; tx_result "$f" t2
+tx_text "$f" "Handoff on disk."
+check 0 "path-form emitter: '/opt/bin/pick-note keep' matches on basename" "$f"
+
+export SYG_PICK_CMD=''
+mktx_bash "$TMP/pick-empty-text.jsonl" "$HANDOFF_CALL" "Handoff on disk. Pick: /clear."
+check 0 "empty SYG_PICK_CMD: text pick '/clear' still passes" "$TMP/pick-empty-text.jsonl"
+mktx_bash "$TMP/pick-empty-none.jsonl" "$HANDOFF_CALL" "Unit 3 is landed."
+check 2 "empty SYG_PICK_CMD: no pick still blocks with the old title" "$TMP/pick-empty-none.jsonl" "" \
+  'handoff written without a next-session pick' '!pick-note'
+
+export SYG_PICK_CMD=$'pick-note\nevil'
+mktx_bash "$TMP/pick-nl-text.jsonl" "$HANDOFF_CALL" "Handoff on disk. Pick: /clear."
+check 0 "multi-line SYG_PICK_CMD: text pick '/clear' still passes" "$TMP/pick-nl-text.jsonl"
+mktx_bash "$TMP/pick-nl-none.jsonl" "$HANDOFF_CALL" "Unit 3 is landed."
+check 2 "multi-line SYG_PICK_CMD: no pick still blocks with the old title" "$TMP/pick-nl-none.jsonl" "" \
+  'handoff written without a next-session pick' '!handoff written without running the pick command'
+
+# Mode agreement with session-start.sh: whitespace-only is unset in both; any
+# other single-line value is emitter mode, even one shlex cannot split.
+export SYG_PICK_CMD='   '
+mktx_bash "$TMP/pick-blank-text.jsonl" "$HANDOFF_CALL" "Handoff on disk. Pick: /clear."
+check 0 "whitespace-only SYG_PICK_CMD: text mode (text pick passes)" "$TMP/pick-blank-text.jsonl"
+export SYG_PICK_CMD='pick-note "x'
+mktx_bash "$TMP/pick-unbal.jsonl" "$HANDOFF_CALL" "Handoff on disk. Pick: /clear."
+check 2 "unbalanced-quote SYG_PICK_CMD: still emitter mode (text pick does not count)" "$TMP/pick-unbal.jsonl" "" \
+  'handoff written without running the pick command'
+export SYG_PICK_CMD="''"
+f="$TMP/pick-emptyword.jsonl"; : > "$f"; tx_user "$f"
+tx_bash "$f" t1 "$HANDOFF_CALL"; tx_result "$f" t1
+tx_bash "$f" t2 "pick-note clear"; tx_result "$f" t2
+tx_text "$f" "Handoff on disk."
+check 2 "quoted-empty SYG_PICK_CMD: matches no call, blocks in emitter mode" "$f" "" \
+  'handoff written without running the pick command'
+unset SYG_PICK_CMD SYG_HANDOFF_CMDS
 
 [ "$fail" = 0 ] && echo "ALL PASS" || { echo "FAILURES"; exit 1; }

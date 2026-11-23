@@ -2,6 +2,12 @@
 
 All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY-MM-DD>` section per released version; under it, `###` categories in fixed order — Breaking Changes, Features, Bug Fixes, Improvements, Chores, Tests — empty ones omitted; items are `- **scope:** description (#PR)`, written from the version's merged commit subjects.
 
+## 0.3.209 - 2026-11-22
+
+### Features
+
+- **handoff-pick-check, session-start:** `SYG_PICK_CMD` names a command a session runs as `<cmd> clear|compact|keep` to record its boundary pick; SessionStart advertises it, and handoff-pick-check then requires that call (after the handoff write, not an error, not a mention) instead of a pick word in the reply. `core.md` points at the SessionStart line (TASK-107). (#PR)
+
 ## 0.3.208 - 2026-11-22
 
 ### Bug Fixes

@@ -13,7 +13,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 # Hermetic: the fixtures below set the SYG_ knobs explicitly, so an ambient
 # SYG_ variable must not override them.
-unset SYG_STATE_DIR SYG_STATE_MAX_DAYS SYG_USER_RULES_DIR SYG_INSTALLED_PLUGINS SYG_PROFILE SYG_ENABLE SYG_DISABLE SYG_MEM_GATE_CMD SYG_LONG_JOB_CMD SYG_CROSS_REVIEW_CMD SYG_SECURITY_SWEEP SYG_SECURITY_SWEEP_REPOS SECURITY_SWEEP_GH CLAUDE_CODE_ENTRYPOINT
+unset SYG_STATE_DIR SYG_STATE_MAX_DAYS SYG_USER_RULES_DIR SYG_INSTALLED_PLUGINS SYG_PROFILE SYG_ENABLE SYG_DISABLE SYG_MEM_GATE_CMD SYG_LONG_JOB_CMD SYG_CROSS_REVIEW_CMD SYG_PICK_CMD SYG_SECURITY_SWEEP SYG_SECURITY_SWEEP_REPOS SECURITY_SWEEP_GH CLAUDE_CODE_ENTRYPOINT
 # The git-hooks relink acts on ${XDG_DATA_HOME}/seyag/git-hooks: a scratch one,
 # so a run with the real plugin root never re-points a real install.
 export XDG_DATA_HOME="$TMP/xdg"
@@ -33,7 +33,7 @@ bad() { echo "FAIL: $1"; [ -n "${2:-}" ] && printf '      got: %s\n' "$2"; fail=
 
 run() { # $1 source, $2 user rules dir → sets OUT, RC
   OUT=$(jq -nc --arg s "$1" '{session_id: "probe", source: $s}' \
-    | env -u SYG_MEM_GATE_CMD -u SYG_LONG_JOB_CMD -u SYG_CROSS_REVIEW_CMD \
+    | env -u SYG_MEM_GATE_CMD -u SYG_LONG_JOB_CMD -u SYG_CROSS_REVIEW_CMD -u SYG_PICK_CMD \
       CLAUDE_PLUGIN_ROOT="$TMP/root" SYG_USER_RULES_DIR="$2" SYG_STATE_DIR="$TMP/state" bash "$HOOK" 2>/dev/null)
   RC=$?
 }
@@ -121,7 +121,7 @@ runenv() { # $1 source, $2 user rules dir, rest = NAME=value env → sets OUT, R
   local src=$1 dir=$2
   shift 2
   OUT=$(jq -nc --arg s "$src" '{session_id: "probe", source: $s}' \
-    | env -u SYG_MEM_GATE_CMD -u SYG_LONG_JOB_CMD -u SYG_CROSS_REVIEW_CMD \
+    | env -u SYG_MEM_GATE_CMD -u SYG_LONG_JOB_CMD -u SYG_CROSS_REVIEW_CMD -u SYG_PICK_CMD \
       CLAUDE_PLUGIN_ROOT="$TMP/root" SYG_USER_RULES_DIR="$dir" SYG_STATE_DIR="$TMP/state" "$@" bash "$HOOK" 2>/dev/null)
   RC=$?
 }
@@ -218,6 +218,40 @@ if [ "$RC" = 0 ] && valid && [ "$(ctx)" = "seyag plugin unknown" ]; then
   ok "SYG_CROSS_REVIEW_CMD set to empty: no cross-family line"
 else
   bad "SYG_CROSS_REVIEW_CMD empty: expected version line only" "$OUT"
+fi
+
+# SYG_PICK_CMD (the boundary-pick command) appends last, on startup and compact.
+PICK_LINE='Pick command: at a finished unit, once the handoff is on disk, run `pick-note clear|compact|keep` as the last Bash call and leave the pick out of the reply (mention it only if the command fails).'
+runenv startup "$TMP/rules-linked" SYG_PICK_CMD="pick-note"
+if [ "$RC" = 0 ] && valid && [ "$(ctx)" = "$(printf 'seyag plugin unknown\n%s' "$PICK_LINE")" ]; then
+  ok "startup with SYG_PICK_CMD set: version line, then the pick line"
+else
+  bad "startup with SYG_PICK_CMD set: expected version line + pick line" "$OUT"
+fi
+runenv compact "$TMP/rules-linked" SYG_PICK_CMD="pick-note"
+if [ "$RC" = 0 ] && valid && grep -q '^POST-COMPACTION RECOVERY' <<<"$(ctx)" \
+  && [ "$(ctx | tail -1)" = "$PICK_LINE" ]; then
+  ok "compact with SYG_PICK_CMD set: checklist then the pick line last"
+else
+  bad "compact with SYG_PICK_CMD set: expected checklist + pick line last" "$OUT"
+fi
+runenv startup "$TMP/rules-linked" SYG_PICK_CMD="pick-note${NL}evil"
+if [ "$RC" = 0 ] && valid && [ "$(ctx)" = "seyag plugin unknown" ]; then
+  ok "SYG_PICK_CMD with an embedded newline: ignored (no pick line)"
+else
+  bad "SYG_PICK_CMD with an embedded newline: expected no pick line" "$OUT"
+fi
+runenv startup "$TMP/rules-linked" SYG_PICK_CMD="pick-note"$'\r'
+if [ "$RC" = 0 ] && valid && [ "$(ctx)" = "seyag plugin unknown" ]; then
+  ok "SYG_PICK_CMD with a carriage return: ignored (matches handoff-pick-check)"
+else
+  bad "SYG_PICK_CMD with a carriage return: expected no pick line" "$OUT"
+fi
+runenv startup "$TMP/rules-linked" SYG_PICK_CMD="   "
+if [ "$RC" = 0 ] && valid && [ "$(ctx)" = "seyag plugin unknown" ]; then
+  ok "whitespace-only SYG_PICK_CMD: ignored (matches handoff-pick-check)"
+else
+  bad "whitespace-only SYG_PICK_CMD: expected no pick line" "$OUT"
 fi
 
 # Output must stay far below Claude Code's ~10 KB hook-output preview cliff.
