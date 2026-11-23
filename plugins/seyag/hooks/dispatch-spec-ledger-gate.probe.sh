@@ -414,7 +414,7 @@ TEMPLATE_FILLED=$(cat <<'EOF'
 > A premise about a value's form or state at a pipeline stage cites the producer line that establishes it AT that stage, never a similar-looking site elsewhere — the form at the stage is exactly what the spec's next step consumes.
 - hooks.json PreToolUse array has no Agent matcher — plugins/seyag/hooks/hooks.json:120
 - The exact string "Premise ledger" in tracked hooks/*.sh appears only in the gate and its probe — `git grep -n -F -e "Premise ledger" -- plugins/seyag/hooks/*.sh`; positive control: `dispatch-spec-ledger-gate.sh:144`
-- Already built? `grep -rn "Premise ledger" plugins/` → only SKILL.md:49
+- Already built? `grep -rn "Premise ledger" plugins/` → SKILL.md:58 plus the gate and its probe
 - Already covered? `git log --all --grep=ledger-gate` → empty
 EOF
 )

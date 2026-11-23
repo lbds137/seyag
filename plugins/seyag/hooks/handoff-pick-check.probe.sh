@@ -17,6 +17,9 @@
 # after the handoff write; pick words in the closing text do not count, and a
 # mention (grep, echo, --help), an earlier call, an errored call or a call to
 # another command does not either. Empty or multi-line values keep the text match.
+# Section 18 covers the stale-pick trigger: a turn that a task-notification started,
+# with an earlier clear or compact pick and no pick of its own, blocks once per turn
+# start (the .stale state file).
 #
 # Usage: plugins/seyag/hooks/handoff-pick-check.probe.sh   (from repo root)
 
@@ -687,5 +690,147 @@ tx_text "$f" "Handoff on disk."
 check 2 "quoted-empty SYG_PICK_CMD: matches no call, blocks in emitter mode" "$f" "" \
   'handoff written without running the pick command'
 unset SYG_PICK_CMD SYG_HANDOFF_CMDS
+
+# --- 18. Stale-pick trigger: a notification-started turn that ends without a pick ---
+# Section 18 runs with SYG_PICK_CMD=pick-note, and each case that can fire gets its
+# own XDG_STATE_HOME (the fire-once .stale file lives there); cases 1 and 3 share one
+# state dir on purpose, and cases 3 and 4 reuse case 1's transcript.
+tx_notif() { # $1=out $2=task id: a task-notification turn start (origin kind)
+  local body
+  body=$(printf '<task-notification>\n<task-id>%s</task-id>\n<status>completed</status>\n</task-notification>' "$2")
+  printf '{"type":"user","isMeta":null,"origin":{"kind":"task-notification"},"message":{"content":%s}}\n' \
+    "$(jsonstr "$body")" >> "$1"
+}
+tx_human() { printf '%s\n' '{"type":"user","isMeta":null,"origin":{"kind":"human"},"message":{"content":"go"}}' >> "$1"; }
+export SYG_PICK_CMD='pick-note'
+unset SYG_HANDOFF_CMDS SYG_HANDOFF_PATHS
+
+# Base: a human turn, a clear pick, a closing text, then a notification turn that ends.
+S18="$TMP/s18-base.jsonl"; : > "$S18"; tx_human "$S18"
+tx_bash "$S18" t1 "pick-note clear"; tx_result "$S18" t1
+tx_text "$S18" "Done."
+tx_notif "$S18" b1
+tx_text "$S18" "b1 finished; nothing else to do."
+
+XDG_STATE_HOME="$TMP/state18-1" check 2 "stale-pick: base notification turn blocks once" "$S18" "" \
+  'the pick went stale on a notification turn' 'pick-note clear\|compact\|keep' 'SYG_DISABLE=stale-pick'
+
+# Case 2: the notification turn re-runs the pick before its text.
+f="$TMP/s18-2.jsonl"; : > "$f"; tx_human "$f"
+tx_bash "$f" t1 "pick-note clear"; tx_result "$f" t1
+tx_text "$f" "Done."
+tx_notif "$f" b1
+tx_bash "$f" t2 "pick-note clear"; tx_result "$f" t2
+tx_text "$f" "b1 finished; nothing else to do."
+XDG_STATE_HOME="$TMP/state18-2" check 0 "stale-pick: the notification turn re-runs the pick, passes" "$f"
+
+# Case 3: the base transcript, checked a second time unchanged, is fire-once silent.
+XDG_STATE_HOME="$TMP/state18-1" check 0 "stale-pick: fire-once, same transcript checked again passes" "$S18"
+
+# Case 4: a second notification turn appended re-arms the gate.
+tx_notif "$S18" b2
+tx_text "$S18" "b2 finished too."
+XDG_STATE_HOME="$TMP/state18-1" check 2 "stale-pick: a new notification turn re-arms and blocks" "$S18" "" \
+  'the pick went stale on a notification turn'
+
+# Case 5: an earlier keep pick is not a clear or compact pick.
+f="$TMP/s18-5.jsonl"; : > "$f"; tx_human "$f"
+tx_bash "$f" t1 "pick-note keep"; tx_result "$f" t1
+tx_text "$f" "Done."
+tx_notif "$f" b1; tx_text "$f" "b1 finished."
+XDG_STATE_HOME="$TMP/state18-5" check 0 "stale-pick: earlier pick is keep, passes" "$f"
+
+# Case 6: an owner turn between the pick and the notification ends the walk.
+f="$TMP/s18-6.jsonl"; : > "$f"; tx_human "$f"
+tx_bash "$f" t1 "pick-note clear"; tx_result "$f" t1
+tx_text "$f" "Done."
+tx_human "$f"; tx_text "$f" "Thanks, next question."
+tx_notif "$f" b1; tx_text "$f" "b1 finished."
+XDG_STATE_HOME="$TMP/state18-6" check 0 "stale-pick: owner turn between pick and notification, passes" "$f"
+
+# Case 7: a compaction between the pick and the notification ends the walk.
+f="$TMP/s18-7.jsonl"; : > "$f"; tx_human "$f"
+tx_bash "$f" t1 "pick-note clear"; tx_result "$f" t1
+tx_text "$f" "Done."
+printf '%s\n' '{"type":"system","subtype":"compact_boundary","content":"Conversation compacted"}' >> "$f"
+tx_notif "$f" b1; tx_text "$f" "b1 finished."
+XDG_STATE_HOME="$TMP/state18-7" check 0 "stale-pick: compact boundary between pick and notification, passes" "$f"
+
+# Case 8: a slash-command entry with no origin is skipped over, so the clear still counts.
+f="$TMP/s18-8.jsonl"; : > "$f"; tx_human "$f"
+tx_bash "$f" t1 "pick-note clear"; tx_result "$f" t1
+tx_text "$f" "Done."
+printf '%s\n' '{"type":"user","isMeta":null,"message":{"content":"<command-name>/reload-plugins</command-name>"}}' >> "$f"
+tx_notif "$f" b1; tx_text "$f" "b1 finished."
+XDG_STATE_HOME="$TMP/state18-8" check 2 "stale-pick: command-name entry between pick and notification is skipped, blocks" "$f" "" \
+  'the pick went stale on a notification turn'
+
+# Case 9: a plain typed message with no origin ends the walk.
+f="$TMP/s18-9.jsonl"; : > "$f"; tx_human "$f"
+tx_bash "$f" t1 "pick-note clear"; tx_result "$f" t1
+tx_text "$f" "Done."
+printf '%s\n' '{"type":"user","isMeta":null,"message":{"content":"hello"}}' >> "$f"
+tx_notif "$f" b1; tx_text "$f" "b1 finished."
+XDG_STATE_HOME="$TMP/state18-9" check 0 "stale-pick: plain typed message between pick and notification, passes" "$f"
+
+# Case 10: the turn starts with a plain user entry (no origin), so there is no notification turn.
+f="$TMP/s18-10.jsonl"; : > "$f"; tx_human "$f"
+tx_bash "$f" t1 "pick-note clear"; tx_result "$f" t1
+tx_text "$f" "Done."
+tx_user "$f"; tx_text "$f" "b1 finished; nothing else to do."
+XDG_STATE_HOME="$TMP/state18-10" check 0 "stale-pick: turn starts with a plain user entry, passes" "$f"
+
+# Case 11: an errored earlier pick does not count.
+f="$TMP/s18-11.jsonl"; : > "$f"; tx_human "$f"
+tx_bash "$f" t1 "pick-note clear"; tx_result "$f" t1 true
+tx_text "$f" "Done."
+tx_notif "$f" b1; tx_text "$f" "b1 finished."
+XDG_STATE_HOME="$TMP/state18-11" check 0 "stale-pick: earlier pick errored, passes" "$f"
+
+# Case 12: a background task launched this session and not yet ended keeps the turn silent.
+f="$TMP/s18-12.jsonl"; : > "$f"; tx_human "$f"
+tx_bash "$f" t1 "pick-note clear"; tx_result "$f" t1
+tx_text "$f" "Done."
+tx_bash "$f" t9 "sleep 999"
+printf '%s\n' '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t9","content":"started"}]},"toolUseResult":{"backgroundTaskId":"b9"}}' >> "$f"
+tx_notif "$f" b1; tx_text "$f" "b1 finished."
+XDG_STATE_HOME="$TMP/state18-12" check 0 "stale-pick: live background task b9 (notification names b1) passes" "$f"
+
+# Case 13: the same transcript, the notification names b9, which ends the live task.
+f="$TMP/s18-13.jsonl"; : > "$f"; tx_human "$f"
+tx_bash "$f" t1 "pick-note clear"; tx_result "$f" t1
+tx_text "$f" "Done."
+tx_bash "$f" t9 "sleep 999"
+printf '%s\n' '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t9","content":"started"}]},"toolUseResult":{"backgroundTaskId":"b9"}}' >> "$f"
+tx_notif "$f" b9; tx_text "$f" "b9 finished."
+XDG_STATE_HOME="$TMP/state18-13" check 2 "stale-pick: notification ends the live task b9, blocks" "$f" "" \
+  'the pick went stale on a notification turn'
+
+# Case 13b: b9 is launched, a task-notification for it is queued mid-turn (a queued_command
+# attachment, not a user entry), then the notification turn starts and ends. The queued
+# attachment ends b9, so nothing is live and the turn blocks.
+f="$TMP/s18-13b.jsonl"; : > "$f"; tx_human "$f"
+tx_bash "$f" t1 "pick-note clear"; tx_result "$f" t1
+tx_text "$f" "Done."
+tx_bash "$f" t9 "sleep 999"
+printf '%s\n' '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t9","content":"started"}]},"toolUseResult":{"backgroundTaskId":"b9"}}' >> "$f"
+printf '%s\n' '{"type":"attachment","attachment":{"type":"queued_command","commandMode":"task-notification","origin":{"kind":"task-notification"},"prompt":"<task-notification>\n<task-id>b9</task-id>\n<status>completed</status>\n</task-notification>"}}' >> "$f"
+tx_notif "$f" b1; tx_text "$f" "b1 finished."
+XDG_STATE_HOME="$TMP/state18-13b" check 2 "stale-pick: b9 ended by a queued mid-turn notification, blocks" "$f" "" \
+  'the pick went stale on a notification turn'
+
+# Case 14: the component switched off by SYG_DISABLE passes the base fixture.
+XDG_STATE_HOME="$TMP/state18-14" SYG_DISABLE=stale-pick check 0 "stale-pick: SYG_DISABLE=stale-pick passes base" "$S18"
+unset SYG_DISABLE
+
+# Case 15: no SYG_PICK_CMD (text mode) passes the base fixture.
+unset SYG_PICK_CMD
+XDG_STATE_HOME="$TMP/state18-15" check 0 "stale-pick: SYG_PICK_CMD unset (text mode) passes base" "$S18"
+export SYG_PICK_CMD='pick-note'
+
+# Case 16: a stop-hook re-stop passes the base fixture.
+XDG_STATE_HOME="$TMP/state18-16" check 0 "stale-pick: stop_hook_active true passes base" "$S18" true
+
+unset SYG_PICK_CMD
 
 [ "$fail" = 0 ] && echo "ALL PASS" || { echo "FAILURES"; exit 1; }

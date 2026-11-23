@@ -4,7 +4,8 @@
 # Profile lines: @profile<TAB><name><TAB><space-separated components>.
 # "rules" and "security" are not hooks: "rules" gates the rules-link warning and
 # the post-compaction checklist in session-start; "security" gates the opt-in
-# security-sweep line in session-start. "session" always runs.
+# security-sweep line in session-start. "stale-pick" gates the stale-pick trigger inside
+# handoff-pick-check. "session" always runs.
 # Env: SYG_PROFILE (base set, default full), SYG_ENABLE, SYG_DISABLE (DISABLE wins).
 session-start	session
 route-check	route
@@ -50,6 +51,6 @@ push-tree-guard	push-tree
 handback-live-task-gate	handback-tasks
 memory-route-gate	memory-route
 lesson-claim-check	lesson-claim
-@profile	full	session rules route turn-shape context context-block guards-shell guards-outbound guards-commit guards-pr pr-watch dispatch api-credit launch-record classifier-ledger handoff-pick-check ask-command-echo ask-pretext ask-pretext-reminder status-claim-cite clock-stamp dispatch-spec live-checkout worktree-branch push-tree handback-tasks memory-route security lesson-claim
+@profile	full	session rules route turn-shape context context-block guards-shell guards-outbound guards-commit guards-pr pr-watch dispatch api-credit launch-record classifier-ledger handoff-pick-check stale-pick ask-command-echo ask-pretext ask-pretext-reminder status-claim-cite clock-stamp dispatch-spec live-checkout worktree-branch push-tree handback-tasks memory-route security lesson-claim
 @profile	guards	guards-shell guards-outbound guards-commit guards-pr context context-block dispatch route session api-credit launch-record classifier-ledger live-checkout worktree-branch push-tree handback-tasks
 @profile	none	session api-credit launch-record classifier-ledger

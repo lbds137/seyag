@@ -13,6 +13,7 @@ ENDED when either:
   (b) a `TaskStop` or `KillShell` call on it has a tool_result whose text
       contains "Successfully stopped task" or "is not running". Any other
       result (another error, say) leaves the task live.
+A task-notification queued mid-turn arrives as an `attachment` entry of type `queued_command` (origin kind `task-notification`), and its `prompt` is read the same way as a notification's content.
 
 Tool ids and tool names are used only when they are strings; a record whose
 ids are not strings is skipped, and the rest of the transcript is still read.
@@ -26,6 +27,8 @@ nothing.
 Contract:
   - input: env `HT_TRANSCRIPT` (the agent transcript path, already validated).
   - output: one line per live task; nothing otherwise.
+  - also imported by `handoff-pick-check.sh`, through `scan_entries` and
+    `live_task_ids`, with `HT_TRANSCRIPT` unset, so `_main` prints nothing.
 """
 
 import json
@@ -100,58 +103,82 @@ def _launch_label(blocks, tool_uses):
     return ""
 
 
-def _scan(path):
-    """Return (owned, ended): owned is [(id, label)] in first-seen order, ended
-    is the set of task ids the transcript ends."""
+def scan_entries(entries):
+    """Return (owned, ended) over already-parsed transcript entries: owned is
+    [(id, label)] in first-seen order, ended is the set of task ids they end.
+    Entries that are not dicts are skipped."""
     owned = []
     seen_owned = set()
     ended = set()
     tool_uses = {}  # tool_use id -> (name, input)
-    with open(path, encoding="utf-8", errors="replace") as fh:
-        for raw in fh:
-            try:
-                entry = json.loads(raw)
-            except ValueError:
-                continue
-            if not isinstance(entry, dict):
-                continue
-            message = entry.get("message")
-            content = message.get("content") if isinstance(message, dict) else None
-            blocks = [b for b in content if isinstance(b, dict)] if isinstance(content, list) else []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        message = entry.get("message")
+        content = message.get("content") if isinstance(message, dict) else None
+        blocks = [b for b in content if isinstance(b, dict)] if isinstance(content, list) else []
 
-            for block in blocks:
-                if block.get("type") == "tool_use":
-                    bid = _key(block.get("id"))
-                    if bid is not None:
-                        inp = block.get("input")
-                        tool_uses[bid] = (_key(block.get("name")), inp if isinstance(inp, dict) else {})
+        for block in blocks:
+            if block.get("type") == "tool_use":
+                bid = _key(block.get("id"))
+                if bid is not None:
+                    inp = block.get("input")
+                    tool_uses[bid] = (_key(block.get("name")), inp if isinstance(inp, dict) else {})
 
-            origin = entry.get("origin")
-            if isinstance(origin, dict) and origin.get("kind") == "task-notification":
-                for text in _text_of_content(content):
+        origin = entry.get("origin")
+        if isinstance(origin, dict) and origin.get("kind") == "task-notification":
+            for text in _text_of_content(content):
+                ended.update(_notified_ids(text))
+
+        attachment = entry.get("attachment")
+        if entry.get("type") == "attachment" and isinstance(attachment, dict) \
+                and attachment.get("type") == "queued_command":
+            queued_origin = attachment.get("origin")
+            if isinstance(queued_origin, dict) and queued_origin.get("kind") == "task-notification":
+                for text in _text_of_content(attachment.get("prompt")):
                     ended.update(_notified_ids(text))
 
-            for block in blocks:
-                if block.get("type") != "tool_result":
-                    continue
-                use = tool_uses.get(_key(block.get("tool_use_id")))
-                if use is None or use[0] not in ENDING_TOOLS:
-                    continue
-                text = _result_text(block)
-                if not any(phrase in text for phrase in STOP_PHRASES):
-                    continue
-                inp = use[1]
-                task = inp.get("task_id") or inp.get("shell_id")
-                if isinstance(task, str) and task:
-                    ended.add(task)
+        for block in blocks:
+            if block.get("type") != "tool_result":
+                continue
+            use = tool_uses.get(_key(block.get("tool_use_id")))
+            if use is None or use[0] not in ENDING_TOOLS:
+                continue
+            text = _result_text(block)
+            if not any(phrase in text for phrase in STOP_PHRASES):
+                continue
+            inp = use[1]
+            task = inp.get("task_id") or inp.get("shell_id")
+            if isinstance(task, str) and task:
+                ended.add(task)
 
-            result = entry.get("toolUseResult")
-            if isinstance(result, dict):
-                tid = _key(result.get("backgroundTaskId"))
-                if tid and tid not in seen_owned:
-                    seen_owned.add(tid)
-                    owned.append((tid, _clean(_launch_label(blocks, tool_uses))))
+        result = entry.get("toolUseResult")
+        if isinstance(result, dict):
+            tid = _key(result.get("backgroundTaskId"))
+            if tid and tid not in seen_owned:
+                seen_owned.add(tid)
+                owned.append((tid, _clean(_launch_label(blocks, tool_uses))))
     return owned, ended
+
+
+def live_task_ids(entries):
+    """The owned task ids that the entries do not end, in launch order."""
+    owned, ended = scan_entries(entries)
+    return [tid for tid, _ in owned if tid not in ended]
+
+
+def _parsed_lines(fh):
+    for raw in fh:
+        try:
+            yield json.loads(raw)
+        except ValueError:
+            continue
+
+
+def _scan(path):
+    """Return (owned, ended) for the transcript file at path (see scan_entries)."""
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        return scan_entries(_parsed_lines(fh))
 
 
 def _main():

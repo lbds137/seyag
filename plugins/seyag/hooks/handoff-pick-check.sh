@@ -55,6 +55,23 @@
 # other single-line value turns emitter mode on (an unbalanced quote falls back
 # to a whitespace split; an empty first word matches no call).
 #
+# Stale-pick trigger (component `stale-pick`, on in `full`; `SYG_DISABLE=stale-pick`
+# turns it off). Emitter mode only, and only when the turn wrote no handoff. It
+# blocks once when all of these hold: (a) the turn starts with a task-notification
+# entry, not owner input; (b) the turn runs no pick command; (c) walking back from
+# the turn start, the newest pick is an earlier `<cmd> clear` or `<cmd> compact`
+# call, with no owner turn, compaction or `keep` call between them (a
+# task-notification turn, and a no-origin user entry whose text starts with
+# `<command-name>`, `<local-command` or `<bash-input>`, are skipped over; any other
+# genuine user entry ends the walk as ok); (d) no background shell task the
+# transcript shows is still running (`handback_tasks.live_task_ids`; any error there
+# counts as none live); (e) the fire-once memory: the state file
+# ${XDG_STATE_HOME:-~/.local/state}/seyag/handoff-pick-check/<transcript
+# basename>.stale holds the turn start's byte offset once it has fired, so the next
+# stop of that turn proceeds. The cause: a host that applies a pick only when it is
+# newer than the turn start reads an earlier pick as stale on such a turn, and the
+# session sits idle. The block asks for the pick to be re-run as the turn's last call.
+#
 # Known false negative, accepted: a closing using `keep` in an ordinary sense
 # (e.g. "I will keep the old flag") counts as a pick under the word-bounded
 # match; the convention states the pick explicitly ("Pick: keep"), block-once
@@ -126,7 +143,15 @@ case "$PICK_CMD" in *$'\n'* | *$'\r'*) PICK_CMD="" ;; esac
 HOOKS_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 HOOK_LIB="$HOOKS_DIR/lib"
 
-VERDICT=$(PICK_CMD="$PICK_CMD" HOOK_LIB="$HOOK_LIB" TRANSCRIPT="$TRANSCRIPT" LAM="$LAM" python3 -I "${SYG_PY_CACHE_ARG:--B}" << 'PYEOF'
+# The stale-pick trigger (see the header) is its own component; the same guarded
+# source as context-size-reminder.sh. Unreadable components.sh leaves it on.
+STALE_ON=1
+if [ -r "$HOOKS_DIR/lib/components.sh" ] && source "$HOOKS_DIR/lib/components.sh" 2>/dev/null \
+    && declare -F syg_enabled >/dev/null; then
+    syg_enabled stale-pick || STALE_ON=0
+fi
+
+VERDICT=$(PICK_CMD="$PICK_CMD" STALE_ON="$STALE_ON" HOOK_LIB="$HOOK_LIB" TRANSCRIPT="$TRANSCRIPT" LAM="$LAM" python3 -I "${SYG_PY_CACHE_ARG:--B}" << 'PYEOF'
 import json, os, re, shlex, sys
 
 
@@ -239,6 +264,76 @@ if turn_start is None:
     print("ok"); sys.exit()
 turn = records[turn_start:]
 
+# Emitter mode (SYG_PICK_CMD): the pick is the recorded call, not a text token.
+# Parsed here so both triggers (the handoff pick and the stale pick) share it.
+emitter_words = None
+raw_pick_cmd = os.environ.get("PICK_CMD", "")
+if raw_pick_cmd.strip(" \t\n\r\v\f"):
+    # Any value SessionStart advertises (non-blank, single-line) turns emitter
+    # mode on, so the two hooks never disagree on the mode: an unbalanced quote
+    # falls back to a whitespace split, and an empty first word (`''`) matches
+    # no call, so the gate blocks and names the bad value.
+    try:
+        emitter_words = shlex.split(raw_pick_cmd)
+    except ValueError:
+        emitter_words = raw_pick_cmd.split()
+    if not emitter_words:
+        emitter_words = [""]
+
+if emitter_words is not None:
+    sys.path.insert(0, os.environ["HOOK_LIB"])
+    from turn_scan import command_argvs  # noqa: E402
+
+    E = emitter_words
+    n = len(E)
+
+    def is_emitter_argv(a):
+        return (
+            E[0] != ""
+            and len(a) > n
+            and a[n] in ("clear", "compact", "keep")
+            and a[1:n] == E[1:]
+            and (a[0] == E[0] or os.path.basename(a[0]) == os.path.basename(E[0]))
+        )
+
+    # tool_use id -> whether its tool_result carries is_error: true (all records).
+    tool_errors = {}
+    for _, entry in records:
+        if entry.get("type") != "user":
+            continue
+        content = entry.get("message", {}).get("content")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "tool_result":
+                tid = block.get("tool_use_id")
+                if isinstance(tid, str):
+                    tool_errors[tid] = block.get("is_error") is True
+
+    def emitter_calls(entries):
+        """Yield (off, word) for each assistant Bash tool_use in entries whose
+        command has an emitter argv and whose id is not errored; word is the
+        matching argv's a[n] (the last matching argv in the call)."""
+        for off, entry in entries:
+            if entry.get("type") != "assistant":
+                continue
+            for block in entry.get("message", {}).get("content", []) or []:
+                if not isinstance(block, dict) or block.get("type") != "tool_use":
+                    continue
+                if block.get("name") != "Bash":
+                    continue
+                inp = block.get("input")
+                cmd = inp.get("command") if isinstance(inp, dict) else None
+                if not isinstance(cmd, str):
+                    continue
+                matches = [a[n] for a in command_argvs(cmd) if is_emitter_argv(a)]
+                if not matches:
+                    continue
+                tid = block.get("id")
+                if isinstance(tid, str) and tool_errors.get(tid):
+                    continue
+                yield off, matches[-1]
+
 
 HEADING_RE = re.compile(r"^[ \t]*#{1,6}[ \t].*", re.MULTILINE)
 
@@ -325,11 +420,96 @@ for off, entry in turn:
         if is_handoff_write(block):
             newest_write_off = off
 
-if newest_write_off is None:
-    print("ok"); sys.exit()
-
 state_home = os.environ.get("XDG_STATE_HOME") or "~/.local/state"
 state_dir = os.path.join(os.path.expanduser(state_home), "seyag", "handoff-pick-check")
+
+
+def origin_kind(entry):
+    origin = entry.get("origin")
+    return origin.get("kind") if isinstance(origin, dict) else None
+
+
+def genuine_text(entry):
+    # The same text is_genuine_user reads: a string, or the first text block.
+    content = entry.get("message", {}).get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                text = block.get("text")
+                return text if isinstance(text, str) else ""
+    return ""
+
+
+COMMAND_PREFIXES = ("<command-name>", "<local-command", "<bash-input>")
+
+
+def earlier_pick_is_latest():
+    """True when the newest pick before this turn is an earlier clear or compact,
+    with no owner turn, compaction or keep call between them."""
+    for i in range(turn_start - 1, -1, -1):
+        entry = records[i][1]
+        if entry.get("type") == "system" and entry.get("subtype") == "compact_boundary":
+            return False
+        if is_genuine_user(entry):
+            kind = origin_kind(entry)
+            if kind == "human":
+                return False
+            if kind != "task-notification" and not genuine_text(entry).lstrip().startswith(COMMAND_PREFIXES):
+                return False
+            continue
+        if entry.get("type") == "assistant":
+            calls = list(emitter_calls([records[i]]))
+            if calls:
+                word = calls[-1][1]
+                if word in ("clear", "compact"):
+                    return True
+                if word == "keep":
+                    return False
+    return False
+
+
+def stale_pick_verdict():
+    """Print the stale-pick verdict and exit. See the hook header, trigger (a) to (e)."""
+    origin = records[turn_start][1].get("origin")
+    if not (isinstance(origin, dict) and origin.get("kind") == "task-notification"):
+        print("ok"); sys.exit()
+    if any(True for _ in emitter_calls(turn)):
+        print("ok"); sys.exit()
+    if not earlier_pick_is_latest():
+        print("ok"); sys.exit()
+    # Live background tasks: the module reads HT_TRANSCRIPT when set, so pop it.
+    os.environ.pop("HT_TRANSCRIPT", None)
+    try:
+        import handback_tasks  # noqa: E402
+        live = handback_tasks.live_task_ids(e for _, e in records)
+    except Exception:
+        live = []
+    if live:
+        print("ok"); sys.exit()
+    stale_file = os.path.join(state_dir, os.path.basename(path) + ".stale")
+    marker = str(records[turn_start][0])
+    try:
+        with open(stale_file) as f:
+            if f.read().strip() == marker:
+                print("ok"); sys.exit()  # this turn start already fired
+    except OSError:
+        pass
+    try:
+        os.makedirs(state_dir, exist_ok=True)
+        with open(stale_file, "w") as f:
+            f.write(marker)
+    except OSError:
+        pass  # fail-open: no memory → the next stop of this turn fires again
+    print("stale:emitter"); sys.exit()
+
+
+if newest_write_off is None:
+    if emitter_words is not None and os.environ.get("STALE_ON") == "1":
+        stale_pick_verdict()
+    print("ok"); sys.exit()
+
 state_file = os.path.join(state_dir, os.path.basename(path) + ".offset")
 
 stored = None
@@ -365,71 +545,9 @@ else:
 
 PICK_RE = re.compile(r"(?<![\w/])/(?:clear|compact)\b|\bkeep\b", re.I)
 
-# Emitter mode (SYG_PICK_CMD): the pick is the recorded call, not a text token.
-emitter_words = None
-raw_pick_cmd = os.environ.get("PICK_CMD", "")
-if raw_pick_cmd.strip(" \t\n\r\v\f"):
-    # Any value SessionStart advertises (non-blank, single-line) turns emitter
-    # mode on, so the two hooks never disagree on the mode: an unbalanced quote
-    # falls back to a whitespace split, and an empty first word (`''`) matches
-    # no call, so the gate blocks and names the bad value.
-    try:
-        emitter_words = shlex.split(raw_pick_cmd)
-    except ValueError:
-        emitter_words = raw_pick_cmd.split()
-    if not emitter_words:
-        emitter_words = [""]
-
 if emitter_words is not None:
-    sys.path.insert(0, os.environ["HOOK_LIB"])
-    from turn_scan import command_argvs  # noqa: E402
-
-    E = emitter_words
-    n = len(E)
-
-    def is_emitter_argv(a):
-        return (
-            E[0] != ""
-            and len(a) > n
-            and a[n] in ("clear", "compact", "keep")
-            and a[1:n] == E[1:]
-            and (a[0] == E[0] or os.path.basename(a[0]) == os.path.basename(E[0]))
-        )
-
-    # tool_use id -> whether its tool_result carries is_error: true.
-    tool_errors = {}
-    for _, entry in turn:
-        if entry.get("type") != "user":
-            continue
-        content = entry.get("message", {}).get("content")
-        if not isinstance(content, list):
-            continue
-        for block in content:
-            if isinstance(block, dict) and block.get("type") == "tool_result":
-                tid = block.get("tool_use_id")
-                if isinstance(tid, str):
-                    tool_errors[tid] = block.get("is_error") is True
-
     def emitter_recorded():
-        for off, entry in turn:
-            if off < newest_write_off or entry.get("type") != "assistant":
-                continue
-            for block in entry.get("message", {}).get("content", []) or []:
-                if not isinstance(block, dict) or block.get("type") != "tool_use":
-                    continue
-                if block.get("name") != "Bash":
-                    continue
-                inp = block.get("input")
-                cmd = inp.get("command") if isinstance(inp, dict) else None
-                if not isinstance(cmd, str):
-                    continue
-                if not any(is_emitter_argv(a) for a in command_argvs(cmd)):
-                    continue
-                tid = block.get("id")
-                if isinstance(tid, str) and tool_errors.get(tid):
-                    continue
-                return True
-        return False
+        return any(off >= newest_write_off for off, _ in emitter_calls(turn))
 
     print("ok" if emitter_recorded() else "missing:emitter")
 elif PICK_RE.search(final_text):
@@ -442,9 +560,30 @@ PYEOF
 ) || exit 0
 
 case "$VERDICT" in
-  missing | missing:unwired | missing:emitter) ;;
+  missing | missing:unwired | missing:emitter | stale:emitter) ;;
   *) exit 0 ;;
 esac
+
+if [ "$VERDICT" = "stale:emitter" ]; then
+  cat >&2 << 'MSG'
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+HANDOFF PICK — the pick went stale on a notification turn
+This turn began with a background-task notification, not owner input,
+and ended without running the pick command. A host that applies a pick
+only when it is newer than the turn's start now reads the earlier pick
+as stale, and the session sits idle. Re-run it as the turn's last Bash
+call:
+MSG
+  printf '  %s clear|compact|keep\n' "$PICK_CMD" >&2
+  cat >&2 << 'MSG2'
+If more work is still pending (a background agent or job that will
+notify again), say so in one line and stop again (this gate fires only
+once per turn — the next stop proceeds). Off switch: SYG_DISABLE=stale-pick.
+(the seyag rules, rules/core.md § "Sessions and handoffs")
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+MSG2
+  exit 2
+fi
 
 if [ "$VERDICT" = "missing:emitter" ]; then
   cat >&2 << 'MSG'
