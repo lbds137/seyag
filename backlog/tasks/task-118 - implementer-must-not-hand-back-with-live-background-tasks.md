@@ -1,7 +1,7 @@
 ---
 id: TASK-118
 title: 'implementer: no hand-back while its own background tasks still run; log-line waiters need a timeout and a liveness check'
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-11-23T05:40:00Z'
 labels:
@@ -25,3 +25,9 @@ Probe: an agent payload with a live background task blocks; none passes; the tog
 
 Capture result (2026-11-23): SubagentStop fires after the report is already delivered through the SubagentHandback tool call, so blocking there is too late; the gate is a PreToolUse hook on SubagentHandback instead (deny verified live). Evidence summarized in the hook header.
 <!-- SECTION:DESCRIPTION:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Shipped as handback-live-task-gate (component handback-tasks), a PreToolUse hook on SubagentHandback rather than SubagentStop; implementer.md and the delegation spec template carry the waiter rule.
+<!-- SECTION:FINAL_SUMMARY:END -->
