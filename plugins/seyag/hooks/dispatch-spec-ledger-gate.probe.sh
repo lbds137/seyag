@@ -390,7 +390,7 @@ assert_err_lacks "case 16b: block does not quote the continuation line" \
 
 # --- Case 17 (CI F1): delegation skill template verbatim vs filled ------------
 # Copies the skill template's `## Premise ledger` section verbatim as
-# restructured (blockquote guidance + three placeholder `- ` rows): the
+# restructured (blockquote guidance + four placeholder `- ` rows): the
 # blockquote is not a `- ` row, while the unfilled `<...>` placeholder row
 # lacks a citation and blocks with HEADLINE_UNCITED. Replacing the `<...>`
 # slots with cited rows passes.
@@ -398,6 +398,7 @@ TEMPLATE_VERBATIM=$(cat <<'EOF'
 ## Premise ledger
 > A premise about a value's form or state at a pipeline stage cites the producer line that establishes it AT that stage, never a similar-looking site elsewhere — the form at the stage is exactly what the spec's next step consumes.
 - <each runtime premise the spec asserts> — <the read or probe that established it>
+- <each absence claim: "no X", "nothing calls Y"> — `<the sweep: every pattern run>`; positive control: `<a known-present instance it matched>`
 - Already built? `<grep for the fix's own name>` → <result>
 - Already covered? `<grep/search for an existing task, PR or branch>` → <result>
 EOF
@@ -412,6 +413,7 @@ TEMPLATE_FILLED=$(cat <<'EOF'
 ## Premise ledger
 > A premise about a value's form or state at a pipeline stage cites the producer line that establishes it AT that stage, never a similar-looking site elsewhere — the form at the stage is exactly what the spec's next step consumes.
 - hooks.json PreToolUse array has no Agent matcher — plugins/seyag/hooks/hooks.json:120
+- No other hook greps for the ledger heading — `git grep -n "Premise ledger" plugins/seyag/hooks/*.sh` → only dispatch-spec-ledger-gate.sh and its probe; positive control: `dispatch-spec-ledger-gate.sh:144`
 - Already built? `grep -rn "Premise ledger" plugins/` → only SKILL.md:49
 - Already covered? `git log --all --grep=ledger-gate` → empty
 EOF
