@@ -30,6 +30,7 @@ plugins/seyag/hooks/pr-merge-review-check-review.probe.sh	52.4
 plugins/seyag/hooks/pr-monitor-reminder.probe.sh	24.3
 plugins/seyag/hooks/promise-ledger-check.probe.sh	7.1
 plugins/seyag/hooks/publish-gate.probe.sh	29.6
+plugins/seyag/hooks/push-tree-guard.probe.sh	7.4
 plugins/seyag/hooks/python-heredoc-edit-guard.probe.sh	1.6
 plugins/seyag/hooks/queued-message-receipt.probe.sh	1.3
 plugins/seyag/hooks/recursive-rm-guard.probe.sh	19.1

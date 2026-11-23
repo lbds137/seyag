@@ -2,6 +2,16 @@
 
 All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY-MM-DD>` section per released version; under it, `###` categories in fixed order — Breaking Changes, Features, Bug Fixes, Improvements, Chores, Tests — empty ones omitted; items are `- **scope:** description (#PR)`, written from the version's merged commit subjects.
 
+## 0.3.210 - 2026-11-22
+
+### Features
+
+- **push-tree-guard:** blocks once a `git push` that publishes HEAD, or a `gh pr create` without `--head`, that runs in a different worktree of the same repo than the session's last `git commit` (the main checkout counts), naming both trees; the acknowledged (commit tree, push tree) pair then passes; `SYG_DISABLE=push-tree` turns it off (TASK-61). (#PR)
+
+### Tests
+
+- **push-tree-guard:** `hooks/push-tree-guard.probe.sh` pins the block, the pass cases, the acknowledged re-run and the `run.sh` toggle in a hermetic repo with two linked worktrees and an unrelated repo. (#PR)
+
 ## 0.3.209 - 2026-11-22
 
 ### Features
@@ -10,7 +20,7 @@ All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY
 
 ### Chores
 
-- **handoff-pick-check:** #377 review lows: header notes (basename match deliberate both ways, order inside one record unchecked), blank test aligned with bash `[:space:]`, same-record order probe; `core.md` offset cut. (#PR)
+- **handoff-pick-check:** #377 review lows: header notes (basename match deliberate both ways, order inside one record unchecked), blank test aligned with bash `[:space:]`, same-record order probe; `core.md` offset cut. (#378)
 
 ## 0.3.208 - 2026-11-22
 

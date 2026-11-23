@@ -1,0 +1,21 @@
+---
+id: TASK-110
+title: 'mutation-canary bin: apply a named mutation, run a probe, report the failing cases, restore'
+status: To Do
+assignee: []
+created_date: '2026-11-23T03:31:00Z'
+labels:
+  - mining
+  - bin
+dependencies: []
+priority: high
+ordinal: 110000
+---
+
+## Description
+
+<!-- SECTION:DESCRIPTION:BEGIN -->
+From session mining (~46 items across ~41 sessions in one week, plus more in other lanes): mutation canaries are hand-built per unit in every code repo, and several first tries were vacuous (the mutation never reached the code the probe runs).
+
+Owner ruling: a small bin. Shape: take a file, a literal old/new pair (or a patch) and a probe command; refuse when the old text is absent or not unique; apply on a scratch copy of the worktree or with a guaranteed restore; run the probe; report red/green plus the failing case labels; restore and verify the file is byte-identical. A canary that stays green is reported as such (the vacuous case). `probe-red-check` is the neighbour to reuse from.
+<!-- SECTION:DESCRIPTION:END -->

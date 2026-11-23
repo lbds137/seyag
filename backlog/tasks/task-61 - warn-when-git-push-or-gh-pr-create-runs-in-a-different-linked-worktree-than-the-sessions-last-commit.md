@@ -1,7 +1,7 @@
 ---
 id: TASK-61
 title: 'Warn when git push or gh pr create runs in a different linked worktree than the session''s last commit'
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-11-21T06:30:00Z'
 labels:
@@ -25,3 +25,9 @@ Probes:
 - same tree: pass;
 - no prior commit: pass.
 <!-- SECTION:DESCRIPTION:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Shipped as push-tree-guard (component push-tree); scope widened to any two worktrees of one repo (main checkout included) and to `gh pr create`; explicit non-HEAD refspecs are not judged.
+<!-- SECTION:FINAL_SUMMARY:END -->
