@@ -5,13 +5,13 @@ All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY
 ## 0.3.216 - 2026-11-23
 
 ### Bug Fixes
-- **safe-worktree-clean:** the `pr-merged` lookup stops calling the forge for the rest of a repo's judging after the first `gh api` timeout (worst case one 20 s wait per repo, was one per tree); the docs gave `SYG_WORKTREE_PR_CHECK`'s default as `1` and now say unset (lookup on, quiet). (#TBD)
+- **safe-worktree-clean:** the `pr-merged` lookup stops calling the forge for the rest of a repo's judging after the first `gh api` timeout (worst case one 20 s wait per repo, was one per tree); the docs gave `SYG_WORKTREE_PR_CHECK`'s default as `1` and now say unset (lookup on, quiet). (#386)
 
 ### Improvements
-- **safe-worktree-clean:** docs correction: the header, README and the 0.3.215 entry now say the `pr-merged` lookup has been on by default since 0.3.215, and the header names the URL forms that fail closed (`ssh://` with no user, any port, a path deeper than owner/repo). (#TBD)
+- **safe-worktree-clean:** docs correction: the header, README and the 0.3.215 entry now say the `pr-merged` lookup has been on by default since 0.3.215, and the header names the URL forms that fail closed (`ssh://` with no user, any port, a path deeper than owner/repo). (#386)
 
 ### Tests
-- **safe-worktree-clean:** L7 no longer reaches a real `gh`; new probes for scp-like and `ssh://` remotes, the fail-closed URL forms and the timeout short-circuit. (#TBD)
+- **safe-worktree-clean:** L7 no longer reaches a real `gh`; new probes for scp-like and `ssh://` remotes, the fail-closed URL forms and the timeout short-circuit. (#386)
 
 ## 0.3.215 - 2026-11-23
 
