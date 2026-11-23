@@ -232,6 +232,7 @@ while IFS= read -r row; do
         and (.timestamp | type) == "string"
         and (.timestamp | length) > 0
       )
+    # The fallback label is defensive: the test above admits only lines this capture matches.
     | ((.message.content | strings | capture("^\\s*(<command-message>[^<]*</command-message>\\s*)?<command-name>/(?<cmd>reload-plugins)</command-name>") | .cmd) // "unlabelled") as $cmd
     | "\(.timestamp)\t\($cmd)"
   ' "${files[@]}" 2>/dev/null)
