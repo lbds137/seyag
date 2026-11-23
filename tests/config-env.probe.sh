@@ -1096,15 +1096,23 @@ PYEOF
 
   # Every python bin adopts the loader (the uniform rule): python shebang in the
   # shipped form, and the wiring call present. zai-spend is a link to zai-usage.
+  # Named exceptions skip only the wiring call, never the shebang:
+  #   change-class: CI runs the same file standalone (no plugin lib), and the
+  #   project config loader can set guard bypasses a classifier must not take.
+  ADOPT_EXEMPT=" change-class "
   ADOPT_BAD=""
   for b in "$PLUGIN"/bin/*; do
     first=$(head -1 "$b" 2>/dev/null)
     case $first in '#!'*python*) ;; *) continue ;; esac
     grep -qx '#!/usr/bin/env -S python3 -I -B' "$b" || ADOPT_BAD="$ADOPT_BAD $(basename "$b"):shebang"
+    case $ADOPT_EXEMPT in *" $(basename "$b") "*)
+      ! grep -q 'config_env' "$b" || ADOPT_BAD="$ADOPT_BAD $(basename "$b"):exempt-but-imports-config_env"
+      continue ;;
+    esac
     grep -q 'config_env.syg_config_env(_SYG_ROOT)' "$b" || ADOPT_BAD="$ADOPT_BAD $(basename "$b"):adoption"
   done
   if [ -z "$ADOPT_BAD" ]; then
-    ok "(w) every python bin in bin/ has the -I -B shebang and calls config_env.syg_config_env"
+    ok "(w) every python bin in bin/ has the -I -B shebang and calls config_env.syg_config_env (exempt:$ADOPT_EXEMPT)"
   else
     fail "(w) python bins not adopting the loader:$ADOPT_BAD"
   fi
