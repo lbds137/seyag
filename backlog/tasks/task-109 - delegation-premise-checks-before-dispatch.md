@@ -1,7 +1,7 @@
 ---
 id: TASK-109
 title: 'delegation: run every spec command and must-fail input before dispatch; reviews attack premises'
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-11-23T03:31:00Z'
 labels:

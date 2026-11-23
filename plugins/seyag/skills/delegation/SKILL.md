@@ -58,6 +58,7 @@ died-before-assertion.>
 ## Premise ledger
 > A premise about a value's form or state at a pipeline stage cites the producer line that establishes it AT that stage, never a similar-looking site elsewhere — the form at the stage is exactly what the spec's next step consumes.
 - <each runtime premise the spec asserts> — <the read or probe that established it>
+- <each absence claim: "no X", "nothing calls Y"> — `<the sweep: every pattern run>`; positive control: `<a known-present instance it matched>`
 - Already built? `<grep for the fix's own name>` → <result>
 - Already covered? `<grep/search for an existing task, PR or branch>` → <result>
 
@@ -90,7 +91,12 @@ never an interpreter rewrite script.>
 - <PROJECT: whole-package test/lint/typecheck commands copied from package.json,
   Makefile or CI, not file-scoped lists>, each run once by the driver before
   dispatch: a missing script's empty output looks like a pass; run
-  sequentially with long timeouts
+  sequentially with long timeouts. The same holds for every other command the
+  spec quotes and every input it says must fail: the driver runs each before
+  dispatch and sees it behave as the spec says
+- <Gates that run over a few minutes: marked "driver runs after the report".
+  The harness backgrounds a foreground call after about 3 minutes, which ends
+  a worker's turn mid-gate>
 - Claim canaries: <for every behavior the PR will claim, the mutation that
   falsifies it, cut strictly inside the fixture, never on the boundary tested>
 
@@ -144,7 +150,7 @@ Read the FULL diff yourself, in the worktree, never through a verifier subagent:
 - **Verify, don't relay.** Re-run `git -C <worktree> log -1`, `status --porcelain` and `diff --stat` for every git claim in the report, and `git -C <worktree> diff --stat -- <file>` for every "added tests to X". Re-run any gate whose tail is missing or truncated. A worker's "this canary cannot redden" is also a claim: build the discriminating fixture.
 - Check each reported deviation against the spec's intent, not just its letter.
 - **Sweep outward from the diff**: name the prose, prompts and constants outside the diff that DESCRIBE the changed behavior, and read each (core rules § A changed premise sweeps its prose). Neither the worker nor a diff-only reviewer can see these. For a review round, the per-finding class sweep is seyag:review-response rule 2a: the spec carries the sweep command and its defective sites, and the command is re-run against the worker's worktree before the push.
-- **Then a fresh-context review agent** (core rules § Subagents by default) from a different model family than the worker where one is reachable (when `$SYG_CROSS_REVIEW_CMD` is set, run it for the route; a same-family review is labelled as the fallback), given the spec and the worktree path (for a cloud unit, the `origin/<base>...origin/<branch>` range), with `model` passed: an independent read finds what a driver checking the diff against its own spec can't. Seed the reviewer with the driver's own diff-read hazards (the assumptions you checked and what could still be wrong), and on a routed lane the reviewer runs on the strongest model the lane reaches — never the driver's own alias. Its findings go back to the worker as one review round.
+- **Then a fresh-context review agent** (core rules § Subagents by default) from a different model family than the worker where one is reachable (when `$SYG_CROSS_REVIEW_CMD` is set, run it for the route; a same-family review is labelled as the fallback), given the spec and the worktree path (for a cloud unit, the `origin/<base>...origin/<branch>` range), with `model` passed: an independent read finds what a driver checking the diff against its own spec can't. Seed the reviewer with the driver's own diff-read hazards (the assumptions you checked and what could still be wrong) and tell it to attack the spec's premise ledger, each row a claim to falsify against the code (a review that only checks the diff against the spec inherits the spec's wrong premises), and on a routed lane the reviewer runs on the strongest model the lane reaches — never the driver's own alias. Its findings go back to the worker as one review round.
 
 **Transfer**, from the main tree on the unit's branch. When the project's main checkout is a live plugin checkout (`live-checkout-guard` active), skip the transfer: the worker edits the unit's branch worktree and the driver commits there. The main tree must ignore `.claude/worktrees/` (`.gitignore` or `.git/info/exclude`), or the clean-tree check stops on it. Primary form: `worktree-transfer --base <base sha> <worktree path>` (plugin bin, on PATH) — it pins the dispatch base, runs the fixed-order checks (main tree identity and cleanliness, registered agent branch matching `SYG_WORKTREE_BRANCH_RE`, worktree `.git` gitfile pointing to its registered entry under the main `.git/worktrees/` and no nested `.git` other than the tree's own submodules and no directory below it that git would take as a repo, the worktree HEAD equals the main tree's HEAD (ahead is as wrong as behind — diagnosed before the patch is built), non-empty `--binary` patch, nothing outside the patch, `git apply --index`, staged byte-identity) and refuses `STOP: <check>: <reason>` on the first failure, removing the worktree and its branch only after every check passed. When main moved since dispatch (a merge landed), rerun with `--rebase-base` instead of hand-copying: it transfers onto the current main HEAD only after proving every path the transfer depends on is unchanged, and refuses naming the paths otherwise. Fallback when the bin is not on PATH — the block this tool mechanizes, tested in a scratch repo: byte-identical on a clean modify+new+delete transfer; stops on an empty patch, a worker commit, a moved or detached main branch, and a dirty main tree (unstaged edit, untracked file). The fallback makes neither `.git` check:
 
