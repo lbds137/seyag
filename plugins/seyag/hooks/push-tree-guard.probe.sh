@@ -16,7 +16,7 @@ HOOK="$SCRIPT_DIR/push-tree-guard.sh"
 RUN="$SCRIPT_DIR/run.sh"
 
 TMP=$(mktemp -d) || { echo "FAIL [setup]: mktemp"; exit 1; }
-trap 'rm -rf "$TMP"' EXIT
+trap 'chmod -R u+w "$TMP" 2>/dev/null; rm -rf "$TMP"' EXIT
 STATE="$TMP/state"
 
 GIT=(git -c user.name=t -c user.email=t@example.invalid)
@@ -165,6 +165,7 @@ if [ -f "$STATE/seyag/push-tree-guard/fo1" ]; then
   chmod 555 "$STATE/seyag/push-tree-guard"
   hook 0 "fo1 push B with read-only state dir fails open" "$WT_B" "git push" fo1
   chmod 755 "$STATE/seyag/push-tree-guard"
+  hook 2 "fo1 control: the failed write acked nothing, so the push blocks once writable" "$WT_B" "git push" fo1
 else
   echo "FAIL [fo1 setup]: no state file for fo1, so the push is not a would-be hit"
   fail=1

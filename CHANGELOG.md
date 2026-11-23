@@ -6,7 +6,7 @@ All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY
 
 ### Improvements
 
-- **push-tree-guard:** the prefilter matches `pr create` instead of any `create`; the header names git aliases and the double trip with cwd-drift-guard as known bounds; a `run_command` comment now says identical consecutive calls are one occurrence (#PR)
+- **push-tree-guard:** the prefilter matches `pr create` instead of any `create`; the header names git aliases, the raw-text prefilter and the double trip with cwd-drift-guard as known bounds; a `run_command` comment now says identical consecutive calls are one occurrence (#PR)
 
 ### Chores
 
