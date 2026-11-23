@@ -2,7 +2,7 @@
 # Fixture check for bin/safe-worktree-clean against throwaway repos (a bare origin, a clone, and
 # agent worktrees under its .claude/worktrees). Every HOLD reason fires alone: each tree breaks
 # exactly one criterion. Also covers multi-repo sweeps (--repo repeatable, --repos-file) and
-# --apply-hold plan verification, backup layout, and removal (P1-P48, PM1-PM8 for the pr-merged
+# --apply-hold plan verification, backup layout, and removal (P1-P48, PM1-PM10 for the pr-merged
 # resolution behind a stub gh, and the L7 relative --only check). The tool always runs with
 # --repo into the fixture, never the real repo.
 # Usage: tests/safe-worktree-clean.probe.sh   (from anywhere)
@@ -3059,8 +3059,8 @@ expect "$out_p47b" fx HOLD:branch-name "P47b: project .claude/seyag.toml syg_wor
 phase_73
 
 phase_pm() {
-local PMB PMREPO PMW PMH PMJ out rc got n
-# PM1-PM8 + L7: the pr-merged resolution. A stub `gh` on PATH answers the forge call: it logs its
+local PMB PMREPO PMW PMW2 PMH PMJ out rc got n pm9c
+# PM1-PM10 + L7: the pr-merged resolution. A stub `gh` on PATH answers the forge call: it logs its
 # argv to $GH_STUB_LOG, exits $GH_STUB_RC when that is non-zero, else prints $GH_STUB_JSON.
 PMB="$T/pmbin"
 mkdir -p "$PMB"
@@ -3264,13 +3264,66 @@ pm_json "$PMJ" "$PMH" main '"2026-11-20T00:00:00Z"'
 out=$(pm_run --base origin/develop --json); got=$(verdict "$out" t)
 [ "$got" = "HOLD:unmerged" ] && ok "PM8: --base origin/develop with base.ref=main stays unmerged" || bad "PM8: main got '$got'"
 
+# PM9 remote URL forms: scp-like and ssh:// (with a user) resolve to the same host and repo as
+# https; ssh:// with no user, a port and a nested path fail closed (gh never called).
+pm9_url() { # $1 fixture name, $2 remote URL; leaves PMREPO/PMW/PMH set, the stub log removed
+  pm_repo "$1" t
+  git -C "$PMREPO" remote set-url origin "$2" || bad "PM9 setup: set-url $2"
+  pm_json "$PMJ" "$PMH" main '"2026-11-20T00:00:00Z"'
+  rm -f "$T/pm.log"
+}
+for pm9c in "a git@example.invalid:o/r.git" "b ssh://git@example.invalid/o/r"; do
+  pm9_url "pm9${pm9c%% *}" "${pm9c#* }"
+  out=$(pm_run --json); got=$(verdict "$out" t)
+  if [ "$got" = "HOLD:pr-merged" ] && [ "$(cat "$T/pm.log" 2>/dev/null)" = "api --hostname example.invalid repos/o/r/commits/$PMH/pulls" ]; then
+    ok "PM9(${pm9c%% *}): remote ${pm9c#* } -> pr-merged, one gh call with host/repo/sha"
+  else
+    bad "PM9(${pm9c%% *}): ${pm9c#* } got '$got', log='$(cat "$T/pm.log" 2>/dev/null)'"
+  fi
+done
+for pm9c in "c1 ssh://example.invalid/o/r.git" "c2 ssh://git@example.invalid:22/o/r.git" "c3 https://example.invalid/g/sub/r.git"; do
+  pm9_url "pm9${pm9c%% *}" "${pm9c#* }"
+  out=$(pm_run --json); got=$(verdict "$out" t)
+  if [ "$got" = "HOLD:unmerged" ] && [ ! -e "$T/pm.log" ]; then
+    ok "PM9(${pm9c%% *}): remote ${pm9c#* } fails closed, gh uncalled, HOLD:unmerged"
+  else
+    bad "PM9(${pm9c%% *}): ${pm9c#* } got '$got', log=$([ -e "$T/pm.log" ] && echo present || echo absent)"
+  fi
+done
+err=$(SYG_WORKTREE_PR_CHECK=1 pm_run --json 2>&1 >/dev/null)
+[ "$err" = "safe-worktree-clean: pr check: .claude/worktrees/t: remote origin URL is not an https, ssh:// or git@host:owner/repo form" ] \
+  && ok "PM9(c): SYG_WORKTREE_PR_CHECK=1 names the URL-shape failure on stderr" \
+  || bad "PM9(c): stderr was '$err'"
+
+# PM10 a gh api timeout (stub exit 124): the first tree pays it, later trees in the run skip the
+# call, both stay HOLD:unmerged, and SYG_WORKTREE_PR_CHECK=1 reports both outcomes.
+pm_repo pm10 t1
+add_tree pm10 t2 && PMW2="$PMREPO/.claude/worktrees/t2" && [ -d "$PMW2" ] || bad "PM10 setup: add_tree t2"
+echo pm10b > "$PMW2/n.txt" && git -C "$PMW2" add n.txt && git -C "$PMW2" commit -qm "pm10b" || bad "PM10 setup: commit t2"
+pm_json "$PMJ" "$PMH" main '"2026-11-20T00:00:00Z"'
+rm -f "$T/pm.log"
+err=$(GH_STUB_RC=124 SYG_WORKTREE_PR_CHECK=1 pm_run --json 2>&1 >"$T/pm10.out"); out=$(cat "$T/pm10.out")
+if [ "$(verdict "$out" t1)" = "HOLD:unmerged" ] && [ "$(verdict "$out" t2)" = "HOLD:unmerged" ] \
+  && [ "$(wc -l < "$T/pm.log")" -eq 1 ] && [ "$(wc -l <<<"$err")" -eq 2 ] \
+  && [ "$(grep -c ': gh api timed out after 20 s$' <<<"$err")" -eq 1 ] \
+  && [ "$(grep -c ': skipped: an earlier gh api call timed out$' <<<"$err")" -eq 1 ]; then
+  ok "PM10: first gh timeout skips the forge for the other tree: one gh call, one timeout note, one skip note"
+else
+  bad "PM10: t1='$(verdict "$out" t1)' t2='$(verdict "$out" t2)' log=$(wc -l < "$T/pm.log" 2>/dev/null) lines, stderr='$err'"
+fi
+# PM10b only a timeout latches: an ordinary gh failure (exit 1) still lets the other tree call.
+rm -f "$T/pm.log"; GH_STUB_RC=1 pm_run --json >/dev/null 2>&1
+[ "$(wc -l < "$T/pm.log" 2>/dev/null)" = 2 ] && ok "PM10b: a non-timeout gh failure does not skip later trees: two gh calls" \
+  || bad "PM10b: log=$(wc -l < "$T/pm.log" 2>/dev/null) lines, want 2"
+
 # L7 --only takes the repo-relative path the refusal line prints (run from the repo root, where
-# that relative path resolves).
-pm_repo pm9 t
-PLAN=$("$TOOL" --repo "$PMREPO" --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["hold_plan"] or "")')
-err=$(SYG_WORKTREE_BACKUP_DIR="$T/bkpm9" "$TOOL" --repo "$PMREPO" --apply-hold "$PLAN" 2>&1 >/dev/null)
+# that relative path resolves). The tool runs directly here, with no stub gh on PATH, so the
+# forge lookup is switched off: a runner with a real gh must not reach the network.
+pm_repo l7 t
+PLAN=$(SYG_WORKTREE_PR_CHECK=0 "$TOOL" --repo "$PMREPO" --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["hold_plan"] or "")')
+err=$(SYG_WORKTREE_PR_CHECK=0 SYG_WORKTREE_BACKUP_DIR="$T/bkl7" "$TOOL" --repo "$PMREPO" --apply-hold "$PLAN" 2>&1 >/dev/null)
 relp=$(sed -n 's/.*commit-carrying tree \([^ ]*\) (.*/\1/p' <<<"$err")
-out=$(cd "$PMREPO" && "$TOOL" --repo "$PMREPO" --only "$relp" --json); rc=$?
+out=$(cd "$PMREPO" && SYG_WORKTREE_PR_CHECK=0 "$TOOL" --repo "$PMREPO" --only "$relp" --json); rc=$?
 if [ "$relp" = ".claude/worktrees/t" ] && [ "$rc" -eq 0 ] && [ "$(verdict "$out" t)" = "HOLD:unmerged" ]; then
   ok "L7: --only accepts the repo-relative path printed in the refusal line (from the repo root)"
 else
