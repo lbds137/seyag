@@ -10,7 +10,7 @@ All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY
 
 ### Chores
 
-- **backlog:** close TASK-61; file TASK-109..117 (re-queued session-mining rows); TASK-20 notes the move. (#379)
+- **backlog:** close TASK-61; file TASK-109..117 (re-queued session-mining rows) and TASK-118 (implementer hand-back with live background tasks); TASK-20 notes the move. (#379)
 
 ### Tests
 
