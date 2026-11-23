@@ -24,6 +24,10 @@ Shape: an extension of handoff-pick-check, not a new hook.
 - Block once per turn with "start the named unit, or run the pick command".
 - Give it its own `SYG_DISABLE` key.
 
+Second shape (same source, same day): a session ran the pick command, then a notification-only turn (a background task finished; no user input) replied and ended without re-running it, so the pick went stale. Later the session told the owner "the /clear is already queued" without re-running it, which was false. So the check also covers:
+- notification-only turns, which end with no fresh pick;
+- a final text that claims a pick is queued while the turn made no pick-command call.
+
 Open design points, for whoever builds it:
 - **Next-unit pattern.** It needs precision against the replay corpus. Many closings legitimately say "next" while a background agent or CI is still running.
 - **Whether live background work exempts the turn.** One option is an Agent or Monitor launched this turn, reusing handback-live-task-gate's task scan.

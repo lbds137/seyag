@@ -92,11 +92,13 @@ never an interpreter rewrite script.>
   Makefile or CI, not file-scoped lists>, each run once by the driver before
   dispatch: a missing script's empty output looks like a pass; run
   sequentially with long timeouts. The same holds for every other command the
-  spec quotes and every input it says must fail: the driver runs each before
-  dispatch and sees it behave as the spec says
+  spec quotes and every input it says must fail: the driver runs each against
+  the base before dispatch and records what it did there (a check that needs
+  the change must at least reach its assertion; a must-fail input must fail
+  for the stated reason, not on a missing script or fixture)
 - <Gates that run over a few minutes: marked "driver runs after the report".
-  The harness backgrounds a foreground call after about 3 minutes, which ends
-  a worker's turn mid-gate>
+  The harness can background a long foreground call (seen at 180 s), which
+  ends a worker's turn mid-gate>
 - Claim canaries: <for every behavior the PR will claim, the mutation that
   falsifies it, cut strictly inside the fixture, never on the boundary tested>
 
