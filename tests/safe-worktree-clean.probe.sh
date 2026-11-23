@@ -2,7 +2,8 @@
 # Fixture check for bin/safe-worktree-clean against throwaway repos (a bare origin, a clone, and
 # agent worktrees under its .claude/worktrees). Every HOLD reason fires alone: each tree breaks
 # exactly one criterion. Also covers multi-repo sweeps (--repo repeatable, --repos-file) and
-# --apply-hold plan verification, backup layout, and removal (P1-P46). The tool always runs with
+# --apply-hold plan verification, backup layout, and removal (P1-P48, PM1-PM8 for the pr-merged
+# resolution behind a stub gh, and the L7 relative --only check). The tool always runs with
 # --repo into the fixture, never the real repo.
 # Usage: tests/safe-worktree-clean.probe.sh   (from anywhere)
 
@@ -2958,7 +2959,7 @@ err_p44r=$(cat "$T/p44.err")
 want_p44r="safe-worktree-clean: --apply-hold refused: plan $PLAN_P44 includes commit-carrying tree .claude/worktrees/uj (1 commit(s) not on origin/main) — only on the owner's yes for that tree: re-run the dry run and apply with --only <tree>"
 bk44_left=$(ls "$T/bk44" 2>/dev/null)
 if [ "$rc_p44r" -eq 2 ] && [ "$err_p44r" = "$want_p44r" ] \
-  && [ -z "$out_p44r" ] && ! grep -q 'refused' <<<"$out_p44r" \
+  && [ -z "$out_p44r" ] \
   && [ -d "$SW44W/uj" ] && [ -z "$bk44_left" ]; then
   ok "P44: --json bare --apply-hold refusal fires on stderr with exit 2 and stdout stays clean"
 else
@@ -2971,6 +2972,8 @@ phase_71() {
 local SW45 SW45W
 # P45 count honesty: a git shim that fails `rev-list --count` must not print a real-looking 0 —
 # the refusal line's count is "?" (plan id, refusal set and exit codes unchanged).
+# The shim fails EVERY `rev-list --count`, so the classifier must never start using that form
+# for anything but the refusal count; if it does, this probe's plan id would stop matching.
 REAL_GIT=$(command -v git)
 mkdir -p "$T/shimcc" && [ -n "$REAL_GIT" ] || bad "P45 setup: shimcc dir"
 cat > "$T/shimcc/git" <<EOF
@@ -3054,6 +3057,228 @@ expect "$out_p47b" fx HOLD:branch-name "P47b: project .claude/seyag.toml syg_wor
 
 }
 phase_73
+
+phase_pm() {
+local PMB PMREPO PMW PMH PMJ out rc got n
+# PM1-PM8 + L7: the pr-merged resolution. A stub `gh` on PATH answers the forge call: it logs its
+# argv to $GH_STUB_LOG, exits $GH_STUB_RC when that is non-zero, else prints $GH_STUB_JSON.
+PMB="$T/pmbin"
+mkdir -p "$PMB"
+cat > "$PMB/gh" <<'STUB'
+#!/bin/bash
+printf '%s\n' "$*" >> "${GH_STUB_LOG:-/dev/null}"
+[ "${GH_STUB_RC:-0}" -eq 0 ] || exit "$GH_STUB_RC"
+cat "$GH_STUB_JSON"
+STUB
+chmod +x "$PMB/gh" && [ -x "$PMB/gh" ] || bad "PM setup: stub gh"
+pm_json() { # $1 file, $2 head sha, $3 base ref, $4 merged_at json literal
+  printf '[{"number":7,"state":"closed","head":{"sha":"%s"},"base":{"ref":"%s"},"merged_at":%s}]\n' "$2" "$3" "$4" > "$1"
+}
+# A repo whose https-shaped origin lets the remote URL parse (nothing in swc fetches), with one
+# tree holding one commit beyond origin/main. Sets PMREPO, PMW (the tree) and PMH (its HEAD).
+pm_repo() { # $1 name, $2 tree name (default t), $3 start point (default origin/main)
+  mk_repo "$1" && [ -d "$T/$1" ] || bad "PM setup: mk_repo $1"
+  PMREPO="$T/$1"
+  git -C "$PMREPO" remote set-url origin https://example.invalid/o/r.git
+  add_tree "$1" "${2:-t}" "${3:-origin/main}" && PMW="$PMREPO/.claude/worktrees/${2:-t}" && [ -d "$PMW" ] || bad "PM setup: add_tree $1"
+  echo "pm-$1" > "$PMW/n.txt" && git -C "$PMW" add n.txt && git -C "$PMW" commit -qm "pm work" || bad "PM setup: commit $1"
+  PMH=$(git -C "$PMW" rev-parse HEAD)
+}
+pm_run() { # args to the tool; PATH has the stub unless PM_PATH is set; prints stdout
+  PATH="${PM_PATH:-$PMB:$PATH}" GH_STUB_JSON="$PMJ" GH_STUB_LOG="${PM_LOG:-$T/pm.log}" "$TOOL" --repo "$PMREPO" "$@"
+}
+PMJ="$T/pm.json"
+
+# PM1 match: one pr-merged reason, approvable, not commit-carrying; the call names the host,
+# owner/repo and full sha; --apply-eligible with pr-merged eligible removes the tree and the
+# backup bundles the branch.
+pm_repo pm1 t
+pm_json "$PMJ" "$PMH" main '"2026-11-20T00:00:00Z"'
+rm -f "$T/pm.log"
+out=$(pm_run --json); got=$(verdict "$out" t)
+n=$(python3 -c 'import json,sys; print(len(json.loads(sys.argv[1]).get("hold_plan_commit_carrying") or []))' "$out")
+if [ "$got" = "HOLD:pr-merged" ] && [ "$(approvable_of "$out" t)" = "True" ] && [ "$n" = 0 ] \
+  && [ "$(reason_msg "$out" t)" = "HEAD ${PMH:0:12} is the head commit of PR #7, merged into main" ] \
+  && [ "$(cat "$T/pm.log")" = "api --hostname example.invalid repos/o/r/commits/$PMH/pulls" ]; then
+  ok "PM1: matching merged PR -> HOLD:pr-merged, approvable, not commit-carrying, one gh call with host/repo/sha"
+else
+  bad "PM1: got '$got', carrying=$n, msg='$(reason_msg "$out" t)', log='$(cat "$T/pm.log" 2>/dev/null)'"
+fi
+out=$(SYG_WORKTREE_ELIGIBLE_REASONS="pr-merged" SYG_WORKTREE_BACKUP_DIR="$T/bkpm1" pm_run --apply-eligible); rc=$?
+shopt -s nullglob
+PMBK=("$T/bkpm1"/*/pm1--t--[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f])
+shopt -u nullglob
+if [ "$rc" -eq 0 ] && [ ! -e "$PMW" ] && [ "${#PMBK[@]}" -eq 1 ] && [ -s "${PMBK[0]}/branch.bundle" ]; then
+  ok "PM1: --apply-eligible with pr-merged eligible removes the tree and writes a backup with branch.bundle"
+else
+  bad "PM1: eligible removal (rc=$rc, tree=$([ -e "$PMW" ] && echo kept || echo gone), backups=${#PMBK[@]})"; printf '%s\n' "$out"
+fi
+
+# PM2 negatives: each leaves the tree HOLD:unmerged (a failure never changes a reason).
+pm_repo pm2 t
+pm_neg() { # $1 label, $2 want log lines ("any" or 0)
+  rm -f "$T/pm.log"
+  out=$(pm_run --json 2>"$T/pm.err"); got=$(verdict "$out" t)
+  if [ "$got" = "HOLD:unmerged" ] && { [ "$2" = any ] || [ ! -s "$T/pm.log" ]; } && [ ! -s "$T/pm.err" ]; then
+    ok "PM2$1: stays HOLD:unmerged with no stderr"
+  else
+    bad "PM2$1: got '$got' (log lines: $(wc -l < "$T/pm.log" 2>/dev/null), err='$(cat "$T/pm.err")')"
+  fi
+}
+pm_json "$PMJ" "0000000000000000000000000000000000000000" main '"2026-11-20T00:00:00Z"'; pm_neg "(a) other head sha" any
+pm_json "$PMJ" "$PMH" main null; pm_neg "(b) merged_at null" any
+pm_json "$PMJ" "$PMH" develop '"2026-11-20T00:00:00Z"'; pm_neg "(c) other base.ref" any
+pm_json "$PMJ" "$PMH" main '"2026-11-20T00:00:00Z"'
+GH_STUB_RC=1 pm_neg "(d) gh exits 1" any
+printf 'not json\n' > "$PMJ"; pm_neg "(e) non-JSON" any
+# (f) no gh at all: a PATH of symlinks to every executable on the real PATH except gh. The
+# method is checked first: `command -v gh` must fail in that PATH.
+mkdir -p "$T/pmnogh"
+for d in ${PATH//:/ }; do
+  [ -d "$d" ] || continue
+  for f in "$d"/*; do
+    [ -x "$f" ] && [ -f "$f" ] || continue
+    [ "${f##*/}" = gh ] && continue
+    [ -e "$T/pmnogh/${f##*/}" ] || ln -s "$f" "$T/pmnogh/${f##*/}"
+  done
+done
+pm_json "$PMJ" "$PMH" main '"2026-11-20T00:00:00Z"'
+if PATH="$T/pmnogh" bash -c 'command -v gh' >/dev/null 2>&1; then bad "PM2(f) setup: gh still on the filtered PATH"; fi
+PM_PATH="$T/pmnogh" pm_neg "(f) no gh on PATH" any
+rm -f "$T/pm.log"
+out=$(SYG_WORKTREE_PR_CHECK=0 pm_run --json 2>"$T/pm.err"); got=$(verdict "$out" t)
+if [ "$got" = "HOLD:unmerged" ] && [ ! -e "$T/pm.log" ]; then
+  ok "PM2(g): SYG_WORKTREE_PR_CHECK=0 stays HOLD:unmerged and the stub log shows no call"
+else
+  bad "PM2(g): got '$got', log=$([ -e "$T/pm.log" ] && echo present || echo absent)"
+fi
+# SYG_WORKTREE_PR_CHECK=1 reports a failure on stderr, in the documented shape.
+printf 'not json\n' > "$PMJ"
+out=$(SYG_WORKTREE_PR_CHECK=1 pm_run --json 2>"$T/pm.err"); got=$(verdict "$out" t)
+if [ "$got" = "HOLD:unmerged" ] && [ "$(cat "$T/pm.err")" = "safe-worktree-clean: pr check: .claude/worktrees/t: gh api output is not a JSON array" ]; then
+  ok "PM2(h): SYG_WORKTREE_PR_CHECK=1 prints the failure on stderr, reasons unchanged"
+else
+  bad "PM2(h): got '$got', err='$(cat "$T/pm.err")'"
+fi
+
+# PM3 unmerged + untracked-new -> pr-merged + untracked-new; with only pr-merged eligible it is
+# demoted and kept.
+pm_repo pm3 t
+echo u > "$PMW/u.txt"
+pm_json "$PMJ" "$PMH" main '"2026-11-20T00:00:00Z"'
+out=$(pm_run --json); got=$(verdict "$out" t)
+if [ "$got" = "HOLD:pr-merged,untracked-new" ] && [ "$(approvable_of "$out" t)" = "True" ]; then
+  ok "PM3: unmerged + untracked-new -> pr-merged + untracked-new, approvable"
+else
+  bad "PM3: got '$got'"
+fi
+out=$(SYG_WORKTREE_ELIGIBLE_REASONS="pr-merged" SYG_WORKTREE_BACKUP_DIR="$T/bkpm3" pm_run --apply-eligible); rc=$?
+if [ "$rc" -eq 0 ] && [ -f "$PMW/u.txt" ] && [ ! -e "$T/bkpm3" ] \
+  && grep -qF '  not eligible: .claude/worktrees/t (untracked-new)' <<<"$out"; then
+  ok "PM3: eligible=pr-merged only demotes the tree (untracked-new) and keeps it"
+else
+  bad "PM3: demotion (rc=$rc)"; printf '%s\n' "$out"
+fi
+
+# PM4 unmerged + dirty: not in the allowed set, so the forge is not asked.
+pm_repo pm4 t
+echo changed >> "$PMW/a.txt"
+pm_json "$PMJ" "$PMH" main '"2026-11-20T00:00:00Z"'
+rm -f "$T/pm.log"
+out=$(pm_run --json); got=$(verdict "$out" t)
+if [ "$got" = "HOLD:unmerged,dirty" ] && [ ! -e "$T/pm.log" ]; then
+  ok "PM4: unmerged + dirty stays HOLD:unmerged,dirty and the stub is never called"
+else
+  bad "PM4: got '$got', log=$([ -e "$T/pm.log" ] && echo present || echo absent)"
+fi
+
+# PM5 a plan id taken with the stub matching does not survive the stub failing: the recomputed
+# plan differs (unmerged again), so --apply-hold exits 2 and removes nothing.
+pm_repo pm5 t
+pm_json "$PMJ" "$PMH" main '"2026-11-20T00:00:00Z"'
+out=$(pm_run --json); PLAN=$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["hold_plan"] or "")' "$out")
+[ -n "$PLAN" ] || bad "PM5 setup: plan id"
+out=$(GH_STUB_RC=1 SYG_WORKTREE_BACKUP_DIR="$T/bkpm5" pm_run --apply-hold "$PLAN" 2>&1); rc=$?
+if [ "$rc" -eq 2 ] && [ -d "$PMW" ] && [ ! -e "$T/bkpm5" ]; then
+  ok "PM5: plan id taken with a matching stub, applied with the stub failing -> exit 2, nothing removed"
+else
+  bad "PM5: rc=$rc, tree=$([ -d "$PMW" ] && echo kept || echo gone)"; printf '%s\n' "$out"
+fi
+
+# PM6 refs: a refs/worktree tip that is an ancestor of the merged head drops worktree-refs; a
+# tip on an orphan commit keeps it. The ancestor case needs a DETACHED tree: for a tree on a
+# branch, an ancestor of its own HEAD is already reachable from the branch the tool's rev-list
+# sees, so it never holds worktree-refs in the first place.
+mk_repo pm6a && PMREPO="$T/pm6a" && PMW="$PMREPO/.claude/worktrees/t" || bad "PM6 setup: mk_repo"
+git -C "$PMREPO" remote set-url origin https://example.invalid/o/r.git
+git -C "$PMREPO" worktree add -q --detach "$PMW" origin/main && [ -d "$PMW" ] || bad "PM6 setup: detached tree"
+echo first > "$PMW/n.txt" && git -C "$PMW" add n.txt && git -C "$PMW" commit -qm "pm first" || bad "PM6 setup: first commit"
+echo second > "$PMW/n2.txt" && git -C "$PMW" add n2.txt && git -C "$PMW" commit -qm "pm second" || bad "PM6 setup: second commit"
+PMH=$(git -C "$PMW" rev-parse HEAD)
+git -C "$PMW" update-ref refs/worktree/x "$(git -C "$PMW" rev-parse HEAD~1)" || bad "PM6 setup: ref x"
+pm_json "$PMJ" "$PMH" main null
+out=$(pm_run --json); got=$(verdict "$out" t)
+[ "$got" = "HOLD:detached-unreferenced,worktree-refs" ] || bad "PM6 setup: pre-check got '$got'"
+pm_json "$PMJ" "$PMH" main '"2026-11-20T00:00:00Z"'
+out=$(pm_run --json); got=$(verdict "$out" t)
+if [ "$got" = "HOLD:pr-merged" ]; then
+  ok "PM6: refs/worktree tip at an ancestor of the merged head drops worktree-refs"
+else
+  bad "PM6: ancestor ref got '$got'"
+fi
+pm_repo pm6b t
+orphan=$(git -C "$PMW" commit-tree "$(git -C "$PMW" hash-object -t tree -w /dev/null)" -m orphan)
+git -C "$PMW" update-ref refs/worktree/y "$orphan" || bad "PM6 setup: ref y"
+pm_json "$PMJ" "$PMH" main '"2026-11-20T00:00:00Z"'
+out=$(pm_run --json); got=$(verdict "$out" t)
+if [ "$got" = "HOLD:pr-merged,worktree-refs" ]; then
+  ok "PM6: refs/worktree tip at an orphan commit keeps worktree-refs beside pr-merged"
+else
+  bad "PM6: orphan ref got '$got'"
+fi
+
+# PM7 a local-path remote is no forge URL: gh is never called, the tree stays unmerged.
+mk_repo pm7 && PMREPO="$T/pm7" && add_tree pm7 t && PMW="$PMREPO/.claude/worktrees/t" || bad "PM7 setup"
+echo pm7 > "$PMW/n.txt" && git -C "$PMW" add n.txt && git -C "$PMW" commit -qm "pm7" || bad "PM7 setup: commit"
+PMH=$(git -C "$PMW" rev-parse HEAD)
+pm_json "$PMJ" "$PMH" main '"2026-11-20T00:00:00Z"'
+rm -f "$T/pm.log"
+out=$(pm_run --json); got=$(verdict "$out" t)
+if [ "$got" = "HOLD:unmerged" ] && [ ! -e "$T/pm.log" ]; then
+  ok "PM7: a local-path remote leaves gh uncalled and the tree HOLD:unmerged"
+else
+  bad "PM7: got '$got', log=$([ -e "$T/pm.log" ] && echo present || echo absent)"
+fi
+
+# PM8 --base origin/develop: the PR's base.ref must be develop.
+mk_repo pm8 && PMREPO="$T/pm8" || bad "PM8 setup"
+git -C "$PMREPO" remote set-url origin https://example.invalid/o/r.git
+git -C "$PMREPO" update-ref refs/remotes/origin/develop refs/remotes/origin/main
+add_tree pm8 t origin/develop && PMW="$PMREPO/.claude/worktrees/t" && [ -d "$PMW" ] || bad "PM8 setup: add_tree"
+echo pm8 > "$PMW/n.txt" && git -C "$PMW" add n.txt && git -C "$PMW" commit -qm "pm8" || bad "PM8 setup: commit"
+PMH=$(git -C "$PMW" rev-parse HEAD)
+pm_json "$PMJ" "$PMH" develop '"2026-11-20T00:00:00Z"'
+out=$(pm_run --base origin/develop --json); got=$(verdict "$out" t)
+[ "$got" = "HOLD:pr-merged" ] && ok "PM8: --base origin/develop with base.ref=develop -> pr-merged" || bad "PM8: develop got '$got'"
+pm_json "$PMJ" "$PMH" main '"2026-11-20T00:00:00Z"'
+out=$(pm_run --base origin/develop --json); got=$(verdict "$out" t)
+[ "$got" = "HOLD:unmerged" ] && ok "PM8: --base origin/develop with base.ref=main stays unmerged" || bad "PM8: main got '$got'"
+
+# L7 --only takes the repo-relative path the refusal line prints (run from the repo root, where
+# that relative path resolves).
+pm_repo pm9 t
+PLAN=$("$TOOL" --repo "$PMREPO" --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["hold_plan"] or "")')
+err=$(SYG_WORKTREE_BACKUP_DIR="$T/bkpm9" "$TOOL" --repo "$PMREPO" --apply-hold "$PLAN" 2>&1 >/dev/null)
+relp=$(sed -n 's/.*commit-carrying tree \([^ ]*\) (.*/\1/p' <<<"$err")
+out=$(cd "$PMREPO" && "$TOOL" --repo "$PMREPO" --only "$relp" --json); rc=$?
+if [ "$relp" = ".claude/worktrees/t" ] && [ "$rc" -eq 0 ] && [ "$(verdict "$out" t)" = "HOLD:unmerged" ]; then
+  ok "L7: --only accepts the repo-relative path printed in the refusal line (from the repo root)"
+else
+  bad "L7: relp='$relp' rc=$rc got '$(verdict "$out" t)'"
+fi
+
+}
+phase_pm
 
 phase_74() {
 local SW48A SW48B SW48C SW48DU SW48DD SW48E SW48EB SW48F SW48GA SW48GB SW48H

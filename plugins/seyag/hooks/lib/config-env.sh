@@ -110,6 +110,7 @@ _SYG_CFG_PROJECT_SECURE=(
   SYG_WORKTREE_REGENERABLE
   SYG_WORKTREE_BASE
   SYG_WORKTREE_ELIGIBLE_REASONS
+  SYG_WORKTREE_PR_CHECK
 )
 
 # _syg_cfg_in_project_secure <NAME>: is NAME a security-material knob (refused

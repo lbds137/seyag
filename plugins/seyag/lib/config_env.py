@@ -54,6 +54,7 @@ _PROJECT_SECURE = frozenset(
         "SYG_WORKTREE_REGENERABLE",
         "SYG_WORKTREE_BASE",
         "SYG_WORKTREE_ELIGIBLE_REASONS",
+        "SYG_WORKTREE_PR_CHECK",
     ]
 )
 
