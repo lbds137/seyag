@@ -1,0 +1,855 @@
+#!/usr/bin/env -S python3 -I -B
+"""change-class: classify a git tree diff (base..head) as exempt or full against a TOML policy.
+
+  change-class classify [--repo DIR] --base REV --head REV (--policy FILE | --policy-ref REV) [--policy-path PATH] [--json] [--timeout SECS]
+  change-class replay [--repo DIR] --policy FILE [--timeout SECS]
+
+classify prints six key=value lines (verdict, classes, skip, mode, policy, reason) for
+GITHUB_OUTPUT, or one JSON object with --json. replay reads tab-separated ID, BASE, HEAD lines
+from stdin, prints one TSV row per pair (ID, verdict, classes, files, lines, reason), and writes
+a reason-prefix summary to stderr.
+Exit 0 for any verdict (full included), 2 on a usage error.
+"""
+import hashlib
+import json
+import math
+import re
+import subprocess
+import sys
+import time
+
+if sys.version_info < (3, 11):
+    print("change-class: needs python \x3e= 3.11", file=sys.stderr)
+    sys.exit(2)
+
+import tomllib
+
+# Built-in hard-deny globs (matched case-insensitively, never loosenable by policy):
+# - control files: CI workflows/actions/policy (.github/**), git metadata/attributes/submodules (**/.git*), ownership (**/CODEOWNERS)
+# - agent instructions: Claude, Cursor, Gemini and generic agent config (**/.claude/**, **/CLAUDE.md, **/CLAUDE.local.md, **/AGENTS.md, **/GEMINI.md, **/.cursorrules, **/.cursor/**)
+# - hooks: git and framework hook dirs/configs (**/.husky/**, **/.pre-commit-config.yaml, **/lefthook.yml, **/lefthook.yaml, **/.githooks/**, **/hooks/**)
+HARD_DENY = (
+    # Control files
+    ".github/**",
+    "**/.git*",
+    "**/CODEOWNERS",
+    # Agent instructions
+    "**/.claude/**",
+    "**/CLAUDE.md",
+    "**/CLAUDE.local.md",
+    "**/AGENTS.md",
+    "**/GEMINI.md",
+    "**/.cursorrules",
+    "**/.cursor/**",
+    # Hooks
+    "**/.husky/**",
+    "**/.pre-commit-config.yaml",
+    "**/lefthook.yml",
+    "**/lefthook.yaml",
+    "**/.githooks/**",
+    "**/hooks/**",
+)
+
+CLASS_NAME_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
+ALLOWED_TOP_KEYS = {"version", "mode", "deny", "limits", "class"}
+ALLOWED_LIMIT_KEYS = {"max_files", "max_lines", "max_file_lines"}
+ALLOWED_CLASS_KEYS = {"paths", "allow_delete"}
+
+
+class _TimeoutError(Exception):
+    pass
+
+
+class _GitError(Exception):
+    pass
+
+
+def _seg_to_regex(seg):
+    out = []
+    for ch in seg:
+        if ch == "*":
+            out.append(r"[^/]*")
+        elif ch == "?":
+            out.append(r"[^/]")
+        else:
+            out.append(re.escape(ch))
+    return "".join(out)
+
+
+def compile_glob(pattern, ignore_case=False):
+    if not isinstance(pattern, str) or not pattern or pattern.startswith("/") or pattern.endswith("/"):
+        raise ValueError(f"invalid glob: {pattern!r}")
+    raw_segs = pattern.split("/")
+    segs = []
+    for s in raw_segs:
+        if not s or s in (".", "..") or ("**" in s and s != "**"):
+            raise ValueError(f"invalid glob segment {s!r} in {pattern!r}")
+        if s == "**" and segs and segs[-1] == "**":
+            continue
+        segs.append(s)
+
+    if segs == ["**"]:
+        body = r"[^/]+(?:/[^/]+)*"
+    else:
+        parts = []
+        for i, s in enumerate(segs):
+            if s == "**":
+                if i == 0:
+                    parts.append(r"(?:[^/]+/)*")
+                elif i == len(segs) - 1:
+                    parts.append(r"(?:/[^/]+)+")
+                else:
+                    parts.append(r"(?:/[^/]+)*")
+            else:
+                needs_slash = 0 < i and not (i == 1 and segs[0] == "**")
+                if needs_slash:
+                    parts.append("/")
+                parts.append(_seg_to_regex(s))
+        body = "".join(parts)
+
+    flags = re.IGNORECASE if ignore_case else 0
+    return re.compile(rf"\A{body}\Z", flags)
+
+
+HARD_DENY_PATTERNS = tuple(compile_glob(g, ignore_case=True) for g in HARD_DENY)
+
+
+def _is_hard_denied(path_str):
+    if any(p.match(path_str) for p in HARD_DENY_PATTERNS):
+        return True
+    # Any path segment starting with .git (case-insensitively): .gitattributes, .gitmodules, .gitignore, .github, etc.
+    return any(seg.lower().startswith(".git") for seg in path_str.split("/"))
+
+
+def _blob_sha(data):
+    header = f"blob {len(data)}\0".encode("ascii")
+    return hashlib.sha1(header + data).hexdigest()
+
+
+def _one_line(text):
+    return text.replace("\r", "\\r").replace("\n", "\\n").replace("\t", "\\t")
+
+
+def _display_path(path_bytes):
+    try:
+        return path_bytes.decode("utf-8")
+    except UnicodeDecodeError:
+        return ascii(path_bytes)
+
+
+def _parse_policy(policy_bytes):
+    try:
+        text = policy_bytes.decode("utf-8")
+        raw = tomllib.loads(text)
+    except (Exception, RecursionError, MemoryError) as e:
+        return None, _one_line(f"policy-invalid: {type(e).__name__}: {e}")
+
+    if not isinstance(raw, dict):
+        return None, "policy-invalid: top-level must be a table"
+
+    unknown_top = set(raw.keys()) - ALLOWED_TOP_KEYS
+    if unknown_top:
+        k = sorted(unknown_top)[0]
+        return None, f"policy-invalid: unknown key {k!r}"
+
+    ver = raw.get("version")
+    if type(ver) is not int or ver != 1:
+        return None, "policy-invalid: version must be integer 1"
+
+    mode = raw.get("mode", "report")
+    if type(mode) is not str or mode not in ("report", "enforce"):
+        return None, "policy-invalid: mode must be 'report' or 'enforce'"
+
+    deny_raw = raw.get("deny", [])
+    if type(deny_raw) is not list:
+        return None, "policy-invalid: deny must be a list of globs"
+    deny_patterns = []
+    for g in deny_raw:
+        if type(g) is not str:
+            return None, "policy-invalid: deny entries must be strings"
+        try:
+            deny_patterns.append(compile_glob(g, ignore_case=False))
+        except ValueError as e:
+            return None, _one_line(f"policy-invalid: {e}")
+
+    limits_raw = raw.get("limits", {})
+    if type(limits_raw) is not dict:
+        return None, "policy-invalid: limits must be a table"
+    unknown_lim = set(limits_raw.keys()) - ALLOWED_LIMIT_KEYS
+    if unknown_lim:
+        k = sorted(unknown_lim)[0]
+        return None, f"policy-invalid: unknown limits key {k!r}"
+
+    limits = {"max_files": 50, "max_lines": 2000, "max_file_lines": 300}
+    for k in ALLOWED_LIMIT_KEYS:
+        if k in limits_raw:
+            v = limits_raw[k]
+            if type(v) is not int or v < 1:
+                return None, f"policy-invalid: limits.{k} must be a positive integer"
+            limits[k] = v
+
+    classes_raw = raw.get("class", {})
+    if type(classes_raw) is not dict:
+        return None, "policy-invalid: class must be a table"
+
+    classes = []
+    for cname, cbody in classes_raw.items():
+        if type(cname) is not str or not CLASS_NAME_RE.match(cname):
+            return None, f"policy-invalid: invalid class name {cname!r}"
+        if type(cbody) is not dict:
+            return None, f"policy-invalid: class.{cname} must be a table"
+        unknown_cls = set(cbody.keys()) - ALLOWED_CLASS_KEYS
+        if unknown_cls:
+            k = sorted(unknown_cls)[0]
+            return None, f"policy-invalid: unknown key {k!r} in class.{cname}"
+        if "paths" not in cbody:
+            return None, f"policy-invalid: class.{cname} missing paths"
+        cpaths = cbody["paths"]
+        if type(cpaths) is not list or len(cpaths) == 0:
+            return None, f"policy-invalid: class.{cname}.paths must be a non-empty list"
+        compiled_paths = []
+        for g in cpaths:
+            if type(g) is not str:
+                return None, f"policy-invalid: class.{cname}.paths entries must be strings"
+            try:
+                compiled_paths.append(compile_glob(g, ignore_case=False))
+            except ValueError as e:
+                return None, _one_line(f"policy-invalid: {e}")
+        allow_del = cbody.get("allow_delete", False)
+        if type(allow_del) is not bool:
+            return None, f"policy-invalid: class.{cname}.allow_delete must be a boolean"
+        classes.append((cname, compiled_paths, allow_del))
+
+    return {
+        "mode": mode,
+        "deny": deny_patterns,
+        "limits": limits,
+        "classes": classes,
+    }, None
+
+
+def _run_git(repo, args, deadline):
+    rem = deadline - time.monotonic()
+    if not (0 < rem):
+        raise _TimeoutError("timeout: run exceeded timeout")
+    try:
+        return subprocess.run(
+            ["git", "-C", repo, "-c", "diff.ignoreSubmodules=none", "-c", "core.attributesFile=/dev/null", *args],
+            capture_output=True,
+            timeout=rem,
+        )
+    except subprocess.TimeoutExpired as e:
+        raise _TimeoutError("timeout: git command timed out") from e
+    except OSError as e:
+        raise _GitError(_one_line(f"git-error: {e}")) from e
+
+
+def _load_policy_source(repo, policy_file, policy_ref, policy_path, deadline):
+    if policy_file is not None:
+        try:
+            with open(policy_file, "rb") as f:
+                return f.read()
+        except OSError as e:
+            return _one_line(f"policy-missing: {e.filename or policy_file}")
+    assert policy_ref is not None
+    if not policy_ref or policy_ref.startswith("-") or not policy_path:
+        return _one_line(f"policy-missing: {policy_ref}:{policy_path}")
+    try:
+        res = _run_git(repo, ["cat-file", "blob", f"{policy_ref}:{policy_path}"], deadline)
+    except _TimeoutError as e:
+        return str(e)
+    except _GitError as e:
+        return str(e)
+    if res.returncode != 0:
+        err_lower = res.stderr.lower()
+        if b"not a git repository" in err_lower or b"unable to read current working directory" in err_lower:
+            msg = res.stderr.decode("utf-8", errors="replace").strip() or "git cat-file failed"
+            return _one_line(f"git-error: {msg}")
+        return _one_line(f"policy-missing: {policy_ref}:{policy_path}")
+    return res.stdout
+
+
+def classify(repo, base, head, policy_bytes_or_error, timeout):
+    known = {"mode": "none", "policy": "none"}
+    try:
+        return _classify(repo, base, head, policy_bytes_or_error, timeout, known)
+    except (_TimeoutError, _GitError) as e:
+        reason = str(e)
+    except (Exception, RecursionError, MemoryError) as e:
+        reason = f"git-error: internal: {type(e).__name__}"
+    return {
+        "verdict": "full",
+        "classes": "",
+        "skip": False,
+        "mode": known["mode"],
+        "policy": known["policy"],
+        "reason": _one_line(reason),
+        "paths": [],
+        "files": None,
+        "lines": None,
+    }
+
+
+def _classify(repo, base, head, policy_bytes_or_error, timeout, known):
+    deadline = time.monotonic() + timeout
+
+    def full_result(reason, mode="none", policy_sha="none", paths=None, files=None, lines=None):
+        return {
+            "verdict": "full",
+            "classes": "",
+            "skip": False,
+            "mode": mode,
+            "policy": policy_sha,
+            "reason": _one_line(reason),
+            "paths": paths if paths is not None else [],
+            "files": files,
+            "lines": lines,
+        }
+
+    # 1. policy-missing (or early git-error / timeout reading policy-ref)
+    if isinstance(policy_bytes_or_error, str):
+        return full_result(policy_bytes_or_error, mode="none", policy_sha="none")
+
+    policy_sha = _blob_sha(policy_bytes_or_error)
+    known["policy"] = policy_sha
+
+    # 2. policy-invalid
+    policy, err = _parse_policy(policy_bytes_or_error)
+    if err is not None or policy is None:
+        return full_result(err or "policy-invalid: invalid policy", mode="none", policy_sha=policy_sha)
+
+    mode = policy["mode"]
+    known["mode"] = mode
+
+    try:
+        # 3. unknown-base / unknown-head
+        if not base or base.startswith("-"):
+            return full_result(f"unknown-base: {base}", mode=mode, policy_sha=policy_sha)
+        r_base = _run_git(repo, ["rev-parse", "--verify", "--quiet", f"{base}^{{commit}}"], deadline)
+        if r_base.returncode != 0:
+            return full_result(f"unknown-base: {base}", mode=mode, policy_sha=policy_sha)
+        base_sha = r_base.stdout.decode("ascii", errors="replace").strip()
+
+        if not head or head.startswith("-"):
+            return full_result(f"unknown-head: {head}", mode=mode, policy_sha=policy_sha)
+        r_head = _run_git(repo, ["rev-parse", "--verify", "--quiet", f"{head}^{{commit}}"], deadline)
+        if r_head.returncode != 0:
+            return full_result(f"unknown-head: {head}", mode=mode, policy_sha=policy_sha)
+        head_sha = r_head.stdout.decode("ascii", errors="replace").strip()
+
+        # 4. diff-tree --raw and --numstat
+        r_raw = _run_git(
+            repo,
+            ["diff-tree", "-r", "-z", "--no-renames", "--ignore-submodules=none", "--no-ext-diff", "--no-textconv", "--raw", base_sha, head_sha],
+            deadline,
+        )
+        if r_raw.returncode != 0:
+            msg = r_raw.stderr.decode("utf-8", errors="replace").strip() or "diff-tree --raw failed"
+            return full_result(f"git-error: {msg}", mode=mode, policy_sha=policy_sha)
+
+        r_num = _run_git(
+            repo,
+            ["diff-tree", "-r", "-z", "--no-renames", "--ignore-submodules=none", "--no-ext-diff", "--no-textconv", "--numstat", base_sha, head_sha],
+            deadline,
+        )
+        if r_num.returncode != 0:
+            msg = r_num.stderr.decode("utf-8", errors="replace").strip() or "diff-tree --numstat failed"
+            return full_result(f"git-error: {msg}", mode=mode, policy_sha=policy_sha)
+
+        if deadline < time.monotonic():
+            raise _TimeoutError("timeout: run exceeded timeout")
+    except _TimeoutError as e:
+        return full_result(str(e), mode=mode, policy_sha=policy_sha)
+    except _GitError as e:
+        return full_result(str(e), mode=mode, policy_sha=policy_sha)
+
+    # Parse --raw output: :oldmode newmode oldsha newsha STATUS\0path\0
+    raw_entries = []
+    raw_out = r_raw.stdout
+    if raw_out:
+        if not raw_out.endswith(b"\x00"):
+            return full_result("git-error: malformed diff-tree --raw output", mode=mode, policy_sha=policy_sha)
+        tokens = raw_out[:-1].split(b"\x00")
+        if len(tokens) % 2 != 0:
+            return full_result("git-error: malformed diff-tree --raw token count", mode=mode, policy_sha=policy_sha)
+        for i in range(0, len(tokens), 2):
+            meta_b = tokens[i]
+            path_b = tokens[i + 1]
+            if not meta_b.startswith(b":") or not path_b:
+                return full_result("git-error: malformed diff-tree --raw record", mode=mode, policy_sha=policy_sha)
+            try:
+                meta_parts = meta_b[1:].decode("ascii").split(" ")
+            except UnicodeDecodeError:
+                return full_result("git-error: non-ascii diff-tree --raw header", mode=mode, policy_sha=policy_sha)
+            if len(meta_parts) != 5:
+                return full_result("git-error: malformed diff-tree --raw header", mode=mode, policy_sha=policy_sha)
+            old_mode, new_mode, _old_sha, _new_sha, status = meta_parts
+            raw_entries.append((path_b, status, old_mode, new_mode))
+
+    raw_paths = [e[0] for e in raw_entries]
+    if len(set(raw_paths)) != len(raw_paths):
+        return full_result("git-error: raw/numstat mismatch", mode=mode, policy_sha=policy_sha)
+
+    # Parse --numstat output: added\tdeleted\tpath\0
+    numstat_by_path = {}
+    total_lines = 0
+    num_out = r_num.stdout
+    if num_out:
+        if not num_out.endswith(b"\x00"):
+            return full_result("git-error: malformed diff-tree --numstat output", mode=mode, policy_sha=policy_sha)
+        records = num_out[:-1].split(b"\x00")
+        for rec in records:
+            parts = rec.split(b"\t", 2)
+            if len(parts) != 3 or not parts[2]:
+                return full_result("git-error: malformed diff-tree --numstat record", mode=mode, policy_sha=policy_sha)
+            add_b, del_b, path_b = parts
+            if path_b in numstat_by_path:
+                return full_result("git-error: raw/numstat mismatch", mode=mode, policy_sha=policy_sha)
+            if add_b == b"-" or del_b == b"-":
+                numstat_by_path[path_b] = (True, 0)
+            else:
+                try:
+                    added = int(add_b)
+                    deleted = int(del_b)
+                except ValueError:
+                    return full_result("git-error: invalid diff-tree --numstat count", mode=mode, policy_sha=policy_sha)
+                if added < 0 or deleted < 0:
+                    return full_result("git-error: negative diff-tree --numstat count", mode=mode, policy_sha=policy_sha)
+                flines = added + deleted
+                total_lines += flines
+                numstat_by_path[path_b] = (False, flines)
+
+    if set(raw_paths) != set(numstat_by_path):
+        return full_result("git-error: raw/numstat mismatch", mode=mode, policy_sha=policy_sha)
+
+    n_files = len(raw_entries)
+
+    # Evaluate per-path classification (10-13) for JSON paths output and per-path verdicts
+    path_results = []
+    first_path_failure = None
+    matched_classes = set()
+
+    for path_b, status, old_mode, new_mode in raw_entries:
+        disp = _display_path(path_b)
+
+        # 10 (part 1): status must be A, M, or D; A/M new_mode 100644; M/D old_mode 100644
+        raw_mode_bad = (
+            status not in ("A", "M", "D")
+            or (status in ("A", "M") and new_mode != "100644")
+            or (status in ("M", "D") and old_mode != "100644")
+        )
+        if raw_mode_bad:
+            reason_p = _one_line(f"mode: {disp}")
+            path_results.append({
+                "path": disp,
+                "status": status,
+                "old_mode": old_mode,
+                "new_mode": new_mode,
+                "class": None,
+                "reason": reason_p,
+            })
+            if first_path_failure is None:
+                first_path_failure = reason_p
+            continue
+
+        # 11: path-encoding
+        try:
+            path_str = path_b.decode("utf-8")
+            enc_bad = any(seg in ("", ".", "..") for seg in path_str.split("/"))
+        except UnicodeDecodeError:
+            enc_bad = True
+        if enc_bad:
+            reason_p = _one_line(f"path-encoding: {disp}")
+            path_results.append({
+                "path": disp,
+                "status": status,
+                "old_mode": old_mode,
+                "new_mode": new_mode,
+                "class": None,
+                "reason": reason_p,
+            })
+            if first_path_failure is None:
+                first_path_failure = reason_p
+            continue
+
+        # 12: denied (built-in hard-deny or policy deny)
+        if _is_hard_denied(path_str) or any(p.match(path_str) for p in policy["deny"]):
+            reason_p = _one_line(f"denied: {path_str}")
+            path_results.append({
+                "path": path_str,
+                "status": status,
+                "old_mode": old_mode,
+                "new_mode": new_mode,
+                "class": None,
+                "reason": reason_p,
+            })
+            if first_path_failure is None:
+                first_path_failure = reason_p
+            continue
+
+        # 13: unclassed
+        matching_cls = []
+        for cname, cpatterns, allow_del in policy["classes"]:
+            if any(p.match(path_str) for p in cpatterns):
+                matching_cls.append((cname, allow_del))
+
+        if not matching_cls:
+            reason_p = _one_line(f"unclassed: {path_str}")
+            path_results.append({
+                "path": path_str,
+                "status": status,
+                "old_mode": old_mode,
+                "new_mode": new_mode,
+                "class": None,
+                "reason": reason_p,
+            })
+            if first_path_failure is None:
+                first_path_failure = reason_p
+            continue
+
+        # 10 (part 2): delete in a class without allow_delete = true
+        if status == "D":
+            allowed_cls = [cname for cname, allow_del in matching_cls if allow_del]
+            if not allowed_cls:
+                reason_p = _one_line(f"mode: {path_str}")
+                path_results.append({
+                    "path": path_str,
+                    "status": status,
+                    "old_mode": old_mode,
+                    "new_mode": new_mode,
+                    "class": None,
+                    "reason": reason_p,
+                })
+                if first_path_failure is None:
+                    first_path_failure = reason_p
+                continue
+            chosen_class = allowed_cls[0]
+        else:
+            chosen_class = matching_cls[0][0]
+
+        matched_classes.add(chosen_class)
+        path_results.append({
+            "path": path_str,
+            "status": status,
+            "old_mode": old_mode,
+            "new_mode": new_mode,
+            "class": chosen_class,
+            "reason": "exempt",
+        })
+
+    # 6. empty-diff
+    if n_files == 0:
+        return full_result(
+            "empty-diff: no changed paths",
+            mode=mode,
+            policy_sha=policy_sha,
+            paths=path_results,
+            files=n_files,
+            lines=total_lines,
+        )
+
+    # 7. too-many-files
+    max_files = policy["limits"]["max_files"]
+    if max_files < n_files:
+        return full_result(
+            f"too-many-files: {n_files} exceeds {max_files}",
+            mode=mode,
+            policy_sha=policy_sha,
+            paths=path_results,
+            files=n_files,
+            lines=total_lines,
+        )
+
+    # 8. too-many-lines / file-too-large
+    max_lines = policy["limits"]["max_lines"]
+    if max_lines < total_lines:
+        return full_result(
+            f"too-many-lines: {total_lines} exceeds {max_lines}",
+            mode=mode,
+            policy_sha=policy_sha,
+            paths=path_results,
+            files=n_files,
+            lines=total_lines,
+        )
+
+    max_file_lines = policy["limits"]["max_file_lines"]
+    for path_b, _status, _old_mode, _new_mode in raw_entries:
+        _is_bin, flines = numstat_by_path.get(path_b, (False, 0))
+        if max_file_lines < flines:
+            disp = _display_path(path_b)
+            return full_result(
+                f"file-too-large: {disp}",
+                mode=mode,
+                policy_sha=policy_sha,
+                paths=path_results,
+                files=n_files,
+                lines=total_lines,
+            )
+
+    # 9. binary
+    for path_b, status, old_mode, new_mode in raw_entries:
+        is_bin, _flines = numstat_by_path.get(path_b, (False, 0))
+        if is_bin:
+            # Only regular blob entries can be binary; symlinks/gitlinks fail check 10 (mode).
+            if (status in ("A", "M") and new_mode in ("120000", "160000")) or (
+                status in ("M", "D") and old_mode in ("120000", "160000")
+            ):
+                continue
+            disp = _display_path(path_b)
+            return full_result(
+                f"binary: {disp}",
+                mode=mode,
+                policy_sha=policy_sha,
+                paths=path_results,
+                files=n_files,
+                lines=total_lines,
+            )
+
+    # 10-13. First failing path in diff order
+    if first_path_failure is not None:
+        return full_result(
+            first_path_failure,
+            mode=mode,
+            policy_sha=policy_sha,
+            paths=path_results,
+            files=n_files,
+            lines=total_lines,
+        )
+
+    classes_str = ",".join(sorted(matched_classes))
+    return {
+        "verdict": "exempt",
+        "classes": classes_str,
+        "skip": mode == "enforce",
+        "mode": mode,
+        "policy": policy_sha,
+        "reason": "exempt",
+        "paths": path_results,
+        "files": n_files,
+        "lines": total_lines,
+    }
+
+
+def _parse_timeout(val):
+    try:
+        t = float(val)
+    except ValueError:
+        return None
+    if math.isnan(t) or math.isinf(t) or not (0 < t):
+        return None
+    return min(t, 86400.0)
+
+
+def _cmd_classify(argv):
+    repo = "."
+    base = None
+    head = None
+    policy_file = None
+    policy_ref = None
+    policy_path = ".github/change-class.toml"
+    as_json = False
+    timeout = 30.0
+
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+        if arg == "--json":
+            as_json = True
+            i += 1
+            continue
+        if arg in ("--repo", "--base", "--head", "--policy", "--policy-ref", "--policy-path", "--timeout"):
+            if len(argv) <= i + 1:
+                print(f"change-class classify: {arg} requires a value", file=sys.stderr)
+                return 2
+            val = argv[i + 1]
+            i += 2
+        elif "=" in arg and arg.split("=", 1)[0] in (
+            "--repo",
+            "--base",
+            "--head",
+            "--policy",
+            "--policy-ref",
+            "--policy-path",
+            "--timeout",
+        ):
+            arg, val = arg.split("=", 1)
+            i += 1
+        else:
+            print(f"change-class classify: unknown argument {arg!r}", file=sys.stderr)
+            return 2
+
+        if arg == "--repo":
+            repo = val
+        elif arg == "--base":
+            base = val
+        elif arg == "--head":
+            head = val
+        elif arg == "--policy":
+            policy_file = val
+        elif arg == "--policy-ref":
+            policy_ref = val
+        elif arg == "--policy-path":
+            policy_path = val
+        elif arg == "--timeout":
+            t = _parse_timeout(val)
+            if t is None:
+                print(f"change-class classify: invalid --timeout {val!r}", file=sys.stderr)
+                return 2
+            timeout = t
+
+    if base is None or head is None:
+        print("change-class classify: --base and --head are required", file=sys.stderr)
+        return 2
+    if (policy_file is None) == (policy_ref is None):
+        print("change-class classify: specify exactly one of --policy or --policy-ref", file=sys.stderr)
+        return 2
+
+    try:
+        t0 = time.monotonic()
+        deadline = t0 + timeout
+        policy_source = _load_policy_source(repo, policy_file, policy_ref, policy_path, deadline)
+        rem = deadline - time.monotonic()
+        if not (0 < rem) and not isinstance(policy_source, str):
+            policy_source = "timeout: run exceeded timeout"
+            rem = 0.001
+
+        res = classify(repo, base, head, policy_source, max(0.001, rem))
+    except (Exception, RecursionError, MemoryError) as e:
+        res = {
+            "verdict": "full",
+            "classes": "",
+            "skip": False,
+            "mode": "none",
+            "policy": "none",
+            "reason": _one_line(f"git-error: internal: {type(e).__name__}"),
+            "paths": [],
+        }
+
+    if as_json:
+        out_obj = {
+            "verdict": res["verdict"],
+            "classes": res["classes"],
+            "skip": res["skip"],
+            "mode": res["mode"],
+            "policy": res["policy"],
+            "reason": res["reason"],
+            "paths": res["paths"],
+        }
+        print(json.dumps(out_obj))
+    else:
+        skip_str = "true" if res["skip"] else "false"
+        print(f"verdict={res['verdict']}")
+        print(f"classes={res['classes']}")
+        print(f"skip={skip_str}")
+        print(f"mode={res['mode']}")
+        print(f"policy={res['policy']}")
+        print(f"reason={res['reason']}")
+    return 0
+
+
+def _cmd_replay(argv):
+    repo = "."
+    policy_file = None
+    timeout = 30.0
+
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+        if arg in ("--repo", "--policy", "--timeout"):
+            if len(argv) <= i + 1:
+                print(f"change-class replay: {arg} requires a value", file=sys.stderr)
+                return 2
+            val = argv[i + 1]
+            i += 2
+        elif "=" in arg and arg.split("=", 1)[0] in ("--repo", "--policy", "--timeout"):
+            arg, val = arg.split("=", 1)
+            i += 1
+        else:
+            print(f"change-class replay: unknown argument {arg!r}", file=sys.stderr)
+            return 2
+
+        if arg == "--repo":
+            repo = val
+        elif arg == "--policy":
+            policy_file = val
+        elif arg == "--timeout":
+            t = _parse_timeout(val)
+            if t is None:
+                print(f"change-class replay: invalid --timeout {val!r}", file=sys.stderr)
+                return 2
+            timeout = t
+
+    if policy_file is None:
+        print("change-class replay: --policy is required", file=sys.stderr)
+        return 2
+
+    policy_source = _load_policy_source(repo, policy_file, None, "", time.monotonic() + timeout)
+
+    n_pairs = 0
+    n_exempt = 0
+    n_full = 0
+    reason_counts = {}
+
+    for raw_line_b in sys.stdin.buffer:
+        line = raw_line_b.decode("utf-8", errors="replace").rstrip("\r\n")
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        n_pairs += 1
+        parts = line.split("\t")
+        if len(parts) != 3 or not parts[0].strip() or not parts[1].strip() or not parts[2].strip():
+            pair_id = parts[0].strip() if parts and parts[0].strip() else "?"
+            n_full += 1
+            reason_counts["bad-line"] = reason_counts.get("bad-line", 0) + 1
+            print(f"{pair_id}\tfull\t\t-\t-\tbad-line")
+            continue
+
+        pair_id, base, head = parts[0].strip(), parts[1].strip(), parts[2].strip()
+        try:
+            res = classify(repo, base, head, policy_source, timeout)
+        except (Exception, RecursionError, MemoryError) as e:
+            res = {
+                "verdict": "full",
+                "classes": "",
+                "reason": _one_line(f"git-error: internal: {type(e).__name__}"),
+                "files": None,
+                "lines": None,
+            }
+        if res["verdict"] == "exempt":
+            n_exempt += 1
+        else:
+            n_full += 1
+        prefix = res["reason"].split(":", 1)[0].strip()
+        reason_counts[prefix] = reason_counts.get(prefix, 0) + 1
+        files_col = str(res["files"]) if res["files"] is not None else "-"
+        lines_col = str(res["lines"]) if res["lines"] is not None else "-"
+        print(f"{pair_id}\t{res['verdict']}\t{res['classes']}\t{files_col}\t{lines_col}\t{res['reason']}")
+
+    print(f"change-class replay: {n_pairs} pairs, {n_exempt} exempt, {n_full} full", file=sys.stderr)
+    for prefix, count in sorted(reason_counts.items(), key=lambda kv: (-kv[1], kv[0])):
+        print(f"  {prefix}: {count}", file=sys.stderr)
+    return 0
+
+
+def main(argv):
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="replace")
+        except (AttributeError, ValueError, OSError):
+            pass
+    if argv and (argv[0] in ("-h", "--help") or (len(argv) > 1 and argv[1] in ("-h", "--help"))):
+        print(__doc__.strip())
+        return 0
+    if not argv:
+        print(__doc__.strip(), file=sys.stderr)
+        return 2
+    sub = argv[0]
+    if sub == "classify":
+        return _cmd_classify(argv[1:])
+    if sub == "replay":
+        return _cmd_replay(argv[1:])
+    print(f"change-class: unknown subcommand {sub!r}", file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
