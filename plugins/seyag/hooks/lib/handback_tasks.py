@@ -18,7 +18,7 @@ Tool ids and tool names are used only when they are strings; a record whose
 ids are not strings is skipped, and the rest of the transcript is still read.
 
 The label is the launching call's `input.description`, else its `input.command`.
-Imported by `handback-live-task-gate.sh` (python3 -I -c 'import handback_tasks')
+Imported by `handback-live-task-gate.sh` (python3 -I "${SYG_PY_CACHE_ARG:--B}" -c 'import handback_tasks')
 so CPython caches its bytecode. Runs on import; any exception prints nothing
 and exits 0. The file is read whole only up to MAX_BYTES; a larger one prints
 nothing.
@@ -38,6 +38,8 @@ TASK_ID = re.compile(r"<task-id>([^<]+)</task-id>")
 STATUS = re.compile(r"<status>([^<]*)</status>")
 NON_TERMINAL = frozenset(("running", "pending"))
 ENDING_TOOLS = frozenset(("TaskStop", "KillShell"))
+# The harness's TaskStop result wording as captured on Claude Code 2.1.330.
+# Re-check these phrases when the harness changes.
 STOP_PHRASES = ("Successfully stopped task", "is not running")
 
 

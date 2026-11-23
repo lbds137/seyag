@@ -201,6 +201,52 @@ expect "8b-1 first collision side refusal 1 of 3" 2 "Refusal 1 of 3"
 hook s8c x.y
 expect "8b-2 other collision side also starts at 1" 2 "Refusal 1 of 3"
 
+# 16a. a clean pass (the transcript now shows the task stopped) clears the agent's count: the next episode starts at 1.
+agent_t s16 a1 "$(bash_launch tu16 bfake1601 'Episode one')"
+hook s16 a1
+expect "16a-1 episode one refusal 1 of 3" 2 "Refusal 1 of 3"
+hook s16 a1
+expect "16a-2 episode one refusal 2 of 3" 2 "Refusal 2 of 3"
+agent_t s16 a1 "$(bash_launch tu16 bfake1601 'Episode one')" "$(stop_call tu16s bfake1601)" "$(stop_ok tu16s bfake1601)"
+hook s16 a1
+expect "16a-3 stopped task passes with count 2 in state" 0
+count=$((count + 1))
+if [ ! -e "$STATE/seyag/handback-live-task-gate/s16/a1" ]; then
+  echo "PASS [16a-4 clean pass removes the state file]"
+else
+  echo "FAIL [16a-4 clean pass removes the state file]: state file still present"
+  fail=1
+fi
+agent_t s16 a1 "$(bash_launch tu16b bfake1602 'Episode two')"
+hook s16 a1
+expect "16a-5 next episode reads refusal 1 of 3" 2 "Refusal 1 of 3"
+
+# 16b. a description with a tab and a newline prints as one line: "    <id>  <label>".
+agent_t s16b a1 '{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"tu16e","name":"Bash","input":{"command":"sleep 600","description":"Watch\tbuild\nlog here","run_in_background":true}}]}}' '{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu16e","content":"Command running in background with ID: bfake1631"}]},"toolUseResult":{"backgroundTaskId":"bfake1631"}}'
+hook s16b a1
+count=$((count + 1))
+if [ "$RC" = 2 ] && [ "$(grep -c '^    bfake1631  Watch build log here$' <<<"$ERR")" = 1 ] && [ "$(grep -c 'bfake1631' <<<"$ERR")" = 1 ]; then
+  echo "PASS [16b tab and newline in description give one label line]"
+else
+  echo "FAIL [16b tab and newline in description give one label line]: exit $RC stderr: $ERR"
+  fail=1
+fi
+
+# 16c. a transcript over 32 MiB passes silently, even with an owned live task appended.
+agent_t s16c a1 "$(bash_launch tu16c bfake1640 'Big transcript')"
+BIG="$PROJ/s16c/subagents/agent-a1.jsonl"
+truncate -s 33M "$BIG"
+printf '%s\n' "$(bash_launch tu16d bfake1641 'Appended after size')" >>"$BIG"
+count=$((count + 1))
+if [ "$(stat -c %s "$BIG")" -gt 33554432 ]; then
+  echo "PASS [16c fixture is over 32 MiB]"
+else
+  echo "FAIL [16c fixture is over 32 MiB]: size $(stat -c %s "$BIG")"
+  fail=1
+fi
+hook s16c a1
+expect "16c over 32 MiB transcript passes silently" 0
+
 # 9. SYG_HANDBACK_GATE_MAX_DENIES: 1 caps at one refusal; a non-number falls back to 3.
 agent_t s9 a1 "$(bash_launch tu9 bfake0901 'Knob job')"
 EXTRA_ENV=(SYG_HANDBACK_GATE_MAX_DENIES=1)

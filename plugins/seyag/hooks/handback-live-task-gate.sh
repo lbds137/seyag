@@ -23,6 +23,8 @@
 #   - Any live task refuses the hand-back (exit 2, the ids and labels on stderr),
 #     up to the cap. The harness's PreToolUse payload has no background_tasks
 #     field, so the agent's own transcript is the only source.
+#   - A hand-back with no live task passes and clears that agent's refusal count,
+#     so the next episode of a resumed agent starts at refusal 1.
 #   - Other agents' tasks never block: only the agent's own transcript is read.
 #
 # KNOWN BOUNDS:
@@ -32,7 +34,9 @@
 #     any status except running or pending is taken as terminal.
 #   - The cap is per (session, agent) and counted in a state file at
 #     <state>/seyag/handback-live-task-gate/<session>/<agent>: a denied
-#     hand-back that is never re-sent leaves the count where it is.
+#     hand-back that is never re-sent leaves the count where it is. The file is
+#     removed on a clean pass, so it stays only for an agent that hit the cap or
+#     never re-sent; nothing prunes it otherwise.
 #   - The hook reads transcripts, not live process state, so a task that died
 #     without a notification or a TaskStop stays live until the cap.
 #
@@ -81,10 +85,15 @@ HOOKS_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 HOOK_LIB="$HOOKS_DIR/lib"
 
 LIVE=$(HT_TRANSCRIPT="$AGENT_T" python3 -I "${SYG_PY_CACHE_ARG:--B}" -c 'import sys; sys.path.insert(0, sys.argv[1]); import handback_tasks' "$HOOK_LIB" 2>/dev/null) || exit 0
-[ -n "$LIVE" ] || exit 0
-
 STATE_DIR="${XDG_STATE_HOME:-${HOME:-}/.local/state}/seyag/handback-live-task-gate"
 STATE_FILE="$STATE_DIR/$SESSION_ID/$AGENT_ID"
+
+# A clean pass (no live task) clears this agent's counter, so a resumed agent's
+# next episode starts at refusal 1.
+if [ -z "$LIVE" ]; then
+  rm -f -- "$STATE_FILE" 2>/dev/null
+  exit 0
+fi
 
 COUNT=0
 if [ -r "$STATE_FILE" ]; then
