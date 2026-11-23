@@ -609,5 +609,7 @@ check_mutant 13 's/\[ "\$commit_ver" = "\$version" \]/true/'
 check_mutant 14 's/test(".*")/startswith("<command-name>\/reload-plugins<\/command-name>")/'
 # 15. Re-add `/clear` as a refresh: the later /clear would displace the 12:05Z reload and name itself.
 check_mutant 15 's#<command-name>/reload-plugins</command-name>"))#<command-name>/(reload-plugins|clear)</command-name>"))#; s#(?<cmd>reload-plugins)</command-name>#(?<cmd>reload-plugins|clear)</command-name>#'
+# 16. Re-add `/clear` as a refresh: the 12:30Z /clear would make the pre-release-reload session current.
+check_mutant 16 's#<command-name>/reload-plugins</command-name>"))#<command-name>/(reload-plugins|clear)</command-name>"))#; s#(?<cmd>reload-plugins)</command-name>#(?<cmd>reload-plugins|clear)</command-name>#'
 
 exit "$fail"
