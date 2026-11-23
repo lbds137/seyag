@@ -2,6 +2,20 @@
 
 All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY-MM-DD>` section per released version; under it, `###` categories in fixed order — Breaking Changes, Features, Bug Fixes, Improvements, Chores, Tests — empty ones omitted; items are `- **scope:** description (#PR)`, written from the version's merged commit subjects.
 
+## 0.3.212 - 2026-11-23
+
+### Improvements
+
+- **push-tree-guard:** the prefilter matches `pr create` instead of any `create`; the header names git aliases and the double trip with cwd-drift-guard as known bounds; a `run_command` comment now says identical consecutive calls are one occurrence (#PR)
+
+### Chores
+
+- **backlog:** file TASK-119 (deferred: regression replay for rule and skill edits) (#PR)
+
+### Tests
+
+- **push-tree-guard:** probe pins fail-open on a would-be hit whose state dir is read-only, a silent pass when the state path is a file, and that `gh pr create` still passes the prefilter (#PR)
+
 ## 0.3.211 - 2026-11-23
 
 ### Features

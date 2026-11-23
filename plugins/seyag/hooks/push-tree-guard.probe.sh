@@ -50,16 +50,16 @@ payload() {
 
 # hook <want-rc> <label> <cwd> <command> <session> [agent] [runner]
 # Runner defaults to the hook itself; "run" goes through run.sh with env passed
-# as RUN_ENV (for the SYG_DISABLE case).
+# as RUN_ENV (for the SYG_DISABLE case). HOOK_STATE overrides the state base.
 hook() {
   local want=$1 label=$2 cwd=$3 cmd=$4 sid=$5 ag=${6:-} runner=${7:-hook} rc=0 err got
   if [ "$runner" = run ]; then
     err=$(payload "$cwd" "$cmd" "$sid" "$ag" \
-      | env -u SYG_PROFILE -u SYG_ENABLE SYG_DISABLE="${RUN_DISABLE:-}" XDG_STATE_HOME="$STATE" \
+      | env -u SYG_PROFILE -u SYG_ENABLE SYG_DISABLE="${RUN_DISABLE:-}" XDG_STATE_HOME="${HOOK_STATE:-$STATE}" \
         bash "$RUN" push-tree-guard 2>&1 >/dev/null) || rc=$?
   else
     err=$(payload "$cwd" "$cmd" "$sid" "$ag" \
-      | XDG_STATE_HOME="$STATE" bash "$HOOK" 2>&1 >/dev/null) || rc=$?
+      | XDG_STATE_HOME="${HOOK_STATE:-$STATE}" bash "$HOOK" 2>&1 >/dev/null) || rc=$?
   fi
   LAST_ERR=$err
   count=$((count + 1))
@@ -157,6 +157,25 @@ hook 0 "14a commit A" "$WT_A" "git commit -m x" c14
 RUN_DISABLE=push-tree hook 0 "14b SYG_DISABLE=push-tree via run.sh passes" "$WT_B" "git push" c14 "" run
 hook 0 "14c commit A" "$WT_A" "git commit -m x" c15
 RUN_DISABLE="" hook 2 "14d no disable via run.sh blocks" "$WT_B" "git push" c15 "" run
+
+# fo. Fail-open: fo1 is a would-be hit whose ack cannot be written (read-only
+# state dir); fo2's state path is a file, so nothing records and both calls pass silently.
+hook 0 "fo1 commit A" "$WT_A" "git commit -m x" fo1
+if [ -f "$STATE/seyag/push-tree-guard/fo1" ]; then
+  chmod 555 "$STATE/seyag/push-tree-guard"
+  hook 0 "fo1 push B with read-only state dir fails open" "$WT_B" "git push" fo1
+  chmod 755 "$STATE/seyag/push-tree-guard"
+else
+  echo "FAIL [fo1 setup]: no state file for fo1, so the push is not a would-be hit"
+  fail=1
+fi
+mkdir -p "$TMP/state-file-base" && : > "$TMP/state-file-base/seyag"
+HOOK_STATE="$TMP/state-file-base" hook 0 "fo2 commit A, state path is a file" "$WT_A" "git commit -m x" fo2
+HOOK_STATE="$TMP/state-file-base" hook 0 "fo2 push B, state path is a file passes silently (no record possible)" "$WT_B" "git push" fo2
+
+# pf. Prefilter positive control: gh pr create still reaches the judge after the prefilter narrowed to pr create.
+hook 0 "pf1 commit A" "$WT_A" "git commit -m x" pf1
+hook 2 "pf1 gh pr create in B still judged" "$WT_B" "gh pr create --title t --body b" pf1
 
 # Extra: refspec and flag shapes.
 hook 0 "x1 commit A" "$WT_A" "git commit -m x" c16

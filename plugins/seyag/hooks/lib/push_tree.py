@@ -166,8 +166,9 @@ def _main():
         sys.exit(0)
 
     def run_command(argv, state, ctx):
-        # Every call, git or not, ends the previous occurrence's run of
-        # identical calls, so a repeated command later in the text is a new one.
+        # A call whose argv differs from the previous call's starts a new
+        # occurrence; identical consecutive calls (git push; git push) stay one
+        # occurrence.
         key = tuple(argv)
         if key != ctx.last_key or not ctx.groups:
             ctx.groups.append([])
