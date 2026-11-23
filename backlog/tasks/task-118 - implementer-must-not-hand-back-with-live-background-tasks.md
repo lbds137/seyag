@@ -1,7 +1,7 @@
 ---
 id: TASK-118
 title: 'implementer: no hand-back while its own background tasks still run; log-line waiters need a timeout and a liveness check'
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-11-23T05:40:00Z'
 labels:
@@ -22,4 +22,6 @@ Fix structurally, not in prose:
 - implementer.md and the delegation spec template: any wait-for-log-line loop carries a timeout and checks that the watched process is still alive on each poll.
 
 Probe: an agent payload with a live background task blocks; none passes; the toggle disables it. Check the SubagentStop payload shape with a live capture before designing (no SubagentStop hook exists in `plugins/seyag/hooks/hooks.json` today).
+
+Capture result (2026-11-23): SubagentStop fires after the report is already delivered through the SubagentHandback tool call, so blocking there is too late; the gate is a PreToolUse hook on SubagentHandback instead (deny verified live). Evidence summarized in the hook header.
 <!-- SECTION:DESCRIPTION:END -->

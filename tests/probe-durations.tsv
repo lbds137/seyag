@@ -16,6 +16,7 @@ plugins/seyag/hooks/dispatch-posture-gate.probe.sh	5.9
 plugins/seyag/hooks/dispatch-spec-ledger-gate.probe.sh	2.6
 plugins/seyag/hooks/env-print-guard.probe.sh	54.4
 plugins/seyag/hooks/grep-escaped-dollar-guard.probe.sh	2.0
+plugins/seyag/hooks/handback-live-task-gate.probe.sh	2.8
 plugins/seyag/hooks/handoff-pick-check.probe.sh	9.6
 plugins/seyag/hooks/launch-record.probe.sh	1.0
 plugins/seyag/hooks/lesson-claim-check.probe.sh	5.1

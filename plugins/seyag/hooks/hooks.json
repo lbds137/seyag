@@ -180,6 +180,15 @@
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/run.sh\" dispatch-spec-ledger-gate"
           }
         ]
+      },
+      {
+        "matcher": "SubagentHandback",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/run.sh\" handback-live-task-gate"
+          }
+        ]
       }
     ],
     "PostToolUse": [

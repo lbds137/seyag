@@ -2,6 +2,16 @@
 
 All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY-MM-DD>` section per released version; under it, `###` categories in fixed order — Breaking Changes, Features, Bug Fixes, Improvements, Chores, Tests — empty ones omitted; items are `- **scope:** description (#PR)`, written from the version's merged commit subjects.
 
+## 0.3.211 - 2026-11-23
+
+### Features
+
+- **handback-live-task-gate:** PreToolUse on `SubagentHandback` refuses a subagent's hand-back while background shell tasks it started (Bash `run_in_background`) still run, naming each with the TaskStop step; at most `SYG_HANDBACK_GATE_MAX_DENIES` (default 3) refusals per agent, then it passes; component `handback-tasks`, `SYG_DISABLE=handback-tasks` turns it off. Probe pins the refusal, the ended and other-agent passes, the cap, and fail-open paths (#PR)
+
+### Improvements
+
+- **implementer, delegation:** the implementer's verification contract and the delegation spec's Landmines carry the background-wait rule: a log-line wait has a timeout and a liveness check, and the worker stops its background tasks before handing back (#PR)
+
 ## 0.3.210 - 2026-11-23
 
 ### Features
