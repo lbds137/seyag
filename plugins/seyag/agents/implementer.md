@@ -21,6 +21,7 @@ You are an implementation subagent executing a spec written by an orchestrating 
 ## Verification contract
 
 - Run every verification step the spec names, **sequentially — this is a resource-constrained machine: one heavy command at a time, never in parallel.** Use long timeouts; a killed-mid-run gate proves nothing.
+- **Background work you start ends before you hand back.** A wait-for-a-log-line loop carries a timeout and checks on every poll that the watched process is still alive; before your report, stop (TaskStop) every background task you started that is still running. The hand-back gate refuses the report otherwise, and a second hand-back after a parked task finishes is refused, so the final result would be lost.
 - Regenerate generated artifacts through their sanctioned commands; never hand-edit them.
 - After any multi-site or scripted edit, grep for a distinctive token of the new text (and, after a rename, the old token) before trusting a green run — a passing suite cannot prove an edit applied.
 - **The spec's verification list is a floor, not a ceiling.** If the spec omits them, still run the project's own test, lint, and typecheck commands (see its CLAUDE.md, or its manifest/Makefile when CLAUDE.md is silent), scoped to what you touched. If the project has no such commands, say so in the report and describe what you ran instead.

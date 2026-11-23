@@ -76,6 +76,7 @@ line or byte budgets, API field limits>.>
 fixture shapes. <PROJECT: standing landmines>. Edit files with the Edit tool,
 never an interpreter rewrite script.>
 <Scratch: `<absolute path from scratch-dir <unit>>`, minted by the driver; the worker writes scratch only there. The driver removes it with `rm -r <that literal path>` when the unit closes (recursive-rm-guard allows it).>
+<Background waits: any loop waiting on a log line has a timeout and a liveness check on the watched PID each poll; the worker stops every background task it started before handing back (handback-live-task-gate enforces the last part).>
 
 ## Authorized routine decisions
 <2-3 calls the worker may make solo. Anything material not listed is a stop.>
