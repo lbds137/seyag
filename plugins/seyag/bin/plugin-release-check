@@ -28,7 +28,8 @@
 # Output: the header names the release time's evidence kind: `checkout received`
 # when the reflog's receive time is the release time, `commit time` otherwise.
 # A session's startedAt comes from one source only, the agents list row. Refresh
-# rows name the command of the latest refresh line (/reload-plugins or /clear).
+# rows name the command of the latest refresh line (/reload-plugins). /clear and
+# /compact do not re-read plugin hook registration, so neither counts as a refresh.
 
 set -uo pipefail
 shopt -s nullglob
@@ -227,11 +228,11 @@ while IFS= read -r row; do
         and .type == "user"
         and (.message | type) == "object"
         and (.message.content | type) == "string"
-        and (.message.content | test("^\\s*(<command-message>[^<]*</command-message>\\s*)?<command-name>/(reload-plugins|clear)</command-name>"))
+        and (.message.content | test("^\\s*(<command-message>[^<]*</command-message>\\s*)?<command-name>/reload-plugins</command-name>"))
         and (.timestamp | type) == "string"
         and (.timestamp | length) > 0
       )
-    | ((.message.content | strings | capture("^\\s*(<command-message>[^<]*</command-message>\\s*)?<command-name>/(?<cmd>reload-plugins|clear)</command-name>") | .cmd) // "unlabelled") as $cmd
+    | ((.message.content | strings | capture("^\\s*(<command-message>[^<]*</command-message>\\s*)?<command-name>/(?<cmd>reload-plugins)</command-name>") | .cmd) // "unlabelled") as $cmd
     | "\(.timestamp)\t\($cmd)"
   ' "${files[@]}" 2>/dev/null)
 

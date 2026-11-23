@@ -242,7 +242,7 @@ An optional TOML file fills in knobs the environment left unset: user `${XDG_CON
 | --- | --- | --- | --- | --- |
 | `PLUGIN_RELEASE_AGENTS_CMD` | `claude agents --json` | Command run by plugin-release-check to list live Claude Code sessions as a JSON array. | `bin/plugin-release-check` | user only |
 | `PLUGIN_RELEASE_FETCH` | `1` | Set to 0 to skip git fetch --all before comparing the checkout version against upstream in plugin-release-check. | `bin/plugin-release-check` | user + project |
-| `PLUGIN_RELEASE_PROJECTS` | `$HOME/.claude/projects` | Projects transcript root searched by plugin-release-check for /reload-plugins and /clear refresh lines. | `bin/plugin-release-check` | user only |
+| `PLUGIN_RELEASE_PROJECTS` | `$HOME/.claude/projects` | Projects transcript root searched by plugin-release-check for /reload-plugins refresh lines. | `bin/plugin-release-check` | user only |
 | `PLUGIN_RELEASE_UPSTREAM_REF` | `@{upstream}` | Git ref compared against the local plugin.json version in plugin-release-check. | `bin/plugin-release-check` | user + project |
 
 ## routing

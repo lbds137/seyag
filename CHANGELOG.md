@@ -2,6 +2,20 @@
 
 All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY-MM-DD>` section per released version; under it, `###` categories in fixed order — Breaking Changes, Features, Bug Fixes, Improvements, Chores, Tests — empty ones omitted; items are `- **scope:** description (#PR)`, written from the version's merged commit subjects.
 
+## 0.3.208 - 2026-11-22
+
+### Bug Fixes
+
+- **plugin-release-check:** `/clear` no longer counts as a plugin refresh; only `/reload-plugins` or a process start re-reads hook registration (peer runtime repro), so a session that only cleared after a release now reports stale (TASK-104). (#PR)
+
+### Chores
+
+- **backlog:** close TASK-104; file TASK-105 (`claude-role --size --file` undercounts a relative path). (#PR)
+
+### Tests
+
+- **plugin-release-check:** canaries pin /clear as a non-refresh, a later /clear not displacing a reload, and a pre-release reload followed by /clear as stale. (#PR)
+
 ## 0.3.207 - 2026-11-22
 
 ### Features
