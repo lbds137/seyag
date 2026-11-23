@@ -1302,7 +1302,8 @@ for p in prs:
 sys.exit(4)
 ' "$head" "$PR_BRANCH") || prc=$?
   if [ "$prc" -eq 3 ]; then pr_note "$tr" "gh api output is not a JSON array"; return 0; fi
-  if [ "$prc" -ne 0 ] || [ -z "$num" ]; then pr_note "$tr" "no merged PR into $PR_BRANCH has head ${head:0:12}"; return 0; fi
+  if [ "$prc" -eq 4 ]; then pr_note "$tr" "the forge's first page returned no merged PR into $PR_BRANCH with head ${head:0:12}"; return 0; fi
+  if [ "$prc" -ne 0 ] || [ -z "$num" ]; then pr_note "$tr" "PR match parser failed (exit $prc)"; return 0; fi
   for e in "${REASONS[@]}"; do
     c=${e%%$'\t'*}
     case $c in
