@@ -2,6 +2,21 @@
 
 All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY-MM-DD>` section per released version; under it, `###` categories in fixed order — Breaking Changes, Features, Bug Fixes, Improvements, Chores, Tests — empty ones omitted; items are `- **scope:** description (#PR)`, written from the version's merged commit subjects.
 
+## 0.3.214 - 2026-11-23
+
+### Bug Fixes
+- **handback-live-task-gate:** a background task whose notification arrived mid-turn (a queued_command attachment) now counts as ended, so a hand-back is not refused for it and handoff-pick-check's stale-pick trigger is not suppressed (#PR)
+
+### Improvements
+- **handoff-pick-check:** blocks once when a background-task notification starts a turn that ends without re-running the pick command after an earlier clear/compact pick, the shape that left sessions idle for hours; `SYG_DISABLE=stale-pick` turns it off (TASK-121) (#PR)
+- **implementer, delegation:** the "floor, not a ceiling" verification rule no longer sends a worker into a gate the spec marked driver-run, and the driver's review step runs every driver-run gate before commit (#383 review) (#PR)
+
+### Chores
+- **backlog:** file TASK-122 (safe-worktree-clean pr-merged resolution), TASK-123 (host resource-profile contract) and TASK-124 (ledger-gate placeholder-only citations) (#PR)
+
+### Tests
+- **dispatch-spec-ledger-gate:** the case-17 filled fixture's stale SKILL.md line reference is corrected (#PR)
+
 ## 0.3.213 - 2026-11-23
 
 ### Improvements

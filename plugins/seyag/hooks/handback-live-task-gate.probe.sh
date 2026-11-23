@@ -290,6 +290,26 @@ ERR=$(payload s12b a1 SubagentHandback \
   | env -u SYG_PROFILE -u SYG_ENABLE -u SYG_DISABLE XDG_STATE_HOME="$STATE" bash "$RUN" handback-live-task-gate 2>&1 >/dev/null); RC=$?
 expect "12b no disable via run.sh blocks" 2 "bfake1202" "Refusal 1 of 3"
 
+# live_task_ids over parsed entries: handoff-pick-check imports it with HT_TRANSCRIPT unset.
+LT_LIB="$SCRIPT_DIR/lib"
+LT_LAUNCH='{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tu1","content":"started"}]},"toolUseResult":{"backgroundTaskId":"b1"}}'
+LT_NOTE='{"type":"user","origin":{"kind":"task-notification"},"message":{"content":"<task-notification>\n<task-id>b1</task-id>\n<status>completed</status>\n</task-notification>"}}'
+LT_PY='import sys, json; sys.path.insert(0, sys.argv[1]); import handback_tasks; print(json.dumps(handback_tasks.live_task_ids(json.loads(l) for l in sys.stdin)))'
+count=$((count + 1))
+got=$(printf '%s\n%s\n' "$LT_LAUNCH" "$LT_NOTE" | env -u HT_TRANSCRIPT python3 -I -c "$LT_PY" "$LT_LIB" 2>&1)
+if [ "$got" = "[]" ]; then echo "PASS [live_task_ids: launch then notification ends b1]: $got"; else echo "FAIL [live_task_ids: launch then notification ends b1] want [] got: $got"; fail=1; fi
+count=$((count + 1))
+got=$(printf '%s\n' "$LT_LAUNCH" | env -u HT_TRANSCRIPT python3 -I -c "$LT_PY" "$LT_LIB" 2>&1)
+if [ "$got" = '["b1"]' ]; then echo "PASS [live_task_ids: launch alone leaves b1 live]: $got"; else echo "FAIL [live_task_ids: launch alone] want [\"b1\"] got: $got"; fail=1; fi
+LT_QUEUED='{"type":"attachment","attachment":{"type":"queued_command","commandMode":"task-notification","origin":{"kind":"task-notification"},"prompt":"<task-notification>\n<task-id>b1</task-id>\n<status>completed</status>\n</task-notification>"}}'
+LT_QUEUED_HUMAN='{"type":"attachment","attachment":{"type":"queued_command","commandMode":"task-notification","origin":{"kind":"human"},"prompt":"<task-notification>\n<task-id>b1</task-id>\n<status>completed</status>\n</task-notification>"}}'
+count=$((count + 1))
+got=$(printf '%s\n%s\n' "$LT_LAUNCH" "$LT_QUEUED" | env -u HT_TRANSCRIPT python3 -I -c "$LT_PY" "$LT_LIB" 2>&1)
+if [ "$got" = "[]" ]; then echo "PASS [live_task_ids: launch then queued mid-turn notification ends b1]: $got"; else echo "FAIL [live_task_ids: launch then queued mid-turn notification ends b1] want [] got: $got"; fail=1; fi
+count=$((count + 1))
+got=$(printf '%s\n%s\n' "$LT_LAUNCH" "$LT_QUEUED_HUMAN" | env -u HT_TRANSCRIPT python3 -I -c "$LT_PY" "$LT_LIB" 2>&1)
+if [ "$got" = '["b1"]' ]; then echo "PASS [live_task_ids: queued attachment with human origin leaves b1 live]: $got"; else echo "FAIL [live_task_ids: queued attachment with human origin] want [\"b1\"] got: $got"; fail=1; fi
+
 echo "---"
 echo "$count cases"
 [ "$fail" = 0 ] && echo "ALL PASS" || { echo "FAILURES"; exit 1; }
