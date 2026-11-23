@@ -6,7 +6,11 @@ All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY
 
 ### Features
 
-- **handoff-pick-check, session-start:** `SYG_PICK_CMD` names a command a session runs as `<cmd> clear|compact|keep` to record its boundary pick; SessionStart advertises it, and handoff-pick-check then requires that call (after the handoff write, not an error, not a mention) instead of a pick word in the reply. `core.md` points at the SessionStart line (TASK-107). (#PR)
+- **handoff-pick-check, session-start:** `SYG_PICK_CMD` names a command a session runs as `<cmd> clear|compact|keep` to record its boundary pick; SessionStart advertises it, and handoff-pick-check then requires that call (after the handoff write, not an error, not a mention) instead of a pick word in the reply. `core.md` points at the SessionStart line (TASK-107). (#377)
+
+### Chores
+
+- **handoff-pick-check:** #377 review lows: header notes (basename match deliberate both ways, order inside one record unchecked), blank test aligned with bash `[:space:]`, same-record order probe; `core.md` offset cut. (#PR)
 
 ## 0.3.208 - 2026-11-22
 
