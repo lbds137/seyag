@@ -20,7 +20,7 @@ The six low findings from the review of PR #400 (TASK-82: --expect and --both), 
 2. An option given after the positionals (`probe-red-check PROBE --expect X`) prints bare usage, or "no such probe: --expect". Add a reason line naming the misplaced option, and consider accepting options anywhere or a `--` separator.
 3. In --both, a failed worktree add on a later probe exits before the summary line, so the earlier probes' verdicts are lost.
 4. The TERM trap only runs after the probe's `$(...)` returns, so a TERM during a long probe is deferred and case 12 can pass falsely.
-5. Fixed in this PR: TASK-139's text named a machine-local job wrapper.
+5. Fixed in PR #401: TASK-139's text named a machine-local job wrapper.
 6. HEAD_SHORT is empty on an unborn HEAD (a repo with no commits), which leaves a blank in the output.
 <!-- SECTION:DESCRIPTION:END -->
 
