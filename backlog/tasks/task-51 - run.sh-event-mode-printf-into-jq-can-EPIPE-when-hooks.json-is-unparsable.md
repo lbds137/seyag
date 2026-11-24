@@ -8,6 +8,7 @@ labels:
   - hooks
   - flake
 dependencies: []
+priority: low
 ordinal: 51000
 ---
 

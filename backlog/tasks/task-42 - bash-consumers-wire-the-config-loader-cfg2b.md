@@ -7,6 +7,7 @@ created_date: '2026-11-20T03:08:00Z'
 labels:
   - bin
 dependencies: []
+priority: medium
 ordinal: 42000
 ---
 

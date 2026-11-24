@@ -10,6 +10,7 @@ labels:
   - chrome-loss-scan
   - peer-ask
 dependencies: []
+priority: low
 ordinal: 52000
 ---
 
