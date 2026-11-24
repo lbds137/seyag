@@ -136,7 +136,7 @@ want_err="resource-profile: clamped jobs 8 -> 1 (auto: cpu some avg60 72.10 >= 5
 [ "$rc" = 0 ] && [ "$(out)" = "1" ] && [ "$(err)" = "$want_err" ] \
   && ok "tie: auto CPU pressure (1) + memory ceiling 1 names the CPU reason" || bad "tie cpu vs mem: rc=$rc out=$(out) err=$(err)"
 
-# 7. --profile: auto with ceiling below nproc prints low (OMP_NUM_THREADS forces nproc).
+# 7. --profile: low under SYG_RESOURCE_PROFILE=low or when 2 * ceiling <= nproc (OMP_NUM_THREADS forces nproc).
 run env SYG_RESOURCE_PROFILE=auto OMP_NUM_THREADS=8 "$RP" --profile
 [ "$rc" = 0 ] && [ "$(out)" = "low" ] && [ ! -s "$tmp/err" ] \
   && ok "--profile: auto with ceiling 3 < nproc 8 prints low" || bad "--profile low: rc=$rc out=$(out) err=$(err)"
@@ -144,6 +144,46 @@ run env SYG_RESOURCE_PROFILE=auto OMP_NUM_THREADS=8 "$RP" --profile
 run env SYG_RESOURCE_PROFILE=auto OMP_NUM_THREADS=2 "$RP" --profile
 [ "$rc" = 0 ] && [ "$(out)" = "normal" ] && [ ! -s "$tmp/err" ] \
   && ok "--profile: auto with ceiling 3 >= nproc 2 prints normal" || bad "--profile normal: rc=$rc out=$(out) err=$(err)"
+
+run env SYG_MAX_PARALLEL=1 OMP_NUM_THREADS=8 "$RP" --profile
+[ "$rc" = 0 ] && [ "$(out)" = "low" ] && [ ! -s "$tmp/err" ] \
+  && ok "--profile: unset + SYG_MAX_PARALLEL=1, nproc 8 prints low" || bad "--profile unset maxp 1 nproc 8: rc=$rc out=$(out) err=$(err)"
+
+run env SYG_MAX_PARALLEL=4 OMP_NUM_THREADS=8 "$RP" --profile
+[ "$rc" = 0 ] && [ "$(out)" = "low" ] && [ ! -s "$tmp/err" ] \
+  && ok "--profile: SYG_MAX_PARALLEL=4, nproc 8 prints low" || bad "--profile maxp 4 nproc 8: rc=$rc out=$(out) err=$(err)"
+
+run env SYG_MAX_PARALLEL=5 OMP_NUM_THREADS=8 "$RP" --profile
+[ "$rc" = 0 ] && [ "$(out)" = "normal" ] && [ ! -s "$tmp/err" ] \
+  && ok "--profile: SYG_MAX_PARALLEL=5, nproc 8 prints normal" || bad "--profile maxp 5 nproc 8: rc=$rc out=$(out) err=$(err)"
+
+run env SYG_MAX_PARALLEL=7 OMP_NUM_THREADS=8 "$RP" --profile
+[ "$rc" = 0 ] && [ "$(out)" = "normal" ] && [ ! -s "$tmp/err" ] \
+  && ok "--profile: SYG_MAX_PARALLEL=7, nproc 8 (7-of-8) prints normal" || bad "--profile maxp 7 nproc 8: rc=$rc out=$(out) err=$(err)"
+
+run env SYG_MAX_PARALLEL=1 OMP_NUM_THREADS=3 "$RP" --profile
+[ "$rc" = 0 ] && [ "$(out)" = "low" ] && [ ! -s "$tmp/err" ] \
+  && ok "--profile: SYG_MAX_PARALLEL=1, nproc 3 prints low" || bad "--profile maxp 1 nproc 3: rc=$rc out=$(out) err=$(err)"
+
+run env SYG_MAX_PARALLEL=2 OMP_NUM_THREADS=3 "$RP" --profile
+[ "$rc" = 0 ] && [ "$(out)" = "normal" ] && [ ! -s "$tmp/err" ] \
+  && ok "--profile: SYG_MAX_PARALLEL=2, nproc 3 prints normal" || bad "--profile maxp 2 nproc 3: rc=$rc out=$(out) err=$(err)"
+
+run env SYG_MAX_PARALLEL=1 OMP_NUM_THREADS=2 "$RP" --profile
+[ "$rc" = 0 ] && [ "$(out)" = "low" ] && [ ! -s "$tmp/err" ] \
+  && ok "--profile: SYG_MAX_PARALLEL=1, nproc 2 prints low" || bad "--profile maxp 1 nproc 2: rc=$rc out=$(out) err=$(err)"
+
+run env SYG_MAX_PARALLEL=1 OMP_NUM_THREADS=1 "$RP" --profile
+[ "$rc" = 0 ] && [ "$(out)" = "normal" ] && [ ! -s "$tmp/err" ] \
+  && ok "--profile: SYG_MAX_PARALLEL=1, nproc 1 prints normal" || bad "--profile maxp 1 nproc 1: rc=$rc out=$(out) err=$(err)"
+
+run env SYG_RESOURCE_PROFILE=normal SYG_MAX_PARALLEL=1 OMP_NUM_THREADS=8 "$RP" --profile
+[ "$rc" = 0 ] && [ "$(out)" = "low" ] && [ ! -s "$tmp/err" ] \
+  && ok "--profile: explicit normal + SYG_MAX_PARALLEL=1, nproc 8 prints low" || bad "--profile normal maxp 1 nproc 8: rc=$rc out=$(out) err=$(err)"
+
+run env OMP_NUM_THREADS=8 "$RP" --profile
+[ "$rc" = 0 ] && [ "$(out)" = "normal" ] && [ ! -s "$tmp/err" ] \
+  && ok "--profile: no ceiling, nproc 8 prints normal" || bad "--profile no ceiling: rc=$rc out=$(out) err=$(err)"
 
 # 8. bad values: SYG_RESOURCE_PROFILE=fast warns and counts as unset; SYG_MAX_PARALLEL=0 and =x warn and are ignored.
 run env SYG_RESOURCE_PROFILE=fast "$RP" --jobs 8
@@ -169,6 +209,14 @@ done
 run "$RP" --help
 [ "$rc" = 0 ] && grep -q "resource-profile --jobs N" "$tmp/out" && [ ! -s "$tmp/err" ] \
   && ok "usage: --help exits 0 with usage on stdout" || bad "usage --help: rc=$rc out=$(out) err=$(err)"
+
+run "$RP" --jobs --help
+[ "$rc" = 0 ] && grep -q "resource-profile --jobs N" "$tmp/out" && [ ! -s "$tmp/err" ] \
+  && ok "usage: --jobs --help exits 0 with usage on stdout and empty stderr" || bad "usage --jobs --help: rc=$rc out=$(out) err=$(err)"
+
+run "$RP" --jobs=--help
+[ "$rc" = 2 ] && [ -s "$tmp/err" ] \
+  && ok "usage: '--jobs=--help' exits 2 with non-empty stderr" || bad "usage '--jobs=--help': rc=$rc out=$(out) err=$(err)"
 
 # 10. config: user config applies (source=config), project file is refused with host-knob warnings, env wins over user config.
 U_CFG="$tmp/xdg-cfg"
@@ -196,6 +244,27 @@ want_err=$(printf '%s\n%s' \
 run env -u SYG_CONFIG SYG_RESOURCE_PROFILE=normal XDG_CONFIG_HOME="$U_CFG" CLAUDE_PROJECT_DIR="$tmp/proj-empty" "$RP"
 [ "$rc" = 0 ] && [ "$(out)" = "profile=normal ceiling=none source=env" ] && [ ! -s "$tmp/err" ] \
   && ok "config: env SYG_RESOURCE_PROFILE=normal wins over user config low (source=env)" || bad "env over user config: rc=$rc out=$(out) err=$(err)"
+
+U_MP2="$tmp/xdg-mp2"
+U_MP1="$tmp/xdg-mp1"
+mkdir -p "$U_MP2/seyag" "$U_MP1/seyag"
+printf '[syg]\nmax_parallel = 2\n' > "$U_MP2/seyag/config.toml"
+printf '[syg]\nmax_parallel = 1\n' > "$U_MP1/seyag/config.toml"
+
+run env -u SYG_CONFIG SYG_RESOURCE_PROFILE=normal OMP_NUM_THREADS=3 XDG_CONFIG_HOME="$U_MP2" CLAUDE_PROJECT_DIR="$tmp/proj-empty" "$RP"
+[ "$rc" = 0 ] && [ "$(out)" = "profile=normal ceiling=2 source=config" ] && [ ! -s "$tmp/err" ] \
+  && ok "config: env SYG_RESOURCE_PROFILE=normal + user config max_parallel=2 at nproc 3 (2*2 > 3) gives profile=normal ceiling=2 source=config" \
+  || bad "env normal + config max_parallel=2 (nproc 3): rc=$rc out=$(out) err=$(err)"
+
+run env -u SYG_CONFIG SYG_RESOURCE_PROFILE=low XDG_CONFIG_HOME="$U_MP1" CLAUDE_PROJECT_DIR="$tmp/proj-empty" "$RP"
+[ "$rc" = 0 ] && [ "$(out)" = "profile=low ceiling=1 source=config" ] && [ ! -s "$tmp/err" ] \
+  && ok "config: env SYG_RESOURCE_PROFILE=low + user config max_parallel=1 tie gives profile=low ceiling=1 source=config" \
+  || bad "env low + config max_parallel=1: rc=$rc out=$(out) err=$(err)"
+
+run env -u SYG_CONFIG SYG_MAX_PARALLEL=2 XDG_CONFIG_HOME="$U_CFG" CLAUDE_PROJECT_DIR="$tmp/proj-empty" "$RP"
+[ "$rc" = 0 ] && [ "$(out)" = "profile=low ceiling=1 source=config" ] && [ ! -s "$tmp/err" ] \
+  && ok "config: env SYG_MAX_PARALLEL=2 + user config syg_resource_profile=\"low\" gives profile=low ceiling=1 source=config" \
+  || bad "env max_parallel=2 + config low: rc=$rc out=$(out) err=$(err)"
 
 echo "resource-profile probe: $pass passed, $fail failed"
 [ "$fail" = 0 ]

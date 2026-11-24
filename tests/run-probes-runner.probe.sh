@@ -1,9 +1,10 @@
 #!/bin/bash
 # Fixture check for tests/run-probes.sh against a synthetic repo of fake probes:
 # suite-order output under -j 1 and -j 3, non-zero exit status, self-SIGKILL (137),
-# process-group cleanup of a leaked background child, SIGTERM propagation, and
-# -j / --jobs option parsing, --shard partitioning and balance, longest-first launch
-# order, and --durations-out.
+# process-group cleanup of a leaked background child, SIGTERM propagation,
+# resource-profile clamping and -j 1 skip, -j / --jobs option parsing (including
+# leading zeros and the 9-digit cap), --shard partitioning and balance,
+# longest-first launch order, and --durations-out.
 # Usage: tests/run-probes-runner.probe.sh   (from anywhere; never recurses into real probes)
 
 set -uo pipefail
@@ -151,8 +152,22 @@ else
   bad "resource-profile clamp (rc=$rc_clamp): out=[$out_clamp] err=[$err_clamp]"
 fi
 
+rm -f "$CLAMP_PIDFILE"
+out_j1_rp=$(env -u SYG_PROBE_TIMEOUT -u SYG_MAX_PARALLEL SYG_CONFIG=0 SYG_RESOURCE_PROFILE=fast \
+  bash "$RC/tests/run-probes.sh" -j 1 2>"$T/j1-rp.err")
+rc_j1_rp=$?
+err_j1_rp=$(<"$T/j1-rp.err")
+[ -s "$CLAMP_PIDFILE" ] && leaked_pids+=("$(<"$CLAMP_PIDFILE")")
+if [ "$rc_j1_rp" -eq 1 ] && [ "$out_j1_rp" = "$out1" ] \
+  && ! grep -qF 'resource-profile:' <<<"$err_j1_rp" \
+  && [ -s "$CLAMP_PIDFILE" ] && gone "$(<"$CLAMP_PIDFILE")"; then
+  ok "resource-profile skipped at -j 1: SYG_RESOURCE_PROFILE=fast produces no resource-profile: stderr line"
+else
+  bad "resource-profile -j 1 skip (rc=$rc_j1_rp): out=[$out_j1_rp] err=[$err_j1_rp]"
+fi
+
 want_usage="Usage: tests/run-probes.sh [-j N | --jobs N] [--shard I/N] [--durations-out FILE]"
-for bad_args in "-j x" "-j -1" "--bogus"; do
+for bad_args in "-j x" "-j -1" "-j 99999999999999999999" "--jobs=1234567890" "--bogus"; do
   # shellcheck disable=SC2086 # intentional word splitting of flag + arg pair
   out=$(bash "$RUNNER" $bad_args 2>"$T/err")
   rc=$?
@@ -163,6 +178,17 @@ for bad_args in "-j x" "-j -1" "--bogus"; do
     bad "invalid option '$bad_args': rc=$rc out=[$out] err=[$err]"
   fi
 done
+
+rm -f "$PIDFILE"
+out_zpad=$(env -u SYG_PROBE_TIMEOUT bash "$RUNNER" -j 0000000000001)
+rc_zpad=$?
+[ -s "$PIDFILE" ] && leaked_pids+=("$(<"$PIDFILE")")
+if [ "$rc_zpad" -eq 1 ] && [ "$out_zpad" = "$out1" ] \
+  && [ -s "$PIDFILE" ] && gone "$(<"$PIDFILE")"; then
+  ok "valid option '-j 0000000000001': leading zeros stripped, output matches -j 1"
+else
+  bad "valid option '-j 0000000000001': rc=$rc_zpad out=[$out_zpad]"
+fi
 
 for ok_args in "-j0" "--jobs=2" "-j 2"; do
   rm -f "$PIDFILE"

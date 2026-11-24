@@ -2,6 +2,21 @@
 
 All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY-MM-DD>` section per released version; under it, `###` categories in fixed order — Breaking Changes, Features, Bug Fixes, Improvements, Chores, Tests — empty ones omitted; items are `- **scope:** description (#PR)`, written from the version's merged commit subjects.
 
+## 0.3.219 - 2026-11-23
+
+### Breaking Changes
+- **mem-gate:** correction to 0.3.218, which filed this under Bug Fixes: `SYG_MEM_GATE_MIN_MB` carries the `host` flag since 0.3.218, so a repo's project config file can no longer set it (the loader warns and ignores the line); set it in the environment or the user `config.toml`. (#PR)
+
+### Bug Fixes
+- **resource-profile:** `--profile` (and `profile=`) is `low` under `SYG_RESOURCE_PROFILE=low` or whenever the ceiling is at most half of `nproc`, from any knob (`SYG_MAX_PARALLEL=1` alone now reads `low`; a ceiling of 7 on 8 CPUs reads `normal`); `source=` names the origin of the knob that sets the ceiling, not the profile's (TASK-134). (#PR)
+- **run-probes:** `-j`/`--jobs` accepts at most 9 significant digits (larger values printed usage only after wrapping at 64 bits) and calls `resource-profile` only for `-j N > 1`, so serial runs skip the fork and its config warnings (TASK-133, TASK-134). (#PR)
+
+### Improvements
+- **resource-profile:** `--help` documents that it wins anywhere among the arguments, and `--jobs=--help` stays a bad value. (#PR)
+
+### Tests
+- **resource-profile, run-probes:** `--profile` rows across nproc 1, 2, 3 and 8, binding-knob `source=` cases, `--help` placement; runner cases for over-long and zero-padded `-j` and a `-j 1` run that never calls `resource-profile`. (#PR)
+
 ## 0.3.218 - 2026-11-23
 
 ### Features
