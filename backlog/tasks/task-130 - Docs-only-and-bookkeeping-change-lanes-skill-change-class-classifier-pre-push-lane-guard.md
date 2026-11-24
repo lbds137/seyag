@@ -44,7 +44,7 @@ Decided before the spec (2026-11-23, driver):
 - [x] #1 Skill documents the three lanes, the decision table and the per-repo config
 - [x] #2 change-class bin classifies a diff with the fail-to-full rules above, pinned by a probe including rename, symlink, mode-change, gitlink and control-file cases
 - [ ] #3 pre-push lane guard is opt-in (toggle), chains the repo hook, and its probe covers create/delete/non-FF/merge/revert-hiding/config-widening cases
-- [ ] #4 Report-only replay against each adopting repo's history recorded before skips are enabled
+- [x] #4 Report-only replay against each adopting repo's history recorded before skips are enabled
 - [ ] #5 Replacement line for the global push rule's interim clause (a pointer to the skill) handed to the platform session, which owns that file
 <!-- AC:END -->
 
@@ -52,4 +52,16 @@ Decided before the spec (2026-11-23, driver):
 
 <!-- SECTION:NOTES:BEGIN -->
 Unit A (0.3.217): `change-class` bin, probe and `change-lanes` skill. Fresh-context review (Anthropic family; the author was Gemini) found and the fix round closed: gitlink bumps hidden by `ignore = all` / `diff.ignoreSubmodules` (now `--ignore-submodules=none`), crashes instead of full (deep TOML, huge timeout, non-UTF-8 replay stdin), `$` matching before a trailing newline, no raw/numstat cross-check, no `.`/`..`/empty segment check, unescaped TAB in replay rows, `--help` taken as an option value, and `git show` replaced by `git cat-file blob`. Ruled out: bounding regex and parse time with `--timeout` (polynomial work over a trusted base-ref policy; the git calls are where unbounded time lives). Next: the report-only replay (AC #4) against the five surveyed repos' last 60 days, then the decision on unit B and the CI wiring under the rule above.
+
+Replay (AC #4), 2026-11-23, against 0.3.217. Pairs are each merged PR's landed range (`mergeCommit~N..mergeCommit`), so the review's base/head-pair caveat does not apply. Each surveyed repo got a draft `mode = "report"` policy (`*.md` + `docs/**` docs, ledger dirs `allow_delete`). Every PR merged in the last 60 days was counted, and no pair resolved to `unknown`.
+- This repo (public): 372 PRs, 6 exempt (5 ledger, 1 docs), 366 full. Most full verdicts are code, `denied` (a release PR touches CHANGELOG/README) or exec-bit `mode`.
+- Public repo T: 253 PRs in the window, 0 exempt. Public repo C: 185, 0 exempt.
+- Private repo S: 222 PRs, 22 exempt (all ledger), about 11 per month.
+- Private repo P: 4 PRs, 0 exempt. It mostly pushes direct: of 1768 direct commits, 797 rate exempt.
+- False exempts: zero. Every check on all 28 exempt PRs concluded SUCCESS (this repo's 6 all ran their probe jobs). Repo S's 22 exempt PRs ran no heavy jobs: its `e2e`/`test` workflows already skip docs-only changes through `paths-ignore`. So the false-exempt test is vacuous there, and so is the saving.
+
+Decision under the pre-registered rule:
+- CI wiring: worth it in NONE of the five. Public repos bill 0 Actions minutes on standard runners (all three use only `ubuntu-latest`, per a grep of their workflows; the zero-billing is GitHub's public-repo policy, not measured here). Repo S already path-filters, saving 0. Repo P has 4 PRs.
+- Unit B: repo S clears the volume bar (11 standalone ledger-only PRs a month against the 10 needed) but has not opted in. Its opt-in is the owner's call, raised via the platform session.
+- Until a repo opts in, unit B stays deferred. Trigger: an opt-in from a repo that clears the 10-a-month bar.
 <!-- SECTION:NOTES:END -->
