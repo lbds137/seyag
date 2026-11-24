@@ -1,9 +1,11 @@
 ---
 id: TASK-57
 title: 'session-log grep: fast prefilter, plus prompt-history and mined-corpus sources'
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - Seyag B
 created_date: '2026-11-21T05:10:00Z'
+updated_date: '2026-11-24T13:45:00Z'
 labels:
   - session-log
   - owner-friction
