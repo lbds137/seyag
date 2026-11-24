@@ -27,13 +27,15 @@ gone() {
 T=$(mktemp -d)
 R="$T/repo"
 PIDFILE="$R/leaked.pid"
+RC="$T/clamprepo"
+CLAMP_PIDFILE="$RC/leaked.pid"
 RS="$T/sigrepo"
 SIG_LEAK_PIDFILE="$RS/leaked.pid"
 SIG_FG_PIDFILE="$RS/fg.pid"
 leaked_pids=()
 cleanup() {
   local f
-  for f in "$PIDFILE" "$SIG_LEAK_PIDFILE" "$SIG_FG_PIDFILE"; do
+  for f in "$PIDFILE" "$CLAMP_PIDFILE" "$SIG_LEAK_PIDFILE" "$SIG_FG_PIDFILE"; do
     [ -s "$f" ] && leaked_pids+=("$(<"$f")")
   done
   # A recorded PID may be long dead and reused: kill it only while it is still
@@ -125,6 +127,28 @@ if [ "$out1" = "$out3" ]; then
   ok "-j 1 and -j 3 outputs are identical"
 else
   bad "-j 1 and -j 3 outputs differ: [-j 1: $out1] vs [-j 3: $out3]"
+fi
+
+# Host resource profile clamp: when plugins/seyag/bin/resource-profile is present
+# beside tests/run-probes.sh, -j 3 under SYG_MAX_PARALLEL=1 clamps to 1 on stderr
+# and produces output identical to -j 1.
+cp -r "$R" "$RC"
+mkdir -p "$RC/plugins/seyag/bin" "$RC/plugins/seyag/hooks/lib"
+cp "$REPO/plugins/seyag/bin/resource-profile" "$RC/plugins/seyag/bin/resource-profile"
+cp "$REPO/plugins/seyag/hooks/lib/config-env.sh" "$RC/plugins/seyag/hooks/lib/config-env.sh"
+chmod +x "$RC/plugins/seyag/bin/resource-profile"
+rm -f "$CLAMP_PIDFILE"
+out_clamp=$(env -u SYG_PROBE_TIMEOUT -u SYG_RESOURCE_PROFILE SYG_CONFIG=0 SYG_MAX_PARALLEL=1 \
+  bash "$RC/tests/run-probes.sh" -j 3 2>"$T/clamp.err")
+rc_clamp=$?
+err_clamp=$(<"$T/clamp.err")
+[ -s "$CLAMP_PIDFILE" ] && leaked_pids+=("$(<"$CLAMP_PIDFILE")")
+if [ "$rc_clamp" -eq 1 ] && [ "$out_clamp" = "$out1" ] \
+  && grep -qF 'resource-profile: clamped jobs 3 -> 1 (SYG_MAX_PARALLEL=1)' <<<"$err_clamp" \
+  && [ -s "$CLAMP_PIDFILE" ] && gone "$(<"$CLAMP_PIDFILE")"; then
+  ok "resource-profile clamp: -j 3 with SYG_MAX_PARALLEL=1 matches -j 1 output and prints clamp line on stderr"
+else
+  bad "resource-profile clamp (rc=$rc_clamp): out=[$out_clamp] err=[$err_clamp]"
 fi
 
 want_usage="Usage: tests/run-probes.sh [-j N | --jobs N] [--shard I/N] [--durations-out FILE]"

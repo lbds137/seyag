@@ -4,7 +4,8 @@
 # On failure the probe's own output is shown.
 #
 # Usage: tests/run-probes.sh [-j N | --jobs N] [--shard I/N] [--durations-out FILE]   (from anywhere)
-#   -j N, --jobs N         run N probes at once (default 1; 0 = nproc)
+#   -j N, --jobs N         run N probes at once (default 1; 0 = nproc).
+#                          -j is capped by the host resource profile (resource-profile).
 #   --shard I/N            run only shard I of N (1 <= I <= N). Probes are split by
 #                          the per-probe seconds in tests/probe-durations.tsv (a probe
 #                          without a row counts as 10 s): sorted longest first, ties by
@@ -84,6 +85,8 @@ if [ "$JOBS" -eq 0 ]; then
   JOBS=$(nproc 2>/dev/null || echo 1)
   [[ "$JOBS" =~ ^[1-9][0-9]*$ ]] || JOBS=1
 fi
+RP="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/plugins/seyag/bin/resource-profile"
+if [ -x "$RP" ] && rp_jobs=$("$RP" --jobs "$JOBS") && [[ "$rp_jobs" =~ ^[1-9][0-9]*$ ]]; then JOBS=$rp_jobs; fi
 
 SHARD_I=0
 SHARD_N=0

@@ -1,0 +1,226 @@
+#!/bin/bash
+# resource-profile: the host resource profile and parallel-job ceiling for test runners
+# and tools. See usage() for the flags and knobs.
+# Probe: tests/resource-profile.probe.sh.
+
+set -uo pipefail
+
+usage() {
+  cat <<'EOF'
+resource-profile: the host resource profile and parallel-job ceiling.
+
+  resource-profile            print profile=<low|normal> ceiling=<N|none> source=<env|config|unset>
+                              (with auto=mem:<MB>MB,cpu:<avg60|na> under SYG_RESOURCE_PROFILE=auto)
+  resource-profile --jobs N   print min(N, ceiling) (N >= 1); notes a clamp on stderr
+  resource-profile --profile  print the resolved profile: low or normal
+  resource-profile --help
+
+Knobs (environment, then user config.toml; refused from a repo's project file):
+  SYG_RESOURCE_PROFILE      low (ceiling 1), normal (no ceiling) or auto; unset: no ceiling
+  SYG_MAX_PARALLEL          positive integer capping any profile
+  SYG_RESOURCE_JOB_MB       MB of MemAvailable per parallel job under auto (default 1024)
+  SYG_RESOURCE_CPU_PSI_MAX  CPU pressure (some avg60) capping auto at 1 (default 50)
+EOF
+}
+
+for a in "$@"; do
+  case "$a" in
+    -h | --help)
+      usage
+      exit 0
+      ;;
+  esac
+done
+
+mode=summary
+req_jobs=""
+if [ $# -eq 0 ]; then
+  mode=summary
+elif [ $# -eq 1 ] && [ "$1" = --profile ]; then
+  mode=profile
+elif [ $# -eq 1 ] && [[ "$1" == --jobs=* ]]; then
+  mode="jobs"
+  req_jobs=${1#--jobs=}
+elif [ $# -eq 2 ] && [ "$1" = --jobs ]; then
+  mode="jobs"
+  req_jobs=$2
+else
+  echo "resource-profile: unknown or invalid arguments (see --help)" >&2
+  exit 2
+fi
+
+if [ "$mode" = jobs ]; then
+  if ! [[ "$req_jobs" =~ ^[0-9]{1,9}$ ]] || [ "$((10#$req_jobs))" -lt 1 ]; then
+    echo "resource-profile: --jobs needs a whole number >= 1, got '$req_jobs'" >&2
+    exit 2
+  fi
+  req_jobs=$((10#$req_jobs))
+fi
+
+prof_in_env=0
+[[ -n ${SYG_RESOURCE_PROFILE+x} ]] && prof_in_env=1
+maxp_in_env=0
+[[ -n ${SYG_MAX_PARALLEL+x} ]] && maxp_in_env=1
+
+# Optional config files (the config.toml loader) fill in knobs the environment
+# left unset before any knob below is read; the environment still wins.
+bin_dir=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")
+# shellcheck source=/dev/null
+if [ -r "$bin_dir/../hooks/lib/config-env.sh" ] \
+  && source "$bin_dir/../hooks/lib/config-env.sh" 2>/dev/null \
+  && declare -F syg_config_env >/dev/null; then
+  syg_config_env "$(readlink -f "$bin_dir/..")"
+fi
+
+raw_profile=${SYG_RESOURCE_PROFILE:-}
+prof_src="unset"
+case "$raw_profile" in
+  '')
+    raw_profile="unset"
+    ;;
+  low | normal | auto)
+    if [ "$prof_in_env" -eq 1 ]; then prof_src="env"; else prof_src="config"; fi
+    ;;
+  *)
+    echo "resource-profile: ignoring SYG_RESOURCE_PROFILE='$raw_profile' (expected low, normal or auto)" >&2
+    raw_profile="unset"
+    ;;
+esac
+
+max_parallel=${SYG_MAX_PARALLEL:-}
+maxp_src="unset"
+if [ -n "$max_parallel" ]; then
+  if [[ "$max_parallel" =~ ^[0-9]{1,9}$ ]] && [ "$((10#$max_parallel))" -ge 1 ]; then
+    max_parallel=$((10#$max_parallel))
+    if [ "$maxp_in_env" -eq 1 ]; then maxp_src="env"; else maxp_src="config"; fi
+  else
+    echo "resource-profile: ignoring SYG_MAX_PARALLEL='$max_parallel' (expected a positive integer)" >&2
+    max_parallel=""
+  fi
+fi
+
+if [ "$raw_profile" != unset ]; then
+  source_kind=$prof_src
+elif [ -n "$max_parallel" ]; then
+  source_kind=$maxp_src
+else
+  source_kind="unset"
+fi
+
+job_mb=${SYG_RESOURCE_JOB_MB:-1024}
+if ! [[ "$job_mb" =~ ^[0-9]{1,9}$ ]] || [ "$((10#$job_mb))" -lt 1 ]; then
+  echo "resource-profile: ignoring SYG_RESOURCE_JOB_MB='$job_mb' (expected a positive integer)" >&2
+  job_mb=1024
+else
+  job_mb=$((10#$job_mb))
+fi
+
+cpu_psi_max=${SYG_RESOURCE_CPU_PSI_MAX:-50}
+if ! [[ "$cpu_psi_max" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+  echo "resource-profile: ignoring SYG_RESOURCE_CPU_PSI_MAX='$cpu_psi_max' (expected a non-negative number)" >&2
+  cpu_psi_max=50
+fi
+
+meminfo=${SYG_MEM_GATE_MEMINFO:-/proc/meminfo}
+psi_file=${SYG_RESOURCE_PSI_CPU:-/proc/pressure/cpu}
+
+mem_avail_mb=""
+mem_ceil=""
+cpu_avg60=""
+cpu_ceil=""
+
+if [ "$raw_profile" = auto ]; then
+  if [ -r "$meminfo" ]; then
+    mem_avail_mb=$(LC_ALL=C awk '/^MemAvailable:[[:space:]]+[0-9]+/{printf "%d", int($2/1024); exit}' "$meminfo" 2>/dev/null || true)
+  fi
+  if [ -n "$mem_avail_mb" ]; then
+    mem_ceil=$((mem_avail_mb / job_mb))
+    [ "$mem_ceil" -lt 1 ] && mem_ceil=1
+  fi
+
+  if [ -r "$psi_file" ]; then
+    cpu_avg60=$(LC_ALL=C awk '
+      /^some[[:space:]]/ {
+        for (i = 2; i <= NF; i++) {
+          if ($i ~ /^avg60=[0-9]+(\.[0-9]+)?$/) {
+            print substr($i, 7)
+            exit
+          }
+        }
+      }
+    ' "$psi_file" 2>/dev/null || true)
+  fi
+  if [ -n "$cpu_avg60" ]; then
+    if LC_ALL=C awk -v a="$cpu_avg60" -v m="$cpu_psi_max" 'BEGIN { exit !((a + 0) >= (m + 0)) }'; then
+      cpu_ceil=1
+    fi
+  fi
+fi
+
+# Smallest binding ceiling wins; ties break in order: SYG_MAX_PARALLEL, CPU, memory, low.
+ceiling=""
+reason=""
+apply_ceiling() {
+  local c=$1 r=$2
+  if [ -z "$ceiling" ] || [ "$c" -lt "$ceiling" ]; then
+    ceiling=$c
+    reason=$r
+  fi
+}
+
+if [ -n "$max_parallel" ]; then
+  apply_ceiling "$max_parallel" "SYG_MAX_PARALLEL=$max_parallel"
+fi
+if [ -n "$cpu_ceil" ]; then
+  apply_ceiling "$cpu_ceil" "auto: cpu some avg60 $cpu_avg60 >= $cpu_psi_max"
+fi
+if [ -n "$mem_ceil" ]; then
+  apply_ceiling "$mem_ceil" "auto: MemAvailable $mem_avail_mb MB / $job_mb MB per job"
+fi
+if [ "$raw_profile" = low ]; then
+  apply_ceiling 1 "SYG_RESOURCE_PROFILE=low"
+fi
+
+resolved_profile=normal
+case "$raw_profile" in
+  low)
+    resolved_profile=low
+    ;;
+  auto)
+    ncpu=$(nproc 2>/dev/null || echo 1)
+    [[ "$ncpu" =~ ^[1-9][0-9]*$ ]] || ncpu=1
+    if [ -n "$ceiling" ] && [ "$ceiling" -lt "$ncpu" ]; then
+      resolved_profile=low
+    else
+      resolved_profile=normal
+    fi
+    ;;
+esac
+
+case "$mode" in
+  profile)
+    echo "$resolved_profile"
+    ;;
+  jobs)
+    if [ -n "$ceiling" ] && [ "$ceiling" -lt "$req_jobs" ]; then
+      echo "resource-profile: clamped jobs $req_jobs -> $ceiling ($reason)" >&2
+      echo "$ceiling"
+    else
+      echo "$req_jobs"
+    fi
+    ;;
+  summary)
+    ceil_disp=${ceiling:-none}
+    line="profile=$resolved_profile ceiling=$ceil_disp source=$source_kind"
+    if [ "$raw_profile" = auto ]; then
+      if [ -n "$mem_avail_mb" ]; then
+        mem_disp="${mem_avail_mb}MB"
+      else
+        mem_disp="na"
+      fi
+      cpu_disp=${cpu_avg60:-na}
+      line="$line auto=mem:$mem_disp,cpu:$cpu_disp"
+    fi
+    echo "$line"
+    ;;
+esac

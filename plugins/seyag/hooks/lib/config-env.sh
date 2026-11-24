@@ -41,9 +41,11 @@
 # machine runs), the security-material knobs in _SYG_CFG_PROJECT_SECURE below
 # cannot be set from the project file (a repo must not weaken the credential
 # store — --with-key downgrades TPM binding, --name can break decrypt — or fake
-# the token and route labels its spend is billed and audited by), and rows
+# the token and route labels its spend is billed and audited by), rows
 # carrying `path` in knobs.tsv's 6th `flags` column cannot be set from the
-# project file (a repo must not aim seyag at arbitrary filesystem paths).
+# project file (a repo must not aim seyag at arbitrary filesystem paths), and
+# rows carrying `host` in knobs.tsv's 6th `flags` column cannot be set from the
+# project file (host-level settings belong to the environment or user config).
 # SYG_CONFIG=0 disables the loader entirely.
 
 # Harness-owned names (see the header): never settable from a config file. Kept
@@ -274,9 +276,9 @@ _syg_cfg_parse_value() {
 }
 
 # _syg_cfg_parse_file <file> <user|project> [foreign]: one file into
-# _SYG_CFG_MAP (name -> value), consulting _SYG_CFG_SETTABLE, _SYG_CFG_ENVONLY
-# and _SYG_CFG_PATH. Warns per offending line and skips it; never returns
-# non-zero, never blocks the caller.
+# _SYG_CFG_MAP (name -> value), consulting _SYG_CFG_SETTABLE, _SYG_CFG_ENVONLY,
+# _SYG_CFG_PATH and _SYG_CFG_HOST. Warns per offending line and skips it; never
+# returns non-zero, never blocks the caller.
 _syg_cfg_parse_file() {
   local file=$1 scope=$2 foreign=${3:-0}
   local -a lines=()
@@ -414,6 +416,15 @@ _syg_cfg_parse_file() {
       fi
       continue
     fi
+    if [ "$scope" = project ] && [ -n "${_SYG_CFG_HOST[$name]+x}" ]; then
+      if [ "$foreign" != 0 ]; then
+        echo "seyag config: $file: line $n: a knob cannot be set from project scope (host knob)" >&2
+      else
+        _syg_cfg_disp "$name"
+        echo "seyag config: $file: line $n: '$disp' cannot be set from project scope (host knob)" >&2
+      fi
+      continue
+    fi
     if [ -n "${seen["n:$name"]+x}" ]; then
       if [ "$foreign" != 0 ]; then
         echo "seyag config: $file: line $n: duplicate key: first value wins" >&2
@@ -462,6 +473,7 @@ syg_config_env() {
   declare -gA _SYG_CFG_SETTABLE=()
   declare -gA _SYG_CFG_ENVONLY=()
   declare -gA _SYG_CFG_PATH=()
+  declare -gA _SYG_CFG_HOST=()
   local -i n=0
   local row stripped name scope rest flags
   for row in "${rows[@]}"; do
@@ -492,10 +504,11 @@ syg_config_env() {
         flags=${flags%%$'\t'*}
         ;;
       *$'\t'*$'\t'*$'\t'*)
-        echo "seyag config: $knobs: line $n: $name: no flags column: path/envonly refusals disabled for this row" >&2
+        echo "seyag config: $knobs: line $n: $name: no flags column: path/envonly/host refusals disabled for this row" >&2
         ;;
     esac
     case " $flags " in *" path "*) _SYG_CFG_PATH[$name]=1 ;; esac
+    case " $flags " in *" host "*) _SYG_CFG_HOST[$name]=1 ;; esac
     case " $flags " in
       *" envonly "*) _SYG_CFG_ENVONLY[$name]=1 ;;
       *) _SYG_CFG_SETTABLE[$name]=1 ;;

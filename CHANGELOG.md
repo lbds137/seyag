@@ -2,6 +2,18 @@
 
 All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY-MM-DD>` section per released version; under it, `###` categories in fixed order — Breaking Changes, Features, Bug Fixes, Improvements, Chores, Tests — empty ones omitted; items are `- **scope:** description (#PR)`, written from the version's merged commit subjects.
 
+## 0.3.218 - 2026-11-23
+
+### Features
+- **resource-profile:** new bin resolving the host resource profile (`SYG_RESOURCE_PROFILE=low|normal|auto`, `SYG_MAX_PARALLEL`, `SYG_RESOURCE_JOB_MB`, `SYG_RESOURCE_CPU_PSI_MAX`) from the environment and user `config.toml` into a parallel-job ceiling (`--jobs N`, `--profile`), wired into `tests/run-probes.sh` and documented in the `testing-discipline` and `delegation` skills (TASK-123). (#PR)
+- **config-env:** new `host` flag in `knobs.tsv` refusing host-level knobs from a repo's project config file while allowing them in the environment and user `config.toml`, rendered `user only` in `docs/config.md`. (#PR)
+
+### Bug Fixes
+- **mem-gate:** `SYG_MEM_GATE_MIN_MB` now carries the `host` flag so a repo's project config file cannot override the host memory floor. (#PR)
+
+### Tests
+- **resource-profile, config-env, run-probes:** new `tests/resource-profile.probe.sh` covering profiles, memory and CPU PSI ceilings, tie order, fail-open warnings and config scope refusals; `config-env.probe.sh` case (p2) and r4 host-flag coverage pin; `run-probes-runner.probe.sh` clamp case. (#PR)
+
 ## 0.3.217 - 2026-11-23
 
 ### Features
