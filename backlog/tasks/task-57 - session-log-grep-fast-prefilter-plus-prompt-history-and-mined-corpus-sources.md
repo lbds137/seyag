@@ -1,11 +1,11 @@
 ---
 id: TASK-57
 title: 'session-log grep: fast prefilter, plus prompt-history and mined-corpus sources'
-status: In Progress
+status: Done
 assignee:
   - Seyag B
 created_date: '2026-11-21T05:10:00Z'
-updated_date: '2026-11-24T13:45:00Z'
+updated_date: '2026-11-24T13:46:00Z'
 labels:
   - session-log
   - owner-friction
@@ -26,3 +26,9 @@ Build:
 3. Then one core line in § "I've raised this before": name `session-log grep` as the one search to run, so the order is mechanical. Cut a line elsewhere first (core byte ceiling).
 Probes: a hit only in history, a hit only in the corpus, the prefilter keeping results identical to the unfiltered run on a fixture, and a timing guard if one can be made non-flaky.
 <!-- SECTION:DESCRIPTION:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Obsolete as open work: shipped in PR #371 (4d95d34, release 0.3.205). Prefilter + fork pool measured 135 s -> 54 s on transcripts+archive, 67 s all sources (commit body). History and both corpus roots are grep sources with knobs SYG_SESSION_LOG_HISTORY / SYG_SESSION_LOG_CORPUS (knobs.tsv:220-221, docs/config.md:129-130) and --no-history / --no-corpus. Probes in tests/session-log.probe.sh: history-only (s. 3e), corpus-only (line 330), prefilter equivalence (s. 3d). Core line landed in core.md s. "I've raised this before". Review lows are TASK-96. Not built: a timing guard probe (the task made it conditional on being non-flaky). Closed by Seyag B 2026-11-24 after the claim found the work done.
+<!-- SECTION:FINAL_SUMMARY:END -->
