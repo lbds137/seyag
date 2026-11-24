@@ -1,8 +1,9 @@
 ---
 id: TASK-136
 title: 'core rules: cut asks the Autonomy rules say are not the owner''s (owner ruling 2026-11-23)'
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - Seyag
 created_date: '2026-11-24T04:40:00Z'
 labels:
   - rules
