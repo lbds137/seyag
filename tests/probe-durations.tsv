@@ -66,6 +66,7 @@ tests/git-hooks.probe.sh	40.4
 tests/hook-wiring.probe.sh	18.0
 tests/keys.probe.sh	12.3
 tests/lines-check.probe.sh	20.7
+tests/mutation-canary.probe.sh	20.2
 tests/pipe-early-exit.probe.sh	0.2
 tests/plugin-release-check.probe.sh	7.6
 tests/pr-ci-wait.probe.sh	17.0
