@@ -325,7 +325,7 @@ The whitelist loads with this skill. Entries are evaluated in order. The user ma
 
 Implicit rule: "touches a file not in the PR's diff so far" is NOT a blocker for auto-apply as long as the edit is one of the trivial shapes above. The blast radius concern comes from the _shape_ of the change, not the _location_. A backlog-file addition to a file the PR hasn't touched is still a trivial-shape edit; a logic change in an untouched code file is still semantic-shape.
 
-### Explicit non-trivial (always semantic regardless of surface simplicity — external contract changes always ASK, async boundary changes need a second opinion, the rest route by rule 1's second axis)
+### Explicit non-trivial (always semantic regardless of surface simplicity — external contract changes always ASK; the rest route by rule 1's second axis, async boundary changes with a required second opinion)
 
 Each of these is flagged because the shape seduces the reader into thinking "this is just a small change" when it alters runtime behavior.
 
