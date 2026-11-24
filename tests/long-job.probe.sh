@@ -214,6 +214,19 @@ out=$(timeout 5 "$tmp/solo/bin/long-job" status 2>&1); rc=$?
   && ok "(g) long-job without lib/owner.sh exits 2 with 'cannot load'" \
   || bad "(g) solo without owner.sh (rc=$rc: $out)"
 
+# Inhibitor fallback: when systemd-inhibit exits 1, run logs and prints the unavailable note and omits systemd-inhibit from systemd-run argv.
+mkdir -p "$tmp/stub-noinh"
+cp "$tmp/stub-rec/systemd-run" "$tmp/stub-rec/systemctl" "$tmp/stub-noinh/"
+printf '#!/bin/sh\nexit 1\n' >"$tmp/stub-noinh/systemd-inhibit"; chmod +x "$tmp/stub-noinh/systemd-inhibit"
+rm -f "$tmp/argv"
+out=$(timeout 5 env PATH="$tmp/stub-noinh:$PATH" "$LJ" run noinh-job --min-mb 0 -- true 2>&1); rc=$?
+[ "$rc" = 0 ] \
+  && grep -qxF "long-job: sleep/idle inhibitor unavailable here (systemd-inhibit refused); running without it" <<<"$out" \
+  && grep -qxF "long-job: sleep/idle inhibitor unavailable here (systemd-inhibit refused); running without it" "$XDG_STATE_HOME/long-job/noinh-job.log" \
+  && [ -s "$tmp/argv" ] && ! grep -q "systemd-inhibit" "$tmp/argv" \
+  && ok "run falls back when systemd-inhibit is refused, notes it on stderr and in log, and omits systemd-inhibit from systemd-run argv" \
+  || bad "inhibitor fallback (rc=$rc, out=[$out], argv=$(tr '\n' ' ' <"$tmp/argv" 2>/dev/null))"
+
 export PATH="$ORIG_PATH"
 # --- long-job against the real user manager
 if ! systemctl --user show-environment >/dev/null 2>&1; then

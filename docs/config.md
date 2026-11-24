@@ -276,8 +276,8 @@ An optional TOML file fills in knobs the environment left unset: user `${XDG_CON
 | `SYG_KEYS_WITH_KEY` | `host+tpm2` | Value passed to systemd-creds encrypt --with-key= in keys (for example host on a machine without a TPM). | `bin/keys`, `hooks/lib/config-env.sh`, `lib/config_env.py` | user only |
 | `SYG_LOAD_GATE_1M` | 2x the CPU count | 1-minute load average ceiling for load-gate --ok/--wait; a decimal. | `bin/load-gate` | user only |
 | `SYG_LOAD_GATE_5M` | 2.5x the CPU count | 5-minute load average ceiling for load-gate --ok/--wait; a decimal. | `bin/load-gate` | user only |
-| `SYG_LONG_JOB_STATE_DIR` | XDG_STATE_HOME/long-job (XDG_STATE_HOME has its XDG default) | Directory holding long-job's per-job NAME.cmd, NAME.owner, NAME.log and NAME.exit files. | `bin/long-job` | user only |
-| `SYG_LONG_JOB_UNIT_PREFIX` | `long-job` | Prefix of the transient systemd user unit long-job starts (PREFIX-NAME.service); letters, digits, '.', '_' and '-'. | `bin/long-job` | user only |
+| `SYG_LONG_JOB_STATE_DIR` | XDG_STATE_HOME/long-job (XDG_STATE_HOME has its XDG default) | Directory holding long-job's per-job NAME.cmd, NAME.owner, NAME.unit, NAME.log and NAME.exit files. | `bin/long-job` | user only |
+| `SYG_LONG_JOB_UNIT_PREFIX` | `long-job` | Prefix of the transient systemd user unit long-job starts (PREFIX-NAME.service); must start with a letter or digit and hold only letters, digits, '.', '_' and '-'. | `bin/long-job` | user only |
 | `SYG_MAX_PARALLEL` | unset | Host cap on parallel jobs, applied by resource-profile on top of any profile. | `bin/resource-profile` | user only |
 | `SYG_MEM_GATE_MIN_MB` | `2048` | Default MemAvailable floor in MB for mem-gate --ok/--wait; an explicit MB argument wins. | `bin/mem-gate` | user only |
 | `SYG_MEM_PRESSURE_MAX_BYTES` | `5242880` | Size in bytes past which mem-pressure-log rotates log.jsonl to log.jsonl.1 (one generation kept). | `bin/mem-pressure-log` | user + project |
@@ -329,7 +329,7 @@ An optional TOML file fills in knobs the environment left unset: user `${XDG_CON
 | `SYG_LOAD_GATE_LOADAVG` | `bin/load-gate` | Test seam overriding the loadavg file load-gate reads. |
 | `SYG_LOAD_GATE_NPROC` | `bin/load-gate` | Test seam overriding the CPU count load-gate scales its default ceilings by. |
 | `SYG_LOAD_GATE_PSI` | `bin/load-gate` | Test seam overriding the CPU pressure file load-gate reads. |
-| `SYG_LONG_JOB_PARENT_CMD` | `bin/long-job` | Test seam giving long-job the parent shell's command text in place of /proc/PPID/cmdline. |
+| `SYG_LONG_JOB_PARENT_CMD` | `bin/long-job` | Test seam giving long-job the parent shell's command text in place of /proc/PPID/cmdline; setting it (even empty) replaces the parent-command read and so disables long-job's own && refusal (for tests only). |
 | `SYG_MEM_GATE_MEMINFO` | `bin/long-job`, `bin/mem-gate`, `bin/resource-profile` | Test seam overriding the meminfo file mem-gate and resource-profile read. |
 | `SYG_MEM_PRESSURE_MEMINFO` | `bin/mem-pressure-log` | Test seam overriding the meminfo file mem-pressure-log reads. |
 | `SYG_MEM_PRESSURE_PSI` | `bin/mem-pressure-log` | Test seam overriding the PSI memory file mem-pressure-log reads. |

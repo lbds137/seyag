@@ -65,6 +65,27 @@ refuse "sudo -E long-job run N -- a && b refuses (prefix word + option)" "sudo -
 refuse "backslash-newline before && still refuses" "$(printf 'long-job run N -- a \\\n&& b')"
 clean "exec long-job run N -- a && b is clean (nothing runs after exec)" "exec long-job run N -- a && b"
 
+# whitespace_split + operator splitting + brace groups + $(...) folding
+refuse "FOO=\$bar long-job run x -- make && echo hi refuses" 'FOO=$bar long-job run x -- make && echo hi'
+out=$(timeout 5 "$CHK" 'SYG_X=a:b long-job run x -- make && echo hi' 2>&1); rc=$?
+[ "$rc" = 3 ] && grep -q "^long-job: refusing: '&& …' after 'long-job run x'" <<<"$out" \
+  && grep -q "^long-job: warning: SYG_X is set on long-job's command line but the job never sees it; pass it with --env SYG_X\." <<<"$out" \
+  && ok "SYG_X=a:b long-job run x -- make && echo hi refuses and prints SYG_X warning" \
+  || bad "SYG_X=a:b refuse+warn (rc $rc: $out)"
+refuse "PATH=/a:/b long-job run x -- make && echo hi refuses" 'PATH=/a:/b long-job run x -- make && echo hi'
+warn_only "SYG_TOKEN=\$t long-job run x -- make warns about SYG_TOKEN" 'SYG_TOKEN=$t long-job run x -- make' \
+  "^long-job: warning: SYG_TOKEN is set on long-job's command line but the job never sees it; pass it with --env SYG_TOKEN\."
+out=$(timeout 5 "$CHK" 'long-job run $N -- make && echo hi' 2>&1); rc=$?
+[ "$rc" = 3 ] && grep -qF "long-job: refusing: '&& …' after 'long-job run \$N'" <<<"$out" \
+  && grep -qF "Put the chain inside the job: long-job run \$N -- bash -c 'a && b'" <<<"$out" \
+  && ok "long-job run \$N -- make && echo hi refuses naming \$N as the job" \
+  || bad "long-job run \$N (rc $rc: $out)"
+refuse "(long-job run x -- a)&&b refuses (no spaces)" '(long-job run x -- a)&&b'
+refuse "{ long-job run x -- foo; } && echo refuses (brace group)" '{ long-job run x -- foo; } && echo'
+refuse "x=\$(foo) long-job run x -- a && b refuses (x=\$(...) fold intact)" 'x=$(foo) long-job run x -- a && b'
+clean "x=\$(long-job run x -- a && b) folds \$(...) into one word (clean)" 'x=$(long-job run x -- a && b)'
+clean "long-job run x -- make; echo hi is not refused (control)" 'long-job run x -- make; echo hi'
+
 # Bash tool eval-wrapper shape: <wrapper> && eval '<user command>' && pwd -P >| /tmp/...
 q="'\"'\"'"
 printf -v eval_bad 'source /etc/profile && eval '\''long-job run N -- bash -c %secho a%s && echo b'\'' && pwd -P >| /tmp/claude-cwd' "$q" "$q"

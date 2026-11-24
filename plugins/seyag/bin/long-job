@@ -13,9 +13,10 @@ process tree, so Claude Code's low-memory reaper can't kill it. Use it for anyth
 longer than ~10 minutes (a miner, a full suite, an extract, an OCR pass).
 
   long-job run NAME [options] -- CMD [ARG...]
-      Gates on memory (mem-gate), then starts CMD in unit long-job-NAME.service in the current
-      directory with the caller's PATH, stdin from /dev/null, stdout+stderr appended to the
-      job's log, and sleep/idle inhibited. Returns at once.
+      Gates on memory (mem-gate), then starts CMD in unit PREFIX-NAME.service (prefix from
+      SYG_LONG_JOB_UNIT_PREFIX, default long-job) in the current directory with the caller's
+      PATH, stdin from /dev/null, stdout+stderr appended to the job's log, and sleep/idle
+      inhibited. Returns at once.
       --min-mb MB      memory gate threshold (default 2048; 0 skips the gate)
       --wait-mem S     wait up to S seconds (at least 1) inside the unit for memory; a gate timeout
                        is recorded as the job's exit 1. While it waits, status shows it running
@@ -24,7 +25,8 @@ longer than ~10 minutes (a miner, a full suite, an extract, an OCR pass).
                        overflow goes to swap rather than killing it
       --nice N         systemd Nice for the unit
       --env NAME       also pass the caller's NAME into the unit (repeatable)
-      --no-inhibit     don't hold a sleep/idle inhibitor
+      --no-inhibit     don't hold a sleep/idle inhibitor (the inhibitor is skipped with a note
+                       when systemd-inhibit is refused)
       When the parent shell's command text is readable (Claude Code's Bash tool, which runs
       `bash -c`; not a script), run also refuses a `&&` tail after it (the tail would run at
       once, outside the job; exit 2, nothing started) and warns on a `||` tail and on a
@@ -42,12 +44,14 @@ longer than ~10 minutes (a miner, a full suite, an extract, an OCR pass).
       run_in_background; the harness wakes the session when the waiter exits. Read the
       waiter's output: a last line "long-job: ended: …" is the result. Anything else (the
       low-memory reaper or a kill stopped the waiter, whose exit code then looks like a
-      failed job's: 1 on SIGKILL, 144 on SIGTERM) means run `long-job wait NAME
-      --poll` and follow its last line, which says to start a waiter again while the job
-      runs (and "state unknown" when systemctl itself failed: check again, not an end). Reaped background tasks do notify, so no backstop is needed. The other form is a CronCreate tick, e.g. cron "*/10 * * * *" with
-      the prompt "Run long-job wait NAME --poll and follow its last line." (a turn per tick;
-      recurring crons expire after 7 days). Not a Monitor or until/while loop over --poll
-      (capped at 30 minutes, while these jobs run longer than ~10).
+      failed job's: 1 on SIGKILL, 144 on SIGTERM) means run `long-job wait NAME --poll`
+      and follow its last line, which says to start a waiter again while the job runs
+      (and "state unknown" when systemctl itself failed: check again, not an end).
+      Reaped background tasks do notify, so no backstop is needed. The other form is a
+      CronCreate tick, e.g. cron "*/10 * * * *" with the prompt "Run long-job wait NAME
+      --poll and follow its last line." (a turn per tick; recurring crons expire after
+      7 days). Not a Monitor or until/while loop over --poll (capped at 30 minutes,
+      while these jobs run longer than ~10).
       Don't launch `long-job run` itself in the background: it returns once the unit has
       started, so its "completed" notice means started, not finished.
   long-job status [NAME]   one line per job (all jobs without NAME), with the owner it was run for
@@ -200,7 +204,13 @@ case "$cmd" in
     # A failed unit from an earlier run stays loaded and blocks the name.
     systemctl --user reset-failed -- "$(job_unit "$name")" 2>/dev/null
     pre=()
-    [ $inhibit = 1 ] && pre=(systemd-inhibit --what=sleep:idle --who=long-job --why="long-job $name")
+    if [ $inhibit = 1 ]; then
+      if systemd-inhibit --what=sleep:idle --who=long-job --why=probe true 2>/dev/null; then
+        pre=(systemd-inhibit --what=sleep:idle --who=long-job --why="long-job $name")
+      else
+        echo "long-job: sleep/idle inhibitor unavailable here (systemd-inhibit refused); running without it" | tee -a "$log" >&2
+      fi
+    fi
     # The wrapper records CMD's exit with a timestamp; describe() reads it after systemd forgets
     # a successful unit. --expand-environment=no: by default systemd rewrites the command's
     # arguments (${VAR} -> its value or empty, $$ -> $), which emptied ${...} in worker specs.
