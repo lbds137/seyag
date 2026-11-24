@@ -215,9 +215,9 @@ both_dies_out=$( (cd "$FIX" && bash "$TOOL" --both --base main tests/dies.probe.
 git -C "$FIX" checkout -q main
 
 # 9. Verdict parity: --both base verdict word equals single-mode verdict for red, green, dies.
-s_red=$( (cd "$FIX" && bash "$TOOL" tests/red.probe.sh main) 2>&1 | head -n1 | cut -d: -f1 )
-s_green=$( (cd "$FIX" && bash "$TOOL" tests/green.probe.sh main) 2>&1 | head -n1 | cut -d: -f1 )
-s_dies=$( (cd "$FIX" && bash "$TOOL" tests/dies.probe.sh main) 2>&1 | head -n1 | cut -d: -f1 )
+s_red=$( (cd "$FIX" && bash "$TOOL" tests/red.probe.sh main) 2>&1 ); s_red=${s_red%%:*}
+s_green=$( (cd "$FIX" && bash "$TOOL" tests/green.probe.sh main) 2>&1 ); s_green=${s_green%%:*}
+s_dies=$( (cd "$FIX" && bash "$TOOL" tests/dies.probe.sh main) 2>&1 ); s_dies=${s_dies%%:*}
 b_red=$(sed -n 's/^tests\/red\.probe\.sh: base main \(.*\) | here .*/\1/p' <<<"$both_rg_out")
 b_green=$(sed -n 's/^tests\/green\.probe\.sh: base main \(.*\) | here .*/\1/p' <<<"$both_rg_out")
 b_dies=$(sed -n 's/^tests\/dies\.probe\.sh: base main \(.*\) | here .*/\1/p' <<<"$both_dies_out")
