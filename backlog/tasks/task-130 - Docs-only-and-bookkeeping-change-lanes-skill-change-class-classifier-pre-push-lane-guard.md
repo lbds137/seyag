@@ -3,7 +3,7 @@ id: TASK-130
 title: >-
   Docs-only and bookkeeping change lanes: skill, change-class classifier,
   pre-push lane guard
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-11-23T21:35:00Z'
 labels:
@@ -43,9 +43,9 @@ Decided before the spec (2026-11-23, driver):
 <!-- AC:BEGIN -->
 - [x] #1 Skill documents the three lanes, the decision table and the per-repo config
 - [x] #2 change-class bin classifies a diff with the fail-to-full rules above, pinned by a probe including rename, symlink, mode-change, gitlink and control-file cases
-- [ ] #3 pre-push lane guard is opt-in (toggle), chains the repo hook, and its probe covers create/delete/non-FF/merge/revert-hiding/config-widening cases
+- [ ] #3 pre-push lane guard is opt-in (toggle), chains the repo hook, and its probe covers create/delete/non-FF/merge/revert-hiding/config-widening cases (moved to TASK-132, deferred)
 - [x] #4 Report-only replay against each adopting repo's history recorded before skips are enabled
-- [ ] #5 Replacement line for the global push rule's interim clause (a pointer to the skill) handed to the platform session, which owns that file
+- [x] #5 Replacement line for the global push rule's interim clause (a pointer to the skill) handed to the platform session, which owns that file
 <!-- AC:END -->
 
 ## Implementation Notes
@@ -64,4 +64,9 @@ Decision under the pre-registered rule:
 - CI wiring: worth it in NONE of the five. Public repos bill 0 Actions minutes on standard runners (all three use only `ubuntu-latest`, per a grep of their workflows; the zero-billing is GitHub's public-repo policy, not measured here). Repo S already path-filters, saving 0. Repo P has 4 PRs.
 - Unit B: repo S clears the volume bar (11 standalone ledger-only PRs a month against the 10 needed) but has not opted in. Its opt-in is the owner's call, raised via the platform session.
 - Until a repo opts in, unit B stays deferred. Trigger: an opt-in from a repo that clears the 10-a-month bar.
+
+Owner rulings (2026-11-23 ~20:00, via the platform session):
+- Repo S unit B: "Not now". Unit B is deferred to TASK-132, with the trigger "a repo clearing 10 ledger-only PRs a month opts in".
+- AC #5: "Apply it". The platform session applied the replacement Before Push line: the Markdown-only exception is kept, and a repo with a `.github/change-class.toml` policy may use `change-class classify`, where `verdict=exempt` means no suite run. The interim clause is gone.
+- CI wiring: no rollout (the replay decision above). Closed with unit A shipped (0.3.217); unit B lives in TASK-132.
 <!-- SECTION:NOTES:END -->
