@@ -2,6 +2,13 @@
 
 All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY-MM-DD>` section per released version; under it, `###` categories in fixed order — Breaking Changes, Features, Bug Fixes, Improvements, Chores, Tests — empty ones omitted; items are `- **scope:** description (#PR)`, written from the version's merged commit subjects.
 
+## 0.3.222 - 2026-11-24
+
+### Improvements
+- **rules:** core.md Autonomy: a technical choice with no product, user-visible, spend, data or taste dimension is decided and reported even when a recommendation is in hand, never put to the owner; an optional council or advisor opinion comes first when unsure. Approved work a memory reaper or crash killed re-runs once the memory gate passes, unasked. The Safety ask-first line names a local `git merge` and says a green PR through the repo's merge path needs no yes. Paid for by cutting three redundant sentences; core.md shrinks by 10 bytes. (TASK-136)
+- **backlog:** TASK-87 carries its grounded shape and fix options in-tree; TASK-138 files the #395 review lows. (#396)
+- **backlog:** TASK-136 records its dispositions; TASK-138 AC #1 and TASK-87's base commit corrected (#396 review lows).
+
 ## 0.3.221 - 2026-11-24
 
 ### Breaking Changes
@@ -15,7 +22,6 @@ All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY
 - **backlog:** TASK-136 and TASK-130 no longer name a private session; TASK-110's case count corrected; TASK-87 folds in the `--body-file` fail-open gap. (#395)
 - **backlog:** priorities set on ten active tasks (TASK-38-43, 49-52). (#394)
 - **backlog:** TASK-57 closed as shipped in 0.3.205. (#393)
-- **backlog:** TASK-87 carries its grounded shape and fix options in-tree; TASK-138 files the #395 review lows. (#396)
 
 ### Tests
 - **mutation-canary:** cases 28-39: timeout forms, apply-time recount, no-op patch, manual `--restore` refusals and `--force`, `HUP` exit 129, `--force` without `--restore`, a reused journal pid, a journal without a pid file and one whose pid appears during the wait; case 23 now expects the refusal and case 24 fakes its live run under the tool's name. (#395)

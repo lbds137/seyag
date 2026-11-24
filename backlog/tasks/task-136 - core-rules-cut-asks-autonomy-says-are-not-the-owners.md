@@ -1,7 +1,7 @@
 ---
 id: TASK-136
 title: 'core rules: cut asks the Autonomy rules say are not the owner''s (owner ruling 2026-11-23)'
-status: In Progress
+status: Done
 assignee:
   - Seyag
 created_date: '2026-11-24T04:40:00Z'
@@ -31,7 +31,16 @@ Related and already tracked: force-push `!` lines handed to the owner for squash
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 core.md Autonomy carries ruling 1, net size not grown (cut elsewhere to pay for it)
-- [ ] #2 Items 2 and 3 each land as a rule line or are ruled out with the reason recorded here
-- [ ] #3 review-response's ASK clause is kept, narrowed or cut, with the reason recorded
+- [x] #1 core.md Autonomy carries ruling 1, net size not grown (cut elsewhere to pay for it)
+- [x] #2 Items 2 and 3 each land as a rule line or are ruled out with the reason recorded here
+- [x] #3 review-response's ASK clause is kept, narrowed or cut, with the reason recorded
 <!-- AC:END -->
+
+## Implementation Notes
+<!-- SECTION:NOTES:BEGIN -->
+Dispositions (0.3.222):
+1. Ruling 1 landed in core.md § Autonomy, replacing the plan-mode sentence it subsumes; "taste" joins the owner's list there and in the formal-channel line. Paid for by cutting three sentences the new line or a neighbour already covers (Escalate's "no escalation" tail, Most-correct's "no speed-vs-correctness menus", the refresh line's framing clause). Net -10 bytes.
+2. Shipped as a clause on the memory-gate sentence in § Other defaults: approved work a reaper or crash killed re-runs once the gate passes, unasked.
+3. Shipped by narrowing § Safety's ask-first line: it names a local `git merge` in a rebase-only project and says merging a green PR through the repo's merge path (Dependabot included) needs no yes. That bare `git merge` item is the likeliest source of the "merging into main always needs your yes" misread; a repo whose merge path is a review workflow still merges through that workflow.
+4. Narrowed, not cut, in the review-response skill (it lands as its own change in that skill's lane). The test-assertion Ask is kept: it rests on § Safety (a test is never changed just to get past it), and the measurement rated those asks borderline, not should-not-ask. The async-boundary Ask becomes a decided item with a required council or advisor second opinion, cited in the round report: the Ask's stated reason is that no test gate catches a wrong call, which is a correctness risk that ruling 1 routes to a second opinion rather than to the owner. External-contract changes stay an Ask (outside this task's measurement).
+<!-- SECTION:NOTES:END -->
