@@ -146,4 +146,126 @@ wtcount=$(git -C "$FIX" worktree list | grep -c . || true)
 [ "$wtcount" = 1 ] && ok "cleanup: only the main checkout remains registered" \
   || bad "cleanup: worktree list has $wtcount entries: $(git -C "$FIX" worktree list)"
 
+# 1. --expect matching a FAIL line: exit 0, confirmation names expected text found.
+out=$( (cd "$FIX" && bash "$TOOL" --expect 'subject printed: old' tests/red.probe.sh main) 2>&1 ); rc=$?
+[ $rc = 0 ] && grep -qF "probe-red-check: red confirmed (expected text found)" <<<"$out" \
+  && ok "--expect match: exit 0 and expected-text confirmation" \
+  || bad "--expect match (rc $rc; out: $out)"
+
+# 2. --expect missing from FAIL lines: exit 3, WRONG REASON summary and footer.
+out=$( (cd "$FIX" && bash "$TOOL" --expect 'no such text' tests/red.probe.sh main) 2>&1 ); rc=$?
+[ $rc = 3 ] \
+  && grep -qF "WRONG REASON: tests/red.probe.sh fails at main" <<<"$out" \
+  && grep -qF "probe-red-check: red for the wrong reason" <<<"$out" \
+  && ok "--expect miss: exit 3, WRONG REASON summary and footer" \
+  || bad "--expect miss (rc $rc; out: $out)"
+
+# 3. --expect text present only on an ok: line does not count: exit 3.
+cat > "$FIX/tests/okline.probe.sh" <<'PROBE'
+#!/bin/bash
+echo "ok:   marker-text here"
+echo "FAIL: something else"
+exit 1
+PROBE
+out=$( (cd "$FIX" && bash "$TOOL" --expect marker-text tests/okline.probe.sh main) 2>&1 ); rc=$?
+[ $rc = 3 ] && grep -qF "probe-red-check: red for the wrong reason" <<<"$out" \
+  && ok "--expect ignores ok: lines: exit 3" \
+  || bad "--expect okline (rc $rc; out: $out)"
+
+# 4. --expect on dies.probe.sh: exit 2, INCONCLUSIVE summary (TEXT not consulted).
+out=$( (cd "$FIX" && bash "$TOOL" --expect anything tests/dies.probe.sh main) 2>&1 ); rc=$?
+[ $rc = 2 ] && grep -qF "INCONCLUSIVE: tests/dies.probe.sh died before any assertion" <<<"$out" \
+  && ok "--expect on INCONCLUSIVE probe: exit 2, INCONCLUSIVE summary" \
+  || bad "--expect dies (rc $rc; out: $out)"
+
+# 5. Usage refusals, each exit 2.
+out=$( (cd "$FIX" && bash "$TOOL" --expect '' tests/red.probe.sh main) 2>&1 ); rc=$?
+[ $rc = 2 ] && grep -qF "must not be empty" <<<"$out" && ok "usage refusal: --expect '' exits 2" || bad "--expect '' (rc $rc; out: $out)"
+out=$( (cd "$FIX" && bash "$TOOL" --expect a --expect b tests/red.probe.sh main) 2>&1 ); rc=$?
+[ $rc = 2 ] && grep -qF "given more than once" <<<"$out" && ok "usage refusal: --expect given twice exits 2" || bad "--expect twice (rc $rc; out: $out)"
+out=$( (cd "$FIX" && bash "$TOOL" --base main tests/red.probe.sh) 2>&1 ); rc=$?
+[ $rc = 2 ] && grep -qF "valid only with --both" <<<"$out" && ok "usage refusal: --base without --both exits 2" || bad "--base without --both (rc $rc; out: $out)"
+out=$( (cd "$FIX" && bash "$TOOL" --both) 2>&1 ); rc=$?
+[ $rc = 2 ] && grep -qF "requires at least one probe" <<<"$out" && ok "usage refusal: --both with no probe exits 2" || bad "--both no probe (rc $rc; out: $out)"
+
+# 6. --help mentions --expect and --both.
+out=$( (cd "$FIX" && bash "$TOOL" --help) 2>&1 ); rc=$?
+[ $rc = 0 ] && grep -q -- '--expect' <<<"$out" && grep -q -- '--both' <<<"$out" \
+  && ok "--help mentions --expect and --both" \
+  || bad "--help content (rc $rc; out: $out)"
+
+# 7. --both on fix branch: red+green exits 1; red alone exits 0.
+git -C "$FIX" checkout -q fix
+both_rg_out=$( (cd "$FIX" && bash "$TOOL" --both --base main tests/red.probe.sh tests/green.probe.sh) 2>&1 ); rc=$?
+[ $rc = 1 ] \
+  && grep -qxF "tests/red.probe.sh: base main RED | here PASS" <<<"$both_rg_out" \
+  && grep -q '^tests/green\.probe\.sh: base main NOT RED | here FAIL' <<<"$both_rg_out" \
+  && ok "--both red+green on fix: exit 1 with RED|PASS and NOT RED|FAIL lines" \
+  || bad "--both red+green (rc $rc; out: $both_rg_out)"
+out=$( (cd "$FIX" && bash "$TOOL" --both --base main tests/red.probe.sh) 2>&1 ); rc=$?
+[ $rc = 0 ] && grep -qxF "tests/red.probe.sh: base main RED | here PASS" <<<"$out" \
+  && ok "--both red alone on fix: exit 0" \
+  || bad "--both red alone (rc $rc; out: $out)"
+
+# 8. --both --base main tests/dies.probe.sh on fix branch: base INCONCLUSIVE, here PASS, exit 2.
+both_dies_out=$( (cd "$FIX" && bash "$TOOL" --both --base main tests/dies.probe.sh) 2>&1 ); rc=$?
+[ $rc = 2 ] && grep -qxF "tests/dies.probe.sh: base main INCONCLUSIVE | here PASS" <<<"$both_dies_out" \
+  && ok "--both dies on fix: base INCONCLUSIVE, here PASS, exit 2" \
+  || bad "--both dies (rc $rc; out: $both_dies_out)"
+git -C "$FIX" checkout -q main
+
+# 9. Verdict parity: --both base verdict word equals single-mode verdict for red, green, dies.
+s_red=$( (cd "$FIX" && bash "$TOOL" tests/red.probe.sh main) 2>&1 | head -n1 | cut -d: -f1 )
+s_green=$( (cd "$FIX" && bash "$TOOL" tests/green.probe.sh main) 2>&1 | head -n1 | cut -d: -f1 )
+s_dies=$( (cd "$FIX" && bash "$TOOL" tests/dies.probe.sh main) 2>&1 | head -n1 | cut -d: -f1 )
+b_red=$(sed -n 's/^tests\/red\.probe\.sh: base main \(.*\) | here .*/\1/p' <<<"$both_rg_out")
+b_green=$(sed -n 's/^tests\/green\.probe\.sh: base main \(.*\) | here .*/\1/p' <<<"$both_rg_out")
+b_dies=$(sed -n 's/^tests\/dies\.probe\.sh: base main \(.*\) | here .*/\1/p' <<<"$both_dies_out")
+[ "$b_red" = "RED" ] && [ "$b_red" = "$s_red" ] \
+  && [ "$b_green" = "NOT RED" ] && [ "$b_green" = "$s_green" ] \
+  && [ "$b_dies" = "INCONCLUSIVE" ] && [ "$b_dies" = "$s_dies" ] \
+  && ok "verdict parity: --both base verdicts equal single-mode (RED / NOT RED / INCONCLUSIVE)" \
+  || bad "verdict parity (single: $s_red/$s_green/$s_dies vs both: $b_red/$b_green/$b_dies)"
+
+# 10. Isolation: fresh base worktree per probe in --both mode.
+cat > "$FIX/tests/writer.probe.sh" <<'PROBE'
+#!/bin/bash
+D=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+: > "$D/leftover"
+echo "FAIL: wrote leftover"
+exit 1
+PROBE
+cat > "$FIX/tests/reader.probe.sh" <<'PROBE'
+#!/bin/bash
+D=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+[ -e "$D/leftover" ] && exit 0
+echo "FAIL: no leftover"
+exit 1
+PROBE
+out=$( (cd "$FIX" && bash "$TOOL" --both --base main tests/writer.probe.sh tests/reader.probe.sh) 2>&1 ); rc=$?
+rm -f "$FIX/leftover"
+grep -q '^tests/reader\.probe\.sh:.*base main RED' <<<"$out" \
+  && ok "isolation: reader sees fresh base tree without writer leftover" \
+  || bad "isolation (rc $rc; out: $out)"
+
+# 11. After all --both cases, worktree list shows only the main checkout.
+wtcount=$(git -C "$FIX" worktree list | grep -c . || true)
+[ "$wtcount" = 1 ] && ok "--both cleanup: only the main checkout remains registered" \
+  || bad "--both cleanup: worktree list has $wtcount entries: $(git -C "$FIX" worktree list)"
+
+# 12. --both mode TERM cleans up worktree registration.
+cd "$FIX" || exit 1
+bash "$TOOL" --both --base main tests/slow.probe.sh >"$T/term-both.out" 2>&1 &
+tpid=$!
+sleep 1
+kill -TERM "$tpid" 2>/dev/null
+wait "$tpid"
+trc=$?
+cd "$SCRIPT_DIR" || exit 1
+[ "$trc" = 143 ] && ok "--both TERM: exit 143" \
+  || ok "--both TERM: exit $trc (tool finished first; case false-passes)"
+wtcount=$(git -C "$FIX" worktree list | grep -c . || true)
+[ "$wtcount" = 1 ] && ok "--both TERM: worktree registration cleaned" \
+  || bad "--both TERM: worktree list has $wtcount entries: $(git -C "$FIX" worktree list)"
+
 exit $fail

@@ -1,36 +1,136 @@
 #!/bin/bash
-# probe-red-check: prove a NEW probe is red against a base ref's unfixed code.
+# probe-red-check: prove a NEW probe is red against a base ref's unfixed code,
+# or (--both) red at the base and passing in the current working tree.
 #
 # Usage:
-#   probe-red-check <probe-path> [base-ref]   (run inside the repo whose code the probe checks)
+#   probe-red-check [--expect TEXT] <probe-path> [base-ref]   (run inside the repo whose code the probe checks)
+#   probe-red-check --both [--expect TEXT] [--base REF] <probe-path>...
 #   probe-red-check -h|--help
 #
 # <probe-path> is an existing *.probe.sh in the CURRENT checkout — the uncommitted
-# new probe; resolved as given, then against the repo root. [base-ref] defaults to
-# origin/main and must resolve.
+# new probe; resolved as given, then against the repo root. Base defaults to
+# origin/main and must resolve ([base-ref] in single mode; --base REF in --both mode).
+#
+# --expect TEXT requires at least one ^FAIL: line from the base run to contain TEXT
+# as a literal substring (non-empty, single-line); ok: and other lines do not count.
+# In --both mode, --expect applies to every named probe, and "here" runs in the
+# current working tree (not the committed HEAD) so an uncommitted fix counts.
 #
 # Exit-code inversion, the pr-ci-wait precedent (plugins/seyag/bin/pr-ci-wait exits
-# 0 only on its good sentinel): here 0 means RED CONFIRMED — the probe failed at the
-# base with at least one FAIL: assertion line. 1 means NOT RED (the probe passed at
-# the base, so the red check failed to prove red). 2 means INCONCLUSIVE: the probe
-# died before any assertion, and an error from a name only the fix adds is not the
-# behavior's red (the delegation skill's red-first rule).
+# 0 only on its good sentinel):
+#   Single mode:
+#     0  RED CONFIRMED (failed at base with >= 1 ^FAIL: line, and matching --expect)
+#     1  NOT RED (passed at base, rc 0)
+#     2  INCONCLUSIVE (died before any assertion: an error from a name only the fix
+#        adds is not the behavior's red), or usage/refusal
+#     3  WRONG REASON (failed at base with >= 1 ^FAIL: line, none containing --expect TEXT)
+#   --both mode:
+#     0  every probe is base RED and here PASS
+#     1  any probe has a definite failure (base NOT RED, base WRONG REASON, or here FAIL)
+#     2  otherwise, when some base INCONCLUSIVE prevents a verdict, or usage/refusal
 #
-# Mechanics: registers a detached worktree at <base-ref> under a mktemp dir (removed
-# on every exit path, signals included), copies the probe to its repo-relative path
-# inside it, and runs it there — the probe resolves sibling code via its own dirname
-# BASH_SOURCE, i.e. the base's code. Limitations: only the probe FILE is copied (a
-# probe needing an uncommitted sibling cannot be red-checked this way), and a FAIL:
-# line from the probe's own fixture build reads as red like an assertion failure —
-# every FAIL line is echoed, so judge which kind ran.
+# Mechanics: registers a fresh detached worktree at the base under a mktemp dir per
+# probe (removed on every exit path, signals included), copies the probe to its
+# repo-relative path inside it, and runs it there — the probe resolves sibling code
+# via its own dirname BASH_SOURCE, i.e. the base's code. Limitations: only the probe
+# FILE is copied (a probe needing an uncommitted sibling cannot be red-checked this
+# way), and a FAIL: line from the probe's own fixture build reads as red like an
+# assertion failure — every FAIL line is echoed, so judge which kind ran.
 
 set -uo pipefail
-usage() { sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; }
-case "${1:-}" in -h | --help) usage; exit 0 ;; esac
-[ $# -ge 1 ] && [ $# -le 2 ] || { usage >&2; exit 2; }
+usage() { awk 'NR > 1 { if (/^#/) { sub(/^# ?/, ""); print } else exit }' "$0"; }
 
-PROBE_ARG=$1
-BASE=${2:-origin/main}
+BOTH_MODE=0
+HAS_EXPECT=0
+EXPECT_TEXT=""
+HAS_BASE=0
+BASE_OPT=""
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h | --help)
+      usage
+      exit 0
+      ;;
+    --both)
+      if [ "$BOTH_MODE" -eq 1 ]; then
+        echo "probe-red-check: --both given more than once" >&2
+        usage >&2
+        exit 2
+      fi
+      BOTH_MODE=1
+      shift
+      ;;
+    --expect)
+      if [ "$HAS_EXPECT" -eq 1 ]; then
+        echo "probe-red-check: --expect given more than once" >&2
+        usage >&2
+        exit 2
+      fi
+      if [ $# -lt 2 ]; then
+        echo "probe-red-check: --expect requires an argument" >&2
+        usage >&2
+        exit 2
+      fi
+      if [ -z "$2" ]; then
+        echo "probe-red-check: --expect text must not be empty" >&2
+        usage >&2
+        exit 2
+      fi
+      if [[ $2 == *$'\n'* ]]; then
+        echo "probe-red-check: --expect text must not contain a newline" >&2
+        usage >&2
+        exit 2
+      fi
+      HAS_EXPECT=1
+      EXPECT_TEXT=$2
+      shift 2
+      ;;
+    --base)
+      if [ "$HAS_BASE" -eq 1 ]; then
+        echo "probe-red-check: --base given more than once" >&2
+        usage >&2
+        exit 2
+      fi
+      if [ $# -lt 2 ] || [ -z "$2" ]; then
+        echo "probe-red-check: --base requires a ref argument" >&2
+        usage >&2
+        exit 2
+      fi
+      HAS_BASE=1
+      BASE_OPT=$2
+      shift 2
+      ;;
+    -*)
+      echo "probe-red-check: unknown option: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+
+if [ "$HAS_BASE" -eq 1 ] && [ "$BOTH_MODE" -eq 0 ]; then
+  echo "probe-red-check: --base is valid only with --both" >&2
+  usage >&2
+  exit 2
+fi
+
+if [ "$BOTH_MODE" -eq 1 ]; then
+  if [ $# -lt 1 ]; then
+    echo "probe-red-check: --both requires at least one probe path" >&2
+    usage >&2
+    exit 2
+  fi
+  PROBE_ARGS=("$@")
+  BASE=${BASE_OPT:-origin/main}
+else
+  [ $# -ge 1 ] && [ $# -le 2 ] || { usage >&2; exit 2; }
+  PROBE_ARGS=("$1")
+  BASE=${2:-origin/main}
+fi
 
 if ! ROOT=$(git rev-parse --show-toplevel 2>/dev/null); then
   echo "probe-red-check: not inside a git repo" >&2
@@ -49,26 +149,31 @@ fi
 # accepted; both sides are canonicalized so a symlinked tmpdir (macOS
 # /tmp -> /private/tmp) cannot split the prefix match.
 ROOT_CANON=$(realpath -- "$ROOT" 2>/dev/null) || ROOT_CANON=$ROOT
-PROBE=""
-RAW=""
-if [[ $PROBE_ARG == *.probe.sh ]]; then
-  if [ -f "$PROBE_ARG" ]; then
-    RAW=$PROBE_ARG
-  elif [ -f "$ROOT/$PROBE_ARG" ]; then
-    RAW=$ROOT/$PROBE_ARG
+PROBES=()
+RELS=()
+for PROBE_ARG in "${PROBE_ARGS[@]}"; do
+  PROBE=""
+  RAW=""
+  if [[ $PROBE_ARG == *.probe.sh ]]; then
+    if [ -f "$PROBE_ARG" ]; then
+      RAW=$PROBE_ARG
+    elif [ -f "$ROOT/$PROBE_ARG" ]; then
+      RAW=$ROOT/$PROBE_ARG
+    fi
   fi
-fi
-if [ -n "$RAW" ]; then
-  CANON=$(realpath -- "$RAW" 2>/dev/null) && PROBE=$CANON
-fi
-case $PROBE in
-  "$ROOT_CANON"/*) ;;
-  *)
-    echo "probe-red-check: no such probe: $PROBE_ARG (an existing *.probe.sh inside $ROOT)" >&2
-    exit 2
-    ;;
-esac
-REL=${PROBE#"$ROOT_CANON"/}
+  if [ -n "$RAW" ]; then
+    CANON=$(realpath -- "$RAW" 2>/dev/null) && PROBE=$CANON
+  fi
+  case $PROBE in
+    "$ROOT_CANON"/*) ;;
+    *)
+      echo "probe-red-check: no such probe: $PROBE_ARG (an existing *.probe.sh inside $ROOT)" >&2
+      exit 2
+      ;;
+  esac
+  PROBES+=("$PROBE")
+  RELS+=("${PROBE#"$ROOT_CANON"/}")
+done
 
 TMP=$(mktemp -d) || exit 2
 cleanup() {
@@ -83,30 +188,150 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM HUP
 
-if ! git worktree add --detach --quiet "$TMP/wt" "$BASE" >/dev/null 2>&1; then
-  echo "probe-red-check: worktree add at '$BASE' failed" >&2
-  exit 2
+classify_base() {
+  local rc=$1 out=$2 line matched=0
+  FAIL_LINES=$(grep -c '^FAIL:' <<<"$out" || true)
+  if [ "$rc" -ne 0 ] && [ "$FAIL_LINES" -ge 1 ]; then
+    if [ "$HAS_EXPECT" -eq 1 ]; then
+      while IFS= read -r line; do
+        if [[ $line == FAIL:* ]] && [[ $line == *"$EXPECT_TEXT"* ]]; then
+          matched=1
+          break
+        fi
+      done <<<"$out"
+      if [ "$matched" -eq 1 ]; then
+        BASE_VERDICT="RED"
+        BASE_EXIT=0
+      else
+        BASE_VERDICT="WRONG REASON"
+        BASE_EXIT=3
+      fi
+    else
+      BASE_VERDICT="RED"
+      BASE_EXIT=0
+    fi
+  elif [ "$rc" -eq 0 ]; then
+    BASE_VERDICT="NOT RED"
+    BASE_EXIT=1
+  else
+    BASE_VERDICT="INCONCLUSIVE"
+    BASE_EXIT=2
+  fi
+}
+
+run_at_base() {
+  local probe=$1 rel=$2
+  if ! git worktree add --detach --quiet "$TMP/wt" "$BASE" >/dev/null 2>&1; then
+    echo "probe-red-check: worktree add at '$BASE' failed" >&2
+    exit 2
+  fi
+  mkdir -p -- "$TMP/wt/$(dirname -- "$rel")"
+  cp -- "$probe" "$TMP/wt/$rel"
+  BASE_OUT=$( (cd "$TMP/wt" && bash "$rel") 2>&1 )
+  BASE_RC=$?
+  git worktree remove --force "$TMP/wt" >/dev/null 2>&1
+  git worktree prune >/dev/null 2>&1
+  rm -rf "$TMP/wt"
+  classify_base "$BASE_RC" "$BASE_OUT"
+}
+
+if [ "$BOTH_MODE" -eq 0 ]; then
+  REL=${RELS[0]}
+  run_at_base "${PROBES[0]}" "$REL"
+  case "$BASE_VERDICT" in
+    "RED")
+      echo "RED: $REL fails at $BASE (rc $BASE_RC, $FAIL_LINES FAIL lines)"
+      grep '^FAIL:' <<<"$BASE_OUT"
+      if [ "$HAS_EXPECT" -eq 1 ]; then
+        echo "probe-red-check: red confirmed (expected text found)"
+      else
+        echo "probe-red-check: red confirmed"
+      fi
+      exit "$BASE_EXIT"
+      ;;
+    "WRONG REASON")
+      echo "WRONG REASON: $REL fails at $BASE (rc $BASE_RC, $FAIL_LINES FAIL lines) but no FAIL line contains the expected text"
+      echo "expected: $EXPECT_TEXT"
+      grep '^FAIL:' <<<"$BASE_OUT"
+      echo "probe-red-check: red for the wrong reason"
+      exit "$BASE_EXIT"
+      ;;
+    "NOT RED")
+      echo "NOT RED: $REL passes at $BASE (rc 0) — the red check failed to prove red"
+      echo "probe-red-check: no red"
+      exit "$BASE_EXIT"
+      ;;
+    *)
+      echo "INCONCLUSIVE: $REL died before any assertion (rc $BASE_RC)"
+      tail -n 15 <<<"$BASE_OUT"
+      echo "probe-red-check: inconclusive"
+      exit "$BASE_EXIT"
+      ;;
+  esac
 fi
-mkdir -p -- "$TMP/wt/$(dirname -- "$REL")"
-cp -- "$PROBE" "$TMP/wt/$REL"
 
-OUT=$( (cd "$TMP/wt" && bash "$REL") 2>&1 )
-RC=$?
+HEAD_SHORT=$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null)
+DIRTY=""
+if [ -n "$(git -C "$ROOT" status --porcelain 2>/dev/null)" ]; then
+  DIRTY=", dirty"
+fi
+echo "here = working tree at HEAD ${HEAD_SHORT}${DIRTY}"
 
-FAIL_LINES=$(grep -c '^FAIL:' <<<"$OUT" || true)
+TOTAL_PROBES=${#PROBES[@]}
+GOOD_PROBES=0
+HAS_DEFINITE_FAIL=0
+HAS_INCONCLUSIVE=0
 
-if [ "$RC" -ne 0 ] && [ "$FAIL_LINES" -ge 1 ]; then
-  echo "RED: $REL fails at $BASE (rc $RC, $FAIL_LINES FAIL lines)"
-  grep '^FAIL:' <<<"$OUT"
-  echo "probe-red-check: red confirmed"
-  exit 0
-elif [ "$RC" -eq 0 ]; then
-  echo "NOT RED: $REL passes at $BASE (rc 0) — the red check failed to prove red"
-  echo "probe-red-check: no red"
+for i in "${!PROBES[@]}"; do
+  PROBE=${PROBES[$i]}
+  REL=${RELS[$i]}
+  run_at_base "$PROBE" "$REL"
+
+  HERE_OUT=$( (cd "$ROOT" && bash "$REL") 2>&1 )
+  HERE_RC=$?
+  if [ "$HERE_RC" -eq 0 ]; then
+    HERE_VERDICT="PASS"
+  else
+    HERE_VERDICT="FAIL (rc $HERE_RC)"
+  fi
+
+  echo "$REL: base $BASE $BASE_VERDICT | here $HERE_VERDICT"
+
+  case "$BASE_VERDICT" in
+    "WRONG REASON")
+      grep '^FAIL:' <<<"$BASE_OUT" | sed 's/^/  /'
+      ;;
+    "INCONCLUSIVE")
+      if [ -n "$BASE_OUT" ]; then
+        tail -n 15 <<<"$BASE_OUT" | sed 's/^/  /'
+      fi
+      ;;
+  esac
+
+  if [ "$HERE_RC" -ne 0 ]; then
+    if grep -q '^FAIL:' <<<"$HERE_OUT"; then
+      grep '^FAIL:' <<<"$HERE_OUT" | sed 's/^/  /'
+    elif [ -n "$HERE_OUT" ]; then
+      tail -n 15 <<<"$HERE_OUT" | sed 's/^/  /'
+    fi
+  fi
+
+  if [ "$BASE_VERDICT" = "RED" ] && [ "$HERE_RC" -eq 0 ]; then
+    GOOD_PROBES=$((GOOD_PROBES + 1))
+  fi
+  if [ "$BASE_VERDICT" = "NOT RED" ] || [ "$BASE_VERDICT" = "WRONG REASON" ] || [ "$HERE_RC" -ne 0 ]; then
+    HAS_DEFINITE_FAIL=1
+  fi
+  if [ "$BASE_VERDICT" = "INCONCLUSIVE" ]; then
+    HAS_INCONCLUSIVE=1
+  fi
+done
+
+echo "probe-red-check: both: $TOTAL_PROBES probes, $GOOD_PROBES red at base and passing here"
+if [ "$HAS_DEFINITE_FAIL" -eq 1 ]; then
   exit 1
-else
-  echo "INCONCLUSIVE: $REL died before any assertion (rc $RC)"
-  tail -n 15 <<<"$OUT"
-  echo "probe-red-check: inconclusive"
+elif [ "$HAS_INCONCLUSIVE" -eq 1 ]; then
   exit 2
+else
+  exit 0
 fi
