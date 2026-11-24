@@ -15,16 +15,21 @@ ordinal: 140000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Requested by a coordinating session. When a role file passes the size cap, `claude-role` moves its oldest Handoff notes to `<stem>-handoff-archive-<YYYY-MM-DD>.md` beside the role file (`plugins/seyag/bin/claude-role:793`, documented at lines 41 and 163). These archives carry role frontmatter, so `claude-role --list` (line 255) lists them as roles: a retired-archive file shows as a second copy of its role.
+Requested by a coordinating session. When a role file passes the size cap, `claude-role` moves its oldest Handoff notes to `<stem>-handoff-archive-<YYYY-MM-DD>.md` beside the role file (the `arch_path = os.path.join(...)` line in the cap-archive block). On the requesting machine this left 59 archive files mixed in with the role files.
 
-Fix: write archives to an `archive/` subfolder beside the role file, keeping the same file name. This also lets a retention prune match one directory. A `--list` filter alone would fix the listing but not the pruning.
+The cap-generated archives are not what `--list` misreads. They start with `# <stem> Handoff archive` and have no frontmatter, so `field()` returns no role for them and the board, `--json` and `--list` all skip them; `tests/claude-role.probe.sh` pins that header. The duplicate the requester saw is a hand-made file: one `<stem>-retired-archive-<date>.md`, a copy of a whole role file with its frontmatter. Of the 59 archive files observed, it is the only one starting with `---`, and `--list` shows it as a second row for its role.
+
+So there are two separate fixes:
+1. Tidiness and retention: cap archives go to `archive/` beside the role file, which gives a retention prune one directory to match.
+2. The duplicate row: the role readers (board, `--json`, `--list`) skip any file whose stem contains `-archive-`, since a hand-made archive can still carry frontmatter. Move the observed retired copy into `archive/` as well; the roles glob `"$ROLES"/*.md` does not recurse, so anything under `archive/` is already ignored.
 
 Owned by the bin lane (`plugins/seyag/bin/**`).
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A cap-triggered archive lands at `<roles dir>/archive/<stem>-handoff-archive-<date>.md`, creating the folder if needed; the probe pins the path
-- [ ] #2 `claude-role --list` never lists a file under `archive/`, and existing archives beside role files are either migrated or filtered out (decision recorded); the probe pins it
-- [ ] #3 The help text (lines 41 and 163) and the session-start role instructions name the new location
+- [ ] #1 A cap-triggered archive lands at `<roles dir>/archive/<stem>-handoff-archive-<date>.md`. `archive/` is created before the `.tmp` file is opened, not just before the `os.replace`. The success message prints `archive/<name>` so it still points at the file. The probe pins the path and the message.
+- [ ] #2 Every `for f in "$ROLES"/*.md` loop (the board, `--json`, `--list` and the earlier reader) skips a role-dir file whose stem contains `-archive-` even when it has `role:` frontmatter. The probe pins this with a fixture that has frontmatter (a retired copy), alongside a positive control showing the same file without the `-archive-` stem does list.
+- [ ] #3 Existing beside-the-file archives are migrated into `archive/` (by a one-shot `claude-role --migrate-archives` or a documented `mv` line, with the choice recorded), the hand-made retired copy included.
+- [ ] #4 The usage comment (`# Handoff notes to <stem>-handoff-archive-…`) and the role-instructions paragraph beginning "Before a /clear" name the new location. These are the only two mentions: `hooks/session-start.sh` has no archive wording.
 <!-- AC:END -->
