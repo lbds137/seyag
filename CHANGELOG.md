@@ -5,9 +5,9 @@ All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY
 ## 0.3.222 - 2026-11-24
 
 ### Improvements
-- **rules:** core.md Autonomy: a technical choice with no product, user-visible, spend, data, taste or security dimension is decided and reported even when a recommendation is in hand, never put to the owner; an optional council or advisor opinion comes first when unsure. Approved work a memory reaper or crash killed gets one unasked re-run once the memory gate passes, from clean state. The Safety ask-first line names a local `git merge` and says a PR whose CI and review gates pass, merged via the repo's merge path, needs no ask. Escalation check-ins are scoped to the owner's decisions. Paid for by trimming redundant sentences and examples; core.md shrinks by 10 bytes. (TASK-136)
+- **rules:** core.md Autonomy: a technical choice with no product, user-visible, spend, data, taste or security dimension is decided and reported even when a recommendation is in hand, never put to the owner; an optional council or advisor opinion comes first when unsure. Approved work a memory reaper or crash killed gets one unasked re-run once the memory gate passes, from clean state. The Safety ask-first line names a local `git merge` and says a PR whose CI and review gates pass, merged via the repo's merge path, needs no ask, Dependabot's included. Escalation check-ins are scoped to the owner's decisions. Paid for by trimming redundant sentences and examples; core.md shrinks by 10 bytes. TASK-136 records its dispositions. (TASK-136). (#397)
 - **backlog:** TASK-87 carries its grounded shape and fix options in-tree; TASK-138 files the #395 review lows. (#396)
-- **backlog:** TASK-136 records its dispositions; TASK-87's base commit corrected (#396 review lows).
+- **backlog:** TASK-87's base commit corrected (#396 review lows). (#397)
 
 ## 0.3.221 - 2026-11-24
 
