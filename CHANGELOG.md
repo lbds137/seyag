@@ -12,7 +12,10 @@ All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY
 
 ### Improvements
 - **mutation-canary:** the kill-grace poll captures `ps` output instead of piping into `grep -q`; comments on the symlink check's scope and on `setsid` exec-ing in place. (#395)
-- **backlog:** TASK-136 and TASK-130 no longer name a private session; TASK-110's case count corrected; priorities set on ten active tasks (TASK-38-43, 49-52; landed separately in #394); TASK-87 moves to this lane and folds in the `--body-file` fail-open gap; TASK-57 closed as shipped in 0.3.205 (#393). (#395)
+- **backlog:** TASK-136 and TASK-130 no longer name a private session; TASK-110's case count corrected; TASK-87 folds in the `--body-file` fail-open gap. (#395)
+- **backlog:** priorities set on ten active tasks (TASK-38-43, 49-52). (#394)
+- **backlog:** TASK-57 closed as shipped in 0.3.205. (#393)
+- **backlog:** TASK-87 carries its grounded shape and fix options in-tree; TASK-138 files the #395 review lows. (#396)
 
 ### Tests
 - **mutation-canary:** cases 28-39: timeout forms, apply-time recount, no-op patch, manual `--restore` refusals and `--force`, `HUP` exit 129, `--force` without `--restore`, a reused journal pid, a journal without a pid file and one whose pid appears during the wait; case 23 now expects the refusal and case 24 fakes its live run under the tool's name. (#395)
