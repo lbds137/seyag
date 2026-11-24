@@ -1,0 +1,297 @@
+#!/bin/bash
+# long-job: run a long job as a transient systemd user unit, outside every Claude session's
+# process tree, so Claude Code's low-memory reaper can't kill it; then wait on it or read it.
+# See usage() for the subcommands.
+# Probe: tests/long-job.probe.sh.
+
+set -uo pipefail
+
+usage() {
+  cat <<'EOF'
+long-job: run a long job as a transient systemd user unit, outside every Claude session's
+process tree, so Claude Code's low-memory reaper can't kill it. Use it for anything that runs
+longer than ~10 minutes (a miner, a full suite, an extract, an OCR pass).
+
+  long-job run NAME [options] -- CMD [ARG...]
+      Gates on memory (mem-gate), then starts CMD in unit long-job-NAME.service in the current
+      directory with the caller's PATH, stdin from /dev/null, stdout+stderr appended to the
+      job's log, and sleep/idle inhibited. Returns at once.
+      --min-mb MB      memory gate threshold (default 2048; 0 skips the gate)
+      --wait-mem S     wait up to S seconds (at least 1) inside the unit for memory; a gate timeout
+                       is recorded as the job's exit 1. While it waits, status shows it running
+                       and no sleep/idle inhibitor is held (the inhibitor covers CMD only)
+      --mem-max SIZE   systemd MemoryMax for the unit (e.g. 600M): caps its RAM, and the
+                       overflow goes to swap rather than killing it
+      --nice N         systemd Nice for the unit
+      --env NAME       also pass the caller's NAME into the unit (repeatable)
+      --no-inhibit     don't hold a sleep/idle inhibitor
+      When the parent shell's command text is readable (Claude Code's Bash tool, which runs
+      `bash -c`; not a script), run also refuses a `&&` tail after it (the tail would run at
+      once, outside the job; exit 2, nothing started) and warns on a `||` tail and on a
+      CLAUDE_/SYG_ variable set on its command line without --env. A multi-step gate goes
+      through gate-run --out DIR --cd DIR 'NAME:CMD'... (one log per step; exit 7 if no step ran).
+  long-job wait NAME [--timeout S] [--interval S] [--owner PID] [--poll]
+      Block until the job ends; print its result, the log's last lines and, only when it saw
+      the end, a last line "long-job: ended: act on the result above". Exit 0 if CMD exited
+      0, 1 if it failed, was killed or never started (or NAME is unknown), 2 on a usage
+      error, 3 if the owner is gone, 4 on timeout.
+      --poll           check once, don't block: exit 4 at once if the job is still running;
+                       its last line names the next step ("still running: …" or "ended: …").
+                       A failed job (exit 1) has ended too.
+      To be woken when the job ends: run `long-job wait NAME` with the Bash tool's
+      run_in_background; the harness wakes the session when the waiter exits. Read the
+      waiter's output: a last line "long-job: ended: …" is the result. Anything else (the
+      low-memory reaper or a kill stopped the waiter, whose exit code then looks like a
+      failed job's: 1 on SIGKILL, 144 on SIGTERM) means run `long-job wait NAME
+      --poll` and follow its last line, which says to start a waiter again while the job
+      runs (and "state unknown" when systemctl itself failed: check again, not an end). Reaped background tasks do notify, so no backstop is needed. The other form is a CronCreate tick, e.g. cron "*/10 * * * *" with
+      the prompt "Run long-job wait NAME --poll and follow its last line." (a turn per tick;
+      recurring crons expire after 7 days). Not a Monitor or until/while loop over --poll
+      (capped at 30 minutes, while these jobs run longer than ~10).
+      Don't launch `long-job run` itself in the background: it returns once the unit has
+      started, so its "completed" notice means started, not finished.
+  long-job status [NAME]   one line per job (all jobs without NAME), with the owner it was run for
+  long-job cmd NAME        the recorded command line for NAME (%q-quoted)
+  long-job rc NAME         the recorded exit code alone (for scripts; status's line is for people);
+                           exit 4 and no output while there is no exit record (running, or killed)
+  long-job log NAME [-n N] the log's last N lines (default 40)
+  long-job --help
+
+NAME: letters, digits, '.', '_' or '-'. State lives in ${SYG_LONG_JOB_STATE_DIR:-${XDG_STATE_HOME:-~/.local/state}/long-job}/
+(NAME.log, NAME.cmd, NAME.owner, NAME.unit, NAME.exit); unit prefix is ${SYG_LONG_JOB_UNIT_PREFIX:-long-job} (PREFIX-NAME.service). Stop a job with: systemctl --user stop PREFIX-NAME
+Exit codes for run: 0 started, 1 memory gate failed (without --wait-mem), 2 usage error or the job is
+already running, 5 the state dir or systemd-run failed (a failed start is recorded as exit 5, so status
+and wait report it), 6 mem-gate could not read memory (without --wait-mem; nothing started). status, cmd, rc and log exit 1 on an unknown NAME.
+EOF
+}
+# Stop at --: a -h after it belongs to the job's command (du -h, ls -h).
+for a in "$@"; do [ "$a" = -- ] && break; case "$a" in -h|--help) usage; exit 0 ;; esac; done
+here=$(dirname "$(readlink -f "$0")")
+lib="$here/../lib/owner.sh"
+# shellcheck source=/dev/null
+. "$lib" || { echo "long-job: cannot load $lib" >&2; exit 2; }
+# config.toml knobs (hooks/lib/config-env.sh) fill unset SYG_LONG_JOB_* before they are read; the
+# environment still wins, and a wiring error proceeds env-only (as in long-job-chain-check).
+if [ -r "$here/../hooks/lib/config-env.sh" ] \
+    && source "$here/../hooks/lib/config-env.sh" 2>/dev/null \
+    && declare -F syg_config_env >/dev/null; then
+  syg_config_env "$(readlink -f "$here/..")"
+fi
+
+die() { echo "long-job: $1" >&2; exit "${2:-2}"; }
+state=${SYG_LONG_JOB_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/long-job}
+[[ $state == /* ]] || die "SYG_LONG_JOB_STATE_DIR must be an absolute path: '$state'"
+unit_prefix=${SYG_LONG_JOB_UNIT_PREFIX:-long-job}
+[[ $unit_prefix =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die "SYG_LONG_JOB_UNIT_PREFIX must start with a letter or digit and may hold only letters, digits, '.', '_' and '-': '$unit_prefix'"
+unit_of() { echo "$unit_prefix-$1.service"; }
+job_unit() {
+  local u=""
+  if [ -r "$state/$1.unit" ] && [ -s "$state/$1.unit" ]; then
+    read -r u <"$state/$1.unit"
+    [ -n "$u" ] && { echo "$u"; return; }
+  fi
+  unit_of "$1"
+}
+check_name() {
+  [ -n "${1:-}" ] || die "needs a job NAME (see --help)"
+  [[ $1 =~ ^[A-Za-z0-9._-]+$ ]] || die "NAME may hold only letters, digits, '.', '_' and '-': '$1'"
+}
+num() { case "$2" in '' | *[!0-9]*) die "$1 needs a whole number, got '$2'" ;; esac; }
+unit_state() { systemctl --user show -p ActiveState --value -- "$(job_unit "$1")" 2>/dev/null; }
+running() { case "$(unit_state "$1")" in active|activating|deactivating|reloading) return 0 ;; esac; return 1; }
+# systemctl show prints "inactive" for a unit it doesn't know, so an empty state means
+# systemctl itself failed: wait keeps waiting rather than reporting an end it didn't see.
+unknown() { [ -z "$(unit_state "$1")" ]; }
+
+# One line for a job: running, or its recorded exit, or what systemd still knows.
+describe() {
+  local n=$1 ex rc at res code who=""
+  # The owner recorded at run (absent for a job started before owners were recorded).
+  if [ -s "$state/$n.owner" ]; then read -r who <"$state/$n.owner"; who=" [owner: $who]"; fi
+  if running "$n"; then echo "$n: running (since $(stat -c %y "$state/$n.cmd" 2>/dev/null | cut -d. -f1))$who"; return 0; fi
+  ex="$state/$n.exit"
+  if [ -s "$ex" ]; then
+    read -r rc at <"$ex"
+    if [ "$rc" = 0 ]; then echo "$n: done, exit 0 ($(date -d "@$at" '+%F %T'))$who"; else echo "$n: failed, exit $rc ($(date -d "@$at" '+%F %T'))$who"; fi
+    return 0
+  fi
+  # No exit file: the wrapper itself died (MemoryMax, a kill, a stop). A failed unit stays
+  # loaded until reset-failed, so systemd may still say why.
+  res=$(systemctl --user show -p Result --value -- "$(job_unit "$n")" 2>/dev/null)
+  code=$(systemctl --user show -p ExecMainStatus --value -- "$(job_unit "$n")" 2>/dev/null)
+  echo "$n: ended without an exit record (systemd result '${res:-unknown}', main status '${code:-unknown}'; killed or stopped?)$who"
+}
+job_rc() {
+  local rc _
+  [ -s "$state/$1.exit" ] && { read -r rc _ <"$state/$1.exit"; echo "$rc"; return; }
+  echo 1
+}
+
+cmd=${1:-}; [ $# -gt 0 ] && shift
+case "$cmd" in
+  run)
+    name=${1:-}; check_name "$name"; shift
+    min_mb=2048 wait_mem="" props=() envs=() inhibit=1
+    while [ $# -gt 0 ] && [ "$1" != -- ]; do
+      case "$1" in
+        --min-mb|--wait-mem|--mem-max|--nice|--env)
+          [ $# -ge 2 ] || die "$1 needs a value" ;;&
+        --min-mb) num "$1" "$2"; min_mb=$2; shift ;;
+        # 0 would reach mem-gate as --timeout 0, which means forever.
+        --wait-mem) num "$1" "$2"; [ "$2" -gt 0 ] || die "--wait-mem needs at least 1 second"; wait_mem=$2; shift ;;
+        --mem-max) props+=(-p "MemoryMax=$2"); shift ;;
+        --nice) [[ $2 =~ ^-?[0-9]+$ ]] || die "--nice needs an integer"; props+=(-p "Nice=$2"); shift ;;
+        --env) [[ $2 =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || die "--env needs a variable name"; envs+=("--setenv=$2"); shift ;;
+        --no-inhibit) inhibit=0 ;;
+        *) die "unknown run option $1 (the command goes after --)" ;;
+      esac
+      shift
+    done
+    [ "${1:-}" = -- ] || die "run needs -- before the command"
+    shift
+    [ $# -gt 0 ] || die "run needs a command after --"
+    running "$name" && die "$name is already running (long-job status $name)"
+
+    # The parent shell's command text, when readable: a Bash tool call is `bash -c TEXT`, and TEXT
+    # shows a `&&` tail or a prefixed CLAUDE_/SYG_ variable that the job never sees.
+    parent_cmd=""
+    if [ -n "${SYG_LONG_JOB_PARENT_CMD+x}" ]; then
+      parent_cmd=$SYG_LONG_JOB_PARENT_CMD
+    else
+      mapfile -d '' -t pargv 2>/dev/null </proc/$PPID/cmdline
+      [[ ${pargv[1]-} =~ ^-[A-Za-z]*c[A-Za-z]*$ ]] && parent_cmd=${pargv[2]-}
+    fi
+    if [ -n "$parent_cmd" ]; then
+      chk_out=$("$here/long-job-chain-check" "$parent_cmd" 2>/dev/null); chk_rc=$?
+      if [ "$chk_rc" = 0 ] || [ "$chk_rc" = 3 ]; then
+        [ -n "$chk_out" ] && printf '%s\n' "$chk_out" >&2
+      fi
+      [ "$chk_rc" = 3 ] && exit 2
+    fi
+
+    if [ "$min_mb" -gt 0 ] && [ -z "$wait_mem" ]; then
+      "$here/mem-gate" --ok "$min_mb" || {
+        rc=$?
+        # mem-gate exits 1 for low memory; anything else (2: no MemAvailable line) means it couldn't read memory.
+        [ "$rc" = 1 ] || { echo "long-job: not starting $name; mem-gate could not read memory (exit $rc, see its message above)" >&2; exit 6; }
+        echo "long-job: not starting $name; retry later or pass --wait-mem S" >&2; exit 1
+      }
+    fi
+
+    [ -n "${SYG_MEM_GATE_MEMINFO+x}" ] && envs+=("--setenv=SYG_MEM_GATE_MEMINFO=$SYG_MEM_GATE_MEMINFO")
+
+    gate_args=(--no-gate)
+    if [ "$min_mb" -gt 0 ] && [ -n "$wait_mem" ]; then
+      interval=15
+      [ "$wait_mem" -lt 15 ] && interval=$wait_mem
+      gate_args=(--gate "$min_mb" "$wait_mem" "$interval" "$here/mem-gate")
+    fi
+
+    # Command lines and logs can carry tokens: owner-only dir and files (an older dir may be 755).
+    umask 077
+    { mkdir -p "$state" && chmod 700 "$state"; } || die "can't create $state" 5
+    log="$state/$name.log" ex="$state/$name.exit"
+    rm -f "$ex"
+    printf '%q ' "$@" >"$state/$name.cmd"; echo >>"$state/$name.cmd"
+    unit_of "$name" >"$state/$name.unit"
+    # Who the unit is for (CLAUDE_JOB_DIR's basename, else the cwd's), read in the caller's env: the unit's env has neither.
+    caller_label >"$state/$name.owner"
+    echo "=== long-job $name started $(date '+%F %T %Z') in $PWD: $(cat "$state/$name.cmd")" >>"$log"
+    # A failed unit from an earlier run stays loaded and blocks the name.
+    systemctl --user reset-failed -- "$(job_unit "$name")" 2>/dev/null
+    pre=()
+    [ $inhibit = 1 ] && pre=(systemd-inhibit --what=sleep:idle --who=long-job --why="long-job $name")
+    # The wrapper records CMD's exit with a timestamp; describe() reads it after systemd forgets
+    # a successful unit. --expand-environment=no: by default systemd rewrites the command's
+    # arguments (${VAR} -> its value or empty, $$ -> $), which emptied ${...} in worker specs.
+    if ! systemctl_out=$(systemd-run --user --quiet --expand-environment=no --unit="$(unit_of "$name")" \
+        --working-directory="$PWD" --setenv=PATH="$PATH" "${envs[@]}" \
+        -p StandardOutput="append:$log" -p StandardError="append:$log" "${props[@]}" \
+        -- bash -c 'ex=$1; shift; if [ "$1" = --gate ]; then mem=$2; s=$3; i=$4; bin=$5; shift 5; "$bin" --wait "$mem" --timeout "$s" --interval "$i" --owner "" || { rc=$?; echo "$rc $(date +%s)" >"$ex"; exit $rc; }; elif [ "$1" = --no-gate ]; then shift; fi; "$@"; rc=$?; echo "$rc $(date +%s)" >"$ex"; exit $rc' \
+        long-job-wrap "$ex" "${gate_args[@]}" "${pre[@]}" "$@" 2>&1); then
+      # Record the failed start so status and wait don't call it "ended without an exit record".
+      echo "long-job: systemd-run failed: $systemctl_out" | tee -a "$log" >&2
+      echo "5 $(date +%s)" >"$ex"
+      exit 5
+    fi
+    if [ "$min_mb" -gt 0 ] && [ -n "$wait_mem" ]; then
+      echo "long-job: started $name as $(unit_of "$name"); it waits for $min_mb MB of memory (up to $wait_mem s) before running; log $log"
+    else
+      echo "long-job: started $name as $(unit_of "$name"); log $log"
+    fi
+    echo "long-job: to be woken when it ends, run \"long-job wait $name\" with Bash run_in_background; on the wake, a last line \"long-job: ended: …\" is the result, anything else means run \"long-job wait $name --poll\" and follow its last line (see --help)"
+    ;;
+  wait)
+    name=${1:-}; check_name "$name"; shift
+    timeout=0 interval=15 owner=$(owner_default) poll=0
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --poll) poll=1; shift; continue ;;
+        --timeout|--interval|--owner) [ $# -ge 2 ] || die "$1 needs a value" ;;&
+        --timeout|--interval) num "$1" "$2" ;;&
+        --timeout) timeout=$2; shift ;;
+        --interval) interval=$2; shift ;;
+        --owner) owner=$2; shift ;;
+        *) die "unknown wait option $1" ;;
+      esac
+      shift
+    done
+    [ "$interval" -gt 0 ] || die "--interval must be at least 1"
+    owner_init "$owner"
+    [ -e "$state/$name.cmd" ] || die "no job named $name (long-job status lists them)" 1
+    # --poll is the post-wake and cron-tick check (see --help): each outcome names the next step.
+    if [ $poll = 1 ] && unknown "$name"; then echo "long-job: state unknown: systemctl show failed for $name; check again shortly (not an end)"; exit 4; fi
+    if [ $poll = 1 ] && running "$name"; then describe "$name"; echo "long-job: still running: with no live waiter for $name, start \"long-job wait $name\" in the background; otherwise, and on a cron tick, say nothing"; exit 4; fi
+    start=$SECONDS
+    if running "$name"; then echo "long-job: waiting for $name; pid $$, checking every $interval s"; fi
+    while running "$name" || unknown "$name"; do
+      sleep "$interval"
+      owner_or_exit
+      # Re-check before the timeout: the job may have ended during the sleep.
+      running "$name" || unknown "$name" || break
+      if [ "$timeout" -gt 0 ] && [ $((SECONDS - start)) -ge "$timeout" ]; then
+        echo "long-job: timed out after $((SECONDS - start)) s; $name is still running"; exit 4
+      fi
+    done
+    describe "$name"
+    echo "--- last lines of $state/$name.log:"
+    tail -n 10 "$state/$name.log" 2>/dev/null
+    if [ $poll = 1 ]; then
+      echo "long-job: ended: act on the result above; if a cron tick ran this check, CronDelete it now (CronList shows its id)"
+    else
+      echo "long-job: ended: act on the result above"
+    fi
+    [ "$(job_rc "$name")" = 0 ]
+    ;;
+  status)
+    if [ -n "${1:-}" ]; then
+      check_name "$1"; [ -e "$state/$1.cmd" ] || die "no job named $1" 1
+      describe "$1"
+    else
+      shopt -s nullglob; found=0
+      for f in "$state"/*.cmd; do found=1; describe "$(basename "$f" .cmd)"; done
+      [ $found = 1 ] || echo "long-job: no jobs recorded in $state"
+    fi
+    ;;
+  cmd)
+    name=${1:-}; check_name "$name"
+    [ -e "$state/$name.cmd" ] || die "no job named $name" 1
+    cat -- "$state/$name.cmd"
+    ;;
+  rc)
+    name=${1:-}; check_name "$name"
+    [ -e "$state/$name.cmd" ] || die "no job named $name" 1
+    # Only a recorded exit counts: no record means still running, or killed before one was written.
+    [ -s "$state/$name.exit" ] || exit 4
+    job_rc "$name"
+    ;;
+  log)
+    name=${1:-}; check_name "$name"; shift
+    n=40
+    if [ "${1:-}" = -n ]; then [ $# -ge 2 ] || die "-n needs a count"; num -n "$2"; n=$2; fi
+    [ -e "$state/$name.log" ] || die "no log for $name" 1
+    tail -n "$n" "$state/$name.log"
+    ;;
+  '') die "needs a subcommand: run, wait, status, cmd, rc or log (see --help)" ;;
+  *) die "unknown subcommand '$cmd' (see --help)" ;;
+esac
