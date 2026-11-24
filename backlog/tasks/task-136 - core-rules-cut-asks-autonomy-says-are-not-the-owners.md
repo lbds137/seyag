@@ -1,7 +1,7 @@
 ---
 id: TASK-136
 title: 'core rules: cut asks the Autonomy rules say are not the owner''s (owner ruling 2026-11-23)'
-status: Done
+status: In Progress
 assignee:
   - Seyag
 created_date: '2026-11-24T04:40:00Z'
@@ -43,4 +43,5 @@ Dispositions (0.3.222):
 2. Shipped as a clause on the memory-gate sentence in § Other defaults: approved work a reaper or crash killed gets one unasked re-run after the gate passes, from clean state. One re-run, not a loop: a job that kills itself again is a finding, not a retry.
 3. Shipped by narrowing § Safety's ask-first line: it names a local `git merge` in a rebase-only project and says a PR whose CI and review gates pass, merged via the repo's merge path (Dependabot included), needs no ask. That bare `git merge` item is the likeliest source of the "merging into main always needs your yes" misread; a repo whose merge path is a review workflow still merges through that workflow.
 4. Narrowed, not cut, in the review-response skill (it lands as its own change in that skill's lane). The test-assertion Ask is kept: it rests on § Safety (a test is never changed just to get past it), and the measurement rated those asks borderline, not should-not-ask. The async-boundary Ask becomes a decided item with a required council or advisor second opinion, cited in the round report: the Ask's stated reason is that no test gate catches a wrong call, which is a correctness risk that ruling 1 routes to a second opinion rather than to the owner. External-contract changes stay an Ask (outside this task's measurement).
+Open until that skill edit merges: until then `plugins/seyag/skills/review-response/SKILL.md` still lists the async-boundary change as always an Ask. Its PR references TASK-136; move this task to Done when it lands.
 <!-- SECTION:NOTES:END -->
