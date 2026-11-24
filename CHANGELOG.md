@@ -5,13 +5,13 @@ All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY
 ## 0.3.220 - 2026-11-23
 
 ### Features
-- **mutation-canary:** new bin that applies one named mutation (a unique literal old/new swap or a modify-only patch) in place, runs a probe command in its own session (whole process group sent TERM then KILL on exit) against an unmutated baseline and the mutant, and reports caught / survived (vacuous) / inconclusive / timeout with the new failing case labels, restoring the file byte-identical from a crash-safe journal under the git dir (`--restore` recovers after a kill) (TASK-110). (#PR)
+- **mutation-canary:** new bin that applies one named mutation (a unique literal old/new swap or a modify-only patch) in place, runs a probe command in its own session (whole process group sent TERM then KILL on exit) against an unmutated baseline and the mutant, and reports caught / survived (vacuous) / inconclusive / timeout with the new failing case labels, restoring the file byte-identical from a crash-safe journal under the git dir (`--restore` recovers after a kill) (TASK-110). (#392)
 
 ### Improvements
-- **delegation, README:** the delegation skill names `mutation-canary` beside `probe-red-check`; the README bin table gains rows for both. (#PR)
+- **delegation, README:** the delegation skill names `mutation-canary` beside `probe-red-check`; the README bin table gains rows for both. (#392)
 
 ### Tests
-- **mutation-canary:** hermetic probe covering every verdict, refusals, label filtering against the baseline, timeout, TERM and KILL recovery, a concurrent edit, patch mode, a process-group cleanup case, a second signal during cleanup, a 137-exit verdict, NUL output, multi-file patches and the restore edge cases. (#PR)
+- **mutation-canary:** hermetic probe covering every verdict, refusals, label filtering against the baseline, timeout, TERM and KILL recovery, a concurrent edit, patch mode, a process-group cleanup case, a second signal during cleanup, a 137-exit verdict, NUL output, multi-file patches and the restore edge cases. (#392)
 
 ## 0.3.219 - 2026-11-23
 
