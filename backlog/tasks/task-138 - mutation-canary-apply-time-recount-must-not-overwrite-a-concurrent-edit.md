@@ -22,6 +22,6 @@ Two lows from the PR #395 review, both on the apply-time recount path (`plugins/
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 rc 4 exits 3, keeps the journal and leaves the target as edited; a probe case pins it (an injected edit between backup and apply, or a documented reason it can't be seamed)
+- [ ] #1 rc 4 with the target differing from `.orig` exits 3, keeps the journal and leaves the target as edited; a probe case pins it (an injected edit between backup and apply, or a documented reason it can't be seamed)
 - [ ] #2 the zero-count rc-4 message says "not found at apply time"; a probe case pins the text
 <!-- AC:END -->
