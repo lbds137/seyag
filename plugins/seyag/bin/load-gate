@@ -1,0 +1,191 @@
+#!/bin/bash
+# load-gate: the CPU load gate (mem-gate's sibling). Call it before a test suite, worker or
+# fan-out so a heavy job doesn't start on a machine already saturated. See usage() for the flags.
+# Probe: tests/load-gate.probe.sh.
+
+set -uo pipefail
+
+usage() {
+  cat <<'EOF'
+load-gate: the CPU sibling of mem-gate, called before a test suite, worker or fan-out so a
+heavy job doesn't start on a machine already saturated; the default is to proceed on timeout
+because a gate that blocks forever on a busy machine stalls the session.
+
+  load-gate [--ok]                          exit 0 if the load is under both limits now, else 1
+  load-gate --wait [--timeout S] [--on-timeout proceed|fail]
+                                            block until the load is under both limits, then exit 0
+  load-gate --help
+
+  Limits default to $SYG_LOAD_GATE_1M (else 2x CPU count) and $SYG_LOAD_GATE_5M (else 2.5x CPU count).
+  --timeout S               seconds to wait before timing out (default 1800, 0 = forever)
+  --on-timeout proceed|fail action when --wait times out (default proceed; accepted and
+                            ignored when given with --ok)
+  --interval S              seconds between checks while waiting (default 15)
+  --owner PID               while waiting, exit 3 once PID is gone (default: owner_default)
+
+Exit codes: 0 pass (or timed-out-proceed), 1 high / timed-out-fail, 2 usage or unreadable
+load (also mid-wait) or lib/owner.sh not loadable, 3 owner gone.
+EOF
+}
+for a in "$@"; do case "$a" in -h|--help) usage; exit 0 ;; esac; done
+lib="$(dirname "$(readlink -f "$0")")/../lib/owner.sh"
+# shellcheck source=/dev/null
+. "$lib" || { echo "load-gate: cannot load $lib" >&2; exit 2; }
+
+# SYG_LOAD_GATE_LOADAVG and SYG_LOAD_GATE_PSI point the probe at fixture files.
+loadavg=${SYG_LOAD_GATE_LOADAVG:-/proc/loadavg}
+psi=${SYG_LOAD_GATE_PSI:-/proc/pressure/cpu}
+num() { case "$2" in '' | *[!0-9]*) echo "load-gate: $1 needs a whole number, got '$2'" >&2; exit 2 ;; esac; }
+dec() { [[ $2 =~ ^[0-9]+(\.[0-9]+)?$ ]] || { echo "load-gate: $1 needs a number, got '$2'" >&2; exit 2; }; }
+fmt_lim() {
+  LC_ALL=C awk -v s="$1" 'BEGIN {
+    if (s ~ /\./) {
+      sub(/0+$/, "", s)
+      sub(/\.$/, "", s)
+    }
+    print s
+  }'
+}
+
+mode=ok timeout=1800 interval=15 on_timeout=proceed owner=$(owner_default)
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --ok|--wait)
+      mode=${1#--} ;;
+    --timeout|--interval|--owner|--on-timeout)
+      [ $# -ge 2 ] || { echo "load-gate: $1 needs a value" >&2; exit 2; }
+      case "$1" in
+        --timeout) num "$1" "$2"; timeout=$2 ;;
+        --interval) num "$1" "$2"; interval=$2 ;;
+        --owner) owner=$2 ;;
+        --on-timeout)
+          case "$2" in
+            proceed|fail) on_timeout=$2 ;;
+            *) echo "load-gate: --on-timeout needs proceed or fail, got '$2'" >&2; exit 2 ;;
+          esac ;;
+      esac
+      shift ;;
+    *) echo "load-gate: unknown option $1 (see --help)" >&2; exit 2 ;;
+  esac
+  shift
+done
+
+if [ -n "${SYG_LOAD_GATE_NPROC+x}" ]; then
+  cpus=$SYG_LOAD_GATE_NPROC
+else
+  cpus=$(nproc 2>/dev/null)
+fi
+num SYG_LOAD_GATE_NPROC "$cpus"
+cpus=$((10#$cpus))
+[ "$cpus" -ge 1 ] || { echo "load-gate: SYG_LOAD_GATE_NPROC must be at least 1" >&2; exit 2; }
+
+if [ -n "${SYG_LOAD_GATE_1M+x}" ]; then
+  dec SYG_LOAD_GATE_1M "$SYG_LOAD_GATE_1M"
+  raw_lim1=$SYG_LOAD_GATE_1M
+else
+  raw_lim1=$((2 * cpus))
+fi
+if [ -n "${SYG_LOAD_GATE_5M+x}" ]; then
+  dec SYG_LOAD_GATE_5M "$SYG_LOAD_GATE_5M"
+  raw_lim5=$SYG_LOAD_GATE_5M
+else
+  raw_lim5=$(LC_ALL=C awk -v c="$cpus" 'BEGIN { printf "%.2f", 2.5 * c }')
+fi
+lim1=$(fmt_lim "$raw_lim1")
+lim5=$(fmt_lim "$raw_lim5")
+
+# Leading zeros (08) are decimal here, not an invalid octal in the arithmetic below.
+timeout=$((10#$timeout)) interval=$((10#$interval))
+[ "$interval" -gt 0 ] || { echo "load-gate: --interval must be at least 1" >&2; exit 2; }
+owner_init "$owner"
+
+read_load() {
+  local line
+  line=$(LC_ALL=C awk 'NR==1 {print $1, $2; exit}' "$loadavg" 2>/dev/null) || {
+    echo "load-gate: cannot read load from $loadavg" >&2
+    exit 2
+  }
+  load1=${line%% *}
+  load5=${line#* }
+  if [ -z "$line" ] || [ "$load1" = "$line" ] || ! [[ $load1 =~ ^[0-9]+(\.[0-9]+)?$ ]] || ! [[ $load5 =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+    echo "load-gate: cannot read load from $loadavg" >&2
+    exit 2
+  fi
+}
+
+psi_str() {
+  local v=""
+  if [ -r "$psi" ]; then
+    v=$(LC_ALL=C awk '
+      /^some[[:space:]]/ {
+        for (i = 2; i <= NF; i++) {
+          if ($i ~ /^avg300=[0-9]+(\.[0-9]+)?$/) {
+            print substr($i, 8)
+            exit
+          }
+        }
+      }
+    ' "$psi" 2>/dev/null || true)
+  fi
+  if [ -n "$v" ]; then
+    printf 'cpu pressure avg300 %s%%' "$v"
+  else
+    printf 'cpu pressure n/a'
+  fi
+}
+
+top3() {
+  ps -eo pid,comm,pcpu --sort=-pcpu | sed -n '2,4p' |
+    awk '{printf "%s%s %s %s%%", (NR > 1 ? ", " : ""), $1, $2, $3}'
+}
+
+check_load() {
+  read_load
+  local op1="<=" op5="<=" over=0
+  if ! LC_ALL=C awk -v a="$load1" -v l="$raw_lim1" 'BEGIN { exit !((a + 0) <= (l + 0)) }'; then
+    op1=">"
+    over=1
+  fi
+  if ! LC_ALL=C awk -v a="$load5" -v l="$raw_lim5" 'BEGIN { exit !((a + 0) <= (l + 0)) }'; then
+    op5=">"
+    over=1
+  fi
+  numbers="load 1m $load1 $op1 $lim1, 5m $load5 $op5 $lim5 on $cpus cpus; $(psi_str)"
+  [ "$over" -eq 0 ]
+}
+
+if check_load; then
+  echo "load-gate: ok: $numbers"
+  exit 0
+fi
+if [ "$mode" = ok ]; then
+  echo "load-gate: high: $numbers; top 3 CPU: $(top3)"
+  exit 1
+fi
+
+echo "load-gate: waiting: $numbers; pid $$, checking every $interval s, timeout ${timeout} s (0 = none), on timeout: $on_timeout"
+start=$SECONDS
+while :; do
+  # The last sleep stops at the timeout, so a wait never overshoots it by most of an interval.
+  nap=$interval
+  if [ "$timeout" -gt 0 ]; then
+    left=$((timeout - (SECONDS - start)))
+    [ "$left" -lt "$nap" ] && nap=$left
+    [ "$nap" -lt 1 ] && nap=1
+  fi
+  sleep "$nap"
+  owner_or_exit
+  if check_load; then
+    echo "load-gate: ok after $((SECONDS - start)) s: $numbers"
+    exit 0
+  fi
+  if [ "$timeout" -gt 0 ] && [ $((SECONDS - start)) -ge "$timeout" ]; then
+    if [ "$on_timeout" = proceed ]; then
+      echo "load-gate: timed out after $((SECONDS - start)) s, proceeding: $numbers"
+      exit 0
+    fi
+    echo "load-gate: timed out after $((SECONDS - start)) s: $numbers; top 3 CPU: $(top3)"
+    exit 1
+  fi
+done

@@ -154,6 +154,11 @@ SYG_LIB	internal	session	unset	Internal run.sh flag: 1 once lib/components.sh is
 SYG_LIB_DIR	internal	guards	<hooks_dir>/lib	Internal env variable passing the hooks/lib directory path to embedded Python helpers.	-
 SYG_LIVE_CHECKOUT_AUTO	user	guards	1	Set to 0 to disable auto-detecting the plugin's own marketplace checkout as a protected live root.	-
 SYG_LIVE_CHECKOUTS	user	guards	unset	Colon-separated absolute paths whose main git working trees are protected by live-checkout-guard.	path
+SYG_LOAD_GATE_1M	user	misc	prose:2x the CPU count	1-minute load average ceiling for load-gate --ok/--wait; a decimal.	host
+SYG_LOAD_GATE_5M	user	misc	prose:2.5x the CPU count	5-minute load average ceiling for load-gate --ok/--wait; a decimal.	host
+SYG_LOAD_GATE_LOADAVG	internal	misc	/proc/loadavg	Test seam overriding the loadavg file load-gate reads.	-
+SYG_LOAD_GATE_NPROC	internal	misc	nproc	Test seam overriding the CPU count load-gate scales its default ceilings by.	-
+SYG_LOAD_GATE_PSI	internal	misc	/proc/pressure/cpu	Test seam overriding the CPU pressure file load-gate reads.	-
 SYG_LONG_JOB_CMD	user	session	unset	Single-line runner prefix advertised at SessionStart for running >10-minute jobs outside the session tree.	-
 SYG_LOSSY_PIPE_GH_WRAPPERS	user	guards	unset	Whitespace-separated read-wrapper command tokens guarded against head/tail/sed truncation in lossy-pipe-guard.	-
 SYG_LOSSY_PIPE_SUITES	user	guards	1	Set to 0 to disable lossy-pipe-guard on test and probe suite commands piped into head/tail/sed.	-
