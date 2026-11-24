@@ -5,7 +5,7 @@
 # Usage:
 #   mutation-canary [OPTIONS] --file PATH (--old TEXT | --old-file F) (--new TEXT | --new-file F) -- CMD [ARG...]
 #   mutation-canary [OPTIONS] --patch FILE -- CMD [ARG...]
-#   mutation-canary --restore
+#   mutation-canary --restore [--force]
 #   mutation-canary -h|--help
 #
 # OPTIONS:
@@ -20,6 +20,7 @@
 #   2  INCONCLUSIVE, TIMEOUT, BASELINE RED, usage error, or pre-run refusal
 #   3  restore problem (file changed during the run or restore verification failed;
 #      journal kept under $(git rev-parse --git-dir)/mutation-canary)
+#   130/143/129  interrupted by INT/TERM/HUP (the restore still runs; exit 3 wins if it fails)
 #
 # CMD runs with stdin from /dev/null in its own session (setsid); at exit or on
 # a signal its whole process group gets TERM and then KILL (procps ps --sid
@@ -29,13 +30,14 @@
 # sees the mutant; run it in a worktree nothing else executes from.
 
 set -uo pipefail
-usage() { sed -n '2,29p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; }
 die() { echo "mutation-canary: $*" >&2; exit 2; }
 [ "${BASH_VERSINFO[0]}" -ge 5 ] || die "needs bash 5 or newer (EPOCHREALTIME)"
 
 [ $# -ge 1 ] || { usage >&2; exit 2; }
 
 RESTORE_MODE=0
+FORCE=0
 SEEN_FILE=0
 FILE_ARG=""
 SEEN_OLD=0
@@ -63,6 +65,11 @@ while [ $# -gt 0 ]; do
     --restore)
       [ "$RESTORE_MODE" -eq 0 ] || { usage >&2; exit 2; }
       RESTORE_MODE=1
+      shift
+      ;;
+    --force)
+      [ "$FORCE" -eq 0 ] || { usage >&2; exit 2; }
+      FORCE=1
       shift
       ;;
     --file)
@@ -146,7 +153,7 @@ if [ "$RESTORE_MODE" -eq 1 ]; then
   fi
   MODE="restore"
 else
-  [ "$SEEN_DASH_DASH" -eq 1 ] && [ $# -ge 1 ] || { usage >&2; exit 2; }
+  [ "$FORCE" -eq 0 ] && [ "$SEEN_DASH_DASH" -eq 1 ] && [ $# -ge 1 ] || { usage >&2; exit 2; }
   if [ "$SEEN_FILE" -eq 1 ] && [ "$SEEN_OLD" -eq 1 ] && [ "$SEEN_NEW" -eq 1 ] && [ "$SEEN_PATCH" -eq 0 ]; then
     MODE="literal"
   elif [ "$SEEN_PATCH" -eq 1 ] && [ "$SEEN_FILE" -eq 0 ] && [ "$SEEN_OLD" -eq 0 ] && [ "$SEEN_NEW" -eq 0 ]; then
@@ -175,16 +182,44 @@ pid_is_alive() {
   if [ -r "/proc/$p/status" ]; then
     ! grep -q '^State:[[:space:]]*Z' "/proc/$p/status" 2>/dev/null || return 1
   fi
+  # Limit: a run launched through a renamed copy or symlink, or with an interpreter flag before the script path (bash -x mutation-canary), is not recognised and reads as stale.
+  if [ -r "/proc/$p/cmdline" ]; then
+    local argv=()
+    if mapfile -d '' -t argv <"/proc/$p/cmdline" 2>/dev/null; then
+      local a0=${argv[0]:-}
+      local a1=${argv[1]:-}
+      if [ "${#argv[@]}" -eq 0 ] \
+        || { [ "${a0##*/}" != "mutation-canary" ] && [ "${a1##*/}" != "mutation-canary" ]; }; then
+        return 1
+      fi
+    fi
+  fi
   return 0
 }
 
-check_existing_journal_and_die() {
-  local rec_pid=""
+JOURNAL_PID=""
+# A run creates the journal dir before writing its pid, so a reader that finds
+# the dir without a pid waits up to 1 s before treating the journal as left
+# behind (a journal from a crash in that gap just costs the 1 s).
+read_journal_pid() {
+  JOURNAL_PID=""
   if [ -f "$JOURNAL_DIR/pid" ]; then
-    rec_pid=$(tr -d '[:space:]' <"$JOURNAL_DIR/pid" 2>/dev/null || true)
+    JOURNAL_PID=$(tr -d '[:space:]' <"$JOURNAL_DIR/pid" 2>/dev/null || true)
   fi
-  if [ -n "$rec_pid" ] && pid_is_alive "$rec_pid"; then
-    die "another mutation-canary run is live in this worktree (pid $rec_pid)"
+  local tries=0
+  while [ -z "$JOURNAL_PID" ] && [ -d "$JOURNAL_DIR" ] && [ "$tries" -lt 20 ]; do
+    sleep 0.05
+    if [ -f "$JOURNAL_DIR/pid" ]; then
+      JOURNAL_PID=$(tr -d '[:space:]' <"$JOURNAL_DIR/pid" 2>/dev/null || true)
+    fi
+    tries=$((tries + 1))
+  done
+}
+
+check_existing_journal_and_die() {
+  read_journal_pid
+  if [ -n "$JOURNAL_PID" ] && pid_is_alive "$JOURNAL_PID"; then
+    die "another mutation-canary run is live in this worktree (pid $JOURNAL_PID)"
   else
     die "a previous run left a journal at $JOURNAL_DIR; run mutation-canary --restore"
   fi
@@ -195,6 +230,18 @@ RESTORE_RC=0
 JOURNAL_ACTIVE=0
 PENDING_SIG=""
 IN_CLEANUP=0
+
+defer_signal_traps() {
+  trap 'PENDING_SIG=${PENDING_SIG:-130}' INT
+  trap 'PENDING_SIG=${PENDING_SIG:-143}' TERM
+  trap 'PENDING_SIG=${PENDING_SIG:-129}' HUP
+}
+
+install_main_traps() {
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  trap 'exit 129' HUP
+}
 
 finish_exit() {
   local code=$1
@@ -209,8 +256,7 @@ finish_exit() {
 
 restore_targets() {
   local rmode=$1
-  trap 'PENDING_SIG=${PENDING_SIG:-130}' INT
-  trap 'PENDING_SIG=${PENDING_SIG:-143}' TERM HUP
+  defer_signal_traps
   RESTORE_RC=0
   local i=0
   local tpath orig mutant tdir tbase ttmp t_mode o_mode
@@ -231,14 +277,19 @@ restore_targets() {
     fi
     if [ "$rmode" = "live" ]; then
       if [ -f "$mutant" ] && ! cmp -s -- "$tpath" "$mutant"; then
-        echo "mutation-canary: $tpath changed during the run; not restored; original kept at $orig" >&2
+        echo "mutation-canary: $tpath changed during the run; not restored; original kept at $orig; mutation-canary --restore --force overwrites it" >&2
         RESTORE_RC=3
         i=$((i + 1))
         continue
       fi
-    else
-      if [ -f "$mutant" ] && ! cmp -s -- "$tpath" "$orig" && ! cmp -s -- "$tpath" "$mutant"; then
-        echo "mutation-canary: $tpath changed during the run; not restored; original kept at $orig" >&2
+    elif [ "$FORCE" -eq 0 ]; then
+      if [ ! -f "$mutant" ]; then
+        echo "mutation-canary: $tpath differs from the original (content or mode) and the run left no mutant snapshot, so later edits cannot be told apart; not restored; original kept at $orig; mutation-canary --restore --force overwrites it" >&2
+        RESTORE_RC=3
+        i=$((i + 1))
+        continue
+      elif ! cmp -s -- "$tpath" "$orig" && ! cmp -s -- "$tpath" "$mutant"; then
+        echo "mutation-canary: $tpath changed during the run; not restored; original kept at $orig; mutation-canary --restore --force overwrites it" >&2
         RESTORE_RC=3
         i=$((i + 1))
         continue
@@ -273,8 +324,7 @@ restore_targets() {
   fi
   RESTORED=1
   if [ "$IN_CLEANUP" -eq 0 ]; then
-    trap 'exit 130' INT
-    trap 'exit 143' TERM HUP
+    install_main_traps
   fi
 }
 
@@ -283,12 +333,9 @@ if [ "$MODE" = "restore" ]; then
     echo "mutation-canary: no journal; nothing to restore"
     exit 0
   fi
-  rec_pid=""
-  if [ -f "$JOURNAL_DIR/pid" ]; then
-    rec_pid=$(tr -d '[:space:]' <"$JOURNAL_DIR/pid" 2>/dev/null || true)
-  fi
-  if [ -n "$rec_pid" ] && pid_is_alive "$rec_pid"; then
-    die "another mutation-canary run is live in this worktree (pid $rec_pid)"
+  read_journal_pid
+  if [ -n "$JOURNAL_PID" ] && pid_is_alive "$JOURNAL_PID"; then
+    die "another mutation-canary run is live in this worktree (pid $JOURNAL_PID)"
   fi
   restore_targets manual
   if [ "$RESTORE_RC" -eq 0 ]; then
@@ -512,22 +559,20 @@ kill_child() {
 
 cleanup() {
   local exit_rc=$?
-  trap 'PENDING_SIG=${PENDING_SIG:-130}' INT
-  trap 'PENDING_SIG=${PENDING_SIG:-143}' TERM HUP
+  defer_signal_traps
   IN_CLEANUP=1
   kill_child
   if [ "$JOURNAL_ACTIVE" -eq 1 ] && [ "$RESTORED" -eq 0 ]; then
     restore_targets live
   fi
   rm -f -- "$BASE_OUT" "$MUT_OUT" "$BASE_LABELS" "$MUT_LABELS" "$NEW_LABELS" 2>/dev/null || true
-  # The first signal wins: a trap's own exit 130/143 beats one deferred later.
+  # The first signal wins: a trap's own exit 130/143/129 beats one deferred later.
   [ "$exit_rc" -ge 129 ] && [ "$exit_rc" -le 159 ] && PENDING_SIG=$exit_rc
   finish_exit "$exit_rc"
 }
 
 trap cleanup EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM HUP
+install_main_traps
 
 run_probe() {
   local out_file=$1
@@ -539,12 +584,17 @@ run_probe() {
   # child is not a group leader and `setsid` exec's in place: `$!` is the new
   # session leader and `-$!` its group. If that ever changes (job control on),
   # the group kill misses the probe.
+  defer_signal_traps
   if [ "$TIMEOUT_SECS" -gt 0 ]; then
     setsid timeout -k 10 "$TIMEOUT_SECS" "${CMD_ARGS[@]}" </dev/null >"$out_file" 2>&1 &
   else
     setsid "${CMD_ARGS[@]}" </dev/null >"$out_file" 2>&1 &
   fi
   CHILD_PID=$!
+  install_main_traps
+  if [ -n "$PENDING_SIG" ]; then
+    exit "$PENDING_SIG"
+  fi
   local cpid=$CHILD_PID
   wait "$cpid"
   RUN_RC=$?

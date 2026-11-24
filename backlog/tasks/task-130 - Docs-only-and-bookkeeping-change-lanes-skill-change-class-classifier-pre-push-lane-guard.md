@@ -27,7 +27,7 @@ Design (survey of five repos, council review by openai/gpt-6.2-astra):
 - Repo specifics live in a tracked per-repo config, outside every exempt class.
 - Rollout: report-only mode first, replaying each repo's historical diffs before any skip or bypass is enabled. Separately, the ruleset tooling must verify bypass actors and modes on readback.
 
-Owner ruling (2026-11-23 16:37, via the platform session): prose docs go by PR in every repo, including repos that today have a direct-doc exception. No repo puts docs in its direct class; lane 2 is standalone ledger data only. Rollout per repo waits on the report-only replay plus the platform session's go.
+Owner ruling (2026-11-23 16:37, via the coordinating session): prose docs go by PR in every repo, including repos that today have a direct-doc exception. No repo puts docs in its direct class; lane 2 is standalone ledger data only. Rollout per repo waits on the report-only replay plus the coordinating session's go.
 
 Decided before the spec (2026-11-23, driver):
 - Plugin boundary. This applies the owner's 2026-11-16 ruling that repo-standards tooling (rulesets, workflow rollout, baseline audit) goes to a sibling plugin; it is not a new boundary call. The lane guard must live here, because the pre-push dispatcher is here. The classifier and the policy format are what that guard consumes, so they live here too. The CI workflow rollout and the ruleset bypass-readback fix belong to the sibling plugin's family; the ruleset tool is not in this repo. Nothing in this task starts the sibling plugin.
@@ -45,7 +45,7 @@ Decided before the spec (2026-11-23, driver):
 - [x] #2 change-class bin classifies a diff with the fail-to-full rules above, pinned by a probe including rename, symlink, mode-change, gitlink and control-file cases
 - [ ] #3 pre-push lane guard is opt-in (toggle), chains the repo hook, and its probe covers create/delete/non-FF/merge/revert-hiding/config-widening cases (moved to TASK-132, deferred)
 - [x] #4 Report-only replay against each adopting repo's history recorded before skips are enabled
-- [x] #5 Replacement line for the global push rule's interim clause (a pointer to the skill) handed to the platform session, which owns that file
+- [x] #5 Replacement line for the global push rule's interim clause (a pointer to the skill) handed to the coordinating session, which owns that file
 <!-- AC:END -->
 
 ## Implementation Notes
@@ -62,11 +62,11 @@ Replay (AC #4), 2026-11-23, against 0.3.217. Pairs are each merged PR's landed r
 
 Decision under the pre-registered rule:
 - CI wiring: worth it in NONE of the five. Public repos bill 0 Actions minutes on standard runners (all three use only `ubuntu-latest`, per a grep of their workflows; the zero-billing is GitHub's public-repo policy, not measured here). Repo S already path-filters, saving 0. Repo P has 4 PRs.
-- Unit B: repo S clears the volume bar (11 standalone ledger-only PRs a month against the 10 needed) but has not opted in. Its opt-in is the owner's call, raised via the platform session.
+- Unit B: repo S clears the volume bar (11 standalone ledger-only PRs a month against the 10 needed) but has not opted in. Its opt-in is the owner's call, raised via the coordinating session.
 - Until a repo opts in, unit B stays deferred. Trigger: an opt-in from a repo that clears the 10-a-month bar.
 
-Owner rulings (2026-11-23 ~20:00, via the platform session):
+Owner rulings (2026-11-23 ~20:00, via the coordinating session):
 - Repo S unit B: "Not now". Unit B is deferred to TASK-132, with the trigger "a repo clearing 10 ledger-only PRs a month opts in".
-- AC #5: "Apply it". The platform session applied the replacement Before Push line: the Markdown-only exception is kept, and a repo with a `.github/change-class.toml` policy may use `change-class classify`, where `verdict=exempt` means no suite run. The interim clause is gone.
+- AC #5: "Apply it". The coordinating session applied the replacement Before Push line: the Markdown-only exception is kept, and a repo with a `.github/change-class.toml` policy may use `change-class classify`, where `verdict=exempt` means no suite run. The interim clause is gone.
 - CI wiring: no rollout (the replay decision above). Closed with unit A shipped (0.3.217); unit B lives in TASK-132.
 <!-- SECTION:NOTES:END -->
