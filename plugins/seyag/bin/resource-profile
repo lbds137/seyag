@@ -10,10 +10,12 @@ usage() {
 resource-profile: the host resource profile and parallel-job ceiling.
 
   resource-profile            print profile=<low|normal> ceiling=<N|none> source=<env|config|unset>
-                              (with auto=mem:<MB>MB,cpu:<avg60|na> under SYG_RESOURCE_PROFILE=auto)
+                              (origin of the knob that sets the ceiling; with
+                              auto=mem:<MB>MB,cpu:<avg60|na> under SYG_RESOURCE_PROFILE=auto)
   resource-profile --jobs N   print min(N, ceiling) (N >= 1); notes a clamp on stderr
-  resource-profile --profile  print the resolved profile: low or normal
+  resource-profile --profile  print low or normal: low under SYG_RESOURCE_PROFILE=low or when the ceiling is at most half of nproc
   resource-profile --help
+  --help anywhere among the arguments prints this and exits 0 (an argument such as --jobs=--help is a bad --jobs value: exit 2).
 
 Knobs (environment, then user config.toml; refused from a repo's project file):
   SYG_RESOURCE_PROFILE      low (ceiling 1), normal (no ceiling) or auto; unset: no ceiling
@@ -99,14 +101,6 @@ if [ -n "$max_parallel" ]; then
   fi
 fi
 
-if [ "$raw_profile" != unset ]; then
-  source_kind=$prof_src
-elif [ -n "$max_parallel" ]; then
-  source_kind=$maxp_src
-else
-  source_kind="unset"
-fi
-
 job_mb=${SYG_RESOURCE_JOB_MB:-1024}
 if ! [[ "$job_mb" =~ ^[0-9]{1,9}$ ]] || [ "$((10#$job_mb))" -lt 1 ]; then
   echo "resource-profile: ignoring SYG_RESOURCE_JOB_MB='$job_mb' (expected a positive integer)" >&2
@@ -160,42 +154,38 @@ fi
 # Smallest binding ceiling wins; ties break in order: SYG_MAX_PARALLEL, CPU, memory, low.
 ceiling=""
 reason=""
+source_kind=$prof_src
 apply_ceiling() {
-  local c=$1 r=$2
+  local c=$1 r=$2 s=$3
   if [ -z "$ceiling" ] || [ "$c" -lt "$ceiling" ]; then
     ceiling=$c
     reason=$r
+    source_kind=$s
   fi
 }
 
 if [ -n "$max_parallel" ]; then
-  apply_ceiling "$max_parallel" "SYG_MAX_PARALLEL=$max_parallel"
+  apply_ceiling "$max_parallel" "SYG_MAX_PARALLEL=$max_parallel" "$maxp_src"
 fi
 if [ -n "$cpu_ceil" ]; then
-  apply_ceiling "$cpu_ceil" "auto: cpu some avg60 $cpu_avg60 >= $cpu_psi_max"
+  apply_ceiling "$cpu_ceil" "auto: cpu some avg60 $cpu_avg60 >= $cpu_psi_max" "$prof_src"
 fi
 if [ -n "$mem_ceil" ]; then
-  apply_ceiling "$mem_ceil" "auto: MemAvailable $mem_avail_mb MB / $job_mb MB per job"
+  apply_ceiling "$mem_ceil" "auto: MemAvailable $mem_avail_mb MB / $job_mb MB per job" "$prof_src"
 fi
 if [ "$raw_profile" = low ]; then
-  apply_ceiling 1 "SYG_RESOURCE_PROFILE=low"
+  apply_ceiling 1 "SYG_RESOURCE_PROFILE=low" "$prof_src"
 fi
 
-resolved_profile=normal
-case "$raw_profile" in
-  low)
-    resolved_profile=low
-    ;;
-  auto)
-    ncpu=$(nproc 2>/dev/null || echo 1)
-    [[ "$ncpu" =~ ^[1-9][0-9]*$ ]] || ncpu=1
-    if [ -n "$ceiling" ] && [ "$ceiling" -lt "$ncpu" ]; then
-      resolved_profile=low
-    else
-      resolved_profile=normal
-    fi
-    ;;
-esac
+ncpu=$(nproc 2>/dev/null || echo 1)
+[[ "$ncpu" =~ ^[1-9][0-9]*$ ]] || ncpu=1
+if [ "$raw_profile" = low ]; then
+  resolved_profile=low
+elif [ -n "$ceiling" ] && [ "$((2 * ceiling))" -le "$ncpu" ]; then
+  resolved_profile=low
+else
+  resolved_profile=normal
+fi
 
 case "$mode" in
   profile)
