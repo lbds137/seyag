@@ -1,0 +1,253 @@
+#!/usr/bin/env -S python3 -I -B
+"""long-job-chain-check: find `long-job run` commands whose shell context would run work outside the job.
+Probe: tests/long-job-chain-check.probe.sh.
+
+Usage:
+  long-job-chain-check TEXT        check a shell command text (one argument)
+  long-job-chain-check --hook      read a Claude Code PreToolUse JSON object on stdin; check
+                                   .tool_input.command (any other shape: silent exit 0; a config.toml warning may still reach stderr)
+
+Findings (one line each, stdout; --hook prints only refusals, to stderr):
+  refuse  a `&&` follows the pipeline holding `long-job run NAME`: the tail runs at once, outside the job.
+          Plain mode exits 3; --hook exits 2 so Claude Code blocks the call.
+  warn    a `||` follows it (runs only if the START fails), or a CLAUDE_/SYG_ variable is set on
+          long-job's command line without a matching `--env NAME` (the job never sees it).
+Also checks the runner named by the first word of SYG_LONG_JOB_CMD when set.
+Text that does not parse (unbalanced quotes) has no findings.
+Recursion: the argument of `eval` is parsed as shell text (the Bash tool wraps commands in eval).
+Not recursed: `bash -c` bodies (a chain inside them after `long-job run N --` is the correct form).
+"""
+import json
+import os
+import re
+import shlex
+import sys
+
+# config.toml knobs (config_env, the Python twin of hooks/lib/config-env.sh); a wiring error proceeds env-only.
+try:
+    _SYG_ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+    sys.path.insert(0, os.path.join(_SYG_ROOT, "lib"))
+    import config_env
+
+    config_env.syg_config_env(_SYG_ROOT)
+except Exception:
+    pass
+
+REFUSE = ("{r}: refusing: '&& …' after '{r} run {n}' runs outside the job, at once, against "
+          "the tree as it is now. Put the chain inside the job: {r} run {n} -- bash -c 'a && b' "
+          "(or gate-run for a multi-step gate); a follow-up meant to run now goes after ';'.")
+WARN_OR = ("{r}: warning: '|| …' after '{r} run {n}' runs only if the START fails, not the job; "
+           "the job's result comes from {r} wait {n}.")
+WARN_VAR = ("{r}: warning: {v} is set on {r}'s command line but the job never sees it; "
+            "pass it with --env {v}.")
+
+ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+PREFIXED = re.compile(r"^(CLAUDE|SYG)_")
+MAX_EVAL_DEPTH = 8
+PREFIX_WORDS = ("time", "sudo", "nice", "nohup", "command")
+
+
+def runner_names():
+    names = {"long-job"}
+    words = os.environ.get("SYG_LONG_JOB_CMD", "").split()
+    if words:
+        alias = words[0].rsplit("/", 1)[-1]
+        if alias:
+            names.add(alias)
+    return names
+
+
+def tokens(text):
+    # shlex with punctuation_chars splits operators; a newline becomes its own token (not whitespace)
+    # and comments are off, so `#` mid-word and `# ...` both stay visible to the operator scan.
+    # A backslash-newline is a line continuation, not a command break (wrong inside single quotes; rare).
+    lex = shlex.shlex(text.replace("\\\n", ""), posix=True, punctuation_chars=True)
+    lex.whitespace = " \t\r"
+    lex.commenters = ""
+    return list(lex)
+
+
+def classify(tok):
+    if tok == "&&":
+        return "and"
+    if tok == "||":
+        return "or"
+    if tok in ("|", "|&"):
+        return "pipe"
+    if tok == "(":
+        return "open"
+    if tok == ")":
+        return "close"
+    if tok and all(c in "|&;\n" for c in tok):
+        return "seq"  # ; ;; & ; newline
+    if any(c in "<>" for c in tok):
+        return "redir"
+    return None
+
+
+def items(text):
+    """Yield ('op', kind), ('redir', None) or ('word', text); $( ), <( ) and backtick spans fold into one word."""
+    toks = tokens(text)
+    i, n = 0, len(toks)
+    while i < n:
+        t = toks[i]
+        if t == "$" and i + 1 < n and toks[i + 1] == "(":
+            buf, depth, i = ["$", "("], 1, i + 2
+        elif t in ("<(", ">("):
+            buf, depth, i = [t], 1, i + 1
+        else:
+            buf = None
+        if buf is not None:
+            while i < n and depth > 0:
+                buf.append(toks[i])
+                if toks[i] == "(":
+                    depth += 1
+                elif toks[i] == ")":
+                    depth -= 1
+                i += 1
+            yield ("word", "".join(buf))
+            continue
+        if t.count("`") % 2 == 1:
+            buf, i = [t], i + 1
+            while i < n:
+                buf.append(toks[i])
+                i += 1
+                if "`" in toks[i - 1]:
+                    break
+            yield ("word", "".join(buf))
+            continue
+        kind = classify(t)
+        if kind in ("and", "or", "pipe", "open", "close", "seq"):
+            yield ("op", kind)
+        elif kind == "redir":
+            yield ("redir", None)
+        else:
+            yield ("word", t)
+        i += 1
+
+
+def parse(text):
+    """Return events: ('cmd', [words]) or ('op', kind)."""
+    evs, words, skip = [], [], False
+
+    def end_cmd():
+        if words:
+            evs.append(("cmd", list(words)))
+            words.clear()
+
+    for kind, val in items(text):
+        if kind == "op":
+            end_cmd()
+            evs.append(("op", val))
+            skip = False
+        elif kind == "redir":
+            skip = True  # the redirect target is not a command word; a redirect does not end the command
+        elif skip:
+            skip = False
+        else:
+            words.append(val)
+    end_cmd()
+    return evs
+
+
+def command_word(words):
+    """Split a simple command into (assignments, argv), argv past any prefix word (time, sudo, …) and its options."""
+    k = 0
+    while k < len(words) and ASSIGN.match(words[k]):
+        k += 1
+    assigns, argv = words[:k], words[k:]
+    # exec is not a prefix here: nothing after it runs, so its tail can't run outside the job.
+    while argv and argv[0] in PREFIX_WORDS:
+        argv = argv[1:]
+        while argv and argv[0].startswith("-"):
+            argv = argv[1:]
+    return assigns, argv
+
+
+def terminator(evs, i):
+    """The operator that ends the pipeline holding evs[i], skipping pipes and the rest of an enclosing group."""
+    depth = 0
+    for kind, val in evs[i + 1:]:
+        if kind == "cmd":
+            continue
+        if val == "open":
+            depth += 1
+        elif val == "close":
+            if depth:
+                depth -= 1
+        elif depth == 0 and val in ("and", "or", "seq"):
+            return val
+    return None
+
+
+def check(text, depth=0):
+    """Return a list of (level, message); level is 'refuse' or 'warn'. Unparseable text gives []."""
+    try:
+        evs = parse(text)
+    except ValueError:
+        return []
+    runners = runner_names()
+    findings = []
+    for i, (kind, val) in enumerate(evs):
+        if kind != "cmd":
+            continue
+        assigns, argv = command_word(val)
+        if argv and argv[0] == "eval" and depth < MAX_EVAL_DEPTH:
+            # The eval argument is shell text of its own; the operators around the eval do not apply inside it.
+            findings += check(" ".join(argv[1:]), depth + 1)
+            continue
+        if not argv or len(argv) < 2 or argv[1] != "run":
+            continue
+        runner = argv[0].rsplit("/", 1)[-1]
+        if runner not in runners:
+            continue
+        name = argv[2] if len(argv) > 2 else "?"
+        envs = set()
+        j = 3
+        while j < len(argv) and argv[j] != "--":
+            if argv[j] == "--env" and j + 1 < len(argv):
+                envs.add(argv[j + 1])
+                j += 1
+            j += 1
+        for a in assigns:
+            var = a.split("=", 1)[0]
+            if PREFIXED.match(var) and var not in envs:
+                findings.append(("warn", WARN_VAR.format(r=runner, v=var)))
+        term = terminator(evs, i)
+        if term == "and":
+            findings.append(("refuse", REFUSE.format(r=runner, n=name)))
+        elif term == "or":
+            findings.append(("warn", WARN_OR.format(r=runner, n=name)))
+    return findings
+
+
+def main(argv):
+    if len(argv) == 2 and argv[1] in ("-h", "--help"):
+        print(__doc__.strip())
+        return 0
+    if len(argv) == 2 and argv[1] == "--hook":
+        try:
+            data = json.load(sys.stdin)
+        except ValueError:
+            return 0
+        if not isinstance(data, dict) or not isinstance(data.get("tool_input"), dict):
+            return 0
+        cmd = data["tool_input"].get("command")
+        if not isinstance(cmd, str):
+            return 0
+        refusals = [m for level, m in check(cmd) if level == "refuse"]
+        if refusals:
+            print("\n".join(refusals), file=sys.stderr)
+            return 2
+        return 0
+    if len(argv) != 2:
+        print("usage: long-job-chain-check TEXT | --hook", file=sys.stderr)
+        return 2
+    findings = check(argv[1])
+    for _, m in findings:
+        print(m)
+    return 3 if any(level == "refuse" for level, _ in findings) else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

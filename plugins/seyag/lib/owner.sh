@@ -12,6 +12,7 @@
 #                        for a PID that wasn't running at owner_init
 #   owner_or_exit        exit 3 with a stderr line once the owner is gone (3, not 0: for a waiter,
 #                        0 means "the condition happened")
+#   caller_label [NAME]  print NAME, else the basename of CLAUDE_JOB_DIR, else the basename of the cwd
 # A watcher takes `--owner PID` (default: owner_default) and calls owner_or_exit after each sleep.
 # /proc/PID/stat fields after the ")" that closes comm (comm may hold spaces): $1 state, $2 ppid,
 # $20 start time.
@@ -44,4 +45,12 @@ owner_or_exit() {
   owner_alive && return 0
   echo "$(basename "$0"): owner $OWNER is gone, exiting" >&2
   exit 3
+}
+
+# Who a long-job unit is for: caller_label [NAME] prints NAME when given, else the basename of
+# CLAUDE_JOB_DIR, else the basename of the cwd. A name, never a secret.
+caller_label() {
+  if [ -n "${1:-}" ]; then printf '%s\n' "$1"
+  elif [ -n "${CLAUDE_JOB_DIR:-}" ]; then basename "$CLAUDE_JOB_DIR"
+  else basename "$PWD"; fi
 }
