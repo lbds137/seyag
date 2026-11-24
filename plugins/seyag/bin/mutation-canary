@@ -325,7 +325,7 @@ if [ "$MODE" = "literal" ]; then
   if [ -L "$TARGET_CANON" ] || [ ! -f "$TARGET_CANON" ]; then
     die "target is not a regular file: $FILE_ARG"
   fi
-  python3 -I -c '
+  python3 -I -B -c '
 import os, sys
 
 target_canon, display_path, old_kind, old_val, new_kind, new_val = sys.argv[1:7]
@@ -390,7 +390,7 @@ else
   [ -n "$PATCH_ARG" ] && [ -f "$PATCH_ARG" ] && [ -r "$PATCH_ARG" ] || die "cannot read patch file: $PATCH_ARG"
   PATCH_ABS=$(realpath -- "$PATCH_ARG" 2>/dev/null) || die "cannot resolve patch file: $PATCH_ARG"
   SUM_OUT=$(git -C "$ROOT" apply --summary "$PATCH_ABS" 2>/dev/null) || die "git apply --summary failed for $PATCH_ARG"
-  PATCH_TARGETS_OUT=$(git -C "$ROOT" apply --numstat -z "$PATCH_ABS" 2>/dev/null | python3 -I -c '
+  PATCH_TARGETS_OUT=$(git -C "$ROOT" apply --numstat -z "$PATCH_ABS" 2>/dev/null | python3 -I -B -c '
 import os, sys
 
 root, root_canon, patch_arg, sum_out = sys.argv[1:5]
@@ -580,7 +580,7 @@ if [ "$MODE" = "literal" ]; then
   tdir=$(dirname -- "$tpath")
   tbase=$(basename -- "$tpath")
   ttmp="$tdir/.$tbase.mutation-canary.tmp"
-  python3 -I -c '
+  python3 -I -B -c '
 import os, sys
 
 target_canon, ttmp, old_kind, old_val, new_kind, new_val = sys.argv[1:7]
