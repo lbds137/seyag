@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-21T02:47:00Z'
-updated_date: '2026-11-24T23:03:00Z'
+updated_date: '2026-11-25T00:28:00Z'
 labels:
   - probes
   - flake
@@ -31,4 +31,6 @@ Related: TASK-30 profiled tests/safe-worktree-clean.probe.sh as the shellcheck m
 11-24: under run-probes -j 4 on a loaded machine safe-worktree-clean hit the 600 s cap (exit 124, lj-gate2); solo it took 353 s, rc 0.
 
 11-24 again: lj-gate3 (-j 4) on #404 round 2 hit the 600 s cap (exit 124); solo rerun same tree rc=0 in 279 s.
+
+11-24 (#404 rebased tree, -j 4): worker-sandbox 'wall knob live' failed at ms=2501 against its 2000 ms wall-clock limit (tests/worker-sandbox.probe.sh ~line 503, which times the whole sandboxed call, startup included); the solo rerun passed in 24 s total. Same load class; safe-worktree-clean hit the 600 s cap again (solo 325 s).
 <!-- SECTION:NOTES:END -->
