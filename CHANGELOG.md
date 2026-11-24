@@ -2,6 +2,21 @@
 
 All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY-MM-DD>` section per released version; under it, `###` categories in fixed order — Breaking Changes, Features, Bug Fixes, Improvements, Chores, Tests — empty ones omitted; items are `- **scope:** description (#PR)`, written from the version's merged commit subjects.
 
+## 0.3.221 - 2026-11-24
+
+### Breaking Changes
+- **mutation-canary:** `HUP` exits 129 instead of 143 (`INT`/`TERM`/`HUP` = 130/143/129, the 128+signal convention). `--restore` refuses (exit 3, journal kept) when the target can't be told apart from later edits: either there is no mutant snapshot and the target differs from the original, or it differs from both. The new `--restore --force` overwrites the target from the original in both cases (TASK-110, owner ruling 2026-11-24). (#393)
+
+### Bug Fixes
+- **mutation-canary:** `--timeout` refuses leading zeros and more than 9 digits (`08` crashed the arithmetic as octal); the literal apply step recounts `--old` and exits 2 if the file changed after validation; a journal pid that now belongs to an unrelated process no longer blocks `--restore` (argv[0]/argv[1] basename check, unreadable cmdline still counts as live); a signal between spawning the probe and recording its pid is deferred so cleanup still kills the probe group; readers wait up to 1 s for a new journal's pid file; bash < 5 is refused up front (TASK-110). (#393)
+
+### Improvements
+- **mutation-canary:** the kill-grace poll captures `ps` output instead of piping into `grep -q`; comments on the symlink check's scope and on `setsid` exec-ing in place. (#393)
+- **backlog:** TASK-136 and TASK-130 no longer name a private session; TASK-110's case count corrected; priorities set on ten active tasks (TASK-38-43, 49-52; landed separately in #394); TASK-87 moves to this lane and folds in the `--body-file` fail-open gap; TASK-57 closed as shipped in 0.3.205 (#393). (#393)
+
+### Tests
+- **mutation-canary:** cases 28-39: timeout forms, apply-time recount, no-op patch, manual `--restore` refusals and `--force`, `HUP` exit 129, `--force` without `--restore`, a reused journal pid, a journal without a pid file and one whose pid appears during the wait; case 23 now expects the refusal and case 24 fakes its live run under the tool's name. (#393)
+
 ## 0.3.220 - 2026-11-23
 
 ### Features

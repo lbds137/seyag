@@ -23,7 +23,7 @@
 # 20. --timeout 0 grandchild cleanup -> TERM mid-run exits 143, grandchild gone within 6 s, subject intact
 # 21. mutant-only exit 137 with FAIL: line under default timeout -> CAUGHT, exit 0, no TIMEOUT line
 # 22. NUL byte in probe output under mutation -> CAUGHT, exit 0
-# 23. --restore with journal holding 0.path and 0.orig but no 0.mutant, subject mutated -> exit 0, restored
+# 23. --restore with journal holding 0.path and 0.orig but no 0.mutant, subject mutated -> rc 3, left no mutant snapshot, subject still mutated, journal kept
 # 24. --restore while journal pid is alive -> refused exit 2, another mutation-canary run is live
 # 25. multi-file patch modifying tools/subject.sh and a second tracked file -> CAUGHT on second file, both files byte-identical
 # 26. probe restores subject itself (git checkout) and exits 0 under mutation -> SURVIVED exit 1, no changed line
@@ -33,6 +33,13 @@
 # 30. apply-time recount (probe appends second old on first run) -> rc 2, occurs 2 times at apply time, journal gone, post-baseline subject kept
 # 31. no-op patch (- and + of the same existing subject line) -> rc 2, did not change, subject intact, journal gone
 # 32. manual --restore with fabricated journal where subject differs from both .orig and .mutant -> rc 3, subject left as is, journal kept
+# 33. HUP mid-run: kill -HUP tool PID once journal exists -> rc 129, restored, no journal, child gone
+# 34. --restore --force with journal holding 0.path and 0.orig but no 0.mutant, subject mutated -> rc 0, restored, no journal
+# 35. --restore --force with fabricated journal where subject differs from both .orig and .mutant -> rc 0, restored, no journal
+# 36. --force without --restore -> rc 2, subject intact
+# 37. --restore with journal pid of a live non-mutation-canary process (sleep) -> rc 0, pid treated as stale, restored
+# 38. --restore with journal dir holding 0.path, 0.orig, 0.mutant but no pid file -> rc 0 after >=900 ms retry window, restored
+# 39. --restore with journal dir holding 0.path, 0.orig, 0.mutant and a live pid written during the retry window -> refused exit 2, subject still mutated, journal kept
 #
 # Usage: tests/mutation-canary.probe.sh   (from anywhere)
 
@@ -555,7 +562,7 @@ check_intact "21. exit 137"
   || bad "22. NUL in output: rc=$rc (out: $(tr -d '\0' <"$T/nul.out"))"
 check_intact "22. NUL in output"
 
-# 23. --restore with journal holding 0.path and 0.orig but no 0.mutant, subject mutated -> exit 0, restored
+# 23. --restore with journal holding 0.path and 0.orig but no 0.mutant, subject mutated -> exit 3, left no mutant snapshot, subject still mutated, journal kept
 SUBJECT_CANON=$(realpath -- "$FIX/tools/subject.sh")
 mkdir -p "$JDIR"
 printf '99999999\n' >"$JDIR/pid"
@@ -563,14 +570,19 @@ printf '%s\n' "$SUBJECT_CANON" >"$JDIR/0.path"
 cp -p "$T/subject.orig" "$JDIR/0.orig"
 printf 'new' >"$FIX/tools/subject.sh"
 out=$( (cd "$FIX" && bash "$TOOL" --restore) 2>&1 ); rc=$?
-[ "$rc" -eq 0 ] \
-  && grep -q '^mutation-canary: restored$' <<<"$out" \
-  && ok "23. --restore without 0.mutant: exit 0, restored" \
+[ "$rc" -eq 3 ] \
+  && grep -qF "left no mutant snapshot" <<<"$out" \
+  && [ "$(cat "$FIX/tools/subject.sh")" = "new" ] \
+  && [ -d "$JDIR" ] && [ -f "$JDIR/0.orig" ] && cmp -s "$JDIR/0.orig" "$T/subject.orig" \
+  && ok "23. --restore without 0.mutant: exit 3, subject still mutated, journal kept" \
   || bad "23. --restore without 0.mutant: rc=$rc (out: $out)"
+cp -p "$T/subject.orig" "$FIX/tools/subject.sh"
+rm -f "$JDIR/pid" "$JDIR/0.path" "$JDIR/0.orig"
+rmdir "$JDIR" 2>/dev/null || true
 check_intact "23. --restore without 0.mutant"
 
 # 24. --restore while journal pid is alive -> exit 2 and another mutation-canary run is live
-sleep 30 &
+( exec -a mutation-canary sleep 30 ) &
 live_pid=$!
 mkdir -p "$JDIR"
 printf '%s\n' "$live_pid" >"$JDIR/pid"
@@ -701,5 +713,131 @@ cp -p "$T/subject.orig" "$FIX/tools/subject.sh"
 rm -f "$JDIR/pid" "$JDIR/0.path" "$JDIR/0.orig" "$JDIR/0.mutant"
 rmdir "$JDIR" 2>/dev/null || true
 check_intact "32. manual --restore with drifted subject"
+
+# 33. HUP mid-run: start in background with slow probe, wait for journal, kill -HUP -> rc 129, restored, no journal, child gone
+rm -f "$T/slow-child.pid"
+(
+  cd "$FIX" || exit 1
+  SLOW_CHILD_PID_FILE="$T/slow-child.pid" exec bash "$TOOL" --no-baseline --file tools/subject.sh --old old --new new -- bash tests/slow.probe.sh
+) >"$T/hup.out" 2>&1 &
+hpid=$!
+w=0
+while [ "$w" -lt 100 ] && { [ ! -d "$JDIR" ] || [ ! -s "$T/slow-child.pid" ]; }; do
+  sleep 0.05
+  w=$((w + 1))
+done
+spid=$(cat "$T/slow-child.pid" 2>/dev/null || true)
+t_kill0=$(date +%s%N)
+kill -HUP "$hpid" 2>/dev/null
+wait "$hpid"
+hrc=$?
+t_kill1=$(date +%s%N)
+kill_ms=$(( (t_kill1 - t_kill0) / 1000000 ))
+[ "$hrc" -eq 129 ] && [ "$kill_ms" -lt 3000 ] \
+  && ok "33. HUP mid-run: exit 129 in ${kill_ms}ms (<3000ms)" \
+  || bad "33. HUP mid-run: exit $hrc in ${kill_ms}ms (out: $(cat "$T/hup.out"))"
+if [ -n "$spid" ] && ! kill -0 "$spid" 2>/dev/null; then
+  ok "33. HUP mid-run: probe child ($spid) gone"
+else
+  [ -n "$spid" ] && kill -KILL "$spid" 2>/dev/null || true
+  bad "33. HUP mid-run: probe child (${spid:-none}) still alive"
+fi
+check_intact "33. HUP mid-run"
+
+# 34. --restore --force with journal holding 0.path and 0.orig but no 0.mutant, subject mutated -> exit 0, restored, no journal
+mkdir -p "$JDIR"
+printf '99999999\n' >"$JDIR/pid"
+printf '%s\n' "$SUBJECT_CANON" >"$JDIR/0.path"
+cp -p "$T/subject.orig" "$JDIR/0.orig"
+printf 'new' >"$FIX/tools/subject.sh"
+out=$( (cd "$FIX" && bash "$TOOL" --restore --force) 2>&1 ); rc=$?
+[ "$rc" -eq 0 ] \
+  && grep -q '^mutation-canary: restored$' <<<"$out" \
+  && ok "34. --restore --force without 0.mutant: exit 0, restored" \
+  || bad "34. --restore --force without 0.mutant: rc=$rc (out: $out)"
+check_intact "34. --restore --force without 0.mutant"
+
+# 35. --restore --force with fabricated journal where subject differs from both .orig and .mutant -> exit 0, subject intact, no journal
+mkdir -p "$JDIR"
+printf '99999999\n' >"$JDIR/pid"
+printf '%s\n' "$SUBJECT_CANON" >"$JDIR/0.path"
+cp -p "$T/subject.orig" "$JDIR/0.orig"
+sed 's/MSG=old/MSG=new/' "$T/subject.orig" >"$JDIR/0.mutant"
+printf 'drifted from both orig and mutant' >"$FIX/tools/subject.sh"
+out=$( (cd "$FIX" && bash "$TOOL" --restore --force) 2>&1 ); rc=$?
+[ "$rc" -eq 0 ] \
+  && grep -q '^mutation-canary: restored$' <<<"$out" \
+  && ok "35. --restore --force with drifted subject: exit 0, restored" \
+  || bad "35. --restore --force with drifted subject: rc=$rc (out: $out)"
+check_intact "35. --restore --force with drifted subject"
+
+# 36. --force without --restore -> exit 2, subject intact
+out=$( (cd "$FIX" && bash "$TOOL" --force --file tools/subject.sh --old old --new new -- true) 2>&1 ); rc=$?
+[ "$rc" -eq 2 ] && grep -q "Usage:" <<<"$out" \
+  && ok "36. --force without --restore: refused exit 2" \
+  || bad "36. --force without --restore: rc=$rc (out: $out)"
+check_intact "36. --force without --restore"
+
+# 37. journal pid of a live plain sleep 30 & (argv[0] sleep), subject mutated, 0.mutant present and equal to it -> --restore exits 0 and restores
+sleep 30 &
+stale_pid=$!
+mkdir -p "$JDIR"
+printf '%s\n' "$stale_pid" >"$JDIR/pid"
+printf '%s\n' "$SUBJECT_CANON" >"$JDIR/0.path"
+cp -p "$T/subject.orig" "$JDIR/0.orig"
+sed 's/MSG=old/MSG=new/' "$T/subject.orig" >"$T/subject.mut"
+cp -p "$T/subject.mut" "$JDIR/0.mutant"
+cp "$T/subject.mut" "$FIX/tools/subject.sh"
+out=$( (cd "$FIX" && bash "$TOOL" --restore) 2>&1 ); rc=$?
+kill -KILL "$stale_pid" 2>/dev/null || true
+wait "$stale_pid" 2>/dev/null || true
+[ "$rc" -eq 0 ] \
+  && grep -q '^mutation-canary: restored$' <<<"$out" \
+  && ok "37. --restore with reused non-mutation-canary pid: exit 0, restored" \
+  || bad "37. --restore with reused non-mutation-canary pid: rc=$rc (out: $out)"
+check_intact "37. --restore with reused non-mutation-canary pid"
+
+# 38. journal dir holding 0.path, 0.orig, 0.mutant but no pid file, subject mutated -> --restore exits 0, restores, and took at least 900 ms
+mkdir -p "$JDIR"
+printf '%s\n' "$SUBJECT_CANON" >"$JDIR/0.path"
+cp -p "$T/subject.orig" "$JDIR/0.orig"
+sed 's/MSG=old/MSG=new/' "$T/subject.orig" >"$T/subject.mut"
+cp -p "$T/subject.mut" "$JDIR/0.mutant"
+cp "$T/subject.mut" "$FIX/tools/subject.sh"
+t_nopid0=$(date +%s%N)
+out=$( (cd "$FIX" && bash "$TOOL" --restore) 2>&1 ); rc=$?
+t_nopid1=$(date +%s%N)
+nopid_ms=$(( (t_nopid1 - t_nopid0) / 1000000 ))
+[ "$rc" -eq 0 ] \
+  && [ "$nopid_ms" -ge 900 ] \
+  && grep -q '^mutation-canary: restored$' <<<"$out" \
+  && ok "38. --restore without pid file: exit 0 after ${nopid_ms}ms (>=900ms), restored" \
+  || bad "38. --restore without pid file: rc=$rc elapsed=${nopid_ms}ms (out: $out)"
+check_intact "38. --restore without pid file"
+
+# 39. journal dir holding 0.path, 0.orig, 0.mutant and no pid file; a live mutation-canary pid appears after 0.3 s -> --restore refused exit 2, subject still mutated, journal kept
+mkdir -p "$JDIR"
+printf '%s\n' "$SUBJECT_CANON" >"$JDIR/0.path"
+cp -p "$T/subject.orig" "$JDIR/0.orig"
+sed 's/MSG=old/MSG=new/' "$T/subject.orig" >"$T/subject.mut"
+cp -p "$T/subject.mut" "$JDIR/0.mutant"
+cp "$T/subject.mut" "$FIX/tools/subject.sh"
+( exec -a mutation-canary sleep 30 ) &
+live_pid=$!
+( sleep 0.3; printf '%s\n' "$live_pid" >"$JDIR/pid" ) &
+writer_pid=$!
+out=$( (cd "$FIX" && bash "$TOOL" --restore) 2>&1 ); rc=$?
+kill -KILL "$live_pid" "$writer_pid" 2>/dev/null || true
+wait "$live_pid" "$writer_pid" 2>/dev/null || true
+[ "$rc" -eq 2 ] \
+  && grep -qF "another mutation-canary run is live" <<<"$out" \
+  && cmp -s "$FIX/tools/subject.sh" "$T/subject.mut" \
+  && [ -d "$JDIR" ] && [ -f "$JDIR/0.orig" ] && cmp -s "$JDIR/0.orig" "$T/subject.orig" \
+  && ok "39. --restore with pid appearing during retry window: refused exit 2, subject still mutated, journal kept" \
+  || bad "39. --restore with pid appearing during retry window: rc=$rc (out: $out)"
+cp -p "$T/subject.orig" "$FIX/tools/subject.sh"
+rm -f "$JDIR/pid" "$JDIR/0.path" "$JDIR/0.orig" "$JDIR/0.mutant"
+rmdir "$JDIR" 2>/dev/null || true
+check_intact "39. --restore with pid appearing during retry window"
 
 exit "$fail"
