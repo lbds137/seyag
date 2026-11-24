@@ -4,7 +4,7 @@
 # bin/claude-usage): scope and precedence (the environment wins, even when set
 # empty; the project file overwrites the user file between the two), the key
 # rule in both forms, the settable set (knobs.tsv user rows minus the
-# harness-owned and envonly names), the _CMD/exec and path project-scope
+# harness-owned and envonly names), the _CMD/exec, path and host project-scope
 # refusals, the envonly refusal in both scopes, SYG_CONFIG=0, the accepted TOML
 # subset (one warning per offending line, fail-open, multiline-string body skip,
 # warnings name file and line; file content is never echoed; name text is
@@ -57,6 +57,7 @@ CFG_ENV=(env
   -u ANTHROPIC_API_KEY -u CC_ROUTE_PRESET -u CLAUDE_USAGE_MODEL -u CLAUDE_USAGE_TTL -u CLAUDE_USAGE_WEEK_STOP
   -u CLAUDE_USAGE_WEEK_RESERVE_CMD -u CLAUDE_USAGE_EXTRA_OK -u CLAUDE_USAGE_ZAI_WEEK_RESERVE
   -u SYG_ENABLE -u SYG_LAUNCH_RECORD_DIR -u SYG_CLASSIFIER_LEDGER -u SYG_ROLE_PREAMBLE_FILE -u SYG_OWNER_NAME
+  -u SYG_MEM_GATE_MIN_MB -u SYG_RESOURCE_PROFILE -u SYG_MAX_PARALLEL -u SYG_RESOURCE_JOB_MB -u SYG_RESOURCE_CPU_PSI_MAX
   HOME="$TMP/home" SYG_TEST_PLUGIN_DIR="$PLUGIN")
 
 # (a) no files: exit 0, empty stderr, nothing exported.
@@ -612,6 +613,35 @@ else
   fail "(p) path refusal: proj=($OUT_P / $(cat "$TMP/err.p")) user=($OUT_PU / $(cat "$TMP/err.pu"))"
 fi
 
+# (p2) host refusals: project scope refuses host-flagged knobs (top-level and
+# sectioned forms alike) with the exact message and leaves them unset; user
+# scope still applies the same knob.
+PP2="$TMP/proj-p2"
+mkdir -p "$PP2/.claude"
+cat >"$PP2/.claude/seyag.toml" <<'EOF'
+syg_mem_gate_min_mb = 1
+[syg.resource]
+profile = "normal"
+EOF
+OUT_P2=$("${CFG_ENV[@]}" XDG_CONFIG_HOME="$TMP/no-xdg" CLAUDE_PROJECT_DIR="$PP2" \
+  bash "$TMP/report" "$LIB" SYG_MEM_GATE_MIN_MB SYG_RESOURCE_PROFILE 2>"$TMP/err.p2")
+WANT_ERR_P2=$(printf '%s' \
+"seyag config: $PP2/.claude/seyag.toml: line 1: 'SYG_MEM_GATE_MIN_MB' cannot be set from project scope (host knob)
+seyag config: $PP2/.claude/seyag.toml: line 3: 'SYG_RESOURCE_PROFILE' cannot be set from project scope (host knob)")
+UP2="$TMP/xdg-p2"
+mkdir -p "$UP2/seyag"
+printf 'syg_mem_gate_min_mb = 4096\n' >"$UP2/seyag/config.toml"
+OUT_P2U=$("${CFG_ENV[@]}" XDG_CONFIG_HOME="$UP2" CLAUDE_PROJECT_DIR="$TMP/proj-none" \
+  bash "$TMP/report" "$LIB" SYG_MEM_GATE_MIN_MB 2>"$TMP/err.p2u")
+if [ "$OUT_P2" = $'SYG_MEM_GATE_MIN_MB=UNSET\nSYG_RESOURCE_PROFILE=UNSET' ] \
+  && [ "$(cat "$TMP/err.p2")" = "$WANT_ERR_P2" ] \
+  && [ "$OUT_P2U" = "SYG_MEM_GATE_MIN_MB=[4096]" ] \
+  && [ ! -s "$TMP/err.p2u" ]; then
+  ok "(p2) host knobs refused from project scope (top-level and sectioned) and allowed from user scope"
+else
+  fail "(p2) host refusal: proj=($OUT_P2 / $(cat "$TMP/err.p2")) user=($OUT_P2U / $(cat "$TMP/err.p2u"))"
+fi
+
 # (q) envonly refusal: refused from both user and project files with the exact warning.
 UQ="$TMP/xdg-q"
 mkdir -p "$UQ/seyag"
@@ -678,10 +708,19 @@ R3_BAD=$(awk -F'\t' -v req="$R3_REQ" '
   $2 == "user" && (" " $6 " ") ~ / path / { delete need[$1] }
   END { for (k in need) print "missing-r3:" k }
 ' "$KNOBS")
-if [ -z "$R1_BAD" ] && [ -z "$R2_BAD" ] && [ -z "$R3_BAD" ]; then
-  ok "(r) knobs.tsv flags coverage pins hold (r1 path heuristic, r2 envonly parity, r3 required list)"
+R4_REQ="SYG_MEM_GATE_MIN_MB SYG_RESOURCE_PROFILE SYG_MAX_PARALLEL SYG_RESOURCE_JOB_MB SYG_RESOURCE_CPU_PSI_MAX"
+R4_BAD=$(awk -F'\t' -v req="$R4_REQ" '
+  BEGIN { n = split(req, arr, " "); for (i = 1; i <= n; i++) need[arr[i]] = 1 }
+  !/^#/ && NF > 0 && (" " $6 " ") ~ / host / {
+    if ($2 != "user") print "non-user-host:" $1
+    else delete need[$1]
+  }
+  END { for (k in need) print "missing-r4:" k }
+' "$KNOBS")
+if [ -z "$R1_BAD" ] && [ -z "$R2_BAD" ] && [ -z "$R3_BAD" ] && [ -z "$R4_BAD" ]; then
+  ok "(r) knobs.tsv flags coverage pins hold (r1 path heuristic, r2 envonly parity, r3 required list, r4 host list)"
 else
-  fail "(r) flags coverage: r1=[$R1_BAD] r2=[$R2_BAD] r3=[$R3_BAD]"
+  fail "(r) flags coverage: r1=[$R1_BAD] r2=[$R2_BAD] r3=[$R3_BAD] r4=[$R4_BAD]"
 fi
 
 # (s) F3 content-free raw warnings and bounded 40-char name echoes: =-less lines,
@@ -849,7 +888,7 @@ OUT_V=$("${CFG_ENV[@]}" XDG_CONFIG_HOME="$U1" SYG_TEST_PLUGIN_DIR="$KNV" CLAUDE_
   bash "$TMP/report" "$LIB" SYG_CLOCK_STAMP_HINT CLAUDE_USAGE_WEEK_RESERVE 2>"$TMP/err.v")
 WANT_ERR_V=$(printf '%s' \
 "seyag config: $KNV/config/knobs.tsv: line 3: malformed row: skipped
-seyag config: $KNV/config/knobs.tsv: line 5: CLAUDE_USAGE_WEEK_RESERVE: no flags column: path/envonly refusals disabled for this row")
+seyag config: $KNV/config/knobs.tsv: line 5: CLAUDE_USAGE_WEEK_RESERVE: no flags column: path/envonly/host refusals disabled for this row")
 if [ "$OUT_V" = $'SYG_CLOCK_STAMP_HINT=[from-user]\nCLAUDE_USAGE_WEEK_RESERVE=[61]' ] && [ "$(cat "$TMP/err.v")" = "$WANT_ERR_V" ]; then
   ok "(v) L3b tab-less row and 5-field user row warn once; 6-field, 5-field internal, comment and blank rows stay silent"
 else
@@ -925,6 +964,7 @@ foo = 1
 syg_statusline_zai_usage = "/bin/x"
 claude_projects_dir = "/x"
 syg_agy_brain_dir = "/tmp/brain"
+syg_mem_gate_min_mb = 4096
 '
   PW_MALFORMED='syg_enable = maybe
 syg_enable = [1]

@@ -3,7 +3,7 @@
 # scope: user | internal
 # group: guards | stop-gates | session | statusline | usage | credit | pr | worktrees | release | routing | misc
 # default: a value (rendered in backticks), unset, or prose:<text> (rendered as plain escaped text with the prefix dropped; use it for a sentence, not a value; only | is escaped, so keep <, backticks, * and _ out of it).
-# flags: - (none) or space-separated tokens, canonical order envonly path; path = the value selects a filesystem path on this machine (refused from project scope, allowed from user config and env); envonly = environment only, refused from every config file.
+# flags: - (none) or space-separated tokens, canonical order envonly path host; path = the value selects a filesystem path on this machine (refused from project scope, allowed from user config and env); host = a host-level setting: refused from the project file; set in the environment or the user config file; envonly = environment only, refused from every config file.
 ANTHROPIC_ADMIN_API_KEY	user	credit	unset	Organization Admin API key enabling provider cost_report balance queries in api-credit and statusline (takes precedence over SYG_CREDIT_ADMIN_KEY_CMD).	-
 CC_ROUTE_KEYS	user	routing	~/.claude/lane-keys.env	Path to the lane key file where zai-usage looks up ZAI_AUTH_TOKEN first.	path
 CC_ROUTE_PRESET	user	routing	unset	Route preset name; set to anthropic-api so claude-usage treats a first-party endpoint as the Console API-key lane.	-
@@ -157,9 +157,10 @@ SYG_LIVE_CHECKOUTS	user	guards	unset	Colon-separated absolute paths whose main g
 SYG_LONG_JOB_CMD	user	session	unset	Single-line runner prefix advertised at SessionStart for running >10-minute jobs outside the session tree.	-
 SYG_LOSSY_PIPE_GH_WRAPPERS	user	guards	unset	Whitespace-separated read-wrapper command tokens guarded against head/tail/sed truncation in lossy-pipe-guard.	-
 SYG_LOSSY_PIPE_SUITES	user	guards	1	Set to 0 to disable lossy-pipe-guard on test and probe suite commands piped into head/tail/sed.	-
+SYG_MAX_PARALLEL	user	misc	unset	Host cap on parallel jobs, applied by resource-profile on top of any profile.	host
 SYG_MEM_GATE_CMD	user	session	unset	Single-line command advertised at SessionStart to check free memory before launching workers or test suites. The plugin's own mem-gate (`mem-gate --ok`) is one such command.	-
-SYG_MEM_GATE_MEMINFO	internal	misc	/proc/meminfo	Test seam overriding the meminfo file mem-gate reads.	-
-SYG_MEM_GATE_MIN_MB	user	misc	2048	Default MemAvailable floor in MB for mem-gate --ok/--wait; an explicit MB argument wins.	-
+SYG_MEM_GATE_MEMINFO	internal	misc	/proc/meminfo	Test seam overriding the meminfo file mem-gate and resource-profile read.	-
+SYG_MEM_GATE_MIN_MB	user	misc	2048	Default MemAvailable floor in MB for mem-gate --ok/--wait; an explicit MB argument wins.	host
 SYG_MEM_PRESSURE_MAX_BYTES	user	misc	5242880	Size in bytes past which mem-pressure-log rotates log.jsonl to log.jsonl.1 (one generation kept).	-
 SYG_MEM_PRESSURE_MEMINFO	internal	misc	/proc/meminfo	Test seam overriding the meminfo file mem-pressure-log reads.	-
 SYG_MEM_PRESSURE_PSI	internal	misc	/proc/pressure/memory	Test seam overriding the PSI memory file mem-pressure-log reads.	-
@@ -190,6 +191,10 @@ SYG_PR_OPEN_UPSTREAM_CHECK	user	pr	1	Set to 0 to skip pr-open's upstream-submiss
 SYG_PR_MONITOR_SEEN_FILE	internal	pr	${XDG_RUNTIME_DIR:-/tmp}/.claude_pr_monitor_seen.<uid>	Test seam overriding the deduplication state file for pr-monitor-reminder.	-
 SYG_PUBLISH_CHECKED	user	guards	unset	Colon-separated <owner/repo> list (or any non-empty value for a gist) in the session env unblocking publish-gate.	-
 SYG_PY_CACHE_ARG	internal	guards	unset	Python flag run.sh exports (`-Xpycache_prefix=<dir>`, or `-B`) for hooks' `python3 -I`, which ignores PYTHONPYCACHEPREFIX; unset on a direct run, where hooks fall back to `-B`; a relative caller prefix gives `-B`.	-
+SYG_RESOURCE_CPU_PSI_MAX	user	misc	50	CPU pressure (some avg60) at or above which SYG_RESOURCE_PROFILE=auto caps jobs at 1.	host
+SYG_RESOURCE_JOB_MB	user	misc	1024	MB of MemAvailable budgeted per parallel job under SYG_RESOURCE_PROFILE=auto.	host
+SYG_RESOURCE_PROFILE	user	misc	unset	Host resource profile for resource-profile and tests/run-probes.sh: low (job ceiling 1), normal (no ceiling) or auto (ceiling from MemAvailable per SYG_RESOURCE_JOB_MB, 1 while CPU pressure is high); unset: no ceiling.	host
+SYG_RESOURCE_PSI_CPU	internal	misc	/proc/pressure/cpu	Test seam overriding the CPU pressure file resource-profile reads.	-
 SYG_ROLE_CONTEXT_CMD	user	session	unset	Command (bash -c) claude-role --board runs for session context sizes: prints a JSON array of {folder, tokens, flagged, flag_at}. Unset means no context lines; a failing one prints an unavailable line.	-
 SYG_ROLE_CONTEXT_LINE	user	session	unset	One line claude-role prints first at session start (hook mode), before the role file and even for a headless or task run. Empty prints nothing.	-
 SYG_ROLE_DIR	user	session	`${XDG_DATA_HOME:-$HOME/.local/share}/seyag/roles`	Directory of role files (one <project folder>.md each) read and written by claude-role and driver-clone.	path

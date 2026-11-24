@@ -87,6 +87,7 @@ class _State:
         self.settable = set()
         self.envonly = set()
         self.path = set()
+        self.host = set()
         self.map = {}
 
 
@@ -310,6 +311,14 @@ def _parse_file(path, scope, foreign, st):
                     f"seyag config: {path}: line {n}: '{_disp(name)}' cannot be set from project scope (path knob)"
                 )
             continue
+        if scope == "project" and name in st.host:
+            if foreign:
+                _warn(f"seyag config: {path}: line {n}: a knob cannot be set from project scope (host knob)")
+            else:
+                _warn(
+                    f"seyag config: {path}: line {n}: '{_disp(name)}' cannot be set from project scope (host knob)"
+                )
+            continue
         if ("n:" + name) in seen:
             if foreign:
                 _warn(f"seyag config: {path}: line {n}: duplicate key: first value wins")
@@ -384,11 +393,13 @@ def _load(plugin_dir, st):
         elif len(fields) == 4:
             _warn(
                 f"seyag config: {knobs}: line {n}: {name}: "
-                "no flags column: path/envonly refusals disabled for this row"
+                "no flags column: path/envonly/host refusals disabled for this row"
             )
         padded = f" {flags} "
         if " path " in padded:
             st.path.add(name)
+        if " host " in padded:
+            st.host.add(name)
         if " envonly " in padded:
             st.envonly.add(name)
         else:
