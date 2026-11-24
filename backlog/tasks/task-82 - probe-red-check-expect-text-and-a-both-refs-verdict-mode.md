@@ -1,9 +1,11 @@
 ---
 id: TASK-82
 title: 'probe-red-check: --expect TEXT and a both-refs verdict mode'
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - Seyag B
 created_date: '2026-11-22T16:45:00Z'
+updated_date: '2026-11-24T13:47:00Z'
 labels:
   - probes
 dependencies: []
