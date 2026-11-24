@@ -19,7 +19,7 @@ Mining row w1115-13 (counts 56/37: items/sessions). A number in a PR body, such 
 
 Code: `plugins/seyag/hooks/lib/claim-shapes.sh` and `tests/pr-body-ref-gate.probe.sh`.
 
-Shape (grounded 2026-11-24 at main 5d79a8f; re-verify cites first):
+Shape (grounded 2026-11-24 at main 9b350cb; re-verify cites first):
 - Put the numeric shape in `CLAIM_SHAPE_PR_BODY_EXTRA_REGEX`, not CORE: CORE is also scanned against added code comments by pr-merge-review-check. CORE already catches some counted nouns (`N tests`, `N files`, `the N ...`).
 - Match a number (decimals allowed, with or without a space) followed by a unit: durations (`ms`, `s`, `sec(onds)`, `min(utes)`, `h`, `hours`, `days`), sizes (`B`, `KB/MB/GB`, `KiB/MiB/GiB`, `bytes`), percentages (`N%`, anchored without a trailing `\b`), ratios (`Nx`, `N×`), and counted nouns CORE lacks (`cases`, `probes`, `lines`, `hits`, `rows`, `sessions`, `items`, `tokens`, `runs`, `transcripts`).
 - Never match version strings, `#NNN` refs, dates, clock times, task ids or bare numbers.
