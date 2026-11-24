@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-21T02:47:00Z'
-updated_date: '2026-11-24T17:36:00Z'
+updated_date: '2026-11-24T23:03:00Z'
 labels:
   - probes
   - flake
@@ -27,4 +27,8 @@ Full gate on the 0.3.198 branch (2026-11-20, swap ~5.5 GB) failed two probes thi
 Related: TASK-30 profiled tests/safe-worktree-clean.probe.sh as the shellcheck memory outlier (~3.7 GB); its runtime under load may share a cause.
 
 2026-11-24 (Seyag B): timed out (exit 124 at the 600 s cap) in `bash tests/run-probes.sh -j 4` on worktree-agent-b82 rebased on 9450989; alone right after, `timeout 600 bash tests/safe-worktree-clean.probe.sh` passed in 594 s, against 123.9 s recorded at tests/probe-durations.tsv:88. Not separated yet: probe regression vs machine load (other lanes ran suites concurrently). Next check: time it alone on an idle machine.
+
+11-24: under run-probes -j 4 on a loaded machine safe-worktree-clean hit the 600 s cap (exit 124, lj-gate2); solo it took 353 s, rc 0.
+
+11-24 again: lj-gate3 (-j 4) on #404 round 2 hit the 600 s cap (exit 124); solo rerun same tree rc=0 in 279 s.
 <!-- SECTION:NOTES:END -->
