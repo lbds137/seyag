@@ -45,6 +45,8 @@ ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 PREFIXED = re.compile(r"^(CLAUDE|SYG)_")
 MAX_EVAL_DEPTH = 8
 PREFIX_WORDS = ("time", "sudo", "nice", "nohup", "command")
+PUNCT = "();<>|&\n"
+OPS = ("&&", "||", "|&", ";;", "<(", ">(", ">>", "<<", ">&", "<&")
 
 
 def runner_names():
@@ -58,13 +60,31 @@ def runner_names():
 
 
 def tokens(text):
-    # shlex with punctuation_chars splits operators; a newline becomes its own token (not whitespace)
-    # and comments are off, so `#` mid-word and `# ...` both stay visible to the operator scan.
+    # shlex with punctuation_chars="();<>|&\n" and whitespace_split=True keeps $, :, /, =, {, }
+    # and similar inside words while splitting shell operators; a newline becomes its own token
+    # (not whitespace) and comments are off, so `#` mid-word and `# ...` both stay visible.
+    # Every all-punctuation token is then split into shell operators, longest match first from
+    # OPS (&&, ||, |&, ;;, <(, >(, >>, <<, >&, <&), then single characters (so `)&&` becomes `)`
+    # and `&&`; `;\n` becomes `;` and `\n`).
     # A backslash-newline is a line continuation, not a command break (wrong inside single quotes; rare).
-    lex = shlex.shlex(text.replace("\\\n", ""), posix=True, punctuation_chars=True)
+    lex = shlex.shlex(text.replace("\\\n", ""), posix=True, punctuation_chars=PUNCT)
     lex.whitespace = " \t\r"
     lex.commenters = ""
-    return list(lex)
+    lex.whitespace_split = True
+    out = []
+    for tok in lex:
+        if len(tok) > 1 and all(c in PUNCT for c in tok):
+            k = 0
+            while k < len(tok):
+                if tok[k:k + 2] in OPS:
+                    out.append(tok[k:k + 2])
+                    k += 2
+                else:
+                    out.append(tok[k])
+                    k += 1
+        else:
+            out.append(tok)
+    return out
 
 
 def classify(tok):
@@ -74,9 +94,9 @@ def classify(tok):
         return "or"
     if tok in ("|", "|&"):
         return "pipe"
-    if tok == "(":
+    if tok in ("(", "{"):
         return "open"
-    if tok == ")":
+    if tok in (")", "}"):
         return "close"
     if tok and all(c in "|&;\n" for c in tok):
         return "seq"  # ; ;; & ; newline
@@ -91,8 +111,8 @@ def items(text):
     i, n = 0, len(toks)
     while i < n:
         t = toks[i]
-        if t == "$" and i + 1 < n and toks[i + 1] == "(":
-            buf, depth, i = ["$", "("], 1, i + 2
+        if t.endswith("$") and i + 1 < n and toks[i + 1] == "(":
+            buf, depth, i = [t, "("], 1, i + 2
         elif t in ("<(", ">("):
             buf, depth, i = [t], 1, i + 1
         else:
@@ -138,6 +158,9 @@ def parse(text):
     for kind, val in items(text):
         if kind == "op":
             end_cmd()
+            if val == "close":
+                while evs and evs[-1] == ("op", "seq"):
+                    evs.pop()
             evs.append(("op", val))
             skip = False
         elif kind == "redir":
