@@ -62,6 +62,16 @@ clean "newline separates long-job run N -- a from b && c" "$(printf 'long-job ru
 refuse "/abs/bin/long-job run N -- a && b refuses" "/abs/bin/long-job run N -- a && b"
 refuse "time long-job run N -- a && b refuses (prefix word)" "time long-job run N -- a && b"
 refuse "sudo -E long-job run N -- a && b refuses (prefix word + option)" "sudo -E long-job run N -- a && b"
+refuse "nice -n 10 long-job run x -- a && b refuses (prefix option arg)" "nice -n 10 long-job run x -- a && b"
+refuse "sudo -u me long-job run n -- c && d refuses (prefix option arg)" "sudo -u me long-job run n -- c && d"
+refuse "timeout 60 long-job run n -- c && d refuses (prefix positional)" "timeout 60 long-job run n -- c && d"
+refuse "timeout -s KILL 60 long-job run n -- c && d refuses (prefix option arg + positional)" "timeout -s KILL 60 long-job run n -- c && d"
+refuse "stdbuf -oL long-job run n -- c && d refuses (attached option value)" "stdbuf -oL long-job run n -- c && d"
+refuse "env FOO=1 long-job run n -- c && d refuses (env assignment)" "env FOO=1 long-job run n -- c && d"
+refuse "nice -n 5 timeout 60 long-job run n -- c && d refuses (chained prefixes)" "nice -n 5 timeout 60 long-job run n -- c && d"
+warn_only "env CLAUDE_X=1 long-job run n -- c warns on unforwarded CLAUDE_X" "env CLAUDE_X=1 long-job run n -- c" \
+  "^long-job: warning: CLAUDE_X is set on long-job's command line but the job never sees it; pass it with --env CLAUDE_X\."
+clean "env CLAUDE_X=1 long-job run n --env CLAUDE_X -- c is clean" "env CLAUDE_X=1 long-job run n --env CLAUDE_X -- c"
 refuse "backslash-newline before && still refuses" "$(printf 'long-job run N -- a \\\n&& b')"
 clean "exec long-job run N -- a && b is clean (nothing runs after exec)" "exec long-job run N -- a && b"
 

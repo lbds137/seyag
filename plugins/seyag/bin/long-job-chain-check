@@ -12,7 +12,9 @@ Findings (one line each, stdout; --hook prints only refusals, to stderr):
           Plain mode exits 3; --hook exits 2 so Claude Code blocks the call.
   warn    a `||` follows it (runs only if the START fails), or a CLAUDE_/SYG_ variable is set on
           long-job's command line without a matching `--env NAME` (the job never sees it).
-Also checks the runner named by the first word of SYG_LONG_JOB_CMD when set.
+Also checks the runner named by the first word of SYG_LONG_JOB_CMD when set (the first word must be
+the runner itself, not an interpreter such as `bash`), past leading prefix words (time, nice, nohup,
+command, sudo, env, timeout, stdbuf) and their options/arguments.
 Text that does not parse (unbalanced quotes) has no findings.
 Recursion: the argument of `eval` is parsed as shell text (the Bash tool wraps commands in eval).
 Not recursed: `bash -c` bodies (a chain inside them after `long-job run N --` is the correct form).
@@ -44,7 +46,17 @@ WARN_VAR = ("{r}: warning: {v} is set on {r}'s command line but the job never se
 ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 PREFIXED = re.compile(r"^(CLAUDE|SYG)_")
 MAX_EVAL_DEPTH = 8
-PREFIX_WORDS = ("time", "sudo", "nice", "nohup", "command")
+# Per prefix word: (options taking a separate argument, positional words consumed before the command).
+PREFIX_WORDS = {
+    "time": (("-f", "-o"), 0),
+    "nice": (("-n",), 0),
+    "nohup": ((), 0),
+    "command": ((), 0),
+    "sudo": (("-u", "-g", "-C", "-D", "-h", "-p", "-r", "-t", "-U"), 0),
+    "env": (("-u", "-C", "-S"), 0),
+    "timeout": (("-s", "-k"), 1),
+    "stdbuf": (("-i", "-o", "-e"), 0),
+}
 PUNCT = "();<>|&\n"
 OPS = ("&&", "||", "|&", ";;", "<(", ">(", ">>", "<<", ">&", "<&")
 
@@ -174,16 +186,28 @@ def parse(text):
 
 
 def command_word(words):
-    """Split a simple command into (assignments, argv), argv past any prefix word (time, sudo, …) and its options."""
+    """Split a simple command into (assignments, argv), argv past any PREFIX_WORDS chain, its options/args, and env assignments."""
     k = 0
     while k < len(words) and ASSIGN.match(words[k]):
         k += 1
     assigns, argv = words[:k], words[k:]
     # exec is not a prefix here: nothing after it runs, so its tail can't run outside the job.
     while argv and argv[0] in PREFIX_WORDS:
+        prefix = argv[0]
+        arg_opts, pos = PREFIX_WORDS[prefix]
         argv = argv[1:]
         while argv and argv[0].startswith("-"):
+            opt = argv[0]
             argv = argv[1:]
+            if opt == "--":
+                break
+            if opt in arg_opts and argv:
+                argv = argv[1:]
+        if prefix == "env":
+            while argv and ASSIGN.match(argv[0]):
+                assigns.append(argv[0])
+                argv = argv[1:]
+        argv = argv[pos:]
     return assigns, argv
 
 

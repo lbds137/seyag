@@ -18,9 +18,10 @@ longer than ~10 minutes (a miner, a full suite, an extract, an OCR pass).
       PATH, stdin from /dev/null, stdout+stderr appended to the job's log, and sleep/idle
       inhibited. Returns at once.
       --min-mb MB      memory gate threshold (default 2048; 0 skips the gate)
-      --wait-mem S     wait up to S seconds (at least 1) inside the unit for memory; a gate timeout
-                       is recorded as the job's exit 1. While it waits, status shows it running
-                       and no sleep/idle inhibitor is held (the inhibitor covers CMD only)
+      --wait-mem S     wait up to S seconds (at least 1; requires the gate, not with --min-mb 0)
+                       inside the unit for memory; a gate timeout is recorded as the job's exit 1.
+                       While it waits, status shows it running and no sleep/idle inhibitor is held
+                       (the inhibitor covers CMD only)
       --mem-max SIZE   systemd MemoryMax for the unit (e.g. 600M): caps its RAM, and the
                        overflow goes to swap rather than killing it
       --nice N         systemd Nice for the unit
@@ -151,19 +152,26 @@ case "$cmd" in
       esac
       shift
     done
+    [ "$min_mb" -eq 0 ] && [ -n "$wait_mem" ] && die "--wait-mem needs the memory gate; drop --min-mb 0"
     [ "${1:-}" = -- ] || die "run needs -- before the command"
     shift
     [ $# -gt 0 ] || die "run needs a command after --"
     running "$name" && die "$name is already running (long-job status $name)"
 
-    # The parent shell's command text, when readable: a Bash tool call is `bash -c TEXT`, and TEXT
+    # The parent shell's command text, when readable: a Bash tool call is `bash -c [-l ...] [--] TEXT`,
+    # where TEXT is the first non-option word after the -c option (or the word after --), and TEXT
     # shows a `&&` tail or a prefixed CLAUDE_/SYG_ variable that the job never sees.
     parent_cmd=""
     if [ -n "${SYG_LONG_JOB_PARENT_CMD+x}" ]; then
       parent_cmd=$SYG_LONG_JOB_PARENT_CMD
     else
       mapfile -d '' -t pargv 2>/dev/null </proc/$PPID/cmdline
-      [[ ${pargv[1]-} =~ ^-[A-Za-z]*c[A-Za-z]*$ ]] && parent_cmd=${pargv[2]-}
+      if [[ ${pargv[1]-} =~ ^-[A-Za-z]*c[A-Za-z]*$ ]]; then
+        for ((i = 2; i < ${#pargv[@]}; i++)); do
+          if [ "${pargv[i]}" = -- ]; then parent_cmd=${pargv[i + 1]-}; break; fi
+          if [[ ${pargv[i]} != -* ]]; then parent_cmd=${pargv[i]}; break; fi
+        done
+      fi
     fi
     if [ -n "$parent_cmd" ]; then
       chk_out=$("$here/long-job-chain-check" "$parent_cmd" 2>/dev/null); chk_rc=$?
@@ -254,7 +262,12 @@ case "$cmd" in
     if [ $poll = 1 ] && running "$name"; then describe "$name"; echo "long-job: still running: with no live waiter for $name, start \"long-job wait $name\" in the background; otherwise, and on a cron tick, say nothing"; exit 4; fi
     start=$SECONDS
     if running "$name"; then echo "long-job: waiting for $name; pid $$, checking every $interval s"; fi
+    warned_unknown=0
     while running "$name" || unknown "$name"; do
+      if [ $warned_unknown = 0 ] && unknown "$name"; then
+        echo "long-job: systemctl show failed for $name; still waiting (pass --timeout S to bound the wait)" >&2
+        warned_unknown=1
+      fi
       sleep "$interval"
       owner_or_exit
       # Re-check before the timeout: the job may have ended during the sleep.

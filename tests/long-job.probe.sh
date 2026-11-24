@@ -49,6 +49,7 @@ run x|run needs -- before the command
 run x -- |run needs a command after --
 run x --bogus -- true|unknown run option --bogus
 run x --wait-mem 0 -- true|--wait-mem needs at least 1 second
+run x --min-mb 0 --wait-mem 5 -- true|--wait-mem needs the memory gate; drop --min-mb 0
 wat|unknown subcommand 'wat'
 EOF
 timeout 5 "$LJ" wait nosuch >/dev/null 2>&1; [ $? = 1 ] && ok "long-job wait on an unknown job exits 1" || bad "long-job wait unknown"
@@ -111,6 +112,9 @@ err=$(timeout 5 env SYG_LONG_JOB_PARENT_CMD='CLAUDE_X=1 long-job run chain-warn 
 out=$(timeout 5 env -u SYG_LONG_JOB_PARENT_CMD PATH="$tmp/stub:$PATH" bash -c "\"$LJ\" run chain-real --min-mb 0 -- true && echo TAIL" 2>&1); rc=$?
 [ "$rc" = 2 ] && grep -q "long-job: refusing:" <<<"$out" && ! grep -q "TAIL" <<<"$out" && [ ! -e "$XDG_STATE_HOME/long-job/chain-real.cmd" ] \
   && ok "real bash -c with && tail exits 2 from /proc/PPID/cmdline and skips TAIL" || bad "run chain-real (rc $rc: $out)"
+out=$(timeout 5 env -u SYG_LONG_JOB_PARENT_CMD PATH="$tmp/stub:$PATH" bash -c -l "\"$LJ\" run chain-real-l --min-mb 0 -- true && echo TAIL" 2>&1); rc=$?
+[ "$rc" = 2 ] && grep -q "long-job: refusing:" <<<"$out" && ! grep -q "TAIL" <<<"$out" && [ ! -e "$XDG_STATE_HOME/long-job/chain-real-l.cmd" ] \
+  && ok "real bash -c -l with && tail skips -l in /proc/PPID/cmdline, exits 2 and skips TAIL" || bad "run chain-real-l (rc $rc: $out)"
 
 # --- new cases (a)-(g)
 # (a) SYG_LONG_JOB_STATE_DIR=$tmp/sd puts NAME.cmd and NAME.owner under $tmp/sd, and status NAME finds it there.
