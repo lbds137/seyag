@@ -1,6 +1,6 @@
 ---
 id: TASK-136
-title: 'core rules: cut asks the Autonomy rules say are not hers (owner ruling 2026-11-23)'
+title: 'core rules: cut asks the Autonomy rules say are not the owner''s (owner ruling 2026-11-23)'
 status: To Do
 assignee: []
 created_date: '2026-11-24T04:40:00Z'
@@ -15,7 +15,7 @@ ordinal: 136000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Requested by the fleet's platform session (its TASK-324). The measurement covered 409 AskUserQuestion asks over 7 days. A Sonnet judge re-read the 119 candidates and rated 32 as should-not-ask: 18 technical choices that already had a recommendation, 11 re-confirms and 3 tool probes. Another 26 were borderline. The figures and item ids are in that session's task notes.
+Requested by a coordinating session. The measurement covered 409 AskUserQuestion asks over 7 days. A Sonnet judge re-read the 119 candidates and rated 32 as should-not-ask: 18 technical choices that already had a recommendation, 11 re-confirms and 3 tool probes. Another 26 were borderline. The figures and item ids are in that session's own task notes.
 
 Owner ruling, 2026-11-23 23:22 EST, the option picked on that session's ask: "Decide, report". The option text, which is the asking session's wording: "Pick the recommendation, say why in the report. When genuinely unsure, an optional council or advisor second opinion first, never a box to you. Product, spend, data and taste stay yours."
 

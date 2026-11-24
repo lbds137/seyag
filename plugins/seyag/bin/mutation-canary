@@ -11,7 +11,7 @@
 # OPTIONS:
 #   --fail-pattern ERE   (default '^FAIL:'; a line of probe output matching it is a failing case label)
 #   --no-baseline        (skip the unmutated run)
-#   --timeout SECS       (per probe run; default 600; 0 = none; whole number)
+#   --timeout SECS       (per probe run; default 600; 0 = none; whole number, no leading zeros, at most 9 digits)
 #
 # Exit codes (probe-red-check inversion):
 #   0  CAUGHT (probe fails under the mutation with >= 1 new failing label)
@@ -31,6 +31,7 @@
 set -uo pipefail
 usage() { sed -n '2,29p' "$0" | sed 's/^# \{0,1\}//'; }
 die() { echo "mutation-canary: $*" >&2; exit 2; }
+[ "${BASH_VERSINFO[0]}" -ge 5 ] || die "needs bash 5 or newer (EPOCHREALTIME)"
 
 [ $# -ge 1 ] || { usage >&2; exit 2; }
 
@@ -297,7 +298,7 @@ if [ "$MODE" = "restore" ]; then
 fi
 
 # Validate options and pre-run refusals before baseline or journal creation.
-[[ $TIMEOUT_SECS =~ ^[0-9]+$ ]] || die "--timeout must be a whole number: $TIMEOUT_SECS"
+[[ $TIMEOUT_SECS =~ ^(0|[1-9][0-9]{0,8})$ ]] || die "--timeout must be 0 or a whole number of seconds without leading zeros, at most 9 digits: $TIMEOUT_SECS"
 [ -n "$FAIL_PATTERN" ] || die "--fail-pattern must not be empty"
 grep -E -- "$FAIL_PATTERN" </dev/null >/dev/null 2>&1; pat_rc=$?
 [ "$pat_rc" -ne 2 ] || die "invalid --fail-pattern: $FAIL_PATTERN"
@@ -334,7 +335,7 @@ def die(msg):
     sys.stderr.write(f"mutation-canary: {msg}\n")
     sys.exit(2)
 
-# Check intermediate components under repo root are not symlinks
+# Reject a symlinked final target (intermediate directories are covered by the realpath-under-root check above)
 if os.path.islink(target_canon):
     die(f"target is a symlink: {display_path}")
 
@@ -472,6 +473,17 @@ if [ -n "$OWN_SID" ] && ps -o stat= --sid "$OWN_SID" >/dev/null 2>&1; then
   PS_SID_OK=1
 fi
 
+sid_has_live_member() {
+  local out line
+  out=$(ps -o stat= --sid "$1" 2>/dev/null) || return 1
+  while IFS= read -r line; do
+    if [ -n "$line" ] && [[ $line != Z* ]]; then
+      return 0
+    fi
+  done <<<"$out"
+  return 1
+}
+
 kill_child() {
   if [ -n "$CHILD_PID" ]; then
     local cpid=$CHILD_PID
@@ -485,7 +497,7 @@ kill_child() {
     # stretches with the cost of each ps fork.
     local deadline=$(( ${EPOCHREALTIME//[!0-9]/} + 5000000 ))
     if [ "$PS_SID_OK" -eq 1 ]; then
-      while [ "${EPOCHREALTIME//[!0-9]/}" -lt "$deadline" ] && ps -o stat= --sid "$cpid" 2>/dev/null | grep -qv '^Z'; do
+      while [ "${EPOCHREALTIME//[!0-9]/}" -lt "$deadline" ] && sid_has_live_member "$cpid"; do
         sleep 0.05
       done
     else
@@ -523,6 +535,10 @@ run_probe() {
   RUN_TIMED_OUT=0
   local t_start t_end elapsed_ms
   t_start=$(date +%s%N)
+  # A non-interactive shell runs `&` jobs in its own process group, so the
+  # child is not a group leader and `setsid` exec's in place: `$!` is the new
+  # session leader and `-$!` its group. If that ever changes (job control on),
+  # the group kill misses the probe.
   if [ "$TIMEOUT_SECS" -gt 0 ]; then
     setsid timeout -k 10 "$TIMEOUT_SECS" "${CMD_ARGS[@]}" </dev/null >"$out_file" 2>&1 &
   else
@@ -600,10 +616,33 @@ else:
 with open(target_canon, "rb") as f:
     data = f.read()
 
+count = 0
+start = 0
+while True:
+    idx = data.find(old_b, start)
+    if idx == -1:
+        break
+    count += 1
+    start = idx + 1
+
+if count != 1:
+    sys.stderr.write(
+        f"mutation-canary: old text occurs {count} times in {target_canon} at apply time; it changed after validation and must be unique\n"
+    )
+    sys.exit(4)
+
 mutated = data.replace(old_b, new_b, 1)
 with open(ttmp, "wb") as f:
     f.write(mutated)
-' "$tpath" "$ttmp" "$OLD_KIND" "$OLD_VAL" "$NEW_KIND" "$NEW_VAL" || { rm -f -- "$ttmp"; die "failed to write mutated file"; }
+' "$tpath" "$ttmp" "$OLD_KIND" "$OLD_VAL" "$NEW_KIND" "$NEW_VAL"
+  py_rc=$?
+  if [ "$py_rc" -eq 4 ]; then
+    rm -f -- "$ttmp"
+    exit 2
+  elif [ "$py_rc" -ne 0 ]; then
+    rm -f -- "$ttmp"
+    die "failed to write mutated file"
+  fi
   chmod --reference="$tpath" -- "$ttmp" || { rm -f -- "$ttmp"; die "chmod failed on temp file"; }
   mv -f -- "$ttmp" "$tpath" || { rm -f -- "$ttmp"; die "mv failed on $tpath"; }
 else

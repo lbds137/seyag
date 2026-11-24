@@ -28,6 +28,11 @@
 # 25. multi-file patch modifying tools/subject.sh and a second tracked file -> CAUGHT on second file, both files byte-identical
 # 26. probe restores subject itself (git checkout) and exits 0 under mutation -> SURVIVED exit 1, no changed line
 # 27. double signal during cleanup (stubborn probe ignores TERM, two TERMs 0.5 s apart) -> exit 143, restored, child gone
+# 28. --timeout 08 -> rc 2, without leading zeros, subject intact
+# 29. --timeout 1234567890 -> rc 2, without leading zeros, subject intact
+# 30. apply-time recount (probe appends second old on first run) -> rc 2, occurs 2 times at apply time, journal gone, post-baseline subject kept
+# 31. no-op patch (- and + of the same existing subject line) -> rc 2, did not change, subject intact, journal gone
+# 32. manual --restore with fabricated journal where subject differs from both .orig and .mutant -> rc 3, subject left as is, journal kept
 #
 # Usage: tests/mutation-canary.probe.sh   (from anywhere)
 
@@ -219,6 +224,17 @@ if [ -n "${STUBBORN_PID_FILE:-}" ]; then
 fi
 sleep 20
 exit 1
+PROBE
+
+cat >"$FIX/tests/recount.probe.sh" <<'PROBE'
+#!/bin/bash
+set -uo pipefail
+D=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+if [ -n "${RECOUNT_MARKER:-}" ] && [ ! -e "$RECOUNT_MARKER" ]; then
+  : >"$RECOUNT_MARKER"
+  printf '\nold\n' >>"$D/tools/subject.sh"
+fi
+exit 0
 PROBE
 
 fail=0
@@ -628,5 +644,62 @@ else
   bad "27. double TERM during cleanup: stubborn probe (${stpid:-none}) still alive"
 fi
 check_intact "27. double TERM during cleanup"
+
+# 28. --timeout 08 -> rc 2, output contains without leading zeros, subject intact
+out=$( (cd "$FIX" && bash "$TOOL" --timeout 08 --file tools/subject.sh --old old --new new -- bash tests/caught.probe.sh) 2>&1 ); rc=$?
+[ "$rc" -eq 2 ] && grep -qF "without leading zeros" <<<"$out" \
+  && ok "28. --timeout 08: refused exit 2" \
+  || bad "28. --timeout 08: rc=$rc (out: $out)"
+check_intact "28. --timeout 08"
+
+# 29. --timeout 1234567890 -> rc 2, same message, subject intact
+out=$( (cd "$FIX" && bash "$TOOL" --timeout 1234567890 --file tools/subject.sh --old old --new new -- bash tests/caught.probe.sh) 2>&1 ); rc=$?
+[ "$rc" -eq 2 ] && grep -qF "without leading zeros" <<<"$out" \
+  && ok "29. --timeout 1234567890: refused exit 2" \
+  || bad "29. --timeout 1234567890: rc=$rc (out: $out)"
+check_intact "29. --timeout 1234567890"
+
+# 30. apply-time recount: probe appends a second line old to tools/subject.sh on its first run only and exits 0 -> rc 2, occurs 2 times at apply time, journal gone, post-baseline content preserved
+rm -f "$T/recount.ran"
+cp -p "$T/subject.orig" "$T/subject.post-baseline"
+printf '\nold\n' >>"$T/subject.post-baseline"
+out=$( (cd "$FIX" && RECOUNT_MARKER="$T/recount.ran" bash "$TOOL" --file tools/subject.sh --old old --new new -- bash tests/recount.probe.sh) 2>&1 ); rc=$?
+[ "$rc" -eq 2 ] \
+  && grep -qF "occurs 2 times" <<<"$out" \
+  && grep -qF "at apply time" <<<"$out" \
+  && [ ! -e "$JDIR" ] \
+  && cmp -s "$FIX/tools/subject.sh" "$T/subject.post-baseline" \
+  && ! cmp -s "$FIX/tools/subject.sh" "$T/subject.orig" \
+  && ok "30. apply-time recount: exit 2, journal gone, post-baseline subject preserved" \
+  || bad "30. apply-time recount: rc=$rc (out: $out)"
+cp -p "$T/subject.orig" "$FIX/tools/subject.sh"
+check_intact "30. apply-time recount"
+
+# 31. no-op patch (- and + of the same existing subject line) -> rc 2, output contains did not change, subject intact, journal gone
+sed 's/^+MSG=new$/+MSG=old/' "$T/mod.patch" >"$T/noop.patch"
+out=$( (cd "$FIX" && bash "$TOOL" --patch "$T/noop.patch" -- bash tests/caught.probe.sh) 2>&1 ); rc=$?
+[ "$rc" -eq 2 ] && grep -qF "did not change" <<<"$out" \
+  && ok "31. no-op patch: refused exit 2 with did not change" \
+  || bad "31. no-op patch: rc=$rc (out: $out)"
+check_intact "31. no-op patch"
+
+# 32. manual --restore with a fabricated journal (0.path, 0.orig, 0.mutant, pid 99999999) where the subject differs from both -> rc 3, subject left as is, journal kept
+mkdir -p "$JDIR"
+printf '99999999\n' >"$JDIR/pid"
+printf '%s\n' "$SUBJECT_CANON" >"$JDIR/0.path"
+cp -p "$T/subject.orig" "$JDIR/0.orig"
+sed 's/MSG=old/MSG=new/' "$T/subject.orig" >"$JDIR/0.mutant"
+printf 'drifted from both orig and mutant' >"$FIX/tools/subject.sh"
+out=$( (cd "$FIX" && bash "$TOOL" --restore) 2>&1 ); rc=$?
+[ "$rc" -eq 3 ] \
+  && grep -qF "changed during the run; not restored; original kept at" <<<"$out" \
+  && [ "$(cat "$FIX/tools/subject.sh")" = "drifted from both orig and mutant" ] \
+  && [ -d "$JDIR" ] && [ -f "$JDIR/0.orig" ] && cmp -s "$JDIR/0.orig" "$T/subject.orig" \
+  && ok "32. manual --restore with drifted subject: exit 3, subject left as is, journal kept" \
+  || bad "32. manual --restore with drifted subject: rc=$rc (out: $out)"
+cp -p "$T/subject.orig" "$FIX/tools/subject.sh"
+rm -f "$JDIR/pid" "$JDIR/0.path" "$JDIR/0.orig" "$JDIR/0.mutant"
+rmdir "$JDIR" 2>/dev/null || true
+check_intact "32. manual --restore with drifted subject"
 
 exit "$fail"
