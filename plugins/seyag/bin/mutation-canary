@@ -1,0 +1,665 @@
+#!/bin/bash
+# mutation-canary: apply one named mutation in place, run a probe command,
+# report the new failing case labels, and restore the file byte-identical.
+#
+# Usage:
+#   mutation-canary [OPTIONS] --file PATH (--old TEXT | --old-file F) (--new TEXT | --new-file F) -- CMD [ARG...]
+#   mutation-canary [OPTIONS] --patch FILE -- CMD [ARG...]
+#   mutation-canary --restore
+#   mutation-canary -h|--help
+#
+# OPTIONS:
+#   --fail-pattern ERE   (default '^FAIL:'; a line of probe output matching it is a failing case label)
+#   --no-baseline        (skip the unmutated run)
+#   --timeout SECS       (per probe run; default 600; 0 = none; whole number)
+#
+# Exit codes (probe-red-check inversion):
+#   0  CAUGHT (probe fails under the mutation with >= 1 new failing label)
+#      or --restore / --help succeeded
+#   1  SURVIVED (probe passes under the mutation; vacuous canary)
+#   2  INCONCLUSIVE, TIMEOUT, BASELINE RED, usage error, or pre-run refusal
+#   3  restore problem (file changed during the run or restore verification failed;
+#      journal kept under $(git rev-parse --git-dir)/mutation-canary)
+#
+# CMD runs with stdin from /dev/null in its own session (setsid); at exit or on
+# a signal its whole process group gets TERM and then KILL (procps ps --sid
+# gives the fast non-zombie grace poll).
+# Warning: the mutation is live in the working tree while CMD runs, so anything
+# else reading this tree (a parallel test run, a live-loaded plugin checkout)
+# sees the mutant; run it in a worktree nothing else executes from.
+
+set -uo pipefail
+usage() { sed -n '2,29p' "$0" | sed 's/^# \{0,1\}//'; }
+die() { echo "mutation-canary: $*" >&2; exit 2; }
+
+[ $# -ge 1 ] || { usage >&2; exit 2; }
+
+RESTORE_MODE=0
+SEEN_FILE=0
+FILE_ARG=""
+SEEN_OLD=0
+OLD_KIND=""
+OLD_VAL=""
+SEEN_NEW=0
+NEW_KIND=""
+NEW_VAL=""
+SEEN_PATCH=0
+PATCH_ARG=""
+SEEN_FAIL_PATTERN=0
+FAIL_PATTERN="^FAIL:"
+SEEN_NO_BASELINE=0
+NO_BASELINE=0
+SEEN_TIMEOUT=0
+TIMEOUT_SECS="600"
+SEEN_DASH_DASH=0
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h | --help)
+      usage
+      exit 0
+      ;;
+    --restore)
+      [ "$RESTORE_MODE" -eq 0 ] || { usage >&2; exit 2; }
+      RESTORE_MODE=1
+      shift
+      ;;
+    --file)
+      [ $# -ge 2 ] && [ "$SEEN_FILE" -eq 0 ] || { usage >&2; exit 2; }
+      SEEN_FILE=1
+      FILE_ARG=$2
+      shift 2
+      ;;
+    --old)
+      [ $# -ge 2 ] && [ "$SEEN_OLD" -eq 0 ] || { usage >&2; exit 2; }
+      SEEN_OLD=1
+      OLD_KIND="text"
+      OLD_VAL=$2
+      shift 2
+      ;;
+    --old-file)
+      [ $# -ge 2 ] && [ "$SEEN_OLD" -eq 0 ] || { usage >&2; exit 2; }
+      SEEN_OLD=1
+      OLD_KIND="file"
+      OLD_VAL=$2
+      shift 2
+      ;;
+    --new)
+      [ $# -ge 2 ] && [ "$SEEN_NEW" -eq 0 ] || { usage >&2; exit 2; }
+      SEEN_NEW=1
+      NEW_KIND="text"
+      NEW_VAL=$2
+      shift 2
+      ;;
+    --new-file)
+      [ $# -ge 2 ] && [ "$SEEN_NEW" -eq 0 ] || { usage >&2; exit 2; }
+      SEEN_NEW=1
+      NEW_KIND="file"
+      NEW_VAL=$2
+      shift 2
+      ;;
+    --patch)
+      [ $# -ge 2 ] && [ "$SEEN_PATCH" -eq 0 ] || { usage >&2; exit 2; }
+      SEEN_PATCH=1
+      PATCH_ARG=$2
+      shift 2
+      ;;
+    --fail-pattern)
+      [ $# -ge 2 ] && [ "$SEEN_FAIL_PATTERN" -eq 0 ] || { usage >&2; exit 2; }
+      SEEN_FAIL_PATTERN=1
+      FAIL_PATTERN=$2
+      shift 2
+      ;;
+    --no-baseline)
+      [ "$SEEN_NO_BASELINE" -eq 0 ] || { usage >&2; exit 2; }
+      SEEN_NO_BASELINE=1
+      NO_BASELINE=1
+      shift
+      ;;
+    --timeout)
+      [ $# -ge 2 ] && [ "$SEEN_TIMEOUT" -eq 0 ] || { usage >&2; exit 2; }
+      SEEN_TIMEOUT=1
+      TIMEOUT_SECS=$2
+      shift 2
+      ;;
+    --)
+      SEEN_DASH_DASH=1
+      shift
+      break
+      ;;
+    *)
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+
+MODE=""
+if [ "$RESTORE_MODE" -eq 1 ]; then
+  if [ "$SEEN_FILE" -ne 0 ] || [ "$SEEN_OLD" -ne 0 ] || [ "$SEEN_NEW" -ne 0 ] \
+    || [ "$SEEN_PATCH" -ne 0 ] || [ "$SEEN_FAIL_PATTERN" -ne 0 ] \
+    || [ "$SEEN_NO_BASELINE" -ne 0 ] || [ "$SEEN_TIMEOUT" -ne 0 ] \
+    || [ "$SEEN_DASH_DASH" -ne 0 ] || [ $# -ne 0 ]; then
+    usage >&2
+    exit 2
+  fi
+  MODE="restore"
+else
+  [ "$SEEN_DASH_DASH" -eq 1 ] && [ $# -ge 1 ] || { usage >&2; exit 2; }
+  if [ "$SEEN_FILE" -eq 1 ] && [ "$SEEN_OLD" -eq 1 ] && [ "$SEEN_NEW" -eq 1 ] && [ "$SEEN_PATCH" -eq 0 ]; then
+    MODE="literal"
+  elif [ "$SEEN_PATCH" -eq 1 ] && [ "$SEEN_FILE" -eq 0 ] && [ "$SEEN_OLD" -eq 0 ] && [ "$SEEN_NEW" -eq 0 ]; then
+    MODE="patch"
+  else
+    usage >&2
+    exit 2
+  fi
+fi
+
+CMD_ARGS=("$@")
+CMD_DISPLAY="$*"
+
+if ! ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || [ -z "$ROOT" ]; then
+  die "not inside a git repo"
+fi
+ROOT_CANON=$(realpath -- "$ROOT" 2>/dev/null) || ROOT_CANON=$ROOT
+GIT_DIR_RAW=$(git rev-parse --git-dir 2>/dev/null) || die "cannot resolve git dir"
+GIT_DIR=$(realpath -- "$GIT_DIR_RAW" 2>/dev/null) || die "cannot canonicalize git dir"
+JOURNAL_DIR="$GIT_DIR/mutation-canary"
+
+pid_is_alive() {
+  local p=$1
+  [[ $p =~ ^[0-9]+$ ]] || return 1
+  kill -0 "$p" 2>/dev/null || return 1
+  if [ -r "/proc/$p/status" ]; then
+    ! grep -q '^State:[[:space:]]*Z' "/proc/$p/status" 2>/dev/null || return 1
+  fi
+  return 0
+}
+
+check_existing_journal_and_die() {
+  local rec_pid=""
+  if [ -f "$JOURNAL_DIR/pid" ]; then
+    rec_pid=$(tr -d '[:space:]' <"$JOURNAL_DIR/pid" 2>/dev/null || true)
+  fi
+  if [ -n "$rec_pid" ] && pid_is_alive "$rec_pid"; then
+    die "another mutation-canary run is live in this worktree (pid $rec_pid)"
+  else
+    die "a previous run left a journal at $JOURNAL_DIR; run mutation-canary --restore"
+  fi
+}
+
+RESTORED=0
+RESTORE_RC=0
+JOURNAL_ACTIVE=0
+PENDING_SIG=""
+IN_CLEANUP=0
+
+finish_exit() {
+  local code=$1
+  if [ "$RESTORE_RC" -eq 3 ]; then
+    exit 3
+  elif [ -n "$PENDING_SIG" ]; then
+    exit "$PENDING_SIG"
+  else
+    exit "$code"
+  fi
+}
+
+restore_targets() {
+  local rmode=$1
+  trap 'PENDING_SIG=${PENDING_SIG:-130}' INT
+  trap 'PENDING_SIG=${PENDING_SIG:-143}' TERM HUP
+  RESTORE_RC=0
+  local i=0
+  local tpath orig mutant tdir tbase ttmp t_mode o_mode
+  while [ -f "$JOURNAL_DIR/$i.path" ]; do
+    IFS= read -r tpath <"$JOURNAL_DIR/$i.path" || tpath=""
+    orig="$JOURNAL_DIR/$i.orig"
+    mutant="$JOURNAL_DIR/$i.mutant"
+    if [ -z "$tpath" ] || [ ! -f "$orig" ]; then
+      i=$((i + 1))
+      continue
+    fi
+    t_mode=$(stat -c %a -- "$tpath" 2>/dev/null || true)
+    o_mode=$(stat -c %a -- "$orig" 2>/dev/null || true)
+    if cmp -s -- "$tpath" "$orig" && [ -n "$t_mode" ] && [ "$t_mode" = "$o_mode" ]; then
+      echo "restore: byte-identical $tpath"
+      i=$((i + 1))
+      continue
+    fi
+    if [ "$rmode" = "live" ]; then
+      if [ -f "$mutant" ] && ! cmp -s -- "$tpath" "$mutant"; then
+        echo "mutation-canary: $tpath changed during the run; not restored; original kept at $orig" >&2
+        RESTORE_RC=3
+        i=$((i + 1))
+        continue
+      fi
+    else
+      if [ -f "$mutant" ] && ! cmp -s -- "$tpath" "$orig" && ! cmp -s -- "$tpath" "$mutant"; then
+        echo "mutation-canary: $tpath changed during the run; not restored; original kept at $orig" >&2
+        RESTORE_RC=3
+        i=$((i + 1))
+        continue
+      fi
+    fi
+    tdir=$(dirname -- "$tpath")
+    tbase=$(basename -- "$tpath")
+    ttmp="$tdir/.$tbase.mutation-canary.tmp"
+    if ! cp -p -- "$orig" "$ttmp" 2>/dev/null || ! mv -f -- "$ttmp" "$tpath" 2>/dev/null; then
+      rm -f -- "$ttmp" 2>/dev/null || true
+      echo "mutation-canary: restore of $tpath is not byte-identical; original kept at $orig" >&2
+      RESTORE_RC=3
+      i=$((i + 1))
+      continue
+    fi
+    t_mode=$(stat -c %a -- "$tpath" 2>/dev/null || true)
+    o_mode=$(stat -c %a -- "$orig" 2>/dev/null || true)
+    if cmp -s -- "$tpath" "$orig" && [ -n "$t_mode" ] && [ "$t_mode" = "$o_mode" ]; then
+      echo "restore: byte-identical $tpath"
+    else
+      echo "mutation-canary: restore of $tpath is not byte-identical; original kept at $orig" >&2
+      RESTORE_RC=3
+    fi
+    i=$((i + 1))
+  done
+  if [ "$RESTORE_RC" -eq 0 ]; then
+    rm -f -- "$JOURNAL_DIR/pid" "$JOURNAL_DIR"/*.path "$JOURNAL_DIR"/*.orig "$JOURNAL_DIR"/*.orig.tmp "$JOURNAL_DIR"/*.mutant "$JOURNAL_DIR"/*.mutant.tmp 2>/dev/null || true
+    if ! rmdir "$JOURNAL_DIR" 2>/dev/null; then
+      echo "mutation-canary: failed to remove journal at $JOURNAL_DIR" >&2
+      RESTORE_RC=3
+    fi
+  fi
+  RESTORED=1
+  if [ "$IN_CLEANUP" -eq 0 ]; then
+    trap 'exit 130' INT
+    trap 'exit 143' TERM HUP
+  fi
+}
+
+if [ "$MODE" = "restore" ]; then
+  if [ ! -d "$JOURNAL_DIR" ]; then
+    echo "mutation-canary: no journal; nothing to restore"
+    exit 0
+  fi
+  rec_pid=""
+  if [ -f "$JOURNAL_DIR/pid" ]; then
+    rec_pid=$(tr -d '[:space:]' <"$JOURNAL_DIR/pid" 2>/dev/null || true)
+  fi
+  if [ -n "$rec_pid" ] && pid_is_alive "$rec_pid"; then
+    die "another mutation-canary run is live in this worktree (pid $rec_pid)"
+  fi
+  restore_targets manual
+  if [ "$RESTORE_RC" -eq 0 ]; then
+    echo "mutation-canary: restored"
+  fi
+  finish_exit 0
+fi
+
+# Validate options and pre-run refusals before baseline or journal creation.
+[[ $TIMEOUT_SECS =~ ^[0-9]+$ ]] || die "--timeout must be a whole number: $TIMEOUT_SECS"
+[ -n "$FAIL_PATTERN" ] || die "--fail-pattern must not be empty"
+grep -E -- "$FAIL_PATTERN" </dev/null >/dev/null 2>&1; pat_rc=$?
+[ "$pat_rc" -ne 2 ] || die "invalid --fail-pattern: $FAIL_PATTERN"
+
+if [ -e "$JOURNAL_DIR" ]; then
+  check_existing_journal_and_die
+fi
+
+TARGETS=()
+PATCH_ABS=""
+
+if [ "$MODE" = "literal" ]; then
+  [ -n "$FILE_ARG" ] || die "target file path is empty"
+  if [ -L "$FILE_ARG" ]; then
+    die "target is a symlink: $FILE_ARG"
+  fi
+  if [ ! -f "$FILE_ARG" ]; then
+    die "target is not a regular file: $FILE_ARG"
+  fi
+  TARGET_CANON=$(realpath -- "$FILE_ARG" 2>/dev/null) || die "cannot resolve target path: $FILE_ARG"
+  case $TARGET_CANON in
+    "$ROOT_CANON"/*) ;;
+    *) die "target path is outside the repository: $FILE_ARG" ;;
+  esac
+  if [ -L "$TARGET_CANON" ] || [ ! -f "$TARGET_CANON" ]; then
+    die "target is not a regular file: $FILE_ARG"
+  fi
+  python3 -I -c '
+import os, sys
+
+target_canon, display_path, old_kind, old_val, new_kind, new_val = sys.argv[1:7]
+
+def die(msg):
+    sys.stderr.write(f"mutation-canary: {msg}\n")
+    sys.exit(2)
+
+# Check intermediate components under repo root are not symlinks
+if os.path.islink(target_canon):
+    die(f"target is a symlink: {display_path}")
+
+if old_kind == "file":
+    if not os.path.isfile(old_val):
+        die(f"cannot read --old-file: {old_val}")
+    try:
+        with open(old_val, "rb") as f:
+            old_b = f.read()
+    except OSError as e:
+        die(f"cannot read --old-file {old_val}: {e}")
+else:
+    old_b = os.fsencode(old_val)
+
+if new_kind == "file":
+    if not os.path.isfile(new_val):
+        die(f"cannot read --new-file: {new_val}")
+    try:
+        with open(new_val, "rb") as f:
+            new_b = f.read()
+    except OSError as e:
+        die(f"cannot read --new-file {new_val}: {e}")
+else:
+    new_b = os.fsencode(new_val)
+
+if len(old_b) == 0:
+    die("old text must not be empty")
+if old_b == new_b:
+    die("old text and new text are identical")
+
+try:
+    with open(target_canon, "rb") as f:
+        data = f.read()
+except OSError as e:
+    die(f"cannot read {display_path}: {e}")
+
+count = 0
+start = 0
+while True:
+    idx = data.find(old_b, start)
+    if idx == -1:
+        break
+    count += 1
+    start = idx + 1
+
+if count == 0:
+    die(f"old text not found in {display_path}")
+if count > 1:
+    die(f"old text occurs {count} times in {display_path}; it must be unique")
+' "$TARGET_CANON" "$FILE_ARG" "$OLD_KIND" "$OLD_VAL" "$NEW_KIND" "$NEW_VAL" || exit 2
+  TARGETS=("$TARGET_CANON")
+else
+  [ -n "$PATCH_ARG" ] && [ -f "$PATCH_ARG" ] && [ -r "$PATCH_ARG" ] || die "cannot read patch file: $PATCH_ARG"
+  PATCH_ABS=$(realpath -- "$PATCH_ARG" 2>/dev/null) || die "cannot resolve patch file: $PATCH_ARG"
+  SUM_OUT=$(git -C "$ROOT" apply --summary "$PATCH_ABS" 2>/dev/null) || die "git apply --summary failed for $PATCH_ARG"
+  PATCH_TARGETS_OUT=$(git -C "$ROOT" apply --numstat -z "$PATCH_ABS" 2>/dev/null | python3 -I -c '
+import os, sys
+
+root, root_canon, patch_arg, sum_out = sys.argv[1:5]
+num_bytes = sys.stdin.buffer.read()
+
+def die(msg):
+    sys.stderr.write(f"mutation-canary: {msg}\n")
+    sys.exit(2)
+
+for line in sum_out.splitlines():
+    s = line.lstrip()
+    for prefix in ("create ", "delete ", "rename ", "copy ", "mode change "):
+        if s.startswith(prefix):
+            die(f"patch must only modify existing files in place ({s})")
+
+parts = num_bytes.split(b"\0")
+if parts and parts[-1] == b"":
+    parts.pop()
+if not parts:
+    die(f"patch modifies no files: {patch_arg}")
+
+seen = []
+for rec in parts:
+    if b"\t" not in rec:
+        die(f"unsupported rename or copy entry in patch: {patch_arg}")
+    fields = rec.split(b"\t", 2)
+    if len(fields) != 3:
+        die(f"malformed numstat entry in patch: {patch_arg}")
+    added_b, deleted_b, rel_b = fields
+    if not rel_b or b"\n" in rel_b:
+        die(f"unsupported path in patch: {patch_arg}")
+    try:
+        rel = rel_b.decode("utf-8")
+    except UnicodeDecodeError:
+        die(f"non-UTF-8 path in patch: {patch_arg}")
+    if added_b == b"-" or deleted_b == b"-":
+        die(f"binary patch entry is not supported: {rel}")
+    if os.path.isabs(rel):
+        die(f"absolute path in patch is not allowed: {rel}")
+    cur = root
+    for comp in rel.split("/"):
+        if comp in ("", ".", ".."):
+            die(f"invalid path component in patch: {rel}")
+        cur = os.path.join(cur, comp)
+        if os.path.islink(cur):
+            die(f"patched path is a symlink: {rel}")
+    if not os.path.isfile(cur):
+        die(f"patched path is not a regular file: {rel}")
+    canon = os.path.realpath(cur)
+    if not (canon.startswith(root_canon + "/") and os.path.isfile(canon) and not os.path.islink(canon)):
+        die(f"patched path is outside the repository: {rel}")
+    if canon not in seen:
+        seen.append(canon)
+
+for p in seen:
+    print(p)
+' "$ROOT" "$ROOT_CANON" "$PATCH_ARG" "$SUM_OUT") || exit 2
+  git -C "$ROOT" apply --check "$PATCH_ABS" >/dev/null 2>&1 || die "git apply --check failed for $PATCH_ARG"
+  while IFS= read -r line; do
+    [ -n "$line" ] && TARGETS+=("$line")
+  done <<<"$PATCH_TARGETS_OUT"
+  [ "${#TARGETS[@]}" -ge 1 ] || die "patch modifies no files: $PATCH_ARG"
+fi
+
+BASE_OUT=$(mktemp) || die "mktemp failed"
+MUT_OUT=$(mktemp) || { rm -f -- "$BASE_OUT"; die "mktemp failed"; }
+BASE_LABELS=$(mktemp) || { rm -f -- "$BASE_OUT" "$MUT_OUT"; die "mktemp failed"; }
+MUT_LABELS=$(mktemp) || { rm -f -- "$BASE_OUT" "$MUT_OUT" "$BASE_LABELS"; die "mktemp failed"; }
+NEW_LABELS=$(mktemp) || { rm -f -- "$BASE_OUT" "$MUT_OUT" "$BASE_LABELS" "$MUT_LABELS"; die "mktemp failed"; }
+
+CHILD_PID=""
+RUN_RC=0
+RUN_TIMED_OUT=0
+PS_SID_OK=0
+# Probe with this shell's own session id: it is rarely a session leader, and
+# procps ps exits 1 when no process matches, so --sid "$$" would always fail.
+OWN_SID=$(ps -o sid= -p "$$" 2>/dev/null | tr -d '[:space:]')
+if [ -n "$OWN_SID" ] && ps -o stat= --sid "$OWN_SID" >/dev/null 2>&1; then
+  PS_SID_OK=1
+fi
+
+kill_child() {
+  if [ -n "$CHILD_PID" ]; then
+    local cpid=$CHILD_PID
+    CHILD_PID=""
+    kill -TERM -- "-$cpid" 2>/dev/null || kill -TERM "$cpid" 2>/dev/null || true
+    # Poll for live (non-zombie) members of the probe's session: the leader
+    # stays a zombie until the wait below reaps it, and kill -0 succeeds on a
+    # zombie, so polling with kill -0 would always burn the whole grace.
+    # The grace is 5 s of wall clock (EPOCHREALTIME, microseconds; the
+    # separator is locale-dependent, so strip non-digits): an iteration count
+    # stretches with the cost of each ps fork.
+    local deadline=$(( ${EPOCHREALTIME//[!0-9]/} + 5000000 ))
+    if [ "$PS_SID_OK" -eq 1 ]; then
+      while [ "${EPOCHREALTIME//[!0-9]/}" -lt "$deadline" ] && ps -o stat= --sid "$cpid" 2>/dev/null | grep -qv '^Z'; do
+        sleep 0.05
+      done
+    else
+      while [ "${EPOCHREALTIME//[!0-9]/}" -lt "$deadline" ] && kill -0 -- "-$cpid" 2>/dev/null; do
+        sleep 0.05
+      done
+    fi
+    kill -KILL -- "-$cpid" 2>/dev/null || true
+    wait "$cpid" 2>/dev/null || true
+  fi
+}
+
+cleanup() {
+  local exit_rc=$?
+  trap 'PENDING_SIG=${PENDING_SIG:-130}' INT
+  trap 'PENDING_SIG=${PENDING_SIG:-143}' TERM HUP
+  IN_CLEANUP=1
+  kill_child
+  if [ "$JOURNAL_ACTIVE" -eq 1 ] && [ "$RESTORED" -eq 0 ]; then
+    restore_targets live
+  fi
+  rm -f -- "$BASE_OUT" "$MUT_OUT" "$BASE_LABELS" "$MUT_LABELS" "$NEW_LABELS" 2>/dev/null || true
+  # The first signal wins: a trap's own exit 130/143 beats one deferred later.
+  [ "$exit_rc" -ge 129 ] && [ "$exit_rc" -le 159 ] && PENDING_SIG=$exit_rc
+  finish_exit "$exit_rc"
+}
+
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM HUP
+
+run_probe() {
+  local out_file=$1
+  RUN_RC=0
+  RUN_TIMED_OUT=0
+  local t_start t_end elapsed_ms
+  t_start=$(date +%s%N)
+  if [ "$TIMEOUT_SECS" -gt 0 ]; then
+    setsid timeout -k 10 "$TIMEOUT_SECS" "${CMD_ARGS[@]}" </dev/null >"$out_file" 2>&1 &
+  else
+    setsid "${CMD_ARGS[@]}" </dev/null >"$out_file" 2>&1 &
+  fi
+  CHILD_PID=$!
+  local cpid=$CHILD_PID
+  wait "$cpid"
+  RUN_RC=$?
+  t_end=$(date +%s%N)
+  CHILD_PID=""
+  kill -KILL -- "-$cpid" 2>/dev/null || true
+  elapsed_ms=$(( (t_end - t_start) / 1000000 ))
+  if [ "$TIMEOUT_SECS" -gt 0 ] \
+    && { [ "$RUN_RC" -eq 124 ] || [ "$RUN_RC" -eq 137 ]; } \
+    && [ "$elapsed_ms" -ge $((TIMEOUT_SECS * 1000)) ]; then
+    RUN_TIMED_OUT=1
+  fi
+}
+
+# Baseline run (before journal creation)
+if [ "$NO_BASELINE" -eq 0 ]; then
+  run_probe "$BASE_OUT"
+  if [ "$RUN_TIMED_OUT" -eq 1 ] || [ "$RUN_RC" -ne 0 ]; then
+    echo "BASELINE RED: $CMD_DISPLAY fails unmutated (rc $RUN_RC); a canary needs a green baseline"
+    tail -n 15 -- "$BASE_OUT"
+    echo "mutation-canary: baseline red"
+    exit 2
+  fi
+  echo "baseline: green"
+  grep -a -E -- "$FAIL_PATTERN" "$BASE_OUT" >"$BASE_LABELS" 2>/dev/null || true
+fi
+
+# Atomic journal creation
+if ! mkdir "$JOURNAL_DIR" 2>/dev/null; then
+  check_existing_journal_and_die
+fi
+printf '%s\n' "$$" >"$JOURNAL_DIR/pid"
+JOURNAL_ACTIVE=1
+echo "mutation-canary: journal $JOURNAL_DIR" >&2
+
+idx=0
+for tpath in "${TARGETS[@]}"; do
+  printf '%s\n' "$tpath" >"$JOURNAL_DIR/$idx.path"
+  if ! cp -p -- "$tpath" "$JOURNAL_DIR/$idx.orig.tmp" \
+    || ! mv -f -- "$JOURNAL_DIR/$idx.orig.tmp" "$JOURNAL_DIR/$idx.orig"; then
+    die "failed to back up $tpath"
+  fi
+  idx=$((idx + 1))
+done
+
+# Apply mutation
+if [ "$MODE" = "literal" ]; then
+  tpath=${TARGETS[0]}
+  tdir=$(dirname -- "$tpath")
+  tbase=$(basename -- "$tpath")
+  ttmp="$tdir/.$tbase.mutation-canary.tmp"
+  python3 -I -c '
+import os, sys
+
+target_canon, ttmp, old_kind, old_val, new_kind, new_val = sys.argv[1:7]
+
+if old_kind == "file":
+    with open(old_val, "rb") as f:
+        old_b = f.read()
+else:
+    old_b = os.fsencode(old_val)
+
+if new_kind == "file":
+    with open(new_val, "rb") as f:
+        new_b = f.read()
+else:
+    new_b = os.fsencode(new_val)
+
+with open(target_canon, "rb") as f:
+    data = f.read()
+
+mutated = data.replace(old_b, new_b, 1)
+with open(ttmp, "wb") as f:
+    f.write(mutated)
+' "$tpath" "$ttmp" "$OLD_KIND" "$OLD_VAL" "$NEW_KIND" "$NEW_VAL" || { rm -f -- "$ttmp"; die "failed to write mutated file"; }
+  chmod --reference="$tpath" -- "$ttmp" || { rm -f -- "$ttmp"; die "chmod failed on temp file"; }
+  mv -f -- "$ttmp" "$tpath" || { rm -f -- "$ttmp"; die "mv failed on $tpath"; }
+else
+  git -C "$ROOT" apply "$PATCH_ABS" || die "git apply failed for $PATCH_ARG"
+fi
+
+idx=0
+for tpath in "${TARGETS[@]}"; do
+  if ! cp -p -- "$tpath" "$JOURNAL_DIR/$idx.mutant.tmp" \
+    || ! mv -f -- "$JOURNAL_DIR/$idx.mutant.tmp" "$JOURNAL_DIR/$idx.mutant"; then
+    die "failed to record mutant snapshot for $tpath"
+  fi
+  idx=$((idx + 1))
+done
+
+idx=0
+for tpath in "${TARGETS[@]}"; do
+  if cmp -s -- "$tpath" "$JOURNAL_DIR/$idx.orig"; then
+    restore_targets live
+    echo "mutation-canary: the mutation did not change $tpath" >&2
+    finish_exit 2
+  fi
+  idx=$((idx + 1))
+done
+
+# Mutant run
+run_probe "$MUT_OUT"
+grep -a -E -- "$FAIL_PATTERN" "$MUT_OUT" >"$MUT_LABELS" 2>/dev/null || true
+
+if [ -s "$BASE_LABELS" ]; then
+  grep -a -vxFf "$BASE_LABELS" "$MUT_LABELS" >"$NEW_LABELS" 2>/dev/null || true
+else
+  cp -- "$MUT_LABELS" "$NEW_LABELS"
+fi
+NEW_COUNT=$(grep -a -c '^' "$NEW_LABELS" 2>/dev/null || true)
+
+if [ "$RUN_TIMED_OUT" -eq 1 ]; then
+  echo "TIMEOUT: $CMD_DISPLAY did not finish within $TIMEOUT_SECS s under the mutation"
+  FINAL_LINE="mutation-canary: timeout"
+  VERDICT_RC=2
+elif [ "$RUN_RC" -ne 0 ] && [ "$NEW_COUNT" -ge 1 ]; then
+  echo "CAUGHT: $CMD_DISPLAY fails under the mutation (rc $RUN_RC, $NEW_COUNT new failing lines)"
+  cat -- "$NEW_LABELS"
+  FINAL_LINE="mutation-canary: caught"
+  VERDICT_RC=0
+elif [ "$RUN_RC" -eq 0 ]; then
+  echo "SURVIVED: $CMD_DISPLAY passes under the mutation; a vacuous canary: the mutated code is not on the path $CMD_DISPLAY runs, or no assertion covers it"
+  FINAL_LINE="mutation-canary: survived"
+  VERDICT_RC=1
+else
+  echo "INCONCLUSIVE: $CMD_DISPLAY failed (rc $RUN_RC) with no new line matching $FAIL_PATTERN; it may have died before any assertion"
+  tail -n 15 -- "$MUT_OUT"
+  FINAL_LINE="mutation-canary: inconclusive"
+  VERDICT_RC=2
+fi
+
+restore_targets live
+echo "$FINAL_LINE"
+finish_exit "$VERDICT_RC"
