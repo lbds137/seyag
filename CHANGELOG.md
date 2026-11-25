@@ -2,6 +2,27 @@
 
 All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY-MM-DD>` section per released version; under it, `###` categories in fixed order — Breaking Changes, Features, Bug Fixes, Improvements, Chores, Tests — empty ones omitted; items are `- **scope:** description (#PR)`, written from the version's merged commit subjects.
 
+## 0.3.226 - 2026-11-25
+
+### Features
+- **long-job:** `run --heavy` for a suite, gate or e2e run: inside the unit it queues for `gate-lock`'s machine-wide lock, then waits for memory (default `--wait-mem 900`, counted from taking the lock), then for the CPU load (`load-gate --wait`; a non-zero exit runs `CMD` anyway and logs it), then runs `CMD` with `SYG_GATE_LOCK_FILE` set to a per-job `NAME@gate.lock` so a nested `gate-lock` does not deadlock. The caller's `SYG_GATE_LOCK_FILE` and `SYG_LOAD_GATE_1M`/`5M` are forwarded into the unit; test seam `SYG_LONG_JOB_LOAD_GATE` (TASK-145, TASK-160 item 3).
+- **claude-role:** stamps `status_at` on every `--set status=` write (unchanged text too) and exposes it in `--json`; a stamp line the tool adds (`status_at` or `updated`) doesn't count as growth for the cap (TASK-170, #422).
+
+### Bug Fixes
+- **probe-red-check:** now counts two-space `FAIL  <label>` lines as FAIL lines, so a red from those probes reads RED, not INCONCLUSIVE (TASK-155, #418).
+- **mutation-canary:** the default `--fail-pattern` now also matches two-space `FAIL  ` lines, the same pattern probe-red-check uses (TASK-164, #420).
+- **claude-role:** writes cap archives into an `archive/` subfolder of the roles dir, and the role listings skip dated `*-archive-YYYY-MM-DD.md` copies, so an archive copy with frontmatter no longer shows as a second role (TASK-140, #421).
+- **fixup-push:** `--resolved`: the remote commit-count mismatch has its own refusal message, and probes v18/v19 cover the refusal side of the base-path skip and the count mismatch. v16/v17 now check that the rebase really conflicted. claude-role's cap-guard stamp allowance is pinned for a missing `updated:` line (TASK-163, #423).
+- **load-gate, mem-gate:** the top-3 process list keeps a process name with a space whole; load-gate prints limits without leading zeros and its `--wait` synopsis lists `--interval` and `--owner` (TASK-149, #425).
+
+### Improvements
+- **scope-drift:** refuses bash < 4.4 and an unborn HEAD by name; labels a reduced base "(fork point of REF)"; matches the Files heading case-insensitively and strips leading `./`; reports more manifests (Gradle, Maven, .NET, Deno, Mix, SwiftPM, go.work, `*.lock`), binary files as (binary), index-deleted files as deletions, and failed reads as ?; documents its config sources (TASK-150, #426).
+- **scope-drift:** binary manifests skip the `-U0` read; `libs.versions.toml`, `*.fsproj`, `*.vbproj` and `Directory.Packages.props` count as manifests; the shallow-clone fallback warning no longer repeats "shallow clone" (TASK-172, #429).
+
+### Tests
+- **probes:** fixup-push v19 no longer depends on an earlier case's REAL_GIT; claude-role's over-cap-without-`updated:` case proves the fixture is over the cap and checks the write byte-exact (TASK-171, #424).
+- **probes:** the safe-worktree-clean probe splits in two (new `tests/safe-worktree-clean-apply-hold.probe.sh`, shared fixture sourced from `tests/safe-worktree-clean-fixture.sh`), solo ~95 s and ~131 s against the 600 s per-probe cap; long-job's `--poll` check and worker-sandbox's wall-knob check drop wall-clock bounds that only measured load (TASK-49, #427).
+
 ## 0.3.225 - 2026-11-25
 
 ### Features
