@@ -653,5 +653,59 @@ else
   bad "case 35: rc=$rc out=$(out) err=$(err)"
 fi
 
+# 36. Shallow fallback: depth-1 clone where merge-base origin/main HEAD fails falls back to REF as given.
+git -C "$wt" checkout -q -b side "$base"
+echo "a2" > "$wt/src/a.sh"
+git -C "$wt" add src/a.sh
+git -C "$wt" commit -qm "side in-scope a"
+git -C "$wt" checkout -q main
+echo "lib2" > "$wt/lib/x/y.sh"
+git -C "$wt" add lib/x/y.sh
+git -C "$wt" commit -qm "main moved on"
+git clone -q --depth 1 --no-single-branch "file://$wt" "$tmp/shallow"
+git -C "$tmp/shallow" checkout -q side
+if git -C "$tmp/shallow" merge-base origin/main HEAD >/dev/null 2>&1; then
+  git -C "$wt" checkout -q main
+  reset_wt
+  git -C "$wt" branch -q -D side
+  rm -rf "$tmp/shallow"
+  bad "case 36: git merge-base origin/main HEAD unexpectedly succeeded in shallow clone"
+else
+  run 5 "$SD" --spec "$tmp/spec1.md" --base origin/main --worktree "$tmp/shallow"
+  rc36=$rc
+  out36=$(out)
+  err36=$(err)
+  git -C "$wt" checkout -q main
+  reset_wt
+  git -C "$wt" branch -q -D side
+  rm -rf "$tmp/shallow"
+  if [ "$rc36" = 1 ] \
+    && grep -qxF "scope-drift: out of scope (1):" <<<"$out36" \
+    && grep -qxF "  lib/x/y.sh" <<<"$out36" \
+    && grep -qF "shallow clone: no merge-base" <<<"$err36"; then
+    ok "case 36: shallow clone with no merge-base falls back to --base ref as given with warning"
+  else
+    bad "case 36: rc=$rc36 out=$out36 err=$err36"
+  fi
+fi
+
+# 37. Base ahead of HEAD: branch ahead is at $base + 1 commit, HEAD on main at $base, no working changes.
+git -C "$wt" checkout -q -b ahead "$base"
+echo "lib2" > "$wt/lib/x/y.sh"
+git -C "$wt" add lib/x/y.sh
+git -C "$wt" commit -qm "ahead commit"
+git -C "$wt" checkout -q main
+run 5 "$SD" --spec "$tmp/spec1.md" --base ahead --worktree "$wt"
+rc37=$rc
+out37=$(out)
+err37=$(err)
+reset_wt
+git -C "$wt" branch -q -D ahead
+if [ "$rc37" = 0 ] && [ "$out37" = "$want_clean0" ] && grep -qF "is ahead of HEAD" <<<"$err37"; then
+  ok "case 37: --base ahead of HEAD exits 0 and warns on stderr"
+else
+  bad "case 37: rc=$rc37 out=$out37 err=$err37"
+fi
+
 echo "scope-drift probe: $pass passed, $fail failed"
 [ "$fail" = 0 ]
