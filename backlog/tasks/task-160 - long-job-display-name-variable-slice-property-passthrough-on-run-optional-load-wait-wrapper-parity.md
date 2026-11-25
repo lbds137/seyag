@@ -3,11 +3,11 @@ id: TASK-160
 title: >-
   long-job: display-name variable, slice/property passthrough on run, optional
   load wait (wrapper parity)
-status: In Progress
+status: Done
 assignee:
   - Seyag B
 created_date: '2026-11-25T04:08:00Z'
-updated_date: '2026-11-25T17:22:00Z'
+updated_date: '2026-11-25T18:00:00Z'
 labels:
   - long-job
   - feature
@@ -36,4 +36,6 @@ Owner: bin/** lane. Related: TASK-145 (--heavy port).
 
 <!-- SECTION:NOTES:BEGIN -->
 2026-11-25 (Seyag B, claimed): items 1-2 (item 3 shipped with TASK-145). Shared probe: tests/long-job.probe.sh.
+
+Shipped items 1-2 (b160 PR). Item 1: messages, hints, the log header, the inhibitor --who/--why and the in-unit wrapper's lines use the basename of SYG_LONG_JOB_CMD's first word (validated; else long-job); the wrapper takes it as its second argument through the --lock re-exec. usage() synopsis keeps long-job. Item 2: run --slice NAME (dropped with a stderr note under --heavy) and repeatable -p/--property KEY=VALUE; StandardInput/Output/Error refused (they carry the job's log) and Slice refused (would bypass the heavy drop). Decided: -p applies to --heavy too; the intended use is a memory backstop, and CPU weighting belongs in the slice. Probe: 106/106 with a live user manager; 11 new cases fail on origin/main's long-job. Council gpt-5.5 review: no defects; ruled out multi-line systemd-run failure prefixing (pre-existing shape; only the ended sentinel is a contract), --nice/--mem-max range checks (unchanged options; systemd rejects, recorded as exit 5), --property=KV form (no = forms in the parser), and the read throwaway '_'. knobs.tsv/config.md description shortened to fit the 220-char cap.
 <!-- SECTION:NOTES:END -->

@@ -25,6 +25,11 @@ longer than ~10 minutes (a miner, a full suite, an extract, an OCR pass).
       --mem-max SIZE   systemd MemoryMax for the unit (e.g. 600M): caps its RAM, and the
                        overflow goes to swap rather than killing it
       --nice N         systemd Nice for the unit
+      --slice NAME     systemd slice for the unit (e.g. a weighted slice for plain jobs;
+                       ignored, with a note, under --heavy)
+      -p, --property KEY=VALUE
+                       repeatable; passed to systemd-run as -p; StandardInput/Output/Error
+                       and Slice refused; applies to --heavy too
       --env NAME       also pass the caller's NAME into the unit (repeatable)
       --heavy          for a suite, gate or e2e run: inside the unit, first queue for the
                        machine-wide gate lock (${SYG_GATE_LOCK_FILE:-/tmp/gate.lock}, the one
@@ -72,6 +77,11 @@ longer than ~10 minutes (a miner, a full suite, an extract, an OCR pass).
   long-job log NAME [-n N] the log's last N lines (default 40)
   long-job --help
 
+Messages, hints and the wait sentinel name the runner as the basename of the first word of
+SYG_LONG_JOB_CMD when it is set (letters, digits, '.', '_', '-'; else long-job), so a wrapper
+that execs long-job keeps its own "<runner>: ended" line. A direct long-job call uses that
+name too.
+
 NAME: must start with a letter or digit and hold only letters, digits, '.', '_' and '-'. State lives in ${SYG_LONG_JOB_STATE_DIR:-${XDG_STATE_HOME:-~/.local/state}/long-job}/
 (NAME.log, NAME.cmd, NAME.owner, NAME.unit, NAME.exit, NAME.lock, NAME@gate.lock); unit prefix is ${SYG_LONG_JOB_UNIT_PREFIX:-long-job} (PREFIX-NAME.service). Stop a job with: systemctl --user stop PREFIX-NAME
 Exit codes for run: 0 started, 1 memory gate failed (without --wait-mem), 2 usage error or the job is
@@ -93,7 +103,17 @@ if [ -r "$here/../hooks/lib/config-env.sh" ] \
   syg_config_env "$(readlink -f "$here/..")"
 fi
 
-die() { echo "long-job: $1" >&2; exit "${2:-2}"; }
+# Messages and hints name the runner the caller uses: the basename of SYG_LONG_JOB_CMD's first
+# word (long-job-chain-check's rule), so a wrapper that execs long-job keeps "<runner>: ended".
+# A value that is empty, multi-line or oddly-charactered leaves "long-job".
+disp=long-job
+if [[ ${SYG_LONG_JOB_CMD:-} != *$'\n'* ]]; then
+  read -r _lj_first _ <<<"${SYG_LONG_JOB_CMD:-}"
+  _lj_first=${_lj_first##*/}
+  [[ $_lj_first =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] && disp=$_lj_first
+fi
+
+die() { echo "$disp: $1" >&2; exit "${2:-2}"; }
 state=${SYG_LONG_JOB_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/long-job}
 [[ $state == /* ]] || die "SYG_LONG_JOB_STATE_DIR must be an absolute path: '$state'"
 unit_prefix=${SYG_LONG_JOB_UNIT_PREFIX:-long-job}
@@ -146,16 +166,25 @@ cmd=${1:-}; [ $# -gt 0 ] && shift
 case "$cmd" in
   run)
     name=${1:-}; check_name "$name"; shift
-    min_mb=2048 wait_mem="" props=() envs=() inhibit=1 heavy=0
+    min_mb=2048 wait_mem="" props=() envs=() inhibit=1 heavy=0 slice=""
     while [ $# -gt 0 ] && [ "$1" != -- ]; do
       case "$1" in
-        --min-mb|--wait-mem|--mem-max|--nice|--env)
+        --min-mb|--wait-mem|--mem-max|--nice|--env|--slice|-p|--property)
           [ $# -ge 2 ] || die "$1 needs a value" ;;&
         --min-mb) num "$1" "$2"; min_mb=$2; shift ;;
         # 0 would reach mem-gate as --timeout 0, which means forever.
         --wait-mem) num "$1" "$2"; [ "$2" -gt 0 ] || die "--wait-mem needs at least 1 second"; wait_mem=$2; shift ;;
         --mem-max) props+=(-p "MemoryMax=$2"); shift ;;
         --nice) [[ $2 =~ ^-?[0-9]+$ ]] || die "--nice needs an integer"; props+=(-p "Nice=$2"); shift ;;
+        --slice) [[ $2 =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die "--slice needs a slice name (letters, digits, '.', '_', '-')"; slice=$2; shift ;;
+        -p|--property)
+          [[ $2 =~ ^[A-Za-z][A-Za-z0-9]*= ]] || die "$1 needs KEY=VALUE (a systemd unit property)"
+          _pkey=${2%%=*}
+          case $_pkey in
+            StandardInput|StandardOutput|StandardError) die "$1 $_pkey is set by $disp (the job's log); not allowed" ;;
+            Slice) die "$1 Slice: use --slice NAME (it is dropped for --heavy jobs)" ;;
+          esac
+          props+=(-p "$2"); shift ;;
         --env) [[ $2 =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || die "--env needs a variable name"; envs+=("--setenv=$2"); shift ;;
         --no-inhibit) inhibit=0 ;;
         --heavy) heavy=1 ;;
@@ -163,6 +192,10 @@ case "$cmd" in
       esac
       shift
     done
+    if [ "$heavy" = 1 ] && [ -n "$slice" ]; then
+      echo "$disp: --slice $slice is ignored for a --heavy job: heavy jobs run one at a time under the gate lock and keep the default slice" >&2
+      slice=""
+    fi
     [ "$min_mb" -eq 0 ] && [ -n "$wait_mem" ] && die "--wait-mem needs the memory gate; drop --min-mb 0"
     # A heavy job's memory check belongs after the lock (memory read before a long queue is stale),
     # so it always waits inside the unit.
@@ -180,8 +213,8 @@ case "$cmd" in
     mkdir -p "$state" || die "can't create $state" 5
     if [ "$need_chmod" = 1 ]; then chmod 700 "$state" || die "can't create $state" 5; fi
     exec 9>"$state/$name.lock" || die "can't lock $state/$name.lock" 5
-    flock -n 9 || die "$name is being started by another long-job run" 2
-    running "$name" && die "$name is already running (long-job status $name)"
+    flock -n 9 || die "$name is being started by another $disp run" 2
+    running "$name" && die "$name is already running ($disp status $name)"
 
     # The parent shell's command text, when readable: a Bash tool call is `bash -c [-l ...] [--] TEXT`,
     # where TEXT is the first non-option word after the -c option (or the word after --), and TEXT
@@ -210,8 +243,8 @@ case "$cmd" in
       "$here/mem-gate" --ok "$min_mb" || {
         rc=$?
         # mem-gate exits 1 for low memory; anything else (2: no MemAvailable line) means it couldn't read memory.
-        [ "$rc" = 1 ] || { echo "long-job: not starting $name; mem-gate could not read memory (exit $rc, see its message above)" >&2; exit 6; }
-        echo "long-job: not starting $name; retry later or pass --wait-mem S" >&2; exit 1
+        [ "$rc" = 1 ] || { echo "$disp: not starting $name; mem-gate could not read memory (exit $rc, see its message above)" >&2; exit 6; }
+        echo "$disp: not starting $name; retry later or pass --wait-mem S" >&2; exit 1
       }
     fi
 
@@ -238,7 +271,7 @@ case "$cmd" in
         load_args=(--load "$lg")
         for v in SYG_LOAD_GATE_1M SYG_LOAD_GATE_5M; do [ -n "${!v+x}" ] && envs+=("--setenv=$v=${!v}"); done
       else
-        echo "long-job: load-gate is not available${lg:+ ($lg is not executable)}, so $name skips the CPU load wait" >&2
+        echo "$disp: load-gate is not available${lg:+ ($lg is not executable)}, so $name skips the CPU load wait" >&2
         lg=""
       fi
     fi
@@ -249,40 +282,43 @@ case "$cmd" in
     unit_of "$name" >"$state/$name.unit"
     # Who the unit is for (CLAUDE_JOB_DIR's basename, else the cwd's), read in the caller's env: the unit's env has neither.
     caller_label >"$state/$name.owner"
-    echo "=== long-job $name started $(date '+%F %T %Z') in $PWD: $(cat "$state/$name.cmd")" >>"$log"
+    echo "=== $disp $name started $(date '+%F %T %Z') in $PWD: $(cat "$state/$name.cmd")" >>"$log"
     # A failed unit from an earlier run stays loaded and blocks the name.
     systemctl --user reset-failed -- "$(job_unit "$name")" 2>/dev/null
     pre=()
     if [ $inhibit = 1 ]; then
-      if systemd-inhibit --what=sleep:idle --who=long-job --why=probe true 2>/dev/null; then
-        pre=(systemd-inhibit --what=sleep:idle --who=long-job --why="long-job $name")
+      if systemd-inhibit --what=sleep:idle --who="$disp" --why=probe true 2>/dev/null; then
+        pre=(systemd-inhibit --what=sleep:idle --who="$disp" --why="$disp $name")
       else
-        echo "long-job: sleep/idle inhibitor unavailable here (systemd-inhibit refused); running without it" | tee -a "$log" >&2
+        echo "$disp: sleep/idle inhibitor unavailable here (systemd-inhibit refused); running without it" | tee -a "$log" >&2
       fi
     fi
+    # --slice lands next to --unit; -p properties (user and --mem-max/--nice alike) ride in props.
+    slice_args=()
+    [ -n "$slice" ] && slice_args=(--slice="$slice")
     # The wrapper records CMD's exit with a timestamp; describe() reads it after systemd forgets
     # a successful unit. --expand-environment=no: by default systemd rewrites the command's
     # arguments (${VAR} -> its value or empty, $$ -> $), which emptied ${...} in worker specs.
-    if ! systemctl_out=$(systemd-run --user --quiet --expand-environment=no --unit="$(unit_of "$name")" \
+    if ! systemctl_out=$(systemd-run --user --quiet --expand-environment=no --unit="$(unit_of "$name")" "${slice_args[@]}" \
         --working-directory="$PWD" --setenv=PATH="$PATH" "${envs[@]}" \
         -p StandardOutput="append:$log" -p StandardError="append:$log" "${props[@]}" \
-        -- bash -c 'ex=$1; shift; if [ "$1" = --lock ]; then bin=$2; priv=$3; shift 3; "$bin" bash -c "$BASH_EXECUTION_STRING" long-job-wrap "$ex" --locked "$priv" "$@"; rc=$?; [ -e "$ex" ] || echo "$rc $(date +%s)" >"$ex"; exit $rc; fi; if [ "$1" = --locked ]; then export SYG_GATE_LOCK_FILE=$2; shift 2; echo "long-job: $(date +%T) holding the gate lock; gate-lock inside the job uses $SYG_GATE_LOCK_FILE"; fi; if [ "$1" = --gate ]; then mem=$2; s=$3; i=$4; bin=$5; shift 5; "$bin" --wait "$mem" --timeout "$s" --interval "$i" --owner "" || { rc=$?; echo "$rc $(date +%s)" >"$ex"; exit $rc; }; elif [ "$1" = --no-gate ]; then shift; fi; if [ "$1" = --load ]; then lg=$2; shift 2; "$lg" --wait --owner ""; rc=$?; [ $rc = 0 ] || echo "long-job: $(date +%T) load-gate exited $rc; running anyway"; elif [ "$1" = --no-load ]; then shift; fi; "$@"; rc=$?; echo "$rc $(date +%s)" >"$ex"; exit $rc' \
-        long-job-wrap "$ex" "${lock_args[@]}" "${gate_args[@]}" "${load_args[@]}" "${pre[@]}" "$@" 2>&1); then
+        -- bash -c 'ex=$1; disp=$2; shift 2; if [ "$1" = --lock ]; then bin=$2; priv=$3; shift 3; "$bin" bash -c "$BASH_EXECUTION_STRING" long-job-wrap "$ex" "$disp" --locked "$priv" "$@"; rc=$?; [ -e "$ex" ] || echo "$rc $(date +%s)" >"$ex"; exit $rc; fi; if [ "$1" = --locked ]; then export SYG_GATE_LOCK_FILE=$2; shift 2; echo "$disp: $(date +%T) holding the gate lock; gate-lock inside the job uses $SYG_GATE_LOCK_FILE"; fi; if [ "$1" = --gate ]; then mem=$2; s=$3; i=$4; bin=$5; shift 5; "$bin" --wait "$mem" --timeout "$s" --interval "$i" --owner "" || { rc=$?; echo "$rc $(date +%s)" >"$ex"; exit $rc; }; elif [ "$1" = --no-gate ]; then shift; fi; if [ "$1" = --load ]; then lg=$2; shift 2; "$lg" --wait --owner ""; rc=$?; [ $rc = 0 ] || echo "$disp: $(date +%T) load-gate exited $rc; running anyway"; elif [ "$1" = --no-load ]; then shift; fi; "$@"; rc=$?; echo "$rc $(date +%s)" >"$ex"; exit $rc' \
+        long-job-wrap "$ex" "$disp" "${lock_args[@]}" "${gate_args[@]}" "${load_args[@]}" "${pre[@]}" "$@" 2>&1); then
       # Record the failed start so status and wait don't call it "ended without an exit record".
-      echo "long-job: systemd-run failed: $systemctl_out" | tee -a "$log" >&2
+      echo "$disp: systemd-run failed: $systemctl_out" | tee -a "$log" >&2
       echo "5 $(date +%s)" >"$ex"
       exec 9>&-
       exit 5
     fi
     exec 9>&-
     if [ "$heavy" = 1 ]; then
-      echo "long-job: started $name as $(unit_of "$name"); it queues for the gate lock${wait_mem:+, then waits for $min_mb MB of memory (up to $wait_mem s)}${lg:+, then for the CPU load (load-gate)}, before running; log $log"
+      echo "$disp: started $name as $(unit_of "$name"); it queues for the gate lock${wait_mem:+, then waits for $min_mb MB of memory (up to $wait_mem s)}${lg:+, then for the CPU load (load-gate)}, before running; log $log"
     elif [ "$min_mb" -gt 0 ] && [ -n "$wait_mem" ]; then
-      echo "long-job: started $name as $(unit_of "$name"); it waits for $min_mb MB of memory (up to $wait_mem s) before running; log $log"
+      echo "$disp: started $name as $(unit_of "$name"); it waits for $min_mb MB of memory (up to $wait_mem s) before running; log $log"
     else
-      echo "long-job: started $name as $(unit_of "$name"); log $log"
+      echo "$disp: started $name as $(unit_of "$name"); log $log"
     fi
-    echo "long-job: to be woken when it ends, run \"long-job wait $name\" with Bash run_in_background; on the wake, a last line \"long-job: ended: …\" is the result, anything else means run \"long-job wait $name --poll\" and follow its last line (see --help)"
+    echo "$disp: to be woken when it ends, run \"$disp wait $name\" with Bash run_in_background; on the wake, a last line \"$disp: ended: …\" is the result, anything else means run \"$disp wait $name --poll\" and follow its last line (see --help)"
     ;;
   wait)
     name=${1:-}; check_name "$name"; shift
@@ -301,16 +337,16 @@ case "$cmd" in
     done
     [ "$interval" -gt 0 ] || die "--interval must be at least 1"
     owner_init "$owner"
-    [ -e "$state/$name.cmd" ] || die "no job named $name (long-job status lists them)" 1
+    [ -e "$state/$name.cmd" ] || die "no job named $name ($disp status lists them)" 1
     # --poll is the post-wake and cron-tick check (see --help): each outcome names the next step.
-    if [ $poll = 1 ] && unknown "$name"; then echo "long-job: state unknown: systemctl show failed for $name; check again shortly (not an end)"; exit 4; fi
-    if [ $poll = 1 ] && running "$name"; then describe "$name"; echo "long-job: still running: with no live waiter for $name, start \"long-job wait $name\" in the background; otherwise, and on a cron tick, say nothing"; exit 4; fi
+    if [ $poll = 1 ] && unknown "$name"; then echo "$disp: state unknown: systemctl show failed for $name; check again shortly (not an end)"; exit 4; fi
+    if [ $poll = 1 ] && running "$name"; then describe "$name"; echo "$disp: still running: with no live waiter for $name, start \"$disp wait $name\" in the background; otherwise, and on a cron tick, say nothing"; exit 4; fi
     start=$SECONDS
-    if running "$name"; then echo "long-job: waiting for $name; pid $$, checking every $interval s"; fi
+    if running "$name"; then echo "$disp: waiting for $name; pid $$, checking every $interval s"; fi
     warned_unknown=0
     while running "$name" || unknown "$name"; do
       if [ $warned_unknown = 0 ] && unknown "$name"; then
-        echo "long-job: systemctl show failed for $name; still waiting (pass --timeout S to bound the wait)" >&2
+        echo "$disp: systemctl show failed for $name; still waiting (pass --timeout S to bound the wait)" >&2
         warned_unknown=1
       fi
       sleep "$interval"
@@ -318,16 +354,16 @@ case "$cmd" in
       # Re-check before the timeout: the job may have ended during the sleep.
       running "$name" || unknown "$name" || break
       if [ "$timeout" -gt 0 ] && [ $((SECONDS - start)) -ge "$timeout" ]; then
-        echo "long-job: timed out after $((SECONDS - start)) s; $name is still running"; exit 4
+        echo "$disp: timed out after $((SECONDS - start)) s; $name is still running"; exit 4
       fi
     done
     describe "$name"
     echo "--- last lines of $state/$name.log:"
     tail -n 10 "$state/$name.log" 2>/dev/null
     if [ $poll = 1 ]; then
-      echo "long-job: ended: act on the result above; if a cron tick ran this check, CronDelete it now (CronList shows its id)"
+      echo "$disp: ended: act on the result above; if a cron tick ran this check, CronDelete it now (CronList shows its id)"
     else
-      echo "long-job: ended: act on the result above"
+      echo "$disp: ended: act on the result above"
     fi
     [ "$(job_rc "$name")" = 0 ]
     ;;
@@ -338,7 +374,7 @@ case "$cmd" in
     else
       shopt -s nullglob; found=0
       for f in "$state"/*.cmd; do found=1; describe "$(basename "$f" .cmd)"; done
-      [ $found = 1 ] || echo "long-job: no jobs recorded in $state"
+      [ $found = 1 ] || echo "$disp: no jobs recorded in $state"
     fi
     ;;
   cmd)
