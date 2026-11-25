@@ -153,12 +153,14 @@ An optional TOML file fills in knobs the environment left unset: user `${XDG_CON
 | Name | Default | What it does | Found in | Config |
 | --- | --- | --- | --- | --- |
 | `CLAUDE_USAGE_EXTRA_OK` | unset | Set to 1 to let claude-usage --ok and --wait pass past the weekly reserve while extra usage is enabled and under budget. | `bin/claude-usage` | user + project |
+| `CLAUDE_USAGE_GATES_FILE` | `${XDG_CONFIG_HOME:-$HOME/.config}/claude-usage/gates` | Config-file-only path of an executable claude-usage runs per gate call; its KEY=VALUE stdout overrides the week gate env vars for that call. | `bin/claude-usage` | user only |
 | `CLAUDE_USAGE_GATE_MAX_AGE` | `21600` | Maximum age in seconds (integer >= TTL) of the OAuth usage cache before claude-usage --ok fails with meter=cache. | `bin/claude-usage` | user + project |
 | `CLAUDE_USAGE_MODEL` | unset | Model name override for claude-usage --ok per-model weekly cap checks when not reading a session transcript. | `bin/claude-usage` | user + project |
 | `CLAUDE_USAGE_TTL` | `120` | Refresh TTL in seconds (integer >= 30) for the OAuth usage cache in claude-usage. | `bin/claude-usage`, `bin/usage-sweep` | user + project |
 | `CLAUDE_USAGE_WEEK_RESERVE` | `75` | Weekly usage percentage threshold (integer 1-99) at which claude-usage --ok blocks new work; week-burn-window also uses it as its hold threshold. | `bin/claude-usage`, `bin/week-burn-window`, `hooks/lib/config-env.sh` | user + project |
 | `CLAUDE_USAGE_WEEK_RESERVE_CMD` | unset | Shell command (5s timeout) printing a dynamic weekly reserve integer 1-99 for claude-usage --ok and --posture. | `bin/claude-usage`, `bin/week-burn-window` | user only |
 | `CLAUDE_USAGE_WEEK_STOP` | `80` | Hard-stop weekly usage percentage (integer 1-99) reported by claude-usage --posture. | `bin/claude-usage` | user + project |
+| `CLAUDE_USAGE_WEEK_STOP_CMD` | unset | Shell command (5s timeout) printing a dynamic weekly hard stop integer 1-99 for claude-usage --posture. | `bin/claude-usage` | user only |
 | `CLAUDE_USAGE_ZAI_FIVE_CAP` | `80` | Maximum 5-hour quota threshold percentage (non-negative integer) allowed by claude-usage --ok on the z.ai lane. | `bin/claude-usage` | user + project |
 | `CLAUDE_USAGE_ZAI_WEEK_RESERVE` | `<CLAUDE_USAGE_WEEK_RESERVE>` | Static weekly quota reserve percentage (integer 1-99) for claude-usage --ok and --posture on the z.ai lane. | `bin/claude-usage` | user + project |
 | `CLAUDE_USAGE_ZAI_WEEK_RESERVE_CMD` | unset | Shell command (5s timeout) printing a dynamic weekly reserve integer 1-99 for the z.ai lane in claude-usage. | `bin/claude-usage` | user only |

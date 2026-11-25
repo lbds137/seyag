@@ -29,14 +29,24 @@
 #                             calling session's lane; always exits 0
 #   claude-usage --posture    one line, exit 0: the configured week thresholds, so a session quotes them instead of inventing
 #                             them: 'week posture: wind-down R% (no new units) · stop S% (checkpoint, wake at reset) · now W%'
-#                             (R = the reserve --ok uses, resolved the same way; S = CLAUDE_USAGE_WEEK_STOP, integer 1-99, default
-#                             80, reported only and read by no gate; W follows --ok's cache rules: ' (cache Nm old)' past the TTL,
-#                             0% plus ' (week reset since cache)' after a passed reset (beside a figure only), '?' (with the age
-#                             tag once past the TTL) past the gate max age or with no weekly figure; ' · extra pass on (…)'
-#                             appended under CLAUDE_USAGE_EXTRA_OK=1); on the z.ai lane 'z.ai week posture: …' with the z.ai
-#                             reserve and z.ai's week %, rounded, tagged ' (cache Nm old)' past the TTL like --ok and '?' with the
-#                             age tag once over 30 minutes old, never the extra clause; other routed lanes print '<lane> posture:
-#                             no week gate (provider enforces its own cap)' and never run the reserve command
+#                             (R = the reserve --ok uses, resolved the same way; S = CLAUDE_USAGE_WEEK_STOP_CMD (integer 1-99
+#                             under a 5 s timeout, wins the slot in success and failure) else CLAUDE_USAGE_WEEK_STOP, integer
+#                             1-99, default 80, reported only and read by no gate; W follows --ok's cache rules: ' (cache Nm old)'
+#                             past the TTL, 0% plus ' (week reset since cache)' after a passed reset (beside a figure only), '?'
+#                             (with the age tag once past the TTL) past the gate max age or with no weekly figure; ' · extra pass
+#                             on (…)' appended under CLAUDE_USAGE_EXTRA_OK=1); on the z.ai lane 'z.ai week posture: …' with the
+#                             z.ai reserve and z.ai's week %, rounded, tagged ' (cache Nm old)' past the TTL like --ok and '?'
+#                             with the age tag once over 30 minutes old, never the extra clause; other routed lanes print
+#                             '<lane> posture: no week gate (provider enforces its own cap)' and never run the reserve command
+#
+# Gate sources: each week gate slot (plan reserve, plan stop, z.ai reserve) resolves per gate call
+# (--ok, --wait, --posture) in this order: the gates file > the env's _CMD > the env's static > the
+# default. The gates file is ${XDG_CONFIG_HOME:-~/.config}/claude-usage/gates (path settable only in
+# seyag's config.toml as claude_usage_gates_file): an executable run under a 5 s timeout with the
+# caller's environment, whose stdout KEY=VALUE lines (gate keys only) override the environment for
+# that call; setting either key of a slot drops the environment's other key of it; to keep an
+# explicit env override the file prints it back; a failure, timeout or malformed line uses the
+# environment unchanged, with a note.
 #
 # Reads the statusline's cache of /api/oauth/usage (~/.cache/claude-statusline/usage.json)
 # and refreshes it when it is older than 2 minutes, under a lock, so any number of polling
@@ -53,6 +63,11 @@
 
 set -uo pipefail
 
+# The gates file's path (see apply_gates_file below) is config-file only: drop any inherited
+# CLAUDE_USAGE_GATES_FILE before the loader runs, because a session's inherited env is exactly
+# what goes stale — the path may come only from seyag's config.toml (claude_usage_gates_file),
+# never from the environment.
+unset CLAUDE_USAGE_GATES_FILE
 # Optional config files (the config.toml loader) fill in knobs the environment
 # left unset before any knob below is read; the environment still wins. This bin
 # is the wiring pattern example; the other bins adopt it later.
@@ -62,6 +77,7 @@ if [ -r "$bin_dir/../hooks/lib/config-env.sh" ] \
     && declare -F syg_config_env >/dev/null; then
     syg_config_env "$(readlink -f "$bin_dir/..")"
 fi
+gates_file=${CLAUDE_USAGE_GATES_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/claude-usage/gates}
 
 cache="${XDG_CACHE_HOME:-$HOME/.cache}/claude-statusline/usage.json"
 ttl=120
@@ -79,24 +95,30 @@ fi
 # CLAUDE_USAGE_WEEK_RESERVE_CMD is consulted in the --ok plan branch and --posture only (see
 # resolve_plan_week_reserve; --posture on a routed non-z.ai lane never runs it): it wins the slot
 # in success and failure, and this static is the fallback it names.
-week_reserve=75
-week_reserve_note=""
-if [[ ${CLAUDE_USAGE_WEEK_RESERVE:-} =~ ^[0-9]+$ ]] && [ "${#CLAUDE_USAGE_WEEK_RESERVE}" -le 8 ] \
-    && [ "$((10#$CLAUDE_USAGE_WEEK_RESERVE))" -ge 1 ] && [ "$((10#$CLAUDE_USAGE_WEEK_RESERVE))" -le 99 ]; then
-    week_reserve=$((10#$CLAUDE_USAGE_WEEK_RESERVE))
-elif [ -n "${CLAUDE_USAGE_WEEK_RESERVE:-}" ]; then
-    week_reserve_note="claude-usage: CLAUDE_USAGE_WEEK_RESERVE=$CLAUDE_USAGE_WEEK_RESERVE ignored: not an integer 1-99; using the default 75"
-fi
-# The week's hard stop, reported by --posture only (no gate reads it): CLAUDE_USAGE_WEEK_STOP,
-# integer 1-99, validated like the reserve above, default 80, with --posture's stderr note.
-week_stop=80
-week_stop_note=""
-if [[ ${CLAUDE_USAGE_WEEK_STOP:-} =~ ^[0-9]+$ ]] && [ "${#CLAUDE_USAGE_WEEK_STOP}" -le 8 ] \
-    && [ "$((10#$CLAUDE_USAGE_WEEK_STOP))" -ge 1 ] && [ "$((10#$CLAUDE_USAGE_WEEK_STOP))" -le 99 ]; then
-    week_stop=$((10#$CLAUDE_USAGE_WEEK_STOP))
-elif [ -n "${CLAUDE_USAGE_WEEK_STOP:-}" ]; then
-    week_stop_note="claude-usage: CLAUDE_USAGE_WEEK_STOP=$CLAUDE_USAGE_WEEK_STOP ignored: not an integer 1-99; using the default 80"
-fi
+# parse_week_statics (re)sets the two static week gates and their notes from the current env:
+# run once at load, and again after apply_gates_file has overlaid the gates file, so the
+# statics and notes reflect what this call actually uses.
+parse_week_statics() {
+    week_reserve=75
+    week_reserve_note=""
+    if [[ ${CLAUDE_USAGE_WEEK_RESERVE:-} =~ ^[0-9]+$ ]] && [ "${#CLAUDE_USAGE_WEEK_RESERVE}" -le 8 ] \
+        && [ "$((10#$CLAUDE_USAGE_WEEK_RESERVE))" -ge 1 ] && [ "$((10#$CLAUDE_USAGE_WEEK_RESERVE))" -le 99 ]; then
+        week_reserve=$((10#$CLAUDE_USAGE_WEEK_RESERVE))
+    elif [ -n "${CLAUDE_USAGE_WEEK_RESERVE:-}" ]; then
+        week_reserve_note="claude-usage: CLAUDE_USAGE_WEEK_RESERVE=$CLAUDE_USAGE_WEEK_RESERVE ignored: not an integer 1-99; using the default 75"
+    fi
+    # The week's hard stop, reported by --posture only (no gate reads it): CLAUDE_USAGE_WEEK_STOP,
+    # integer 1-99, validated like the reserve above, default 80, with --posture's stderr note.
+    week_stop=80
+    week_stop_note=""
+    if [[ ${CLAUDE_USAGE_WEEK_STOP:-} =~ ^[0-9]+$ ]] && [ "${#CLAUDE_USAGE_WEEK_STOP}" -le 8 ] \
+        && [ "$((10#$CLAUDE_USAGE_WEEK_STOP))" -ge 1 ] && [ "$((10#$CLAUDE_USAGE_WEEK_STOP))" -le 99 ]; then
+        week_stop=$((10#$CLAUDE_USAGE_WEEK_STOP))
+    elif [ -n "${CLAUDE_USAGE_WEEK_STOP:-}" ]; then
+        week_stop_note="claude-usage: CLAUDE_USAGE_WEEK_STOP=$CLAUDE_USAGE_WEEK_STOP ignored: not an integer 1-99; using the default 80"
+    fi
+}
+parse_week_statics
 # z.ai's 5h window, capped below Tzurot's free-tier cutoff: Tzurot moves guests off GLM once the
 # HIGHER of z.ai's 5h and weekly meters reaches its zaiHeadroomPercent (90), so dev work stops
 # starting at 80% in either window and leaves guests a 10-15 point band.
@@ -153,6 +175,90 @@ resolve_zai_week_reserve() {
     elif [ -n "${CLAUDE_USAGE_ZAI_WEEK_RESERVE:-}" ]; then
         echo "claude-usage: CLAUDE_USAGE_ZAI_WEEK_RESERVE=$CLAUDE_USAGE_ZAI_WEEK_RESERVE ignored: not an integer 1-99; using week_reserve ($week_reserve)" >&2
     fi
+}
+
+# The week's hard stop can follow a deployment command the way the reserve can:
+# CLAUDE_USAGE_WEEK_STOP_CMD runs per gate check (--posture only — no gate reads the stop, so
+# --ok never forks it) under a 5 s timeout, stderr dropped so a chatty helper can't corrupt the
+# value. A trimmed integer 1-99 on stdout becomes the stop; anything else — non-zero exit,
+# timeout, empty, non-integer, over-length, out of 1-99 — keeps $week_stop (the static override's
+# value, else the default 80) with one stderr note. The command wins the slot in success and
+# failure: the static is only the fallback it names, and non-gate runs never fork it. Sets
+# global week_stop.
+resolve_week_stop() {
+    local ws_out ws_rc
+    [ -n "${CLAUDE_USAGE_WEEK_STOP_CMD:-}" ] || return 0
+    ws_out=$(timeout 5 bash -c "$CLAUDE_USAGE_WEEK_STOP_CMD" 2>/dev/null); ws_rc=$?
+    ws_out=${ws_out#"${ws_out%%[![:space:]]*}"}; ws_out=${ws_out%"${ws_out##*[![:space:]]}"}
+    if [ "$ws_rc" -eq 0 ] && [[ "$ws_out" =~ ^[0-9]+$ ]] && [ "${#ws_out}" -le 8 ] \
+        && [ "$ws_out" -ge 1 ] && [ "$ws_out" -le 99 ]; then
+        week_stop=$((10#$ws_out))
+    else
+        echo "claude-usage: CLAUDE_USAGE_WEEK_STOP_CMD gave no usable stop (exit $ws_rc); week stop falls back to week_stop ($week_stop)" >&2
+    fi
+}
+
+# The gates file: a per-call overlay of the week gate env vars, so a stale inherited env (a
+# session's env is frozen at launch) cannot pin the gates to launch-time values. An executable at
+# $gates_file runs per gate call (--ok, --wait via --ok, --posture; lanes without a week gate and
+# non-gate runs never fork it): its stdout KEY=VALUE lines override the environment for this one
+# call. Never sourced or eval'd: each line must match ^([A-Z][A-Z0-9_]*)=(.*)$ (split at the first
+# '='), the key is checked against the fixed gate-key list, and the value is exported verbatim.
+# Slot rule: the three slots are (static, _CMD) pairs — the plan reserve, the stop, the z.ai
+# reserve; setting either key of a pair drops the environment's other key of it unless the file sets it too
+# (a file printing only the static beats a stale inherited _CMD; printing KEY_CMD= clears the
+# command). A missing file applies nothing quietly; a failed run (timeout included) or malformed
+# line keeps the environment unchanged with one stderr note; a key outside the gate list is
+# skipped with a note while the rest still apply. Accepted values are exported, so command
+# children (week-burn-window and friends) see them.
+apply_gates_file() {
+    local out rc line key val n gk i a b known
+    local -a gate_keys=(CLAUDE_USAGE_WEEK_RESERVE CLAUDE_USAGE_WEEK_RESERVE_CMD
+        CLAUDE_USAGE_WEEK_STOP CLAUDE_USAGE_WEEK_STOP_CMD
+        CLAUDE_USAGE_ZAI_WEEK_RESERVE CLAUDE_USAGE_ZAI_WEEK_RESERVE_CMD)
+    local -A kv=()
+    [ -e "$gates_file" ] || return 0
+    if ! [ -f "$gates_file" ] || ! [ -x "$gates_file" ]; then
+        echo "claude-usage: gates file $gates_file is not an executable file; using the environment's gates" >&2
+        return 0
+    fi
+    out=$(timeout 5 "$gates_file" </dev/null 2>/dev/null); rc=$?
+    if [ "$rc" -ne 0 ]; then
+        echo "claude-usage: gates file $gates_file failed (exit $rc); using the environment's gates" >&2
+        return 0
+    fi
+    # Parse the whole output before touching the environment: a malformed line applies nothing.
+    n=0
+    while IFS= read -r line || [ -n "$line" ]; do
+        n=$((n + 1))
+        [ -z "$line" ] && continue
+        case ${line#"${line%%[![:space:]]*}"} in '#'*) continue ;; esac
+        if ! [[ $line =~ ^([A-Z][A-Z0-9_]*)=(.*)$ ]]; then
+            echo "claude-usage: gates file $gates_file: line $n is not KEY=VALUE; using the environment's gates" >&2
+            return 0
+        fi
+        key=${BASH_REMATCH[1]}
+        val=${BASH_REMATCH[2]}
+        known=0
+        for gk in "${gate_keys[@]}"; do
+            [ "$key" = "$gk" ] && known=1 && break
+        done
+        if [ "$known" = 0 ]; then
+            echo "claude-usage: gates file $gates_file: $key ignored: not a gate key" >&2
+            continue
+        fi
+        kv[$key]=$val # a duplicate key: last wins
+    done <<< "$out"
+    # Slot rule: a file-set key drops its pair partner from the environment for this call.
+    for ((i = 0; i < ${#gate_keys[@]}; i += 2)); do
+        a=${gate_keys[i]} b=${gate_keys[i + 1]}
+        [ -n "${kv[$a]+x}" ] && [ -z "${kv[$b]+x}" ] && unset "$b"
+        [ -n "${kv[$b]+x}" ] && [ -z "${kv[$a]+x}" ] && unset "$a"
+    done
+    for key in "${gate_keys[@]}"; do
+        [ -n "${kv[$key]+x}" ] && export "$key=${kv[$key]}"
+    done
+    parse_week_statics
 }
 
 # --posture's one stdout line: <prefix>week posture: wind-down R% … stop S% … now <W>[ · extra pass …].
@@ -318,6 +424,9 @@ reset_in() {
 # zai-usage's local fallback estimate is not account truth, so it never blocks. Other lanes
 # (OpenRouter) pass: their limit is a dollar cap the provider enforces itself.
 if [ "${1:-}" = --ok ] && [ "$routed" = 1 ]; then
+    # The gates file re-anchors the week gates for this one call (z.ai lanes only: a pass-through
+    # lane has no week gate and never forks it).
+    if [ "$vendor_lane" = zai ]; then apply_gates_file; fi
     # The static reserve clamp's note, gate-path only (see the clamp above), printed here at
     # the routed gate's head so every lane's verdict follows it; the plan lane's --ok branch
     # prints it at its own head.
@@ -369,9 +478,11 @@ fi
 # --ok, "?" when none, and "?" with the age tag once the reading is over --ok's 30-minute cutoff.
 # The z.ai gate doesn't read CLAUDE_USAGE_EXTRA_OK, so no extra clause.
 if [ "${1:-}" = --posture ] && [ "$vendor_lane" = zai ]; then
+    apply_gates_file
     if [ -n "$week_reserve_note" ]; then echo "$week_reserve_note" >&2; fi
     if [ -n "$week_stop_note" ]; then echo "$week_stop_note" >&2; fi
     resolve_zai_week_reserve
+    resolve_week_stop
     zj=$(zai_api_json)
     zas_of=$(jq -r 'if (.as_of | type) == "number" then (.as_of | floor) else empty end' <<< "${zj:-null}" 2>/dev/null)
     zpw=$(jq -r '(.week_pct | numbers | round) // empty' <<< "${zj:-null}" 2>/dev/null)
@@ -628,9 +739,12 @@ extra_figure() {
 
 case "${1:-}" in
     --ok)
-        # The static reserve clamp's note, gate-path only (see the clamp above): printed once
-        # here, ahead of this branch's checks and verdicts. The routed lanes print it at their
-        # own gate head further up; a gate check passes through exactly one of the two.
+        # The gates file re-anchors the week gates for this one call (the plan lane's week gate);
+        # the static reserve clamp's note, gate-path only (see the clamp above), is printed once
+        # here — after the overlay, so it reflects it — ahead of this branch's checks and
+        # verdicts. The routed lanes print it at their own gate head further up; a gate check
+        # passes through exactly one of the two.
+        apply_gates_file
         if [ -n "$week_reserve_note" ]; then echo "$week_reserve_note" >&2; fi
         # A week at the reserve blocks everything, whatever the 5h window says, unless the extra-usage
         # opt-in below applies: the last 25% is reserved for the owner and GitHub claude-review.
@@ -778,9 +892,13 @@ case "${1:-}" in
         exit 0
         ;;
     --posture)
+        # The gates file re-anchors the week gates for this one call before the notes and
+        # resolvers read them.
+        apply_gates_file
         if [ -n "$week_reserve_note" ]; then echo "$week_reserve_note" >&2; fi
         if [ -n "$week_stop_note" ]; then echo "$week_stop_note" >&2; fi
         resolve_plan_week_reserve
+        resolve_week_stop
         # "now" follows --ok's cache rules: the age tag, a week reset since the cache reads 0%, and
         # a cache past the gate's max age (or with no weekly figure) reads "?".
         pnow="?"
@@ -852,7 +970,7 @@ case "${1:-}" in
         echo "$note$(plan_line)$extra_tail$tail"
         ;;
     *)
-        sed -n '2,37p' "$0" | sed 's/^# \{0,1\}//'
+        sed -n '2,49p' "$0" | sed 's/^# \{0,1\}//'
         exit 2
         ;;
 esac

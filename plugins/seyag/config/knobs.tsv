@@ -14,11 +14,13 @@ CLAUDE_SESSION_ARCHIVE	user	session	~/Documents/claude-session-archive	Directory
 CLAUDE_USAGE_API_CREDIT	internal	usage	<script_dir>/api-credit	Test seam overriding the sibling api-credit binary path in claude-usage.	-
 CLAUDE_USAGE_EXTRA_OK	user	usage	unset	Set to 1 to let claude-usage --ok and --wait pass past the weekly reserve while extra usage is enabled and under budget.	-
 CLAUDE_USAGE_GATE_MAX_AGE	user	usage	21600	Maximum age in seconds (integer >= TTL) of the OAuth usage cache before claude-usage --ok fails with meter=cache.	-
+CLAUDE_USAGE_GATES_FILE	user	usage	${XDG_CONFIG_HOME:-$HOME/.config}/claude-usage/gates	Config-file-only path of an executable claude-usage runs per gate call; its KEY=VALUE stdout overrides the week gate env vars for that call.	path
 CLAUDE_USAGE_MODEL	user	usage	unset	Model name override for claude-usage --ok per-model weekly cap checks when not reading a session transcript.	-
 CLAUDE_USAGE_TTL	user	usage	120	Refresh TTL in seconds (integer >= 30) for the OAuth usage cache in claude-usage.	-
 CLAUDE_USAGE_WEEK_RESERVE	user	usage	75	Weekly usage percentage threshold (integer 1-99) at which claude-usage --ok blocks new work; week-burn-window also uses it as its hold threshold.	-
 CLAUDE_USAGE_WEEK_RESERVE_CMD	user	usage	unset	Shell command (5s timeout) printing a dynamic weekly reserve integer 1-99 for claude-usage --ok and --posture.	-
 CLAUDE_USAGE_WEEK_STOP	user	usage	80	Hard-stop weekly usage percentage (integer 1-99) reported by claude-usage --posture.	-
+CLAUDE_USAGE_WEEK_STOP_CMD	user	usage	unset	Shell command (5s timeout) printing a dynamic weekly hard stop integer 1-99 for claude-usage --posture.	-
 CLAUDE_USAGE_ZAI_FIVE_CAP	user	usage	80	Maximum 5-hour quota threshold percentage (non-negative integer) allowed by claude-usage --ok on the z.ai lane.	-
 CLAUDE_USAGE_ZAI_USAGE	internal	usage	<script_dir>/zai-usage	Test seam overriding the sibling zai-usage binary path in claude-usage.	-
 CLAUDE_USAGE_ZAI_WEEK_RESERVE	user	usage	<CLAUDE_USAGE_WEEK_RESERVE>	Static weekly quota reserve percentage (integer 1-99) for claude-usage --ok and --posture on the z.ai lane.	-

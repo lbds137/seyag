@@ -10,8 +10,12 @@
 # degrades, --json's lane fields and as_of/source, OpenRouter dollars read-only from the statusline's credits cache,
 # per-deployment z.ai week reserve overrides (CLAUDE_USAGE_ZAI_WEEK_RESERVE_CMD / _WEEK_RESERVE)
 # and the plan-week ones (CLAUDE_USAGE_WEEK_RESERVE_CMD / _WEEK_RESERVE, integer 1-99),
-# the extra-usage budget stop (SYG_EXTRA_USAGE_BUDGET_CMD / SYG_EXTRA_USAGE_BUDGET_USD), and the
-# gate's cache-age / missing-weekly-figure stop (meter=cache) and passed-reset rows.
+# the extra-usage budget stop (SYG_EXTRA_USAGE_BUDGET_CMD / SYG_EXTRA_USAGE_BUDGET_USD), the
+# gate's cache-age / missing-weekly-figure stop (meter=cache) and passed-reset rows, the per-call
+# gates file (an executable whose KEY=VALUE stdout overrides the week gate env vars for one call,
+# default ${XDG_CONFIG_HOME:-$HOME/.config}/claude-usage/gates, its path settable only in
+# config.toml as claude_usage_gates_file: the env var is dropped, inherited envs go stale) and
+# CLAUDE_USAGE_WEEK_STOP_CMD (a dynamic stop for --posture, wins the slot in success and failure).
 # Usage: tests/claude-usage.probe.sh   (from anywhere; never touches the real cache, settings or API)
 
 set -uo pipefail
@@ -1650,6 +1654,147 @@ CLAUDE_USAGE_WEEK_RESERVE_CMD="touch $sentinel; echo 60" run --json >/dev/null 2
 [ ! -e "$sentinel" ] && ok "plain run and --json never fork CLAUDE_USAGE_WEEK_RESERVE_CMD" || bad "a non-gate run forked CLAUDE_USAGE_WEEK_RESERVE_CMD"
 CLAUDE_USAGE_WEEK_RESERVE_CMD="touch $sentinel; echo 60" run --posture >/dev/null 2>&1
 [ -e "$sentinel" ] && ok "--posture does fork it (control for the sentinel row)" || bad "sentinel control: --posture did not run the CMD"
+
+# --- the gates file: a per-call overlay of the week gate env vars ---
+# An executable at $tmp/.config/claude-usage/gates (run()'s HOME fixes the default path) whose
+# stdout KEY=VALUE lines override the week gate env vars for one gate call: parsed whole before
+# anything applies (a malformed line or failed run applies nothing), the slot rule (setting
+# either key of a static/_CMD pair drops the env's other key of it), non-gate keys skipped with
+# a note that never echoes their value, and a missing file stays silent. The path knob
+# CLAUDE_USAGE_GATES_FILE is config-file only (the bin drops the env var before its loader), so
+# below it changes only via $tmp/.config/seyag/config.toml.
+gates_path="$tmp/.config/claude-usage/gates"
+gates_write() { # gates_write <script line...>: an executable gates file running the arguments as its body
+    mkdir -p "${gates_path%/*}"
+    { printf '#!/bin/bash\n'; printf '%s\n' "$@"; } > "$gates_path"
+    chmod +x "$gates_path"
+}
+gates_print() { # gates_print <output line...>: a gates file echoing each argument's verbatim text
+    mkdir -p "${gates_path%/*}"
+    { printf '#!/bin/bash\n'; printf "echo '%s'\n" "$@"; } > "$gates_path"
+    chmod +x "$gates_path"
+}
+gates_rm() { rm -f "$gates_path"; }
+gates_rm
+
+# Fixture repro, three arms: one file pinning both CMD gates beats every stale-arm env shape.
+gates_print 'CLAUDE_USAGE_WEEK_RESERVE_CMD=echo 95' 'CLAUDE_USAGE_WEEK_STOP_CMD=echo 98'
+fixture 10 50 0
+out=$(run --posture 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 0 ] && [ -z "$err" ] && [ "$out" = "$(posture_line "" 95 98 50%)" ] \
+    && ok "gates file (no gate env): wind-down 95, stop 98, empty stderr" || bad "gates file plain: rc=$rc out=[$out] err=[$err]"
+out=$(CLAUDE_USAGE_WEEK_RESERVE_CMD='echo 75' CLAUDE_USAGE_WEEK_STOP=80 run --posture 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 0 ] && [ -z "$err" ] && [ "$out" = "$(posture_line "" 95 98 50%)" ] \
+    && ok "gates file beats the stale session's CMD + static (slot rule drops both partners)" || bad "gates file stale CMD: rc=$rc out=[$out] err=[$err]"
+out=$(CLAUDE_USAGE_WEEK_RESERVE=75 CLAUDE_USAGE_WEEK_STOP=80 run --posture 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 0 ] && [ -z "$err" ] && [ "$out" = "$(posture_line "" 95 98 50%)" ] \
+    && ok "gates file beats a statics-only env" || bad "gates file statics: rc=$rc out=[$out] err=[$err]"
+gates_rm
+# Slot rule: a file printing only the static beats an inherited stale _CMD.
+gates_print 'CLAUDE_USAGE_WEEK_RESERVE=95'
+out=$(CLAUDE_USAGE_WEEK_RESERVE_CMD='echo 75' run --posture 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 0 ] && [ -z "$err" ] && [ "$out" = "$(posture_line "" 95 80 50%)" ] \
+    && ok "gates file printing only the static beats the env's stale _CMD" || bad "gates slot static: rc=$rc out=[$out] err=[$err]"
+# A pair the file doesn't mention keeps the env's values.
+gates_print 'CLAUDE_USAGE_WEEK_STOP=90'
+out=$(CLAUDE_USAGE_WEEK_RESERVE=85 run --posture 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 0 ] && [ -z "$err" ] && [ "$out" = "$(posture_line "" 85 90 50%)" ] \
+    && ok "gates file touching only the stop keeps the env's reserve (85/90)" || bad "gates untouched pair: rc=$rc out=[$out] err=[$err]"
+gates_rm
+
+# --ok follows the file: at week 85% the stale env CMD 'echo 75' fails today; the file's echo 95 passes.
+fixture 10 85 0
+CLAUDE_USAGE_WEEK_RESERVE_CMD='echo 75' run --ok 90 >/dev/null 2>&1; [ $? = 1 ] \
+    && ok "gates file: the stale env CMD 'echo 75' still fails --ok at week 85%" || bad "gates --ok stale base: should fail"
+gates_print 'CLAUDE_USAGE_WEEK_RESERVE_CMD=echo 95'
+out=$(CLAUDE_USAGE_WEEK_RESERVE_CMD='echo 75' run --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 0 ] && [ -z "$out" ] && [ "$err" = "claude-usage: --ok pass lane=anthropic meter=5h 5h=10%<90% week=85%<95% source=api" ] \
+    && ok "gates file CMD=echo 95 flips --ok to a pass with week=85%<95%" || bad "gates --ok pass: rc=$rc out=[$out] err=[$err]"
+gates_rm
+# Values accepted from the file are exported, so command children see them (week-burn-window
+# reads its env's reserve as a fallback): a literal $ in the file's value stays literal, expanded
+# only when the _CMD child runs.
+gates_print 'CLAUDE_USAGE_WEEK_RESERVE=93' 'CLAUDE_USAGE_WEEK_RESERVE_CMD=echo $CLAUDE_USAGE_WEEK_RESERVE'
+fixture 10 50 0
+out=$(run --posture 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 0 ] && [ -z "$err" ] && [ "$out" = "$(posture_line "" 93 80 50%)" ] \
+    && ok "gates file values are exported: the _CMD child reads WEEK_RESERVE=93 from its env" || bad "gates export: rc=$rc out=[$out] err=[$err]"
+# The gates file runs as a plain child with the caller's environment visible.
+gates_write 'echo "CLAUDE_USAGE_WEEK_RESERVE=$MY_KEEP"'
+out=$(MY_KEEP=88 run --posture 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 0 ] && [ -z "$err" ] && [ "$out" = "$(posture_line "" 88 80 50%)" ] \
+    && ok "gates file sees the caller's environment (MY_KEEP=88)" || bad "gates env visible: rc=$rc out=[$out] err=[$err]"
+# Over the 5 s timeout: one failed note, and the environment's gates keep working.
+gates_write 'sleep 10'
+out=$(CLAUDE_USAGE_WEEK_RESERVE=85 run --posture 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 0 ] && [ "$out" = "$(posture_line "" 85 80 50%)" ] \
+    && grep -q 'gates file .* failed (exit 124)' <<< "$err" \
+    && ok "gates file 'sleep 10': exit 124 note, the env's reserve 85 still applies" || bad "gates timeout: rc=$rc out=[$out] err=[$err]"
+# A non-zero exit applies nothing, whatever the file printed.
+gates_write 'echo CLAUDE_USAGE_WEEK_RESERVE=95' 'exit 3'
+out=$(run --posture 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 0 ] && [ "$out" = "$(posture_line "" 75 80 50%)" ] \
+    && [ "$err" = "claude-usage: gates file $gates_path failed (exit 3); using the environment's gates" ] \
+    && ok "gates file exit 3: the note names it and nothing applied (default 75)" || bad "gates exit 3: rc=$rc out=[$out] err=[$err]"
+# A malformed line aborts the whole overlay: nothing applied, defaults.
+gates_print 'CLAUDE_USAGE_WEEK_RESERVE=95' 'not a pair'
+out=$(run --posture 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 0 ] && [ "$out" = "$(posture_line "" 75 80 50%)" ] \
+    && [ "$err" = "claude-usage: gates file $gates_path: line 2 is not KEY=VALUE; using the environment's gates" ] \
+    && ok "gates file malformed line 2: one note, nothing applied (default 75)" || bad "gates malformed: rc=$rc out=[$out] err=[$err]"
+# A key outside the gate list is skipped with a note (value never echoed); the rest still apply.
+gates_print 'PATH=/nope' 'CLAUDE_USAGE_WEEK_RESERVE=95'
+out=$(run --posture 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 0 ] && [ "$out" = "$(posture_line "" 95 80 50%)" ] \
+    && [ "$err" = "claude-usage: gates file $gates_path: PATH ignored: not a gate key" ] \
+    && ok "gates file PATH: ignored with a note that never echoes the value, the rest applies" || bad "gates PATH: rc=$rc out=[$out] err=[$err]"
+# Exists but not an executable file: one note, defaults.
+mkdir -p "${gates_path%/*}"
+printf '#!/bin/bash\necho CLAUDE_USAGE_WEEK_RESERVE=95\n' > "$gates_path"
+chmod 644 "$gates_path"
+out=$(run --posture 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 0 ] && [ "$out" = "$(posture_line "" 75 80 50%)" ] \
+    && [ "$err" = "claude-usage: gates file $gates_path is not an executable file; using the environment's gates" ] \
+    && ok "gates file mode 644: one note, defaults" || bad "gates not exec: rc=$rc out=[$out] err=[$err]"
+# Missing file: the explicit control for the existing empty-stderr posture cases.
+gates_rm
+out=$(run --posture 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 0 ] && [ -z "$err" ] && [ "$out" = "$(posture_line "" 75 80 50%)" ] \
+    && ok "no gates file: stderr stays empty, defaults (explicit)" || bad "gates missing: rc=$rc out=[$out] err=[$err]"
+# Off the gate paths the file never runs.
+rm -f "$tmp/gates-ran"
+gates_write "touch $tmp/gates-ran"
+run >/dev/null 2>&1
+run --json >/dev/null 2>&1
+[ ! -e "$tmp/gates-ran" ] && ok "plain run and --json never run the gates file" || bad "a non-gate run ran the gates file"
+run --posture >/dev/null 2>&1
+[ -e "$tmp/gates-ran" ] && ok "--posture does run the gates file (control for the row)" || bad "gates control: --posture did not run the file"
+gates_rm
+rm -f "$tmp/gates-ran"
+# The path knob is config-file only: the env var is dropped by the bin, config.toml is honoured.
+gates_rm
+mkdir -p "$tmp/.config/seyag"
+printf '#!/bin/bash\necho CLAUDE_USAGE_WEEK_RESERVE=95\n' > "$tmp/elsewhere"
+chmod +x "$tmp/elsewhere"
+out=$(CLAUDE_USAGE_GATES_FILE="$tmp/elsewhere" run --posture 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 0 ] && [ -z "$err" ] && [ "$out" = "$(posture_line "" 75 80 50%)" ] \
+    && ok "CLAUDE_USAGE_GATES_FILE in the env is ignored (config-file only): defaults" || bad "gates env var: rc=$rc out=[$out] err=[$err]"
+printf 'claude_usage_gates_file = "%s"\n' "$tmp/elsewhere" > "$tmp/.config/seyag/config.toml"
+out=$(run --posture 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 0 ] && [ -z "$err" ] && [ "$out" = "$(posture_line "" 95 80 50%)" ] \
+    && ok "config.toml's claude_usage_gates_file points the gates file (95)" || bad "gates config path: rc=$rc out=[$out] err=[$err]"
+rm -f "$tmp/.config/seyag/config.toml" "$tmp/elsewhere"
+# CLAUDE_USAGE_WEEK_STOP_CMD without a gates file: wins in success and failure.
+fixture 10 50 0
+out=$(CLAUDE_USAGE_WEEK_STOP_CMD='echo 97' run --posture 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 0 ] && [ -z "$err" ] && [ "$out" = "$(posture_line "" 75 97 50%)" ] \
+    && ok "CLAUDE_USAGE_WEEK_STOP_CMD='echo 97': stop 97" || bad "WEEK_STOP_CMD 97: rc=$rc out=[$out] err=[$err]"
+out=$(CLAUDE_USAGE_WEEK_STOP_CMD='echo 0' CLAUDE_USAGE_WEEK_STOP=85 run --posture 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 0 ] && [ "$out" = "$(posture_line "" 75 85 50%)" ] \
+    && [ "$err" = "claude-usage: CLAUDE_USAGE_WEEK_STOP_CMD gave no usable stop (exit 0); week stop falls back to week_stop (85)" ] \
+    && ok "CLAUDE_USAGE_WEEK_STOP_CMD='echo 0': unusable, notes and falls back to the static 85" || bad "WEEK_STOP_CMD 0: rc=$rc out=[$out] err=[$err]"
+gates_rm
+
 # z.ai lane: its own reserve resolver and week figure.
 route_zai
 zai_stub api 10 61
@@ -1682,6 +1827,13 @@ zai_stub fail 10 61
 out=$(run --posture 2>/dev/null); rc=$?
 [ $rc = 0 ] && [ "$out" = "$(posture_line "z.ai " 75 80 '?')" ] \
     && ok "--posture (z.ai, no live quota): now ?" || bad "--posture z.ai unavailable: rc=$rc out=[$out]"
+# The gates file overlays the z.ai lane's gates too: its z.ai reserve key and the plan stop CMD.
+zai_stub api 10 61
+gates_print 'CLAUDE_USAGE_ZAI_WEEK_RESERVE=92' 'CLAUDE_USAGE_WEEK_STOP_CMD=echo 98'
+out=$(run --posture 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 0 ] && [ -z "$err" ] && [ "$out" = "$(posture_line "z.ai " 92 98 61%)" ] \
+    && ok "--posture (z.ai): the gates file sets the z.ai reserve and the stop CMD" || bad "--posture z.ai gates: rc=$rc out=[$out] err=[$err]"
+gates_rm
 route_anthropic
 
 # --json as_of and source (plan cache): as_of is the cache's mtime, source is --ok's verdict on it.
