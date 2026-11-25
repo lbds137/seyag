@@ -1,13 +1,15 @@
 ---
 id: TASK-72
 title: 'backlog-md: --priority required when creating or promoting a task'
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - Seyag
 created_date: '2026-11-22T05:50:00Z'
+updated_date: '2026-11-25T20:09:00Z'
 labels:
   - backlog
 dependencies: []
-priority: medium
+priority: high
 ordinal: 72000
 ---
 
