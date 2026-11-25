@@ -41,6 +41,7 @@
 # 38. --restore with journal dir holding 0.path, 0.orig, 0.mutant but no pid file -> rc 0 after >=900 ms retry window, restored
 # 39. --restore with journal dir holding 0.path, 0.orig, 0.mutant and a live pid written during the retry window -> refused exit 2, subject still mutated, journal kept
 # 40. default --fail-pattern with a two-space "FAIL  " probe line (tests/twosp.probe.sh) -> caught, exit 0, subject intact
+# 41. the same probe with the opt-out --fail-pattern '^FAIL:' -> INCONCLUSIVE, exit 2, subject intact
 #
 # Usage: tests/mutation-canary.probe.sh   (from anywhere)
 
@@ -861,5 +862,11 @@ out=$( (cd "$FIX" && bash "$TOOL" --file tools/subject.sh --old old --new new --
   && grep -qF "FAIL  subject printed new instead of old" <<<"$out" \
   && ok "40. default --fail-pattern: two-space FAIL line caught exit 0" || bad "40. default --fail-pattern two-space: rc=$rc (out: $out)"
 check_intact "40. default --fail-pattern two-space"
+
+# 41. opt-out: --fail-pattern '^FAIL:' does not read the two-space line -> inconclusive
+out=$( (cd "$FIX" && bash "$TOOL" --fail-pattern '^FAIL:' --file tools/subject.sh --old old --new new -- bash tests/twosp.probe.sh) 2>&1 ); rc=$?
+[ "$rc" -eq 2 ] && grep -qF "INCONCLUSIVE: bash tests/twosp.probe.sh failed (rc 1) with no new line matching ^FAIL:;" <<<"$out" \
+  && ok "41. --fail-pattern '^FAIL:' opt-out: two-space line inconclusive exit 2" || bad "41. opt-out: rc=$rc (out: $out)"
+check_intact "41. --fail-pattern opt-out"
 
 exit "$fail"
