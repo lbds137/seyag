@@ -503,7 +503,8 @@ out=$(timeout 25 "$LJ" wait "$p-plainld" --interval 1 --timeout 20 --owner ""); 
   || bad "plain run load-gate (rc=$rc, wait=$wrc, log=$(tr '\n' '|' <"$LJS/$p-plainld.log" 2>/dev/null))"
 unset SYG_GATE_LOCK_FILE SYG_LONG_JOB_LOAD_GATE
 
-n=$(timeout 5 "$LJ" status | grep -c "^$p-")
+# status queries systemd once per recorded job; 5 s ran out under heavy load (0 listed, 11-25).
+n=$(timeout 60 "$LJ" status | grep -c "^$p-")
 [ "$n" = 14 ] && ok "status lists every recorded job" || bad "status lists $n jobs, want 14"
 
 echo "long-job probe: $pass passed, $fail failed"
