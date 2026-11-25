@@ -1,10 +1,11 @@
 ---
 id: TASK-172
 title: 'scope-drift: the #426 review lows'
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - Seyag B
 created_date: '2026-11-25T13:08:00Z'
-updated_date: '2026-11-25T13:08:00Z'
+updated_date: '2026-11-25T14:16:51Z'
 labels:
   - scope-drift
 dependencies: []
