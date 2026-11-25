@@ -3,11 +3,11 @@ id: TASK-49
 title: >-
   Probes fail under suite load: pr-monitor-reminder 18ai and safe-worktree-clean
   timeout
-status: In Progress
+status: Done
 assignee:
   - Seyag B
 created_date: '2026-11-21T02:47:00Z'
-updated_date: '2026-11-25T18:43:00Z'
+updated_date: '2026-11-25T19:23:00Z'
 labels:
   - probes
   - flake
@@ -54,4 +54,6 @@ Both new failures look timing-dependent; that is an inference, not yet runtime-c
 2026-11-25: closed. TASK-175 (the three hook items) is on main, filed in 0.3.226; their fixes are tracked there.
 
 2026-11-25 correction (Seyag B): reopened. The 009c754 close assumed TASK-175 was on main; it is not (still in lane A's unpushed t174; origin/main has only the filing commit 7f07286). Close once A reports t174 merged.
+
+2026-11-25: closed. TASK-175 landed on main with #434 (42952bb, 0.3.227).
 <!-- SECTION:NOTES:END -->
