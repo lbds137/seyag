@@ -3,9 +3,11 @@ id: TASK-175
 title: >-
   Hook probe load flakes: pr-monitor-reminder 18ai, dispatch-posture-gate O9,
   launch-record case 1 (TASK-49 hook part)
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - Seyag
 created_date: '2026-11-25T15:00:00Z'
+updated_date: '2026-11-25T17:01:00Z'
 labels:
   - hooks
   - probes

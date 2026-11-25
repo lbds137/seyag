@@ -1,9 +1,11 @@
 ---
 id: TASK-174
 title: 'lossy-pipe-guard: cover the long-job runner''s run verb piped into a filter'
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - Seyag
 created_date: '2026-11-25T15:00:00Z'
+updated_date: '2026-11-25T17:01:00Z'
 labels:
   - hooks
   - guard
