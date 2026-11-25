@@ -42,11 +42,14 @@
 # Gate sources: each week gate slot (plan reserve, plan stop, z.ai reserve) resolves per gate call
 # (--ok, --wait, --posture) in this order: the gates file > the env's _CMD > the env's static > the
 # default. The gates file is ${XDG_CONFIG_HOME:-~/.config}/claude-usage/gates (path settable only in
-# seyag's config.toml as claude_usage_gates_file): an executable run under a 5 s timeout with the
-# caller's environment, whose stdout KEY=VALUE lines (gate keys only) override the environment for
+# seyag's config.toml as claude_usage_gates_file: an absolute path; ~ is not expanded — the loader
+# exports values verbatim): an executable run under a 5 s timeout with the
+# caller's environment, whose stdout KEY=VALUE lines (gate keys only; one trailing \r and leading
+# spaces/tabs per line are tolerated) override the environment for
 # that call; setting either key of a slot drops the environment's other key of it; to keep an
 # explicit env override the file prints it back; a failure, timeout or malformed line uses the
-# environment unchanged, with a note.
+# environment unchanged, with a note; a configured path that doesn't exist notes so, a missing
+# default path stays silent.
 #
 # Reads the statusline's cache of /api/oauth/usage (~/.cache/claude-statusline/usage.json)
 # and refreshes it when it is older than 2 minutes, under a lock, so any number of polling
@@ -77,7 +80,16 @@ if [ -r "$bin_dir/../hooks/lib/config-env.sh" ] \
     && declare -F syg_config_env >/dev/null; then
     syg_config_env "$(readlink -f "$bin_dir/..")"
 fi
-gates_file=${CLAUDE_USAGE_GATES_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/claude-usage/gates}
+# gates_file_from_config: the path came from config.toml (CLAUDE_USAGE_GATES_FILE survived the
+# unset above because the loader set it), so a missing file there is worth a note — a missing
+# default path is just "not configured" and stays quiet (see apply_gates_file).
+gates_file_from_config=0
+if [ -n "${CLAUDE_USAGE_GATES_FILE:-}" ]; then
+    gates_file=$CLAUDE_USAGE_GATES_FILE
+    gates_file_from_config=1
+else
+    gates_file=${XDG_CONFIG_HOME:-$HOME/.config}/claude-usage/gates
+fi
 
 cache="${XDG_CACHE_HOME:-$HOME/.cache}/claude-statusline/usage.json"
 ttl=120
@@ -203,21 +215,31 @@ resolve_week_stop() {
 # $gates_file runs per gate call (--ok, --wait via --ok, --posture; lanes without a week gate and
 # non-gate runs never fork it): its stdout KEY=VALUE lines override the environment for this one
 # call. Never sourced or eval'd: each line must match ^([A-Z][A-Z0-9_]*)=(.*)$ (split at the first
-# '='), the key is checked against the fixed gate-key list, and the value is exported verbatim.
+# '=', after one trailing \r and leading spaces/tabs are stripped — CRLF files and indented lines
+# parse), the key is checked against the fixed gate-key list, and the value is exported verbatim.
 # Slot rule: the three slots are (static, _CMD) pairs — the plan reserve, the stop, the z.ai
 # reserve; setting either key of a pair drops the environment's other key of it unless the file sets it too
 # (a file printing only the static beats a stale inherited _CMD; printing KEY_CMD= clears the
-# command). A missing file applies nothing quietly; a failed run (timeout included) or malformed
-# line keeps the environment unchanged with one stderr note; a key outside the gate list is
-# skipped with a note while the rest still apply. Accepted values are exported, so command
-# children (week-burn-window and friends) see them.
+# command). A missing file applies nothing quietly at the default path, while a configured path
+# ($gates_file_from_config: CLAUDE_USAGE_GATES_FILE from config.toml) that doesn't exist notes so
+# once per gate call; a failed run (timeout included) or malformed line keeps the environment
+# unchanged with one stderr note; a key outside the gate list is skipped with a note — buffered
+# until the whole output parsed, so a malformed file's note is the only one — while the rest
+# still apply. Accepted values are exported, so command children (week-burn-window and friends)
+# see them.
 apply_gates_file() {
     local out rc line key val n gk i a b known
     local -a gate_keys=(CLAUDE_USAGE_WEEK_RESERVE CLAUDE_USAGE_WEEK_RESERVE_CMD
         CLAUDE_USAGE_WEEK_STOP CLAUDE_USAGE_WEEK_STOP_CMD
         CLAUDE_USAGE_ZAI_WEEK_RESERVE CLAUDE_USAGE_ZAI_WEEK_RESERVE_CMD)
     local -A kv=()
-    [ -e "$gates_file" ] || return 0
+    local -a skipped=()
+    if [ ! -e "$gates_file" ]; then
+        if [ "$gates_file_from_config" = 1 ]; then
+            echo "claude-usage: gates file $gates_file (from config) does not exist; using the environment's gates" >&2
+        fi
+        return 0
+    fi
     if ! [ -f "$gates_file" ] || ! [ -x "$gates_file" ]; then
         echo "claude-usage: gates file $gates_file is not an executable file; using the environment's gates" >&2
         return 0
@@ -227,12 +249,17 @@ apply_gates_file() {
         echo "claude-usage: gates file $gates_file failed (exit $rc); using the environment's gates" >&2
         return 0
     fi
-    # Parse the whole output before touching the environment: a malformed line applies nothing.
+    # Parse the whole output before touching the environment: a malformed line applies nothing,
+    # and the unknown-key notes buffer with the parse, printed only once the whole output parsed —
+    # so a malformed file prints exactly its one note. Each line is matched after one trailing \r
+    # (a CRLF file) and leading spaces/tabs are stripped.
     n=0
     while IFS= read -r line || [ -n "$line" ]; do
         n=$((n + 1))
+        line=${line%$'\r'}
+        line=${line#"${line%%[![:space:]]*}"}
         [ -z "$line" ] && continue
-        case ${line#"${line%%[![:space:]]*}"} in '#'*) continue ;; esac
+        case $line in '#'*) continue ;; esac
         if ! [[ $line =~ ^([A-Z][A-Z0-9_]*)=(.*)$ ]]; then
             echo "claude-usage: gates file $gates_file: line $n is not KEY=VALUE; using the environment's gates" >&2
             return 0
@@ -244,11 +271,12 @@ apply_gates_file() {
             [ "$key" = "$gk" ] && known=1 && break
         done
         if [ "$known" = 0 ]; then
-            echo "claude-usage: gates file $gates_file: $key ignored: not a gate key" >&2
+            skipped+=("claude-usage: gates file $gates_file: $key ignored: not a gate key")
             continue
         fi
         kv[$key]=$val # a duplicate key: last wins
     done <<< "$out"
+    for line in "${skipped[@]}"; do echo "$line" >&2; done
     # Slot rule: a file-set key drops its pair partner from the environment for this call.
     for ((i = 0; i < ${#gate_keys[@]}; i += 2)); do
         a=${gate_keys[i]} b=${gate_keys[i + 1]}
@@ -970,7 +998,7 @@ case "${1:-}" in
         echo "$note$(plan_line)$extra_tail$tail"
         ;;
     *)
-        sed -n '2,49p' "$0" | sed 's/^# \{0,1\}//'
+        sed -n '2,52p' "$0" | sed 's/^# \{0,1\}//'
         exit 2
         ;;
 esac
