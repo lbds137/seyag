@@ -11,7 +11,7 @@ labels:
   - feature
 dependencies: []
 priority: medium
-ordinal: 163000
+ordinal: 170000
 ---
 
 ## Description
@@ -27,7 +27,17 @@ Ask:
 
 Consumer: a fleet STATUS-STALE check reads status_at when present (status older than the session's last activity by more than 2h), falling back to the 48h `updated:` rule when absent, so nothing breaks before this ships.
 
-Related: TASK-140 item 2 (skip `-archive-` stems in the role loops) is the single fix for ghost rows; readers enumerate through `claude-role --list/--json`. Positive control (requester, on 0.3.225): a copy of a retired archive file in a temp SYG_ROLE_DIR still lists as a second live role.
+Related: TASK-140 (ghost rows from archive copies; its notes carry the consumer's positive control).
 
 Owner: bin/** lane.
 <!-- SECTION:DESCRIPTION:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Consumer contract (confirmed 2026-11-25 by the consumer, which has already shipped its reader):
+- `status_at:` uses the same local-time format as `updated:` (`YYYY-MM-DD[ HH:MM]`).
+- It lives wherever `updated:` lives. The reader accepts it at the top level or under `metadata:`.
+- Every `--set status=` write stamps it, including a write with unchanged text. No other verb touches it.
+- No deadline: without the field, the reader falls back to the 48h `updated:` rule.
+<!-- SECTION:NOTES:END -->
