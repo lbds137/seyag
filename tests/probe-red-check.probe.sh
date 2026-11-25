@@ -38,6 +38,22 @@ out=$(bash "$D/tools/subject.sh")
 [ "$out" = "new" ] && echo "ok:   subject fixed" || { echo "FAIL: subject printed: $out"; fail=1; }
 exit $fail
 PROBE
+cat > "$FIX/tests/red2sp.probe.sh" <<'PROBE'
+#!/bin/bash
+set -uo pipefail
+D=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+fail=0
+out=$(bash "$D/tools/subject.sh")
+[ "$out" = "new" ] && echo "ok:   subject fixed" || { echo "FAIL  subject printed: $out"; fail=1; }
+exit $fail
+PROBE
+cat > "$FIX/tests/notfail.probe.sh" <<'PROBE'
+#!/bin/bash
+echo "  FAIL: indented colon form"
+echo "FAILED not a fail line"
+echo "FAIL one-space form"
+exit 1
+PROBE
 cat > "$FIX/tests/green.probe.sh" <<'PROBE'
 #!/bin/bash
 set -uo pipefail
@@ -79,6 +95,32 @@ grep -qF "FAIL: subject printed: old" <<<"$out" \
   && ok "RED: the FAIL line follows" || bad "RED FAIL line (out: $out)"
 grep -qF "probe-red-check: red confirmed" <<<"$out" \
   && ok "RED: confirmation line" || bad "RED confirm (out: $out)"
+
+# RED with the two-space FAIL form ("FAIL  x", no colon; 32 probes print it).
+out=$( (cd "$FIX" && bash "$TOOL" tests/red2sp.probe.sh main) 2>&1 ); rc=$?
+[ $rc = 0 ] && ok "RED two-space FAIL: exit 0" || bad "RED two-space exit $rc (out: $out)"
+grep -qF "RED: tests/red2sp.probe.sh fails at main (rc 1, 1 FAIL lines)" <<<"$out" \
+  && ok "RED two-space FAIL: summary line counts the line" || bad "RED two-space summary (out: $out)"
+grep -qF "FAIL  subject printed: old" <<<"$out" \
+  && ok "RED two-space FAIL: the FAIL line is echoed" || bad "RED two-space FAIL line (out: $out)"
+
+# --expect matches a two-space FAIL line: exit 0.
+out=$( (cd "$FIX" && bash "$TOOL" --expect 'subject printed' tests/red2sp.probe.sh main) 2>&1 ); rc=$?
+[ $rc = 0 ] && grep -qF "probe-red-check: red confirmed (expected text found)" <<<"$out" \
+  && ok "--expect on two-space FAIL line: exit 0" \
+  || bad "--expect two-space match (rc $rc; out: $out)"
+
+# --expect missing from the two-space FAIL line: exit 3 (WRONG REASON).
+out=$( (cd "$FIX" && bash "$TOOL" --expect 'no such text' tests/red2sp.probe.sh main) 2>&1 ); rc=$?
+[ $rc = 3 ] && grep -qF "WRONG REASON: tests/red2sp.probe.sh fails at main" <<<"$out" \
+  && ok "--expect miss on two-space FAIL line: exit 3" \
+  || bad "--expect miss two-space (rc $rc; out: $out)"
+
+# Not FAIL lines: indented, FAILED, one space; rc 1 without a FAIL line is INCONCLUSIVE.
+out=$( (cd "$FIX" && bash "$TOOL" tests/notfail.probe.sh main) 2>&1 ); rc=$?
+[ $rc = 2 ] && grep -qF "INCONCLUSIVE: tests/notfail.probe.sh" <<<"$out" \
+  && ok "non-FAIL lines (indented, FAILED, one space): exit 2 INCONCLUSIVE" \
+  || bad "non-FAIL lines (rc $rc; out: $out)"
 
 # NOT RED: an already-green probe at base; exit 1.
 out=$( (cd "$FIX" && bash "$TOOL" tests/green.probe.sh main) 2>&1 ); rc=$?
