@@ -1,0 +1,2514 @@
+#!/bin/bash
+# Multi-repo sweep, --apply-hold backup/removal, --apply-eligible (P1-P48) and pr-merged (PM1-PM10,
+# L7) checks for bin/safe-worktree-clean. The single-repo checks live in tests/safe-worktree-clean.probe.sh.
+# The fixture and helpers come from tests/safe-worktree-clean-fixture.sh.
+# Usage: tests/safe-worktree-clean-apply-hold.probe.sh   (from anywhere)
+
+REPO_TESTS="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=tests/safe-worktree-clean-fixture.sh
+. "$REPO_TESTS/safe-worktree-clean-fixture.sh" || { echo "FAIL: cannot source tests/safe-worktree-clean-fixture.sh"; exit 1; }
+
+
+# --- Multi-repo sweep and --apply-hold backup/removal (P1-P48). ---
+
+phase_17() {
+local BUSY_PID
+# P1 dry run: sweepone with fine (SAFE), held (commit + dirty + untracked + notes.log + __pycache__/x.pyc), busy (live cwd).
+mk_repo sweepone && [ -d "$T/sweepone" ] || bad "P1 setup: mk_repo sweepone"
+SW1="$T/sweepone"
+SW1W="$SW1/.claude/worktrees"
+add_tree sweepone fine && [ -d "$SW1W/fine" ] || bad "P1 setup: add_tree fine"
+add_tree sweepone held && [ -d "$SW1W/held" ] || bad "P1 setup: add_tree held"
+echo committed > "$SW1W/held/committed.txt" \
+  && git -C "$SW1W/held" add committed.txt \
+  && git -C "$SW1W/held" commit -qm "held work" \
+  || bad "P1 setup: held commit"
+HELD_SHA=$(git -C "$SW1W/held" rev-parse HEAD 2>/dev/null)
+[ -n "$HELD_SHA" ] || bad "P1 setup: HELD_SHA"
+echo dirty-edit > "$SW1W/held/a.txt" && [ -f "$SW1W/held/a.txt" ] || bad "P1 setup: dirty edit"
+echo untracked-item > "$SW1W/held/extra.txt" && [ -f "$SW1W/held/extra.txt" ] || bad "P1 setup: untracked extra.txt"
+echo keep-log > "$SW1W/held/notes.log" && [ -f "$SW1W/held/notes.log" ] || bad "P1 setup: ignored notes.log"
+mkdir -p "$SW1W/held/__pycache__" && echo pyc > "$SW1W/held/__pycache__/x.pyc" && [ -f "$SW1W/held/__pycache__/x.pyc" ] \
+  || bad "P1 setup: ignored __pycache__/x.pyc"
+add_tree sweepone busy && [ -d "$SW1W/busy" ] || bad "P1 setup: add_tree busy"
+(cd "$SW1W/busy" && exec sleep 300) &
+BUSY_PID=$!
+PIDS+=("$BUSY_PID")
+sleep 0.3
+kill -0 "$BUSY_PID" 2>/dev/null || bad "P1 setup: busy sleep process"
+
+J_P1=$("$TOOL" --repo "$SW1" --json); rc_p1j=$?
+out_p1=$("$TOOL" --repo "$SW1"); rc_p1t=$?
+expect "$J_P1" fine SAFE "P1: fine is SAFE"
+expect "$J_P1" held HOLD:unmerged,dirty,untracked-new,ignored "P1: held has expected HOLD reasons"
+expect "$J_P1" busy HOLD:live-cwd "P1: busy has HOLD:live-cwd"
+if [ "$(approvable_of "$J_P1" fine)" = "False" ] && [ "$(approvable_of "$J_P1" held)" = "True" ]; then
+  ok "P1: held is approvable and fine is not"
+else
+  bad "P1: fine/held approvable flags (fine=$(approvable_of "$J_P1" fine), held=$(approvable_of "$J_P1" held))"
+fi
+if [ "$rc_p1t" -eq 0 ] && [ "$(approvable_of "$J_P1" busy)" = "False" ] && ! grep -q 'approvable with --apply-hold: .*busy' <<<"$out_p1"; then
+  ok "P1: busy is not approvable"
+else
+  bad "P1: busy should not be approvable (got $(approvable_of "$J_P1" busy))"
+fi
+PLAN_P1_JSON=$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["hold_plan"] or "")' "$J_P1")
+PLAN_P1_TXT=$(sed -n 's/^hold plan: \([0-9a-f]\{12\}\)$/\1/p' <<<"$out_p1")
+if [ "$rc_p1j" -eq 0 ] && [ "$rc_p1t" -eq 0 ] && [ -n "$PLAN_P1_TXT" ] && [ "$PLAN_P1_TXT" = "$PLAN_P1_JSON" ] \
+  && grep -qx '  approvable with --apply-hold: \.claude/worktrees/held' <<<"$out_p1"; then
+  ok "P1: dry run text hold plan ($PLAN_P1_TXT) matches JSON hold_plan and lists held"
+else
+  bad "P1: dry run plan id (rc_j=$rc_p1j, rc_t=$rc_p1t, txt='$PLAN_P1_TXT', json='$PLAN_P1_JSON')"; printf '%s\n' "$out_p1"
+fi
+
+}
+phase_17
+phase_18() {
+# P2 wrong id: --apply-hold 000000000000 -> rc 2, stderr starts safe-worktree-clean: hold plan changed:, all three trees stay.
+err_p2=$("$TOOL" --repo "$SW1" --apply-hold 000000000000 2>&1 >/dev/null); rc_p2=$?
+if [ "$rc_p2" -eq 2 ] \
+  && [[ $err_p2 == "safe-worktree-clean: hold plan changed: approved 000000000000, now $PLAN_P1_JSON; rerun the dry run and get a fresh yes"* ]] \
+  && [ -d "$SW1W/fine" ] && [ -d "$SW1W/held" ] && [ -d "$SW1W/busy" ]; then
+  ok "P2: wrong id exits 2 with hold plan changed message and leaves all three trees in place"
+else
+  bad "P2: wrong id (rc=$rc_p2, err='$err_p2', fine=$([ -d "$SW1W/fine" ] && echo ok || echo gone), held=$([ -d "$SW1W/held" ] && echo ok || echo gone))"
+fi
+
+}
+phase_18
+phase_19() {
+# P3 stale id: add an untracked file in held, apply with old id -> rc 2, nothing removed; remove file again and re-read id.
+echo drift > "$SW1W/held/drift.txt" && [ -f "$SW1W/held/drift.txt" ] || bad "P3 setup: create drift.txt"
+err_p3=$("$TOOL" --repo "$SW1" --apply-hold "$PLAN_P1_JSON" 2>&1 >/dev/null); rc_p3=$?
+if [ "$rc_p3" -eq 2 ] \
+  && [[ $err_p3 == "safe-worktree-clean: hold plan changed: approved $PLAN_P1_JSON, now "* ]] \
+  && [ -d "$SW1W/fine" ] && [ -d "$SW1W/held" ] && [ -d "$SW1W/busy" ]; then
+  ok "P3: stale id after adding untracked file exits 2 and removes nothing"
+else
+  bad "P3: stale id (rc=$rc_p3, err='$err_p3')"
+fi
+rm "$SW1W/held/drift.txt" && [ ! -e "$SW1W/held/drift.txt" ] || bad "P3 setup: remove drift.txt"
+PLAN_P3=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["hold_plan"] or "")' < <("$TOOL" --repo "$SW1" --json))
+if [ "$PLAN_P3" = "$PLAN_P1_JSON" ]; then
+  ok "P3: removing drift.txt restores the original hold plan id ($PLAN_P3)"
+else
+  bad "P3: restored plan id got '$PLAN_P3', want '$PLAN_P1_JSON'"
+fi
+
+}
+phase_19
+phase_20() {
+local bf bk_dirs modes_ok
+# P4 apply: --apply-hold <id> with --only naming every tree (held is commit-carrying, so the bare
+# id refuses; the approvable set is unchanged by the naming, so the id still matches PLAN_P3)
+# -> rc 0; fine and held gone, branches deleted, busy present, backup verified.
+out_p4=$(SYG_WORKTREE_BACKUP_DIR="$T/bk" "$TOOL" --repo "$SW1" --apply-hold="$PLAN_P3" \
+  --only "$SW1W/fine" --only "$SW1W/held" --only "$SW1W/busy"); rc_p4=$?
+if [ "$rc_p4" -eq 0 ] && [ ! -e "$SW1W/fine" ] && [ ! -e "$SW1W/held" ] && [ -d "$SW1W/busy" ] \
+  && ! git -C "$SW1" rev-parse -q --verify refs/heads/worktree-agent-fine >/dev/null \
+  && ! git -C "$SW1" rev-parse -q --verify refs/heads/worktree-agent-held >/dev/null \
+  && git -C "$SW1" rev-parse -q --verify refs/heads/worktree-agent-busy >/dev/null \
+  && grep -q "^backups: $T/bk/" <<<"$out_p4"; then
+  ok "P4: --apply-hold removes fine and held and their branches, keeps busy, and prints backups dir"
+else
+  bad "P4: --apply-hold removal/branches (rc=$rc_p4, fine=$([ -e "$SW1W/fine" ] && echo present || echo gone), held=$([ -e "$SW1W/held" ] && echo present || echo gone), busy=$([ -d "$SW1W/busy" ] && echo present || echo gone))"; printf '%s\n' "$out_p4"
+fi
+shopt -s nullglob
+bk_dirs=("$T/bk"/*/sweepone--held--[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f])
+shopt -u nullglob
+BK_HELD=${bk_dirs[0]:-}
+if [ "${#bk_dirs[@]}" -eq 1 ] && [ -d "$BK_HELD" ] && [ "$(stat -c %a "$BK_HELD")" = 700 ]; then
+  ok "P4: backup dir exists for held with mode 700"
+else
+  bad "P4: backup dir for held (count=${#bk_dirs[@]}, dir='$BK_HELD', mode=$(stat -c %a "$BK_HELD" 2>/dev/null))"
+fi
+modes_ok=true
+for bf in tree.tgz branch.bundle uncommitted.patch changes.txt README.txt; do
+  if [ ! -f "$BK_HELD/$bf" ] || [ "$(stat -c %a "$BK_HELD/$bf" 2>/dev/null)" != 600 ]; then
+    modes_ok=false
+    bad "P4: $bf missing or not mode 600 (got $(stat -c %a "$BK_HELD/$bf" 2>/dev/null))"
+  fi
+done
+$modes_ok && ok "P4: tree.tgz, branch.bundle, uncommitted.patch, changes.txt, README.txt all mode 600"
+tar_list=$(tar -tzf "$BK_HELD/tree.tgz" 2>/dev/null) || bad "P4: tar -tzf on the backup tree.tgz failed"
+if grep -qx 'extra\.txt' <<<"$tar_list" && grep -qx 'notes\.log' <<<"$tar_list" && ! grep -qE '(^|/)\.git(/|$)' <<<"$tar_list"; then
+  ok "P4: tree.tgz lists extra.txt and notes.log and omits .git"
+else
+  bad "P4: tree.tgz contents missing extra.txt or notes.log (list: $tar_list)"
+fi
+if ! grep -q '__pycache__' <<<"$tar_list"; then
+  ok "P4: tree.tgz excludes __pycache__"
+else
+  bad "P4: tree.tgz includes __pycache__ (list: $tar_list)"
+fi
+git clone -q "$T/sweepone-origin.git" "$T/p4-scratch" 2>/dev/null && [ -d "$T/p4-scratch" ] || bad "P4 setup: clone scratch"
+if git -C "$T/p4-scratch" fetch -q "$BK_HELD/branch.bundle" worktree-agent-held:worktree-agent-held 2>/dev/null \
+  && [ "$(git -C "$T/p4-scratch" rev-parse worktree-agent-held 2>/dev/null)" = "$HELD_SHA" ]; then
+  ok "P4: fetching branch.bundle into scratch repo yields worktree-agent-held at pre-removal HEAD"
+else
+  bad "P4: bundle fetch (got '$(git -C "$T/p4-scratch" rev-parse worktree-agent-held 2>/dev/null)', want '$HELD_SHA')"
+fi
+if grep -q 'a\.txt' "$BK_HELD/uncommitted.patch" && grep -q 'dirty-edit' "$BK_HELD/uncommitted.patch"; then
+  ok "P4: uncommitted.patch names the dirty path a.txt"
+else
+  bad "P4: uncommitted.patch contents"
+fi
+
+}
+phase_20
+phase_21() {
+local SW5 SW5W bk5_dirs
+# P5 no commits beyond base: a tree with only an untracked new file -> apply removes it, no branch.bundle, changes.txt says no commits beyond.
+mk_repo sweepnoc && [ -d "$T/sweepnoc" ] || bad "P5 setup: mk_repo sweepnoc"
+SW5="$T/sweepnoc"
+SW5W="$SW5/.claude/worktrees"
+add_tree sweepnoc onlynew && [ -d "$SW5W/onlynew" ] || bad "P5 setup: add_tree onlynew"
+echo u > "$SW5W/onlynew/only.txt" && [ -f "$SW5W/onlynew/only.txt" ] || bad "P5 setup: only.txt"
+PLAN_P5=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["hold_plan"] or "")' < <("$TOOL" --repo "$SW5" --json))
+[ -n "$PLAN_P5" ] || bad "P5 setup: PLAN_P5"
+SYG_WORKTREE_BACKUP_DIR="$T/bk5" "$TOOL" --repo "$SW5" --apply-hold "$PLAN_P5" >/dev/null; rc_p5=$?
+shopt -s nullglob
+bk5_dirs=("$T/bk5"/*/sweepnoc--onlynew--[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f])
+shopt -u nullglob
+BK5=${bk5_dirs[0]:-}
+if [ "$rc_p5" -eq 0 ] && [ ! -e "$SW5W/onlynew" ] && [ -d "$BK5" ] && [ ! -e "$BK5/branch.bundle" ] \
+  && grep -q 'no commits beyond origin/main' "$BK5/changes.txt" \
+  && grep -q 'no branch.bundle: no commits beyond origin/main' "$BK5/README.txt"; then
+  ok "P5: tree with no commits beyond base is removed without branch.bundle and changes.txt/README.txt note no commits beyond"
+else
+  bad "P5: no commits beyond base (rc=$rc_p5, dir='$BK5')"
+fi
+
+}
+phase_21
+phase_22() {
+local SW6 SW6W
+# P6 backup failure: SYG_WORKTREE_BACKUP_DIR set to a regular file -> rc 3, tree stays, action names failed: backup:.
+mk_repo sweepfail && [ -d "$T/sweepfail" ] || bad "P6 setup: mk_repo sweepfail"
+SW6="$T/sweepfail"
+SW6W="$SW6/.claude/worktrees"
+add_tree sweepfail stuck && [ -d "$SW6W/stuck" ] || bad "P6 setup: add_tree stuck"
+echo u > "$SW6W/stuck/u.txt" && [ -f "$SW6W/stuck/u.txt" ] || bad "P6 setup: u.txt"
+PLAN_P6=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["hold_plan"] or "")' < <("$TOOL" --repo "$SW6" --json))
+[ -n "$PLAN_P6" ] || bad "P6 setup: PLAN_P6"
+echo not-a-dir > "$T/bkfile" && [ -f "$T/bkfile" ] || bad "P6 setup: bkfile"
+J_P6=$(SYG_WORKTREE_BACKUP_DIR="$T/bkfile" "$TOOL" --repo "$SW6" --apply-hold "$PLAN_P6" --json 2>/dev/null); rc_p6=$?
+act_p6=$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["worktrees"][0]["action"] or "")' "$J_P6")
+if [ "$rc_p6" -eq 3 ] && [ -d "$SW6W/stuck" ] && [ -f "$SW6W/stuck/u.txt" ] && [[ $act_p6 == "failed: backup: "* ]]; then
+  ok "P6: backup failure exits 3, leaves the tree in place, and records failed: backup: action"
+else
+  bad "P6: backup failure (rc=$rc_p6, action='$act_p6')"
+fi
+
+}
+phase_22
+phase_23() {
+# P7 several repos: sweepa and sweepb, one approvable tree each.
+mk_repo sweepa && [ -d "$T/sweepa" ] || bad "P7 setup: mk_repo sweepa"
+mk_repo sweepb && [ -d "$T/sweepb" ] || bad "P7 setup: mk_repo sweepb"
+SWA="$T/sweepa"
+SWB="$T/sweepb"
+add_tree sweepa ha && [ -d "$SWA/.claude/worktrees/ha" ] || bad "P7 setup: add_tree ha"
+add_tree sweepb hb && [ -d "$SWB/.claude/worktrees/hb" ] || bad "P7 setup: add_tree hb"
+echo a > "$SWA/.claude/worktrees/ha/new_a.txt" && [ -f "$SWA/.claude/worktrees/ha/new_a.txt" ] || bad "P7 setup: new_a.txt"
+echo b > "$SWB/.claude/worktrees/hb/new_b.txt" && [ -f "$SWB/.claude/worktrees/hb/new_b.txt" ] || bad "P7 setup: new_b.txt"
+
+out_p7=$("$TOOL" --repo "$SWA" --repo "$SWB"); rc_p7=$?
+SWEEP_ID=$(sed -n 's/^sweep plan: \([0-9a-f]\{12\}\)$/\1/p' <<<"$out_p7")
+if [ "$rc_p7" -eq 0 ] && grep -q "^repo: $SWA " <<<"$out_p7" && grep -q "^repo: $SWB " <<<"$out_p7" && [ -n "$SWEEP_ID" ]; then
+  ok "P7: --repo A --repo B shows both repo: headers and sweep plan: $SWEEP_ID"
+else
+  bad "P7: multi-repo text dry run (rc=$rc_p7, sweep_id='$SWEEP_ID')"; printf '%s\n' "$out_p7"
+fi
+
+printf '# comment line\n\n%s/sweepa\n%s\n' '~' "$SWB" > "$T/repos.txt" && [ -f "$T/repos.txt" ] || bad "P7 setup: repos.txt"
+out_p7f=$(HOME="$T" "$TOOL" --repos-file "$T/repos.txt"); rc_p7f=$?
+SWEEP_ID_FILE=$(sed -n 's/^sweep plan: \([0-9a-f]\{12\}\)$/\1/p' <<<"$out_p7f")
+if [ "$rc_p7f" -eq 0 ] && [ "$SWEEP_ID_FILE" = "$SWEEP_ID" ]; then
+  ok "P7: --repos-file with comment, blank line, and ~/ gives the same sweep plan id"
+else
+  bad "P7: --repos-file (rc=$rc_p7f, got '$SWEEP_ID_FILE', want '$SWEEP_ID')"
+fi
+
+J_P7=$("$TOOL" --repo "$SWA" --repo "$SWB" --json); rc_p7j=$?
+if [ "$rc_p7j" -eq 0 ] && python3 -c '
+import json, sys
+d = json.loads(sys.argv[1])
+assert len(d["repos"]) == 2 and d["sweep_plan"] == sys.argv[2]
+' "$J_P7" "$SWEEP_ID"; then
+  ok "P7: --json has repos of length 2 and matching sweep_plan"
+else
+  bad "P7: --json multi-repo (rc=$rc_p7j)"; printf '%s\n' "$J_P7"
+fi
+
+err_p7w=$("$TOOL" --repo "$SWA" --repo "$SWB" --apply-hold 000000000000 2>&1 >/dev/null); rc_p7w=$?
+if [ "$rc_p7w" -eq 2 ] && [ -d "$SWA/.claude/worktrees/ha" ] && [ -d "$SWB/.claude/worktrees/hb" ]; then
+  ok "P7: wrong sweep id exits 2 and removes nothing in either repo"
+else
+  bad "P7: wrong sweep id (rc=$rc_p7w, err='$err_p7w')"
+fi
+
+out_p7a=$(SYG_WORKTREE_BACKUP_DIR="$T/bk7" "$TOOL" --repo "$SWA" --repo "$SWB" --apply-hold "$SWEEP_ID"); rc_p7a=$?
+if [ "$rc_p7a" -eq 0 ] && [ ! -e "$SWA/.claude/worktrees/ha" ] && [ ! -e "$SWB/.claude/worktrees/hb" ] \
+  && [ "$(grep -c '^backups: ' <<<"$out_p7a")" -eq 1 ]; then
+  ok "P7: right sweep id backs up and removes both trees across repos"
+else
+  bad "P7: right sweep id apply (rc=$rc_p7a)"; printf '%s\n' "$out_p7a"
+fi
+
+}
+phase_23
+phase_24() {
+# P8 refusals: --apply-hold X --all -> 2; --repo A --repo B --only P -> 2; --repos-file /nonexistent -> 2.
+"$TOOL" --repo "$SWA" --apply-hold "$SWEEP_ID" --all >/dev/null 2>&1; rc_r1=$?
+[ "$rc_r1" -eq 2 ] && ok "P8: --apply-hold with --all exits 2" || bad "P8: --apply-hold --all exit $rc_r1"
+err_r2=$("$TOOL" --repo "$SWA" --repo "$SWB" --only "$SWA/.claude/worktrees/ha" 2>&1 >/dev/null); rc_r2=$?
+[ "$rc_r2" -eq 2 ] && grep -qF -- '--only applies to one repo' <<<"$err_r2" \
+  && ok "P8: --repo A --repo B --only P exits 2 (--only applies to one repo)" || bad "P8: multi-repo --only (rc=$rc_r2, err='$err_r2')"
+"$TOOL" --repos-file "$T/no-such-repos-file" >/dev/null 2>&1; rc_r3=$?
+[ "$rc_r3" -eq 2 ] && ok "P8: --repos-file /nonexistent exits 2" || bad "P8: --repos-file /nonexistent exit $rc_r3"
+
+}
+phase_24
+phase_25() {
+local sp
+# P9 same basename + spaces: two repos $T/sp1/my proj and $T/sp2/my proj, each with tree w.
+for sp in sp1 sp2; do
+  mkdir -p "$T/$sp" && [ -d "$T/$sp" ] || bad "P9 setup: mkdir $sp"
+  r_sp="$T/$sp/my proj"
+  git init -q --bare -b main "$T/$sp/origin.git" && [ -d "$T/$sp/origin.git" ] || bad "P9 setup: bare $sp"
+  git clone -q "$T/$sp/origin.git" "$r_sp" 2>/dev/null && [ -d "$r_sp" ] || bad "P9 setup: clone $sp"
+  printf '*.log\n__pycache__/\n' > "$r_sp/.gitignore"
+  echo v1 > "$r_sp/a.txt"
+  git -C "$r_sp" add . && git -C "$r_sp" commit -qm first && git -C "$r_sp" push -q origin main 2>/dev/null \
+    && git -C "$r_sp" remote set-head origin main \
+    && echo .claude/ >> "$r_sp/.git/info/exclude" \
+    || bad "P9 setup: init commits $sp"
+  git -C "$r_sp" worktree add -q -b worktree-agent-w "$r_sp/.claude/worktrees/w" origin/main 2>/dev/null \
+    && [ -d "$r_sp/.claude/worktrees/w" ] || bad "P9 setup: worktree w in $sp"
+  echo "commit-$sp" > "$r_sp/.claude/worktrees/w/c.txt" \
+    && git -C "$r_sp/.claude/worktrees/w" add c.txt \
+    && git -C "$r_sp/.claude/worktrees/w" commit -qm "work $sp" \
+    || bad "P9 setup: commit in $sp/w"
+  echo "only-in-$sp" > "$r_sp/.claude/worktrees/w/u.txt" \
+    && [ -f "$r_sp/.claude/worktrees/w/u.txt" ] || bad "P9 setup: u.txt in $sp/w"
+done
+SPA="$T/sp1/my proj"
+SPB="$T/sp2/my proj"
+SPA_W_SHA=$(git -C "$SPA" rev-parse refs/heads/worktree-agent-w 2>/dev/null)
+[ -n "$SPA_W_SHA" ] || bad "P9 setup: SPA_W_SHA"
+out_p9d=$("$TOOL" --repo "$SPA" --repo "$SPB"); rc_p9d=$?
+SWEEP_P9=$(sed -n 's/^sweep plan: \([0-9a-f]\{12\}\)$/\1/p' <<<"$out_p9d")
+[ "$rc_p9d" -eq 0 ] && [ -n "$SWEEP_P9" ] || bad "P9 setup: sweep plan id (rc=$rc_p9d, id='$SWEEP_P9')"
+}
+phase_25
+phase_26() {
+local BK9_A BK9_B
+# P9 apply: each w tree is commit-carrying (a commit beyond base), so the bare sweep id refuses
+# (P42(ii)); the per-repo scoped flow approves each: scoped dry run over w, then
+# --apply-hold <scoped id> --only w.
+SID_P9A=$(sed -n 's/^hold plan: \([0-9a-f]\{12\}\)$/\1/p' < <("$TOOL" --repo "$SPA" --only "$SPA/.claude/worktrees/w"))
+SID_P9B=$(sed -n 's/^hold plan: \([0-9a-f]\{12\}\)$/\1/p' < <("$TOOL" --repo "$SPB" --only "$SPB/.claude/worktrees/w"))
+[ -n "$SID_P9A" ] && [ -n "$SID_P9B" ] || bad "P9 setup: scoped ids ('$SID_P9A'/'$SID_P9B')"
+out_p9a=$(SYG_WORKTREE_BACKUP_DIR="$T/bk9" "$TOOL" --repo "$SPA" --apply-hold "$SID_P9A" --only "$SPA/.claude/worktrees/w"); rc_p9a=$?
+SYG_WORKTREE_BACKUP_DIR="$T/bk9" "$TOOL" --repo "$SPB" --apply-hold "$SID_P9B" --only "$SPB/.claude/worktrees/w" >/dev/null; rc_p9b=$?
+[ "$rc_p9b" -eq 0 ] || rc_p9a=$rc_p9b
+sha_spa=$(printf '%s\0%s' "$SPA" "$SPA/.claude/worktrees/w" | sha256sum | cut -c1-8)
+sha_spb=$(printf '%s\0%s' "$SPB" "$SPB/.claude/worktrees/w" | sha256sum | cut -c1-8)
+shopt -s nullglob
+bk9_dirs=("$T/bk9"/*/"my proj--w--"[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f])
+bk9_a=("$T/bk9"/*/"my proj--w--$sha_spa")
+bk9_b=("$T/bk9"/*/"my proj--w--$sha_spb")
+shopt -u nullglob
+BK9_A=${bk9_a[0]:-}
+BK9_B=${bk9_b[0]:-}
+if [ "$rc_p9a" -eq 0 ] && [ ! -e "$SPA/.claude/worktrees/w" ] && [ ! -e "$SPB/.claude/worktrees/w" ] \
+  && [ "${#bk9_dirs[@]}" -eq 2 ] && [ -d "$BK9_A" ] && [ -d "$BK9_B" ] && [ "$BK9_A" != "$BK9_B" ] \
+  && [ "$(tar -xzOf "$BK9_A/tree.tgz" u.txt 2>/dev/null)" = "only-in-sp1" ] \
+  && [ "$(tar -xzOf "$BK9_B/tree.tgz" u.txt 2>/dev/null)" = "only-in-sp2" ]; then
+  ok "P9: same basename repos get two distinct backup dirs my proj--w--<8hex> with their own tree.tgz content"
+else
+  bad "P9: same basename backups (rc=$rc_p9a, count=${#bk9_dirs[@]}, A='$BK9_A', B='$BK9_B')"; printf '%s\n' "$out_p9a"
+fi
+restore_cmd=$(grep '^  git -C .* fetch ' "$BK9_A/README.txt" 2>/dev/null)
+if [ -n "$restore_cmd" ] && eval "$restore_cmd" 2>/dev/null \
+  && [ "$(git -C "$SPA" rev-parse -q --verify refs/heads/worktree-agent-w 2>/dev/null)" = "$SPA_W_SHA" ]; then
+  ok "P9: eval of quoted git -C restore line from README.txt restores refs/heads/worktree-agent-w in repo with space"
+else
+  bad "P9: README restore eval (cmd='$restore_cmd', sha='$(git -C "$SPA" rev-parse -q --verify refs/heads/worktree-agent-w 2>/dev/null)', want='$SPA_W_SHA')"
+fi
+
+}
+phase_26
+phase_27() {
+local SW10 SW10L SW10LW SW10W
+# P10 content change: editing an untracked file's or ignored non-cache file's content invalidates the plan id.
+mk_repo sweepcontent && [ -d "$T/sweepcontent" ] || bad "P10 setup: mk_repo sweepcontent"
+SW10="$T/sweepcontent"
+SW10W="$SW10/.claude/worktrees"
+add_tree sweepcontent wc && [ -d "$SW10W/wc" ] || bad "P10 setup: add_tree wc"
+echo v1 > "$SW10W/wc/u.txt" && [ -f "$SW10W/wc/u.txt" ] || bad "P10 setup: u.txt v1"
+PLAN_P10_U=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["hold_plan"] or "")' < <("$TOOL" --repo "$SW10" --json))
+[ -n "$PLAN_P10_U" ] || bad "P10 setup: PLAN_P10_U"
+echo v2 > "$SW10W/wc/u.txt" && [ -f "$SW10W/wc/u.txt" ] || bad "P10 setup: u.txt v2"
+err_p10u=$(SYG_WORKTREE_BACKUP_DIR="$T/bk10" "$TOOL" --repo "$SW10" --apply-hold "$PLAN_P10_U" 2>&1 >/dev/null); rc_p10u=$?
+if [ "$rc_p10u" -eq 2 ] && [ -d "$SW10W/wc" ] && grep -q 'hold plan changed' <<<"$err_p10u"; then
+  ok "P10: changing untracked file content (same name) invalidates plan id (rc 2, tree stays)"
+else
+  bad "P10: untracked content change (rc=$rc_p10u, err='$err_p10u')"
+fi
+mk_repo sweepcontentlog && [ -d "$T/sweepcontentlog" ] || bad "P10 setup: mk_repo sweepcontentlog"
+SW10L="$T/sweepcontentlog"
+SW10LW="$SW10L/.claude/worktrees"
+add_tree sweepcontentlog wclog && [ -d "$SW10LW/wclog" ] || bad "P10 setup: add_tree wclog"
+echo log1 > "$SW10LW/wclog/app.log" && [ -f "$SW10LW/wclog/app.log" ] || bad "P10 setup: app.log v1"
+PLAN_P10_L=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["hold_plan"] or "")' < <("$TOOL" --repo "$SW10L" --json))
+[ -n "$PLAN_P10_L" ] || bad "P10 setup: PLAN_P10_L"
+echo log2 > "$SW10LW/wclog/app.log" && [ -f "$SW10LW/wclog/app.log" ] || bad "P10 setup: app.log v2"
+err_p10l=$(SYG_WORKTREE_BACKUP_DIR="$T/bk10" "$TOOL" --repo "$SW10L" --apply-hold "$PLAN_P10_L" 2>&1 >/dev/null); rc_p10l=$?
+if [ "$rc_p10l" -eq 2 ] && [ -d "$SW10LW/wclog" ] && grep -q 'hold plan changed' <<<"$err_p10l"; then
+  ok "P10: changing ignored non-cache file content (*.log) invalidates plan id (rc 2, tree stays)"
+else
+  bad "P10: ignored content change (rc=$rc_p10l, err='$err_p10l')"
+fi
+
+}
+phase_27
+phase_28() {
+local SW11 SW11W bk11_dirs
+# P11 changed during backup: tar shim writes late.txt into -C dir after -czf.
+REAL_TAR=$(command -v tar)
+mkdir -p "$T/shim" && [ -n "$REAL_TAR" ] || bad "P11 setup: shim dir"
+cat > "$T/shim/tar" <<EOF
+#!/bin/bash
+"$REAL_TAR" "\$@"
+rc=\$?
+is_czf=false
+c_dir=""
+prev=""
+for a in "\$@"; do
+  [ "\$prev" = "-C" ] && c_dir=\$a
+  [ "\$a" = "-czf" ] && is_czf=true
+  prev=\$a
+done
+if \$is_czf && [ -n "\$c_dir" ]; then
+  echo late > "\$c_dir/late.txt"
+fi
+exit \$rc
+EOF
+chmod +x "$T/shim/tar" && [ -x "$T/shim/tar" ] || bad "P11 setup: chmod tar shim"
+mk_repo sweeprace && [ -d "$T/sweeprace" ] || bad "P11 setup: mk_repo sweeprace"
+SW11="$T/sweeprace"
+SW11W="$SW11/.claude/worktrees"
+add_tree sweeprace wr && [ -d "$SW11W/wr" ] || bad "P11 setup: add_tree wr"
+echo u > "$SW11W/wr/u.txt" && [ -f "$SW11W/wr/u.txt" ] || bad "P11 setup: u.txt"
+PLAN_P11=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["hold_plan"] or "")' < <("$TOOL" --repo "$SW11" --json))
+[ -n "$PLAN_P11" ] || bad "P11 setup: PLAN_P11"
+J_P11=$(PATH="$T/shim:$PATH" SYG_WORKTREE_BACKUP_DIR="$T/bk11" "$TOOL" --repo "$SW11" --apply-hold "$PLAN_P11" --json); rc_p11=$?
+act_p11=$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["worktrees"][0]["action"] or "")' "$J_P11")
+sha_sw11=$(printf '%s\0%s' "$SW11" "$SW11W/wr" | sha256sum | cut -c1-8)
+shopt -s nullglob
+bk11_dirs=("$T/bk11"/*/"sweeprace--wr--$sha_sw11")
+shopt -u nullglob
+if [ "$rc_p11" -eq 3 ] && [ -d "$SW11W/wr" ] && [ -f "$SW11W/wr/late.txt" ] \
+  && [[ $act_p11 == *"kept: tree changed during backup"* ]] \
+  && [ "${#bk11_dirs[@]}" -eq 1 ] && [ -d "${bk11_dirs[0]}" ]; then
+  ok "P11: tree changed during backup exits 3, keeps tree with late.txt, keeps backup dir, and reports kept: tree changed during backup"
+else
+  bad "P11: changed during backup (rc=$rc_p11, action='$act_p11', dirs=${#bk11_dirs[@]})"
+fi
+
+}
+phase_28
+phase_29() {
+local PRE_LEAF STAMP_P12 SW12 SW12W
+# P12 pre-existing leaf: fixed SYG_WORKTREE_RUN_STAMP, pre-created leaf dir with sentinel.
+mk_repo sweeppre && [ -d "$T/sweeppre" ] || bad "P12 setup: mk_repo sweeppre"
+SW12="$T/sweeppre"
+SW12W="$SW12/.claude/worktrees"
+add_tree sweeppre wp && [ -d "$SW12W/wp" ] || bad "P12 setup: add_tree wp"
+echo u > "$SW12W/wp/u.txt" && [ -f "$SW12W/wp/u.txt" ] || bad "P12 setup: u.txt"
+PLAN_P12=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["hold_plan"] or "")' < <("$TOOL" --repo "$SW12" --json))
+[ -n "$PLAN_P12" ] || bad "P12 setup: PLAN_P12"
+STAMP_P12="2026-01-02T030405"
+sha_sw12=$(printf '%s\0%s' "$SW12" "$SW12W/wp" | sha256sum | cut -c1-8)
+PRE_LEAF="$T/bk12/$STAMP_P12/sweeppre--wp--$sha_sw12"
+mkdir -p "$PRE_LEAF" && echo keep-sentinel > "$PRE_LEAF/sentinel.txt" && [ -f "$PRE_LEAF/sentinel.txt" ] \
+  || bad "P12 setup: pre-create leaf dir"
+J_P12=$(SYG_WORKTREE_BACKUP_DIR="$T/bk12" SYG_WORKTREE_RUN_STAMP="$STAMP_P12" "$TOOL" --repo "$SW12" --apply-hold "$PLAN_P12" --json); rc_p12=$?
+act_p12=$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["worktrees"][0]["action"] or "")' "$J_P12")
+if [ "$rc_p12" -eq 3 ] && [ -d "$SW12W/wp" ] && [ -f "$SW12W/wp/u.txt" ] \
+  && [[ $act_p12 == *"already exists"* ]] \
+  && [ "$(cat "$PRE_LEAF/sentinel.txt" 2>/dev/null)" = "keep-sentinel" ] \
+  && [ ! -e "$PRE_LEAF/tree.tgz" ]; then
+  ok "P12: pre-existing backup leaf dir exits 3 with already exists, keeps tree, and leaves sentinel untouched"
+else
+  bad "P12: pre-existing leaf (rc=$rc_p12, action='$act_p12')"
+fi
+
+}
+phase_29
+phase_30() {
+# P13 text after apply: P4 text output has HOLD removed after backup: 1 tree(s) and HOLD report: 1 tree(s) left in place.
+if grep -qx 'HOLD removed after backup: 1 tree(s)' <<<"$out_p4" \
+  && grep -q '^  \.claude/worktrees/held  \[worktree-agent-held\]  backed up to ' <<<"$out_p4" \
+  && grep -qx 'HOLD report: 1 tree(s) left in place' <<<"$out_p4" \
+  && grep -q '^  \.claude/worktrees/busy  \[worktree-agent-busy\]$' <<<"$out_p4"; then
+  ok "P13: text after apply separates HOLD removed after backup: 1 tree(s) and HOLD report: 1 tree(s) left in place"
+else
+  bad "P13: text after apply"; printf '%s\n' "$out_p4"
+fi
+
+}
+phase_30
+phase_31() {
+local SW14 SW14W
+# P14 multi-repo failures: --repo <good> --repo $T/not-a-repo --apply-hold X and --json dry run.
+mk_repo sweepgood && [ -d "$T/sweepgood" ] || bad "P14 setup: mk_repo sweepgood"
+SW14="$T/sweepgood"
+SW14W="$SW14/.claude/worktrees"
+add_tree sweepgood wg && [ -d "$SW14W/wg" ] || bad "P14 setup: add_tree wg"
+echo u > "$SW14W/wg/u.txt" && [ -f "$SW14W/wg/u.txt" ] || bad "P14 setup: u.txt"
+mkdir -p "$T/not-a-repo" && [ -d "$T/not-a-repo" ] || bad "P14 setup: mkdir not-a-repo"
+err_p14=$("$TOOL" --repo "$SW14" --repo "$T/not-a-repo" --apply-hold 000000000000 2>&1 >/dev/null); rc_p14=$?
+if [ "$rc_p14" -eq 2 ] && grep -qF "safe-worktree-clean: $T/not-a-repo: dry run failed; nothing removed" <<<"$err_p14" \
+  && [ -d "$SW14W/wg" ]; then
+  ok "P14: multi-repo --apply-hold with a failing dry run exits 2 with dry run failed; nothing removed and keeps good repo's tree"
+else
+  bad "P14: multi-repo --apply-hold failure (rc=$rc_p14, err='$err_p14')"
+fi
+J_P14=$("$TOOL" --repo "$SW14" --repo "$T/not-a-repo" --json 2>/dev/null); rc_p14j=$?
+out_p14t=$("$TOOL" --repo "$SW14" --repo "$T/not-a-repo" 2>/dev/null); rc_p14t=$?
+if [ "$rc_p14j" -eq 2 ] && [ "$rc_p14t" -eq 2 ] && python3 -c '
+import json, sys
+d = json.loads(sys.argv[1])
+repos = d["repos"]
+assert len(repos) == 2
+assert repos[0]["repo"] == sys.argv[2] and "worktrees" in repos[0]
+assert repos[1] == {"repo": sys.argv[3], "error": "exit 2"}
+assert d["sweep_plan"] is None
+' "$J_P14" "$SW14" "$T/not-a-repo" \
+  && grep -qxF "sweep plan: none (dry run failed for $T/not-a-repo; fix it or drop it from the list)" <<<"$out_p14t" \
+  && ! grep -q '^sweep plan: [0-9a-f]\{12\}$' <<<"$out_p14t"; then
+  ok "P14: multi-repo dry run with failed child has sweep_plan null in JSON and prints sweep plan: none in text"
+else
+  bad "P14: multi-repo dry run (rc_j=$rc_p14j, rc_t=$rc_p14t)"; printf '%s\n%s\n' "$J_P14" "$out_p14t"
+fi
+
+}
+phase_31
+phase_32() {
+local BK15 SW15 SW15W bk15_dirs
+# P15 staged-reverted: tree with echo secret > a.txt; git add a.txt; echo hi > a.txt (status MM, checked).
+mk_repo sweep15 && [ -d "$T/sweep15" ] || bad "P15 setup: mk_repo sweep15"
+SW15="$T/sweep15"
+SW15W="$SW15/.claude/worktrees"
+add_tree sweep15 mm && [ -d "$SW15W/mm" ] || bad "P15 setup: add_tree mm"
+echo secret > "$SW15W/mm/a.txt" \
+  && git -C "$SW15W/mm" add a.txt \
+  && echo hi > "$SW15W/mm/a.txt" \
+  && _pipe_out=$(git -C "$SW15W/mm" status --porcelain=v1) && grep -qx 'MM a\.txt' <<<"$_pipe_out" \
+  || bad "P15 setup: status MM a.txt"
+PLAN_P15=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["hold_plan"] or "")' < <("$TOOL" --repo "$SW15" --json))
+[ -n "$PLAN_P15" ] || bad "P15 setup: PLAN_P15"
+SYG_WORKTREE_BACKUP_DIR="$T/bk15" "$TOOL" --repo "$SW15" --apply-hold "$PLAN_P15" >/dev/null; rc_p15=$?
+sha_sw15=$(printf '%s\0%s' "$SW15" "$SW15W/mm" | sha256sum | cut -c1-8)
+shopt -s nullglob
+bk15_dirs=("$T/bk15"/*/"sweep15--mm--$sha_sw15")
+shopt -u nullglob
+BK15=${bk15_dirs[0]:-}
+git clone -q "$T/sweep15-origin.git" "$T/p15-clone" 2>/dev/null && [ -d "$T/p15-clone" ] || bad "P15 setup: clone p15-clone"
+if [ "$rc_p15" -eq 0 ] && [ ! -e "$SW15W/mm" ] && [ -f "$BK15/staged.patch" ] \
+  && [ "$(stat -c %a "$BK15/staged.patch" 2>/dev/null)" = 600 ] \
+  && grep -q 'secret' "$BK15/staged.patch" \
+  && grep -q 'git -C <tree or new worktree> apply --index .*staged\.patch' "$BK15/README.txt" \
+  && git -C "$T/p15-clone" apply --check "$BK15/staged.patch" 2>/dev/null; then
+  ok "P15: staged-reverted (MM) tree removed, staged.patch (mode 600) has secret and applies cleanly to base clone"
+else
+  bad "P15: staged-reverted (rc=$rc_p15, dir='$BK15')"
+fi
+
+}
+phase_32
+phase_33() {
+local SW16 SW16W
+# P16 index-only change: staged edit, dry run id, change index only, old id -> rc 2, tree stays.
+mk_repo sweep16 && [ -d "$T/sweep16" ] || bad "P16 setup: mk_repo sweep16"
+SW16="$T/sweep16"
+SW16W="$SW16/.claude/worktrees"
+add_tree sweep16 idx && [ -d "$SW16W/idx" ] || bad "P16 setup: add_tree idx"
+echo staged1 > "$SW16W/idx/a.txt" \
+  && git -C "$SW16W/idx" add a.txt \
+  && echo work > "$SW16W/idx/a.txt" \
+  || bad "P16 setup: initial staged edit"
+cached_p16_before=$(git -C "$SW16W/idx" diff --cached HEAD 2>/dev/null)
+[ -n "$cached_p16_before" ] || bad "P16 setup: cached_p16_before"
+PLAN_P16=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["hold_plan"] or "")' < <("$TOOL" --repo "$SW16" --json))
+[ -n "$PLAN_P16" ] || bad "P16 setup: PLAN_P16"
+echo staged2 > "$SW16W/idx/a.txt" \
+  && git -C "$SW16W/idx" add a.txt \
+  && echo work > "$SW16W/idx/a.txt" \
+  || bad "P16 setup: second staged edit"
+cached_p16_after=$(git -C "$SW16W/idx" diff --cached HEAD 2>/dev/null)
+[ -n "$cached_p16_after" ] && [ "$cached_p16_after" != "$cached_p16_before" ] && [ "$(cat "$SW16W/idx/a.txt")" = "work" ] \
+  || bad "P16 setup: git diff --cached changed while worktree file unchanged"
+err_p16=$(SYG_WORKTREE_BACKUP_DIR="$T/bk16" "$TOOL" --repo "$SW16" --apply-hold "$PLAN_P16" 2>&1 >/dev/null); rc_p16=$?
+if [ "$rc_p16" -eq 2 ] && [ -d "$SW16W/idx" ] && grep -q 'hold plan changed' <<<"$err_p16"; then
+  ok "P16: index-only change invalidates plan id (rc 2, tree stays)"
+else
+  bad "P16: index-only change (rc=$rc_p16, err='$err_p16')"
+fi
+
+}
+phase_33
+phase_34() {
+local SW17 SW17W
+# P17 unmerged: unmerged index entry without MERGE_HEAD plus untracked file -> approvable false, no hold plan:.
+mk_repo sweep17 && [ -d "$T/sweep17" ] || bad "P17 setup: mk_repo sweep17"
+SW17="$T/sweep17"
+SW17W="$SW17/.claude/worktrees"
+add_tree sweep17 unm && [ -d "$SW17W/unm" ] || bad "P17 setup: add_tree unm"
+b1_17=$(printf 'base\n' | git -C "$SW17W/unm" hash-object -w --stdin)
+b2_17=$(printf 'ours\n' | git -C "$SW17W/unm" hash-object -w --stdin)
+b3_17=$(printf 'theirs\n' | git -C "$SW17W/unm" hash-object -w --stdin)
+[ -n "$b1_17" ] && [ -n "$b2_17" ] && [ -n "$b3_17" ] || bad "P17 setup: hash-object stage blobs"
+printf '100644 %s 1\ta.txt\n100644 %s 2\ta.txt\n100644 %s 3\ta.txt\n' "$b1_17" "$b2_17" "$b3_17" \
+  | git -C "$SW17W/unm" update-index --index-info || bad "P17 setup: update-index --index-info"
+[ "$(git -C "$SW17W/unm" ls-files -u | wc -l)" -eq 3 ] \
+  && [ ! -e "$(git -C "$SW17W/unm" rev-parse --git-path MERGE_HEAD)" ] \
+  || bad "P17 setup: git ls-files -u has 3 entries and no MERGE_HEAD"
+echo u > "$SW17W/unm/u.txt" && [ -f "$SW17W/unm/u.txt" ] || bad "P17 setup: u.txt"
+J_P17=$("$TOOL" --repo "$SW17" --json); rc_p17j=$?
+out_p17=$("$TOOL" --repo "$SW17"); rc_p17t=$?
+if [ "$rc_p17j" -eq 0 ] && [ "$rc_p17t" -eq 0 ] \
+  && [ "$(approvable_of "$J_P17" unm)" = "False" ] \
+  && python3 -c 'import json,sys; assert json.loads(sys.argv[1])["hold_plan"] is None' "$J_P17" \
+  && ! grep -q '^hold plan:' <<<"$out_p17"; then
+  ok "P17: unmerged index entry without MERGE_HEAD makes tree non-approvable with no hold plan:"
+else
+  bad "P17: unmerged index entry (rc_j=$rc_p17j, rc_t=$rc_p17t, approvable=$(approvable_of "$J_P17" unm))"; printf '%s\n' "$out_p17"
+fi
+
+}
+phase_34
+phase_35() {
+local SW18 SW18W
+# P18 backup root inside a tree or repo root -> rc 2, stderr starts safe-worktree-clean: backup dir, tree stays.
+mk_repo sweep18 && [ -d "$T/sweep18" ] || bad "P18 setup: mk_repo sweep18"
+SW18="$T/sweep18"
+SW18W="$SW18/.claude/worktrees"
+add_tree sweep18 wt18 && [ -d "$SW18W/wt18" ] || bad "P18 setup: add_tree wt18"
+echo u > "$SW18W/wt18/u.txt" && [ -f "$SW18W/wt18/u.txt" ] || bad "P18 setup: u.txt"
+PLAN_P18=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["hold_plan"] or "")' < <("$TOOL" --repo "$SW18" --json))
+[ -n "$PLAN_P18" ] || bad "P18 setup: PLAN_P18"
+err_p18a=$(SYG_WORKTREE_BACKUP_DIR="$SW18W/wt18/bk" "$TOOL" --repo "$SW18" --apply-hold "$PLAN_P18" 2>&1 >/dev/null); rc_p18a=$?
+err_p18b=$(SYG_WORKTREE_BACKUP_DIR="$SW18/bk" "$TOOL" --repo "$SW18" --apply-hold "$PLAN_P18" 2>&1 >/dev/null); rc_p18b=$?
+if [ "$rc_p18a" -eq 2 ] && [ "$rc_p18b" -eq 2 ] \
+  && [[ $err_p18a == "safe-worktree-clean: backup dir "*"; choose SYG_WORKTREE_BACKUP_DIR outside the repo and its worktrees" ]] \
+  && [[ $err_p18b == "safe-worktree-clean: backup dir "*"; choose SYG_WORKTREE_BACKUP_DIR outside the repo and its worktrees" ]] \
+  && [ -d "$SW18W/wt18" ] && [ ! -e "$SW18W/wt18/bk" ] && [ ! -e "$SW18/bk" ]; then
+  ok "P18: backup root inside approvable tree or repo root exits 2 with backup dir error and leaves tree in place"
+else
+  bad "P18: backup root guard (rc_a=$rc_p18a, err_a='$err_p18a', rc_b=$rc_p18b, err_b='$err_p18b')"
+fi
+
+}
+phase_35
+phase_36() {
+local BK19 SW19 SW19W bk19_dirs
+# P19 backslash name: untracked back\slash.txt -> apply rc 0, tree removed, tar --quoting-style=literal -tzf lists back\slash.txt.
+mk_repo sweep19 && [ -d "$T/sweep19" ] || bad "P19 setup: mk_repo sweep19"
+SW19="$T/sweep19"
+SW19W="$SW19/.claude/worktrees"
+add_tree sweep19 bs && [ -d "$SW19W/bs" ] || bad "P19 setup: add_tree bs"
+echo bs > "$SW19W/bs/"'back\slash.txt' && [ -f "$SW19W/bs/"'back\slash.txt' ] || bad "P19 setup: back\\slash.txt"
+PLAN_P19=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["hold_plan"] or "")' < <("$TOOL" --repo "$SW19" --json))
+[ -n "$PLAN_P19" ] || bad "P19 setup: PLAN_P19"
+SYG_WORKTREE_BACKUP_DIR="$T/bk19" "$TOOL" --repo "$SW19" --apply-hold "$PLAN_P19" >/dev/null; rc_p19=$?
+sha_sw19=$(printf '%s\0%s' "$SW19" "$SW19W/bs" | sha256sum | cut -c1-8)
+shopt -s nullglob
+bk19_dirs=("$T/bk19"/*/"sweep19--bs--$sha_sw19")
+shopt -u nullglob
+BK19=${bk19_dirs[0]:-}
+tar19_list=$(tar --quoting-style=literal -tzf "$BK19/tree.tgz" 2>/dev/null)
+if [ "$rc_p19" -eq 0 ] && [ ! -e "$SW19W/bs" ] && [ -f "$BK19/tree.tgz" ] \
+  && grep -qxF 'back\slash.txt' <<<"$tar19_list"; then
+  ok "P19: untracked back\\slash.txt backs up, verifies with literal quoting, and removes tree"
+else
+  bad "P19: backslash name (rc=$rc_p19, dir='$BK19', list='$tar19_list')"
+fi
+
+}
+phase_36
+phase_37() {
+# P20 cache record: P4's held backup changes.txt lists __pycache__ under the excluded section.
+if [ -f "$BK_HELD/changes.txt" ] \
+  && _pipe_out=$(sed -n '/^=== Excluded as cache\/regenerable (not in tree\.tgz) ===$/,$p' "$BK_HELD/changes.txt") && grep -qx '__pycache__' <<<"$_pipe_out" \
+  && _pipe_out=$(sed -n '/^=== Excluded as cache\/regenerable (not in tree\.tgz) ===$/,$p' "$BK5/changes.txt") && grep -qx 'none' <<<"$_pipe_out"; then
+  ok "P20: changes.txt lists __pycache__ under excluded section for P4 held and none when none excluded"
+else
+  bad "P20: changes.txt excluded section"; cat "$BK_HELD/changes.txt" 2>/dev/null
+fi
+
+}
+phase_37
+phase_38() {
+local PROBE_PID SW21 SW21W
+# P21 locked during backup: tar shim locks the tree with live pid $$ -> rc 3, tree stays, action contains kept: tree locked during backup.
+PROBE_PID=$$
+kill -0 "$PROBE_PID" 2>/dev/null || bad "P21 setup: PROBE_PID alive"
+mkdir -p "$T/shim21" && [ -n "$REAL_TAR" ] || bad "P21 setup: shim21 dir"
+cat > "$T/shim21/tar" <<EOF
+#!/bin/bash
+"$REAL_TAR" "\$@"
+rc=\$?
+is_czf=false
+c_dir=""
+prev=""
+for a in "\$@"; do
+  [ "\$prev" = "-C" ] && c_dir=\$a
+  [ "\$a" = "-czf" ] && is_czf=true
+  prev=\$a
+done
+if \$is_czf && [ -n "\$c_dir" ]; then
+  git -C "\$c_dir" worktree lock --reason "pid $PROBE_PID" "\$c_dir"
+fi
+exit \$rc
+EOF
+chmod +x "$T/shim21/tar" && [ -x "$T/shim21/tar" ] || bad "P21 setup: chmod tar shim21"
+mk_repo sweeplockrace && [ -d "$T/sweeplockrace" ] || bad "P21 setup: mk_repo sweeplockrace"
+SW21="$T/sweeplockrace"
+SW21W="$SW21/.claude/worktrees"
+add_tree sweeplockrace wlr && [ -d "$SW21W/wlr" ] || bad "P21 setup: add_tree wlr"
+echo u > "$SW21W/wlr/u.txt" && [ -f "$SW21W/wlr/u.txt" ] || bad "P21 setup: u.txt"
+PLAN_P21=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["hold_plan"] or "")' < <("$TOOL" --repo "$SW21" --json))
+[ -n "$PLAN_P21" ] || bad "P21 setup: PLAN_P21"
+J_P21=$(PATH="$T/shim21:$PATH" SYG_WORKTREE_BACKUP_DIR="$T/bk21" "$TOOL" --repo "$SW21" --apply-hold "$PLAN_P21" --json); rc_p21=$?
+act_p21=$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["worktrees"][0]["action"] or "")' "$J_P21")
+if [ "$rc_p21" -eq 3 ] && [ -d "$SW21W/wlr" ] && [[ $act_p21 == *"kept: tree locked during backup"* ]]; then
+  ok "P21: tree locked during backup exits 3, keeps tree, and reports kept: tree locked during backup"
+else
+  bad "P21: locked during backup (rc=$rc_p21, action='$act_p21')"
+fi
+
+}
+phase_38
+phase_39() {
+local SW22 SW22A SW22AW SW22B SW22BW SW22W bk22b_readmes
+# P22 volatile root: real-tmpfs branch when $T is tmpfs/ramfs, plus host-independent stat shim sub-cases (a) tmpfs and (b) ext2/ext3.
+mk_repo sweep22 && [ -d "$T/sweep22" ] || bad "P22 setup: mk_repo sweep22"
+SW22="$T/sweep22"
+SW22W="$SW22/.claude/worktrees"
+add_tree sweep22 wt22 && [ -d "$SW22W/wt22" ] || bad "P22 setup: add_tree wt22"
+echo u > "$SW22W/wt22/u.txt" && [ -f "$SW22W/wt22/u.txt" ] || bad "P22 setup: u.txt"
+PLAN_P22=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["hold_plan"] or "")' < <("$TOOL" --repo "$SW22" --json))
+[ -n "$PLAN_P22" ] || bad "P22 setup: PLAN_P22"
+t_fstype=$(stat -f -c %T "$T" 2>/dev/null) || t_fstype=""
+case "$t_fstype" in
+  tmpfs | ramfs)
+    err_p22=$(env -u SYG_WORKTREE_BACKUP_ALLOW_VOLATILE SYG_WORKTREE_BACKUP_DIR="$T/bk22" "$TOOL" --repo "$SW22" --apply-hold "$PLAN_P22" 2>&1 >/dev/null); rc_p22=$?
+    if [ "$rc_p22" -eq 2 ] \
+      && [[ $err_p22 == "safe-worktree-clean: backup dir "* ]] \
+      && [[ $err_p22 == *"lost on reboot"* ]] \
+      && [ -d "$SW22W/wt22" ] && [ -f "$SW22W/wt22/u.txt" ] && [ ! -e "$T/bk22" ]; then
+      ok "P22: volatile backup root ($t_fstype) without SYG_WORKTREE_BACKUP_ALLOW_VOLATILE=1 exits 2, keeps tree, and leaves $T/bk22 absent"
+    else
+      bad "P22: volatile backup root (rc=$rc_p22, err='$err_p22', tree=$([ -d "$SW22W/wt22" ] && echo present || echo gone), bk22=$([ -e "$T/bk22" ] && echo present || echo absent))"
+    fi
+    ;;
+  *)
+    echo "skip: P22 real tmpfs ($T is $t_fstype)"
+    ;;
+esac
+REAL_STAT=$(command -v stat)
+mkdir -p "$T/shim22" && [ -n "$REAL_STAT" ] || bad "P22 setup: shim22 dir"
+cat > "$T/shim22/stat" <<EOF
+#!/bin/bash
+for a in "\$@"; do
+  if [ "\$a" = "-f" ]; then
+    printf '%s\n' "\${P22_FSTYPE:-}"
+    exit 0
+  fi
+done
+exec "$REAL_STAT" "\$@"
+EOF
+chmod +x "$T/shim22/stat" && [ -x "$T/shim22/stat" ] || bad "P22 setup: chmod stat shim22"
+mk_repo sweep22a && [ -d "$T/sweep22a" ] || bad "P22a setup: mk_repo sweep22a"
+SW22A="$T/sweep22a"
+SW22AW="$SW22A/.claude/worktrees"
+add_tree sweep22a wt22a && [ -d "$SW22AW/wt22a" ] || bad "P22a setup: add_tree wt22a"
+echo u > "$SW22AW/wt22a/u.txt" && [ -f "$SW22AW/wt22a/u.txt" ] || bad "P22a setup: u.txt"
+PLAN_P22A=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["hold_plan"] or "")' < <("$TOOL" --repo "$SW22A" --json))
+[ -n "$PLAN_P22A" ] || bad "P22a setup: PLAN_P22A"
+err_p22a=$(env -u SYG_WORKTREE_BACKUP_ALLOW_VOLATILE PATH="$T/shim22:$PATH" P22_FSTYPE=tmpfs SYG_WORKTREE_BACKUP_DIR="$T/bk22s" "$TOOL" --repo "$SW22A" --apply-hold "$PLAN_P22A" 2>&1 >/dev/null); rc_p22a=$?
+if [ "$rc_p22a" -eq 2 ] \
+  && [[ $err_p22a == "safe-worktree-clean: backup dir "* ]] \
+  && [[ $err_p22a == *"lost on reboot"* ]] \
+  && [ -d "$SW22AW/wt22a" ] && [ -f "$SW22AW/wt22a/u.txt" ] && [ ! -e "$T/bk22s" ]; then
+  ok "P22(a): stat shim tmpfs without SYG_WORKTREE_BACKUP_ALLOW_VOLATILE=1 exits 2, keeps tree, and leaves $T/bk22s absent"
+else
+  bad "P22(a): stat shim tmpfs (rc=$rc_p22a, err='$err_p22a', tree=$([ -d "$SW22AW/wt22a" ] && echo present || echo gone), bk22s=$([ -e "$T/bk22s" ] && echo present || echo absent))"
+fi
+mk_repo sweep22b && [ -d "$T/sweep22b" ] || bad "P22b setup: mk_repo sweep22b"
+SW22B="$T/sweep22b"
+SW22BW="$SW22B/.claude/worktrees"
+add_tree sweep22b wt22b && [ -d "$SW22BW/wt22b" ] || bad "P22b setup: add_tree wt22b"
+echo u > "$SW22BW/wt22b/u.txt" && [ -f "$SW22BW/wt22b/u.txt" ] || bad "P22b setup: u.txt"
+PLAN_P22B=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["hold_plan"] or "")' < <("$TOOL" --repo "$SW22B" --json))
+[ -n "$PLAN_P22B" ] || bad "P22b setup: PLAN_P22B"
+env -u SYG_WORKTREE_BACKUP_ALLOW_VOLATILE PATH="$T/shim22:$PATH" P22_FSTYPE=ext2/ext3 SYG_WORKTREE_BACKUP_DIR="$T/bk22p" "$TOOL" --repo "$SW22B" --apply-hold "$PLAN_P22B" >/dev/null 2>&1; rc_p22b=$?
+sha_sw22b=$(printf '%s\0%s' "$SW22B" "$SW22BW/wt22b" | sha256sum | cut -c1-8)
+shopt -s nullglob
+bk22b_readmes=("$T/bk22p"/*/"sweep22b--wt22b--$sha_sw22b/README.txt")
+shopt -u nullglob
+if [ "$rc_p22b" -eq 0 ] && [ ! -e "$SW22BW/wt22b" ] && [ "${#bk22b_readmes[@]}" -eq 1 ] && [ -f "${bk22b_readmes[0]}" ]; then
+  ok "P22(b): stat shim ext2/ext3 without SYG_WORKTREE_BACKUP_ALLOW_VOLATILE=1 exits 0, removes tree, and writes backup README.txt"
+else
+  bad "P22(b): stat shim ext2/ext3 (rc=$rc_p22b, tree=$([ -e "$SW22BW/wt22b" ] && echo present || echo gone), readmes=${#bk22b_readmes[@]})"
+fi
+
+}
+phase_39
+phase_40() {
+local SW23 SW23W
+# P23 duplicate repo: --repo <R> --repo <R/.>, --repo <R> --repo <linked worktree>, and with --apply-hold <id> -> rc 2, stderr contains are the same repo, approvable tree stays.
+mk_repo sweep23 && [ -d "$T/sweep23" ] || bad "P23 setup: mk_repo sweep23"
+SW23="$T/sweep23"
+SW23W="$SW23/.claude/worktrees"
+add_tree sweep23 wt23 && [ -d "$SW23W/wt23" ] || bad "P23 setup: add_tree wt23"
+echo u > "$SW23W/wt23/u.txt" && [ -f "$SW23W/wt23/u.txt" ] || bad "P23 setup: u.txt"
+PLAN_P23=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["hold_plan"] or "")' < <("$TOOL" --repo "$SW23" --json))
+[ -n "$PLAN_P23" ] || bad "P23 setup: PLAN_P23"
+err_p23a=$("$TOOL" --repo "$SW23" --repo "$SW23/." 2>&1 >/dev/null); rc_p23a=$?
+err_p23b=$("$TOOL" --repo "$SW23" --repo "$SW23W/wt23" 2>&1 >/dev/null); rc_p23b=$?
+err_p23c=$(SYG_WORKTREE_BACKUP_DIR="$T/bk23" "$TOOL" --repo "$SW23" --repo "$SW23/." --apply-hold "$PLAN_P23" 2>&1 >/dev/null); rc_p23c=$?
+if [ "$rc_p23a" -eq 2 ] && [ "$rc_p23b" -eq 2 ] && [ "$rc_p23c" -eq 2 ] \
+  && [[ $err_p23a == *"are the same repo"* ]] \
+  && [[ $err_p23b == *"are the same repo"* ]] \
+  && [[ $err_p23c == *"are the same repo"* ]] \
+  && [ -d "$SW23W/wt23" ] && [ -f "$SW23W/wt23/u.txt" ]; then
+  ok "P23: duplicate repo (different spelling or linked worktree) exits 2 with are the same repo in dry run and --apply-hold, keeping tree"
+else
+  bad "P23: duplicate repo (rc_a=$rc_p23a, err_a='$err_p23a', rc_b=$rc_p23b, err_b='$err_p23b', rc_c=$rc_p23c, err_c='$err_p23c')"
+fi
+
+}
+phase_40
+phase_41() {
+local BK24 SW24 SW24W bk24_dirs
+# P24 reflog commit: commit c1 (lost.txt), git reset --hard HEAD~1, untracked file -> apply rc 0, reflog.pack + changes.txt + index-pack restore check.
+mk_repo sweep24 && [ -d "$T/sweep24" ] || bad "P24 setup: mk_repo sweep24"
+SW24="$T/sweep24"
+SW24W="$SW24/.claude/worktrees"
+add_tree sweep24 wt24 && [ -d "$SW24W/wt24" ] || bad "P24 setup: add_tree wt24"
+echo lost-payload > "$SW24W/wt24/lost.txt" \
+  && git -C "$SW24W/wt24" add lost.txt \
+  && git -C "$SW24W/wt24" commit -qm "reflog only commit" \
+  || bad "P24 setup: commit lost.txt"
+C1_P24=$(git -C "$SW24W/wt24" rev-parse HEAD 2>/dev/null)
+[ -n "$C1_P24" ] || bad "P24 setup: C1_P24"
+git -C "$SW24W/wt24" reset -q --hard HEAD~1 || bad "P24 setup: reset --hard HEAD~1"
+! git -C "$SW24W/wt24" merge-base --is-ancestor "$C1_P24" refs/heads/worktree-agent-wt24 2>/dev/null \
+  && _pipe_out=$(git -C "$SW24W/wt24" rev-list --walk-reflogs HEAD 2>/dev/null) && grep -qx "$C1_P24" <<<"$_pipe_out" \
+  || bad "P24 setup: C1_P24 unreachable from branch and present in HEAD reflog"
+echo u > "$SW24W/wt24/u.txt" && [ -f "$SW24W/wt24/u.txt" ] || bad "P24 setup: u.txt"
+PLAN_P24=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["hold_plan"] or "")' < <("$TOOL" --repo "$SW24" --json))
+[ -n "$PLAN_P24" ] || bad "P24 setup: PLAN_P24"
+SYG_WORKTREE_BACKUP_DIR="$T/bk24" "$TOOL" --repo "$SW24" --apply-hold "$PLAN_P24" >/dev/null; rc_p24=$?
+sha_sw24=$(printf '%s\0%s' "$SW24" "$SW24W/wt24" | sha256sum | cut -c1-8)
+shopt -s nullglob
+bk24_dirs=("$T/bk24"/*/"sweep24--wt24--$sha_sw24")
+shopt -u nullglob
+BK24=${bk24_dirs[0]:-}
+git clone -q "$T/sweep24-origin.git" "$T/p24-clone" 2>/dev/null && [ -d "$T/p24-clone" ] || bad "P24 setup: clone p24-clone"
+if [ "$rc_p24" -eq 0 ] && [ ! -e "$SW24W/wt24" ] && [ -f "$BK24/reflog.pack" ] \
+  && [ "$(stat -c %a "$BK24/reflog.pack" 2>/dev/null)" = 600 ] \
+  && [ -f "$BK24/reflog.idx" ] \
+  && [ "$(stat -c %a "$BK24/reflog.idx" 2>/dev/null)" = 600 ] \
+  && { [ ! -e "$BK24/reflog.rev" ] || [ "$(stat -c %a "$BK24/reflog.rev" 2>/dev/null)" = 600 ]; } \
+  && _pipe_out=$(sed -n '/^=== Commits only in reflogs or per-worktree refs (in reflog\.pack) ===$/,/^===/p' "$BK24/changes.txt") && grep -q "^$C1_P24 " <<<"$_pipe_out" \
+  && grep -q 'index-pack --stdin --fix-thin < .*reflog\.pack' "$BK24/README.txt" \
+  && git -C "$T/p24-clone" index-pack --stdin --fix-thin < "$BK24/reflog.pack" >/dev/null 2>&1 \
+  && git -C "$T/p24-clone" cat-file -e "$C1_P24^{commit}" 2>/dev/null \
+  && [ "$(git -C "$T/p24-clone" show "$C1_P24:lost.txt" 2>/dev/null)" = "lost-payload" ]; then
+  ok "P24: reflog-only commit is packed in reflog.pack, listed in changes.txt, and restores into a fresh clone"
+else
+  bad "P24: reflog commit (rc=$rc_p24, dir='$BK24')"
+fi
+
+}
+phase_41
+phase_42() {
+# P25 detached tree with commits: tree detached at a commit beyond BASE (approvable as detached-unreferenced), apply -> rc 0, README HEAD:restored-worktree fetch restores old HEAD.
+mk_repo sweep25 && [ -d "$T/sweep25" ] || bad "P25 setup: mk_repo sweep25"
+SW25="$T/sweep25"
+SW25W="$SW25/.claude/worktrees"
+git -C "$SW25" worktree add -q --detach "$SW25W/det25" origin/main 2>/dev/null \
+  && [ -d "$SW25W/det25" ] || bad "P25 setup: worktree add --detach det25"
+echo det-work > "$SW25W/det25/det.txt" \
+  && git -C "$SW25W/det25" add det.txt \
+  && git -C "$SW25W/det25" commit -qm "detached commit" \
+  || bad "P25 setup: detached commit"
+DET25_SHA=$(git -C "$SW25W/det25" rev-parse HEAD 2>/dev/null)
+[ -n "$DET25_SHA" ] || bad "P25 setup: DET25_SHA"
+J_P25=$("$TOOL" --repo "$SW25" --json)
+expect "$J_P25" det25 HOLD:detached-unreferenced "P25: det25 held as detached-unreferenced"
+PLAN_P25=$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["hold_plan"] or "")' "$J_P25")
+[ "$(approvable_of "$J_P25" det25)" = "True" ] && [ -n "$PLAN_P25" ] || bad "P25 setup: det25 approvable and PLAN_P25 non-empty"
+}
+phase_42
+phase_43() {
+local BK25 bk25_dirs
+# P25 refusal: the bare id refuses the unnamed detached-unreferenced tree and the line asserts
+# the printed count (det25's HEAD is 1 commit beyond origin/main); exit 2, tree kept, no backup.
+err_p25r=$(SYG_WORKTREE_BACKUP_DIR="$T/bk25r" "$TOOL" --repo "$SW25" --apply-hold "$PLAN_P25" 2>&1 >/dev/null); rc_p25r=$?
+want_p25r="safe-worktree-clean: --apply-hold refused: plan $PLAN_P25 includes commit-carrying tree .claude/worktrees/det25 (1 commit(s) not on origin/main) — only on the owner's yes for that tree: re-run the dry run and apply with --only <tree>"
+bk25r_left=$(ls "$T/bk25r" 2>/dev/null)
+if [ "$rc_p25r" -eq 2 ] && [ "$err_p25r" = "$want_p25r" ] \
+  && [ -d "$SW25W/det25" ] && [ -z "$bk25r_left" ]; then
+  ok "P25 refusal: bare id refuses the detached-unreferenced tree with its 1-commit count, removing nothing and writing no backup"
+else
+  bad "P25 refusal: bare-id count line (rc=$rc_p25r, det25=$([ -d "$SW25W/det25" ] && echo ok || echo gone), bk25r='$bk25r_left', err='$err_p25r')"
+fi
+# det25 is commit-carrying (detached-unreferenced): apply with the tree named via --only
+# (the approvable set is unchanged, so PLAN_P25 still matches).
+SYG_WORKTREE_BACKUP_DIR="$T/bk25" "$TOOL" --repo "$SW25" --apply-hold "$PLAN_P25" --only "$SW25W/det25" >/dev/null; rc_p25=$?
+sha_sw25=$(printf '%s\0%s' "$SW25" "$SW25W/det25" | sha256sum | cut -c1-8)
+shopt -s nullglob
+bk25_dirs=("$T/bk25"/*/"sweep25--det25--$sha_sw25")
+shopt -u nullglob
+BK25=${bk25_dirs[0]:-}
+restore_p25=$(grep '^  git -C .* fetch .* HEAD:restored-worktree$' "$BK25/README.txt" 2>/dev/null)
+if [ "$rc_p25" -eq 0 ] && [ ! -e "$SW25W/det25" ] && [ -n "$restore_p25" ] \
+  && eval "$restore_p25" 2>/dev/null \
+  && [ "$(git -C "$SW25" rev-parse -q --verify refs/heads/restored-worktree 2>/dev/null)" = "$DET25_SHA" ]; then
+  ok "P25: detached tree with commits is approvable, removed on apply, and README fetch HEAD:restored-worktree restores old HEAD"
+else
+  bad "P25: detached tree with commits (rc=$rc_p25, cmd='$restore_p25')"
+fi
+
+}
+phase_43
+phase_44() {
+local SW26 SW26W
+# P26 dead-pid lock: approvable tree locked with --reason "pid <dead pid>" -> apply rc 0, tree removed.
+mk_repo sweep26 && [ -d "$T/sweep26" ] || bad "P26 setup: mk_repo sweep26"
+SW26="$T/sweep26"
+SW26W="$SW26/.claude/worktrees"
+add_tree sweep26 wt26 && [ -d "$SW26W/wt26" ] || bad "P26 setup: add_tree wt26"
+echo u > "$SW26W/wt26/u.txt" && [ -f "$SW26W/wt26/u.txt" ] || bad "P26 setup: u.txt"
+dp26=$(sh -c 'echo $$')
+[ -n "$dp26" ] && [ ! -e "/proc/$dp26" ] || bad "P26 setup: dead pid $dp26"
+git -C "$SW26" worktree lock --reason "pid $dp26" "$SW26W/wt26" || bad "P26 setup: worktree lock"
+PLAN_P26=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["hold_plan"] or "")' < <("$TOOL" --repo "$SW26" --json))
+[ -n "$PLAN_P26" ] || bad "P26 setup: PLAN_P26"
+SYG_WORKTREE_BACKUP_DIR="$T/bk26" "$TOOL" --repo "$SW26" --apply-hold "$PLAN_P26" >/dev/null; rc_p26=$?
+if [ "$rc_p26" -eq 0 ] && [ ! -e "$SW26W/wt26" ] \
+  && ! git -C "$SW26" rev-parse -q --verify refs/heads/worktree-agent-wt26 >/dev/null; then
+  ok "P26: approvable tree locked with dead pid unlocks, backs up, and removes on --apply-hold"
+else
+  bad "P26: dead-pid lock (rc=$rc_p26, tree=$([ -e "$SW26W/wt26" ] && echo present || echo gone))"
+fi
+
+}
+phase_44
+phase_45() {
+local PIDFILE_P27 SW27 SW27W pids_p27
+# P27 cwd appears during backup: tar shim starts sleep 60 with cwd in tree on -czf, records pid to file -> apply rc 3, action contains has its cwd inside the tree, tree stays; kill recorded pid.
+mkdir -p "$T/shim27" && [ -n "$REAL_TAR" ] || bad "P27 setup: shim27 dir"
+PIDFILE_P27="$T/p27-sleep.pid"
+cat > "$T/shim27/tar" <<EOF
+#!/bin/bash
+"$REAL_TAR" "\$@"
+rc=\$?
+is_czf=false
+c_dir=""
+prev=""
+for a in "\$@"; do
+  [ "\$prev" = "-C" ] && c_dir=\$a
+  [ "\$a" = "-czf" ] && is_czf=true
+  prev=\$a
+done
+if \$is_czf && [ -n "\$c_dir" ]; then
+  (cd "\$c_dir" && exec sleep 60) >/dev/null 2>&1 </dev/null &
+  echo \$! >> "$PIDFILE_P27"
+  sleep 0.2
+fi
+exit \$rc
+EOF
+chmod +x "$T/shim27/tar" && [ -x "$T/shim27/tar" ] || bad "P27 setup: chmod tar shim27"
+mk_repo sweepcwdrace && [ -d "$T/sweepcwdrace" ] || bad "P27 setup: mk_repo sweepcwdrace"
+SW27="$T/sweepcwdrace"
+SW27W="$SW27/.claude/worktrees"
+add_tree sweepcwdrace wcr && [ -d "$SW27W/wcr" ] || bad "P27 setup: add_tree wcr"
+echo u > "$SW27W/wcr/u.txt" && [ -f "$SW27W/wcr/u.txt" ] || bad "P27 setup: u.txt"
+PLAN_P27=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["hold_plan"] or "")' < <("$TOOL" --repo "$SW27" --json))
+[ -n "$PLAN_P27" ] || bad "P27 setup: PLAN_P27"
+J_P27=$(PATH="$T/shim27:$PATH" SYG_WORKTREE_BACKUP_DIR="$T/bk27" "$TOOL" --repo "$SW27" --apply-hold "$PLAN_P27" --json); rc_p27=$?
+pids_p27=()
+if [ -s "$PIDFILE_P27" ]; then
+  while IFS= read -r p27 || [ -n "$p27" ]; do
+    [ -n "$p27" ] || continue
+    PIDS+=("$p27")
+    pids_p27+=("$p27")
+  done < "$PIDFILE_P27"
+fi
+if [ "${#pids_p27[@]}" -gt 0 ]; then
+  for p27 in "${pids_p27[@]}"; do
+    kill "$p27" 2>/dev/null
+    wait "$p27" 2>/dev/null
+  done
+else
+  bad "P27 setup: recorded sleep pid missing"
+fi
+act_p27=$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["worktrees"][0]["action"] or "")' "$J_P27")
+if [ "$rc_p27" -eq 3 ] && [ -d "$SW27W/wcr" ] && [[ $act_p27 == *"has its cwd inside the tree"* ]]; then
+  ok "P27: cwd appearing during backup exits 3, keeps tree, and reports has its cwd inside the tree"
+else
+  bad "P27: cwd during backup (rc=$rc_p27, action='$act_p27')"
+fi
+
+}
+phase_45
+phase_46() {
+local BK28 SW28 SW28W bk28_dirs
+# P28 branch-name approvable: tree on branch feature/x (not matching ^worktree-agent-) with an untracked file -> approvable true; apply -> rc 0, tree removed, feature/x deleted, bundle/README name feature/x.
+mk_repo sweep28 && [ -d "$T/sweep28" ] || bad "P28 setup: mk_repo sweep28"
+SW28="$T/sweep28"
+SW28W="$SW28/.claude/worktrees"
+add_tree sweep28 wt28 origin/main feature/x && [ -d "$SW28W/wt28" ] || bad "P28 setup: add_tree wt28 feature/x"
+echo u > "$SW28W/wt28/u.txt" && [ -f "$SW28W/wt28/u.txt" ] || bad "P28 setup: u.txt"
+J_P28_PRE=$("$TOOL" --repo "$SW28" --json)
+[ "$(approvable_of "$J_P28_PRE" wt28)" = "True" ] || bad "P28 setup: wt28 on feature/x with untracked file should be approvable"
+echo feat > "$SW28W/wt28/feat.txt" \
+  && git -C "$SW28W/wt28" add feat.txt \
+  && git -C "$SW28W/wt28" commit -qm "feature x commit" \
+  || bad "P28 setup: commit feat.txt"
+J_P28=$("$TOOL" --repo "$SW28" --json)
+PLAN_P28=$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["hold_plan"] or "")' "$J_P28")
+[ "$(approvable_of "$J_P28" wt28)" = "True" ] && [ -n "$PLAN_P28" ] || bad "P28 setup: PLAN_P28"
+# wt28 is commit-carrying (unmerged on feature/x): apply with the tree named via --only.
+SYG_WORKTREE_BACKUP_DIR="$T/bk28" "$TOOL" --repo "$SW28" --apply-hold "$PLAN_P28" --only "$SW28W/wt28" >/dev/null; rc_p28=$?
+sha_sw28=$(printf '%s\0%s' "$SW28" "$SW28W/wt28" | sha256sum | cut -c1-8)
+shopt -s nullglob
+bk28_dirs=("$T/bk28"/*/"sweep28--wt28--$sha_sw28")
+shopt -u nullglob
+BK28=${bk28_dirs[0]:-}
+if [ "$rc_p28" -eq 0 ] && [ ! -e "$SW28W/wt28" ] \
+  && ! git -C "$SW28" rev-parse -q --verify refs/heads/feature/x >/dev/null \
+  && [ -f "$BK28/branch.bundle" ] \
+  && _pipe_out=$(git -C "$SW28" bundle list-heads "$BK28/branch.bundle" 2>/dev/null) && grep -q 'refs/heads/feature/x$' <<<"$_pipe_out" \
+  && grep -qx 'branch: feature/x' "$BK28/README.txt" \
+  && grep -q 'feature/x:feature/x$' "$BK28/README.txt"; then
+  ok "P28: branch feature/x tree is approvable, removed on apply with branch deleted, and bundle/README name feature/x"
+else
+  bad "P28: branch-name approvable (rc=$rc_p28, dir='$BK28')"
+fi
+
+}
+phase_46
+phase_47() {
+local SW29 SW29W head_log_p29
+# P29 big reflog: HEAD reflog with >=60000 entries (appended directly to <common>/worktrees/wt29/logs/HEAD) plus untracked file -> apply rc 0, tree removed.
+mk_repo sweep29 && [ -d "$T/sweep29" ] || bad "P29 setup: mk_repo sweep29"
+SW29="$T/sweep29"
+SW29W="$SW29/.claude/worktrees"
+add_tree sweep29 wt29 && [ -d "$SW29W/wt29" ] || bad "P29 setup: add_tree wt29"
+sha1_p29=$(git -C "$SW29W/wt29" rev-parse HEAD~1 2>/dev/null)
+sha2_p29=$(git -C "$SW29W/wt29" rev-parse HEAD 2>/dev/null)
+common_p29=$(git -C "$SW29" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)
+head_log_p29="$common_p29/worktrees/wt29/logs/HEAD"
+[ -n "$sha1_p29" ] && [ -n "$sha2_p29" ] && [ -f "$head_log_p29" ] || bad "P29 setup: shas and HEAD reflog path"
+awk -v a="$sha1_p29" -v b="$sha2_p29" 'BEGIN {
+  for (i = 0; i < 30000; i++) {
+    printf "%s %s t <t@example.invalid> 1700000000 +0000\tflip\n%s %s t <t@example.invalid> 1700000000 +0000\tflop\n", b, a, a, b
+  }
+}' >> "$head_log_p29"
+n_rl_p29=$(git -C "$SW29W/wt29" rev-list --walk-reflogs HEAD 2>/dev/null | wc -l)
+[ "$n_rl_p29" -ge 60000 ] || bad "P29 setup: walk-reflogs count ($n_rl_p29 < 60000)"
+echo u > "$SW29W/wt29/u.txt" && [ -f "$SW29W/wt29/u.txt" ] || bad "P29 setup: u.txt"
+PLAN_P29=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["hold_plan"] or "")' < <("$TOOL" --repo "$SW29" --json))
+[ -n "$PLAN_P29" ] || bad "P29 setup: PLAN_P29"
+SYG_WORKTREE_BACKUP_DIR="$T/bk29" "$TOOL" --repo "$SW29" --apply-hold "$PLAN_P29" >/dev/null; rc_p29=$?
+if [ "$rc_p29" -eq 0 ] && [ ! -e "$SW29W/wt29" ]; then
+  ok "P29: tree with >=60000 HEAD reflog entries backs up and removes on --apply-hold without hitting argv limit"
+else
+  bad "P29: big reflog (rc=$rc_p29, tree=$([ -e "$SW29W/wt29" ] && echo present || echo gone))"
+fi
+
+}
+phase_47
+phase_48() {
+local BK30 BR30 SW30 SW30W bk30_dirs
+# P30 quoted restore refspec: branch worktree-agent-feat(x);y with commit beyond base + untracked file -> README fetch line run with bash -c recreates branch at backed-up HEAD sha.
+mk_repo sweep30 && [ -d "$T/sweep30" ] || bad "P30 setup: mk_repo sweep30"
+SW30="$T/sweep30"
+SW30W="$SW30/.claude/worktrees"
+BR30='worktree-agent-feat(x);y'
+add_tree sweep30 wt30 origin/main "$BR30" && [ -d "$SW30W/wt30" ] || bad "P30 setup: add_tree wt30"
+echo c30 > "$SW30W/wt30/c30.txt" \
+  && git -C "$SW30W/wt30" add c30.txt \
+  && git -C "$SW30W/wt30" commit -qm "p30 commit" \
+  || bad "P30 setup: commit c30.txt"
+SHA_P30=$(git -C "$SW30W/wt30" rev-parse HEAD 2>/dev/null)
+echo u30 > "$SW30W/wt30/u30.txt" && [ -f "$SW30W/wt30/u30.txt" ] && [ -n "$SHA_P30" ] || bad "P30 setup: u30.txt and SHA_P30"
+PLAN_P30=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["hold_plan"] or "")' < <("$TOOL" --repo "$SW30" --json))
+[ -n "$PLAN_P30" ] || bad "P30 setup: PLAN_P30"
+# wt30 is commit-carrying (unmerged): apply with the tree named via --only.
+SYG_WORKTREE_BACKUP_DIR="$T/bk30" "$TOOL" --repo "$SW30" --apply-hold "$PLAN_P30" --only "$SW30W/wt30" >/dev/null; rc_p30=$?
+! git -C "$SW30" rev-parse -q --verify "refs/heads/$BR30" >/dev/null || bad "P30 setup: branch deleted by --apply-hold"
+sha_sw30=$(printf '%s\0%s' "$SW30" "$SW30W/wt30" | sha256sum | cut -c1-8)
+shopt -s nullglob
+bk30_dirs=("$T/bk30"/*/"sweep30--wt30--$sha_sw30")
+shopt -u nullglob
+BK30=${bk30_dirs[0]:-}
+restore_p30=$(grep '^  git -C .* fetch ' "$BK30/README.txt" 2>/dev/null)
+if [ "$rc_p30" -eq 0 ] && [ ! -e "$SW30W/wt30" ] && [ -n "$restore_p30" ] \
+  && bash -c "$restore_p30" >/dev/null 2>&1 \
+  && [ "$(git -C "$SW30" rev-parse -q --verify "refs/heads/$BR30" 2>/dev/null)" = "$SHA_P30" ]; then
+  ok "P30: README fetch line quotes special branch name worktree-agent-feat(x);y and bash -c recreates it at backed-up HEAD"
+else
+  bad "P30: quoted restore refspec (rc=$rc_p30, cmd='$restore_p30', got='$(git -C "$SW30" rev-parse -q --verify "refs/heads/$BR30" 2>/dev/null)', want='$SHA_P30')"
+fi
+
+}
+phase_48
+phase_49() {
+# P31 per-worktree refs: (i) refs/worktree/keep at commit-tree commit holds as worktree-refs (approvable); (ii) --apply-hold packs it in reflog.pack and records it in changes.txt/README.txt; (iii) refs/worktree/x on base stays SAFE.
+mk_repo sweep31 && [ -d "$T/sweep31" ] || bad "P31 setup: mk_repo sweep31"
+SW31="$T/sweep31"
+SW31W="$SW31/.claude/worktrees"
+add_tree sweep31 wt31k && [ -d "$SW31W/wt31k" ] || bad "P31 setup: add_tree wt31k"
+add_tree sweep31 wt31s && [ -d "$SW31W/wt31s" ] || bad "P31 setup: add_tree wt31s"
+tree_31=$(git -C "$SW31W/wt31k" rev-parse 'HEAD^{tree}' 2>/dev/null)
+C_P31=$(git -C "$SW31W/wt31k" commit-tree "$tree_31" -p HEAD -m keep 2>/dev/null)
+[ -n "$C_P31" ] && git -C "$SW31W/wt31k" update-ref refs/worktree/keep "$C_P31" || bad "P31 setup: commit-tree + update-ref keep"
+_pipe_out=$(git -C "$SW31W/wt31k" rev-list --walk-reflogs HEAD 2>/dev/null) || bad "P31 setup: walking the HEAD reflog"
+! grep -qx "$C_P31" <<<"$_pipe_out" || bad "P31 setup: C_P31 is in the HEAD reflog"
+_pipe_out=$(git -C "$SW31W/wt31k" rev-list --walk-reflogs refs/heads/worktree-agent-wt31k 2>/dev/null) || bad "P31 setup: walking the branch reflog"
+! grep -qx "$C_P31" <<<"$_pipe_out" || bad "P31 setup: C_P31 is in the branch reflog"
+git -C "$SW31W/wt31s" update-ref refs/worktree/x "$C1" || bad "P31 setup: update-ref refs/worktree/x on base"
+J_P31=$("$TOOL" --repo "$SW31" --json); rc_p31d=$?
+PLAN_P31=$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["hold_plan"] or "")' "$J_P31")
+if [ "$rc_p31d" -eq 0 ] && [ "$(verdict "$J_P31" wt31k)" = "HOLD:worktree-refs" ] \
+  && [ "$(approvable_of "$J_P31" wt31k)" = "True" ] && [ -n "$PLAN_P31" ]; then
+  ok "P31(i): tree with unreferenced refs/worktree/keep is HOLD:worktree-refs and approvable"
+else
+  bad "P31(i): worktree-refs verdict/approvable (rc=$rc_p31d, verdict='$(verdict "$J_P31" wt31k)', approvable='$(approvable_of "$J_P31" wt31k)', plan='$PLAN_P31')"
+fi
+if [ "$(verdict "$J_P31" wt31s)" = "SAFE" ]; then
+  ok "P31(iii): tree whose refs/worktree/x points at a commit on base stays SAFE"
+else
+  bad "P31(iii): wt31s expected SAFE, got '$(verdict "$J_P31" wt31s)'"
+fi
+}
+phase_49
+phase_50() {
+local BK31 bk31_dirs restore_p31
+# P31 refusal pin: with wt31k unnamed, the bare id refuses even though wt31k's only commit-carrying
+# reason is worktree-refs and its branch is even with the base — the count is the branch's
+# beyond-base commits, so the line says so ("0 branch commit(s) ... ; per-worktree refs hold
+# more"); exit 2, nothing removed (SAFE wt31s included), no backup dir written.
+err_p31r=$(SYG_WORKTREE_BACKUP_DIR="$T/bk31r" "$TOOL" --repo "$SW31" --apply-hold "$PLAN_P31" 2>&1 >/dev/null); rc_p31r=$?
+want_p31r="safe-worktree-clean: --apply-hold refused: plan $PLAN_P31 includes commit-carrying tree .claude/worktrees/wt31k (0 branch commit(s) not on origin/main; per-worktree refs hold more) — only on the owner's yes for that tree: re-run the dry run and apply with --only <tree>"
+bk31r_left=$(ls "$T/bk31r" 2>/dev/null)
+if [ "$rc_p31r" -eq 2 ] && [ "$err_p31r" = "$want_p31r" ] \
+  && [ -d "$SW31W/wt31k" ] && [ -d "$SW31W/wt31s" ] && [ -z "$bk31r_left" ]; then
+  ok "P31 refusal: bare id refuses the unnamed worktree-refs tree with the deliberate 0-count line, removing nothing and writing no backup"
+else
+  bad "P31 refusal: 0-count worktree-refs line (rc=$rc_p31r, wt31k=$([ -d "$SW31W/wt31k" ] && echo ok || echo gone), wt31s=$([ -d "$SW31W/wt31s" ] && echo ok || echo gone), bk31r='$bk31r_left', err='$err_p31r')"
+fi
+
+# wt31k is commit-carrying (worktree-refs): apply with every judged tree named via --only
+# (the approvable set is unchanged, so PLAN_P31 still matches, and SAFE wt31s still goes as --apply).
+SYG_WORKTREE_BACKUP_DIR="$T/bk31" "$TOOL" --repo "$SW31" --apply-hold "${PLAN_P31:-none}" \
+  --only "$SW31W/wt31k" --only "$SW31W/wt31s" >/dev/null 2>&1; rc_p31a=$?
+sha_sw31=$(printf '%s\0%s' "$SW31" "$SW31W/wt31k" | sha256sum | cut -c1-8)
+shopt -s nullglob
+bk31_dirs=("$T/bk31"/*/"sweep31--wt31k--$sha_sw31")
+shopt -u nullglob
+BK31=${bk31_dirs[0]:-}
+restore_p31=''
+git clone -q "$T/sweep31-origin.git" "$T/p31-clone" 2>/dev/null && [ -d "$T/p31-clone" ] || bad "P31 setup: clone p31-clone"
+if [ "$rc_p31a" -eq 0 ] && [ ! -e "$SW31W/wt31k" ] && [ ! -e "$SW31W/wt31s" ] && [ -f "$BK31/reflog.pack" ] \
+  && _pipe_out=$(sed -n '/^=== Commits only in reflogs or per-worktree refs (in reflog\.pack) ===$/,/^===/p' "$BK31/changes.txt") && grep -q "^$C_P31 " <<<"$_pipe_out" \
+  && _pipe_out=$(sed -n '/^=== Per-worktree refs (refs\/worktree\/\*, refs\/bisect\/\*, refs\/rewritten\/\*) ===$/,/^===/p' "$BK31/changes.txt") && grep -qx "$C_P31 refs/worktree/keep" <<<"$_pipe_out" \
+  && restore_p31=$(grep '^  git -C .* update-ref refs/seyag-restored/' "$BK31/README.txt") \
+  && eval "$restore_p31" \
+  && [ "$(git -C "$SW31" rev-parse -q --verify "refs/seyag-restored/$PLAN_P31/worktree/keep" 2>/dev/null)" = "$C_P31" ] \
+  && ! git -C "$SW31" rev-parse -q --verify refs/worktree/keep >/dev/null 2>&1 \
+  && ! grep -qE 'update-ref refs/(worktree|bisect|rewritten)/' "$BK31/README.txt" \
+  && git -C "$T/p31-clone" index-pack --stdin --fix-thin < "$BK31/reflog.pack" >/dev/null 2>&1 \
+  && git -C "$T/p31-clone" cat-file -e "$C_P31^{commit}" 2>/dev/null; then
+  ok "P31(ii): --apply-hold packs refs/worktree/keep commit in reflog.pack, lists it in changes.txt, and the README's update-ref line restores it as refs/seyag-restored/<plan>/worktree/keep (no verbatim refs/worktree/keep, and no update-ref line names a verbatim per-worktree ref)"
+else
+  bad "P31(ii): worktree-refs backup (rc=$rc_p31a, dir='$BK31', cmd='$restore_p31', got='$(git -C "$SW31" rev-parse -q --verify "refs/seyag-restored/$PLAN_P31/worktree/keep" 2>/dev/null)', want='$C_P31')"
+fi
+
+}
+phase_50
+phase_51() {
+local SW31B SW31BW
+# P31(iv)/(v) non-commit refs/worktree/* tips: a ref at a blob and a ref at an annotated tag object (on an otherwise-unreferenced commit-tree commit) HOLD as worktree-refs-object and are never approvable (the backup packs commits only).
+mk_repo sweep31b && [ -d "$T/sweep31b" ] || bad "P31b setup: mk_repo sweep31b"
+SW31B="$T/sweep31b"
+SW31BW="$SW31B/.claude/worktrees"
+add_tree sweep31b wt31blob && [ -d "$SW31BW/wt31blob" ] || bad "P31b setup: add_tree wt31blob"
+add_tree sweep31b wt31tag && [ -d "$SW31BW/wt31tag" ] || bad "P31b setup: add_tree wt31tag"
+blob_31=$(printf 'blob payload\n' | git -C "$SW31BW/wt31blob" hash-object -w --stdin 2>/dev/null)
+[ -n "$blob_31" ] && git -C "$SW31BW/wt31blob" update-ref refs/worktree/blobref "$blob_31" || bad "P31(iv) setup: hash-object -w + update-ref blobref"
+[ "$(git -C "$SW31BW/wt31blob" for-each-ref --format='%(objecttype)' refs/worktree/blobref 2>/dev/null)" = blob ] || bad "P31(iv) setup: blobref is not a blob"
+tree_31t=$(git -C "$SW31BW/wt31tag" rev-parse 'HEAD^{tree}' 2>/dev/null)
+C_P31T=$(git -C "$SW31BW/wt31tag" commit-tree "$tree_31t" -p HEAD -m tagged 2>/dev/null)
+[ -n "$C_P31T" ] && git -C "$SW31BW/wt31tag" tag -a -m "p31 tag" p31tmptag "$C_P31T" 2>/dev/null || bad "P31(v) setup: commit-tree + tag -a"
+tag_31=$(git -C "$SW31BW/wt31tag" rev-parse refs/tags/p31tmptag 2>/dev/null)
+[ -n "$tag_31" ] && git -C "$SW31BW/wt31tag" update-ref refs/worktree/tagref "$tag_31" \
+  && git -C "$SW31BW/wt31tag" tag -d p31tmptag >/dev/null 2>&1 || bad "P31(v) setup: update-ref tagref + delete tag"
+[ "$(git -C "$SW31BW/wt31tag" for-each-ref --format='%(objecttype)' refs/worktree/tagref 2>/dev/null)" = tag ] \
+  && [ -z "$(git -C "$SW31BW/wt31tag" for-each-ref refs/tags/p31tmptag 2>/dev/null)" ] || bad "P31(v) setup: tagref is not a tag object or the temporary tag remains"
+J_P31B=$("$TOOL" --repo "$SW31B" --json); rc_p31b=$?
+if [ "$rc_p31b" -eq 0 ] && [ "$(verdict "$J_P31B" wt31blob)" = "HOLD:worktree-refs-object" ] \
+  && [ "$(approvable_of "$J_P31B" wt31blob)" = "False" ]; then
+  ok "P31(iv): tree whose refs/worktree/blobref points at a blob is HOLD:worktree-refs-object and not approvable"
+else
+  bad "P31(iv): blob ref verdict/approvable (rc=$rc_p31b, verdict='$(verdict "$J_P31B" wt31blob)', approvable='$(approvable_of "$J_P31B" wt31blob)')"
+fi
+v_p31t=$(verdict "$J_P31B" wt31tag)
+if [[ $v_p31t == HOLD:* ]] && [[ ",${v_p31t#HOLD:}," == *,worktree-refs-object,* ]] \
+  && [ "$(approvable_of "$J_P31B" wt31tag)" = "False" ]; then
+  ok "P31(v): tree whose refs/worktree/tagref points at an annotated tag object is HOLD with worktree-refs-object and not approvable"
+else
+  bad "P31(v): tag ref verdict/approvable (verdict='$v_p31t', approvable='$(approvable_of "$J_P31B" wt31tag)')"
+fi
+
+}
+phase_51
+phase_52() {
+local SW32 SW32W
+# P32 moving refs/worktree/* between dry run and --apply-hold invalidates plan id (exit 2, tree kept).
+mk_repo sweep32 && [ -d "$T/sweep32" ] || bad "P32 setup: mk_repo sweep32"
+SW32="$T/sweep32"
+SW32W="$SW32/.claude/worktrees"
+add_tree sweep32 wt32 && [ -d "$SW32W/wt32" ] || bad "P32 setup: add_tree wt32"
+tree_32=$(git -C "$SW32W/wt32" rev-parse 'HEAD^{tree}' 2>/dev/null)
+C1_P32=$(git -C "$SW32W/wt32" commit-tree "$tree_32" -p HEAD -m keep1 2>/dev/null)
+C2_P32=$(git -C "$SW32W/wt32" commit-tree "$tree_32" -p HEAD -m keep2 2>/dev/null)
+[ -n "$C1_P32" ] && [ -n "$C2_P32" ] && [ "$C1_P32" != "$C2_P32" ] \
+  && git -C "$SW32W/wt32" update-ref refs/worktree/keep "$C1_P32" || bad "P32 setup: update-ref C1_P32"
+PLAN_P32=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["hold_plan"] or "")' < <("$TOOL" --repo "$SW32" --json))
+[ -n "$PLAN_P32" ] || bad "P32 setup: PLAN_P32"
+git -C "$SW32W/wt32" update-ref refs/worktree/keep "$C2_P32" || bad "P32 setup: move refs/worktree/keep to C2_P32"
+err_p32=$(SYG_WORKTREE_BACKUP_DIR="$T/bk32" "$TOOL" --repo "$SW32" --apply-hold "${PLAN_P32:-none}" 2>&1 >/dev/null); rc_p32=$?
+if [ "$rc_p32" -eq 2 ] && [ -d "$SW32W/wt32" ] && grep -q 'hold plan changed' <<<"$err_p32"; then
+  ok "P32: moving refs/worktree/keep between dry run and --apply-hold invalidates plan id (rc 2, tree kept)"
+else
+  bad "P32: moving refs/worktree/keep (rc=$rc_p32, err='$err_p32')"
+fi
+
+}
+phase_52
+phase_53() {
+local SW33W WT33 p33 ref_state_p33
+# P33 batch hash-object parity: 3 untracked files (1 regular, 1 symlink, 1 newline-named) + 1 ignored file match reference per-file formula.
+mk_repo sweep33 && [ -d "$T/sweep33" ] || bad "P33 setup: mk_repo sweep33"
+SW33="$T/sweep33"
+SW33W="$SW33/.claude/worktrees"
+WT33="$SW33W/wt33"
+add_tree sweep33 wt33 && [ -d "$WT33" ] || bad "P33 setup: add_tree wt33"
+echo one > "$WT33/u1.txt" \
+  && ln -s a.txt "$WT33/ulink" \
+  && echo two > "$WT33/"$'u\nnl.txt' \
+  && echo three > "$WT33/extra.log" \
+  && [ -f "$WT33/u1.txt" ] && [ -L "$WT33/ulink" ] && [ -f "$WT33/"$'u\nnl.txt' ] && [ -f "$WT33/extra.log" ] \
+  || bad "P33 setup: create files"
+# The reference mirrors tree_state_sha's stream exactly, rc sentinels included (all children
+# succeed on a healthy tree, the batch covers u1.txt and extra.log: batch=0:0).
+ref_state_p33=$(
+  {
+    printf '\001atrisk=%s\0' 0
+    git -C "$WT33" status --porcelain=v1 -z --ignored --untracked-files=all; rc33=$?
+    printf '\001status=%s\0' "$rc33"
+    git -C "$WT33" diff --binary HEAD; rc33=$?
+    printf '\001diff=%s\0' "$rc33"
+    git -C "$WT33" diff --binary --cached HEAD; rc33=$?
+    printf '\001diffcached=%s\0' "$rc33"
+    printf '\001batch=%s\0' "0:0"
+    for p33 in $'u\nnl.txt' u1.txt ulink extra.log; do
+      rc33=0
+      if [ -L "$WT33/$p33" ]; then
+        h33=$(readlink -- "$WT33/$p33") || rc33=$?
+      else
+        h33=$(git -C "$WT33" hash-object --no-filters -- "$p33") || rc33=$?
+      fi
+      printf '%s\0%s\0' "$p33" "${h33:-}"
+      printf '\001hash=%s\0' "$rc33"
+    done
+    git -C "$WT33" for-each-ref --format='%(objectname) %(refname)' refs/worktree/ refs/bisect/ refs/rewritten/; rc33=$?
+    printf '\001foreachref=%s\0' "$rc33"
+  } | sha256sum | cut -d' ' -f1
+)
+head_p33=$(git -C "$WT33" rev-parse HEAD)
+reasons_p33=$(printf '%s\n' \
+  $'untracked-new\tu\nnl.txt is untracked and not on origin/main' \
+  $'untracked-new\tu1.txt is untracked and not on origin/main' \
+  $'untracked-new\tulink is untracked and not on origin/main' \
+  $'ignored\textra.log is ignored and not a safe-clean cache name or a declared regenerable path' \
+  | LC_ALL=C sort)
+ref_plan_p33=$(printf '%s\0%s\0%s\0%s\0%s\0' "$WT33" "worktree-agent-wt33" "$head_p33" "$reasons_p33" "$ref_state_p33" | sha256sum | cut -c1-12)
+PLAN_P33=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["hold_plan"] or "")' < <("$TOOL" --repo "$SW33" --json))
+if [ -n "$PLAN_P33" ] && [ "$PLAN_P33" = "$ref_plan_p33" ]; then
+  ok "P33: batched hash-object hold_plan ($PLAN_P33) matches old per-file formula with regular, symlink, and newline-named files"
+else
+  bad "P33: batched hash-object parity (got '$PLAN_P33', want '$ref_plan_p33')"
+fi
+
+}
+phase_53
+phase_54() {
+local SW33B ref1_p33b ref2_p33b
+# P33b batch path hygiene: untracked `a` and `"a"` (literal quotes in the name) must not collide in the batch (git C-unquotes a stdin-paths line starting with a quote); hold_plan equals the old per-file formula and changes when `"a"` changes.
+mk_repo sweep33b && [ -d "$T/sweep33b" ] || bad "P33b setup: mk_repo sweep33b"
+SW33B="$T/sweep33b"
+WT33B="$SW33B/.claude/worktrees/wt33b"
+add_tree sweep33b wt33b && [ -d "$WT33B" ] || bad "P33b setup: add_tree wt33b"
+printf 'one\n' > "$WT33B/a" \
+  && printf 'two\n' > "$WT33B/"'"a"' \
+  && [ -f "$WT33B/a" ] && [ -f "$WT33B/"'"a"' ] \
+  || bad "P33b setup: create a and quoted-name files"
+ref1_p33b=$(ref_plan_p33b)
+PLAN1_P33B=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["hold_plan"] or "")' < <("$TOOL" --repo "$SW33B" --json))
+printf 'three\n' > "$WT33B/"'"a"' || bad "P33b setup: rewrite quoted-name file"
+ref2_p33b=$(ref_plan_p33b)
+PLAN2_P33B=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["hold_plan"] or "")' < <("$TOOL" --repo "$SW33B" --json))
+if [ -n "$PLAN1_P33B" ] && [ "$PLAN1_P33B" = "$ref1_p33b" ] \
+  && [ -n "$PLAN2_P33B" ] && [ "$PLAN2_P33B" = "$ref2_p33b" ] && [ "$PLAN1_P33B" != "$PLAN2_P33B" ]; then
+  ok "P33b: hold_plan matches the per-file formula for untracked a and \"a\", and changes when \"a\" changes"
+else
+  bad "P33b: quoted-name batch parity (plan1='$PLAN1_P33B' want '$ref1_p33b'; plan2='$PLAN2_P33B' want '$ref2_p33b')"
+fi
+
+}
+phase_54
+phase_55() {
+# P34 SYG_WORKTREE_RUN_STAMP validation: ../x, a/b and a set-but-empty value exit 2 with message prefix; no dir created under backup root.
+err_p34a=$(SYG_WORKTREE_BACKUP_DIR="$T/bk34" SYG_WORKTREE_RUN_STAMP="../x" "$TOOL" --repo "$SW33" 2>&1 >/dev/null); rc_p34a=$?
+err_p34b=$(SYG_WORKTREE_BACKUP_DIR="$T/bk34" SYG_WORKTREE_RUN_STAMP="a/b" "$TOOL" --repo "$SW33" 2>&1 >/dev/null); rc_p34b=$?
+err_p34c=$(SYG_WORKTREE_BACKUP_DIR="$T/bk34" SYG_WORKTREE_RUN_STAMP="" "$TOOL" --repo "$SW33" 2>&1 >/dev/null); rc_p34c=$?
+if [ "$rc_p34a" -eq 2 ] && [ "$rc_p34b" -eq 2 ] && [ "$rc_p34c" -eq 2 ] \
+  && [[ $err_p34a == "safe-worktree-clean: SYG_WORKTREE_RUN_STAMP is internal and must be a plain name: ../x"* ]] \
+  && [[ $err_p34b == "safe-worktree-clean: SYG_WORKTREE_RUN_STAMP is internal and must be a plain name: a/b"* ]] \
+  && [[ $err_p34c == "safe-worktree-clean: SYG_WORKTREE_RUN_STAMP is internal and must be a plain name: "* ]] \
+  && [ ! -e "$T/bk34" ] && [ ! -e "$T/x" ]; then
+  ok "P34: invalid SYG_WORKTREE_RUN_STAMP values ../x, a/b and set-but-empty exit 2 with plain-name error and create no backup dir"
+else
+  bad "P34: SYG_WORKTREE_RUN_STAMP validation (rc_a=$rc_p34a, err_a='$err_p34a', rc_b=$rc_p34b, err_b='$err_p34b', rc_c=$rc_p34c, err_c='$err_p34c')"
+fi
+
+}
+phase_55
+phase_56() {
+local SW35 SW35W bk35_readmes
+# P35 same tree basename at different depths in one repo: .claude/worktrees/a/wt and .claude/worktrees/b/wt -> both backed up and removed, rc 0.
+mk_repo sweep35 && [ -d "$T/sweep35" ] || bad "P35 setup: mk_repo sweep35"
+SW35="$T/sweep35"
+SW35W="$SW35/.claude/worktrees"
+mkdir -p "$SW35W/a" "$SW35W/b" || bad "P35 setup: mkdir a b"
+git -C "$SW35" worktree add -q -b worktree-agent-awt "$SW35W/a/wt" origin/main 2>/dev/null \
+  && git -C "$SW35" worktree add -q -b worktree-agent-bwt "$SW35W/b/wt" origin/main 2>/dev/null \
+  && [ -d "$SW35W/a/wt" ] && [ -d "$SW35W/b/wt" ] || bad "P35 setup: worktrees a/wt and b/wt"
+echo ua > "$SW35W/a/wt/u.txt" && echo ub > "$SW35W/b/wt/u.txt" \
+  && [ -f "$SW35W/a/wt/u.txt" ] && [ -f "$SW35W/b/wt/u.txt" ] || bad "P35 setup: u.txt in a/wt and b/wt"
+PLAN_P35=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["hold_plan"] or "")' < <("$TOOL" --repo "$SW35" --json))
+[ -n "$PLAN_P35" ] || bad "P35 setup: PLAN_P35"
+SYG_WORKTREE_BACKUP_DIR="$T/bk35" "$TOOL" --repo "$SW35" --apply-hold "$PLAN_P35" >/dev/null; rc_p35=$?
+shopt -s nullglob
+bk35_readmes=("$T/bk35"/*/sweep35--wt--*/README.txt)
+shopt -u nullglob
+if [ "$rc_p35" -eq 0 ] && [ ! -e "$SW35W/a/wt" ] && [ ! -e "$SW35W/b/wt" ] && [ "${#bk35_readmes[@]}" -eq 2 ]; then
+  ok "P35: two approvable trees with basename wt under .claude/worktrees/{a,b}/wt get distinct backup leaves and both are removed"
+else
+  bad "P35: duplicate tree basename in one repo (rc=$rc_p35, readmes=${#bk35_readmes[@]})"
+fi
+
+}
+phase_56
+phase_57() {
+local SW36A SW36B
+# P36 text and JSON sweep plan parity on a two-repo fixture.
+mk_repo sweep36a && mk_repo sweep36b && [ -d "$T/sweep36a" ] && [ -d "$T/sweep36b" ] || bad "P36 setup: mk_repo sweep36a/b"
+SW36A="$T/sweep36a"
+SW36B="$T/sweep36b"
+add_tree sweep36a wt36a && add_tree sweep36b wt36b \
+  && [ -d "$SW36A/.claude/worktrees/wt36a" ] && [ -d "$SW36B/.claude/worktrees/wt36b" ] || bad "P36 setup: add_tree wt36a/b"
+echo a36 > "$SW36A/.claude/worktrees/wt36a/u.txt" && echo b36 > "$SW36B/.claude/worktrees/wt36b/u.txt" \
+  && [ -f "$SW36A/.claude/worktrees/wt36a/u.txt" ] && [ -f "$SW36B/.claude/worktrees/wt36b/u.txt" ] || bad "P36 setup: u.txt"
+out_p36t=$("$TOOL" --repo "$SW36A" --repo "$SW36B"); rc_p36t=$?
+J_P36=$("$TOOL" --repo "$SW36A" --repo "$SW36B" --json); rc_p36j=$?
+SWEEP_P36_TXT=$(sed -n 's/^sweep plan: \([0-9a-f]\{12\}\)$/\1/p' <<<"$out_p36t")
+SWEEP_P36_JSON=$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["sweep_plan"] or "")' "$J_P36")
+if [ "$rc_p36t" -eq 0 ] && [ "$rc_p36j" -eq 0 ] && [ -n "$SWEEP_P36_TXT" ] && [ "$SWEEP_P36_TXT" = "$SWEEP_P36_JSON" ]; then
+  ok "P36: text and JSON dry runs produce identical non-empty sweep plan id ($SWEEP_P36_TXT)"
+else
+  bad "P36: text vs JSON sweep plan (rc_t=$rc_p36t, rc_j=$rc_p36j, txt='$SWEEP_P36_TXT', json='$SWEEP_P36_JSON')"
+fi
+
+}
+phase_57
+phase_58() {
+local BK37 SW37 SW37W bk37_dirs restore_p37
+# P37 per-worktree ref namespaces beyond refs/worktree/: refs/bisect/* (organic git bisect) and
+# refs/rewritten/* (a --rebase-merges label stopped mid-rebase). wt37live keeps BISECT_LOG, so it
+# also holds as in-progress and is never approvable; wt37done is back on its branch with BISECT_LOG
+# gone, holds as bisect-refs only, and its --apply-hold backup lists the refs and restores the
+# commit; wt37rew stops an authored todo (label + break) after the pick, so refs/rewritten/mid-rew
+# points at a rebased commit on no branch.
+mk_repo sweep37 && [ -d "$T/sweep37" ] || bad "P37 setup: mk_repo sweep37"
+SW37="$T/sweep37"
+SW37W="$SW37/.claude/worktrees"
+add_tree sweep37 wt37live && [ -d "$SW37W/wt37live" ] || bad "P37 setup: add_tree wt37live"
+echo live > "$SW37W/wt37live/live.txt" && git -C "$SW37W/wt37live" add live.txt \
+  && git -C "$SW37W/wt37live" commit -qm "live era" || bad "P37 setup: wt37live commit"
+LIVE37=$(git -C "$SW37W/wt37live" rev-parse HEAD)
+git -C "$SW37W/wt37live" reset -q --hard origin/main || bad "P37 setup: wt37live reset"
+git -C "$SW37W/wt37live" bisect start >/dev/null 2>&1 \
+  && git -C "$SW37W/wt37live" bisect bad "$LIVE37" >/dev/null 2>&1 \
+  && git -C "$SW37W/wt37live" bisect good origin/main >/dev/null 2>&1 || bad "P37 setup: wt37live bisect"
+[ -n "$(git -C "$SW37W/wt37live" for-each-ref refs/bisect/ 2>/dev/null)" ] \
+  && [ -e "$(git -C "$SW37W/wt37live" rev-parse --git-path BISECT_LOG)" ] || bad "P37 setup: wt37live refs/bisect + BISECT_LOG"
+add_tree sweep37 wt37done && [ -d "$SW37W/wt37done" ] || bad "P37 setup: add_tree wt37done"
+echo bisect-done > "$SW37W/wt37done/done.txt" && git -C "$SW37W/wt37done" add done.txt \
+  && git -C "$SW37W/wt37done" commit -qm "done era" || bad "P37 setup: wt37done commit"
+DONE37=$(git -C "$SW37W/wt37done" rev-parse HEAD)
+git -C "$SW37W/wt37done" reset -q --hard origin/main || bad "P37 setup: wt37done reset"
+git -C "$SW37W/wt37done" bisect start >/dev/null 2>&1 \
+  && git -C "$SW37W/wt37done" bisect bad "$DONE37" >/dev/null 2>&1 \
+  && git -C "$SW37W/wt37done" bisect good origin/main >/dev/null 2>&1 || bad "P37 setup: wt37done bisect"
+git -C "$SW37W/wt37done" checkout -q worktree-agent-wt37done >/dev/null 2>&1 \
+  && rm -f "$(git -C "$SW37W/wt37done" rev-parse --git-path BISECT_LOG)" \
+  && [ -n "$(git -C "$SW37W/wt37done" for-each-ref refs/bisect/ 2>/dev/null)" ] \
+  && [ ! -e "$(git -C "$SW37W/wt37done" rev-parse --git-path BISECT_LOG)" ] || bad "P37 setup: wt37done refs/bisect without BISECT_LOG"
+add_tree sweep37 wt37rew && [ -d "$SW37W/wt37rew" ] || bad "P37 setup: add_tree wt37rew"
+echo rew > "$SW37W/wt37rew/rew.txt" && git -C "$SW37W/wt37rew" add rew.txt \
+  && git -C "$SW37W/wt37rew" commit -qm "rew one" || bad "P37 setup: wt37rew commit"
+echo m37 > "$SW37/m37.txt" && git -C "$SW37" add m37.txt && git -C "$SW37" commit -qm "main ahead" \
+  || bad "P37 setup: main ahead commit"
+printf '#!/bin/sh\nawk \x27{print} /^pick /{print "label mid-rew"; print "break"; exit}\x27 "$1" > "$1.new" && mv "$1.new" "$1"\n' > "$T/seqed_p37.sh"
+chmod +x "$T/seqed_p37.sh"
+GIT_SEQUENCE_EDITOR="$T/seqed_p37.sh" git -C "$SW37W/wt37rew" rebase -i --rebase-merges main >/dev/null 2>&1 \
+  && [ -n "$(git -C "$SW37W/wt37rew" for-each-ref refs/rewritten/ 2>/dev/null)" ] \
+  || bad "P37 setup: wt37rew rebase stopped with refs/rewritten"
+J_P37=$("$TOOL" --repo "$SW37" --json); rc_p37=$?
+if [ "$rc_p37" -eq 0 ] && [ "$(verdict "$J_P37" wt37live)" = "HOLD:bisect-refs,in-progress" ] \
+  && [ "$(approvable_of "$J_P37" wt37live)" = "False" ]; then
+  ok "P37(i): a mid-bisect tree with refs/bisect/bad at an orphan commit is HOLD:bisect-refs,in-progress and not approvable"
+else
+  bad "P37(i): wt37live (rc=$rc_p37, verdict='$(verdict "$J_P37" wt37live)', approvable=$(approvable_of "$J_P37" wt37live))"
+fi
+if [ "$(verdict "$J_P37" wt37done)" = "HOLD:bisect-refs" ] && [ "$(approvable_of "$J_P37" wt37done)" = "True" ]; then
+  ok "P37(ii): refs/bisect/* with no bisect in progress is HOLD:bisect-refs alone and approvable"
+else
+  bad "P37(ii): wt37done (verdict='$(verdict "$J_P37" wt37done)', approvable=$(approvable_of "$J_P37" wt37done))"
+fi
+want_p37d="refs/bisect/* holds commits on neither origin/main nor another branch (2 ref(s) in the namespace, first: refs/bisect/bad)"
+got_p37d=$(reason_msg "$J_P37" wt37done)
+[ "$got_p37d" = "$want_p37d" ] && ok "P37(ii): bisect-refs reason line: $want_p37d" \
+  || bad "P37(ii): bisect-refs reason line: got '$got_p37d', want '$want_p37d'"
+v_p37r=$(verdict "$J_P37" wt37rew)
+if [ "$v_p37r" = "HOLD:detached-unreferenced,rewritten-refs,in-progress" ] \
+  && [ "$(approvable_of "$J_P37" wt37rew)" = "False" ]; then
+  ok "P37(iii): a --rebase-merges label at a rebased commit is HOLD with rewritten-refs (shared scan) and not approvable"
+else
+  bad "P37(iii): wt37rew (verdict='$v_p37r', approvable=$(approvable_of "$J_P37" wt37rew))"
+fi
+want_p37r="refs/rewritten/* holds commits on neither origin/main nor another branch (2 ref(s) in the namespace, first: refs/rewritten/mid-rew)"
+got_p37r=$(python3 -c '
+import json, sys
+d = json.loads(sys.argv[1])
+for t in d["worktrees"]:
+    if t["path"].endswith("/" + sys.argv[2]):
+        for r in t["reasons"]:
+            if r["code"] == sys.argv[3]:
+                print(r["detail"])
+                break
+' "$J_P37" wt37rew rewritten-refs)
+[ "$got_p37r" = "$want_p37r" ] && ok "P37(iii): rewritten-refs reason line: $want_p37r" \
+  || bad "P37(iii): rewritten-refs reason line: got '$got_p37r', want '$want_p37r'"
+PLAN_P37=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["hold_plan"] or "")' <<<"$J_P37")
+[ -n "$PLAN_P37" ] || bad "P37 setup: PLAN_P37"
+# wt37done is commit-carrying (bisect-refs): apply with every judged tree named via --only
+# (the approvable set is unchanged, so PLAN_P37 still matches; wt37live/wt37rew hold in-progress and stay).
+SYG_WORKTREE_BACKUP_DIR="$T/bk37" "$TOOL" --repo "$SW37" --apply-hold "$PLAN_P37" \
+  --only "$SW37W/wt37live" --only "$SW37W/wt37done" --only "$SW37W/wt37rew" >/dev/null 2>&1; rc_p37a=$?
+sha_sw37=$(printf '%s\0%s' "$SW37" "$SW37W/wt37done" | sha256sum | cut -c1-8)
+shopt -s nullglob
+bk37_dirs=("$T/bk37"/*/"sweep37--wt37done--$sha_sw37")
+shopt -u nullglob
+BK37=${bk37_dirs[0]:-}
+GOOD37=$(sed -n 's/^\([0-9a-f]*\) refs\/bisect\/good-.*$/\1/p' "$BK37/changes.txt" 2>/dev/null)
+restore_p37=''
+git clone -q "$T/sweep37-origin.git" "$T/p37-clone" 2>/dev/null && [ -d "$T/p37-clone" ] || bad "P37 setup: clone p37-clone"
+if [ "$rc_p37a" -eq 0 ] && [ ! -e "$SW37W/wt37done" ] && [ -f "$BK37/reflog.pack" ] \
+  && _pipe_out=$(sed -n '/^=== Per-worktree refs (refs\/worktree\/\*, refs\/bisect\/\*, refs\/rewritten\/\*) ===$/,/^===/p' "$BK37/changes.txt") \
+  && grep -qx "$DONE37 refs/bisect/bad" <<<"$_pipe_out" \
+  && grep -q "^$GOOD37 refs/bisect/good-" <<<"$_pipe_out" \
+  && restore_p37=$(grep '^  git -C .* update-ref refs/seyag-restored/.*bisect/bad ' "$BK37/README.txt") \
+  && eval "$restore_p37" \
+  && [ "$(git -C "$SW37" rev-parse -q --verify "refs/seyag-restored/$PLAN_P37/bisect/bad" 2>/dev/null)" = "$DONE37" ] \
+  && ! git -C "$SW37" rev-parse -q --verify refs/bisect/bad >/dev/null 2>&1 \
+  && ! grep -qE 'update-ref refs/(worktree|bisect|rewritten)/' "$BK37/README.txt" \
+  && git -C "$T/p37-clone" index-pack --stdin --fix-thin < "$BK37/reflog.pack" >/dev/null 2>&1 \
+  && git -C "$T/p37-clone" cat-file -e "$DONE37^{commit}" 2>/dev/null; then
+  ok "P37(iv): --apply-hold backs up wt37done, lists both refs/bisect refs in changes.txt, and the README's update-ref line restores refs/bisect/bad as refs/seyag-restored/<plan>/bisect/bad (no verbatim refs/bisect/bad, and no update-ref line names a verbatim per-worktree ref), the bad tip into a scratch clone"
+else
+  bad "P37(iv): bisect backup (rc=$rc_p37a, dir='$BK37', good='$GOOD37', cmd='$restore_p37', got='$(git -C "$SW37" rev-parse -q --verify "refs/seyag-restored/$PLAN_P37/bisect/bad" 2>/dev/null)', want='$DONE37')"
+fi
+
+}
+phase_58
+phase_59() {
+local SW38
+# P38 batch-fallback seam: SYG_WORKTREE_STATE_BATCH_FAIL=1 skips tree_state_sha's hash-object
+# batch child (batch_ok=false, rc_batch=1), forcing each at-risk file to hash per file; the
+# plan id must equal the per-file reference formula (true content, not a vacuous batch) with
+# the batch sentinel flipped, and differ from the healthy-batch id of the same tree.
+mk_repo sweep38 && [ -d "$T/sweep38" ] || bad "P38 setup: mk_repo sweep38"
+SW38="$T/sweep38"
+WT38="$SW38/.claude/worktrees/wt38"
+add_tree sweep38 wt38 && [ -d "$WT38" ] || bad "P38 setup: add_tree wt38"
+echo f1 > "$WT38/u1.txt" && echo f2 > "$WT38/u2.txt" \
+  && [ -f "$WT38/u1.txt" ] && [ -f "$WT38/u2.txt" ] || bad "P38 setup: u1.txt u2.txt"
+PLAN_P38_SEAM=$(SYG_WORKTREE_STATE_BATCH_FAIL=1 "$TOOL" --repo "$SW38" --json 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)["hold_plan"] or "")')
+PLAN_P38_NORM=$("$TOOL" --repo "$SW38" --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["hold_plan"] or "")')
+if [ -n "$PLAN_P38_SEAM" ] && [ "$PLAN_P38_SEAM" = "$(ref_plan_p38 '1:1')" ] \
+  && [ -n "$PLAN_P38_NORM" ] && [ "$PLAN_P38_NORM" = "$(ref_plan_p38 '0:0')" ] \
+  && [ "$PLAN_P38_SEAM" != "$PLAN_P38_NORM" ]; then
+  ok "P38: with the batch failed, the hold plan still matches the per-file formula (batch=1:1) and differs from the healthy-batch id ($PLAN_P38_NORM)"
+else
+  bad "P38: batch fallback (seam='$PLAN_P38_SEAM' want '$(ref_plan_p38 '1:1')', norm='$PLAN_P38_NORM' want '$(ref_plan_p38 '0:0')')"
+fi
+
+}
+phase_59
+phase_60() {
+local WT38B p38b ref_state_38b_pf
+# P38b real-failure family: a fake git first on PATH proxies every call to real git, but for
+# the one tree_state_sha call shape baked into SHIM38B_MATCH it emits the real output
+# byte-for-byte and exits 42 — so the poisoned run's stream differs from the healthy one ONLY
+# by the folded child rc (status / diff / diff --cached / for-each-ref / batch hash-object),
+# or, for the per-file hash-object shape, by the rc plus the emptied hash that rc forces.
+# Each variant's hold plan id must differ from the same tree's healthy id; the two hash-object
+# variants exercise the real `else rc_batch=$?` / per-file failure branches (P38 above pins
+# only the seam's skipping). Red-check: a tree_state_sha that dropped child rcs hashes the
+# poisoned streams identically for the status/diff/diff --cached/for-each-ref variants, so
+# their checks fail — the batch hash-object variant still differs on such a mutant, but via
+# the batch_ok flip (a failed batch child zeroes the \001batch=<rc>:<0|1> ok bit and forces
+# the per-file fallback), not via the rc in its own sentinel; the per-file variant is pinned
+# by its rc-faithful formula below, which the mutant also misses.
+mk_repo sweep38b && [ -d "$T/sweep38b" ] || bad "P38b setup: mk_repo sweep38b"
+SW38B="$T/sweep38b"
+WT38B="$SW38B/.claude/worktrees/wt38b"
+add_tree sweep38b wt38b && [ -d "$WT38B" ] || bad "P38b setup: add_tree wt38b"
+echo f1 > "$WT38B/u1.txt" && echo f2 > "$WT38B/u2.txt" \
+  && echo nl > "$WT38B/"$'u\nnl.txt' \
+  && [ -f "$WT38B/u1.txt" ] && [ -f "$WT38B/u2.txt" ] && [ -f "$WT38B/"$'u\nnl.txt' ] \
+  || bad "P38b setup: untracked files (2 batchable, 1 newline-named)"
+REAL_GIT=$(command -v git)
+[ -n "$REAL_GIT" ] || bad "P38b setup: command -v git"
+mkdir -p "$T/shim38b"
+cat > "$T/shim38b/git" <<EOF
+#!/bin/sh
+# P38b: proxy to real git; for the one tree_state_sha call shape matched by
+# SHIM38B_MATCH, emit the real output byte-for-byte and exit 42.
+real='$REAL_GIT'
+case " \$* " in
+  *"\$SHIM38B_MATCH"*) ;;
+  *) exec "\$real" "\$@" ;;
+esac
+tmp=\$(mktemp) || exit 1
+"\$real" "\$@" >"\$tmp" 2>/dev/null
+cat "\$tmp"
+rm -f "\$tmp"
+exit 42
+EOF
+chmod +x "$T/shim38b/git"
+PLAN_38B_OK=$("$TOOL" --repo "$SW38B" --json 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)["hold_plan"] or "")')
+[ -n "$PLAN_38B_OK" ] || bad "P38b setup: healthy hold plan id"
+# the fragments match tree_state_sha's call shapes, never the judge's (status: --ignored
+# bare vs the judge's --no-renames --ignored=matching; diff: --binary vs --name-only;
+# for-each-ref: the two-field format vs the judge's three-field one). NOT unique by shape
+# alone, though: regen_verdict's `hash-object --no-filters --` call and backup_tree's
+# `diff --binary HEAD` / two-field for-each-ref are byte-identical to tree_state_sha's.
+# Uniqueness today rests on --json never invoking backup_tree (an apply-path function) and
+# sweep38b holding no regenerable or ignored entries (so regen_verdict never runs) — a
+# fixture edit adding either must re-check every fragment here.
+check38b 'git status'                     ' status --porcelain=v1 -z --ignored '
+check38b 'git diff'                       ' diff --binary HEAD '
+check38b 'git diff --cached'              ' diff --binary --cached HEAD '
+check38b 'git for-each-ref'               'for-each-ref --format=%(objectname) %(refname) refs/worktree/'
+check38b 'batch hash-object --stdin-paths' ' hash-object --no-filters --stdin-paths'
+
+# the per-file shape empties the hash on its nonzero rc, so this variant also pins the exact
+# rc-faithful stream: the newline-named file's hash is empty and its hash sentinel is 42
+plan_38b_pf=$(fail_plan ' hash-object --no-filters -- ')
+ref_state_38b_pf=$(
+  {
+    printf '\001atrisk=%s\0' 0
+    git -C "$WT38B" status --porcelain=v1 -z --ignored --untracked-files=all; rc38b=$?
+    printf '\001status=%s\0' "$rc38b"
+    git -C "$WT38B" diff --binary HEAD; rc38b=$?
+    printf '\001diff=%s\0' "$rc38b"
+    git -C "$WT38B" diff --binary --cached HEAD; rc38b=$?
+    printf '\001diffcached=%s\0' "$rc38b"
+    printf '\001batch=%s\0' "0:0"  # u1.txt and u2.txt still batch healthy
+    for p38b in $'u\nnl.txt' u1.txt u2.txt; do
+      rc38b=0
+      if [ "$p38b" = $'u\nnl.txt' ]; then
+        h38b=""; rc38b=42
+      else
+        h38b=$(git -C "$WT38B" hash-object --no-filters -- "$p38b") || rc38b=$?
+      fi
+      printf '%s\0%s\0' "$p38b" "${h38b:-}"
+      printf '\001hash=%s\0' "$rc38b"
+    done
+    git -C "$WT38B" for-each-ref --format='%(objectname) %(refname)' refs/worktree/ refs/bisect/ refs/rewritten/; rc38b=$?
+    printf '\001foreachref=%s\0' "$rc38b"
+  } | sha256sum | cut -d' ' -f1
+)
+head38b=$(git -C "$WT38B" rev-parse HEAD)
+reasons38b=$(printf '%s\n' \
+  $'untracked-new\tu\nnl.txt is untracked and not on origin/main' \
+  $'untracked-new\tu1.txt is untracked and not on origin/main' \
+  $'untracked-new\tu2.txt is untracked and not on origin/main' \
+  | LC_ALL=C sort)
+ref_plan_38b_pf=$(printf '%s\0%s\0%s\0%s\0%s\0' "$WT38B" "worktree-agent-wt38b" "$head38b" "$reasons38b" "$ref_state_38b_pf" | sha256sum | cut -c1-12)
+if [ -n "$plan_38b_pf" ] && [ "$plan_38b_pf" != "$PLAN_38B_OK" ] && [ "$plan_38b_pf" = "$ref_plan_38b_pf" ]; then
+  ok "P38b: per-file hash-object failing (rc 42, hash emptied) changes the plan id and matches the rc-faithful formula"
+else
+  bad "P38b: per-file hash-object (plan='$plan_38b_pf', formula='$ref_plan_38b_pf', healthy='$PLAN_38B_OK')"
+fi
+
+}
+phase_60
+phase_61() {
+local SW39 WT39
+# P39 refs/bisect non-commit tip (shape follows P31(iv)/(v), for the bisect namespace): a ref
+# at a blob under refs/bisect/ HOLDs as bisect-refs-object — pinning the $ns-refs-object
+# interpolation — names the object type, and the tree is never approvable (the backup packs
+# commits only).
+mk_repo sweep39 && [ -d "$T/sweep39" ] || bad "P39 setup: mk_repo sweep39"
+SW39="$T/sweep39"
+WT39="$SW39/.claude/worktrees/wt39blob"
+add_tree sweep39 wt39blob && [ -d "$WT39" ] || bad "P39 setup: add_tree wt39blob"
+blob_39=$(printf 'bisect blob payload\n' | git -C "$WT39" hash-object -w --stdin 2>/dev/null)
+[ -n "$blob_39" ] && git -C "$WT39" update-ref refs/bisect/blobref "$blob_39" || bad "P39 setup: hash-object -w + update-ref refs/bisect/blobref"
+[ "$(git -C "$WT39" for-each-ref --format='%(objecttype)' refs/bisect/blobref 2>/dev/null)" = blob ] || bad "P39 setup: blobref is not a blob"
+J_P39=$("$TOOL" --repo "$SW39" --json); rc_p39=$?
+want_p39="refs/bisect/blobref points at a blob; back it up by hand before removing the tree"
+if [ "$rc_p39" -eq 0 ] && [ "$(verdict "$J_P39" wt39blob)" = "HOLD:bisect-refs-object" ] \
+  && [ "$(approvable_of "$J_P39" wt39blob)" = "False" ] \
+  && [ "$(reason_msg "$J_P39" wt39blob)" = "$want_p39" ]; then
+  ok "P39: refs/bisect/blobref at a blob is HOLD:bisect-refs-object, names the object type ('points at a blob'), not approvable"
+else
+  bad "P39: bisect blob ref (rc=$rc_p39, verdict='$(verdict "$J_P39" wt39blob)', approvable='$(approvable_of "$J_P39" wt39blob)', reason='$(reason_msg "$J_P39" wt39blob)')"
+fi
+
+}
+phase_61
+phase_62() {
+local SW40 SW40W
+# P40 blast radius: a plan over an unmerged tree (um, 1 commit beyond base) and a dirty tree (dy)
+# prints its tree list, and bare --apply-hold refuses while the commit-carrying tree is unnamed;
+# a scoped id (--only) approves exactly the named trees.
+mk_repo sweep40 && [ -d "$T/sweep40" ] || bad "P40 setup: mk_repo sweep40"
+SW40="$T/sweep40"
+SW40W="$SW40/.claude/worktrees"
+add_tree sweep40 um && [ -d "$SW40W/um" ] || bad "P40 setup: add_tree um"
+echo new > "$SW40W/um/c.txt" && git -C "$SW40W/um" add c.txt \
+  && git -C "$SW40W/um" commit -qm "unique work" || bad "P40 setup: um commit"
+UNM40=$(git -C "$SW40W/um" rev-list --count origin/main..worktree-agent-um 2>/dev/null)
+[ "$UNM40" = 1 ] || bad "P40 setup: um has 1 commit beyond base (got $UNM40)"
+add_tree sweep40 dy && [ -d "$SW40W/dy" ] || bad "P40 setup: add_tree dy"
+echo mine > "$SW40W/dy/a.txt" || bad "P40 setup: dy dirty edit"
+out_p40=$("$TOOL" --repo "$SW40"); rc_p40=$?
+J_P40=$("$TOOL" --repo "$SW40" --json)
+PLAN_P40=$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["hold_plan"] or "")' "$J_P40")
+[ -n "$PLAN_P40" ] || bad "P40 setup: PLAN_P40"
+SUM40="hold plan $PLAN_P40 would remove 2 tree(s): .claude/worktrees/dy, .claude/worktrees/um"
+if [ "$rc_p40" -eq 0 ] && grep -qxF "$SUM40" <<<"$out_p40" && grep -qx "hold plan: $PLAN_P40" <<<"$out_p40"; then
+  ok "P40(i): dry run text prints the plan's tree list and the id: $SUM40"
+else
+  bad "P40(i): plan summary line (rc=$rc_p40)"; printf '%s\n' "$out_p40"
+fi
+if python3 -c '
+import json, sys
+d = json.loads(sys.argv[1])
+assert d["hold_plan_trees"] == [sys.argv[2] + "/.claude/worktrees/dy", sys.argv[2] + "/.claude/worktrees/um"], d["hold_plan_trees"]
+cc = d["hold_plan_commit_carrying"]
+assert len(cc) == 1 and cc[0]["path"] == sys.argv[2] + "/.claude/worktrees/um" \
+  and cc[0]["commits"] == 1 and cc[0]["base"] == "origin/main", cc
+' "$J_P40" "$SW40"; then
+  ok "P40(i): JSON hold_plan_trees lists both trees and hold_plan_commit_carrying names um with 1 commit"
+else
+  bad "P40(i): JSON plan tree fields"; printf '%s\n' "$J_P40"
+fi
+err_p40b=$(SYG_WORKTREE_BACKUP_DIR="$T/bk40" "$TOOL" --repo "$SW40" --apply-hold "$PLAN_P40" 2>&1 >/dev/null); rc_p40b=$?
+want_p40b="safe-worktree-clean: --apply-hold refused: plan $PLAN_P40 includes commit-carrying tree .claude/worktrees/um (1 commit(s) not on origin/main) — only on the owner's yes for that tree: re-run the dry run and apply with --only <tree>"
+bk40_left=$(ls "$T/bk40" 2>/dev/null)
+if [ "$rc_p40b" -eq 2 ] && [ "$err_p40b" = "$want_p40b" ] \
+  && [ -d "$SW40W/um" ] && [ -d "$SW40W/dy" ] && [ -z "$bk40_left" ]; then
+  ok "P40(ii): bare --apply-hold exits 2 with the naming-refusal line (um, 1 commit), removes nothing, writes no backup"
+else
+  bad "P40(ii): bare --apply-hold refusal (rc=$rc_p40b, um=$([ -d "$SW40W/um" ] && echo ok || echo gone), dy=$([ -d "$SW40W/dy" ] && echo ok || echo gone), err='$err_p40b')"
+fi
+err_p40c=$(SYG_WORKTREE_BACKUP_DIR="$T/bk40c" "$TOOL" --repo "$SW40" --apply-hold "$PLAN_P40" --only "$SW40W/dy" 2>&1 >/dev/null); rc_p40c=$?
+if [ "$rc_p40c" -eq 2 ] && [ -d "$SW40W/um" ] && [ -d "$SW40W/dy" ] && grep -q 'hold plan changed' <<<"$err_p40c"; then
+  ok "P40(iii): bare id with --only naming only the dirty tree exits 2 (the bare plan still spans um) and removes nothing"
+else
+  bad "P40(iii): bare id + --only dirty (rc=$rc_p40c, err='$err_p40c')"
+fi
+sout_p40=$("$TOOL" --repo "$SW40" --only "$SW40W/um" --only "$SW40W/dy")
+SID_P40=$(sed -n 's/^hold plan: \([0-9a-f]\{12\}\)$/\1/p' <<<"$sout_p40")
+# The scoped dry run names the same approvable set the bare dry run judged, so its id EQUALS
+# the bare id; P40(iii) is what keeps a bare id from removing a tree a narrower scope didn't name.
+[ -n "$SID_P40" ] && [ "$SID_P40" = "$PLAN_P40" ] \
+  || bad "P40 setup: scoped id ($SID_P40) should equal the bare id over the same set ($PLAN_P40)"
+if grep -qxF "hold plan $SID_P40 would remove 2 tree(s): .claude/worktrees/dy, .claude/worktrees/um" <<<"$sout_p40"; then
+  ok "P40(iv): scoped dry run's summary line lists the named trees only"
+else
+  bad "P40(iv): scoped summary line"; printf '%s\n' "$sout_p40"
+fi
+out_p40a=$(SYG_WORKTREE_BACKUP_DIR="$T/bk40a" "$TOOL" --repo "$SW40" --apply-hold "$SID_P40" --only "$SW40W/um" --only "$SW40W/dy"); rc_p40a=$?
+if [ "$rc_p40a" -eq 0 ] && [ ! -e "$SW40W/um" ] && [ ! -e "$SW40W/dy" ]; then
+  ok "P40(v): scoped id over both trees applies with --only naming both, removing um and dy"
+else
+  bad "P40(v): scoped apply both (rc=$rc_p40a, um=$([ -e "$SW40W/um" ] && echo present || echo gone), dy=$([ -e "$SW40W/dy" ] && echo present || echo gone))"; printf '%s\n' "$out_p40a"
+fi
+}
+phase_62
+phase_63() {
+local SW40B SW40BW
+# P40(vi): a scoped id over only the commit-carrying tree approves just it; the dirty tree stays.
+mk_repo sweep40b && [ -d "$T/sweep40b" ] || bad "P40(vi) setup: mk_repo sweep40b"
+SW40B="$T/sweep40b"
+SW40BW="$SW40B/.claude/worktrees"
+add_tree sweep40b um2 && [ -d "$SW40BW/um2" ] || bad "P40(vi) setup: add_tree um2"
+echo n2 > "$SW40BW/um2/c.txt" && git -C "$SW40BW/um2" add c.txt \
+  && git -C "$SW40BW/um2" commit -qm "unique work 2" || bad "P40(vi) setup: um2 commit"
+add_tree sweep40b dy2 && [ -d "$SW40BW/dy2" ] || bad "P40(vi) setup: add_tree dy2"
+echo m2 > "$SW40BW/dy2/a.txt" || bad "P40(vi) setup: dy2 dirty edit"
+SID_P40B=$(sed -n 's/^hold plan: \([0-9a-f]\{12\}\)$/\1/p' < <("$TOOL" --repo "$SW40B" --only "$SW40BW/um2"))
+[ -n "$SID_P40B" ] || bad "P40(vi) setup: scoped id over um2"
+SYG_WORKTREE_BACKUP_DIR="$T/bk40b" "$TOOL" --repo "$SW40B" --apply-hold "$SID_P40B" --only "$SW40BW/um2" >/dev/null; rc_p40ba=$?
+if [ "$rc_p40ba" -eq 0 ] && [ ! -e "$SW40BW/um2" ] && [ -d "$SW40BW/dy2" ] && [ "$(cat "$SW40BW/dy2/a.txt")" = m2 ]; then
+  ok "P40(vi): scoped id over the commit-carrying tree alone applies with --only naming it; the dirty tree stays"
+else
+  bad "P40(vi): scoped apply um2 only (rc=$rc_p40ba, um2=$([ -e "$SW40BW/um2" ] && echo present || echo gone), dy2=$([ -e "$SW40BW/dy2" ] && echo present || echo gone))"
+fi
+
+}
+phase_63
+phase_64() {
+local SW41 SW41W t41
+# P41 summary truncation: four approvable dirty trees -> text lists 3 and "… +1 more"; JSON lists all four.
+mk_repo sweep41 && [ -d "$T/sweep41" ] || bad "P41 setup: mk_repo sweep41"
+SW41="$T/sweep41"
+SW41W="$SW41/.claude/worktrees"
+for t41 in ta tb tc td; do
+  add_tree sweep41 "$t41" && echo x > "$SW41W/$t41/a.txt" && [ -d "$SW41W/$t41" ] || bad "P41 setup: tree $t41"
+done
+out_p41=$("$TOOL" --repo "$SW41"); rc_p41=$?
+PLAN_P41=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["hold_plan"] or "")' < <("$TOOL" --repo "$SW41" --json))
+SUM41="hold plan $PLAN_P41 would remove 4 tree(s): .claude/worktrees/ta, .claude/worktrees/tb, .claude/worktrees/tc, … +1 more"
+if [ "$rc_p41" -eq 0 ] && grep -qxF "$SUM41" <<<"$out_p41"; then
+  ok "P41: summary line truncates at 3 with … +1 more: $SUM41"
+else
+  bad "P41: truncation line (rc=$rc_p41)"; printf '%s\n' "$out_p41"
+fi
+J_P41_TREES=$("$TOOL" --repo "$SW41" --json)
+if python3 -c '
+import json, sys
+d = json.loads(sys.argv[1])
+want = [sys.argv[2] + "/.claude/worktrees/" + n for n in ("ta", "tb", "tc", "td")]
+assert d["hold_plan_trees"] == want, d["hold_plan_trees"]
+' "$J_P41_TREES" "$SW41"; then
+  ok "P41: JSON hold_plan_trees carries the full four-tree list"
+else
+  bad "P41: JSON full tree list"; printf '%s\n' "$J_P41_TREES"
+fi
+
+}
+phase_64
+phase_65() {
+# P42 sweep blast radius: repo A holds an unmerged tree (ua), repo B a dirty tree (ub); the sweep
+# id's tree list spans both repos, a bare sweep apply refuses at the parent (nothing removed
+# anywhere), and the per-repo --only flow is the approval path for the commit-carrying tree.
+mk_repo sweep42a && mk_repo sweep42b && [ -d "$T/sweep42a" ] && [ -d "$T/sweep42b" ] || bad "P42 setup: mk_repo sweep42a/b"
+SW42A="$T/sweep42a"
+SW42B="$T/sweep42b"
+SW42AW="$SW42A/.claude/worktrees"
+SW42BW="$SW42B/.claude/worktrees"
+add_tree sweep42a ua && [ -d "$SW42AW/ua" ] || bad "P42 setup: add_tree ua"
+echo new > "$SW42AW/ua/c.txt" && git -C "$SW42AW/ua" add c.txt \
+  && git -C "$SW42AW/ua" commit -qm "unique sweep work" || bad "P42 setup: ua commit"
+add_tree sweep42b ub && [ -d "$SW42BW/ub" ] || bad "P42 setup: add_tree ub"
+echo mine > "$SW42BW/ub/a.txt" || bad "P42 setup: ub dirty edit"
+out_p42=$("$TOOL" --repo "$SW42A" --repo "$SW42B"); rc_p42=$?
+SWEEP_P42=$(sed -n 's/^sweep plan: \([0-9a-f]\{12\}\)$/\1/p' <<<"$out_p42")
+[ -n "$SWEEP_P42" ] || bad "P42 setup: sweep plan id (rc=$rc_p42)"
+SUM_P42="sweep plan $SWEEP_P42 would remove 2 tree(s): $SW42A/.claude/worktrees/ua, $SW42B/.claude/worktrees/ub"
+if [ "$rc_p42" -eq 0 ] && grep -qxF "$SUM_P42" <<<"$out_p42"; then
+  ok "P42(i): sweep dry run prints the sweep plan's full cross-repo tree list"
+else
+  bad "P42(i): sweep summary line (rc=$rc_p42)"; printf '%s\n' "$out_p42"
+fi
+J_P42=$("$TOOL" --repo "$SW42A" --repo "$SW42B" --json)
+if python3 -c '
+import json, sys
+d = json.loads(sys.argv[1])
+assert d["sweep_plan_trees"] == [sys.argv[2] + "/.claude/worktrees/ua", sys.argv[3] + "/.claude/worktrees/ub"], d["sweep_plan_trees"]
+cc = d["sweep_plan_commit_carrying"]
+assert len(cc) == 1 and cc[0]["path"] == sys.argv[2] + "/.claude/worktrees/ua" and cc[0]["commits"] == 1, cc
+' "$J_P42" "$SW42A" "$SW42B"; then
+  ok "P42(i): JSON sweep_plan_trees spans both repos and sweep_plan_commit_carrying names ua"
+else
+  bad "P42(i): JSON sweep tree fields"; printf '%s\n' "$J_P42"
+fi
+err_p42a=$(SYG_WORKTREE_BACKUP_DIR="$T/bk42" "$TOOL" --repo "$SW42A" --repo "$SW42B" --apply-hold "$SWEEP_P42" 2>&1 >/dev/null); rc_p42a=$?
+want_p42a="safe-worktree-clean: --apply-hold refused: plan $SWEEP_P42 includes commit-carrying tree $SW42A/.claude/worktrees/ua (1 commit(s) not on origin/main) — only on the owner's yes for that tree: re-run the dry run and apply with --only <tree>"
+bk42_left=$(ls "$T/bk42" 2>/dev/null)
+if [ "$rc_p42a" -eq 2 ] && [ "$err_p42a" = "$want_p42a" ] \
+  && [ -d "$SW42AW/ua" ] && [ -d "$SW42BW/ub" ] && [ -z "$bk42_left" ]; then
+  ok "P42(ii): bare sweep id refuses at the parent with the repo-prefixed refusal line; nothing removed anywhere"
+else
+  bad "P42(ii): sweep refusal (rc=$rc_p42a, ua=$([ -d "$SW42AW/ua" ] && echo ok || echo gone), ub=$([ -d "$SW42BW/ub" ] && echo ok || echo gone), err='$err_p42a')"
+fi
+}
+phase_65
+phase_66() {
+# P42(iii): the per-repo --only flow approves the commit-carrying tree.
+SID_P42=$(sed -n 's/^hold plan: \([0-9a-f]\{12\}\)$/\1/p' < <("$TOOL" --repo "$SW42A" --only "$SW42AW/ua"))
+[ -n "$SID_P42" ] || bad "P42 setup: scoped id over ua"
+SYG_WORKTREE_BACKUP_DIR="$T/bk42a" "$TOOL" --repo "$SW42A" --apply-hold "$SID_P42" --only "$SW42AW/ua" >/dev/null; rc_p42a2=$?
+if [ "$rc_p42a2" -eq 0 ] && [ ! -e "$SW42AW/ua" ] && [ -d "$SW42BW/ub" ]; then
+  ok "P42(iii): per-repo scoped id applies ua; repo B untouched"
+else
+  bad "P42(iii): per-repo --only apply (rc=$rc_p42a2, ua=$([ -e "$SW42AW/ua" ] && echo present || echo gone), ub=$([ -d "$SW42BW/ub" ] && echo ok || echo gone))"
+fi
+}
+phase_66
+phase_67() {
+# P42(iv): repo B's dirty-only plan has no commit-carrying tree; the bare id applies.
+PLAN_P42B=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["hold_plan"] or "")' < <("$TOOL" --repo "$SW42B" --json))
+[ -n "$PLAN_P42B" ] || bad "P42 setup: repo B plan id"
+SYG_WORKTREE_BACKUP_DIR="$T/bk42b" "$TOOL" --repo "$SW42B" --apply-hold "$PLAN_P42B" >/dev/null; rc_p42b=$?
+if [ "$rc_p42b" -eq 0 ] && [ ! -e "$SW42BW/ub" ]; then
+  ok "P42(iv): a plan with no commit-carrying tree still applies bare"
+else
+  bad "P42(iv): dirty-only bare apply (rc=$rc_p42b, ub=$([ -e "$SW42BW/ub" ] && echo present || echo gone))"
+fi
+
+}
+phase_67
+phase_68() {
+local SW43 SW43B SW43BW SW43W
+# P43 scoped id staleness: a scoped id invalidates when a NAMED tree changes (hold plan changed,
+# nothing removed) but NOT when an unrelated tree outside the named set changes (apply still runs).
+mk_repo sweep43 && [ -d "$T/sweep43" ] || bad "P43 setup: mk_repo sweep43"
+SW43="$T/sweep43"
+SW43W="$SW43/.claude/worktrees"
+add_tree sweep43 na && [ -d "$SW43W/na" ] || bad "P43 setup: add_tree na"
+add_tree sweep43 nb && [ -d "$SW43W/nb" ] || bad "P43 setup: add_tree nb"
+echo a > "$SW43W/na/a.txt" && echo b > "$SW43W/nb/a.txt" \
+  && [ -f "$SW43W/na/a.txt" ] && [ -f "$SW43W/nb/a.txt" ] || bad "P43 setup: dirty edits"
+SID_P43=$(sed -n 's/^hold plan: \([0-9a-f]\{12\}\)$/\1/p' < <("$TOOL" --repo "$SW43" --only "$SW43W/na"))
+[ -n "$SID_P43" ] || bad "P43 setup: scoped id over na"
+echo drift > "$SW43W/nb/extra.txt" && [ -f "$SW43W/nb/extra.txt" ] || bad "P43 setup: touch unrelated nb"
+out_p43=$(SYG_WORKTREE_BACKUP_DIR="$T/bk43" "$TOOL" --repo "$SW43" --apply-hold "$SID_P43" --only "$SW43W/na"); rc_p43=$?
+if [ "$rc_p43" -eq 0 ] && [ ! -e "$SW43W/na" ] && [ -d "$SW43W/nb" ] && [ -f "$SW43W/nb/extra.txt" ]; then
+  ok "P43(i): an unrelated tree changing between dry run and apply does NOT invalidate the scoped id (na removed, nb kept with its drift)"
+else
+  bad "P43(i): unrelated-tree change (rc=$rc_p43, na=$([ -e "$SW43W/na" ] && echo present || echo gone), nb=$([ -d "$SW43W/nb" ] && echo ok || echo gone))"; printf '%s\n' "$out_p43"
+fi
+mk_repo sweep43b && [ -d "$T/sweep43b" ] || bad "P43(ii) setup: mk_repo sweep43b"
+SW43B="$T/sweep43b"
+SW43BW="$SW43B/.claude/worktrees"
+add_tree sweep43b nc && [ -d "$SW43BW/nc" ] || bad "P43(ii) setup: add_tree nc"
+echo c > "$SW43BW/nc/a.txt" && [ -f "$SW43BW/nc/a.txt" ] || bad "P43(ii) setup: dirty edit"
+SID_P43B=$(sed -n 's/^hold plan: \([0-9a-f]\{12\}\)$/\1/p' < <("$TOOL" --repo "$SW43B" --only "$SW43BW/nc"))
+[ -n "$SID_P43B" ] || bad "P43(ii) setup: scoped id over nc"
+echo extra > "$SW43BW/nc/extra.txt" && [ -f "$SW43BW/nc/extra.txt" ] || bad "P43(ii) setup: touch named nc"
+err_p43b=$(SYG_WORKTREE_BACKUP_DIR="$T/bk43b" "$TOOL" --repo "$SW43B" --apply-hold "$SID_P43B" --only "$SW43BW/nc" 2>&1 >/dev/null); rc_p43b=$?
+if [ "$rc_p43b" -eq 2 ] && [ -d "$SW43BW/nc" ] && grep -q 'hold plan changed' <<<"$err_p43b"; then
+  ok "P43(ii): a NAMED tree changing between dry run and apply invalidates the scoped id (rc 2, tree kept)"
+else
+  bad "P43(ii): named-tree change (rc=$rc_p43b, err='$err_p43b')"
+fi
+
+}
+phase_68
+phase_69() {
+local SW42C SW42D t42
+# P42(v): the sweep summary line aggregates a truncated child line: repo C holds four approvable
+# dirty trees (its own summary truncates at three), repo D one; the sweep line totals five,
+# shows C's first three, and counts the rest as "… +2 more".
+mk_repo sweep42c && mk_repo sweep42d && [ -d "$T/sweep42c" ] && [ -d "$T/sweep42d" ] || bad "P42(v) setup: mk_repo sweep42c/d"
+SW42C="$T/sweep42c"
+SW42D="$T/sweep42d"
+for t42 in ta tb tc td; do
+  add_tree sweep42c "$t42" && echo x > "$SW42C/.claude/worktrees/$t42/a.txt" \
+    && [ -d "$SW42C/.claude/worktrees/$t42" ] || bad "P42(v) setup: tree $t42"
+done
+add_tree sweep42d te && echo y > "$SW42D/.claude/worktrees/te/a.txt" \
+  && [ -d "$SW42D/.claude/worktrees/te" ] || bad "P42(v) setup: tree te"
+out_p42v=$("$TOOL" --repo "$SW42C" --repo "$SW42D"); rc_p42v=$?
+SWEEP_P42V=$(sed -n 's/^sweep plan: \([0-9a-f]\{12\}\)$/\1/p' <<<"$out_p42v")
+SUM_P42V="sweep plan $SWEEP_P42V would remove 5 tree(s): $SW42C/.claude/worktrees/ta, $SW42C/.claude/worktrees/tb, $SW42C/.claude/worktrees/tc, … +2 more"
+if [ "$rc_p42v" -eq 0 ] && [ -n "$SWEEP_P42V" ] && grep -qxF "$SUM_P42V" <<<"$out_p42v"; then
+  ok "P42(v): sweep summary aggregates the truncated child line and totals 5 with … +2 more"
+else
+  bad "P42(v): sweep summary aggregation (rc=$rc_p42v, id='$SWEEP_P42V')"; printf '%s\n' "$out_p42v"
+fi
+
+}
+phase_69
+phase_70() {
+local SW44 SW44W
+# P44 --json refusal: the bare-id naming refusal under --json fires on stderr with exit 2 and
+# the stdout stays clean of the refusal text (empty here: the refusal precedes any JSON output).
+mk_repo sweep44 && [ -d "$T/sweep44" ] || bad "P44 setup: mk_repo sweep44"
+SW44="$T/sweep44"
+SW44W="$SW44/.claude/worktrees"
+add_tree sweep44 uj && [ -d "$SW44W/uj" ] || bad "P44 setup: add_tree uj"
+echo n44 > "$SW44W/uj/n.txt" && git -C "$SW44W/uj" add n.txt \
+  && git -C "$SW44W/uj" commit -qm "p44 work" && [ -d "$SW44W/uj" ] || bad "P44 setup: uj commit"
+PLAN_P44=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["hold_plan"] or "")' < <("$TOOL" --repo "$SW44" --json))
+[ -n "$PLAN_P44" ] || bad "P44 setup: PLAN_P44"
+out_p44r=$(SYG_WORKTREE_BACKUP_DIR="$T/bk44" "$TOOL" --repo "$SW44" --apply-hold "$PLAN_P44" --json 2>"$T/p44.err"); rc_p44r=$?
+err_p44r=$(cat "$T/p44.err")
+want_p44r="safe-worktree-clean: --apply-hold refused: plan $PLAN_P44 includes commit-carrying tree .claude/worktrees/uj (1 commit(s) not on origin/main) — only on the owner's yes for that tree: re-run the dry run and apply with --only <tree>"
+bk44_left=$(ls "$T/bk44" 2>/dev/null)
+if [ "$rc_p44r" -eq 2 ] && [ "$err_p44r" = "$want_p44r" ] \
+  && [ -z "$out_p44r" ] \
+  && [ -d "$SW44W/uj" ] && [ -z "$bk44_left" ]; then
+  ok "P44: --json bare --apply-hold refusal fires on stderr with exit 2 and stdout stays clean"
+else
+  bad "P44: --json refusal (rc=$rc_p44r, uj=$([ -d "$SW44W/uj" ] && echo ok || echo gone), bk44='$bk44_left', out='${out_p44r:0:120}', err='$err_p44r')"
+fi
+
+}
+phase_70
+phase_71() {
+local SW45 SW45W
+# P45 count honesty: a git shim that fails `rev-list --count` must not print a real-looking 0 —
+# the refusal line's count is "?" (plan id, refusal set and exit codes unchanged).
+# The shim fails EVERY `rev-list --count`, so the classifier must never start using that form
+# for anything but the refusal count; if it does, this probe's plan id would stop matching.
+REAL_GIT=$(command -v git)
+mkdir -p "$T/shimcc" && [ -n "$REAL_GIT" ] || bad "P45 setup: shimcc dir"
+cat > "$T/shimcc/git" <<EOF
+#!/bin/bash
+case " \$* " in
+  *" rev-list --count "*) exit 1 ;;
+esac
+exec "$REAL_GIT" "\$@"
+EOF
+chmod +x "$T/shimcc/git" && [ -x "$T/shimcc/git" ] || bad "P45 setup: chmod git shim"
+mk_repo sweep45 && [ -d "$T/sweep45" ] || bad "P45 setup: mk_repo sweep45"
+SW45="$T/sweep45"
+SW45W="$SW45/.claude/worktrees"
+add_tree sweep45 uk && [ -d "$SW45W/uk" ] || bad "P45 setup: add_tree uk"
+echo n45 > "$SW45W/uk/n.txt" && git -C "$SW45W/uk" add n.txt \
+  && git -C "$SW45W/uk" commit -qm "p45 work" && [ -d "$SW45W/uk" ] || bad "P45 setup: uk commit"
+PLAN_P45=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["hold_plan"] or "")' < <("$TOOL" --repo "$SW45" --json))
+[ -n "$PLAN_P45" ] || bad "P45 setup: PLAN_P45"
+err_p45=$(PATH="$T/shimcc:$PATH" SYG_WORKTREE_BACKUP_DIR="$T/bk45" "$TOOL" --repo "$SW45" --apply-hold "$PLAN_P45" 2>&1 >/dev/null); rc_p45=$?
+want_p45="safe-worktree-clean: --apply-hold refused: plan $PLAN_P45 includes commit-carrying tree .claude/worktrees/uk (? commit(s) not on origin/main) — only on the owner's yes for that tree: re-run the dry run and apply with --only <tree>"
+bk45_left=$(ls "$T/bk45" 2>/dev/null)
+if [ "$rc_p45" -eq 2 ] && [ "$err_p45" = "$want_p45" ] \
+  && [ -d "$SW45W/uk" ] && [ -z "$bk45_left" ]; then
+  ok "P45: a failed rev-list --count prints ? in the refusal count, still refusing with exit 2"
+else
+  bad "P45: ? count on rev-list failure (rc=$rc_p45, uk=$([ -d "$SW45W/uk" ] && echo ok || echo gone), bk45='$bk45_left', err='$err_p45')"
+fi
+
+}
+phase_71
+# P46 sweep-parent ref-only suffix: the sweep parent's python emitter must carry the same
+# reason-aware count form as the per-repo one — repo A holds a worktree-refs tree built like
+phase_73() {
+local SW46A SW46AW SW46B SW46BW
+# P31's wt31k (branch even with the base, an orphan commit only in refs/worktree/keep), repo B
+# one sweep-legal tree; the bare sweep id refuses at the parent with the suffixed line.
+mk_repo sweep46a && mk_repo sweep46b \
+  && [ -d "$T/sweep46a" ] && [ -d "$T/sweep46b" ] || bad "P46 setup: mk_repo sweep46a/b"
+SW46A="$T/sweep46a"
+SW46AW="$SW46A/.claude/worktrees"
+SW46B="$T/sweep46b"
+SW46BW="$SW46B/.claude/worktrees"
+add_tree sweep46a wt46k && [ -d "$SW46AW/wt46k" ] || bad "P46 setup: add_tree wt46k"
+tree_46=$(git -C "$SW46AW/wt46k" rev-parse 'HEAD^{tree}' 2>/dev/null)
+C_P46=$(git -C "$SW46AW/wt46k" commit-tree "$tree_46" -p HEAD -m keep46 2>/dev/null)
+[ -n "$C_P46" ] && git -C "$SW46AW/wt46k" update-ref refs/worktree/keep "$C_P46" \
+  || bad "P46 setup: commit-tree + update-ref keep46"
+add_tree sweep46b ub46 && echo mine > "$SW46BW/ub46/a.txt" \
+  && [ -d "$SW46BW/ub46" ] || bad "P46 setup: add_tree ub46"
+out_p46=$("$TOOL" --repo "$SW46A" --repo "$SW46B"); rc_p46d=$?
+SWEEP_P46=$(sed -n 's/^sweep plan: \([0-9a-f]\{12\}\)$/\1/p' <<<"$out_p46")
+[ "$rc_p46d" -eq 0 ] && [ -n "$SWEEP_P46" ] || bad "P46 setup: sweep plan id (rc=$rc_p46d)"
+err_p46=$(SYG_WORKTREE_BACKUP_DIR="$T/bk46" "$TOOL" --repo "$SW46A" --repo "$SW46B" --apply-hold "$SWEEP_P46" 2>&1 >/dev/null); rc_p46r=$?
+want_p46="safe-worktree-clean: --apply-hold refused: plan $SWEEP_P46 includes commit-carrying tree $SW46A/.claude/worktrees/wt46k (0 branch commit(s) not on origin/main; per-worktree refs hold more) — only on the owner's yes for that tree: re-run the dry run and apply with --only <tree>"
+bk46_left=$(ls "$T/bk46" 2>/dev/null)
+if [ "$rc_p46r" -eq 2 ] && [ "$err_p46" = "$want_p46" ] \
+  && [ -d "$SW46AW/wt46k" ] && [ -d "$SW46BW/ub46" ] && [ -z "$bk46_left" ]; then
+  ok "P46: bare sweep id refuses the worktree-refs tree at the parent with the reason-aware 0-branch-count line; nothing removed anywhere"
+else
+  bad "P46: sweep-parent ref-only suffix line (rc=$rc_p46r, wt46k=$([ -d "$SW46AW/wt46k" ] && echo ok || echo gone), ub46=$([ -d "$SW46BW/ub46" ] && echo ok || echo gone), bk46='$bk46_left', err='$err_p46')"
+fi
+
+# P47 config.toml loader: with SYG_WORKTREE_BRANCH_RE unset and $XDG_CONFIG_HOME/seyag/config.toml
+# setting syg_worktree_branch_re = "^feat-", a tree on branch feat-x is not held as branch-name.
+local SW47 XDG47 out_p47 out_p47b
+mk_repo cfg47 && [ -d "$T/cfg47" ] || bad "P47 setup: mk_repo cfg47"
+SW47="$T/cfg47"
+add_tree cfg47 fx origin/main feat-x && [ -d "$SW47/.claude/worktrees/fx" ] || bad "P47 setup: add_tree fx"
+XDG47="$T/xdg47"
+mkdir -p "$XDG47/seyag"
+printf 'syg_worktree_branch_re = "^feat-"\n' > "$XDG47/seyag/config.toml"
+out_p47=$(env -u SYG_WORKTREE_BRANCH_RE XDG_CONFIG_HOME="$XDG47" CLAUDE_PROJECT_DIR="$SW47" "$TOOL" --repo "$SW47" --json)
+expect "$out_p47" fx SAFE "P47: config.toml syg_worktree_branch_re = ^feat- accepts feat-x without branch-name HOLD"
+
+# P47b project .claude/seyag.toml refusal: syg_worktree_branch_re in CLAUDE_PROJECT_DIR/.claude/seyag.toml
+# is refused from project scope, so feat-x is still reported branch-name.
+mkdir -p "$SW47/.claude" "$T/xdg47-none"
+printf 'syg_worktree_branch_re = "^feat-"\n' > "$SW47/.claude/seyag.toml"
+out_p47b=$(env -u SYG_WORKTREE_BRANCH_RE XDG_CONFIG_HOME="$T/xdg47-none" CLAUDE_PROJECT_DIR="$SW47" "$TOOL" --repo "$SW47" --json 2>/dev/null)
+expect "$out_p47b" fx HOLD:branch-name "P47b: project .claude/seyag.toml syg_worktree_branch_re refused; feat-x still held as branch-name"
+
+}
+phase_73
+
+phase_pm() {
+local PMB PMREPO PMW PMW2 PMH PMJ out rc got n pm9c
+# PM1-PM10 + L7: the pr-merged resolution. A stub `gh` on PATH answers the forge call: it logs its
+# argv to $GH_STUB_LOG, exits $GH_STUB_RC when that is non-zero, else prints $GH_STUB_JSON.
+PMB="$T/pmbin"
+mkdir -p "$PMB"
+cat > "$PMB/gh" <<'STUB'
+#!/bin/bash
+printf '%s\n' "$*" >> "${GH_STUB_LOG:-/dev/null}"
+[ "${GH_STUB_RC:-0}" -eq 0 ] || exit "$GH_STUB_RC"
+cat "$GH_STUB_JSON"
+STUB
+chmod +x "$PMB/gh" && [ -x "$PMB/gh" ] || bad "PM setup: stub gh"
+pm_json() { # $1 file, $2 head sha, $3 base ref, $4 merged_at json literal
+  printf '[{"number":7,"state":"closed","head":{"sha":"%s"},"base":{"ref":"%s"},"merged_at":%s}]\n' "$2" "$3" "$4" > "$1"
+}
+# A repo whose https-shaped origin lets the remote URL parse (nothing in swc fetches), with one
+# tree holding one commit beyond origin/main. Sets PMREPO, PMW (the tree) and PMH (its HEAD).
+pm_repo() { # $1 name, $2 tree name (default t), $3 start point (default origin/main)
+  mk_repo "$1" && [ -d "$T/$1" ] || bad "PM setup: mk_repo $1"
+  PMREPO="$T/$1"
+  git -C "$PMREPO" remote set-url origin https://example.invalid/o/r.git
+  add_tree "$1" "${2:-t}" "${3:-origin/main}" && PMW="$PMREPO/.claude/worktrees/${2:-t}" && [ -d "$PMW" ] || bad "PM setup: add_tree $1"
+  echo "pm-$1" > "$PMW/n.txt" && git -C "$PMW" add n.txt && git -C "$PMW" commit -qm "pm work" || bad "PM setup: commit $1"
+  PMH=$(git -C "$PMW" rev-parse HEAD)
+}
+pm_run() { # args to the tool; PATH has the stub unless PM_PATH is set; prints stdout
+  PATH="${PM_PATH:-$PMB:$PATH}" GH_STUB_JSON="$PMJ" GH_STUB_LOG="${PM_LOG:-$T/pm.log}" "$TOOL" --repo "$PMREPO" "$@"
+}
+PMJ="$T/pm.json"
+
+# PM1 match: one pr-merged reason, approvable, not commit-carrying; the call names the host,
+# owner/repo and full sha; --apply-eligible with pr-merged eligible removes the tree and the
+# backup bundles the branch.
+pm_repo pm1 t
+pm_json "$PMJ" "$PMH" main '"2026-11-20T00:00:00Z"'
+rm -f "$T/pm.log"
+out=$(pm_run --json); got=$(verdict "$out" t)
+n=$(python3 -c 'import json,sys; print(len(json.loads(sys.argv[1]).get("hold_plan_commit_carrying") or []))' "$out")
+if [ "$got" = "HOLD:pr-merged" ] && [ "$(approvable_of "$out" t)" = "True" ] && [ "$n" = 0 ] \
+  && [ "$(reason_msg "$out" t)" = "HEAD ${PMH:0:12} is the head commit of PR #7, merged into main" ] \
+  && [ "$(cat "$T/pm.log")" = "api --hostname example.invalid repos/o/r/commits/$PMH/pulls" ]; then
+  ok "PM1: matching merged PR -> HOLD:pr-merged, approvable, not commit-carrying, one gh call with host/repo/sha"
+else
+  bad "PM1: got '$got', carrying=$n, msg='$(reason_msg "$out" t)', log='$(cat "$T/pm.log" 2>/dev/null)'"
+fi
+out=$(SYG_WORKTREE_ELIGIBLE_REASONS="pr-merged" SYG_WORKTREE_BACKUP_DIR="$T/bkpm1" pm_run --apply-eligible); rc=$?
+shopt -s nullglob
+PMBK=("$T/bkpm1"/*/pm1--t--[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f])
+shopt -u nullglob
+if [ "$rc" -eq 0 ] && [ ! -e "$PMW" ] && [ "${#PMBK[@]}" -eq 1 ] && [ -s "${PMBK[0]}/branch.bundle" ]; then
+  ok "PM1: --apply-eligible with pr-merged eligible removes the tree and writes a backup with branch.bundle"
+else
+  bad "PM1: eligible removal (rc=$rc, tree=$([ -e "$PMW" ] && echo kept || echo gone), backups=${#PMBK[@]})"; printf '%s\n' "$out"
+fi
+
+# PM2 negatives: each leaves the tree HOLD:unmerged (a failure never changes a reason).
+pm_repo pm2 t
+pm_neg() { # $1 label, $2 want log lines ("any" or 0)
+  rm -f "$T/pm.log"
+  out=$(pm_run --json 2>"$T/pm.err"); got=$(verdict "$out" t)
+  if [ "$got" = "HOLD:unmerged" ] && { [ "$2" = any ] || [ ! -s "$T/pm.log" ]; } && [ ! -s "$T/pm.err" ]; then
+    ok "PM2$1: stays HOLD:unmerged with no stderr"
+  else
+    bad "PM2$1: got '$got' (log lines: $(wc -l < "$T/pm.log" 2>/dev/null), err='$(cat "$T/pm.err")')"
+  fi
+}
+pm_json "$PMJ" "0000000000000000000000000000000000000000" main '"2026-11-20T00:00:00Z"'; pm_neg "(a) other head sha" any
+pm_json "$PMJ" "$PMH" main null; pm_neg "(b) merged_at null" any
+pm_json "$PMJ" "$PMH" develop '"2026-11-20T00:00:00Z"'; pm_neg "(c) other base.ref" any
+pm_json "$PMJ" "$PMH" main '"2026-11-20T00:00:00Z"'
+GH_STUB_RC=1 pm_neg "(d) gh exits 1" any
+printf 'not json\n' > "$PMJ"; pm_neg "(e) non-JSON" any
+# (f) no gh at all: a PATH of symlinks to every executable on the real PATH except gh. The
+# method is checked first: `command -v gh` must fail in that PATH.
+mkdir -p "$T/pmnogh"
+for d in ${PATH//:/ }; do
+  [ -d "$d" ] || continue
+  for f in "$d"/*; do
+    [ -x "$f" ] && [ -f "$f" ] || continue
+    [ "${f##*/}" = gh ] && continue
+    [ -e "$T/pmnogh/${f##*/}" ] || ln -s "$f" "$T/pmnogh/${f##*/}"
+  done
+done
+pm_json "$PMJ" "$PMH" main '"2026-11-20T00:00:00Z"'
+if PATH="$T/pmnogh" bash -c 'command -v gh' >/dev/null 2>&1; then bad "PM2(f) setup: gh still on the filtered PATH"; fi
+PM_PATH="$T/pmnogh" pm_neg "(f) no gh on PATH" any
+rm -f "$T/pm.log"
+out=$(SYG_WORKTREE_PR_CHECK=0 pm_run --json 2>"$T/pm.err"); got=$(verdict "$out" t)
+if [ "$got" = "HOLD:unmerged" ] && [ ! -e "$T/pm.log" ]; then
+  ok "PM2(g): SYG_WORKTREE_PR_CHECK=0 stays HOLD:unmerged and the stub log shows no call"
+else
+  bad "PM2(g): got '$got', log=$([ -e "$T/pm.log" ] && echo present || echo absent)"
+fi
+# SYG_WORKTREE_PR_CHECK=1 reports a failure on stderr, in the documented shape.
+printf 'not json\n' > "$PMJ"
+out=$(SYG_WORKTREE_PR_CHECK=1 pm_run --json 2>"$T/pm.err"); got=$(verdict "$out" t)
+if [ "$got" = "HOLD:unmerged" ] && [ "$(cat "$T/pm.err")" = "safe-worktree-clean: pr check: .claude/worktrees/t: gh api output is not a JSON array" ]; then
+  ok "PM2(h): SYG_WORKTREE_PR_CHECK=1 prints the failure on stderr, reasons unchanged"
+else
+  bad "PM2(h): got '$got', err='$(cat "$T/pm.err")'"
+fi
+
+# PM3 unmerged + untracked-new -> pr-merged + untracked-new; with only pr-merged eligible it is
+# demoted and kept.
+pm_repo pm3 t
+echo u > "$PMW/u.txt"
+pm_json "$PMJ" "$PMH" main '"2026-11-20T00:00:00Z"'
+out=$(pm_run --json); got=$(verdict "$out" t)
+if [ "$got" = "HOLD:pr-merged,untracked-new" ] && [ "$(approvable_of "$out" t)" = "True" ]; then
+  ok "PM3: unmerged + untracked-new -> pr-merged + untracked-new, approvable"
+else
+  bad "PM3: got '$got'"
+fi
+out=$(SYG_WORKTREE_ELIGIBLE_REASONS="pr-merged" SYG_WORKTREE_BACKUP_DIR="$T/bkpm3" pm_run --apply-eligible); rc=$?
+if [ "$rc" -eq 0 ] && [ -f "$PMW/u.txt" ] && [ ! -e "$T/bkpm3" ] \
+  && grep -qF '  not eligible: .claude/worktrees/t (untracked-new)' <<<"$out"; then
+  ok "PM3: eligible=pr-merged only demotes the tree (untracked-new) and keeps it"
+else
+  bad "PM3: demotion (rc=$rc)"; printf '%s\n' "$out"
+fi
+
+# PM4 unmerged + dirty: not in the allowed set, so the forge is not asked.
+pm_repo pm4 t
+echo changed >> "$PMW/a.txt"
+pm_json "$PMJ" "$PMH" main '"2026-11-20T00:00:00Z"'
+rm -f "$T/pm.log"
+out=$(pm_run --json); got=$(verdict "$out" t)
+if [ "$got" = "HOLD:unmerged,dirty" ] && [ ! -e "$T/pm.log" ]; then
+  ok "PM4: unmerged + dirty stays HOLD:unmerged,dirty and the stub is never called"
+else
+  bad "PM4: got '$got', log=$([ -e "$T/pm.log" ] && echo present || echo absent)"
+fi
+
+# PM5 a plan id taken with the stub matching does not survive the stub failing: the recomputed
+# plan differs (unmerged again), so --apply-hold exits 2 and removes nothing.
+pm_repo pm5 t
+pm_json "$PMJ" "$PMH" main '"2026-11-20T00:00:00Z"'
+out=$(pm_run --json); PLAN=$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["hold_plan"] or "")' "$out")
+[ -n "$PLAN" ] || bad "PM5 setup: plan id"
+out=$(GH_STUB_RC=1 SYG_WORKTREE_BACKUP_DIR="$T/bkpm5" pm_run --apply-hold "$PLAN" 2>&1); rc=$?
+if [ "$rc" -eq 2 ] && [ -d "$PMW" ] && [ ! -e "$T/bkpm5" ]; then
+  ok "PM5: plan id taken with a matching stub, applied with the stub failing -> exit 2, nothing removed"
+else
+  bad "PM5: rc=$rc, tree=$([ -d "$PMW" ] && echo kept || echo gone)"; printf '%s\n' "$out"
+fi
+
+# PM6 refs: a refs/worktree tip that is an ancestor of the merged head drops worktree-refs; a
+# tip on an orphan commit keeps it. The ancestor case needs a DETACHED tree: for a tree on a
+# branch, an ancestor of its own HEAD is already reachable from the branch the tool's rev-list
+# sees, so it never holds worktree-refs in the first place.
+mk_repo pm6a && PMREPO="$T/pm6a" && PMW="$PMREPO/.claude/worktrees/t" || bad "PM6 setup: mk_repo"
+git -C "$PMREPO" remote set-url origin https://example.invalid/o/r.git
+git -C "$PMREPO" worktree add -q --detach "$PMW" origin/main && [ -d "$PMW" ] || bad "PM6 setup: detached tree"
+echo first > "$PMW/n.txt" && git -C "$PMW" add n.txt && git -C "$PMW" commit -qm "pm first" || bad "PM6 setup: first commit"
+echo second > "$PMW/n2.txt" && git -C "$PMW" add n2.txt && git -C "$PMW" commit -qm "pm second" || bad "PM6 setup: second commit"
+PMH=$(git -C "$PMW" rev-parse HEAD)
+git -C "$PMW" update-ref refs/worktree/x "$(git -C "$PMW" rev-parse HEAD~1)" || bad "PM6 setup: ref x"
+pm_json "$PMJ" "$PMH" main null
+out=$(pm_run --json); got=$(verdict "$out" t)
+[ "$got" = "HOLD:detached-unreferenced,worktree-refs" ] || bad "PM6 setup: pre-check got '$got'"
+pm_json "$PMJ" "$PMH" main '"2026-11-20T00:00:00Z"'
+out=$(pm_run --json); got=$(verdict "$out" t)
+if [ "$got" = "HOLD:pr-merged" ]; then
+  ok "PM6: refs/worktree tip at an ancestor of the merged head drops worktree-refs"
+else
+  bad "PM6: ancestor ref got '$got'"
+fi
+pm_repo pm6b t
+orphan=$(git -C "$PMW" commit-tree "$(git -C "$PMW" hash-object -t tree -w /dev/null)" -m orphan)
+git -C "$PMW" update-ref refs/worktree/y "$orphan" || bad "PM6 setup: ref y"
+pm_json "$PMJ" "$PMH" main '"2026-11-20T00:00:00Z"'
+out=$(pm_run --json); got=$(verdict "$out" t)
+if [ "$got" = "HOLD:pr-merged,worktree-refs" ]; then
+  ok "PM6: refs/worktree tip at an orphan commit keeps worktree-refs beside pr-merged"
+else
+  bad "PM6: orphan ref got '$got'"
+fi
+
+# PM7 a local-path remote is no forge URL: gh is never called, the tree stays unmerged.
+mk_repo pm7 && PMREPO="$T/pm7" && add_tree pm7 t && PMW="$PMREPO/.claude/worktrees/t" || bad "PM7 setup"
+echo pm7 > "$PMW/n.txt" && git -C "$PMW" add n.txt && git -C "$PMW" commit -qm "pm7" || bad "PM7 setup: commit"
+PMH=$(git -C "$PMW" rev-parse HEAD)
+pm_json "$PMJ" "$PMH" main '"2026-11-20T00:00:00Z"'
+rm -f "$T/pm.log"
+out=$(pm_run --json); got=$(verdict "$out" t)
+if [ "$got" = "HOLD:unmerged" ] && [ ! -e "$T/pm.log" ]; then
+  ok "PM7: a local-path remote leaves gh uncalled and the tree HOLD:unmerged"
+else
+  bad "PM7: got '$got', log=$([ -e "$T/pm.log" ] && echo present || echo absent)"
+fi
+
+# PM8 --base origin/develop: the PR's base.ref must be develop.
+mk_repo pm8 && PMREPO="$T/pm8" || bad "PM8 setup"
+git -C "$PMREPO" remote set-url origin https://example.invalid/o/r.git
+git -C "$PMREPO" update-ref refs/remotes/origin/develop refs/remotes/origin/main
+add_tree pm8 t origin/develop && PMW="$PMREPO/.claude/worktrees/t" && [ -d "$PMW" ] || bad "PM8 setup: add_tree"
+echo pm8 > "$PMW/n.txt" && git -C "$PMW" add n.txt && git -C "$PMW" commit -qm "pm8" || bad "PM8 setup: commit"
+PMH=$(git -C "$PMW" rev-parse HEAD)
+pm_json "$PMJ" "$PMH" develop '"2026-11-20T00:00:00Z"'
+out=$(pm_run --base origin/develop --json); got=$(verdict "$out" t)
+[ "$got" = "HOLD:pr-merged" ] && ok "PM8: --base origin/develop with base.ref=develop -> pr-merged" || bad "PM8: develop got '$got'"
+pm_json "$PMJ" "$PMH" main '"2026-11-20T00:00:00Z"'
+out=$(pm_run --base origin/develop --json); got=$(verdict "$out" t)
+[ "$got" = "HOLD:unmerged" ] && ok "PM8: --base origin/develop with base.ref=main stays unmerged" || bad "PM8: main got '$got'"
+
+# PM9 remote URL forms: scp-like and ssh:// (with a user) resolve to the same host and repo as
+# https; ssh:// with no user, a port and a nested path fail closed (gh never called).
+pm9_url() { # $1 fixture name, $2 remote URL; leaves PMREPO/PMW/PMH set, the stub log removed
+  pm_repo "$1" t
+  git -C "$PMREPO" remote set-url origin "$2" || bad "PM9 setup: set-url $2"
+  pm_json "$PMJ" "$PMH" main '"2026-11-20T00:00:00Z"'
+  rm -f "$T/pm.log"
+}
+for pm9c in "a git@example.invalid:o/r.git" "b ssh://git@example.invalid/o/r"; do
+  pm9_url "pm9${pm9c%% *}" "${pm9c#* }"
+  out=$(pm_run --json); got=$(verdict "$out" t)
+  if [ "$got" = "HOLD:pr-merged" ] && [ "$(cat "$T/pm.log" 2>/dev/null)" = "api --hostname example.invalid repos/o/r/commits/$PMH/pulls" ]; then
+    ok "PM9(${pm9c%% *}): remote ${pm9c#* } -> pr-merged, one gh call with host/repo/sha"
+  else
+    bad "PM9(${pm9c%% *}): ${pm9c#* } got '$got', log='$(cat "$T/pm.log" 2>/dev/null)'"
+  fi
+done
+for pm9c in "c1 ssh://example.invalid/o/r.git" "c2 ssh://git@example.invalid:22/o/r.git" "c3 https://example.invalid/g/sub/r.git"; do
+  pm9_url "pm9${pm9c%% *}" "${pm9c#* }"
+  out=$(pm_run --json); got=$(verdict "$out" t)
+  if [ "$got" = "HOLD:unmerged" ] && [ ! -e "$T/pm.log" ]; then
+    ok "PM9(${pm9c%% *}): remote ${pm9c#* } fails closed, gh uncalled, HOLD:unmerged"
+  else
+    bad "PM9(${pm9c%% *}): ${pm9c#* } got '$got', log=$([ -e "$T/pm.log" ] && echo present || echo absent)"
+  fi
+done
+err=$(SYG_WORKTREE_PR_CHECK=1 pm_run --json 2>&1 >/dev/null)
+[ "$err" = "safe-worktree-clean: pr check: .claude/worktrees/t: remote origin URL is not an https, ssh:// or git@host:owner/repo form" ] \
+  && ok "PM9(c): SYG_WORKTREE_PR_CHECK=1 names the URL-shape failure on stderr" \
+  || bad "PM9(c): stderr was '$err'"
+
+# PM10 a gh api timeout (stub exit 124): the first tree pays it, later trees in the run skip the
+# call, both stay HOLD:unmerged, and SYG_WORKTREE_PR_CHECK=1 reports both outcomes.
+pm_repo pm10 t1
+add_tree pm10 t2 && PMW2="$PMREPO/.claude/worktrees/t2" && [ -d "$PMW2" ] || bad "PM10 setup: add_tree t2"
+echo pm10b > "$PMW2/n.txt" && git -C "$PMW2" add n.txt && git -C "$PMW2" commit -qm "pm10b" || bad "PM10 setup: commit t2"
+pm_json "$PMJ" "$PMH" main '"2026-11-20T00:00:00Z"'
+rm -f "$T/pm.log"
+err=$(GH_STUB_RC=124 SYG_WORKTREE_PR_CHECK=1 pm_run --json 2>&1 >"$T/pm10.out"); out=$(cat "$T/pm10.out")
+if [ "$(verdict "$out" t1)" = "HOLD:unmerged" ] && [ "$(verdict "$out" t2)" = "HOLD:unmerged" ] \
+  && [ "$(wc -l < "$T/pm.log")" -eq 1 ] && [ "$(wc -l <<<"$err")" -eq 2 ] \
+  && [ "$(grep -c ': gh api timed out after 20 s$' <<<"$err")" -eq 1 ] \
+  && [ "$(grep -c ': skipped: an earlier gh api call timed out$' <<<"$err")" -eq 1 ]; then
+  ok "PM10: first gh timeout skips the forge for the other tree: one gh call, one timeout note, one skip note"
+else
+  bad "PM10: t1='$(verdict "$out" t1)' t2='$(verdict "$out" t2)' log=$(wc -l < "$T/pm.log" 2>/dev/null) lines, stderr='$err'"
+fi
+# PM10b only a timeout latches: an ordinary gh failure (exit 1) still lets the other tree call.
+rm -f "$T/pm.log"; GH_STUB_RC=1 pm_run --json >/dev/null 2>&1
+[ "$(wc -l < "$T/pm.log" 2>/dev/null)" = 2 ] && ok "PM10b: a non-timeout gh failure does not skip later trees: two gh calls" \
+  || bad "PM10b: log=$(wc -l < "$T/pm.log" 2>/dev/null) lines, want 2"
+
+# L7 --only takes the repo-relative path the refusal line prints (run from the repo root, where
+# that relative path resolves). The tool runs directly here, with no stub gh on PATH, so the
+# forge lookup is switched off: a runner with a real gh must not reach the network.
+pm_repo l7 t
+PLAN=$(SYG_WORKTREE_PR_CHECK=0 "$TOOL" --repo "$PMREPO" --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["hold_plan"] or "")')
+err=$(SYG_WORKTREE_PR_CHECK=0 SYG_WORKTREE_BACKUP_DIR="$T/bkl7" "$TOOL" --repo "$PMREPO" --apply-hold "$PLAN" 2>&1 >/dev/null)
+relp=$(sed -n 's/.*commit-carrying tree \([^ ]*\) (.*/\1/p' <<<"$err")
+out=$(cd "$PMREPO" && SYG_WORKTREE_PR_CHECK=0 "$TOOL" --repo "$PMREPO" --only "$relp" --json); rc=$?
+if [ "$relp" = ".claude/worktrees/t" ] && [ "$rc" -eq 0 ] && [ "$(verdict "$out" t)" = "HOLD:unmerged" ]; then
+  ok "L7: --only accepts the repo-relative path printed in the refusal line (from the repo root)"
+else
+  bad "L7: relp='$relp' rc=$rc got '$(verdict "$out" t)'"
+fi
+
+}
+phase_pm
+
+phase_74() {
+local SW48A SW48B SW48C SW48DU SW48DD SW48E SW48EB SW48F SW48GA SW48GB SW48H
+local out_48a rc_48a bk48a_dirs out_48b rc_48b out_48c1 rc_48c1 out_48c2 rc_48c2
+local out_48du rc_48du err_48du out_48dd rc_48dd err_48dd out_48do rc_48do err_48do
+local out_48e err_48e rc_48e out_48em err_48em rc_48em out_48f rc_48f bk48f_dirs
+local out_48g rc_48g bk48ga_dirs bk48gb_dirs out_48gw rc_48gw err_48gw out_48h rc_48h bk48h_dirs
+
+# P48(a) Knob 'branch-name ignored', tree whose reasons are only branch-name: removed, backup dir exists, exit 0.
+mk_repo elig48a && [ -d "$T/elig48a" ] || bad "P48(a) setup: mk_repo elig48a"
+SW48A="$T/elig48a"
+add_tree elig48a odd origin/main feat-odd && [ -d "$SW48A/.claude/worktrees/odd" ] || bad "P48(a) setup: add_tree odd"
+out_48a=$(SYG_WORKTREE_ELIGIBLE_REASONS="branch-name ignored" SYG_WORKTREE_BACKUP_DIR="$T/bk48a" "$TOOL" --repo "$SW48A" --apply-eligible); rc_48a=$?
+shopt -s nullglob
+bk48a_dirs=("$T/bk48a"/*/elig48a--odd--[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f])
+shopt -u nullglob
+if [ "$rc_48a" -eq 0 ] && [ ! -e "$SW48A/.claude/worktrees/odd" ] \
+  && ! git -C "$SW48A" rev-parse -q --verify refs/heads/feat-odd >/dev/null \
+  && grep -q "^backups: $T/bk48a/" <<<"$out_48a" \
+  && [ "${#bk48a_dirs[@]}" -eq 1 ] && [ -d "${bk48a_dirs[0]}" ] && [ -f "${bk48a_dirs[0]}/tree.tgz" ]; then
+  ok "P48(a): --apply-eligible with knob 'branch-name ignored' removes branch-name-only tree, deletes branch, writes backup dir, exits 0"
+else
+  bad "P48(a): eligible branch-name removal (rc=$rc_48a, dirs=${#bk48a_dirs[@]})"; printf '%s\n' "$out_48a"
+fi
+
+# P48(b) Same knob, tree with branch-name plus untracked-new: kept, prints 'not eligible: … (untracked-new)', exit 0.
+mk_repo elig48b && [ -d "$T/elig48b" ] || bad "P48(b) setup: mk_repo elig48b"
+SW48B="$T/elig48b"
+add_tree elig48b oddnew origin/main feat-oddnew && [ -d "$SW48B/.claude/worktrees/oddnew" ] || bad "P48(b) setup: add_tree oddnew"
+echo u > "$SW48B/.claude/worktrees/oddnew/u.txt" && [ -f "$SW48B/.claude/worktrees/oddnew/u.txt" ] || bad "P48(b) setup: u.txt"
+out_48b=$(SYG_WORKTREE_ELIGIBLE_REASONS="branch-name ignored" SYG_WORKTREE_BACKUP_DIR="$T/bk48b" "$TOOL" --repo "$SW48B" --apply-eligible); rc_48b=$?
+if [ "$rc_48b" -eq 0 ] && [ -d "$SW48B/.claude/worktrees/oddnew" ] && [ -f "$SW48B/.claude/worktrees/oddnew/u.txt" ] \
+  && git -C "$SW48B" rev-parse -q --verify refs/heads/feat-oddnew >/dev/null \
+  && ! grep -q '^backups: ' <<<"$out_48b" && [ ! -e "$T/bk48b" ] \
+  && grep -qx '  not eligible: \.claude/worktrees/oddnew (untracked-new)' <<<"$out_48b"; then
+  ok "P48(b): --apply-eligible keeps tree with branch-name + untracked-new, prints 'not eligible: .claude/worktrees/oddnew (untracked-new)', exits 0"
+else
+  bad "P48(b): ineligible untracked-new (rc=$rc_48b)"; printf '%s\n' "$out_48b"
+fi
+
+# P48(c) Knob empty or unset, a tree with only branch-name: kept, nothing removed.
+mk_repo elig48c && [ -d "$T/elig48c" ] || bad "P48(c) setup: mk_repo elig48c"
+SW48C="$T/elig48c"
+add_tree elig48c odd origin/main feat-odd && [ -d "$SW48C/.claude/worktrees/odd" ] || bad "P48(c) setup: add_tree odd"
+out_48c1=$(SYG_WORKTREE_ELIGIBLE_REASONS="" SYG_WORKTREE_BACKUP_DIR="$T/bk48c" "$TOOL" --repo "$SW48C" --apply-eligible); rc_48c1=$?
+out_48c2=$(env -u SYG_WORKTREE_ELIGIBLE_REASONS SYG_WORKTREE_BACKUP_DIR="$T/bk48c" "$TOOL" --repo "$SW48C" --apply-eligible); rc_48c2=$?
+if [ "$rc_48c1" -eq 0 ] && [ "$rc_48c2" -eq 0 ] \
+  && [ -d "$SW48C/.claude/worktrees/odd" ] \
+  && git -C "$SW48C" rev-parse -q --verify refs/heads/feat-odd >/dev/null \
+  && ! grep -q '^backups: ' <<<"$out_48c1" && ! grep -q '^backups: ' <<<"$out_48c2" \
+  && [ ! -e "$T/bk48c" ] \
+  && grep -qx '  not eligible: \.claude/worktrees/odd (branch-name)' <<<"$out_48c1" \
+  && grep -qx '  not eligible: \.claude/worktrees/odd (branch-name)' <<<"$out_48c2"; then
+  ok "P48(c): --apply-eligible with empty or unset knob keeps branch-name tree, removes nothing, exits 0"
+else
+  bad "P48(c): empty/unset knob (rc1=$rc_48c1, rc2=$rc_48c2)"; printf '%s\n---\n%s\n' "$out_48c1" "$out_48c2"
+fi
+
+# P48(d)(i) Knob 'branch-name unmerged', unmerged tree in its own repo: kept, exit 0, stderr warning, 'not eligible:' line printed.
+mk_repo elig48du && [ -d "$T/elig48du" ] || bad "P48(d)(i) setup: mk_repo elig48du"
+SW48DU="$T/elig48du"
+add_tree elig48du um && [ -d "$SW48DU/.claude/worktrees/um" ] || bad "P48(d)(i) setup: add_tree um"
+echo c48 > "$SW48DU/.claude/worktrees/um/c.txt" && git -C "$SW48DU/.claude/worktrees/um" add c.txt \
+  && git -C "$SW48DU/.claude/worktrees/um" commit -qm "unmerged 48du" || bad "P48(d)(i) setup: um commit"
+out_48du=$(SYG_WORKTREE_ELIGIBLE_REASONS="branch-name unmerged" SYG_WORKTREE_BACKUP_DIR="$T/bk48du" "$TOOL" --repo "$SW48DU" --apply-eligible 2>"$T/p48du.err"); rc_48du=$?
+err_48du=$(cat "$T/p48du.err")
+if [ "$rc_48du" -eq 0 ] \
+  && [ -d "$SW48DU/.claude/worktrees/um" ] \
+  && git -C "$SW48DU" rev-parse -q --verify refs/heads/worktree-agent-um >/dev/null \
+  && ! grep -q '^backups: ' <<<"$out_48du" && [ ! -e "$T/bk48du" ] \
+  && [ "$err_48du" = "safe-worktree-clean: SYG_WORKTREE_ELIGIBLE_REASONS: unmerged is never eligible; ignored" ] \
+  && grep -qx '  not eligible: \.claude/worktrees/um (unmerged)' <<<"$out_48du"; then
+  ok "P48(d)(i): never-eligible code 'unmerged' in its own repo warns on stderr, prints 'not eligible:', and keeps the tree (exit 0)"
+else
+  bad "P48(d)(i): unmerged in knob (rc=$rc_48du, err='$err_48du')"; printf '%s\n' "$out_48du"
+fi
+
+# P48(d)(ii) Knob 'branch-name dirty', dirty tree in its own repo: kept, exit 0, stderr warning, 'not eligible:' line printed.
+mk_repo elig48dd && [ -d "$T/elig48dd" ] || bad "P48(d)(ii) setup: mk_repo elig48dd"
+SW48DD="$T/elig48dd"
+add_tree elig48dd dy && [ -d "$SW48DD/.claude/worktrees/dy" ] || bad "P48(d)(ii) setup: add_tree dy"
+echo dirty48 > "$SW48DD/.claude/worktrees/dy/a.txt" || bad "P48(d)(ii) setup: dy edit"
+out_48dd=$(SYG_WORKTREE_ELIGIBLE_REASONS="branch-name dirty" SYG_WORKTREE_BACKUP_DIR="$T/bk48dd" "$TOOL" --repo "$SW48DD" --apply-eligible 2>"$T/p48dd.err"); rc_48dd=$?
+err_48dd=$(cat "$T/p48dd.err")
+if [ "$rc_48dd" -eq 0 ] \
+  && [ -d "$SW48DD/.claude/worktrees/dy" ] \
+  && git -C "$SW48DD" rev-parse -q --verify refs/heads/worktree-agent-dy >/dev/null \
+  && ! grep -q '^backups: ' <<<"$out_48dd" && [ ! -e "$T/bk48dd" ] \
+  && [ "$err_48dd" = "safe-worktree-clean: SYG_WORKTREE_ELIGIBLE_REASONS: dirty is never eligible; ignored" ] \
+  && grep -qx '  not eligible: \.claude/worktrees/dy (dirty)' <<<"$out_48dd"; then
+  ok "P48(d)(ii): never-eligible code 'dirty' in its own repo warns on stderr, prints 'not eligible:', and keeps the tree (exit 0)"
+else
+  bad "P48(d)(ii): dirty in knob (rc=$rc_48dd, err='$err_48dd')"; printf '%s\n' "$out_48dd"
+fi
+
+# P48(d)(iii) --apply-eligible --only <unmerged tree> with knob 'branch-name': tree is kept, exit 0, no backup written.
+out_48do=$(SYG_WORKTREE_ELIGIBLE_REASONS="branch-name" SYG_WORKTREE_BACKUP_DIR="$T/bk48do" "$TOOL" --repo "$SW48DU" --apply-eligible --only "$SW48DU/.claude/worktrees/um" 2>"$T/p48do.err"); rc_48do=$?
+err_48do=$(cat "$T/p48do.err")
+if [ "$rc_48do" -eq 0 ] && [ -z "$err_48do" ] \
+  && [ -d "$SW48DU/.claude/worktrees/um" ] \
+  && git -C "$SW48DU" rev-parse -q --verify refs/heads/worktree-agent-um >/dev/null \
+  && ! grep -q '^backups: ' <<<"$out_48do" && [ ! -e "$T/bk48do" ] \
+  && grep -qx '  not eligible: \.claude/worktrees/um (unmerged)' <<<"$out_48do"; then
+  ok "P48(d)(iii): --apply-eligible --only <unmerged tree> with knob 'branch-name' keeps the tree, exits 0, and writes no backup"
+else
+  bad "P48(d)(iii): --apply-eligible --only unmerged (rc=$rc_48do, err='$err_48do')"; printf '%s\n' "$out_48do"
+fi
+
+# P48(e) Each of --apply-eligible --apply-hold X, --apply-eligible --all, --apply-eligible --base HEAD, --apply-eligible --base=HEAD, --apply-eligible --locks-apply: exit 2, nothing removed.
+mk_repo elig48e && [ -d "$T/elig48e" ] || bad "P48(e) setup: mk_repo elig48e"
+SW48E="$T/elig48e"
+add_tree elig48e sf && [ -d "$SW48E/.claude/worktrees/sf" ] || bad "P48(e) setup: add_tree sf"
+add_tree elig48e el origin/main feat-el && [ -d "$SW48E/.claude/worktrees/el" ] || bad "P48(e) setup: add_tree el"
+for combo in "--apply-hold 000000000000" "--all" "--base HEAD" "--base=HEAD" "--locks-apply"; do
+  # shellcheck disable=SC2086
+  out_48e=$(SYG_WORKTREE_ELIGIBLE_REASONS="branch-name" SYG_WORKTREE_BACKUP_DIR="$T/bk48e" "$TOOL" --repo "$SW48E" --apply-eligible $combo 2>"$T/p48e.err"); rc_48e=$?
+  err_48e=$(cat "$T/p48e.err")
+  if [ "$rc_48e" -eq 2 ] && [ -z "$out_48e" ] && [ "$(grep -c . <<<"$err_48e")" -eq 1 ] \
+    && [ -d "$SW48E/.claude/worktrees/sf" ] && [ -d "$SW48E/.claude/worktrees/el" ] \
+    && git -C "$SW48E" rev-parse -q --verify refs/heads/worktree-agent-sf >/dev/null \
+    && git -C "$SW48E" rev-parse -q --verify refs/heads/feat-el >/dev/null \
+    && [ ! -e "$T/bk48e" ]; then
+    ok "P48(e): --apply-eligible $combo exits 2 with one stderr line and removes nothing"
+  else
+    bad "P48(e): --apply-eligible $combo (rc=$rc_48e, out='$out_48e', err='$err_48e')"
+  fi
+done
+
+# P48(e)(ii) --repo A --repo B --apply-eligible --all: exit 2, nothing removed in either repo.
+mk_repo elig48eb && [ -d "$T/elig48eb" ] || bad "P48(e)(ii) setup: mk_repo elig48eb"
+SW48EB="$T/elig48eb"
+add_tree elig48eb sfb && [ -d "$SW48EB/.claude/worktrees/sfb" ] || bad "P48(e)(ii) setup: add_tree sfb"
+add_tree elig48eb elb origin/main feat-elb && [ -d "$SW48EB/.claude/worktrees/elb" ] || bad "P48(e)(ii) setup: add_tree elb"
+out_48em=$(SYG_WORKTREE_ELIGIBLE_REASONS="branch-name" SYG_WORKTREE_BACKUP_DIR="$T/bk48em" "$TOOL" --repo "$SW48E" --repo "$SW48EB" --apply-eligible --all 2>"$T/p48em.err"); rc_48em=$?
+err_48em=$(cat "$T/p48em.err")
+if [ "$rc_48em" -eq 2 ] && [ -z "$out_48em" ] && [ "$(grep -c . <<<"$err_48em")" -eq 1 ] \
+  && [ -d "$SW48E/.claude/worktrees/sf" ] && [ -d "$SW48E/.claude/worktrees/el" ] \
+  && [ -d "$SW48EB/.claude/worktrees/sfb" ] && [ -d "$SW48EB/.claude/worktrees/elb" ] \
+  && git -C "$SW48E" rev-parse -q --verify refs/heads/worktree-agent-sf >/dev/null \
+  && git -C "$SW48E" rev-parse -q --verify refs/heads/feat-el >/dev/null \
+  && git -C "$SW48EB" rev-parse -q --verify refs/heads/worktree-agent-sfb >/dev/null \
+  && git -C "$SW48EB" rev-parse -q --verify refs/heads/feat-elb >/dev/null \
+  && [ ! -e "$T/bk48em" ]; then
+  ok "P48(e)(ii): --repo A --repo B --apply-eligible --all exits 2 and removes nothing in either repo"
+else
+  bad "P48(e)(ii): multi-repo --apply-eligible --all (rc=$rc_48em, out='$out_48em', err='$err_48em')"
+fi
+
+# P48(f) A SAFE tree plus an eligible HOLD tree: both removed.
+mk_repo elig48f && [ -d "$T/elig48f" ] || bad "P48(f) setup: mk_repo elig48f"
+SW48F="$T/elig48f"
+add_tree elig48f sf && [ -d "$SW48F/.claude/worktrees/sf" ] || bad "P48(f) setup: add_tree sf"
+add_tree elig48f el origin/main feat-el && [ -d "$SW48F/.claude/worktrees/el" ] || bad "P48(f) setup: add_tree el"
+echo log48f > "$SW48F/.claude/worktrees/el/run.log" && [ -f "$SW48F/.claude/worktrees/el/run.log" ] || bad "P48(f) setup: run.log"
+out_48f=$(SYG_WORKTREE_ELIGIBLE_REASONS="branch-name ignored" SYG_WORKTREE_BACKUP_DIR="$T/bk48f" "$TOOL" --repo "$SW48F" --apply-eligible); rc_48f=$?
+shopt -s nullglob
+bk48f_dirs=("$T/bk48f"/*/elig48f--el--[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f])
+shopt -u nullglob
+if [ "$rc_48f" -eq 0 ] \
+  && [ ! -e "$SW48F/.claude/worktrees/sf" ] && [ ! -e "$SW48F/.claude/worktrees/el" ] \
+  && ! git -C "$SW48F" rev-parse -q --verify refs/heads/worktree-agent-sf >/dev/null \
+  && ! git -C "$SW48F" rev-parse -q --verify refs/heads/feat-el >/dev/null \
+  && grep -q "^backups: $T/bk48f/" <<<"$out_48f" \
+  && [ "${#bk48f_dirs[@]}" -eq 1 ] && [ -d "${bk48f_dirs[0]}" ]; then
+  ok "P48(f): --apply-eligible removes both SAFE tree and eligible HOLD tree (with backup), deletes branches, exits 0"
+else
+  bad "P48(f): SAFE + eligible HOLD (rc=$rc_48f, dirs=${#bk48f_dirs[@]})"; printf '%s\n' "$out_48f"
+fi
+
+# P48(g) Two repos via --repo A --repo B: each repo's eligible tree removed, an ineligible one kept.
+mk_repo elig48ga && mk_repo elig48gb && [ -d "$T/elig48ga" ] && [ -d "$T/elig48gb" ] || bad "P48(g) setup: mk_repo elig48ga/b"
+SW48GA="$T/elig48ga"
+SW48GB="$T/elig48gb"
+add_tree elig48ga ela origin/main feat-ela && [ -d "$SW48GA/.claude/worktrees/ela" ] || bad "P48(g) setup: ela"
+add_tree elig48ga ina && echo u > "$SW48GA/.claude/worktrees/ina/u.txt" || bad "P48(g) setup: ina"
+add_tree elig48gb elb && echo l > "$SW48GB/.claude/worktrees/elb/app.log" || bad "P48(g) setup: elb"
+add_tree elig48gb inb && echo d > "$SW48GB/.claude/worktrees/inb/a.txt" || bad "P48(g) setup: inb"
+out_48g=$(SYG_WORKTREE_ELIGIBLE_REASONS="branch-name ignored" SYG_WORKTREE_BACKUP_DIR="$T/bk48g" "$TOOL" --repo "$SW48GA" --repo "$SW48GB" --apply-eligible); rc_48g=$?
+shopt -s nullglob
+bk48ga_dirs=("$T/bk48g"/*/elig48ga--ela--[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f])
+bk48gb_dirs=("$T/bk48g"/*/elig48gb--elb--[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f])
+shopt -u nullglob
+if [ "$rc_48g" -eq 0 ] \
+  && [ ! -e "$SW48GA/.claude/worktrees/ela" ] && [ -d "$SW48GA/.claude/worktrees/ina" ] \
+  && [ ! -e "$SW48GB/.claude/worktrees/elb" ] && [ -d "$SW48GB/.claude/worktrees/inb" ] \
+  && ! git -C "$SW48GA" rev-parse -q --verify refs/heads/feat-ela >/dev/null \
+  && git -C "$SW48GA" rev-parse -q --verify refs/heads/worktree-agent-ina >/dev/null \
+  && ! git -C "$SW48GB" rev-parse -q --verify refs/heads/worktree-agent-elb >/dev/null \
+  && git -C "$SW48GB" rev-parse -q --verify refs/heads/worktree-agent-inb >/dev/null \
+  && grep -q "^backups: $T/bk48g/" <<<"$out_48g" && ! grep -q '^sweep plan:' <<<"$out_48g" \
+  && [ "${#bk48ga_dirs[@]}" -eq 1 ] && [ "${#bk48gb_dirs[@]}" -eq 1 ] \
+  && grep -qx '  not eligible: \.claude/worktrees/ina (untracked-new)' <<<"$out_48g" \
+  && grep -qx '  not eligible: \.claude/worktrees/inb (dirty)' <<<"$out_48g"; then
+  ok "P48(g): multi-repo --apply-eligible removes each repo's eligible tree with backup and keeps ineligible ones (exit 0)"
+else
+  bad "P48(g): multi-repo --apply-eligible (rc=$rc_48g, bk_a=${#bk48ga_dirs[@]}, bk_b=${#bk48gb_dirs[@]})"; printf '%s\n' "$out_48g"
+fi
+
+# P48(g)(ii) Two repos, knob 'branch-name dirty': the 'dirty is never eligible' warning appears exactly once on stderr.
+out_48gw=$(SYG_WORKTREE_ELIGIBLE_REASONS="branch-name dirty" SYG_WORKTREE_BACKUP_DIR="$T/bk48gw" "$TOOL" --repo "$SW48GA" --repo "$SW48GB" --apply-eligible 2>"$T/p48gw.err"); rc_48gw=$?
+err_48gw=$(cat "$T/p48gw.err")
+if [ "$rc_48gw" -eq 0 ] \
+  && [ "$err_48gw" = "safe-worktree-clean: SYG_WORKTREE_ELIGIBLE_REASONS: dirty is never eligible; ignored" ] \
+  && [ "$(grep -cx 'safe-worktree-clean: SYG_WORKTREE_ELIGIBLE_REASONS: dirty is never eligible; ignored' <<<"$err_48gw")" -eq 1 ] \
+  && [ -d "$SW48GA/.claude/worktrees/ina" ] && [ -d "$SW48GB/.claude/worktrees/inb" ] \
+  && [ ! -e "$T/bk48gw" ]; then
+  ok "P48(g)(ii): multi-repo --apply-eligible with knob 'branch-name dirty' prints the 'dirty is never eligible' warning exactly once on stderr"
+else
+  bad "P48(g)(ii): multi-repo warn once (rc=$rc_48gw, err='$err_48gw')"; printf '%s\n' "$out_48gw"
+fi
+
+# P48(h) --json: eligible_mode true, eligible_reasons sorted, per-tree eligible only on pre-demotion approvable trees (omitted on SAFE and non-approvable trees).
+mk_repo elig48h && [ -d "$T/elig48h" ] || bad "P48(h) setup: mk_repo elig48h"
+SW48H="$T/elig48h"
+add_tree elig48h sfh && [ -d "$SW48H/.claude/worktrees/sfh" ] || bad "P48(h) setup: sfh"
+add_tree elig48h elh origin/main feat-elh && [ -d "$SW48H/.claude/worktrees/elh" ] || bad "P48(h) setup: elh"
+add_tree elig48h inh && echo u > "$SW48H/.claude/worktrees/inh/u.txt" || bad "P48(h) setup: inh"
+add_tree elig48h lkh && git -C "$SW48H" worktree lock "$SW48H/.claude/worktrees/lkh" || bad "P48(h) setup: lkh"
+out_48h=$(SYG_WORKTREE_ELIGIBLE_REASONS="untracked-differs branch-name ignored" SYG_WORKTREE_BACKUP_DIR="$T/bk48h" "$TOOL" --repo "$SW48H" --apply-eligible --json); rc_48h=$?
+shopt -s nullglob
+bk48h_dirs=("$T/bk48h"/*/elig48h--elh--[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f])
+shopt -u nullglob
+if [ "$rc_48h" -eq 0 ] \
+  && [ ! -e "$SW48H/.claude/worktrees/sfh" ] && [ ! -e "$SW48H/.claude/worktrees/elh" ] \
+  && [ -d "$SW48H/.claude/worktrees/inh" ] && [ -d "$SW48H/.claude/worktrees/lkh" ] \
+  && ! git -C "$SW48H" rev-parse -q --verify refs/heads/worktree-agent-sfh >/dev/null \
+  && ! git -C "$SW48H" rev-parse -q --verify refs/heads/feat-elh >/dev/null \
+  && git -C "$SW48H" rev-parse -q --verify refs/heads/worktree-agent-inh >/dev/null \
+  && git -C "$SW48H" rev-parse -q --verify refs/heads/worktree-agent-lkh >/dev/null \
+  && [ "${#bk48h_dirs[@]}" -eq 1 ] && [ -d "${bk48h_dirs[0]}" ] \
+  && python3 -c '
+import json, sys
+d = json.loads(sys.argv[1])
+assert d["eligible_mode"] is True, d.get("eligible_mode")
+assert d["eligible_reasons"] == ["branch-name", "ignored", "untracked-differs"], d.get("eligible_reasons")
+by_name = {t["path"].rsplit("/", 1)[-1]: t for t in d["worktrees"]}
+assert by_name["sfh"]["verdict"] == "SAFE" and by_name["sfh"]["approvable"] is False and "eligible" not in by_name["sfh"]
+assert by_name["sfh"]["action"] == "removed, branch worktree-agent-sfh deleted", by_name["sfh"]["action"]
+assert by_name["elh"]["approvable"] is True and by_name["elh"]["eligible"] is True
+assert by_name["elh"]["action"] and by_name["elh"]["action"].startswith("backed up to " + sys.argv[2] + "/")
+assert by_name["inh"]["approvable"] is True and by_name["inh"]["eligible"] is False
+assert by_name["lkh"]["approvable"] is False and "eligible" not in by_name["lkh"]
+' "$out_48h" "$T/bk48h"; then
+  ok "P48(h): --apply-eligible --json sets eligible_mode=true, sorted eligible_reasons, and eligible only on pre-demotion approvable trees (omitted on removed SAFE and non-approvable trees)"
+else
+  bad "P48(h): --apply-eligible --json (rc=$rc_48h, dirs=${#bk48h_dirs[@]})"; printf '%s\n' "$out_48h"
+fi
+
+exit $fail
+}
+phase_74

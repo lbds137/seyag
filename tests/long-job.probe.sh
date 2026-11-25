@@ -321,8 +321,9 @@ out=$(timeout 10 "$LJ" wait "$p-stop" --interval 1 --timeout 2 --owner ""); rc=$
 sleep 0 & dead=$!; wait "$dead"
 out=$(timeout 15 "$LJ" wait "$p-stop" --interval 1 --timeout 10 --owner "$dead" 2>&1); rc=$?
 [ "$rc" = 3 ] && ! grep -q "^long-job: ended" <<<"$out" && ok "a wait whose owner is gone exits 3 with no ended line" || bad "owner-gone wait (rc $rc: $out)"
-s=$SECONDS; out=$(timeout 5 "$LJ" wait "$p-stop" --poll --owner ""); rc=$?
-[ "$rc" = 4 ] && [ $((SECONDS - s)) -le 2 ] && grep -q "$p-stop: running" <<<"$out" && ok "wait --poll on a running job exits 4 at once" || bad "wait --poll running (rc $rc: $out)"
+# Not timed: a --poll that blocked would sleep the 15 s default interval and die at timeout 5 (rc 124), never rc 4.
+out=$(timeout 5 "$LJ" wait "$p-stop" --poll --owner ""); rc=$?
+[ "$rc" = 4 ] && grep -q "$p-stop: running" <<<"$out" && ok "wait --poll on a running job exits 4 without blocking" || bad "wait --poll running (rc $rc: $out)"
 [ "$(tail -n 1 <<<"$out")" = "long-job: still running: with no live waiter for $p-stop, start \"long-job wait $p-stop\" in the background; otherwise, and on a cron tick, say nothing" ] && ! grep -q "CronDelete" <<<"$out" && ok "wait --poll on a running job ends with the still-running line" || bad "wait --poll running last line ($out)"
 timeout 5 systemctl --user stop "long-job-$p-stop.service"
 out=$(timeout 15 "$LJ" wait "$p-stop" --interval 1 --timeout 10 --owner ""); rc=$?

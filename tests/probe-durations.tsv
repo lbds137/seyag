@@ -85,7 +85,8 @@ tests/resource-profile.probe.sh	1.5
 tests/review-workflow-draft.probe.sh	1.0
 tests/run-probes-runner.probe.sh	2.1
 tests/safe-clean.probe.sh	0.5
-tests/safe-worktree-clean.probe.sh	123.9
+tests/safe-worktree-clean-apply-hold.probe.sh	131.0
+tests/safe-worktree-clean.probe.sh	95.0
 tests/scanner-parity.probe.sh	0.2
 tests/security-sweep.probe.sh	149.6
 tests/session-context.probe.sh	2.9
