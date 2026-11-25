@@ -494,15 +494,16 @@ done <<<"$addrs"
   || bad "host addresses: control=[$control] rc=$rc out=[$out] err=[$(cat "$T/err")]"
 
 # 7c. The knob is a live wall on any host: 192.0.2.1 (TEST-NET-1) is never routed to the host, so
-# "No route to host" with the knob and its absence without it proves the route was applied (connect.py's
-# 3 s timeout prints "timed out", never that text). The call's wall time includes sandbox startup, so it
-# is reported, not asserted.
+# "No route to host" with the knob and its absence without it proves the route was applied. The control
+# must still be connect.py's own report line, so an empty or crashed control fails; its text is
+# host-dependent ("error timed out" on the Deck; unobserved on CI, which shows only probe summaries)
+# and not asserted. The call's wall time includes sandbox startup, so it is reported, not asserted.
 fake "python3 $T/connect.py 80 192.0.2.1; exit 0"
 t0=$(date +%s%N)
 out=$(cd "$W" && SYG_WORKER_SANDBOX_WALL=192.0.2.0/24 SYG_WORKER_SANDBOX_RO_BINDS=$T/connect.py SYG_WORKER_SANDBOX_CLAUDE=$T/fake-claude "$B/worker-sandbox" --settings "$T/overlay.json" 2>"$T/err"); rc=$?
 ms=$(( ($(date +%s%N) - t0) / 1000000 ))
 ctl=$(cd "$W" && SYG_WORKER_SANDBOX_RO_BINDS=$T/connect.py SYG_WORKER_SANDBOX_CLAUDE=$T/fake-claude "$B/worker-sandbox" --settings "$T/overlay.json" 2>>"$T/err")
-[[ $out == *"No route to host"* ]] && [[ $ctl != *"No route to host"* ]] \
+[[ $out == *"No route to host"* ]] && [[ $ctl == "192.0.2.1 "* ]] && [[ $ctl != *"No route to host"* ]] \
   && ok "SYG_WORKER_SANDBOX_WALL=192.0.2.0/24: 'No route to host' in ${ms} ms (startup included, not asserted); without it: [$ctl]" \
   || bad "wall knob live: rc=$rc ms=$ms out=[$out] ctl=[$ctl] err=[$(cat "$T/err")]"
 

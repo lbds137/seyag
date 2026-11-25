@@ -920,7 +920,7 @@ printf '{"nodes":{}}\n' > wt/flake.lock
 printf 'packages\n' > wt/Directory.Packages.props
 printf 'fsproj\n' > wt/app.fsproj
 printf 'vbproj\n' > wt/app.vbproj
-mkdir -p "$wt/gradle"
+mkdir -p wt/gradle
 printf 'catalog\n' > wt/gradle/libs.versions.toml
 cat > spec48.md <<'EOF'
 ## Files in scope
@@ -1003,6 +1003,7 @@ fi
 
 # 52. Index-deleted BINARY lockfile (git rm --cached, file still on disk) -> '(binary)' with the
 # '[untracked copy on disk]' tag, never '(+0 -0)'.
+# bun.lockb is a lockfile, so this never reaches the binary -U0 skip; case 53 does.
 printf 'bun\000v1\n' > "$wt/bun.lockb"
 git -C "$wt" add bun.lockb
 git -C "$wt" commit -qm "add binary lockfile for case 52"
