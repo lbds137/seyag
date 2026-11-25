@@ -167,7 +167,7 @@ SYG_LOSSY_PIPE_GH_WRAPPERS	user	guards	unset	Whitespace-separated read-wrapper c
 SYG_LOSSY_PIPE_SUITES	user	guards	1	Set to 0 to disable lossy-pipe-guard on test and probe suite commands piped into head/tail/sed.	-
 SYG_MAX_PARALLEL	user	misc	unset	Host cap on parallel jobs, applied by resource-profile on top of any profile.	host
 SYG_MEM_GATE_CMD	user	session	unset	Single-line command advertised at SessionStart to check free memory before launching workers or test suites. The plugin's own mem-gate (`mem-gate --ok`) is one such command.	-
-SYG_MEM_GATE_MEMINFO	internal	misc	/proc/meminfo	Test seam overriding the meminfo file mem-gate and resource-profile read.	-
+SYG_MEM_GATE_MEMINFO	internal	misc	/proc/meminfo	Test seam overriding the meminfo file mem-gate and resource-profile read (long-job forwards it into the unit).	-
 SYG_MEM_GATE_MIN_MB	user	misc	2048	Default MemAvailable floor in MB for mem-gate --ok/--wait; an explicit MB argument wins.	host
 SYG_MEM_PRESSURE_MAX_BYTES	user	misc	5242880	Size in bytes past which mem-pressure-log rotates log.jsonl to log.jsonl.1 (one generation kept).	-
 SYG_MEM_PRESSURE_MEMINFO	internal	misc	/proc/meminfo	Test seam overriding the meminfo file mem-pressure-log reads.	-
