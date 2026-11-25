@@ -609,16 +609,23 @@ fi
 
 # Fallback (the primary path for `git push`): resolve the PR from the
 # effective directory's current branch. Silently exits if the branch has no
-# open PR, or if DIR is not (or no longer) a readable git repo. Bounded at 2s:
-# an unbounded `gh` here would stall the whole PostToolUse hook (and, with it,
-# the tool call it fires after) on a network hang. A timeout kill (exit 124)
-# gets its own stderr note, same fail-open direction (PR_NUM stays empty).
+# open PR, or if DIR is not (or no longer) a readable git repo. Bounded at 2s
+# by default, or SYG_PR_MONITOR_GH_TIMEOUT seconds (a positive integer;
+# anything else means 2 — raise it on a loaded machine where a real gh call
+# needs longer than the bound): an unbounded `gh` here would stall the whole
+# PostToolUse hook (and, with it, the tool call it fires after) on a network
+# hang. A timeout kill (exit 124) gets its own stderr note, same fail-open
+# direction (PR_NUM stays empty).
+GH_TIMEOUT=2
+if [[ "${SYG_PR_MONITOR_GH_TIMEOUT:-}" =~ ^[1-9][0-9]*$ ]]; then
+  GH_TIMEOUT="$SYG_PR_MONITOR_GH_TIMEOUT"
+fi
 if [ -z "$PR_NUM" ]; then
   [ -z "$PR_BRANCH" ] && exit 0
-  GH_LIST_OUT=$(cd "$DIR" 2>/dev/null && timeout 2 gh pr list --head "$PR_BRANCH" --state open --json number --jq '.[0].number' 2>/dev/null)
+  GH_LIST_OUT=$(cd "$DIR" 2>/dev/null && timeout "$GH_TIMEOUT" gh pr list --head "$PR_BRANCH" --state open --json number --jq '.[0].number' 2>/dev/null)
   GH_LIST_RC=$?
   if [ "$GH_LIST_RC" -eq 124 ]; then
-    echo "pr-monitor-reminder: gh pr list timed out after 2s; skipping this reminder" >&2
+    echo "pr-monitor-reminder: gh pr list timed out after ${GH_TIMEOUT}s; skipping this reminder" >&2
     exit 0
   fi
   PR_NUM="$GH_LIST_OUT"

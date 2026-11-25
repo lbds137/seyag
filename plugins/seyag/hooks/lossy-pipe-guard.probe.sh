@@ -28,9 +28,9 @@ export PYTHONDONTWRITEBYTECODE=1
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 HOOK="$SCRIPT_DIR/lossy-pipe-guard.sh"
 
-# Hermetic by default: a wrapper list or suite toggle set in the caller's
-# environment would change the verdicts below.
-unset SYG_LOSSY_PIPE_GH_WRAPPERS SYG_LOSSY_PIPE_SUITES
+# Hermetic by default: a wrapper list, suite/job toggle or runner alias set in
+# the caller's environment would change the verdicts below.
+unset SYG_LOSSY_PIPE_GH_WRAPPERS SYG_LOSSY_PIPE_SUITES SYG_LONG_JOB_CMD SYG_LOSSY_PIPE_JOBS
 
 FAILURES=0
 
@@ -70,6 +70,23 @@ run_wrappers_syg() {
   local wrappers="$1" expected="$2" label="$3" cmd="$4"
   jq -n --arg c "$cmd" '{tool_name:"Bash",tool_input:{command:$c}}' \
     | SYG_LOSSY_PIPE_GH_WRAPPERS="$wrappers" "$HOOK" >/dev/null 2>&1
+  local actual=$?
+  if [ "$actual" -eq "$expected" ]; then
+    printf 'PASS  (exit %d)  %s\n' "$actual" "$label"
+  else
+    printf 'FAIL  (exit %d, expected %d)  %s\n' "$actual" "$expected" "$label"
+    FAILURES=$((FAILURES + 1))
+  fi
+}
+
+# run_jobs <SYG_LONG_JOB_CMD> <expected-exit> <label> <command> — the same
+# check with SYG_LONG_JOB_CMD set to <value> for this call, so the job
+# family's runner-alias opt-in (the value's first word) can be pinned. The
+# alias name is the invented `jobrun`, never a real machine tool.
+run_jobs() {
+  local ljc="$1" expected="$2" label="$3" cmd="$4"
+  jq -n --arg c "$cmd" '{tool_name:"Bash",tool_input:{command:$c}}' \
+    | SYG_LONG_JOB_CMD="$ljc" "$HOOK" >/dev/null 2>&1
   local actual=$?
   if [ "$actual" -eq "$expected" ]; then
     printf 'PASS  (exit %d)  %s\n' "$actual" "$label"
@@ -763,6 +780,66 @@ if [ $? -eq 2 ]; then
   printf 'PASS  (exit 2)  SYG_LOSSY_PIPE_SUITES=0 keeps gh read rule blocking\n'
 else
   printf 'FAIL  SYG_LOSSY_PIPE_SUITES=0 must not disable gh read rule\n'
+  FAILURES=$((FAILURES + 1))
+fi
+
+# --- long-job runner run × ANY filter (rule name `job`) ---------------------
+# `<runner> run NAME -- CMD | grep …` hid a memory-gate refusal the runner
+# prints BEFORE the job started; the session read "no output" as "running
+# fine". The alias cases use the invented runner name `jobrun`.
+run 2 "job: long-job run piped to tail"          'long-job run x -- sleep 1 | tail -5'
+run 2 "job: long-job run --heavy piped to grep"  'long-job run x --heavy -- make | grep FAIL'
+run 2 "job: path-prefixed runner piped to head"  '/opt/bin/long-job run x -- y | head'
+run 2 "job: env-prefixed runner piped to awk"    "env A=1 long-job run x -- y | awk '{print}'"
+run_jobs "jobrun run" 2 "job: SYG_LONG_JOB_CMD alias piped to sed" 'jobrun run x -- y | sed -n 1p'
+run_jobs "/usr/local/bin/jobrun run" 2 "job: alias from a path value piped to tail" 'jobrun run x -- y | tail'
+run 2 "job: substitution arm echo \"\$(long-job run x -- y)\" | tail" 'echo "$(long-job run x -- y)" | tail'
+JOB_ERR=$(printf '%s' 'long-job run x -- y | tail' \
+  | jq -Rs '{tool_name:"Bash",tool_input:{command:.}}' \
+  | "$HOOK" 2>&1 >/dev/null)
+if grep -qF "LOSSY PIPE GUARD — long-job runner output filtered" <<<"$JOB_ERR" \
+  && grep -qF "Run it UNFILTERED" <<<"$JOB_ERR" \
+  && grep -qF "SYG_LONG_JOB_CMD names" <<<"$JOB_ERR" \
+  && grep -qF "sets SYG_LOSSY_PIPE_JOBS=0" <<<"$JOB_ERR"; then
+  printf 'PASS  (banner)  job block prints the long-job runner banner and remedies\n'
+else
+  printf 'FAIL  (banner missing long-job runner header/remedies)  job block banner\n'
+  FAILURES=$((FAILURES + 1))
+fi
+run 0 "job: long-job run unpiped allowed"        'long-job run x -- y'
+run 0 "job: long-job run into a pass-through"    'long-job run x -- y | cat'
+run 0 "job: long-job status is not run"          'long-job status x | tail'
+run 0 "job: long-job log is not run"             'long-job log x | tail'
+run 0 "job: argument-position mention allowed"   'echo long-job run | grep run'
+run 0 "job: pipe inside the quoted job body"     "long-job run x -- bash -c 'y | tail'"
+run 0 "job: alias not armed when SYG_LONG_JOB_CMD unset" 'jobrun run x -- y | tail'
+# SYG_LOSSY_PIPE_JOBS=0 disables the job family while leaving the others on.
+printf '%s' 'long-job run x -- y | tail' \
+  | jq -Rs '{tool_name:"Bash",tool_input:{command:.}}' \
+  | SYG_LOSSY_PIPE_JOBS=0 "$HOOK" >/dev/null 2>&1
+if [ $? -eq 0 ]; then
+  printf 'PASS  (exit 0)  SYG_LOSSY_PIPE_JOBS=0 disables the job family\n'
+else
+  printf 'FAIL  SYG_LOSSY_PIPE_JOBS=0 should allow long-job run truncation\n'
+  FAILURES=$((FAILURES + 1))
+fi
+# `echo gh pr` passes the bash pre-filter, so this pins the python-side toggle.
+printf '%s' 'echo gh pr && long-job run x -- y | tail' \
+  | jq -Rs '{tool_name:"Bash",tool_input:{command:.}}' \
+  | SYG_LOSSY_PIPE_JOBS=0 "$HOOK" >/dev/null 2>&1
+if [ $? -eq 0 ]; then
+  printf 'PASS  (exit 0)  SYG_LOSSY_PIPE_JOBS=0 disables the job rule in python too\n'
+else
+  printf 'FAIL  SYG_LOSSY_PIPE_JOBS=0 should disable the job rule in python scan\n'
+  FAILURES=$((FAILURES + 1))
+fi
+printf '%s' 'git push | tail' \
+  | jq -Rs '{tool_name:"Bash",tool_input:{command:.}}' \
+  | SYG_LOSSY_PIPE_JOBS=0 "$HOOK" >/dev/null 2>&1
+if [ $? -eq 2 ]; then
+  printf 'PASS  (exit 2)  SYG_LOSSY_PIPE_JOBS=0 keeps the git rule blocking\n'
+else
+  printf 'FAIL  SYG_LOSSY_PIPE_JOBS=0 must not disable the git rule\n'
   FAILURES=$((FAILURES + 1))
 fi
 

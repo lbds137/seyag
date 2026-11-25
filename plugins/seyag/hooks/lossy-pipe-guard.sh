@@ -1,7 +1,7 @@
 #!/bin/bash
 # PreToolUse hook (matcher: Bash): block commands whose output MUST be read
 # whole from being piped into something that discards part of it. Ported from
-# Tzurot's .claude/hooks/lossy-pipe-guard.sh. Two rules today, each a
+# Tzurot's .claude/hooks/lossy-pipe-guard.sh. Four rules today, each a
 # (target, lossy-stage) pair:
 #
 #   1. git commit/push  ×  tail|head|grep|sed|awk
@@ -27,6 +27,13 @@
 #      | tail`) collapses to `bash S` under `strip_quoted` before `SUITE_TARGET`
 #      runs and is missed; bare-target runners (`npm test`, `yarn test`,
 #      `pnpm test`, `make test`) and `nice`/`sudo` prefixes are also not matched.
+#
+#   4. long-job runner run  ×  tail|head|grep|sed|awk (rule name `job`,
+#      toggle SYG_LOSSY_PIPE_JOBS=0 disables the family; default on)
+#      A long-job runner's `run` verb (`long-job`, or the basename of
+#      SYG_LONG_JOB_CMD's first word) prints its refusals BEFORE the job
+#      starts; a filter can drop that line, and "no output" reads as
+#      "running fine".
 #
 # Background: the seyag rules (rules/core.md § Lossy steps are for known
 # output shapes) name grep/head/tail/sed pipes as the lossy steps that turn a
@@ -162,6 +169,19 @@ mentions_target() { # <text> — 0 when the text could carry a rule's target
     case "$1" in
       *run-probes*|*.probe.sh*|*pytest*|*vitest*|*jest*|*"cargo test"*|*"go test"*) return 0 ;;
     esac
+  fi
+  if [ "${SYG_LOSSY_PIPE_JOBS:-1}" != "0" ]; then
+    case "$1" in
+      *long-job*) return 0 ;;
+    esac
+    # The runner alias: the FIRST word of SYG_LONG_JOB_CMD, basename only —
+    # the same name the python side's runner set builds. Pure parameter
+    # expansion, no fork: this is the PreToolUse hot path.
+    local lj="${SYG_LONG_JOB_CMD:-}"
+    lj="${lj#"${lj%%[![:space:]]*}"}"
+    lj="${lj%%[[:space:]]*}"
+    lj="${lj##*/}"
+    [ -n "$lj" ] && case "$1" in *"$lj"*) return 0 ;; esac
   fi
   local w
   for w in "${GH_WRAPPERS[@]}"; do
@@ -563,6 +583,29 @@ SUITE_TARGET = re.compile(
 )
 SUITES_ENABLED = os.environ.get("SYG_LOSSY_PIPE_SUITES", "1") != "0"
 
+# Rule 4's targets: a long-job runner's `run` verb (`run NAME [options] --
+# CMD`), anchored at an invocation position like the suite rule so a token in
+# argument position (`echo long-job run | grep run`) never matches. Runner
+# names are exactly the set long-job-chain-check's runner_names() builds:
+# `long-job` plus the basename of the FIRST word of SYG_LONG_JOB_CMD, so a
+# machine that renames the runner keeps its refusals protected under the new
+# name. Disabled when SYG_LOSSY_PIPE_JOBS=0 (default on); the lossy set is
+# FILTERS (any filter), like the git rule — the runner's output is short when
+# it works and essential when it doesn't.
+_job_names = {"long-job"}
+_job_words = os.environ.get("SYG_LONG_JOB_CMD", "").split()
+if _job_words:
+    _job_alias = _job_words[0].rsplit("/", 1)[-1]
+    if _job_alias:
+        _job_names.add(_job_alias)
+JOB_TARGET = re.compile(
+    r"(?i)(?:^|[;&|\n(])\s*(?:" + SUITE_RUNNER + r"\s+)*"
+    r"(?<![-\w])(?:[A-Za-z0-9._/-]+/)?(?:"
+    + "|".join(re.escape(n) for n in sorted(_job_names))
+    + r")\s+run(?![-\w])"
+)
+JOBS_ENABLED = os.environ.get("SYG_LOSSY_PIPE_JOBS", "1") != "0"
+
 # The gh and suite halves of the substitution scan (see SPAN_CARRIES_GIT_TARGET
 # above for the full reasoning and the accepted command-wide over-block).
 # Symmetric with git: `echo "$(gh pr checks 2000)" | tail` truncates a gh read
@@ -579,10 +622,18 @@ SPAN_CARRIES_SUITE_TARGET = (
     if SUITES_ENABLED
     else False
 )
+SPAN_CARRIES_JOB_TARGET = (
+    substitution_spans_matching(
+        raw_cmd, lambda span: JOB_TARGET.search(span) is not None
+    )
+    if JOBS_ENABLED
+    else False
+)
 SPAN_TARGET_HITS = {
     "git": SPAN_CARRIES_GIT_TARGET,
     "gh": SPAN_CARRIES_GH_TARGET,
     "suite": SPAN_CARRIES_SUITE_TARGET,
+    "job": SPAN_CARRIES_JOB_TARGET,
 }
 
 # (target, lossy-stage, rule-name). Different lossy sets and banners are why
@@ -591,6 +642,8 @@ SPAN_TARGET_HITS = {
 RULES = [(GIT_TARGET, FILTERS, "git"), (GH_READ_TARGET, TRUNCATORS, "gh")]
 if SUITES_ENABLED:
     RULES.append((SUITE_TARGET, TRUNCATORS, "suite"))
+if JOBS_ENABLED:
+    RULES.append((JOB_TARGET, FILTERS, "job"))
 
 # A leading REDIRECT does not stop a stage from being a filter. `git push |
 # 2>&1 tail -20` is valid bash and identical in effect to putting the redirect
@@ -684,7 +737,7 @@ PYEOF
 ) || exit 0
 
 case "$VERDICT" in
-  block:git | block:gh | block:suite) ;;
+  block:git | block:gh | block:suite | block:job) ;;
   *) exit 0 ;;
 esac
 
@@ -726,6 +779,28 @@ redirect to a file and read it whole:
 
 Or run the suite unfiltered. A project that does not want this family
 sets SYG_LOSSY_PIPE_SUITES=0 in settings.json env.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+MSG
+elif [ "$VERDICT" = "block:job" ]; then
+  cat >&2 << 'MSG'
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+LOSSY PIPE GUARD — long-job runner output filtered
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+This pipes a long-job runner's `run` verb (long-job, or the runner
+SYG_LONG_JOB_CMD names) through a filter (tail/head/grep/sed/awk).
+The runner prints its refusals (a memory gate, a lock, a bad name)
+before the job starts; a filter can drop that line, and "no output"
+then reads as "running fine".
+
+  - Run it UNFILTERED. Its output is short when it works and
+    essential when it doesn't.
+  - To filter the job's own output, filter inside the job
+    (`... run NAME -- bash -c 'CMD | grep X'`) or filter its log
+    afterwards.
+
+This block stopped the WHOLE command: nothing in its && chain ran.
+A project that does not want this family sets SYG_LOSSY_PIPE_JOBS=0
+in settings.json env.
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 MSG
 else

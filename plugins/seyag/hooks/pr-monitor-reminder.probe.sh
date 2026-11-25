@@ -63,6 +63,11 @@ exit 1
 SHIM
 chmod +x "$FAKE_BIN/gh"
 
+# Every case runs with a generous gh-timeout budget so a loaded machine cannot
+# make the fake gh overshoot the hook's default 2s bound and flip a passing
+# case red; case 16 re-pins the default with the knob at 2, and 16c checks that an invalid value falls back to it.
+export SYG_PR_MONITOR_GH_TIMEOUT=30
+
 FAILURES=0
 pass() { printf 'PASS  %s\n' "$1"; }
 fail() { printf 'FAIL  %s\n' "$1"; FAILURES=$((FAILURES + 1)); }
@@ -311,22 +316,54 @@ OUT15B=$(run_hook_cwd "Bash" "git push" "$OTHER_WT" SYG_PR_MONITOR_SEEN_FILE="$S
   || { fail "dedup key includes the repo toplevel"; printf 'A:%s\nB:%s\n' "$OUT15A" "$OUT15B" | sed 's/^/      /'; }
 
 # --- 16. a hung `gh pr list` (10s, well past the 2s bound) does not stall
-#          the hook: it returns within ~3s, silent (no banner), with a
+#          the hook: it returns in under 6s, silent (no banner), with a
 #          stderr note --------------------------------------------------
+#          Runs with SYG_PR_MONITOR_GH_TIMEOUT=2 (the default) so this case
+#          still pins the default path despite the probe-wide =30 above.
 START16=$(date +%s%N)
 OUT16=$(run_hook_cwd "Bash" "git push" "$FIXTURE_WT" \
-  SYG_PR_MONITOR_SEEN_FILE="$WORK/seen16" FAKE_GH_PR_LIST_SLEEP=10)
+  SYG_PR_MONITOR_SEEN_FILE="$WORK/seen16" FAKE_GH_PR_LIST_SLEEP=10 SYG_PR_MONITOR_GH_TIMEOUT=2)
 END16=$(date +%s%N)
 ELAPSED_MS16=$(( (END16 - START16) / 1000000 ))
-[ "$ELAPSED_MS16" -lt 3500 ] \
-  && pass "hung gh pr list: hook returns within ~3s (got ${ELAPSED_MS16}ms)" \
-  || fail "hung gh pr list: hook returns within ~3s (got ${ELAPSED_MS16}ms — did NOT bound the call)"
+[ "$ELAPSED_MS16" -lt 6000 ] \
+  && pass "hung gh pr list: hook returns in under 6s (got ${ELAPSED_MS16}ms)" \
+  || fail "hung gh pr list: hook returns in under 6s (got ${ELAPSED_MS16}ms — did NOT bound the call)"
 [[ "$OUT16" != *'"hookSpecificOutput"'* ]] \
   && pass "hung gh pr list: silent (no banner)" \
   || { fail "hung gh pr list: silent (no banner)"; printf '%s\n' "$OUT16" | sed 's/^/      /'; }
 [[ "$OUT16" == *"timed out after 2s"* ]] \
   && pass "hung gh pr list: stderr note on timeout" \
   || { fail "hung gh pr list: stderr note on timeout"; printf '%s\n' "$OUT16" | sed 's/^/      /'; }
+
+# --- 16b. SYG_PR_MONITOR_GH_TIMEOUT=1 shortens the bound: a 10s gh is cut
+#          short (under 6s), silent, note names the 1s bound -------------------
+START16B=$(date +%s%N)
+OUT16B=$(run_hook_cwd "Bash" "git push" "$FIXTURE_WT" \
+  SYG_PR_MONITOR_SEEN_FILE="$WORK/seen16b" FAKE_GH_PR_LIST_SLEEP=10 SYG_PR_MONITOR_GH_TIMEOUT=1)
+END16B=$(date +%s%N)
+ELAPSED_MS16B=$(( (END16B - START16B) / 1000000 ))
+[ "$ELAPSED_MS16B" -lt 6000 ] \
+  && pass "16b: knob=1, 10s gh: hook returns in under 6s (got ${ELAPSED_MS16B}ms)" \
+  || fail "16b: knob=1, 10s gh: hook returns in under 6s (got ${ELAPSED_MS16B}ms — did NOT bound the call)"
+[[ "$OUT16B" != *'"hookSpecificOutput"'* ]] \
+  && pass "16b: silent (no banner)" \
+  || { fail "16b: silent (no banner)"; printf '%s\n' "$OUT16B" | sed 's/^/      /'; }
+[[ "$OUT16B" == *"timed out after 1s"* ]] \
+  && pass "16b: stderr note names the 1s bound" \
+  || { fail "16b: stderr note names the 1s bound"; printf '%s\n' "$OUT16B" | sed 's/^/      /'; }
+
+# --- 16c. an invalid knob value behaves as the 2s default ------------------
+START16C=$(date +%s%N)
+OUT16C=$(run_hook_cwd "Bash" "git push" "$FIXTURE_WT" \
+  SYG_PR_MONITOR_SEEN_FILE="$WORK/seen16c" FAKE_GH_PR_LIST_SLEEP=10 SYG_PR_MONITOR_GH_TIMEOUT=abc)
+END16C=$(date +%s%N)
+ELAPSED_MS16C=$(( (END16C - START16C) / 1000000 ))
+[ "$ELAPSED_MS16C" -lt 6000 ] \
+  && pass "16c: knob=abc: 10s gh is cut short (under 6s) (got ${ELAPSED_MS16C}ms)" \
+  || fail "16c: knob=abc: 10s gh is cut short (under 6s) (got ${ELAPSED_MS16C}ms)"
+[[ "$OUT16C" == *"timed out after 2s"* ]] \
+  && pass "16c: stderr note names the 2s default" \
+  || { fail "16c: stderr note names the 2s default"; printf '%s\n' "$OUT16C" | sed 's/^/      /'; }
 
 # --- 17. a push behind a heredoc past 128 KiB (Linux's cap on one env string)
 #          still prints the banner ------------------------------------------

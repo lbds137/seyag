@@ -49,18 +49,20 @@ run() {
 
 # run_sized <expected-exit> <label> <payload-json> <ack_file> [project_dir] [src_re]
 # The 6th arg overrides SYG_DISPATCH_SRC_RE; the literal `-` means UNSET.
-# Stores hook stderr in $ERR.
+# Stores hook stderr in $ERR. The payload is fed with a here-string, never a
+# printf pipe: under `set -o pipefail` a hook that exits before reading stdin
+# (env unset, case O9) SIGPIPEs the printf writer and the pipeline reports
+# 141 instead of the hook's own exit. `<<<` appends a newline; the hook reads
+# stdin with `$(cat)`, which strips it, so no case can tell the difference.
 run_sized() {
   # `${6-...}` (no colon): an EMPTY sixth arg stays empty, it is the env-empty case.
   local expected="$1" label="$2" payload="$3" ack="$4" project="${5:-$FIXTURE}" re="${6-$PROBE_RE}"
   if [ "$re" = "-" ]; then
-    ERR=$(printf '%s' "$payload" \
-      | env -u SYG_DISPATCH_SRC_RE CLAUDE_PROJECT_DIR="$project" SYG_DISPATCH_ACK_FILE="$ack" \
-        "$HOOK" 2>&1 >/dev/null)
+    ERR=$(env -u SYG_DISPATCH_SRC_RE CLAUDE_PROJECT_DIR="$project" SYG_DISPATCH_ACK_FILE="$ack" \
+      "$HOOK" <<<"$payload" 2>&1 >/dev/null)
   else
-    ERR=$(printf '%s' "$payload" \
-      | CLAUDE_PROJECT_DIR="$project" SYG_DISPATCH_ACK_FILE="$ack" SYG_DISPATCH_SRC_RE="$re" \
-        "$HOOK" 2>&1 >/dev/null)
+    ERR=$(CLAUDE_PROJECT_DIR="$project" SYG_DISPATCH_ACK_FILE="$ack" SYG_DISPATCH_SRC_RE="$re" \
+      "$HOOK" <<<"$payload" 2>&1 >/dev/null)
   fi
   local actual=$?
   if [ "$actual" -eq "$expected" ]; then

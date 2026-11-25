@@ -2,6 +2,17 @@
 
 All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY-MM-DD>` section per released version; under it, `###` categories in fixed order — Breaking Changes, Features, Bug Fixes, Improvements, Chores, Tests — empty ones omitted; items are `- **scope:** description (#PR)`, written from the version's merged commit subjects.
 
+## 0.3.227 - 2026-11-25
+
+### Features
+- **lossy-pipe-guard:** blocks `long-job run …` piped into any filter, because a filter can hide a refusal the runner prints before the job starts. It also matches the first word of `SYG_LONG_JOB_CMD` as an alias of the runner. Toggle: `SYG_LOSSY_PIPE_JOBS=0` (TASK-174).
+- **long-job:** messages, hints and the `ended` wait sentinel name the runner by the basename of `SYG_LONG_JOB_CMD`'s first word (default `long-job`), so an exec wrapper keeps its own wake line; `run` gains `--slice NAME` (dropped, with a note, under `--heavy`) and repeatable `-p/--property KEY=VALUE` (stdio keys and `Slice` refused) (TASK-160, #433).
+- **pr-monitor-reminder:** the `gh pr list` timeout is now a knob, `SYG_PR_MONITOR_GH_TIMEOUT` (whole seconds, default 2) (TASK-175).
+
+### Tests
+- **probes:** dispatch-posture-gate O9 and launch-record now feed the hook with a here-string, so a hook that exits before reading stdin can no longer SIGPIPE the writer and leave rc 141. launch-record's failures now print RC and stderr. pr-monitor-reminder runs with a 30 s gh bound, and cases 16, 16b and 16c pin the bound (TASK-175).
+- **probes:** the safe-worktree-clean P33b/P38/P38b helpers move into the apply-hold probe, and worker-sandbox 7c requires a real control report (TASK-173, #431).
+
 ## 0.3.226 - 2026-11-25
 
 ### Features
