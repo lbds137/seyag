@@ -1,7 +1,8 @@
 #!/bin/bash
 # Multi-repo sweep, --apply-hold backup/removal, --apply-eligible (P1-P48) and pr-merged (PM1-PM10,
 # L7) checks for bin/safe-worktree-clean. The single-repo checks live in tests/safe-worktree-clean.probe.sh.
-# The fixture and helpers come from tests/safe-worktree-clean-fixture.sh.
+# The fixture and shared helpers come from tests/safe-worktree-clean-fixture.sh; the P33b/P38/P38b
+# helpers are defined below.
 # Usage: tests/safe-worktree-clean-apply-hold.probe.sh   (from anywhere)
 
 REPO_TESTS="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

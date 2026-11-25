@@ -497,7 +497,8 @@ done <<<"$addrs"
 # "No route to host" with the knob and its absence without it proves the route was applied. The control
 # must still be connect.py's own report line ('OPEN', 'refused' or 'error <text>'), so an empty or
 # crashed control fails; its error text is host-dependent ("error timed out" on the Deck; unobserved
-# on CI, which shows only probe summaries) and not asserted. The call's wall time includes sandbox startup, so it is reported, not asserted.
+# on CI, which shows only probe summaries) and not asserted. The call's wall time includes sandbox
+# startup, so it is reported, not asserted.
 fake "python3 $T/connect.py 80 192.0.2.1; exit 0"
 t0=$(date +%s%N)
 out=$(cd "$W" && SYG_WORKER_SANDBOX_WALL=192.0.2.0/24 SYG_WORKER_SANDBOX_RO_BINDS=$T/connect.py SYG_WORKER_SANDBOX_CLAUDE=$T/fake-claude "$B/worker-sandbox" --settings "$T/overlay.json" 2>"$T/err"); rc=$?
