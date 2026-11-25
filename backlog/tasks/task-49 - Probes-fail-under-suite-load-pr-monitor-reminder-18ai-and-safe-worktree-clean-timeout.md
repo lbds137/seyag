@@ -38,4 +38,5 @@ Related: TASK-30 profiled tests/safe-worktree-clean.probe.sh as the shellcheck m
 - bfix (PR #409): only safe-worktree-clean failed (exit 124). Alone it passed: 332 ok, 0 fail, real 5m16s.
 - bscope (TASK-74): three probes failed: safe-worktree-clean (exit 124), `plugins/seyag/hooks/launch-record.probe.sh` case "1. unset dir", and `tests/worker-sandbox.probe.sh` "wall knob live" (rc=0, ms=2231, out=`192.0.2.1 error [Errno 113] No route to host`, ctl=`timed out`). Run alone in the same tree, launch-record passed (rc 0, 13 ok) and worker-sandbox passed (rc 0).
 Both new failures look timing-dependent; that is an inference, not yet runtime-confirmed. launch-record case 1 and worker-sandbox's live wall check join this task's list of probes that fail only under load.
+- bscope after the rebase onto f08ffa0 (PR #411): `plugins/seyag/hooks/dispatch-posture-gate.probe.sh` case "env unset + non-JSON stdin exits 0" exited 141 under `-j 4`, and passed alone (rc 0). Exit 141 is SIGPIPE: inferred, not traced. Fix shape: drain or ignore SIGPIPE in the probe's stdin writer, or have the hook consume stdin before an early exit. Not a retry.
 <!-- SECTION:NOTES:END -->
