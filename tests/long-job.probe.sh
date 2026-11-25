@@ -44,7 +44,9 @@ while IFS='|' read -r args want_msg; do
 done <<'EOF'
 |needs a subcommand
 run|needs a job NAME
-run bad/name -- true|NAME may hold only letters
+run bad/name -- true|NAME must start with a letter or digit and hold only letters
+run -- make|NAME must start with a letter or digit and hold only letters, digits, '.', '_' and '-': '--'
+status ..|NAME must start with a letter or digit and hold only letters, digits, '.', '_' and '-': '..'
 run x|run needs -- before the command
 run x -- |run needs a command after --
 run x --bogus -- true|unknown run option --bogus
@@ -116,28 +118,50 @@ out=$(timeout 5 env -u SYG_LONG_JOB_PARENT_CMD PATH="$tmp/stub:$PATH" bash -c -l
 [ "$rc" = 2 ] && grep -q "long-job: refusing:" <<<"$out" && ! grep -q "TAIL" <<<"$out" && [ ! -e "$XDG_STATE_HOME/long-job/chain-real-l.cmd" ] \
   && ok "real bash -c -l with && tail skips -l in /proc/PPID/cmdline, exits 2 and skips TAIL" || bad "run chain-real-l (rc $rc: $out)"
 
-# --- new cases (a)-(g)
-# (a) SYG_LONG_JOB_STATE_DIR=$tmp/sd puts NAME.cmd and NAME.owner under $tmp/sd, and status NAME finds it there.
+# --- long-job state dir, unit prefix, recorded unit, config, owner.sh
+# SYG_LONG_JOB_STATE_DIR=$tmp/sd puts NAME.cmd and NAME.owner under $tmp/sd, and status NAME finds it there.
 timeout 5 env SYG_LONG_JOB_STATE_DIR="$tmp/sd" PATH="$tmp/stub:$PATH" "$LJ" run sd-job --min-mb 0 -- true >/dev/null 2>&1; rc=$?
 out=$(timeout 5 env SYG_LONG_JOB_STATE_DIR="$tmp/sd" "$LJ" status sd-job 2>&1); rc2=$?
 [ "$rc" = 0 ] && [ -s "$tmp/sd/sd-job.cmd" ] && [ -s "$tmp/sd/sd-job.owner" ] \
   && [ "$rc2" = 0 ] && [[ $out == "sd-job:"* ]] \
-  && ok "(a) SYG_LONG_JOB_STATE_DIR puts NAME.cmd and NAME.owner under custom dir and status finds it" \
-  || bad "(a) SYG_LONG_JOB_STATE_DIR (rc=$rc/$rc2, out=$out)"
+  && ok "SYG_LONG_JOB_STATE_DIR puts NAME.cmd and NAME.owner under custom dir and status finds it" \
+  || bad "SYG_LONG_JOB_STATE_DIR (rc=$rc/$rc2, out=$out)"
 
-# (b) SYG_LONG_JOB_UNIT_PREFIX=pfx: stub systemd-run records --unit=pfx-NAME.service and stub systemctl calls name pfx-NAME.service.
+# Existing SYG_LONG_JOB_STATE_DIR keeps its mode (755); a new state dir under it is created 700; files inside are 600.
+mkdir -p "$tmp/sd-keep"
+chmod 755 "$tmp/sd-keep"
+timeout 5 env SYG_LONG_JOB_STATE_DIR="$tmp/sd-keep" PATH="$tmp/stub:$PATH" "$LJ" run keep-job --min-mb 0 -- true >/dev/null 2>&1; rc=$?
+timeout 5 env SYG_LONG_JOB_STATE_DIR="$tmp/sd-keep/new-sub" PATH="$tmp/stub:$PATH" "$LJ" run sub-job --min-mb 0 -- true >/dev/null 2>&1; rc2=$?
+modes=$(stat -c %a "$tmp/sd-keep" "$tmp/sd-keep/keep-job.cmd" "$tmp/sd-keep/new-sub" "$tmp/sd-keep/new-sub/sub-job.cmd" 2>/dev/null | tr '\n' ' ')
+[ "$rc" = 0 ] && [ "$rc2" = 0 ] && [ "$modes" = "755 600 700 600 " ] \
+  && ok "existing SYG_LONG_JOB_STATE_DIR keeps 755 while a new dir under it is created 700 (files 600)" \
+  || bad "SYG_LONG_JOB_STATE_DIR chmod ownership (rc=$rc/$rc2, modes=[$modes])"
+
+# Per-NAME start lock: holding flock on $sd/x.lock makes run x exit 2 with the lock message and write no NAME.cmd.
+sd="$tmp/sd-lock"
+mkdir -p "$sd"
+( flock 9; sleep 3 ) 9>"$sd/x.lock" &
+lpid=$!
+for _ in $(seq 20); do flock -n "$sd/x.lock" true 2>/dev/null || break; sleep 0.05; done
+out=$(timeout 5 env SYG_LONG_JOB_STATE_DIR="$sd" PATH="$tmp/stub:$PATH" "$LJ" run x --min-mb 0 -- true 2>&1); rc=$?
+wait "$lpid" 2>/dev/null
+[ "$rc" = 2 ] && grep -qF "long-job: x is being started by another long-job run" <<<"$out" && [ ! -e "$sd/x.cmd" ] \
+  && ok "run exits 2 when NAME.lock is held by another start and writes no NAME.cmd" \
+  || bad "same-NAME start lock (rc=$rc: $out)"
+
+# SYG_LONG_JOB_UNIT_PREFIX=pfx: stub systemd-run records --unit=pfx-NAME.service and stub systemctl calls name pfx-NAME.service.
 rm -f "$tmp/argv" "$tmp/systemctl-argv"
 out=$(timeout 5 env SYG_LONG_JOB_UNIT_PREFIX=pfx PATH="$tmp/stub-rec:$PATH" "$LJ" run pfx-job --min-mb 0 -- true 2>&1); rc=$?
 [ "$rc" = 0 ] && grep -qxF -- "--unit=pfx-pfx-job.service" "$tmp/argv" \
   && grep -qxF -- "pfx-pfx-job.service" "$tmp/systemctl-argv" \
-  && ok "(b) SYG_LONG_JOB_UNIT_PREFIX=pfx passes --unit=pfx-NAME.service to systemd-run and pfx-NAME.service to systemctl" \
-  || bad "(b) SYG_LONG_JOB_UNIT_PREFIX=pfx (rc=$rc, argv=$(tr '\n' ' ' <"$tmp/argv" 2>/dev/null), sysctl=$(tr '\n' ' ' <"$tmp/systemctl-argv" 2>/dev/null))"
+  && ok "SYG_LONG_JOB_UNIT_PREFIX=pfx passes --unit=pfx-NAME.service to systemd-run and pfx-NAME.service to systemctl" \
+  || bad "SYG_LONG_JOB_UNIT_PREFIX=pfx (rc=$rc, argv=$(tr '\n' ' ' <"$tmp/argv" 2>/dev/null), sysctl=$(tr '\n' ' ' <"$tmp/systemctl-argv" 2>/dev/null))"
 
-# (c) SYG_LONG_JOB_UNIT_PREFIX='a b' exits 2 naming the knob; leading '-' exits 2 saying it must start with a letter or digit.
+# SYG_LONG_JOB_UNIT_PREFIX='a b' exits 2 naming the knob; leading '-' exits 2 saying it must start with a letter or digit.
 out=$(timeout 5 env SYG_LONG_JOB_UNIT_PREFIX='a b' PATH="$tmp/stub:$PATH" "$LJ" run bad-pfx --min-mb 0 -- true 2>&1); rc=$?
 [ "$rc" = 2 ] && grep -q "SYG_LONG_JOB_UNIT_PREFIX" <<<"$out" \
-  && ok "(c) SYG_LONG_JOB_UNIT_PREFIX='a b' exits 2 naming the knob" \
-  || bad "(c) SYG_LONG_JOB_UNIT_PREFIX='a b' (rc=$rc: $out)"
+  && ok "SYG_LONG_JOB_UNIT_PREFIX='a b' exits 2 naming the knob" \
+  || bad "SYG_LONG_JOB_UNIT_PREFIX='a b' (rc=$rc: $out)"
 out=$(timeout 5 env SYG_LONG_JOB_UNIT_PREFIX=-x "$LJ" status x 2>&1); rc=$?
 [ "$rc" = 2 ] && grep -q "SYG_LONG_JOB_UNIT_PREFIX must start with a letter or digit" <<<"$out" \
   && ok "SYG_LONG_JOB_UNIT_PREFIX=-x exits 2 saying the prefix must start with a letter or digit" \
@@ -180,13 +204,13 @@ out=$(timeout 5 env SYG_LONG_JOB_UNIT_PREFIX=envp XDG_CONFIG_HOME="$tmp/cfg-lj" 
   && ok "env SYG_LONG_JOB_UNIT_PREFIX=envp overrides config.toml syg_long_job_unit_prefix" \
   || bad "env overrides config.toml unit prefix (rc=$rc, argv=$(tr '\n' ' ' <"$tmp/argv" 2>/dev/null))"
 
-# (d) && refusal through SYG_LONG_JOB_PARENT_CMD with SYG_LONG_JOB_CMD='jobrun run' alias.
+# && refusal through SYG_LONG_JOB_PARENT_CMD with SYG_LONG_JOB_CMD='jobrun run' alias.
 err=$(timeout 5 env SYG_LONG_JOB_CMD='jobrun run' SYG_LONG_JOB_PARENT_CMD='jobrun run x --min-mb 0 -- true && echo after' PATH="$tmp/stub:$PATH" "$LJ" run x --min-mb 0 -- true 2>&1 >/dev/null); rc=$?
 [ "$rc" = 2 ] && grep -q "^jobrun: refusing:" <<<"$err" && [ ! -e "$XDG_STATE_HOME/long-job/x.cmd" ] \
-  && ok "(d) SYG_LONG_JOB_CMD='jobrun run' refuses && tail via SYG_LONG_JOB_PARENT_CMD with exit 2 and nothing recorded" \
-  || bad "(d) alias && refusal (rc=$rc: $err)"
+  && ok "SYG_LONG_JOB_CMD='jobrun run' refuses && tail via SYG_LONG_JOB_PARENT_CMD with exit 2 and nothing recorded" \
+  || bad "alias && refusal (rc=$rc: $err)"
 
-# (e) Old parent-cmd variable set to an && chain, with SYG_LONG_JOB_PARENT_CMD unset and run from a script (not bash -c), is ignored.
+# Old parent-cmd variable set to an && chain, with SYG_LONG_JOB_PARENT_CMD unset and run from a script (not bash -c), is ignored.
 old_seam_var=OLD_JOB_PARENT_CMD
 cat >"$tmp/run-from-script.sh" <<EOF
 #!/usr/bin/env bash
@@ -195,10 +219,10 @@ EOF
 chmod +x "$tmp/run-from-script.sh"
 out=$(timeout 5 env -u SYG_LONG_JOB_PARENT_CMD "${old_seam_var}=long-job run old-seam --min-mb 0 -- true && echo after" PATH="$tmp/stub:$PATH" bash "$tmp/run-from-script.sh" 2>&1); rc=$?
 [ "$rc" = 0 ] && [ -s "$XDG_STATE_HOME/long-job/old-seam.cmd" ] \
-  && ok "(e) old parent-cmd variable is ignored when SYG_LONG_JOB_PARENT_CMD is unset and run from a script" \
-  || bad "(e) old parent-cmd variable not ignored (rc=$rc: $out)"
+  && ok "old parent-cmd variable is ignored when SYG_LONG_JOB_PARENT_CMD is unset and run from a script" \
+  || bad "old parent-cmd variable not ignored (rc=$rc: $out)"
 
-# (f) --wait-mem path: stub systemd-run records gate args carrying $REPO/plugins/seyag/bin/mem-gate,
+# --wait-mem path: stub systemd-run records gate args carrying $REPO/plugins/seyag/bin/mem-gate,
 # and mem-gate --wait 1 --timeout 1 --interval 1 --owner "" against a high fixture exits 0.
 rm -f "$tmp/argv"
 out=$(timeout 5 env PATH="$tmp/stub-rec:$PATH" "$LJ" run wm-job --min-mb 512 --wait-mem 10 -- true 2>&1); rc=$?
@@ -207,16 +231,16 @@ printf 'MemTotal: 15000000 kB\nMemAvailable: 5242880 kB\nSwapTotal: 2097152 kB\n
 timeout 5 env SYG_MEM_GATE_MEMINFO="$tmp/meminfo-high" "$MG" --wait 1 --timeout 1 --interval 1 --owner "" >/dev/null 2>&1; mg_rc=$?
 [ "$rc" = 0 ] && grep -qxF -- "--gate" "$tmp/argv" && [ -n "$rec_mg" ] \
   && [ "$(readlink -f "$rec_mg")" = "$(readlink -f "$MG")" ] && [ "$mg_rc" = 0 ] \
-  && ok "(f) --wait-mem passes $MG in gate args and mem-gate --wait with empty --owner exits 0" \
-  || bad "(f) --wait-mem / mem-gate empty owner (rc=$rc, mg_rc=$mg_rc, rec_mg=$rec_mg, argv=$(tr '\n' ' ' <"$tmp/argv" 2>/dev/null))"
+  && ok "--wait-mem passes $MG in gate args and mem-gate --wait with empty --owner exits 0" \
+  || bad "--wait-mem / mem-gate empty owner (rc=$rc, mg_rc=$mg_rc, rec_mg=$rec_mg, argv=$(tr '\n' ' ' <"$tmp/argv" 2>/dev/null))"
 
-# (g) Copied bin/long-job without ../lib/owner.sh exits 2 with 'cannot load'.
+# Copied bin/long-job without ../lib/owner.sh exits 2 with 'cannot load'.
 mkdir -p "$tmp/solo/bin"
 cp "$LJ" "$tmp/solo/bin/long-job"
 out=$(timeout 5 "$tmp/solo/bin/long-job" status 2>&1); rc=$?
 [ "$rc" = 2 ] && grep -q "cannot load" <<<"$out" \
-  && ok "(g) long-job without lib/owner.sh exits 2 with 'cannot load'" \
-  || bad "(g) solo without owner.sh (rc=$rc: $out)"
+  && ok "long-job without lib/owner.sh exits 2 with 'cannot load'" \
+  || bad "solo without owner.sh (rc=$rc: $out)"
 
 # Inhibitor fallback: when systemd-inhibit exits 1, run logs and prints the unavailable note and omits systemd-inhibit from systemd-run argv.
 mkdir -p "$tmp/stub-noinh"

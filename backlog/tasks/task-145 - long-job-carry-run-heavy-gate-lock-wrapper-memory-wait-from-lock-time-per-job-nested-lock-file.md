@@ -17,7 +17,7 @@ ordinal: 144000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Upstream machine runner gained run --heavy (deck-platform e3bb37c, local at filing; port from the origin sha once sent): the unit wrapper runs under gate-lock, then a memory wait (default 900 s from taking the lock), then CMD with SYG_GATE_LOCK_FILE/GATE_LOCK_FILE set to a per-job lock file so a nested gate-lock does not deadlock on the job's own lock; the caller's lock-file variables are forwarded into the unit. Trigger: TASK-141 merged AND the upstream sha is on origin. Probe cases: lock held during CMD, nested gate-lock inside CMD does not deadlock, the memory wait counts from lock time.
+Upstream machine runner gained run --heavy (upstream runner repo commit e3bb37c, local at filing; port from the origin sha once sent): the unit wrapper runs under gate-lock, then a memory wait (default 900 s from taking the lock), then CMD with SYG_GATE_LOCK_FILE/GATE_LOCK_FILE set to a per-job lock file so a nested gate-lock does not deadlock on the job's own lock; the caller's lock-file variables are forwarded into the unit. Trigger: TASK-141 merged AND the upstream sha is on origin. Probe cases: lock held during CMD, nested gate-lock inside CMD does not deadlock, the memory wait counts from lock time.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Implementation Notes
