@@ -28,4 +28,9 @@ From the round-3 review (2026-11-24, Sonnet). The medium finding (shallow clone)
 8. When `--base REF` is reduced to its fork point, the summary names only the fork sha. Consider `vs <sha> (fork point of REF)`; case 34 pins the current line.
 9. delegation SKILL.md line 153: optionally note that any `--base` ref is reduced to its fork point.
 10. Probe gaps: no case for REF == HEAD, and case 35 does not assert that stdout is empty.
+
+From the round-4 review (2026-11-24, Sonnet, PASS):
+11. In a shallow repo, a truly unrelated REF also falls back to diffing against REF as given, so it produces a whole-tree out-of-scope list instead of exit 2. The two cases cannot be told apart there. Reword the warning to "no merge-base found (shallow clone, or unrelated history)" while keeping the `shallow clone: no merge-base` prefix that case 36 matches.
+12. The "is ahead of HEAD" stderr note is not described in `--help` or the README row. Add one clause to each.
+13. Case 36 should also assert that stderr lacks `shares no history`. Add a detached-HEAD or `--base HEAD` case asserting there is no ahead note (this overlaps item 10).
 <!-- SECTION:DESCRIPTION:END -->
