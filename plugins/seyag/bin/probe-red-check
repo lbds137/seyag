@@ -11,19 +11,21 @@
 # new probe; resolved as given, then against the repo root. Base defaults to
 # origin/main and must resolve ([base-ref] in single mode; --base REF in --both mode).
 #
-# --expect TEXT requires at least one ^FAIL: line from the base run to contain TEXT
+# --expect TEXT requires at least one FAIL line from the base run to contain TEXT
 # as a literal substring (non-empty, single-line); ok: and other lines do not count.
 # In --both mode, --expect applies to every named probe, and "here" runs in the
 # current working tree (not the committed HEAD) so an uncommitted fix counts.
 #
+# A FAIL line is one starting "FAIL:" or "FAIL" plus two spaces, at column 0.
+#
 # Exit-code inversion, the pr-ci-wait precedent (plugins/seyag/bin/pr-ci-wait exits
 # 0 only on its good sentinel):
 #   Single mode:
-#     0  RED CONFIRMED (failed at base with >= 1 ^FAIL: line, and matching --expect)
+#     0  RED CONFIRMED (failed at base with >= 1 FAIL line, and matching --expect)
 #     1  NOT RED (passed at base, rc 0)
 #     2  INCONCLUSIVE (died before any assertion: an error from a name only the fix
 #        adds is not the behavior's red), or usage/refusal
-#     3  WRONG REASON (failed at base with >= 1 ^FAIL: line, none containing --expect TEXT)
+#     3  WRONG REASON (failed at base with >= 1 FAIL line, none containing --expect TEXT)
 #   --both mode:
 #     0  every probe is base RED and here PASS
 #     1  any probe has a definite failure (base NOT RED, base WRONG REASON, or here FAIL)
@@ -34,10 +36,11 @@
 # repo-relative path inside it, and runs it there — the probe resolves sibling code
 # via its own dirname BASH_SOURCE, i.e. the base's code. Limitations: only the probe
 # FILE is copied (a probe needing an uncommitted sibling cannot be red-checked this
-# way), and a FAIL: line from the probe's own fixture build reads as red like an
+# way), and a FAIL line from the probe's own fixture build reads as red like an
 # assertion failure — every FAIL line is echoed, so judge which kind ran.
 
 set -uo pipefail
+FAIL_RE='^FAIL(:|  )'   # a probe's failing line: "FAIL: x" or "FAIL  x", column 0
 usage() { awk 'NR > 1 { if (/^#/) { sub(/^# ?/, ""); print } else exit }' "$0"; }
 
 BOTH_MODE=0
@@ -190,11 +193,11 @@ trap 'exit 143' TERM HUP
 
 classify_base() {
   local rc=$1 out=$2 line matched=0
-  FAIL_LINES=$(grep -c '^FAIL:' <<<"$out" || true)
+  FAIL_LINES=$(grep -c -E "$FAIL_RE" <<<"$out" || true)
   if [ "$rc" -ne 0 ] && [ "$FAIL_LINES" -ge 1 ]; then
     if [ "$HAS_EXPECT" -eq 1 ]; then
       while IFS= read -r line; do
-        if [[ $line == FAIL:* ]] && [[ $line == *"$EXPECT_TEXT"* ]]; then
+        if [[ $line =~ $FAIL_RE ]] && [[ $line == *"$EXPECT_TEXT"* ]]; then
           matched=1
           break
         fi
@@ -241,7 +244,7 @@ if [ "$BOTH_MODE" -eq 0 ]; then
   case "$BASE_VERDICT" in
     "RED")
       echo "RED: $REL fails at $BASE (rc $BASE_RC, $FAIL_LINES FAIL lines)"
-      grep '^FAIL:' <<<"$BASE_OUT"
+      grep -E "$FAIL_RE" <<<"$BASE_OUT"
       if [ "$HAS_EXPECT" -eq 1 ]; then
         echo "probe-red-check: red confirmed (expected text found)"
       else
@@ -252,7 +255,7 @@ if [ "$BOTH_MODE" -eq 0 ]; then
     "WRONG REASON")
       echo "WRONG REASON: $REL fails at $BASE (rc $BASE_RC, $FAIL_LINES FAIL lines) but no FAIL line contains the expected text"
       echo "expected: $EXPECT_TEXT"
-      grep '^FAIL:' <<<"$BASE_OUT"
+      grep -E "$FAIL_RE" <<<"$BASE_OUT"
       echo "probe-red-check: red for the wrong reason"
       exit "$BASE_EXIT"
       ;;
@@ -299,7 +302,7 @@ for i in "${!PROBES[@]}"; do
 
   case "$BASE_VERDICT" in
     "WRONG REASON")
-      grep '^FAIL:' <<<"$BASE_OUT" | sed 's/^/  /'
+      grep -E "$FAIL_RE" <<<"$BASE_OUT" | sed 's/^/  /'
       ;;
     "INCONCLUSIVE")
       if [ -n "$BASE_OUT" ]; then
@@ -309,8 +312,8 @@ for i in "${!PROBES[@]}"; do
   esac
 
   if [ "$HERE_RC" -ne 0 ]; then
-    if grep -q '^FAIL:' <<<"$HERE_OUT"; then
-      grep '^FAIL:' <<<"$HERE_OUT" | sed 's/^/  /'
+    if grep -q -E "$FAIL_RE" <<<"$HERE_OUT"; then
+      grep -E "$FAIL_RE" <<<"$HERE_OUT" | sed 's/^/  /'
     elif [ -n "$HERE_OUT" ]; then
       tail -n 15 <<<"$HERE_OUT" | sed 's/^/  /'
     fi
