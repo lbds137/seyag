@@ -215,6 +215,7 @@ SYG_ROUTE_MARKER_FIELD	user	routing	unset	YAML frontmatter field name in SYG_ROU
 SYG_ROUTE_MARKER_FILE	user	routing	unset	Path template ({project} expanded) checked with SYG_ROUTE_MARKER_FIELD to require an approved route.	path
 SYG_ROUTE_REQUIRED	user	routing	unset	Boolean (1/true/yes/on vs 0/false/no/off) requiring an approved model route in route-check.	-
 SYG_ROUTE_SHOW_CMD	user	session	unset	Command (bash -c, the name as its argument) claude-role --set route=NAME runs to check a route preset exists; nonzero refuses the route. Unset means only the name shape is checked.	-
+SYG_SCOPE_DRIFT_MANIFESTS	user	misc	unset	Extra whitespace-separated basename patterns scope-drift treats as dependency manifests, added to its built-in list.	-
 SYG_SCRATCH_RM_EXEMPT	user	guards	1	Set to 0 to make recursive-rm-guard block deletes inside the session scratch dir too (the job tmp exemption is unaffected).	-
 SYG_SCRATCH_ROOT	user	guards	prose:/tmp/seyag-scratch-UID	Parent of the per-session scratch dirs scratch-dir makes and recursive-rm-guard exempts.	path
 SYG_SECURITY_SWEEP	user	session	unset	Set to 1 to run security-sweep --session-line --cap 2 at SessionStart (startup and clear).	-

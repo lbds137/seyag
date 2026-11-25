@@ -284,6 +284,7 @@ An optional TOML file fills in knobs the environment left unset: user `${XDG_CON
 | `SYG_RESOURCE_CPU_PSI_MAX` | `50` | CPU pressure (some avg60) at or above which SYG_RESOURCE_PROFILE=auto caps jobs at 1. | `bin/resource-profile` | user only |
 | `SYG_RESOURCE_JOB_MB` | `1024` | MB of MemAvailable budgeted per parallel job under SYG_RESOURCE_PROFILE=auto. | `bin/resource-profile` | user only |
 | `SYG_RESOURCE_PROFILE` | unset | Host resource profile for resource-profile and tests/run-probes.sh: low (job ceiling 1), normal (no ceiling) or auto (ceiling from MemAvailable per SYG_RESOURCE_JOB_MB, 1 while CPU pressure is high); unset: no ceiling. | `bin/resource-profile` | user only |
+| `SYG_SCOPE_DRIFT_MANIFESTS` | unset | Extra whitespace-separated basename patterns scope-drift treats as dependency manifests, added to its built-in list. | `bin/scope-drift` | user + project |
 | `SYG_SUITE_BUDGET_S` | unset | Per-suite wall-time budget in seconds for suite-time run; over it, suite-time prints a pointer to the testing-discipline skill. --budget overrides it. | `bin/suite-time` | user + project |
 | `SYG_SUITE_TIME_LOG` | the seyag state dir's suite-time.tsv (XDG_STATE_HOME, else ~/.local/state) | TSV log suite-time run appends to and suite-time log reads. | `bin/suite-time` | user only |
 | `SYG_SUITE_TIME_TOLERANCE` | `20` | Percent over the median of a suite's last 5 clean runs at which suite-time run reports a regression. | `bin/suite-time` | user + project |
