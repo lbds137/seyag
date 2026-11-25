@@ -7,7 +7,10 @@
 # exit 2 `no base`), dependency manifests and lockfiles (in-scope manifest reporting, `-`/`+`
 # lines in diff order, 20-line cap with `... K more`, `SYG_SCOPE_DRIFT_MANIFESTS` extension and
 # config-file loading, untracked manifests), usage/error exits (exit 2), and read-only tree/index
-# invariance.
+# invariance. Also: bash >= 4.4 guard (static check), unborn HEAD, fork-point label, shallow
+# warning wording, failed ls-files/numstat/-U0 reads (fake git on PATH), index-deleted and tracked
+# nested manifests, the extended manifest and lockfile list, case-insensitive `## files` heading,
+# leading `./` entries, the user config file, and the default-base hint.
 # Usage: tests/scope-drift.probe.sh   (from anywhere)
 
 set -uo pipefail
@@ -639,18 +642,19 @@ out34=$(out)
 git -C "$wt" checkout -q main
 reset_wt
 git -C "$wt" branch -q -D side
-if [ "$rc34" = 0 ] && [ "$out34" = "$want_clean1" ] && [ "$main_short" != "$short" ]; then
-  ok "case 34: moved --base main resolves to fork point ($short), not main tip ($main_short)"
+want34="scope-drift: clean (1 changed paths, all in scope; no manifest changes) vs $short (fork point of main)"
+if [ "$rc34" = 0 ] && [ "$out34" = "$want34" ] && [ "$main_short" != "$short" ]; then
+  ok "case 34: moved --base main resolves to fork point ($short, labelled), not main tip ($main_short)"
 else
-  bad "case 34: rc=$rc34 out=$out34 want=$want_clean1 main_short=$main_short"
+  bad "case 34: rc=$rc34 out=$out34 want=$want34 main_short=$main_short"
 fi
 
 # 35. Unrelated history: --base names an orphan commit with no shared history with HEAD -> exit 2,
-# stderr contains 'shares no history'.
+# stderr contains 'shares no history', and stdout is empty.
 empty_tree=$(git -C "$wt" hash-object -w -t tree /dev/null)
 orphan=$(git -C "$wt" commit-tree "$empty_tree" -m "orphan")
 run 5 "$SD" --spec "$tmp/spec1.md" --base "$orphan" --worktree "$wt"
-if [ "$rc" = 2 ] && grep -qF "scope-drift: base '$orphan' shares no history with HEAD" err; then
+if [ "$rc" = 2 ] && [ ! -s out ] && grep -qF "scope-drift: base '$orphan' shares no history with HEAD" err; then
   ok "case 35: unrelated history --base orphan commit exits 2 with 'shares no history'"
 else
   bad "case 35: rc=$rc out=$(out) err=$(err)"
@@ -685,7 +689,9 @@ else
   if [ "$rc36" = 1 ] \
     && grep -qxF "scope-drift: out of scope (1):" <<<"$out36" \
     && grep -qxF "  lib/x/y.sh" <<<"$out36" \
-    && grep -qF "shallow clone: no merge-base" <<<"$err36"; then
+    && grep -qF "shallow clone: no merge-base" <<<"$err36" \
+    && grep -qF "(shallow clone, or unrelated history)" <<<"$err36" \
+    && ! grep -qF "shares no history" <<<"$err36"; then
     ok "case 36: shallow clone with no merge-base falls back to --base ref as given with warning"
   else
     bad "case 36: rc=$rc36 out=$out36 err=$err36"
@@ -704,10 +710,11 @@ out37=$(out)
 err37=$(err)
 reset_wt
 git -C "$wt" branch -q -D ahead
-if [ "$rc37" = 0 ] && [ "$out37" = "$want_clean0" ] && grep -qF "is ahead of HEAD" <<<"$err37"; then
-  ok "case 37: --base ahead of HEAD exits 0 and warns on stderr"
+want37="scope-drift: clean (0 changed paths, all in scope; no manifest changes) vs $short (fork point of ahead)"
+if [ "$rc37" = 0 ] && [ "$out37" = "$want37" ] && grep -qF "is ahead of HEAD" <<<"$err37"; then
+  ok "case 37: --base ahead of HEAD exits 0 with fork-point label and warns on stderr"
 else
-  bad "case 37: rc=$rc37 out=$out37 err=$err37"
+  bad "case 37: rc=$rc37 out=$out37 want=$want37 err=$err37"
 fi
 
 # 38. Project config .claude/seyag.toml loads syg_scope_drift_manifests when env is unset;
@@ -728,6 +735,250 @@ else
   bad "case 38b: rc=$rc out=$(out) err=$(err)"
 fi
 reset_wt
+
+# 39. Bash floor (STATIC check: the guard text is not run under an old bash). The
+# 'needs bash >= 4.4' guard must sit before the first mapfile line.
+guard_ln=$(awk 'index($0, "needs bash >= 4.4") { print NR; exit }' "$SD")
+mapfile_ln=$(awk '/^mapfile/ { print NR; exit }' "$SD")
+if [ -n "$guard_ln" ] && [ -n "$mapfile_ln" ] && [ "$guard_ln" -lt "$mapfile_ln" ]; then
+  ok "case 39: bash >= 4.4 guard (line $guard_ln) precedes the first mapfile (line $mapfile_ln) [static check]"
+else
+  bad "case 39: guard_ln=$guard_ln mapfile_ln=$mapfile_ln"
+fi
+
+# 40. Unborn HEAD: a repo with no commits exits 2 'HEAD has no commits yet', with --base HEAD and
+# without --base; stdout empty.
+git init -q -b main "$tmp/unborn"
+echo "x" > "$tmp/unborn/untracked.txt"
+run 5 "$SD" --spec "$tmp/spec1.md" --base HEAD --worktree "$tmp/unborn"
+rc40a=$rc
+err40a=$(err)
+out40a=$(out)
+run 5 "$SD" --spec "$tmp/spec1.md" --worktree "$tmp/unborn"
+rc40b=$rc
+err40b=$(err)
+out40b=$(out)
+if [ "$rc40a" = 2 ] && [ "$rc40b" = 2 ] \
+  && grep -qF "HEAD has no commits yet" <<<"$err40a" && grep -qF "HEAD has no commits yet" <<<"$err40b" \
+  && [ -z "$out40a" ] && [ -z "$out40b" ]; then
+  ok "case 40: unborn HEAD exits 2 with 'HEAD has no commits yet' with and without --base; stdout empty"
+else
+  bad "case 40: a=($rc40a/$err40a) b=($rc40b/$err40b) out=($out40a|$out40b)"
+fi
+
+# 41. --base HEAD and --base $base on a clean worktree (HEAD == $base): exit 0, exact want_clean0
+# (no fork-point label because the base is not reduced), stderr empty (no ahead note).
+run 5 "$SD" --spec "$tmp/spec1.md" --base HEAD --worktree "$wt"
+rc41a=$rc
+out41a=$(out)
+err41a=$(err)
+run 5 "$SD" --spec "$tmp/spec1.md" --base "$base" --worktree "$wt"
+rc41b=$rc
+out41b=$(out)
+err41b=$(err)
+if [ "$rc41a" = 0 ] && [ "$out41a" = "$want_clean0" ] && [ -z "$err41a" ] \
+  && [ "$rc41b" = 0 ] && [ "$out41b" = "$want_clean0" ] && [ -z "$err41b" ]; then
+  ok "case 41: --base HEAD and --base \$base on a clean tree exit 0 with plain label and empty stderr"
+else
+  bad "case 41: a=($rc41a/$out41a/$err41a) b=($rc41b/$out41b/$err41b)"
+fi
+
+# Fake git for cases 42-43: a wrapper on PATH that exits 128 for any call whose argv contains the
+# exact word in $FAKE_GIT_FAIL, and execs the real git (path captured before PATH is changed).
+REAL_GIT=$(command -v git)
+mkdir -p "$tmp/gitbin"
+cat > "$tmp/gitbin/git" <<EOF
+#!/bin/bash
+for a in "\$@"; do
+  if [ "\$a" = "\${FAKE_GIT_FAIL:-__none__}" ]; then
+    echo "fake git: forced failure for \$a" >&2
+    exit 128
+  fi
+done
+exec "$REAL_GIT" "\$@"
+EOF
+chmod +x "$tmp/gitbin/git"
+
+# 42. Only ls-files fails (fake git, FAKE_GIT_FAIL=ls-files) -> exit 2 naming 'git ls-files failed'.
+run 5 env PATH="$tmp/gitbin:$PATH" FAKE_GIT_FAIL=ls-files "$SD" --spec "$tmp/spec1.md" --base "$base" --worktree "$wt"
+rc42=$rc
+if [ "$rc42" = 2 ] && grep -qF "git ls-files failed" err; then
+  ok "case 42: fake git failing only ls-files exits 2 with 'git ls-files failed'"
+else
+  bad "case 42: rc=$rc42 out=$(out) err=$(err)"
+fi
+
+# 43. A listed tracked manifest with only the --numstat read failing -> '  package.json (+? -?)' with
+# its -/+ lines still shown; only the -U0 read failing -> '    (git diff failed; lines not shown)'.
+printf '{\n  "name": "demo2",\n  "dependencies": {\n    "x": "1.0.0"\n  }\n}\n' > wt/package.json
+run 5 env PATH="$tmp/gitbin:$PATH" FAKE_GIT_FAIL=--numstat "$SD" --spec "$tmp/spec13.md" --base "$base" --worktree "$wt"
+rc43a=$rc
+out43a=$(out)
+run 5 env PATH="$tmp/gitbin:$PATH" FAKE_GIT_FAIL=-U0 "$SD" --spec "$tmp/spec13.md" --base "$base" --worktree "$wt"
+rc43b=$rc
+out43b=$(out)
+if [ "$rc43a" = 1 ] && grep -qxF "  package.json (+? -?)" <<<"$out43a" \
+  && grep -qE '^    [-+] ' <<<"$out43a" \
+  && [ "$rc43b" = 1 ] && grep -qxF "  package.json (+1 -1)" <<<"$out43b" \
+  && grep -qxF "    (git diff failed; lines not shown)" <<<"$out43b" \
+  && ! grep -qE '^    [-+] ' <<<"$out43b"; then
+  ok "case 43: failed --numstat prints (+? -?) with lines; failed -U0 prints '(git diff failed; lines not shown)'"
+else
+  bad "case 43: a=($rc43a) out=$out43a | b=($rc43b) out=$out43b"
+fi
+reset_wt
+
+# 44. TRACKED nested manifest sub/dir/package.json, committed at base44 then modified in the tree;
+# spec27 ('- sub/') -> exit 1 with its (+1 -1) header and -/+ lines via the :(top,literal) pathspec.
+mkdir -p "$wt/sub/dir"
+printf '{\n  "name": "nested1"\n}\n' > "$wt/sub/dir/package.json"
+git -C "$wt" add sub/dir/package.json
+git -C "$wt" commit -qm "add tracked nested manifest"
+base44=$(git -C "$wt" rev-parse HEAD)
+printf '{\n  "name": "nested2"\n}\n' > "$wt/sub/dir/package.json"
+run 5 "$SD" --spec "$tmp/spec27.md" --base "$base44" --worktree "$wt"
+rc44=$rc
+out44=$(out)
+reset_wt
+if [ "$rc44" = 1 ] && grep -qxF "  sub/dir/package.json (+1 -1)" <<<"$out44" \
+  && grep -qxF '    -   "name": "nested1"' <<<"$out44" \
+  && grep -qxF '    +   "name": "nested2"' <<<"$out44" \
+  && ! grep -q "out of scope" <<<"$out44"; then
+  ok "case 44: tracked nested sub/dir/package.json reports (+1 -1) with its -/+ lines"
+else
+  bad "case 44: rc=$rc44 out=$out44"
+fi
+
+# 45. Index-deleted manifest (git rm --cached, file still on disk) -> listed once with the git
+# deletion counts and the '[untracked copy on disk]' tag, not as an all-added file.
+git -C "$wt" rm -q --cached package.json
+run 5 "$SD" --spec "$tmp/spec13.md" --base "$base" --worktree "$wt"
+rc45=$rc
+out45=$(out)
+reset_wt
+if [ "$rc45" = 1 ] && grep -qxF "  package.json (+0 -6) [untracked copy on disk]" <<<"$out45" \
+  && ! grep -qE '^    \+ ' <<<"$out45"; then
+  ok "case 45: index-deleted manifest on disk shows (+0 -6) [untracked copy on disk], not all-added"
+else
+  bad "case 45: rc=$rc45 out=$out45"
+fi
+
+# 46. Leading './' in a scope entry is stripped: '- ./src/a.sh' matches src/a.sh.
+cat > spec46.md <<'EOF'
+## Files in scope
+- ./src/a.sh
+EOF
+echo "a2" > wt/src/a.sh
+run 5 "$SD" --spec "$tmp/spec46.md" --base "$base" --worktree "$wt"
+if [ "$rc" = 0 ] && [ "$(out)" = "$want_clean1" ]; then
+  ok "case 46: scope entry '- ./src/a.sh' matches src/a.sh"
+else
+  bad "case 46: rc=$rc out=$(out) err=$(err)"
+fi
+reset_wt
+
+# 47. Heading match is case-insensitive: '## files in scope' and '## FILES' open the section;
+# '## Filesystem' and '## Files (out of scope)' do not (exit 2, no section).
+printf '## files in scope\n- src/a.sh\n' > spec47a.md
+printf '## FILES\n- src/a.sh\n' > spec47b.md
+printf '## Filesystem\n- src/a.sh\n' > spec47c.md
+printf '## Files (out of scope)\n- src/a.sh\n' > spec47d.md
+echo "a2" > wt/src/a.sh
+run 5 "$SD" --spec "$tmp/spec47a.md" --base "$base" --worktree "$wt"
+rc47a=$rc
+out47a=$(out)
+run 5 "$SD" --spec "$tmp/spec47b.md" --base "$base" --worktree "$wt"
+rc47b=$rc
+out47b=$(out)
+run 5 "$SD" --spec "$tmp/spec47c.md" --base "$base" --worktree "$wt"
+rc47c=$rc
+run 5 "$SD" --spec "$tmp/spec47d.md" --base "$base" --worktree "$wt"
+rc47d=$rc
+if [ "$rc47a" = 0 ] && [ "$out47a" = "$want_clean1" ] \
+  && [ "$rc47b" = 0 ] && [ "$out47b" = "$want_clean1" ] \
+  && [ "$rc47c" = 2 ] && [ "$rc47d" = 2 ]; then
+  ok "case 47: '## files in scope' and '## FILES' open the section; '## Filesystem' and '## Files (out of scope)' do not"
+else
+  bad "case 47: a=$rc47a/$out47a b=$rc47b/$out47b c=$rc47c d=$rc47d"
+fi
+reset_wt
+
+# 48. Extended manifest list: untracked pom.xml, deno.lock, gradle.lockfile and flake.lock, all in
+# scope -> exit 1 with four manifests; pom.xml shows its + line, the three lockfiles counts only.
+printf '<project/>\n' > wt/pom.xml
+printf '{"version":1}\n' > wt/deno.lock
+printf 'lockv = 1\n' > wt/gradle.lockfile
+printf '{"nodes":{}}\n' > wt/flake.lock
+cat > spec48.md <<'EOF'
+## Files in scope
+- pom.xml
+- deno.lock
+- gradle.lockfile
+- flake.lock
+EOF
+run 5 "$SD" --spec "$tmp/spec48.md" --base "$base" --worktree "$wt"
+rc48=$rc
+out48=$(out)
+if [ "$rc48" = 1 ] && grep -qxF "scope-drift: manifests changed (4):" <<<"$out48" \
+  && grep -qxF "  pom.xml (+1 -0)" <<<"$out48" \
+  && grep -qxF "    + <project/>" <<<"$out48" \
+  && grep -qxF "  deno.lock (+1 -0)" <<<"$out48" \
+  && grep -qxF "  gradle.lockfile (+1 -0)" <<<"$out48" \
+  && grep -qxF "  flake.lock (+1 -0)" <<<"$out48" \
+  && [ "$(grep -cE '^    [+-] ' <<<"$out48")" = 1 ]; then
+  ok "case 48: pom.xml, deno.lock, gradle.lockfile and flake.lock are manifests; only pom.xml shows lines"
+else
+  bad "case 48: rc=$rc48 out=$out48"
+fi
+reset_wt
+
+# 49. User config file: $XDG_CONFIG_HOME/seyag/config.toml syg_scope_drift_manifests = "*.gemspec"
+# makes x.gemspec a manifest with the environment unset. The file is removed afterwards.
+mkdir -p "$XDG_CONFIG_HOME/seyag"
+printf 'syg_scope_drift_manifests = "*.gemspec"\n' > "$XDG_CONFIG_HOME/seyag/config.toml"
+echo "gem2" > wt/x.gemspec
+run 5 env -u SYG_SCOPE_DRIFT_MANIFESTS "$SD" --spec "$tmp/spec15.md" --base "$base" --worktree "$wt"
+rc49=$rc
+out49=$(out)
+rm -f "$XDG_CONFIG_HOME/seyag/config.toml"
+reset_wt
+if [ "$rc49" = 1 ] && grep -qxF "  x.gemspec (+1 -1)" <<<"$out49"; then
+  ok "case 49: user config file syg_scope_drift_manifests loads with the environment unset"
+else
+  bad "case 49: rc=$rc49 out=$out49"
+fi
+
+# 50. Default base with no remote: the error carries the shallow-clone / missing-remote hint.
+run 5 "$SD" --spec "$tmp/spec1.md" --worktree "$wt"
+rc50=$rc
+err50=$(err)
+if [ "$rc50" = 2 ] && grep -qF "a missing remote or a shallow clone can cause this" <<<"$err50"; then
+  ok "case 50: no-base error names a missing remote or a shallow clone as a cause"
+else
+  bad "case 50: rc=$rc50 err=$err50"
+fi
+
+# 51. Binary manifests print '(binary)', never '(+0 -0)': a tracked bun.lockb (committed at base51,
+# then rewritten) and an untracked new sub/bun.lockb, both in scope.
+printf 'bun\000v1\n' > "$wt/bun.lockb"
+git -C "$wt" add bun.lockb
+git -C "$wt" commit -qm "add binary lockfile"
+base51=$(git -C "$wt" rev-parse HEAD)
+printf 'bun\000v2\n' > "$wt/bun.lockb"
+mkdir -p "$wt/sub"
+printf 'app\000v1\n' > "$wt/sub/bun.lockb"
+printf '## Files in scope\n- bun.lockb\n- sub/bun.lockb\n' > spec51.md
+run 5 "$SD" --spec "$tmp/spec51.md" --base "$base51" --worktree "$wt"
+rc51=$rc
+out51=$(out)
+reset_wt
+if [ "$rc51" = 1 ] && grep -qxF "  bun.lockb (binary)" <<<"$out51" \
+  && grep -qxF "  sub/bun.lockb (binary)" <<<"$out51" \
+  && ! grep -qF "(+0 -0)" <<<"$out51"; then
+  ok "case 51: tracked and untracked binary lockfiles print (binary), not (+0 -0)"
+else
+  bad "case 51: rc=$rc51 out=$out51"
+fi
 
 echo "scope-drift probe: $pass passed, $fail failed"
 [ "$fail" = 0 ]

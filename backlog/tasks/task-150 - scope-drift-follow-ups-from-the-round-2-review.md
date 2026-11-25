@@ -48,3 +48,31 @@ From #413's claude-review (2026-11-24, PASS, lows only):
 21. No probe case for the user config file (`$XDG_CONFIG_HOME/seyag/config.toml`).
 22. Optional: one sentence noting that project config comes from CLAUDE_PROJECT_DIR/$PWD, not from `--worktree`.
 <!-- SECTION:DESCRIPTION:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+- Item 1: shipped (edit 1: bash >= 4.4 guard before any other code; `--help` exit-2 clause; probe case 39 static check).
+- Item 2: shipped (case 42 uses a fake git on PATH that fails only `ls-files`; the fixture is not corrupt-index based).
+- Item 3: shipped (edit 10: checked numstat and `-U0` reads; `(+? -?)` and `(git diff failed; lines not shown)`; cases 43).
+- Item 4: shipped (case 44: tracked nested `sub/dir/package.json` through `:(top,literal)`).
+- Item 5: ruled out: the optional move of the Scope drift bullet. Running the tool first and then checking each reported deviation is the right order.
+- Item 6: ruled out as a change: global excludes kept (user-level ignores hide editor and OS junk that would otherwise list as out of scope on every run); documented in `--help` and the README row (edit 11).
+- Item 7: shipped (edit 2: unborn-HEAD exit 2 with `HEAD has no commits yet`; case 40).
+- Item 8: shipped (edit 5: `vs <sha> (fork point of REF)` on the clean and drift lines when the base is reduced; cases 34 and 37 updated).
+- Item 9: shipped (edit 15: delegation SKILL.md Scope-drift bullet notes that any `--base` is reduced to its fork point; bullet not moved).
+- Item 10: shipped (case 35 asserts empty stdout; case 41 covers `--base HEAD` and `--base $base` with no fork-point label and no ahead note).
+- Item 11: shipped (edit 3: shallow warning reads `(shallow clone, or unrelated history)`, keeping the `shallow clone: no merge-base` prefix; case 36 asserts it).
+- Item 12: already fixed (lane-B knobs PR): the ahead note is described in `--help` and the README row.
+- Item 13: shipped (case 36 asserts stderr lacks `shares no history`; case 41 covers `--base HEAD` with no ahead note).
+- Item 14: shipped (edit 13: glob note scoped to entries containing `*` in `--help` and the README row).
+- Item 15: shipped, case-insensitive heading match only (edit 7; case 47). Ruled out: indented sub-bullets (they annotate the parent entry, so counting them would let prose widen scope), and a trailing parenthetical (`## Files (out of scope)` would turn a forbidden list into scope).
+- Item 16: shipped (edit 9: a manifest in both the diff and the untracked list takes the git-diff branch and prints `[untracked copy on disk]`; case 45).
+- Item 17: shipped (edit 4: no-base error names a missing remote or a shallow clone; case 50).
+- Item 18: shipped (edit 8: manifest list and is_lockfile extended; case 48).
+- Item 19: shipped (edit 6: leading `./` stripped from scope entries; case 46).
+- Item 20: shipped (edit 12: `--help` and the README row say `SYG_SCOPE_DRIFT_MANIFESTS` is also read from the user and project config files; case 49 covers the user file).
+- Item 21: shipped (case 49: user config file `syg_scope_drift_manifests`).
+- Cross-family review (council, gpt-5.5, 2026-11-25): one fix taken — git numstat's `-<TAB>-` for a binary file was normalised to `(+0 -0)` (reads as no change; `bun.lockb` is in the list); tracked and untracked binaries now print `(binary)` (case 51). Ruled out: "a failed numstat/-U0 read can exit 0" (false: a listed manifest always makes exit 1); explicit-fd PID capture (same `wait $!` pattern as the file's other reads, correct on bash >= 4.4); malformed numstat validation and an unchecked `rev-parse --short` (git output for a verified sha and one literal path); multiple spaces after `##` and `../` entries (both fail safe: more drift, never a false clean).
+- Item 22: shipped (edit 12: `--help` and the README row say the project file comes from `CLAUDE_PROJECT_DIR` (else the current directory), not `--worktree`).
+<!-- SECTION:NOTES:END -->

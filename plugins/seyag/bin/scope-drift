@@ -5,6 +5,11 @@
 
 set -uo pipefail
 
+if [ "${BASH_VERSINFO[0]}" -lt 4 ] || { [ "${BASH_VERSINFO[0]}" -eq 4 ] && [ "${BASH_VERSINFO[1]}" -lt 4 ]; }; then
+  echo "scope-drift: needs bash >= 4.4 (this is $BASH_VERSION)" >&2
+  exit 2
+fi
+
 _syg_bin_dir=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")
 if [ -r "$_syg_bin_dir/../hooks/lib/config-env.sh" ] \
     && source "$_syg_bin_dir/../hooks/lib/config-env.sh" 2>/dev/null \
@@ -20,35 +25,49 @@ what the spec never named so the driver amends the spec or signs it off before l
   scope-drift --spec FILE [--spec FILE...] [--base REF] [--worktree DIR]
   scope-drift --help
 
-  --spec FILE      markdown spec carrying a "## Files in scope" (or "## Files") section;
+  --spec FILE      markdown spec carrying a "## Files in scope" (or "## Files") section,
+                   matched case-insensitively;
                    repeatable (the scope set is the union across all given files)
   --base REF       git base ref to diff against, reduced to its merge-base with HEAD (the
                    fork point, so a base branch that moved on does not count its own newer
                    commits as this branch's changes; a shallow clone with no merge-base
                    falls back to REF as given, with a warning; when REF is ahead of HEAD
                    (the fork point is HEAD itself), a stderr note says only uncommitted and
-                   untracked changes are diffed; default: git merge-base HEAD origin/HEAD,
-                   falling back to git merge-base HEAD origin/main)
+                   untracked changes are diffed; a reduced base is named
+                   "vs <sha> (fork point of REF)" in the summary line; default: git
+                   merge-base HEAD origin/HEAD, falling back to git merge-base HEAD
+                   origin/main)
   --worktree DIR   git work tree to inspect (default: current directory; every git call
                    runs from the repo top, so DIR may name any directory inside the tree)
 
 Changed paths are the sorted union of `git diff --name-only --no-renames BASE` (committed,
 staged and unstaged vs BASE, deletions included) and `git ls-files --others --exclude-standard`
-(untracked, not ignored).
+(untracked, not ignored; ignores include `.gitignore`, `.git/info/exclude` and the user's
+`core.excludesFile`, so an untracked manifest matching one is not reported).
 
 Scope entries are `- ` or `* ` bullets under the first `## Files in scope` or `## Files`
-heading up to the next `## ` line: the first backticked span when the entry starts with a
-backtick, else text up to ` (` or end of line, with any trailing `:<digits>[-<digits>]` line
-cite stripped. Entries ending `/` or `/**` cover everything below that directory; entries
-containing `*` match as globs across `/`; all other entries match as exact strings.
+heading (matched case-insensitively) up to the next `## ` line: the first backticked span when
+the entry starts with a backtick, else text up to ` (` or end of line, with any trailing
+`:<digits>[-<digits>]` line cite and any leading `./` stripped. Entries ending `/` or `/**`
+cover everything below that directory; entries containing `*` match as globs across `/`;
+entries without `*` match literally (`[` and `?` included), and inside an entry containing
+`*`, `[` and `?` are glob syntax too.
 
 Dependency manifests match by basename against the built-in manifest/lockfile list plus the
-whitespace-separated basename globs in $SYG_SCOPE_DRIFT_MANIFESTS (extends, never replaces),
-and are reported even when in scope. Non-lockfile manifests show up to 20 `-`/`+` diff lines
-(then `... K more`); lockfiles show `(+A -D)` line counts only.
+whitespace-separated basename globs in $SYG_SCOPE_DRIFT_MANIFESTS (extends, never replaces;
+also read from the user config file `${XDG_CONFIG_HOME:-~/.config}/seyag/config.toml` and the
+project `.claude/seyag.toml` as `syg_scope_drift_manifests`, the environment winning; the
+project file is found from `CLAUDE_PROJECT_DIR` (else the current directory), not from
+`--worktree`), and are reported even when in scope. Non-lockfile manifests show up to 20
+`-`/`+` diff lines (then `... K more`); lockfiles show `(+A -D)` line counts only; a binary file shows `(binary)`. A manifest deleted
+from the index but still on disk shows git's deletion counts tagged `[untracked copy on disk]`.
+A failed
+numstat or `-U0` read prints `(+? -?)` or `(git diff failed; lines not shown)` and still
+exits 1.
 
 Exit codes: 0 clean, 1 drift (out-of-scope paths or changed manifests), 2 usage error,
-unreadable spec, missing section, not a git work tree, unresolvable base, or a failed git read.
+bash older than 4.4, unreadable spec, missing section, not a git work tree, unresolvable base,
+HEAD with no commits, or a failed git read.
 EOF
 }
 
@@ -115,6 +134,11 @@ if ! top=$(git -C "$worktree" rev-parse --show-toplevel 2>/dev/null) || [ -z "$t
   exit 2
 fi
 
+if ! git -C "$top" rev-parse --verify -q HEAD >/dev/null 2>&1; then
+  echo "scope-drift: HEAD has no commits yet (unborn branch); nothing to diff against" >&2
+  exit 2
+fi
+
 if [ "$has_base" -eq 1 ]; then
   if ! resolved=$(git -C "$top" rev-parse --verify --quiet "$base_opt^{commit}" 2>/dev/null); then
     echo "scope-drift: base '$base_opt' does not resolve" >&2
@@ -126,7 +150,7 @@ if [ "$has_base" -eq 1 ]; then
     :
   elif [ "$(git -C "$top" rev-parse --is-shallow-repository 2>/dev/null)" = "true" ]; then
     base_sha=$resolved
-    echo "scope-drift: shallow clone: no merge-base for '$base_opt'; diffing against it as given (deepen the fetch for a fork-point diff)" >&2
+    echo "scope-drift: shallow clone: no merge-base for '$base_opt' (shallow clone, or unrelated history); diffing against it as given (deepen the fetch for a fork-point diff)" >&2
   else
     echo "scope-drift: base '$base_opt' shares no history with HEAD" >&2
     exit 2
@@ -140,15 +164,19 @@ else
     base_sha=$(git -C "$top" merge-base HEAD origin/main 2>/dev/null) || base_sha=""
   fi
   if [ -z "$base_sha" ]; then
-    echo "scope-drift: no base: pass --base REF" >&2
+    echo "scope-drift: no base: pass --base REF (no merge-base with origin/HEAD or origin/main; a missing remote or a shallow clone can cause this)" >&2
     exit 2
   fi
 fi
 base_short=$(git -C "$top" rev-parse --short "$base_sha" 2>/dev/null)
+base_label=$base_short
+if [ "$has_base" -eq 1 ] && [ "$base_sha" != "$resolved" ]; then
+  base_label="$base_short (fork point of $base_opt)"
+fi
 
 scope_entries=()
 parse_spec() {
-  local file=$1 found=0 in_sec=0 raw line rest entry
+  local file=$1 found=0 in_sec=0 raw line lower rest entry
   if [ ! -f "$file" ] || [ ! -r "$file" ]; then
     echo "scope-drift: cannot read spec: $file" >&2
     exit 2
@@ -156,7 +184,8 @@ parse_spec() {
   while IFS= read -r raw || [ -n "$raw" ]; do
     line=${raw%$'\r'}
     if [ "$in_sec" -eq 0 ]; then
-      if [[ $line =~ ^##\ Files(\ in\ scope)?[[:space:]]*$ ]]; then
+      lower=${line,,}
+      if [[ $lower =~ ^##\ files(\ in\ scope)?[[:space:]]*$ ]]; then
         found=1
         in_sec=1
       fi
@@ -184,6 +213,7 @@ parse_spec() {
         if [[ $entry =~ ^(.+):[0-9]+(-[0-9]+)?$ ]]; then
           entry=${BASH_REMATCH[1]}
         fi
+        while [[ $entry == ./* ]]; do entry=${entry#./}; done
         [ -n "$entry" ] && scope_entries+=("$entry")
         ;;
     esac
@@ -237,6 +267,9 @@ manifest_globs=(
   go.mod go.sum
   Gemfile Gemfile.lock
   composer.json composer.lock
+  pom.xml build.gradle build.gradle.kts settings.gradle settings.gradle.kts gradle.lockfile
+  '*.csproj' packages.lock.json deno.json deno.jsonc deno.lock mix.exs mix.lock
+  Package.swift Package.resolved go.work go.work.sum '*.lock'
 )
 if [ -n "${SYG_SCOPE_DRIFT_MANIFESTS:-}" ]; then
   set -f
@@ -257,7 +290,8 @@ is_manifest() {
 is_lockfile() {
   local b=${1##*/}
   case "$b" in
-    *.lock | *.lockb | *-lock.json | *-lock.yaml | npm-shrinkwrap.json | go.sum)
+    *.lock | *.lockb | *-lock.json | *-lock.yaml | npm-shrinkwrap.json | go.sum | gradle.lockfile \
+      | packages.lock.json | Package.resolved | go.work.sum)
       return 0
       ;;
     *)
@@ -285,6 +319,11 @@ for p in "${untracked_paths[@]+"${untracked_paths[@]}"}"; do
   [ -n "$p" ] && is_untracked[$p]=1
 done
 
+declare -A in_diff=()
+for p in "${diff_paths[@]+"${diff_paths[@]}"}"; do
+  [ -n "$p" ] && in_diff[$p]=1
+done
+
 changed_paths=()
 while IFS= read -r -d '' p; do
   [ -n "$p" ] && changed_paths+=("$p")
@@ -308,7 +347,7 @@ for p in "${changed_paths[@]+"${changed_paths[@]}"}"; do
 done
 
 if [ "${#out_of_scope[@]}" -eq 0 ] && [ "${#manifests_changed[@]}" -eq 0 ]; then
-  printf 'scope-drift: clean (%d changed paths, all in scope; no manifest changes) vs %s\n' "${#changed_paths[@]}" "$base_short"
+  printf 'scope-drift: clean (%d changed paths, all in scope; no manifest changes) vs %s\n' "${#changed_paths[@]}" "$base_label"
   exit 0
 fi
 
@@ -323,23 +362,37 @@ if [ "${#manifests_changed[@]}" -gt 0 ]; then
   printf 'scope-drift: manifests changed (%d):\n' "${#manifests_changed[@]}"
   for p in "${manifests_changed[@]}"; do
     clines=()
-    if [ -n "${is_untracked[$p]+x}" ]; then
+    tag=""
+    binary=0
+    if [ -n "${is_untracked[$p]+x}" ] && [ -z "${in_diff[$p]+x}" ]; then
       flines=()
       [ -r "$top/$p" ] && mapfile -t flines <"$top/$p"
       add_count=${#flines[@]}
       del_count=0
-      if ! is_lockfile "$p"; then
+      # git's own binary test: a NUL byte in the first 8000 bytes.
+      if [ -r "$top/$p" ] && [ "$(head -c 8000 "$top/$p" | LC_ALL=C tr -dc '\000' | wc -c)" -gt 0 ]; then
+        binary=1
+      elif ! is_lockfile "$p"; then
         for fl in "${flines[@]+"${flines[@]}"}"; do
           clines+=("    + $fl")
         done
       fi
     else
+      [ -n "${is_untracked[$p]+x}" ] && tag=" [untracked copy on disk]"
       numline=$(git -C "$top" diff --numstat --no-renames --no-relative --ignore-submodules=none "$base_sha" -- ":(top,literal)$p")
-      add_count=${numline%%$'\t'*}
-      rest_num=${numline#*$'\t'}
-      del_count=${rest_num%%$'\t'*}
-      if [ "$add_count" = "-" ] || [ -z "$add_count" ]; then add_count=0; fi
-      if [ "$del_count" = "-" ] || [ -z "$del_count" ]; then del_count=0; fi
+      numrc=$?
+      if [ "$numrc" -ne 0 ]; then
+        add_count="?"
+        del_count="?"
+      else
+        add_count=${numline%%$'\t'*}
+        rest_num=${numline#*$'\t'}
+        del_count=${rest_num%%$'\t'*}
+        # git numstat prints "-<TAB>-" for a binary file; "(+0 -0)" would read as no change.
+        [ "$add_count" = "-" ] && [ "$del_count" = "-" ] && binary=1
+        if [ "$add_count" = "-" ] || [ -z "$add_count" ]; then add_count=0; fi
+        if [ "$del_count" = "-" ] || [ -z "$del_count" ]; then del_count=0; fi
+      fi
       if ! is_lockfile "$p"; then
         in_hunk=0
         while IFS= read -r dline; do
@@ -354,9 +407,18 @@ if [ "${#manifests_changed[@]}" -gt 0 ]; then
               ;;
           esac
         done < <(git -C "$top" diff -U0 --no-color --no-ext-diff --no-renames --no-relative --ignore-submodules=none "$base_sha" -- ":(top,literal)$p")
+        wait $!
+        dash_rc=$?
+        if [ "$dash_rc" -ne 0 ]; then
+          clines=("    (git diff failed; lines not shown)")
+        fi
       fi
     fi
-    printf '  %s (+%s -%s)\n' "$p" "$add_count" "$del_count"
+    if [ "$binary" -eq 1 ]; then
+      printf '  %s (binary)%s\n' "$p" "$tag"
+      continue
+    fi
+    printf '  %s (+%s -%s)%s\n' "$p" "$add_count" "$del_count" "$tag"
     if ! is_lockfile "$p"; then
       total_c=${#clines[@]}
       limit=20
@@ -371,5 +433,5 @@ if [ "${#manifests_changed[@]}" -gt 0 ]; then
   done
 fi
 
-printf "scope-drift: drift vs %s: amend the spec's ## Files in scope, or record a named reviewer sign-off for each entry\n" "$base_short"
+printf "scope-drift: drift vs %s: amend the spec's ## Files in scope, or record a named reviewer sign-off for each entry\n" "$base_label"
 exit 1
