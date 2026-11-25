@@ -15,8 +15,10 @@ what the spec never named so the driver amends the spec or signs it off before l
 
   --spec FILE      markdown spec carrying a "## Files in scope" (or "## Files") section;
                    repeatable (the scope set is the union across all given files)
-  --base REF       git base ref to diff against (default: git merge-base HEAD origin/HEAD,
-                   falling back to git merge-base HEAD origin/main)
+  --base REF       git base ref to diff against, reduced to its merge-base with HEAD (the
+                   fork point, so a base branch that moved on does not count its own newer
+                   commits as this branch's changes; default: git merge-base HEAD
+                   origin/HEAD, falling back to git merge-base HEAD origin/main)
   --worktree DIR   git work tree to inspect (default: current directory; every git call
                    runs from the repo top, so DIR may name any directory inside the tree)
 
@@ -104,8 +106,13 @@ if ! top=$(git -C "$worktree" rev-parse --show-toplevel 2>/dev/null) || [ -z "$t
 fi
 
 if [ "$has_base" -eq 1 ]; then
-  if ! base_sha=$(git -C "$top" rev-parse --verify --quiet "$base_opt^{commit}" 2>/dev/null); then
+  if ! resolved=$(git -C "$top" rev-parse --verify --quiet "$base_opt^{commit}" 2>/dev/null); then
     echo "scope-drift: base '$base_opt' does not resolve" >&2
+    exit 2
+  fi
+  base_sha=$(git -C "$top" merge-base "$resolved" HEAD 2>/dev/null) || base_sha=""
+  if [ -z "$base_sha" ]; then
+    echo "scope-drift: base '$base_opt' shares no history with HEAD" >&2
     exit 2
   fi
 else
