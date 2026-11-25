@@ -22,8 +22,9 @@
 #   claude-role --set status="…" [holds="…"] [route=PRESET] [parked="…"] [--handoff FILE] [--file F]
 #                          # checkpoint: set fields in the calling session's role file (its start
 #                          # folder via CLAUDE_PID, else the current folder); status/holds
-#                          # stamp updated. route= must be a preset-shaped name, is refused when listed
-#                          # in $SYG_ROLE_HEADLESS_ROUTES, and is checked by $SYG_ROUTE_SHOW_CMD when
+#                          # stamp updated; status= also stamps status_at (same text too). route=
+#                          # must be a preset-shaped name, is refused when listed in
+#                          # $SYG_ROLE_HEADLESS_ROUTES, and is checked by $SYG_ROUTE_SHOW_CMD when
 #                          # set (empty = no route of its own); parked= non-empty parks the role,
 #                          # empty unparks it. --handoff FILE replaces the `## Handoff` section with
 #                          # FILE (which starts with its own `## Handoff` heading).
@@ -247,11 +248,12 @@ case "${1:-}" in
             [ -n "$r" ] || continue
             jq -n --arg role "$r" --arg file "${f##*/}" --arg status "$(field "$f" status)" \
                   --arg holds "$(field "$f" holds)" --arg updated "$(field "$f" updated)" \
+                  --arg status_at "$(field "$f" status_at)" \
                   --arg privacy "$(field "$f" privacy | flat)" --arg route "$(field "$f" route | flat)" \
                   --arg next "$(awk '{ sub(/\r$/, "") } /^## / { s = ($0 ~ /^## Next[ \t]*$/); next } s' "$f" | sed '/./,$!d')" \
                   --argjson deck "$(deck_items "$f" | items_json deck)" \
                   --argjson needs "$(needs_items "$f" | items_json needs)" \
-                  '{role: $role, file: $file, status: $status, holds: $holds, updated: $updated,
+                  '{role: $role, file: $file, status: $status, holds: $holds, updated: $updated, status_at: $status_at,
                     privacy: $privacy, route: $route, next: $next, deck: $deck, needs: $needs}'
         done | jq -s --arg synced "$(date '+%F %H:%M')" '{syncedAt: $synced, roles: .}'
         exit 0 ;;
@@ -305,7 +307,8 @@ PYEOF
         # `metadata:` by the memory system), so a checkpoint never depends on line numbers or on a
         # `^status:` anchor. Values are written as double-quoted YAML strings. `updated` is stamped
         # when status, holds, or a section-writing verb runs; the config fields (route, parked)
-        # aren't a check-in.
+        # aren't a check-in. `status_at` is stamped by every `status=` write, an unchanged one
+        # included, and by nothing else.
         # The calling session's own folder, not the shell's cwd: a session that cd's into another
         # repo (a commit made elsewhere) would otherwise overwrite that repo's role. Claude Code
         # sets CLAUDE_PID, and its process cwd is the folder the session was started in.
@@ -721,13 +724,16 @@ lines += [""] * final
 
 if "status" in values or "holds" in values or (has_need and need_added) or has_need_done or has_note or has_next:
     values["updated"] = stamp
+if "status" in values:
+    values["status_at"] = stamp   # status age, apart from updated: every status= write, same text too
 
 def quote(key, value):
-    # `updated` stays bare, matching every existing role file; free text is quoted.
-    return value if key == "updated" else json.dumps(value, ensure_ascii=False)
+    # `updated` and `status_at` stay bare, matching every existing role file; free text is quoted.
+    return value if key in ("updated", "status_at") else json.dumps(value, ensure_ascii=False)
 
 # Indent of the role fields: that of the `role:` line, else top level.
 indent = next((m.group(1) for l in lines[1:end] if (m := re.match(r"^(\s*)role:", l))), "")
+stamp_inserts = []   # stamp lines this call inserts (not replaced), measured once u16 exists
 for key, value in values.items():
     pat = re.compile(r"^(\s*)" + re.escape(key) + r":")
     hits = [i for i in range(1, end) if pat.match(lines[i])]
@@ -740,11 +746,17 @@ for key, value in values.items():
             del lines[j]
             end -= 1
     else:
-        lines.insert(end, indent + key + ": " + quote(key, value))
+        new_line = indent + key + ": " + quote(key, value)
+        lines.insert(end, new_line)
         end += 1
+        if key in ("updated", "status_at"):
+            stamp_inserts.append(new_line)
 
 def u16(s):
     return len(s.encode("utf-8", "surrogateescape").decode("utf-8", "replace").encode("utf-16-le")) // 2   # as the hook measures: replace bad bytes
+
+# a stamp line the tool adds itself (status_at's first write) is not growth
+stamp_growth = sum(u16(l) + 1 for l in stamp_inserts)
 
 now_ep = int(os.environ["SYG_ROLE_NOW_EPOCH"]) if os.environ.get("SYG_ROLE_NOW_EPOCH") else int(time.time())
 
@@ -757,7 +769,7 @@ new_size = rendered_u16(text)
 guarded = bool({"status", "holds"} & values.keys() or handoff_path or has_need or has_note or has_next)
 NOTE_RE = re.compile(r"^- \*\*\d{2}-\d{2} \d{2}:\d{2}:\*\*")
 arch_write = None
-if guarded and new_size > cap and new_size > old_size and not handoff_path:
+if guarded and new_size > cap and new_size > old_size + stamp_growth and not handoff_path:
     heads, unfenced, _ = body_scan()
     hand = [i for i in heads if is_handoff(lines[i])]
     if len(hand) == 1:
@@ -807,7 +819,7 @@ if guarded and new_size > cap and new_size > old_size and not handoff_path:
                 out_msgs.append(f"archived {moved_count} oldest Handoff notes to archive/{arch_base}")
                 break
 
-if guarded and new_size > cap and new_size > old_size:
+if guarded and new_size > cap and new_size > old_size + stamp_growth:
     heads, _, _ = body_scan()
     secs = []
     for idx, start in enumerate(heads):
