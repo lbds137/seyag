@@ -38,7 +38,7 @@
 #                          # append "- TEXT" (or "- TEXT (due …)") to "## Next"
 #                          # Write verbs combine atomically, stamp updated, print N/10000 chars at
 #                          # session start (UTF-16 units), and past 10000 move the oldest stamped
-#                          # Handoff notes to <stem>-handoff-archive-<YYYY-MM-DD>.md beside the role
+#                          # Handoff notes to archive/<stem>-handoff-archive-<YYYY-MM-DD>.md beside the role
 #                          # file (refusing --handoff FILE or when no notes are left).
 #
 # Role files are $SYG_ROLE_DIR/<folder>.md (default ${XDG_DATA_HOME:-~/.local/share}/seyag/roles),
@@ -160,7 +160,7 @@ context_line() {
 IFS= read -r -d '' DEFAULT_PREAMBLE <<'EOF'
 [Role] You are the "{role}" session. Your role file is {path}; its contents follow.
 - At each checkpoint, run: claude-role --set status="…" holds="…" (stamps updated; never edit the frontmatter by hand). claude-role --note "…" adds a time-stamped Handoff line. Any clock time you write comes from `date`, never a guess.
-- Before a /clear, or when your context is getting large: rewrite Handoff and Next so a fresh session could continue from them alone (`claude-role --set --handoff FILE` swaps in a Handoff section you wrote to FILE). Every write prints the size against the 10000-character session-start limit; past it, the oldest time-stamped Handoff notes move to <name>-handoff-archive-<date>.md beside the role file (a --handoff FILE rewrite is refused instead). `claude-role --size` shows headroom; `claude-role --next "…"` (`--due "YYYY-MM-DD HH:MM"`) appends a Next bullet.
+- Before a /clear, or when your context is getting large: rewrite Handoff and Next so a fresh session could continue from them alone (`claude-role --set --handoff FILE` swaps in a Handoff section you wrote to FILE). Every write prints the size against the 10000-character session-start limit; past it, the oldest time-stamped Handoff notes move to archive/<name>-handoff-archive-<date>.md beside the role file (a --handoff FILE rewrite is refused instead). `claude-role --size` shows headroom; `claude-role --next "…"` (`--due "YYYY-MM-DD HH:MM"`) appends a Next bullet.
 - After a fresh start or /clear, open with one line: your role and the next task. Then continue.
 - `claude-role --board` shows every role's status.
 - Anything waiting on the owner gets one bullet the turn it arises: `claude-role --need "what they do — what it unblocks"` (stamps the date; `--due YYYY-MM-DD` optional) writes "## {needs}"; add `--in-person` when they must be physically present, which writes "## {in_person}". `claude-role --need-done "words from the bullet"` deletes it once done.
@@ -214,6 +214,7 @@ case "${1:-}" in
             [ -n "$ctx" ] || echo "(context sizes unavailable: SYG_ROLE_CONTEXT_CMD failed)"
         fi
         for f in "$ROLES"/*.md; do
+            case "${f##*/}" in *-archive-[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9].md) continue ;; esac   # dated archive copies (<stem>-...-archive-YYYY-MM-DD.md) are not roles, even with frontmatter
             [ -n "$(field "$f" role)" ] || continue    # README and handoff notes aren't roles
             printf '%s  (%s, %s)\n    status: %s\n    holds:  %s\n' "$(field "$f" role | flat)" \
                    "${f##*/}" "$(field "$f" updated)" "$(field "$f" status | flat)" "$(field "$f" holds | flat)"
@@ -228,6 +229,7 @@ case "${1:-}" in
             need_role_dir
             # Every role's in-person bullets: what the owner must do physically present, grouped by role.
             for f in "$ROLES"/*.md; do
+                case "${f##*/}" in *-archive-[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9].md) continue ;; esac
                 r=$(field "$f" role | flat)
                 [ -n "$r" ] || continue
                 items=$(deck_items "$f" | sed 's/^/  - /')
@@ -240,6 +242,7 @@ case "${1:-}" in
         # Board + in-person (.deck) and needs (.needs) items as one JSON document, for a dashboard to sync.
         # A bullet "what — unblocks (added YYYY-MM-DD)" splits into those three fields.
         for f in "$ROLES"/*.md; do
+            case "${f##*/}" in *-archive-[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9].md) continue ;; esac
             r=$(field "$f" role)
             [ -n "$r" ] || continue
             jq -n --arg role "$r" --arg file "${f##*/}" --arg status "$(field "$f" status)" \
@@ -255,6 +258,7 @@ case "${1:-}" in
     --list)
         need_role_dir
         for f in "$ROLES"/*.md; do
+            case "${f##*/}" in *-archive-[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9].md) continue ;; esac
             r=$(field "$f" role | flat)
             [ -n "$r" ] && printf '%s\t%s\t%s\t%s\t%s\n' "$(basename "$f" .md)" "$r" \
                 "$(field "$f" parked | flat)" "$(field "$f" privacy | flat)" \
@@ -791,7 +795,7 @@ if guarded and new_size > cap and new_size > old_size and not handoff_path:
                 base = os.path.basename(path)
                 stem = base[:-3] if base.endswith(".md") else base
                 arch_base = f"{stem}-handoff-archive-{stamp[:10]}.md"
-                arch_path = os.path.join(os.path.dirname(path), arch_base)
+                arch_path = os.path.join(os.path.dirname(path), "archive", arch_base)
                 arch_hdr = f"## Moved by claude-role {stamp} (oldest Handoff notes, verbatim, to fit the 10000 cap)"
                 if os.path.exists(arch_path):
                     prev = open(arch_path, encoding="utf-8").read()
@@ -800,7 +804,7 @@ if guarded and new_size > cap and new_size > old_size and not handoff_path:
                 else:
                     arch_text = "\n".join([f"# {stem} Handoff archive", "", arch_hdr] + moved_lines) + "\n"
                 arch_write = (arch_path, arch_text)
-                out_msgs.append(f"archived {moved_count} oldest Handoff notes to {arch_base}")
+                out_msgs.append(f"archived {moved_count} oldest Handoff notes to archive/{arch_base}")
                 break
 
 if guarded and new_size > cap and new_size > old_size:
@@ -822,6 +826,7 @@ if guarded and new_size > cap and new_size > old_size:
 # them again, a duplicate), never in neither.
 if arch_write is not None:
     arch_path, arch_text = arch_write
+    os.makedirs(os.path.dirname(arch_path), exist_ok=True)
     arch_tmp = arch_path + ".tmp"
     with open(arch_tmp, "w", encoding="utf-8") as f:
         f.write(arch_text)

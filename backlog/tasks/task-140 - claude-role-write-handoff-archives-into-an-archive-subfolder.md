@@ -1,9 +1,11 @@
 ---
 id: TASK-140
 title: 'claude-role: write handoff archives into an archive/ subfolder'
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - Seyag B
 created_date: '2026-11-24T17:00:00Z'
+updated_date: '2026-11-25T08:10:00Z'
 labels:
   - claude-role
   - bin
@@ -28,8 +30,18 @@ Owned by the bin lane (`plugins/seyag/bin/**`).
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A cap-triggered archive lands at `<roles dir>/archive/<stem>-handoff-archive-<date>.md`. `archive/` is created before the `.tmp` file is opened, not just before the `os.replace`. The success message prints `archive/<name>` so it still points at the file. The probe pins the path and the message.
-- [ ] #2 Every `for f in "$ROLES"/*.md` loop (the board, `--json`, `--list` and the earlier reader) skips a role-dir file whose stem contains `-archive-` even when it has `role:` frontmatter. The probe pins this with a fixture that has frontmatter (a retired copy), alongside a positive control showing the same file without the `-archive-` stem does list.
+- [x] #1 A cap-triggered archive lands at `<roles dir>/archive/<stem>-handoff-archive-<date>.md`. `archive/` is created before the `.tmp` file is opened, not just before the `os.replace`. The success message prints `archive/<name>` so it still points at the file. The probe pins the path and the message.
+- [x] #2 Every `for f in "$ROLES"/*.md` loop (the board, `--json`, `--list` and the earlier reader) skips a role-dir file whose stem contains `-archive-` even when it has `role:` frontmatter. The probe pins this with a fixture that has frontmatter (a retired copy), alongside a positive control showing the same file without the `-archive-` stem does list.
 - [ ] #3 Existing beside-the-file archives are migrated into `archive/` (by a one-shot `claude-role --migrate-archives` or a documented `mv` line, with the choice recorded), the hand-made retired copy included.
-- [ ] #4 The usage comment (`# Handoff notes to <stem>-handoff-archive-…`) and the role-instructions paragraph beginning "Before a /clear" name the new location. These are the only two mentions: `hooks/session-start.sh` has no archive wording.
+- [x] #4 The usage comment (`# Handoff notes to <stem>-handoff-archive-…`) and the role-instructions paragraph beginning "Before a /clear" name the new location. These are the only two mentions: `hooks/session-start.sh` has no archive wording.
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+AC #1, #2 and #4 shipped in the b140 PR. `os.makedirs` runs in the write block, so a refused write creates no directory. The `-archive-` skip is the first line of all four role loops (`--board`, `--in-person`/`--deck`, `--json`, `--list`). The probe pins `--list`, `--board` and `--json` with a frontmatter-carrying copy plus a positive control. The skip matches only dated archive names (`*-archive-YYYY-MM-DD.md`), so a role whose own name contains `-archive-` still lists; the probe pins both. Only these four loops scan the roles dir (driver-clone and session-start open role files by exact name). The read-modify-write without a lock is older than this change and out of its scope: one session writes one role file. Ruled out unless a role gains two writers.
+
+AC #3, the choice: a documented `mv` line, not a `--migrate-archives` flag, because the migration runs once per machine and a flag would be permanent code for a one-time step. The retired copy already moved (in the memory repo, before this PR). Remaining step, once the release carrying this PR is live on the machine (moving earlier would split a same-day archive across two files):
+`mkdir -p <roles dir>/archive && mv <roles dir>/*-handoff-archive-*.md <roles dir>/archive/`
+Close this task after that move, with a count of the files moved.
+<!-- SECTION:NOTES:END -->
