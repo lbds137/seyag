@@ -32,7 +32,7 @@ This is a hard precondition. If `.claude/settings.json` has no `"SYG_TRACKING_SU
 By `backlog.md` convention, a `backlog/` directory at the repository root holds `config.yml` and `tasks/`, plus `archive/`, `completed/`, `decisions/`, `docs/` and `drafts/` created by `backlog.md` itself, and `milestones/` where the project uses them.
 
 - `config.yml` carries the project name (e.g. `example-app`), the status list, labels, the task prefix and similar store-wide settings.
-- Task files live at `backlog/tasks/task-N - Title.md` with YAML frontmatter fields `id` (`TASK-N`), `title`, `status`, `assignee`, `created_date`, `labels`, `dependencies` and `ordinal`.
+- Task files live at `backlog/tasks/task-N - Title.md` with YAML frontmatter fields `id` (`TASK-N`), `title`, `status`, `assignee`, `created_date`, `labels`, `dependencies`, `priority` and `ordinal`.
 - Treat this layout and frontmatter as the shape to expect, not a schema this skill enforces.
 
 ```markdown
@@ -45,6 +45,7 @@ created_date: '2026-03-15 10:00'
 labels:
   - reliability
 dependencies: []
+priority: medium
 ordinal: 1000
 ---
 
@@ -57,6 +58,7 @@ Ensure `example-app` bounds retry intervals when downstream endpoints return 503
 
 - **Prefer the CLI over hand-editing task files.** The CLI is the writer of record for `id` assignment, `ordinal` ordering and `status` moves.
 - Run commands through the project's own wiring (its pinned package and manifest scripts, such as a store validation or lint script), and run the project's lint gate after filing or updating entries.
+- **Every task carries a priority.** Creating a task, or moving one into To Do or In Progress, sets `--priority` (high, medium or low) unless its file already has one; a draft gets its priority (`backlog draft edit <id> --priority <p>`) before `backlog draft promote`. The backlog-priority-guard hook enforces it (statuses: `SYG_BACKLOG_PRIORITY_STATUSES`).
 - Direct file edits are reserved for cases the pinned CLI cannot express, and even then touch only markdown body text — never frontmatter fields owned by the CLI.
 
 ## 5. Session-side flows
