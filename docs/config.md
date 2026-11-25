@@ -331,7 +331,7 @@ An optional TOML file fills in knobs the environment left unset: user `${XDG_CON
 | `SYG_LOAD_GATE_NPROC` | `bin/load-gate` | Test seam overriding the CPU count load-gate scales its default ceilings by. |
 | `SYG_LOAD_GATE_PSI` | `bin/load-gate` | Test seam overriding the CPU pressure file load-gate reads. |
 | `SYG_LONG_JOB_PARENT_CMD` | `bin/long-job` | Test seam giving long-job the parent shell's command text in place of /proc/PPID/cmdline; setting it (even empty) replaces the parent-command read and so disables long-job's own && refusal (for tests only). |
-| `SYG_MEM_GATE_MEMINFO` | `bin/long-job`, `bin/mem-gate`, `bin/resource-profile` | Test seam overriding the meminfo file mem-gate and resource-profile read. |
+| `SYG_MEM_GATE_MEMINFO` | `bin/long-job`, `bin/mem-gate`, `bin/resource-profile` | Test seam overriding the meminfo file mem-gate and resource-profile read (long-job forwards it into the unit). |
 | `SYG_MEM_PRESSURE_MEMINFO` | `bin/mem-pressure-log` | Test seam overriding the meminfo file mem-pressure-log reads. |
 | `SYG_MEM_PRESSURE_PSI` | `bin/mem-pressure-log` | Test seam overriding the PSI memory file mem-pressure-log reads. |
 | `SYG_MEM_WATCH_MEMINFO` | `bin/mem-watch` | Test seam overriding the meminfo file mem-watch reads. |

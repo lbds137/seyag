@@ -5,8 +5,9 @@
 # directory prefixes, globs, exact literal `[` and `?`, `## Files` heading variant, non-bullet
 # lines, repeatable `--spec`), default base resolution (`origin/HEAD` -> `origin/main` fallback ->
 # exit 2 `no base`), dependency manifests and lockfiles (in-scope manifest reporting, `-`/`+`
-# lines in diff order, 20-line cap with `... K more`, `SYG_SCOPE_DRIFT_MANIFESTS` extension,
-# untracked manifests), usage/error exits (exit 2), and read-only tree/index invariance.
+# lines in diff order, 20-line cap with `... K more`, `SYG_SCOPE_DRIFT_MANIFESTS` extension and
+# config-file loading, untracked manifests), usage/error exits (exit 2), and read-only tree/index
+# invariance.
 # Usage: tests/scope-drift.probe.sh   (from anywhere)
 
 set -uo pipefail
@@ -22,7 +23,9 @@ pass=0; fail=0
 ok()  { pass=$((pass + 1)); echo "PASS  $1"; }
 bad() { fail=$((fail + 1)); echo "FAIL  $1"; }
 
-unset SYG_SCOPE_DRIFT_MANIFESTS
+unset SYG_SCOPE_DRIFT_MANIFESTS SYG_CONFIG
+export XDG_CONFIG_HOME="$tmp/xdg-config" CLAUDE_PROJECT_DIR="$tmp/no-project"
+mkdir -p "$XDG_CONFIG_HOME"
 
 run() {
   local t=$1; shift
@@ -706,6 +709,25 @@ if [ "$rc37" = 0 ] && [ "$out37" = "$want_clean0" ] && grep -qF "is ahead of HEA
 else
   bad "case 37: rc=$rc37 out=$out37 err=$err37"
 fi
+
+# 38. Project config .claude/seyag.toml loads syg_scope_drift_manifests when env is unset;
+# 38b. SYG_SCOPE_DRIFT_MANIFESTS='' in env overrides config even when empty.
+mkdir -p "$tmp/proj38/.claude"
+printf 'syg_scope_drift_manifests = "*.gemspec"\n' > "$tmp/proj38/.claude/seyag.toml"
+echo "gem2" > wt/x.gemspec
+run 5 env -u SYG_SCOPE_DRIFT_MANIFESTS CLAUDE_PROJECT_DIR="$tmp/proj38" "$SD" --spec "$tmp/spec15.md" --base "$base" --worktree "$wt"
+if [ "$rc" = 1 ] && grep -qxF "  x.gemspec (+1 -1)" out; then
+  ok "case 38: project .claude/seyag.toml syg_scope_drift_manifests loads when env is unset"
+else
+  bad "case 38: rc=$rc out=$(out) err=$(err)"
+fi
+run 5 env SYG_SCOPE_DRIFT_MANIFESTS='' CLAUDE_PROJECT_DIR="$tmp/proj38" "$SD" --spec "$tmp/spec15.md" --base "$base" --worktree "$wt"
+if [ "$rc" = 0 ] && [ "$(out)" = "$want_clean1" ]; then
+  ok "case 38b: empty SYG_SCOPE_DRIFT_MANIFESTS='' in env overrides config file and exits 0"
+else
+  bad "case 38b: rc=$rc out=$(out) err=$(err)"
+fi
+reset_wt
 
 echo "scope-drift probe: $pass passed, $fail failed"
 [ "$fail" = 0 ]
