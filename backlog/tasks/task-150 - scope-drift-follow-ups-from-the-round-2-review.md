@@ -1,8 +1,9 @@
 ---
 id: TASK-150
 title: 'scope-drift: follow-ups from the round-2 review'
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - Seyag B
 created_date: '2026-11-25T00:45:00Z'
 labels:
   - bin
