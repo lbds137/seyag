@@ -335,7 +335,7 @@ else
       mapfile -t rem_commits <<<"$rem_list"
     fi
     if [ "${#rem_commits[@]}" -ne "$k" ]; then
-      refuse "git rev-list failed"
+      refuse "resolved proof failed: git listed ${#rem_commits[@]} remote commit(s) where it counted $k"
     fi
     L=${loc_commits[k - 1]}
     base_paths=()

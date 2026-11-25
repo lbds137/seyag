@@ -5,7 +5,7 @@ status: Done
 assignee:
   - Seyag B
 created_date: '2026-11-25T07:40:00Z'
-updated_date: '2026-11-25T07:40:00Z'
+updated_date: '2026-11-25T11:00:00Z'
 labels:
   - bin
   - tests
@@ -28,5 +28,5 @@ Sweep: `git grep -n -E "\^FAIL|FAIL:\*|'FAIL:'"` over plugins and tests (non-pro
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Red-checked: mutation-canary case 40 fails at origin/main, where the old default read the two-space line as inconclusive (rc 2). Council gpt-5.5 review found no blocker. The contract it named is accepted and recorded here: under the default, a column-0 `FAIL  ` line is a failure label, so a probe must not print one as information. Checked 2026-11-25 over all 64 distinct emitting lines in the 32 probes: each one is a failure message (a fail helper, an `||` branch or an `else` branch), and none is informational. A caller who needs the old reading passes `--fail-pattern '^FAIL:'`. The style lows (quote the pattern in the INCONCLUSIVE message, a validation helper, a shared default constant across the two bins) were ruled out: the message is pinned verbatim, and two bins do not justify a shared library.
+Red-checked: mutation-canary case 40 fails at origin/main, where the old default read the two-space line as inconclusive (rc 2). Council gpt-5.5 review found no blocker. The contract it named is accepted and recorded here: under the default, a column-0 `FAIL  ` line is a failure label, so a probe must not print one as information. Checked 2026-11-25 over all 64 distinct emitting lines in the 32 probes: each one is a failure message (a fail helper, an `||` branch or an `else` branch), and none is informational. A caller who needs the old reading passes `--fail-pattern '^FAIL:'`. #420's review lows, taken with TASK-163: this `updated_date` had stayed at `created_date`, and the mutation-canary header's `--fail-pattern` line was long with mixed quoting; it is now one short line. The style lows (quote the pattern in the INCONCLUSIVE message, a validation helper, a shared default constant across the two bins) were ruled out: the message is pinned verbatim, and two bins do not justify a shared library.
 <!-- SECTION:NOTES:END -->

@@ -456,6 +456,21 @@ before_over=$(cat "$roles/over.md")
 err=$("$CR" --set status="growing status on an already over-cap file" --file "$roles/over.md" 2>&1); rc=$?
 [ $rc = 1 ] && [ "$(cat "$roles/over.md")" = "$before_over" ] \
   && ok "status growth on an over-cap file refuses and leaves file unchanged" || bad "status growth on over-cap: rc=$rc $err"
+
+# Over-cap file with no updated: line; a holds= write that changes nothing else passes and adds updated: (a stamp, not growth).
+python3 - "$roles/over-noupd.md" <<'PY'
+import sys
+path = sys.argv[1]
+open(path, "w").write(
+    f'---\nrole: "Over role"\nstatus: "busy"\nholds: "h"\n---\n\n'
+    f'## Charter\n{"c" * 500}\n\n## Handoff\n{"h" * 6300}\n\n## Next\n{"n" * 2200}\n'
+)
+PY
+out=$("$CR" --set holds="h" --file "$roles/over-noupd.md" 2>&1); rc=$?
+[ $rc = 0 ] && grep -q '^updated: ' "$roles/over-noupd.md" \
+  && ok "over-cap file without updated: a holds= write that changes nothing else passes and adds updated:" \
+  || bad "over-cap file without updated: rc=$rc $out"
+rm "$roles/over-noupd.md"
 rm "$roles/cap.md" "$roles/over.md"
 
 # 5. --need: Needs and --deck targets, tag order with --due, date stamp equals date +%F,
