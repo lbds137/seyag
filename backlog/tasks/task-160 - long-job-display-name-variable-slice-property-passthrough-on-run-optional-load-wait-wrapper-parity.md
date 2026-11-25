@@ -3,9 +3,11 @@ id: TASK-160
 title: >-
   long-job: display-name variable, slice/property passthrough on run, optional
   load wait (wrapper parity)
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - Seyag B
 created_date: '2026-11-25T04:08:00Z'
+updated_date: '2026-11-25T17:22:00Z'
 labels:
   - long-job
   - feature
@@ -29,3 +31,9 @@ Owner: bin/** lane. Related: TASK-145 (--heavy port).
 
 11-25 (Seyag): item 3 ships with TASK-145 (--heavy runs `load-gate --wait` after the memory wait); this task keeps items 1 and 2. Acceptance for item 2: a --heavy job never lands in a low-weight slice the caller set for plain jobs (heavy jobs run one at a time under the gate lock, and a low CPU weight starved suite timeouts upstream: 1829 s with 2 timeouts vs 672 s outside the slice, same tree).
 <!-- SECTION:DESCRIPTION:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+2026-11-25 (Seyag B, claimed): items 1-2 (item 3 shipped with TASK-145). Shared probe: tests/long-job.probe.sh.
+<!-- SECTION:NOTES:END -->

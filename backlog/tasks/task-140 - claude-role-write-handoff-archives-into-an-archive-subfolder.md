@@ -1,11 +1,11 @@
 ---
 id: TASK-140
 title: 'claude-role: write handoff archives into an archive/ subfolder'
-status: In Progress
+status: Done
 assignee:
   - Seyag B
 created_date: '2026-11-24T17:00:00Z'
-updated_date: '2026-11-25T08:10:00Z'
+updated_date: '2026-11-25T17:22:00Z'
 labels:
   - claude-role
   - bin
@@ -32,7 +32,7 @@ Owned by the bin lane (`plugins/seyag/bin/**`).
 <!-- AC:BEGIN -->
 - [x] #1 A cap-triggered archive lands at `<roles dir>/archive/<stem>-handoff-archive-<date>.md`. `archive/` is created before the `.tmp` file is opened, not just before the `os.replace`. The success message prints `archive/<name>` so it still points at the file. The probe pins the path and the message.
 - [x] #2 Every `for f in "$ROLES"/*.md` loop (the board, `--json`, `--list` and the earlier reader) skips a role-dir file whose stem contains `-archive-` even when it has `role:` frontmatter. The probe pins this with a fixture that has frontmatter (a retired copy), alongside a positive control showing the same file without the `-archive-` stem does list.
-- [ ] #3 Existing beside-the-file archives are migrated into `archive/` (by a one-shot `claude-role --migrate-archives` or a documented `mv` line, with the choice recorded), the hand-made retired copy included.
+- [x] #3 Existing beside-the-file archives are migrated into `archive/` (by a one-shot `claude-role --migrate-archives` or a documented `mv` line, with the choice recorded), the hand-made retired copy included.
 - [x] #4 The usage comment (`# Handoff notes to <stem>-handoff-archive-…`) and the role-instructions paragraph beginning "Before a /clear" name the new location. These are the only two mentions: `hooks/session-start.sh` has no archive wording.
 <!-- AC:END -->
 
@@ -46,4 +46,6 @@ Consumer evidence (2026-11-25, on 0.3.225): in a temp SYG_ROLE_DIR, a copy of a 
 AC #3, the choice: a documented `mv` line, not a `--migrate-archives` flag, because the migration runs once per machine and a flag would be permanent code for a one-time step. The retired copy already moved (in the memory repo, before this PR). Remaining step, once the release carrying this PR is live on the machine (moving earlier would split a same-day archive across two files):
 `mkdir -p <roles dir>/archive && mv <roles dir>/*-handoff-archive-*.md <roles dir>/archive/`
 Close this task after that move, with a count of the files moved.
+
+2026-11-25: AC #3 done after the 0.3.226 install: 66 beside-the-file archives moved into roles/archive/ (65 with mv -n, no clobbers; one same-day name collision, seyag-b-handoff-archive-2026-11-25.md, merged older-first into the archive/ copy).
 <!-- SECTION:NOTES:END -->

@@ -3,11 +3,11 @@ id: TASK-49
 title: >-
   Probes fail under suite load: pr-monitor-reminder 18ai and safe-worktree-clean
   timeout
-status: In Progress
+status: Done
 assignee:
   - Seyag B
 created_date: '2026-11-21T02:47:00Z'
-updated_date: '2026-11-25T14:56:13Z'
+updated_date: '2026-11-25T17:22:00Z'
 labels:
   - probes
   - flake
@@ -50,4 +50,6 @@ Both new failures look timing-dependent; that is an inference, not yet runtime-c
 - Lane A (hook probes), specs sent to Seyag A 2026-11-25. 18ai, hypothesis: `hooks/pr-monitor-reminder.sh:618` gives a fake gh only `timeout 2`, which load can exceed (only the banner assert failed; from code reading, not runtime-confirmed). dispatch-posture-gate O9's 141 is a SIGPIPE race: the hook exits before reading stdin. launch-record case 1 needs RC and err printed before it can be diagnosed.
 - Lane B part merged as #427 (793a167; claude-review PASS with three lows, filed as TASK-173; gate 129/129; council gpt-5.5 review, no defects; mutation parity 150 FAIL / 182 ok old vs split). The task stays In Progress until lane A lands or files the three hook items.
 - 2026-11-25: lane A filed the three hook items as TASK-175, on its 0.3.226 release branch. Close TASK-49 once TASK-175 is on main.
+
+2026-11-25: closed. TASK-175 (the three hook items) is on main, filed in 0.3.226; their fixes are tracked there.
 <!-- SECTION:NOTES:END -->
