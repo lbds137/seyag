@@ -2,6 +2,11 @@
 
 All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY-MM-DD>` section per released version; under it, `###` categories in fixed order — Breaking Changes, Features, Bug Fixes, Improvements, Chores, Tests — empty ones omitted; items are `- **scope:** description (#PR)`, written from the version's merged commit subjects.
 
+## 0.3.224 - 2026-11-24
+
+### Bug Fixes
+- **pr-merge-review-check:** an apostrophe inside a heredoc body no longer counts as an unclosed quote when no heredoc body can execute, so a `gh pr create --body-file - <<'EOF'` body that names `gh pr merge` is no longer read as a merge of a number from later prose; commands with a shell, `eval` or substitution in an unquoted-delimiter body keep the old check (TASK-146).
+
 ## 0.3.223 - 2026-11-24
 
 ### Features

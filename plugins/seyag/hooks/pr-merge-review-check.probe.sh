@@ -1126,6 +1126,52 @@ assert_no_fetch "a merge quoted inside a heredoc body does not arm the gate"
 new_case; invoke "$(printf 'gh pr comment 7 --body "$(cat <<%sEOF%s\nsee gh pr merge 1\nEOF\n)" && gh pr merge 2002' "'" "'")"
 assert_pr "a real merge after the heredoc terminator still arms the gate" 2002
 
+# TASK-146: an apostrophe in a heredoc body used to count as an open quote and
+# send the raw command to legacy_scan; the heredoc-stripped quote check
+# applies only when no body can execute (no interpreter word, no substitution
+# in an unquoted-delimiter body), while executable shapes keep the raw check.
+new_case; invoke "$(printf 'gh pr create --title t --body-file - <<%sEOF%s\n#406%ss lows: run gh pr merge <N> --disable-auto\ncapped at the 600 s per-probe limit\nEOF' "'" "'" "'")"
+assert_no_fetch "an apostrophe in a quoted-delimiter heredoc body does not arm the gate"
+assert_exit "an apostrophe in a quoted-delimiter heredoc body exits 0" 0
+
+new_case; invoke "$(printf 'gh pr create --title t --body-file - <<EOF\n#406%ss lows: run gh pr merge <N> --disable-auto\ncapped at the 600 s per-probe limit\nEOF' "'")"
+assert_no_fetch "an apostrophe in an unquoted-delimiter heredoc body does not arm the gate"
+
+new_case; invoke 'git commit -m "don'\''t gh pr merge 600 yet"'
+assert_no_fetch "an apostrophe inside a double-quoted argument does not arm the gate"
+
+new_case; invoke "$(printf 'cat <<%sEOF%s >/dev/null\nit%ss data\nEOF\ngh pr merge 2002' "'" "'" "'")"
+assert_pr "a real merge after an apostrophe-bearing data heredoc still arms the gate" 2002
+
+new_case; invoke "$(printf 'bash <<%sEOF%s\n# it%ss fine\ngh pr merge 2002\nEOF' "'" "'" "'")"
+assert_pr "a merge in an apostrophe-bearing heredoc body fed to a shell still arms the gate" 2002
+
+new_case; invoke "$(printf 'bash <<%sEOF%s\ncat <<%sDOC%s >/dev/null\nit%ss data\nDOC\ngh pr merge 2002 -t %stitle%s\nEOF' "'" "'" "'" "'" "'" "'" "'")"
+assert_pr "R1a: nested data heredoc inside a stdin-shell heredoc keeps the raw check and arms 2002" 2002
+
+new_case; invoke "$(printf 'cat <<%sDOC%s >/dev/null\nit%ss data\nDOC\nbash <<%sEOF%s\ngh pr merge 2002\necho %sdone%s\nEOF' "'" "'" "'" "'" "'" "'" "'")"
+assert_pr "R1b: data heredoc before a stdin-shell heredoc keeps the raw check and arms 2002" 2002
+
+new_case; invoke "$(printf 'bash --rcfile /dev/null <<%sEOF%s\n# it%ss fine\ngh pr merge 2002\nEOF' "'" "'" "'")"
+assert_pr "R1c: stdin-shell heredoc with --rcfile option keeps the raw check and arms 2002" 2002
+
+new_case; invoke "$(printf 'cat <<EOF\nit%ss $(gh pr merge 2002 --rebase)\nEOF' "'")"
+assert_pr "R2a: command substitution in an unquoted-delimiter heredoc body keeps the raw check and arms 2002" 2002
+
+new_case; invoke "$(printf 'cat <<-EOF\n\tit%ss `gh pr merge 2002 --rebase`\n\tEOF' "'")"
+assert_pr "R2b: backtick substitution in a tab-indented unquoted-delimiter heredoc body keeps the raw check and arms 2002" 2002
+
+new_case; SHIM_NUMBER_EXIT=0; SHIM_PR_NUMBER=4242
+invoke "$(printf 'cat <<%sEOF%s >/dev/null\nit%ss data\nEOF\ngh pr merge --rebase' "'" "'" "'")"
+assert_pr "R3a: a numberless merge after an apostrophe-bearing data heredoc resolves the branch PR" 4242
+SHIM_NUMBER_EXIT=1; SHIM_PR_NUMBER=''
+
+new_case; invoke "$(printf 'b\\ash <<%sEOF%s\ncat <<%sDOC%s >/dev/null\nit%ss data\nDOC\ngh pr merge 2002 -t %stitle%s\nEOF' "'" "'" "'" "'" "'" "'" "'")"
+assert_pr "Q1: backslash-split interpreter word before a stdin-shell heredoc keeps the raw check and arms 2002" 2002
+
+new_case; invoke "$(printf 'cat <<EOF\nit%ss $%s\n(gh pr merge 2002 --rebase)\nEOF' "'" '\')"
+assert_pr "Q2: backslash-newline continuation inside an unquoted-delimiter heredoc body substitution keeps the raw check and arms 2002" 2002
+
 # An UNTERMINATED heredoc inside a command substitution leaves the quote
 # unbalanced, so the splitter cannot classify the span and extract() falls to
 # the legacy textual scan — the deliberate over-arm for input it cannot parse
