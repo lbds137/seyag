@@ -27,4 +27,9 @@ Full gate on the 0.3.198 branch (2026-11-20, swap ~5.5 GB) failed two probes thi
 Related: TASK-30 profiled tests/safe-worktree-clean.probe.sh as the shellcheck memory outlier (~3.7 GB); its runtime under load may share a cause.
 
 2026-11-24 (Seyag B): timed out (exit 124 at the 600 s cap) in `bash tests/run-probes.sh -j 4` on worktree-agent-b82 rebased on 9450989; alone right after, `timeout 600 bash tests/safe-worktree-clean.probe.sh` passed in 594 s, against 123.9 s recorded at tests/probe-durations.tsv:88. Not separated yet: probe regression vs machine load (other lanes ran suites concurrently). Next check: time it alone on an idle machine.
+
+2026-11-24 evening (Seyag B), two more `-j 4` gates:
+- bfix (PR #409): only safe-worktree-clean failed (exit 124). Alone it passed: 332 ok, 0 fail, real 5m16s.
+- bscope (TASK-74): three probes failed: safe-worktree-clean (exit 124), `plugins/seyag/hooks/launch-record.probe.sh` case "1. unset dir", and `tests/worker-sandbox.probe.sh` "wall knob live" (rc=0, ms=2231, out=`192.0.2.1 error [Errno 113] No route to host`, ctl=`timed out`). Run alone in the same tree, launch-record passed (rc 0, 13 ok) and worker-sandbox passed (rc 0).
+Both new failures look timing-dependent; that is an inference, not yet runtime-confirmed. launch-record case 1 and worker-sandbox's live wall check join this task's list of probes that fail only under load.
 <!-- SECTION:NOTES:END -->
