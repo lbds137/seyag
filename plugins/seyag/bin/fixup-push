@@ -16,9 +16,12 @@
 #   --onto-base       squash first if there are fixups, then rebase onto the
 #                     PR's current base tip; proves pre-rebase and rebased
 #                     commit lists have identical `git patch-id --verbatim` lists.
+#   rebased           proves remote commits reappear patch-identical and in order
+#                     on a later base point; composes with squash and --onto-base.
 #
 # Notes:
 #   patch-ids ignore line numbers, so the proof shows the same hunks at possibly shifted positions;
+#   rebased and --onto-base proofs compare diffs only: a reworded or re-authored commit passes and replaces the remote's message.
 #   the --onto-base local move (`checkout -B`) has no compare-and-swap; HEAD is re-read just before it, and a commit made in that window stays in the reflog.
 #
 # Exit codes:
@@ -26,9 +29,10 @@
 #   1  refused (no local branch or remote ref moved)
 #   2  usage error
 #   3  local branch moved, push failed (prints old full SHA to recover)
+#   4  push failed or not attempted; this run did not move the local branch
 
 set -uo pipefail
-usage() { sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'; }
 
 ONTO_BASE=false
 DRY_RUN=false
@@ -83,6 +87,19 @@ check_hidden() {
         ;;
     esac
   done <<<"$v"
+}
+
+# Command substitution at call sites, not < <(...): a refuse inside patch_ids exits only its subshell.
+patch_ids() {
+  local dir=$1 range=$2 fail_msg=${3:-rebase proof failed} list c pid
+  list=$(git -C "$dir" rev-list --reverse "$range" 2>/dev/null) || refuse "$fail_msg"
+  [ -n "$list" ] || refuse "$fail_msg"
+  while IFS= read -r c; do
+    [ -n "$c" ] || continue
+    pid=$(git -C "$dir" -c diff.noprefix=false -c diff.mnemonicPrefix=false -c diff.relative=false show --ignore-submodules=none --no-ext-diff --no-color --no-textconv --no-renames -U3 --binary --full-index --format= "$c" 2>/dev/null | git patch-id --verbatim | cut -d' ' -f1) || refuse "$fail_msg"
+    [ -n "$pid" ] || refuse "$fail_msg"
+    printf '%s\n' "$pid"
+  done <<<"$list"
 }
 
 # 1. Current branch (detached HEAD refuses).
@@ -225,14 +242,48 @@ git fetch -q --no-tags "$origin_url" "+refs/heads/$b:refs/remotes/origin/$b" "+r
 R=$(git rev-parse --verify -q "refs/remotes/origin/$b" 2>/dev/null) || refuse "cannot resolve remote branch"
 B=$(git rev-parse --verify -q "refs/remotes/origin/$base" 2>/dev/null) || refuse "cannot resolve remote base"
 OLD=$(git rev-parse --verify -q HEAD 2>/dev/null) || refuse "cannot resolve HEAD"
-if ! git merge-base --is-ancestor "$R" "$OLD" 2>/dev/null; then
-  refuse "remote branch has commits not in local"
+rebased=false
+mb=""
+if git merge-base --is-ancestor "$R" "$OLD" 2>/dev/null; then
+  ahead=$(git rev-list --count "$R..$OLD") || refuse "git rev-list failed"
+else
+  mbR=$(git merge-base "$R" "$B" 2>/dev/null) || refuse "no merge-base with $base"
+  [ -n "$mbR" ] || refuse "no merge-base with $base"
+  mb=$(git merge-base "$OLD" "$B" 2>/dev/null) || refuse "no merge-base with $base"
+  [ -n "$mb" ] || refuse "no merge-base with $base"
+  if [ "$mbR" = "$mb" ]; then
+    refuse "remote branch has commits not in local (same base point: not a rebase)"
+  fi
+  if ! git merge-base --is-ancestor "$mbR" "$mb" 2>/dev/null; then
+    refuse "remote branch has commits not in local (local is not on a later base point than the remote)"
+  fi
+  not_rebased_msg="remote branch has commits not in local (no patch-identical, in-order copy of them on a newer base; a rebase that resolved conflicts cannot be proven)"
+  rem_count=$(git rev-list --count "$mbR..$R" 2>/dev/null) || refuse "git rev-list failed"
+  if [ "${rem_count:-0}" -le 0 ]; then
+    refuse "$not_rebased_msg"
+  fi
+  rem_merges=$(git rev-list --merges "$mbR..$R" 2>/dev/null) || refuse "git rev-list failed"
+  if [ -n "$rem_merges" ]; then
+    refuse "$not_rebased_msg"
+  fi
+  rem_out=$(patch_ids "$top" "$mbR..$R" "$not_rebased_msg") || exit 1
+  loc_out=$(patch_ids "$top" "$mb..$OLD" "$not_rebased_msg") || exit 1
+  mapfile -t rem_ids <<<"$rem_out"
+  mapfile -t loc_ids <<<"$loc_out"
+  k=${#rem_ids[@]}
+  loc_prefix=("${loc_ids[@]:0:k}")
+  if [ "$k" -eq 0 ] || [ "${#loc_ids[@]}" -lt "$k" ] || [ "${rem_ids[*]-}" != "${loc_prefix[*]-}" ]; then
+    refuse "$not_rebased_msg"
+  fi
+  rebased=true
+  ahead=$((${#loc_ids[@]} - k))
 fi
-ahead=$(git rev-list --count "$R..$OLD") || refuse "git rev-list failed"
 
 # 7. Range inspection.
-mb=$(git merge-base "$OLD" "$B" 2>/dev/null) || refuse "no merge-base with $base"
-[ -n "$mb" ] || refuse "no merge-base with $base"
+if [ -z "$mb" ]; then
+  mb=$(git merge-base "$OLD" "$B" 2>/dev/null) || refuse "no merge-base with $base"
+  [ -n "$mb" ] || refuse "no merge-base with $base"
+fi
 ahead_base=$(git rev-list --count "$mb..$OLD" 2>/dev/null) || refuse "git rev-list failed"
 if [ "${ahead_base:-0}" -le 0 ]; then
   refuse "no commits ahead of $base"
@@ -255,11 +306,13 @@ while IFS= read -r subj; do
 done <<<"$subjects"
 
 # 8. Rewrite necessity check.
-if [ "$nfix" -eq 0 ] && ! $ONTO_BASE; then
-  refuse "no fixup! commits to squash"
-fi
-if $ONTO_BASE && [ "$nfix" -eq 0 ] && [ "$mb" = "$B" ]; then
-  refuse "nothing to rewrite"
+if ! $rebased; then
+  if [ "$nfix" -eq 0 ] && ! $ONTO_BASE; then
+    refuse "no fixup! commits to squash"
+  fi
+  if $ONTO_BASE && [ "$nfix" -eq 0 ] && [ "$mb" = "$B" ]; then
+    refuse "nothing to rewrite"
+  fi
 fi
 
 # 9. Temporary detached worktree.
@@ -308,21 +361,8 @@ if $ONTO_BASE && [ "$mb" != "$B" ]; then
   fi
   NEW=$(git -C "$T/wt" rev-parse --verify -q HEAD 2>/dev/null) || refuse "rebase proof failed"
 
-  patch_ids() {
-    local range=$1 list c pid
-    list=$(git -C "$T/wt" rev-list --reverse "$range" 2>/dev/null) || refuse "rebase proof failed"
-    [ -n "$list" ] || refuse "rebase proof failed"
-    while IFS= read -r c; do
-      [ -n "$c" ] || continue
-      pid=$(git -C "$T/wt" -c diff.noprefix=false -c diff.mnemonicPrefix=false -c diff.relative=false show --ignore-submodules=none --no-ext-diff --no-color --no-textconv --no-renames -U3 --binary --full-index --format= "$c" 2>/dev/null | git patch-id --verbatim | cut -d' ' -f1) || refuse "rebase proof failed"
-      [ -n "$pid" ] || refuse "rebase proof failed"
-      printf '%s\n' "$pid"
-    done <<<"$list"
-  }
-
-  # Command substitution, not < <(...): a refuse inside patch_ids exits only its subshell.
-  pre_out=$(patch_ids "$mb..$MID") || exit 1
-  post_out=$(patch_ids "$B..$NEW") || exit 1
+  pre_out=$(patch_ids "$T/wt" "$mb..$MID" "rebase proof failed") || exit 1
+  post_out=$(patch_ids "$T/wt" "$B..$NEW" "rebase proof failed") || exit 1
   mapfile -t pre_ids <<<"$pre_out"
   mapfile -t post_ids <<<"$post_out"
 
@@ -340,12 +380,15 @@ B7=${B:0:7}
 OLD7=${OLD:0:7}
 NEW7=${NEW:0:7}
 
-if [ "$nfix" -gt 0 ] && $did_onto; then
-  shape="squash+onto-base $B7"
-elif $did_onto; then
-  shape="onto-base $B7"
-else
-  shape="squash"
+shape=""
+if $rebased; then
+  shape="rebased"
+fi
+if [ "$nfix" -gt 0 ]; then
+  shape="${shape:+$shape+}squash"
+fi
+if $did_onto; then
+  shape="${shape:+$shape+}onto-base $B7"
 fi
 
 # 12. --dry-run.
@@ -368,10 +411,12 @@ if [ "$cur_b" != "$b" ] || [ "$cur_head" != "$OLD" ] || ! git diff --ignore-subm
   refuse "worktree changed during the run"
 fi
 
-if $did_onto; then
-  git -c submodule.recurse=false checkout -q --no-overwrite-ignore -B "$b" "$NEW" 2>/dev/null || refuse "checkout of the rewritten branch failed (an untracked file colliding with the rewritten tree is the usual cause)"
-else
-  git update-ref -m fixup-push "refs/heads/$b" "$NEW" "$OLD" 2>/dev/null || refuse "local branch moved during the run"
+if [ "$NEW" != "$OLD" ]; then
+  if $did_onto; then
+    git -c submodule.recurse=false checkout -q --no-overwrite-ignore -B "$b" "$NEW" 2>/dev/null || refuse "checkout of the rewritten branch failed (an untracked file colliding with the rewritten tree is the usual cause)"
+  else
+    git update-ref -m fixup-push "refs/heads/$b" "$NEW" "$OLD" 2>/dev/null || refuse "local branch moved during the run"
+  fi
 fi
 
 cleanup
@@ -379,12 +424,28 @@ cleanup
 # 14. Push from the caller's cwd with a pinned lease.
 fail_exit_3() {
   local action=${1:-push failed}
-  local remote_head_actual actual7
+  local remote_head_actual actual7 cur cur7
   remote_head_actual=$(git ls-remote "$origin_url" "refs/heads/$b" 2>/dev/null | awk '{print $1}')
   if [ -n "$remote_head_actual" ]; then
     actual7=${remote_head_actual:0:7}
   else
     actual7="unknown"
+  fi
+  if [ "$NEW" = "$OLD" ]; then
+    cur=$(git rev-parse --verify -q "refs/heads/$b" 2>/dev/null || true)
+    if [ "$cur" = "$OLD" ]; then
+      printf 'fixup-push: %s; local %s unchanged at %s; remote %s at %s\n' \
+        "$action" "$b" "$OLD7" "$b" "$actual7" >&2
+    else
+      if [ -n "$cur" ]; then
+        cur7=${cur:0:7}
+      else
+        cur7="unknown"
+      fi
+      printf 'fixup-push: %s; local %s now at %s (moved by another process); remote %s at %s\n' \
+        "$action" "$b" "$cur7" "$b" "$actual7" >&2
+    fi
+    exit 4
   fi
   printf 'fixup-push: %s; local %s moved %s..%s; remote %s at %s; old head %s\n' \
     "$action" "$b" "$OLD7" "$NEW7" "$b" "$actual7" "$OLD" >&2
