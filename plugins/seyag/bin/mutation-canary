@@ -9,7 +9,7 @@
 #   mutation-canary -h|--help
 #
 # OPTIONS:
-#   --fail-pattern ERE   (default '^FAIL:'; a line of probe output matching it is a failing case label)
+#   --fail-pattern ERE   (default '^FAIL(:|  )', a "FAIL:" or "FAIL  " line at column 0; a line of probe output matching it is a failing case label)
 #   --no-baseline        (skip the unmutated run)
 #   --timeout SECS       (per probe run; default 600; 0 = none; whole number, no leading zeros, at most 9 digits)
 #
@@ -49,7 +49,7 @@ NEW_VAL=""
 SEEN_PATCH=0
 PATCH_ARG=""
 SEEN_FAIL_PATTERN=0
-FAIL_PATTERN="^FAIL:"
+FAIL_PATTERN='^FAIL(:|  )'
 SEEN_NO_BASELINE=0
 NO_BASELINE=0
 SEEN_TIMEOUT=0

@@ -2,7 +2,7 @@
 # Fixture check for plugins/seyag/bin/probe-red-check against a throwaway repo.
 # The fixture repo stands in for the "current checkout": `main` carries the
 # unfixed subject tool (checked out), a `fix` branch carries the fixed one, and
-# the three "new probes" are uncommitted files in the fixture's tests/. Each
+# the "new probes" are uncommitted files in the fixture's tests/. Each
 # probe-red-check run has the fixture repo as cwd (the bin registers and
 # removes one detached worktree in whatever repo it runs from).
 #
@@ -61,6 +61,15 @@ D=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 fail=0
 out=$(bash "$D/tools/subject.sh")
 [ "$out" = "old" ] && echo "ok:   subject unfixed" || { echo "FAIL: subject printed: $out"; fail=1; }
+exit $fail
+PROBE
+cat > "$FIX/tests/green2sp.probe.sh" <<'PROBE'
+#!/bin/bash
+set -uo pipefail
+D=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+fail=0
+out=$(bash "$D/tools/subject.sh")
+[ "$out" = "old" ] && echo "ok:   subject unfixed" || { echo "FAIL  subject printed: $out"; fail=1; }
 exit $fail
 PROBE
 # Dies at base: it sources a helper file only the fix adds, under set -e, so
@@ -244,6 +253,15 @@ both_rg_out=$( (cd "$FIX" && bash "$TOOL" --both --base main tests/red.probe.sh 
   && grep -q '^tests/green\.probe\.sh: base main NOT RED | here FAIL' <<<"$both_rg_out" \
   && ok "--both red+green on fix: exit 1 with RED|PASS and NOT RED|FAIL lines" \
   || bad "--both red+green (rc $rc; out: $both_rg_out)"
+# --both with the two-space FAIL form on both sides: red2sp RED on base and PASS
+# here, green2sp NOT RED on base and FAIL here (the indented echo shows it).
+out=$( (cd "$FIX" && bash "$TOOL" --both --base main tests/red2sp.probe.sh tests/green2sp.probe.sh) 2>&1 ); rc=$?
+[ $rc = 1 ] \
+  && grep -qxF "tests/red2sp.probe.sh: base main RED | here PASS" <<<"$out" \
+  && grep -q '^tests/green2sp\.probe\.sh: base main NOT RED | here FAIL' <<<"$out" \
+  && grep -qxF "  FAIL  subject printed: new" <<<"$out" \
+  && ok "--both two-space red+green on fix: exit 1, RED|PASS, NOT RED|FAIL, indented FAIL echo" \
+  || bad "--both two-space red+green (rc $rc; out: $out)"
 out=$( (cd "$FIX" && bash "$TOOL" --both --base main tests/red.probe.sh) 2>&1 ); rc=$?
 [ $rc = 0 ] && grep -qxF "tests/red.probe.sh: base main RED | here PASS" <<<"$out" \
   && ok "--both red alone on fix: exit 0" \
