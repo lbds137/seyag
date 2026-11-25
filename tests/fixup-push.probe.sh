@@ -1554,6 +1554,7 @@ conflict_rebase_onto_main() {
   git -C "$CLONE" add f1.txt
   if ! GIT_EDITOR=true git -C "$CLONE" rebase --continue >/dev/null 2>&1; then
     bad "conflict fixture: git rebase --continue failed after resolving f1.txt"
+    git -C "$CLONE" rebase --abort >/dev/null 2>&1 || true
     return 1
   fi
 }
@@ -1874,6 +1875,7 @@ R=$(git -C "$ORIGIN" rev-parse refs/heads/feat)
 B=$(git -C "$ORIGIN" rev-parse refs/heads/main)
 mbR=$(git -C "$CLONE" merge-base "$R" "$B")
 V19_RANGE="$mbR..$R"
+REAL_GIT=$(command -v git)
 GIT_WRAPPER_DIR="$WORK/git_wrapper_bin"
 mkdir -p "$GIT_WRAPPER_DIR"
 cat > "$GIT_WRAPPER_DIR/git" <<EOF

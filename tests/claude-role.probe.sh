@@ -466,11 +466,20 @@ open(path, "w").write(
     f'## Charter\n{"c" * 500}\n\n## Handoff\n{"h" * 6300}\n\n## Next\n{"n" * 2200}\n'
 )
 PY
+cp "$roles/over-noupd.md" "$roles/over-noupd.before"
+# The cap guard: one char of holds growth on this fixture refuses (so the fixture really is over cap).
+cp "$roles/over-noupd.md" "$roles/over-noupd1.md"
+out=$("$CR" --set holds="hh" --file "$roles/over-noupd1.md" 2>&1); rc=$?
+[ $rc = 1 ] && cmp -s "$roles/over-noupd.md" "$roles/over-noupd1.md" \
+  && ok "over-noupd fixture is over the cap: one char of holds growth refuses" || bad "over-noupd fixture not over cap: rc=$rc $out"
+rm "$roles/over-noupd1.md"
 out=$("$CR" --set holds="h" --file "$roles/over-noupd.md" 2>&1); rc=$?
+# Byte-exact: the file minus the inserted updated: line equals the pre-write file.
 [ $rc = 0 ] && grep -q '^updated: ' "$roles/over-noupd.md" \
+  && grep -v '^updated: ' "$roles/over-noupd.md" | cmp -s - "$roles/over-noupd.before" \
   && ok "over-cap file without updated: a holds= write that changes nothing else passes and adds updated:" \
-  || bad "over-cap file without updated: rc=$rc $out"
-rm "$roles/over-noupd.md"
+  || bad "over-cap file without updated: rc=$rc $out (file minus updated: line changed, or no updated: line)"
+rm "$roles/over-noupd.md" "$roles/over-noupd.before"
 rm "$roles/cap.md" "$roles/over.md"
 
 # 5. --need: Needs and --deck targets, tag order with --due, date stamp equals date +%F,
