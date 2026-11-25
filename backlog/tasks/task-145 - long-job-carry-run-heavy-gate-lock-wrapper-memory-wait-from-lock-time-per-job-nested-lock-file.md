@@ -3,11 +3,11 @@ id: TASK-145
 title: >-
   long-job: carry run --heavy (gate-lock wrapper, memory wait from lock time,
   per-job nested lock file)
-status: In Progress
+status: Done
 assignee:
   - Seyag
 created_date: '2026-11-24T19:44:00Z'
-updated_date: '2026-11-25T09:19:00Z'
+updated_date: '2026-11-25T15:40:00Z'
 labels:
   - extraction
 dependencies: []
