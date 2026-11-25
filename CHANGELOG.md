@@ -5,11 +5,14 @@ All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY
 ## 0.3.225 - 2026-11-25
 
 ### Features
-- **fixup-push:** `--resolved` proves a conflict-resolved hand rebase (same subjects in order, files outside the base's changes identical to the remote, base-only files identical to the base, intermediate commits confined to both sides' change sets) and lists the files both sides changed for re-review. The dead-end refusal now names it. Also: probes for the remote merge-commit refusal and the exit-4 "moved by another process" line, and separate wording for those refusals. (TASK-148, TASK-43, #415)
+- **fixup-push:** `--resolved` proves a conflict-resolved hand rebase (same subjects in order, files outside the base's changes identical to the remote, base-only files identical to the base, each intermediate commit's content matching the remote's commit at the same position outside the resolved files and the base's own content) and lists the files both sides changed for re-review. The dead-end refusal now names it. Also: probes for the remote merge-commit refusal and the exit-4 "moved by another process" line, and separate wording for those refusals. (TASK-148, TASK-43, #415)
 
 ### Bug Fixes
-- **fixup-push:** `--resolved` compares each intermediate rebased commit with the remote's commit at the same position, allowing differences only in the resolved files or the base's own content. Content added in one commit and removed by a later one is now refused. A remote history that adds and later deletes a file no longer gets a false refusal. (TASK-162, #416)
+- **fixup-push:** `--resolved` refuses an intermediate rebased commit whose content differs from the remote's commit at the same position outside the resolved files and the base's own content; the earlier path-only check let content that one commit added and a later one removed slip through. A remote history that adds and later deletes a file no longer gets a false refusal. (TASK-162, #416)
 - **scope-drift:** reads `SYG_SCOPE_DRIFT_MANIFESTS` from the user and project config files, as its knob row always claimed; `--help` and the README list a failed git read as an exit-2 cause and describe the base-ahead note. (TASK-74 follow-up, #413)
+
+### Improvements
+- **delegation, mem-gate:** the fresh-review bullet's "on a routed lane" clause no longer reads as a fourth scope-drift check; the `SYG_MEM_GATE_MEMINFO` knob notes that long-job forwards it into the unit (`docs/config.md` regenerated). (#413)
 
 ## 0.3.224 - 2026-11-24
 
@@ -17,7 +20,7 @@ All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY
 - **scope-drift:** new bin. Lists changed paths outside a spec's files-in-scope section and changed dependency manifests or lockfiles with their lines. Exit 1 on drift, 2 on errors, including failed git reads. `SYG_SCOPE_DRIFT_MANIFESTS` extends the manifest list. The delegation skill runs it in the full-diff read, and the fresh-review brief asks the reviewer to check scope drift. (TASK-74, #411)
 
 ### Bug Fixes
-- **pr-merge-review-check:** an apostrophe inside a heredoc body no longer counts as an unclosed quote when no heredoc body can execute, so a `gh pr create --body-file - <<'EOF'` body that names `gh pr merge` is no longer read as a merge of a number from later prose; commands with a shell, `eval` or substitution in an unquoted-delimiter body keep the old check (TASK-146).
+- **pr-merge-review-check:** an apostrophe inside a heredoc body no longer counts as an unclosed quote when no heredoc body can execute, so a `gh pr create --body-file - <<'EOF'` body that names `gh pr merge` is no longer read as a merge of a number from later prose; commands with a shell, `eval` or substitution in an unquoted-delimiter body keep the old check (TASK-146, #412).
 
 ## 0.3.223 - 2026-11-24
 
