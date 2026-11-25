@@ -117,7 +117,7 @@ parse_week_statics() {
         && [ "$((10#$CLAUDE_USAGE_WEEK_RESERVE))" -ge 1 ] && [ "$((10#$CLAUDE_USAGE_WEEK_RESERVE))" -le 99 ]; then
         week_reserve=$((10#$CLAUDE_USAGE_WEEK_RESERVE))
     elif [ -n "${CLAUDE_USAGE_WEEK_RESERVE:-}" ]; then
-        week_reserve_note="claude-usage: CLAUDE_USAGE_WEEK_RESERVE=$CLAUDE_USAGE_WEEK_RESERVE ignored: not an integer 1-99; using the default 75"
+        week_reserve_note="claude-usage: CLAUDE_USAGE_WEEK_RESERVE=$CLAUDE_USAGE_WEEK_RESERVE ignored: not an integer 1-99; using the default 75$(gates_note_suffix CLAUDE_USAGE_WEEK_RESERVE)"
     fi
     # The week's hard stop, reported by --posture only (no gate reads it): CLAUDE_USAGE_WEEK_STOP,
     # integer 1-99, validated like the reserve above, default 80, with --posture's stderr note.
@@ -127,8 +127,16 @@ parse_week_statics() {
         && [ "$((10#$CLAUDE_USAGE_WEEK_STOP))" -ge 1 ] && [ "$((10#$CLAUDE_USAGE_WEEK_STOP))" -le 99 ]; then
         week_stop=$((10#$CLAUDE_USAGE_WEEK_STOP))
     elif [ -n "${CLAUDE_USAGE_WEEK_STOP:-}" ]; then
-        week_stop_note="claude-usage: CLAUDE_USAGE_WEEK_STOP=$CLAUDE_USAGE_WEEK_STOP ignored: not an integer 1-99; using the default 80"
+        week_stop_note="claude-usage: CLAUDE_USAGE_WEEK_STOP=$CLAUDE_USAGE_WEEK_STOP ignored: not an integer 1-99; using the default 80$(gates_note_suffix CLAUDE_USAGE_WEEK_STOP)"
     fi
+}
+# The gate keys apply_gates_file set for the current call (" KEY1 KEY2 "; " " before it runs and
+# on its early returns — at load no file has run, so the suffixes below stay off): a note about
+# one of those keys appends gates_note_suffix's " (from the gates file)", naming the source the
+# unusable value came from.
+gates_keys_applied=" "
+gates_note_suffix() {
+    case $gates_keys_applied in *" $1 "*) printf ' (from the gates file)' ;; esac
 }
 parse_week_statics
 # z.ai's 5h window, capped below Tzurot's free-tier cutoff: Tzurot moves guests off GLM once the
@@ -164,7 +172,7 @@ resolve_plan_week_reserve() {
         && [ "$wr_out" -ge 1 ] && [ "$wr_out" -le 99 ]; then
         week_reserve=$((10#$wr_out))
     else
-        echo "claude-usage: CLAUDE_USAGE_WEEK_RESERVE_CMD gave no usable reserve (exit $wr_rc); plan week reserve falls back to week_reserve ($week_reserve)" >&2
+        echo "claude-usage: CLAUDE_USAGE_WEEK_RESERVE_CMD gave no usable reserve (exit $wr_rc); plan week reserve falls back to week_reserve ($week_reserve)$(gates_note_suffix CLAUDE_USAGE_WEEK_RESERVE_CMD)" >&2
     fi
 }
 
@@ -179,13 +187,13 @@ resolve_zai_week_reserve() {
         if [ "$zwr_rc" -eq 0 ] && [[ "$zwr_out" =~ ^[0-9]+$ ]] && [ "${#zwr_out}" -le 8 ] && [ "$zwr_out" -ge 1 ] && [ "$zwr_out" -le 99 ]; then
             zai_week_reserve=$((10#$zwr_out))
         else
-            echo "claude-usage: CLAUDE_USAGE_ZAI_WEEK_RESERVE_CMD gave no usable reserve (exit $zwr_rc); z.ai week reserve falls back to week_reserve ($week_reserve)" >&2
+            echo "claude-usage: CLAUDE_USAGE_ZAI_WEEK_RESERVE_CMD gave no usable reserve (exit $zwr_rc); z.ai week reserve falls back to week_reserve ($week_reserve)$(gates_note_suffix CLAUDE_USAGE_ZAI_WEEK_RESERVE_CMD)" >&2
         fi
     elif [[ ${CLAUDE_USAGE_ZAI_WEEK_RESERVE:-} =~ ^[0-9]+$ ]] && [ "${#CLAUDE_USAGE_ZAI_WEEK_RESERVE}" -le 8 ] \
         && [ "$((10#$CLAUDE_USAGE_ZAI_WEEK_RESERVE))" -ge 1 ] && [ "$((10#$CLAUDE_USAGE_ZAI_WEEK_RESERVE))" -le 99 ]; then
         zai_week_reserve=$((10#$CLAUDE_USAGE_ZAI_WEEK_RESERVE))
     elif [ -n "${CLAUDE_USAGE_ZAI_WEEK_RESERVE:-}" ]; then
-        echo "claude-usage: CLAUDE_USAGE_ZAI_WEEK_RESERVE=$CLAUDE_USAGE_ZAI_WEEK_RESERVE ignored: not an integer 1-99; using week_reserve ($week_reserve)" >&2
+        echo "claude-usage: CLAUDE_USAGE_ZAI_WEEK_RESERVE=$CLAUDE_USAGE_ZAI_WEEK_RESERVE ignored: not an integer 1-99; using week_reserve ($week_reserve)$(gates_note_suffix CLAUDE_USAGE_ZAI_WEEK_RESERVE)" >&2
     fi
 }
 
@@ -206,7 +214,7 @@ resolve_week_stop() {
         && [ "$ws_out" -ge 1 ] && [ "$ws_out" -le 99 ]; then
         week_stop=$((10#$ws_out))
     else
-        echo "claude-usage: CLAUDE_USAGE_WEEK_STOP_CMD gave no usable stop (exit $ws_rc); week stop falls back to week_stop ($week_stop)" >&2
+        echo "claude-usage: CLAUDE_USAGE_WEEK_STOP_CMD gave no usable stop (exit $ws_rc); week stop falls back to week_stop ($week_stop)$(gates_note_suffix CLAUDE_USAGE_WEEK_STOP_CMD)" >&2
     fi
 }
 
@@ -226,7 +234,9 @@ resolve_week_stop() {
 # unchanged with one stderr note; a key outside the gate list is skipped with a note — buffered
 # until the whole output parsed, so a malformed file's note is the only one — while the rest
 # still apply. Accepted values are exported, so command children (week-burn-window and friends)
-# see them.
+# see them. A --posture call can run the gates file, WEEK_RESERVE_CMD and WEEK_STOP_CMD in
+# sequence, each under its own 5 s timeout, so a gate call's worst case is ~15 s before the usage
+# read.
 apply_gates_file() {
     local out rc line key val n gk i a b known
     local -a gate_keys=(CLAUDE_USAGE_WEEK_RESERVE CLAUDE_USAGE_WEEK_RESERVE_CMD
@@ -234,6 +244,9 @@ apply_gates_file() {
         CLAUDE_USAGE_ZAI_WEEK_RESERVE CLAUDE_USAGE_ZAI_WEEK_RESERVE_CMD)
     local -A kv=()
     local -a skipped=()
+    # The fallback notes' source set (gates_keys_applied above) resets per call: an early return
+    # below applies nothing and must not carry any keys.
+    gates_keys_applied=" "
     if [ ! -e "$gates_file" ]; then
         if [ "$gates_file_from_config" = 1 ]; then
             echo "claude-usage: gates file $gates_file (from config) does not exist; using the environment's gates" >&2
@@ -252,7 +265,9 @@ apply_gates_file() {
     # Parse the whole output before touching the environment: a malformed line applies nothing,
     # and the unknown-key notes buffer with the parse, printed only once the whole output parsed —
     # so a malformed file prints exactly its one note. Each line is matched after one trailing \r
-    # (a CRLF file) and leading spaces/tabs are stripped.
+    # (a CRLF file), with leading spaces/tabs before the key and trailing spaces/tabs after the
+    # value stripped (a value's own leading spaces stay; trailing ones are harmless to strip off
+    # a _CMD value too).
     n=0
     while IFS= read -r line || [ -n "$line" ]; do
         n=$((n + 1))
@@ -266,6 +281,7 @@ apply_gates_file() {
         fi
         key=${BASH_REMATCH[1]}
         val=${BASH_REMATCH[2]}
+        val=${val%"${val##*[![:space:]]}"}
         known=0
         for gk in "${gate_keys[@]}"; do
             [ "$key" = "$gk" ] && known=1 && break
@@ -284,7 +300,7 @@ apply_gates_file() {
         [ -n "${kv[$b]+x}" ] && [ -z "${kv[$a]+x}" ] && unset "$a"
     done
     for key in "${gate_keys[@]}"; do
-        [ -n "${kv[$key]+x}" ] && export "$key=${kv[$key]}"
+        [ -n "${kv[$key]+x}" ] && export "$key=${kv[$key]}" && gates_keys_applied="$gates_keys_applied$key "
     done
     parse_week_statics
 }
