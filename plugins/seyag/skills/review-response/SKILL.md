@@ -174,7 +174,7 @@ merge --rebase` does NOT autosquash fixup commits.** It runs `git rebase`,
 not `git rebase --autosquash` — fixups land on the base branch with their
 `fixup!` titles intact and clutter `git log` permanently. The autosquash is one command: `GIT_EDITOR=true GIT_SEQUENCE_EDITOR=true git rebase -i --autosquash <base>` — both editors pinned, so it never opens an editor and folds plain `fixup!` commits without touching messages; an unpinned `git rebase -i` in an agent session is never acceptable, and on git < 2.44 the form without `-i` silently does nothing. One push per
 round is still the rule; the exception is the final round, which folds the
-round's fixups and the pre-merge autosquash into one force-push. Run that push as `fixup-push` (add `--onto-base` when the base moved): it proves the rewrite before force-pushing the PR's own branch, refuses any rewrite it cannot prove, and reports local-only commits that ride along. A mid-PR
+round's fixups and the pre-merge autosquash into one force-push. Run that push as `fixup-push` (add `--onto-base` when the base moved; `--resolved` when you rebased by hand and resolved conflicts): it proves the rewrite before force-pushing the PR's own branch, refuses any rewrite it cannot prove, and reports local-only commits that ride along. A mid-PR
 rebase is justified by exactly three things: the owner asks for it, a fixup
 needs `--edit` (a message change), or commits need restructuring. Tidying
 history is not one of them. Rebase-only merging is not
