@@ -20,7 +20,7 @@ Low findings from the cross-family re-review of scope-drift round 2 (TASK-74, VE
 2. The `git ls-files failed` branch has no probe case: case 25's corrupt index makes `git diff` fail first. Find a fixture where only `ls-files` fails, or record why none exists.
 3. The `--numstat` and `-U0` reads for a listed manifest are unchecked: a git failure prints `(+0 -0)` with no lines. The path stays listed and exit stays 1, so the count is misleading but nothing passes falsely. Check the status and print `?` counts.
 4. Case 27 covers untracked nested manifests only; add a TRACKED nested manifest (`sub/dir/package.json` modified) through the `:(top,literal)` pathspec.
-5. delegation SKILL.md fresh-review bullet: "...the spec never named, and on a routed lane..." can read as a fourth scope-drift item; a semicolon before "and on a routed lane" separates it. Optional: place the Scope drift bullet after "Check each reported deviation".
+5. (Semicolon fixed in the lane-B knobs PR; the optional bullet move stays open.) delegation SKILL.md fresh-review bullet: "...the spec never named, and on a routed lane..." can read as a fourth scope-drift item; a semicolon before "and on a routed lane" separates it. Optional: place the Scope drift bullet after "Check each reported deviation".
 6. Known limit, documented in --help: `--exclude-standard` honours the user's global excludes and `.git/info/exclude`, so an untracked manifest matching one is not reported. Decide whether to drop the global excludes or keep it documented.
 
 From the round-3 review (2026-11-24, Sonnet). The medium finding (shallow clone) and the low (base ahead of HEAD) were fixed in round 4.
@@ -31,6 +31,14 @@ From the round-3 review (2026-11-24, Sonnet). The medium finding (shallow clone)
 
 From the round-4 review (2026-11-24, Sonnet, PASS):
 11. In a shallow repo, a truly unrelated REF also falls back to diffing against REF as given, so it produces a whole-tree out-of-scope list instead of exit 2. The two cases cannot be told apart there. Reword the warning to "no merge-base found (shallow clone, or unrelated history)" while keeping the `shallow clone: no merge-base` prefix that case 36 matches.
-12. The "is ahead of HEAD" stderr note is not described in `--help` or the README row. Add one clause to each.
+12. (Fixed in the lane-B knobs PR.) The "is ahead of HEAD" stderr note is not described in `--help` or the README row. Add one clause to each.
 13. Case 36 should also assert that stderr lacks `shares no history`. Add a detached-HEAD or `--base HEAD` case asserting there is no ahead note (this overlaps item 10).
+
+From #411's claude-review (2026-11-24, PASS, lows only). Its config-loading, exit-2 wording and semicolon lows were fixed in the lane-B knobs PR; the rest:
+14. Glob wording: inside an entry that contains `*`, `[` and `?` are glob syntax too, but the README's "(`[` and `?` are not glob syntax)" note can read as covering every entry. Scope that note to exact entries, or escape them in glob entries.
+15. The `## Files` heading match is case-sensitive and rejects a trailing ` (...)`; indented sub-bullets are ignored. Both fail safe (more drift reported, never less). Decide whether to loosen either.
+16. A path deleted from the index but still on disk (untracked) shows as all-added.
+17. The default base's "no base" error should mention a shallow clone as a possible cause.
+18. The built-in manifest list misses pom.xml, Gradle files, *.csproj, deno.json/deno.lock, mix.exs/mix.lock, Package.swift/Package.resolved and go.work; `*.lock` files outside the list are never reported.
+19. Strip a leading `./` from scope entries; today `./src/a.sh` never matches `src/a.sh`, so it reads as drift.
 <!-- SECTION:DESCRIPTION:END -->
