@@ -59,11 +59,10 @@ also read from the user config file `${XDG_CONFIG_HOME:-~/.config}/seyag/config.
 project `.claude/seyag.toml` as `syg_scope_drift_manifests`, the environment winning; the
 project file is found from `CLAUDE_PROJECT_DIR` (else the current directory), not from
 `--worktree`), and are reported even when in scope. Non-lockfile manifests show up to 20
-`-`/`+` diff lines (then `... K more`); lockfiles show `(+A -D)` line counts only; a binary file shows `(binary)`. A manifest deleted
-from the index but still on disk shows git's deletion counts tagged `[untracked copy on disk]`.
-A failed
-numstat or `-U0` read prints `(+? -?)` or `(git diff failed; lines not shown)` and still
-exits 1.
+`-`/`+` diff lines (then `... K more`); lockfiles show `(+A -D)` line counts only; a binary
+file shows `(binary)`. A manifest deleted from the index but still on disk shows git's
+deletion counts tagged `[untracked copy on disk]`. A failed numstat or `-U0` read prints
+`(+? -?)` or `(git diff failed; lines not shown)` and still exits 1.
 
 Exit codes: 0 clean, 1 drift (out-of-scope paths or changed manifests), 2 usage error,
 bash older than 4.4, unreadable spec, missing section, not a git work tree, unresolvable base,
@@ -150,7 +149,7 @@ if [ "$has_base" -eq 1 ]; then
     :
   elif [ "$(git -C "$top" rev-parse --is-shallow-repository 2>/dev/null)" = "true" ]; then
     base_sha=$resolved
-    echo "scope-drift: shallow clone: no merge-base for '$base_opt' (shallow clone, or unrelated history); diffing against it as given (deepen the fetch for a fork-point diff)" >&2
+    echo "scope-drift: shallow clone: no merge-base for '$base_opt' (or unrelated history); diffing against it as given (deepen the fetch for a fork-point diff)" >&2
   else
     echo "scope-drift: base '$base_opt' shares no history with HEAD" >&2
     exit 2
@@ -257,6 +256,8 @@ in_scope() {
   return 1
 }
 
+# '*.lock' is a deliberate fail-safe catch-all: an unknown ecosystem's lockfile is reported
+# rather than missed.
 manifest_globs=(
   package.json package-lock.json npm-shrinkwrap.json
   pnpm-lock.yaml pnpm-workspace.yaml yarn.lock
@@ -268,7 +269,8 @@ manifest_globs=(
   Gemfile Gemfile.lock
   composer.json composer.lock
   pom.xml build.gradle build.gradle.kts settings.gradle settings.gradle.kts gradle.lockfile
-  '*.csproj' packages.lock.json deno.json deno.jsonc deno.lock mix.exs mix.lock
+  libs.versions.toml '*.csproj' '*.fsproj' '*.vbproj' Directory.Packages.props packages.lock.json
+  deno.json deno.jsonc deno.lock mix.exs mix.lock
   Package.swift Package.resolved go.work go.work.sum '*.lock'
 )
 if [ -n "${SYG_SCOPE_DRIFT_MANIFESTS:-}" ]; then
@@ -393,7 +395,7 @@ if [ "${#manifests_changed[@]}" -gt 0 ]; then
         if [ "$add_count" = "-" ] || [ -z "$add_count" ]; then add_count=0; fi
         if [ "$del_count" = "-" ] || [ -z "$del_count" ]; then del_count=0; fi
       fi
-      if ! is_lockfile "$p"; then
+      if [ "$binary" -eq 0 ] && ! is_lockfile "$p"; then
         in_hunk=0
         while IFS= read -r dline; do
           case "$dline" in
