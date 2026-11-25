@@ -41,6 +41,8 @@ Owned by the bin lane (`plugins/seyag/bin/**`).
 <!-- SECTION:NOTES:BEGIN -->
 AC #1, #2 and #4 shipped in the b140 PR. `os.makedirs` runs in the write block, so a refused write creates no directory. The `-archive-` skip is the first line of all four role loops (`--board`, `--in-person`/`--deck`, `--json`, `--list`). The probe pins `--list`, `--board` and `--json` with a frontmatter-carrying copy plus a positive control. The skip matches only dated archive names (`*-archive-YYYY-MM-DD.md`), so a role whose own name contains `-archive-` still lists; the probe pins both. Only these four loops scan the roles dir (driver-clone and session-start open role files by exact name). The read-modify-write without a lock is older than this change and out of its scope: one session writes one role file. Ruled out unless a role gains two writers.
 
+Consumer evidence (2026-11-25, on 0.3.225): in a temp SYG_ROLE_DIR, a copy of a retired archive file still listed as a second live role. That is the case the new probe pins, and the red-check against origin/main reproduced it.
+
 AC #3, the choice: a documented `mv` line, not a `--migrate-archives` flag, because the migration runs once per machine and a flag would be permanent code for a one-time step. The retired copy already moved (in the memory repo, before this PR). Remaining step, once the release carrying this PR is live on the machine (moving earlier would split a same-day archive across two files):
 `mkdir -p <roles dir>/archive && mv <roles dir>/*-handoff-archive-*.md <roles dir>/archive/`
 Close this task after that move, with a count of the files moved.
