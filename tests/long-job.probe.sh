@@ -2,8 +2,8 @@
 # Hermetic probe for plugins/seyag/bin/long-job: usage errors, unreadable-memory exit 6, owner
 # recording (CLAUDE_JOB_DIR or cwd basename), state-dir permissions, SYG_LONG_JOB_STATE_DIR,
 # SYG_LONG_JOB_UNIT_PREFIX, SYG_LONG_JOB_PARENT_CMD and SYG_LONG_JOB_CMD chain refusals/warnings,
-# --wait-mem gate forwarding, missing lib/owner.sh, and real transient user units when a user
-# systemd manager is available (explicit SKIP count otherwise).
+# --wait-mem gate forwarding, --heavy (gate lock, memory and load waits, nested lock), missing
+# lib/owner.sh, and real transient user units when a user systemd manager is available (explicit SKIP count otherwise).
 # Usage: tests/long-job.probe.sh   (from anywhere)
 
 set -uo pipefail
@@ -21,6 +21,7 @@ ok()  { pass=$((pass + 1)); echo "PASS  $1"; }
 bad() { fail=$((fail + 1)); echo "FAIL  $1"; }
 
 unset SYG_LONG_JOB_STATE_DIR SYG_LONG_JOB_UNIT_PREFIX SYG_LONG_JOB_PARENT_CMD SYG_LONG_JOB_CMD
+unset SYG_LONG_JOB_LOAD_GATE SYG_GATE_LOCK_FILE SYG_LOAD_GATE_1M SYG_LOAD_GATE_5M
 unset SYG_MEM_GATE_MIN_MB SYG_MEM_GATE_MEMINFO
 export XDG_STATE_HOME="$tmp/state"
 export XDG_CONFIG_HOME="$tmp/cfg"
@@ -157,6 +158,64 @@ out=$(timeout 5 env SYG_LONG_JOB_UNIT_PREFIX=pfx PATH="$tmp/stub-rec:$PATH" "$LJ
   && ok "SYG_LONG_JOB_UNIT_PREFIX=pfx passes --unit=pfx-NAME.service to systemd-run and pfx-NAME.service to systemctl" \
   || bad "SYG_LONG_JOB_UNIT_PREFIX=pfx (rc=$rc, argv=$(tr '\n' ' ' <"$tmp/argv" 2>/dev/null), sysctl=$(tr '\n' ' ' <"$tmp/systemctl-argv" 2>/dev/null))"
 
+# --- long-job run --heavy: argv shape against the recording stub (no unit starts)
+cat >"$tmp/load-gate-stub" <<EOF
+#!/bin/bash
+echo "load-gate-stub: \$* 1m=\${SYG_LOAD_GATE_1M-unset}"
+exit \$(cat "$tmp/load-rc" 2>/dev/null || echo 0)
+EOF
+chmod +x "$tmp/load-gate-stub"
+printf 'MemTotal: 15000000 kB\nMemAvailable: 1048576 kB\nSwapTotal: 2097152 kB\nSwapFree: 1048576 kB\n' >"$tmp/meminfo-low"
+GL="$REPO/plugins/seyag/bin/gate-lock"
+av() { tr '\n' ' ' <"$tmp/argv" 2>/dev/null; }
+
+# S1: --heavy defaults to a 900 s memory wait, takes the gate lock, and forwards the caller's seams.
+rm -f "$tmp/argv"
+out=$(timeout 5 env SYG_GATE_LOCK_FILE="$tmp/gl" SYG_LONG_JOB_LOAD_GATE="$tmp/load-gate-stub" SYG_LOAD_GATE_1M=7 SYG_MEM_GATE_MEMINFO="$tmp/meminfo-low" PATH="$tmp/stub-rec:$PATH" "$LJ" run hv-job --heavy -- true 2>/dev/null); rc=$?
+[ "$rc" = 0 ] && grep -qxF -- "--setenv=SYG_GATE_LOCK_FILE=$tmp/gl" "$tmp/argv" \
+  && grep -qxF -- "--setenv=SYG_LOAD_GATE_1M=7" "$tmp/argv" \
+  && grep -qxF -- "--lock" "$tmp/argv" && grep -qxF -- "$GL" "$tmp/argv" \
+  && grep -qxF -- "$XDG_STATE_HOME/long-job/hv-job@gate.lock" "$tmp/argv" \
+  && grep -qxF -- "--gate" "$tmp/argv" && grep -qxF -- "900" "$tmp/argv" \
+  && grep -qxF -- "--load" "$tmp/argv" && grep -qxF -- "$tmp/load-gate-stub" "$tmp/argv" \
+  && grep -qF "queues for the gate lock, then waits for 2048 MB of memory (up to 900 s), then for the CPU load (load-gate)" <<<"$out" \
+  && ok "run --heavy locks, defaults --wait-mem to 900, loads the load-gate and forwards the lock file and load limits" \
+  || bad "run --heavy defaults (rc=$rc, out=[$out], argv=$(av))"
+
+# S2: --heavy --min-mb 0 skips the memory wait but keeps the lock.
+rm -f "$tmp/argv"
+out=$(timeout 5 env SYG_GATE_LOCK_FILE="$tmp/gl" SYG_LONG_JOB_LOAD_GATE="$tmp/load-gate-stub" PATH="$tmp/stub-rec:$PATH" "$LJ" run hv-job0 --heavy --min-mb 0 -- true 2>&1); rc=$?
+[ "$rc" = 0 ] && grep -qxF -- "--no-gate" "$tmp/argv" && ! grep -qxF -- "900" "$tmp/argv" && grep -qxF -- "--lock" "$tmp/argv" \
+  && ok "run --heavy --min-mb 0 skips the memory wait but still takes the gate lock" \
+  || bad "run --heavy --min-mb 0 (rc=$rc, out=[$out], argv=$(av))"
+
+# S3: an empty load-gate seam skips the load wait with a warning.
+rm -f "$tmp/argv"
+err=$(timeout 5 env SYG_GATE_LOCK_FILE="$tmp/gl" SYG_LONG_JOB_LOAD_GATE='' PATH="$tmp/stub-rec:$PATH" "$LJ" run hv-noload --heavy --min-mb 0 -- true 2>&1 >/dev/null); rc=$?
+[ "$rc" = 0 ] && grep -qF "skips the CPU load wait" <<<"$err" && grep -qxF -- "--no-load" "$tmp/argv" && ! grep -qxF -- "--load" "$tmp/argv" \
+  && ok "run --heavy with no load-gate warns and passes --no-load" \
+  || bad "run --heavy no load-gate (rc=$rc, err=[$err], argv=$(av))"
+
+# S4: a plain run neither locks nor forwards the lock file or the load limits.
+rm -f "$tmp/argv"
+out=$(timeout 5 env SYG_GATE_LOCK_FILE="$tmp/gl" SYG_LOAD_GATE_1M=7 SYG_LONG_JOB_LOAD_GATE="$tmp/load-gate-stub" PATH="$tmp/stub-rec:$PATH" "$LJ" run plain-job --min-mb 0 -- true 2>&1); rc=$?
+[ "$rc" = 0 ] && grep -qxF -- "--no-load" "$tmp/argv" && ! grep -qxF -- "--lock" "$tmp/argv" \
+  && ! grep -qF -- "--setenv=SYG_GATE_LOCK_FILE=" "$tmp/argv" && ! grep -qF -- "--setenv=SYG_LOAD_GATE_1M=" "$tmp/argv" \
+  && ok "a plain run passes --no-load, no --lock and forwards neither the lock file nor the load limits" \
+  || bad "plain run (rc=$rc, out=[$out], argv=$(av))"
+
+# S5: an explicit --wait-mem survives --heavy.
+rm -f "$tmp/argv"
+out=$(timeout 5 env SYG_GATE_LOCK_FILE="$tmp/gl" SYG_LONG_JOB_LOAD_GATE="$tmp/load-gate-stub" PATH="$tmp/stub-rec:$PATH" "$LJ" run hv-w30 --heavy --wait-mem 30 -- true 2>&1); rc=$?
+w=$(awk '/^--gate$/{getline; getline; print; exit}' "$tmp/argv")
+[ "$rc" = 0 ] && [ "$w" = 30 ] && ! grep -qxF -- "900" "$tmp/argv" \
+  && ok "run --heavy --wait-mem 30 keeps 30" \
+  || bad "run --heavy --wait-mem 30 (rc=$rc, w=[$w], out=[$out], argv=$(av))"
+
+# S6: --help documents --heavy.
+out=$(timeout 5 "$LJ" --help 2>&1)
+grep -qF -- "--heavy" <<<"$out" && ok "--help documents --heavy" || bad "--help lacks --heavy"
+
 # SYG_LONG_JOB_UNIT_PREFIX='a b' exits 2 naming the knob; leading '-' exits 2 saying it must start with a letter or digit.
 out=$(timeout 5 env SYG_LONG_JOB_UNIT_PREFIX='a b' PATH="$tmp/stub:$PATH" "$LJ" run bad-pfx --min-mb 0 -- true 2>&1); rc=$?
 [ "$rc" = 2 ] && grep -q "SYG_LONG_JOB_UNIT_PREFIX" <<<"$out" \
@@ -265,7 +324,7 @@ if ! systemctl --user show-environment >/dev/null 2>&1; then
   exit $?
 fi
 p=probe-$$
-cleanup_units() { for s in ok bad stop gate race wq wr dollar; do systemctl --user stop "long-job-$p-$s.service" 2>/dev/null; systemctl --user reset-failed "long-job-$p-$s.service" 2>/dev/null; done; rm -rf "$tmp"; }
+cleanup_units() { for s in ok bad stop gate race wq wr dollar heavy heavyq heavymem heavyld heavylf heavyln plainld; do systemctl --user stop "long-job-$p-$s.service" 2>/dev/null; systemctl --user reset-failed "long-job-$p-$s.service" 2>/dev/null; done; rm -rf "$tmp"; }
 trap cleanup_units EXIT
 
 timeout 10 "$LJ" run "$p-gate" --min-mb 99999999 -- true >/dev/null 2>&1; rc=$?
@@ -365,10 +424,87 @@ out=$(timeout 45 "$LJ" wait "$p-wr" --interval 1 --timeout 40 --owner ""); rc=$?
 [ -e "$tmp/ran-wr" ] && ok "ran-wr exists" || bad "ran-wr does not exist"
 log=$(timeout 5 "$LJ" log "$p-wr")
 grep -q "ok after" <<<"$log" && ok "log contains ok after" || bad "ok after not in log ($log)"
+
+# --- long-job run --heavy inside real units (every heavy case uses a lock file under $tmp, never /tmp/gate.lock)
+export SYG_GATE_LOCK_FILE="$tmp/gate.lock"
+export SYG_LONG_JOB_LOAD_GATE="$tmp/load-gate-stub"
+LJS="$XDG_STATE_HOME/long-job"
+# logwait FILE PATTERN SECONDS: poll the log for a fixed string.
+logwait() { local i; for ((i = 0; i < $3 * 2; i++)); do grep -qF -- "$2" "$1" 2>/dev/null && return 0; sleep 0.5; done; return 1; }
+# lineno FILE REGEX: the first matching line number, or empty.
+lineno() { grep -n -m1 -- "$2" "$1" 2>/dev/null | cut -d: -f1; }
+
+# C: low memory, --heavy does not refuse at start; the memory wait starts only after the lock is held.
+export SYG_MEM_GATE_MEMINFO="$tmp/meminfo-low"
+timeout 10 "$LJ" run "$p-heavymem" --heavy --min-mb 4000 --no-inhibit -- true >/dev/null 2>&1; rc=$?
+logwait "$LJS/$p-heavymem.log" "mem-gate: waiting" 10; wrc=$?
+l_lock=$(lineno "$LJS/$p-heavymem.log" "holding the gate lock"); l_mem=$(lineno "$LJS/$p-heavymem.log" "mem-gate: waiting")
+[ "$rc" = 0 ] && [ "$wrc" = 0 ] && [ -n "$l_lock" ] && [ -n "$l_mem" ] && [ "$l_lock" -lt "$l_mem" ] \
+  && ok "run --heavy on low memory starts, and its memory wait begins after the gate lock is held" \
+  || bad "heavy memory wait (rc=$rc, wait=$wrc, lock line=[$l_lock], mem line=[$l_mem], log=$(cat "$LJS/$p-heavymem.log" 2>/dev/null | tr '\n' '|'))"
+timeout 10 systemctl --user stop "long-job-$p-heavymem.service" 2>/dev/null
 unset SYG_MEM_GATE_MEMINFO
 
+# D: a gate-lock call inside the job takes the per-job lock instead of waiting on the job's own.
+timeout 10 "$LJ" run "$p-heavy" --heavy --min-mb 0 --no-inhibit -- bash -c 'exec "$1" echo nested-ran' _ "$REPO/plugins/seyag/bin/gate-lock" >/dev/null 2>&1; rc=$?
+out=$(timeout 25 "$LJ" wait "$p-heavy" --interval 1 --timeout 20 --owner ""); wrc=$?
+grep -qx "nested-ran" "$LJS/$p-heavy.log" 2>/dev/null \
+  && [ "$rc" = 0 ] && [ "$wrc" = 0 ] \
+  && ok "a gate-lock call inside a --heavy job does not deadlock on the job's own lock" \
+  || bad "heavy nested gate-lock (rc=$rc, wait=$wrc, out=$out, log=$(tr '\n' '|' <"$LJS/$p-heavy.log" 2>/dev/null))"
+# A deadlocked job would hold the gate lock for the cases below: release it.
+timeout 10 systemctl --user stop "long-job-$p-heavy.service" 2>/dev/null
+
+# E: a held gate lock queues the job; it runs once the lock is released.
+exec 8>>"$SYG_GATE_LOCK_FILE"; flock 8
+timeout 10 "$LJ" run "$p-heavyq" --heavy --min-mb 0 --no-inhibit -- touch "$tmp/ran-heavyq" >/dev/null 2>&1; rc=$?
+logwait "$LJS/$p-heavyq.log" "gate-lock: waiting" 10; wrc=$?
+sleep 1
+timeout 5 "$LJ" wait "$p-heavyq" --poll --owner "" >/dev/null 2>&1; prc=$?
+[ -e "$tmp/ran-heavyq" ] && ran1=1 || ran1=0
+exec 8>&-
+out=$(timeout 25 "$LJ" wait "$p-heavyq" --interval 1 --timeout 20 --owner ""); wrc2=$?
+[ "$rc" = 0 ] && [ "$wrc" = 0 ] && [ "$prc" = 4 ] && [ "$ran1" = 0 ] && [ "$wrc2" = 0 ] && [ -e "$tmp/ran-heavyq" ] \
+  && ok "run --heavy queues behind a held gate lock (still running, CMD not run) and runs after release" \
+  || bad "heavy queue (rc=$rc, logwait=$wrc, poll=$prc, ran-before=$ran1, wait=$wrc2, out=$out)"
+
+# F: the load wait runs after the lock, before CMD, with the forwarded load limit.
+SYG_LOAD_GATE_1M=7 timeout 10 "$LJ" run "$p-heavyld" --heavy --min-mb 0 --no-inhibit -- echo cmd-ran >"$tmp/heavyld.out" 2>&1; rc=$?
+out=$(timeout 25 "$LJ" wait "$p-heavyld" --interval 1 --timeout 20 --owner ""); wrc=$?
+f1=$(lineno "$LJS/$p-heavyld.log" "holding the gate lock"); f2=$(lineno "$LJS/$p-heavyld.log" '^load-gate-stub: --wait --owner  1m=7$'); f3=$(lineno "$LJS/$p-heavyld.log" '^cmd-ran$')
+[ "$rc" = 0 ] && [ "$wrc" = 0 ] && [ -n "$f1" ] && [ -n "$f2" ] && [ -n "$f3" ] && [ "$f1" -lt "$f2" ] && [ "$f2" -lt "$f3" ] \
+  && grep -qF "then for the CPU load (load-gate)" "$tmp/heavyld.out" \
+  && ok "run --heavy: lock, then the load wait with the forwarded limit, then CMD" \
+  || bad "heavy load wait (rc=$rc, wait=$wrc, lines=[$f1/$f2/$f3], start=$(cat "$tmp/heavyld.out"), log=$(tr '\n' '|' <"$LJS/$p-heavyld.log" 2>/dev/null))"
+
+# G: a failing load-gate runs CMD anyway and says so.
+echo 2 >"$tmp/load-rc"
+timeout 10 "$LJ" run "$p-heavylf" --heavy --min-mb 0 --no-inhibit -- echo cmd-ran >/dev/null 2>&1; rc=$?
+out=$(timeout 25 "$LJ" wait "$p-heavylf" --interval 1 --timeout 20 --owner ""); wrc=$?
+rm -f "$tmp/load-rc"
+grep -qF "load-gate exited 2; running anyway" "$LJS/$p-heavylf.log" 2>/dev/null && grep -qx "cmd-ran" "$LJS/$p-heavylf.log" 2>/dev/null \
+  && [ "$rc" = 0 ] && [ "$wrc" = 0 ] \
+  && ok "run --heavy runs CMD anyway when load-gate exits non-zero, and logs it" \
+  || bad "heavy load-gate failure (rc=$rc, wait=$wrc, log=$(tr '\n' '|' <"$LJS/$p-heavylf.log" 2>/dev/null))"
+
+# H: no load-gate: warn at start, skip the load wait.
+err=$(SYG_LONG_JOB_LOAD_GATE='' timeout 10 "$LJ" run "$p-heavyln" --heavy --min-mb 0 --no-inhibit -- echo cmd-ran 2>&1 >/dev/null); rc=$?
+out=$(timeout 25 "$LJ" wait "$p-heavyln" --interval 1 --timeout 20 --owner ""); wrc=$?
+[ "$rc" = 0 ] && [ "$wrc" = 0 ] && grep -qF "skips the CPU load wait" <<<"$err" \
+  && grep -qx "cmd-ran" "$LJS/$p-heavyln.log" 2>/dev/null && ! grep -q "load-gate-stub" "$LJS/$p-heavyln.log" \
+  && ok "run --heavy without a load-gate warns and runs CMD without the load wait" \
+  || bad "heavy no load-gate (rc=$rc, wait=$wrc, err=$err, log=$(tr '\n' '|' <"$LJS/$p-heavyln.log" 2>/dev/null))"
+
+# I: a plain run never calls the load-gate.
+timeout 10 "$LJ" run "$p-plainld" --min-mb 0 --no-inhibit -- echo cmd-ran >/dev/null 2>&1; rc=$?
+out=$(timeout 25 "$LJ" wait "$p-plainld" --interval 1 --timeout 20 --owner ""); wrc=$?
+[ "$rc" = 0 ] && [ "$wrc" = 0 ] && grep -qx "cmd-ran" "$LJS/$p-plainld.log" 2>/dev/null && ! grep -q "load-gate-stub" "$LJS/$p-plainld.log" \
+  && ok "a plain run does not call the load-gate" \
+  || bad "plain run load-gate (rc=$rc, wait=$wrc, log=$(tr '\n' '|' <"$LJS/$p-plainld.log" 2>/dev/null))"
+unset SYG_GATE_LOCK_FILE SYG_LONG_JOB_LOAD_GATE
+
 n=$(timeout 5 "$LJ" status | grep -c "^$p-")
-[ "$n" = 7 ] && ok "status lists every recorded job" || bad "status lists $n jobs, want 7"
+[ "$n" = 14 ] && ok "status lists every recorded job" || bad "status lists $n jobs, want 14"
 
 echo "long-job probe: $pass passed, $fail failed"
 [ "$fail" = 0 ]

@@ -160,6 +160,7 @@ SYG_LOAD_GATE_LOADAVG	internal	misc	/proc/loadavg	Test seam overriding the loada
 SYG_LOAD_GATE_NPROC	internal	misc	nproc	Test seam overriding the CPU count load-gate scales its default ceilings by.	-
 SYG_LOAD_GATE_PSI	internal	misc	/proc/pressure/cpu	Test seam overriding the CPU pressure file load-gate reads.	-
 SYG_LONG_JOB_CMD	user	session	unset	Single-line runner prefix advertised at SessionStart for >10-minute jobs (`long-job run`); long-job-chain-check also checks commands whose first word equals this value's first word and whose second word is `run`.	-
+SYG_LONG_JOB_LOAD_GATE	internal	misc	prose:load-gate beside long-job	Test seam: the load-gate long-job run --heavy calls inside the unit (a path); empty skips the load wait, with a warning.	-
 SYG_LONG_JOB_PARENT_CMD	internal	misc	unset	Test seam giving long-job the parent shell's command text in place of /proc/PPID/cmdline; setting it (even empty) replaces the parent-command read and so disables long-job's own && refusal (for tests only).	-
 SYG_LONG_JOB_STATE_DIR	user	misc	prose:XDG_STATE_HOME/long-job (XDG_STATE_HOME has its XDG default)	Directory holding long-job's per-job NAME.cmd, NAME.owner, NAME.unit, NAME.log and NAME.exit files.	path
 SYG_LONG_JOB_UNIT_PREFIX	user	misc	long-job	Prefix of the transient systemd user unit long-job starts (PREFIX-NAME.service); must start with a letter or digit and hold only letters, digits, '.', '_' and '-'.	host

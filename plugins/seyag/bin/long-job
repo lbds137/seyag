@@ -26,6 +26,16 @@ longer than ~10 minutes (a miner, a full suite, an extract, an OCR pass).
                        overflow goes to swap rather than killing it
       --nice N         systemd Nice for the unit
       --env NAME       also pass the caller's NAME into the unit (repeatable)
+      --heavy          for a suite, gate or e2e run: inside the unit, first queue for the
+                       machine-wide gate lock (${SYG_GATE_LOCK_FILE:-/tmp/gate.lock}, the one
+                       gate-lock takes), then wait for memory as --wait-mem does (default 900 s,
+                       counted from taking the lock; --min-mb 0 skips it), then wait for the CPU
+                       load with `load-gate --wait` (its limits and 1800 s timeout; a timeout or
+                       an unreadable load runs CMD anyway, saying so in the log), then run CMD.
+                       While queued, status shows the job running and its log says
+                       "gate-lock: waiting". A gate-lock call inside CMD takes a per-job lock
+                       instead (it would otherwise wait forever on the job's own lock): CMD gets
+                       SYG_GATE_LOCK_FILE set to NAME@gate.lock in the state dir
       --no-inhibit     don't hold a sleep/idle inhibitor (the inhibitor is skipped with a note
                        when systemd-inhibit is refused)
       When the parent shell's command text is readable (Claude Code's Bash tool, which runs
@@ -63,7 +73,7 @@ longer than ~10 minutes (a miner, a full suite, an extract, an OCR pass).
   long-job --help
 
 NAME: must start with a letter or digit and hold only letters, digits, '.', '_' and '-'. State lives in ${SYG_LONG_JOB_STATE_DIR:-${XDG_STATE_HOME:-~/.local/state}/long-job}/
-(NAME.log, NAME.cmd, NAME.owner, NAME.unit, NAME.exit, NAME.lock); unit prefix is ${SYG_LONG_JOB_UNIT_PREFIX:-long-job} (PREFIX-NAME.service). Stop a job with: systemctl --user stop PREFIX-NAME
+(NAME.log, NAME.cmd, NAME.owner, NAME.unit, NAME.exit, NAME.lock, NAME@gate.lock); unit prefix is ${SYG_LONG_JOB_UNIT_PREFIX:-long-job} (PREFIX-NAME.service). Stop a job with: systemctl --user stop PREFIX-NAME
 Exit codes for run: 0 started, 1 memory gate failed (without --wait-mem), 2 usage error or the job is
 already running, 5 the state dir or systemd-run failed (a failed start is recorded as exit 5, so status
 and wait report it), 6 mem-gate could not read memory (without --wait-mem; nothing started). status, cmd, rc and log exit 1 on an unknown NAME.
@@ -136,7 +146,7 @@ cmd=${1:-}; [ $# -gt 0 ] && shift
 case "$cmd" in
   run)
     name=${1:-}; check_name "$name"; shift
-    min_mb=2048 wait_mem="" props=() envs=() inhibit=1
+    min_mb=2048 wait_mem="" props=() envs=() inhibit=1 heavy=0
     while [ $# -gt 0 ] && [ "$1" != -- ]; do
       case "$1" in
         --min-mb|--wait-mem|--mem-max|--nice|--env)
@@ -148,11 +158,15 @@ case "$cmd" in
         --nice) [[ $2 =~ ^-?[0-9]+$ ]] || die "--nice needs an integer"; props+=(-p "Nice=$2"); shift ;;
         --env) [[ $2 =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || die "--env needs a variable name"; envs+=("--setenv=$2"); shift ;;
         --no-inhibit) inhibit=0 ;;
+        --heavy) heavy=1 ;;
         *) die "unknown run option $1 (the command goes after --)" ;;
       esac
       shift
     done
     [ "$min_mb" -eq 0 ] && [ -n "$wait_mem" ] && die "--wait-mem needs the memory gate; drop --min-mb 0"
+    # A heavy job's memory check belongs after the lock (memory read before a long queue is stale),
+    # so it always waits inside the unit.
+    [ "$heavy" = 1 ] && [ "$min_mb" -gt 0 ] && [ -z "$wait_mem" ] && wait_mem=900
     [ "${1:-}" = -- ] || die "run needs -- before the command"
     shift
     [ $# -gt 0 ] || die "run needs a command after --"
@@ -210,6 +224,25 @@ case "$cmd" in
       gate_args=(--gate "$min_mb" "$wait_mem" "$interval" "$here/mem-gate")
     fi
 
+    lock_args=() load_args=(--no-load) lg=""
+    if [ "$heavy" = 1 ]; then
+      # The unit has no caller env: the caller's lock file (a probe's, or a config.toml value)
+      # must reach the gate-lock inside it, or the job queues on a different lock.
+      [ -n "${SYG_GATE_LOCK_FILE+x}" ] && envs+=("--setenv=SYG_GATE_LOCK_FILE=$SYG_GATE_LOCK_FILE")
+      # NAME@gate.lock: '@' is not a NAME character, so no job's NAME.lock start lock can collide.
+      lock_args=(--lock "$here/gate-lock" "$state/$name@gate.lock")
+      # The load wait runs inside the lock, after the memory wait: a reading taken before a long
+      # queue is stale. SYG_LONG_JOB_LOAD_GATE (a path, or empty for none) is the probe's seam.
+      lg=${SYG_LONG_JOB_LOAD_GATE-$here/load-gate}
+      if [ -n "$lg" ] && [ -x "$lg" ]; then
+        load_args=(--load "$lg")
+        for v in SYG_LOAD_GATE_1M SYG_LOAD_GATE_5M; do [ -n "${!v+x}" ] && envs+=("--setenv=$v=${!v}"); done
+      else
+        echo "long-job: load-gate is not available${lg:+ ($lg is not executable)}, so $name skips the CPU load wait" >&2
+        lg=""
+      fi
+    fi
+
     log="$state/$name.log" ex="$state/$name.exit"
     rm -f "$ex"
     printf '%q ' "$@" >"$state/$name.cmd"; echo >>"$state/$name.cmd"
@@ -233,8 +266,8 @@ case "$cmd" in
     if ! systemctl_out=$(systemd-run --user --quiet --expand-environment=no --unit="$(unit_of "$name")" \
         --working-directory="$PWD" --setenv=PATH="$PATH" "${envs[@]}" \
         -p StandardOutput="append:$log" -p StandardError="append:$log" "${props[@]}" \
-        -- bash -c 'ex=$1; shift; if [ "$1" = --gate ]; then mem=$2; s=$3; i=$4; bin=$5; shift 5; "$bin" --wait "$mem" --timeout "$s" --interval "$i" --owner "" || { rc=$?; echo "$rc $(date +%s)" >"$ex"; exit $rc; }; elif [ "$1" = --no-gate ]; then shift; fi; "$@"; rc=$?; echo "$rc $(date +%s)" >"$ex"; exit $rc' \
-        long-job-wrap "$ex" "${gate_args[@]}" "${pre[@]}" "$@" 2>&1); then
+        -- bash -c 'ex=$1; shift; if [ "$1" = --lock ]; then bin=$2; priv=$3; shift 3; "$bin" bash -c "$BASH_EXECUTION_STRING" long-job-wrap "$ex" --locked "$priv" "$@"; rc=$?; [ -e "$ex" ] || echo "$rc $(date +%s)" >"$ex"; exit $rc; fi; if [ "$1" = --locked ]; then export SYG_GATE_LOCK_FILE=$2; shift 2; echo "long-job: $(date +%T) holding the gate lock; gate-lock inside the job uses $SYG_GATE_LOCK_FILE"; fi; if [ "$1" = --gate ]; then mem=$2; s=$3; i=$4; bin=$5; shift 5; "$bin" --wait "$mem" --timeout "$s" --interval "$i" --owner "" || { rc=$?; echo "$rc $(date +%s)" >"$ex"; exit $rc; }; elif [ "$1" = --no-gate ]; then shift; fi; if [ "$1" = --load ]; then lg=$2; shift 2; "$lg" --wait --owner ""; rc=$?; [ $rc = 0 ] || echo "long-job: $(date +%T) load-gate exited $rc; running anyway"; elif [ "$1" = --no-load ]; then shift; fi; "$@"; rc=$?; echo "$rc $(date +%s)" >"$ex"; exit $rc' \
+        long-job-wrap "$ex" "${lock_args[@]}" "${gate_args[@]}" "${load_args[@]}" "${pre[@]}" "$@" 2>&1); then
       # Record the failed start so status and wait don't call it "ended without an exit record".
       echo "long-job: systemd-run failed: $systemctl_out" | tee -a "$log" >&2
       echo "5 $(date +%s)" >"$ex"
@@ -242,7 +275,9 @@ case "$cmd" in
       exit 5
     fi
     exec 9>&-
-    if [ "$min_mb" -gt 0 ] && [ -n "$wait_mem" ]; then
+    if [ "$heavy" = 1 ]; then
+      echo "long-job: started $name as $(unit_of "$name"); it queues for the gate lock${wait_mem:+, then waits for $min_mb MB of memory (up to $wait_mem s)}${lg:+, then for the CPU load (load-gate)}, before running; log $log"
+    elif [ "$min_mb" -gt 0 ] && [ -n "$wait_mem" ]; then
       echo "long-job: started $name as $(unit_of "$name"); it waits for $min_mb MB of memory (up to $wait_mem s) before running; log $log"
     else
       echo "long-job: started $name as $(unit_of "$name"); log $log"
