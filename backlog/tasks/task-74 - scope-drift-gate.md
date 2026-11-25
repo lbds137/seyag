@@ -1,8 +1,9 @@
 ---
 id: TASK-74
 title: 'delegation: scope-drift gate before landing a worker diff or PR'
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - Seyag B
 created_date: '2026-11-22T05:50:00Z'
 labels:
   - delegation
