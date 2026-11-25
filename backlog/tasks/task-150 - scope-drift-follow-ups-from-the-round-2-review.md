@@ -41,4 +41,9 @@ From #411's claude-review (2026-11-24, PASS, lows only). Its config-loading, exi
 17. The default base's "no base" error should mention a shallow clone as a possible cause.
 18. The built-in manifest list misses pom.xml, Gradle files, *.csproj, deno.json/deno.lock, mix.exs/mix.lock, Package.swift/Package.resolved and go.work; `*.lock` files outside the list are never reported.
 19. Strip a leading `./` from scope entries; today `./src/a.sh` never matches `src/a.sh`, so it reads as drift.
+
+From #413's claude-review (2026-11-24, PASS, lows only):
+20. `--help` and the README row don't say that SYG_SCOPE_DRIFT_MANIFESTS is also read from the user and project config files.
+21. No probe case for the user config file (`$XDG_CONFIG_HOME/seyag/config.toml`).
+22. Optional: one sentence noting that project config comes from CLAUDE_PROJECT_DIR/$PWD, not from `--worktree`.
 <!-- SECTION:DESCRIPTION:END -->
