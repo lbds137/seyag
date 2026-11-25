@@ -4,6 +4,9 @@ All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY
 
 ## 0.3.224 - 2026-11-24
 
+### Features
+- **scope-drift:** new bin. Lists changed paths outside a spec's files-in-scope section and changed dependency manifests or lockfiles with their lines. Exit 1 on drift, 2 on errors, including failed git reads. `SYG_SCOPE_DRIFT_MANIFESTS` extends the manifest list. The delegation skill runs it in the full-diff read, and the fresh-review brief asks the reviewer to check scope drift. (TASK-74, #411)
+
 ### Bug Fixes
 - **pr-merge-review-check:** an apostrophe inside a heredoc body no longer counts as an unclosed quote when no heredoc body can execute, so a `gh pr create --body-file - <<'EOF'` body that names `gh pr merge` is no longer read as a merge of a number from later prose; commands with a shell, `eval` or substitution in an unquoted-delimiter body keep the old check (TASK-146).
 
