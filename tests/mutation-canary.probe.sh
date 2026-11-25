@@ -40,6 +40,7 @@
 # 37. --restore with journal pid of a live non-mutation-canary process (sleep) -> rc 0, pid treated as stale, restored
 # 38. --restore with journal dir holding 0.path, 0.orig, 0.mutant but no pid file -> rc 0 after >=900 ms retry window, restored
 # 39. --restore with journal dir holding 0.path, 0.orig, 0.mutant and a live pid written during the retry window -> refused exit 2, subject still mutated, journal kept
+# 40. default --fail-pattern with a two-space "FAIL  " probe line (tests/twosp.probe.sh) -> caught, exit 0, subject intact
 #
 # Usage: tests/mutation-canary.probe.sh   (from anywhere)
 
@@ -121,6 +122,19 @@ if [ "$out" = "old" ]; then
   exit 0
 fi
 echo "not ok 1 - subject output is $out"
+exit 1
+PROBE
+
+cat >"$FIX/tests/twosp.probe.sh" <<'PROBE'
+#!/bin/bash
+set -uo pipefail
+D=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+out=$("$D/tools/subject.sh")
+if [ "$out" = "old" ]; then
+  echo "ok:   subject prints old"
+  exit 0
+fi
+echo "FAIL  subject printed $out instead of old"
 exit 1
 PROBE
 
@@ -285,7 +299,7 @@ check_intact "2. survived"
 # 3. inconclusive
 out=$( (cd "$FIX" && bash "$TOOL" --file tools/subject.sh --old old --new new -- bash tests/inconclusive.probe.sh) 2>&1 ); rc=$?
 [ "$rc" -eq 2 ] && ok "3. inconclusive: exit 2" || bad "3. inconclusive: exit $rc (out: $out)"
-grep -qF "INCONCLUSIVE: bash tests/inconclusive.probe.sh failed (rc 1) with no new line matching ^FAIL:; it may have died before any assertion" <<<"$out" \
+grep -qF "INCONCLUSIVE: bash tests/inconclusive.probe.sh failed (rc 1) with no new line matching ^FAIL(:|  ); it may have died before any assertion" <<<"$out" \
   && ok "3. inconclusive: verdict line" || bad "3. inconclusive: verdict line (out: $out)"
 grep -qF "fatal: died before any assertion" <<<"$out" \
   && ok "3. inconclusive: tail shown" || bad "3. inconclusive: tail (out: $out)"
@@ -839,5 +853,13 @@ cp -p "$T/subject.orig" "$FIX/tools/subject.sh"
 rm -f "$JDIR/pid" "$JDIR/0.path" "$JDIR/0.orig" "$JDIR/0.mutant"
 rmdir "$JDIR" 2>/dev/null || true
 check_intact "39. --restore with pid appearing during retry window"
+
+# 40. default --fail-pattern with a two-space "FAIL  " line -> caught
+out=$( (cd "$FIX" && bash "$TOOL" --file tools/subject.sh --old old --new new -- bash tests/twosp.probe.sh) 2>&1 ); rc=$?
+[ "$rc" -eq 0 ] \
+  && grep -qF "CAUGHT: bash tests/twosp.probe.sh fails under the mutation (rc 1, 1 new failing lines)" <<<"$out" \
+  && grep -qF "FAIL  subject printed new instead of old" <<<"$out" \
+  && ok "40. default --fail-pattern: two-space FAIL line caught exit 0" || bad "40. default --fail-pattern two-space: rc=$rc (out: $out)"
+check_intact "40. default --fail-pattern two-space"
 
 exit "$fail"

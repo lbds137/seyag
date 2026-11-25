@@ -53,7 +53,7 @@ fix where it can. Where the new name is itself the fix, its absence is the red: 
 error names that missing name and nothing else. The
 `probe-red-check [--expect TEXT] <probe> [base]` (or `--both [--expect TEXT] [--base REF] <probe>...`) plugin bin runs the probe against a
 temp worktree at the base and classifies red / not-red /
-died-before-assertion (`--expect TEXT` checks a `^FAIL:` line names the stated reason; `--both` checks red at base and green here in one run). After the fix is green, the `mutation-canary` plugin bin re-breaks it on purpose (a literal old/new swap or a patch, restored byte-identical) and reports caught / survived (a vacuous canary) / inconclusive.>
+died-before-assertion (`--expect TEXT` checks that a FAIL line (`FAIL:` or `FAIL  `, column 0) names the stated reason; `--both` checks red at base and green here in one run). After the fix is green, the `mutation-canary` plugin bin re-breaks it on purpose (a literal old/new swap or a patch, restored byte-identical) and reports caught / survived (a vacuous canary) / inconclusive.>
 
 ## Premise ledger
 > A premise about a value's form or state at a pipeline stage cites the producer line that establishes it AT that stage, never a similar-looking site elsewhere — the form at the stage is exactly what the spec's next step consumes.
