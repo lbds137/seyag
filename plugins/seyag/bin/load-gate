@@ -12,7 +12,7 @@ heavy job doesn't start on a machine already saturated; the default is to procee
 because a gate that blocks forever on a busy machine stalls the session.
 
   load-gate [--ok]                          exit 0 if the load is under both limits now, else 1
-  load-gate --wait [--timeout S] [--on-timeout proceed|fail]
+  load-gate --wait [--timeout S] [--interval S] [--on-timeout proceed|fail] [--owner PID]
                                             block until the load is under both limits, then exit 0
   load-gate --help
 
@@ -43,6 +43,9 @@ fmt_lim() {
       sub(/0+$/, "", s)
       sub(/\.$/, "", s)
     }
+    # Drop leading zeros of the integer part (08 -> 8), keeping one 0 before a dot or for zero.
+    sub(/^0+/, "", s)
+    if (s == "" || s ~ /^\./) s = "0" s
     print s
   }'
 }
@@ -136,8 +139,9 @@ psi_str() {
 }
 
 top3() {
-  ps -eo pid,comm,pcpu --sort=-pcpu | sed -n '2,4p' |
-    awk '{printf "%s%s %s %s%%", (NR > 1 ? ", " : ""), $1, $2, $3}'
+  # comm goes last and is rebuilt from $3..NF, so a space in it ("Web Content") can't shift pcpu.
+  ps -eo pid,pcpu,comm --sort=-pcpu | sed -n '2,4p' |
+    awk '{c=$3; for (i=4;i<=NF;i++) c=c " " $i; printf "%s%s %s %s%%", (NR > 1 ? ", " : ""), $1, c, $2}'
 }
 
 check_load() {
