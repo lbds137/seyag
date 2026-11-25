@@ -3,10 +3,11 @@ id: TASK-49
 title: >-
   Probes fail under suite load: pr-monitor-reminder 18ai and safe-worktree-clean
   timeout
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - Seyag B
 created_date: '2026-11-21T02:47:00Z'
-updated_date: '2026-11-25T00:28:00Z'
+updated_date: '2026-11-25T13:08:00Z'
 labels:
   - probes
   - flake
