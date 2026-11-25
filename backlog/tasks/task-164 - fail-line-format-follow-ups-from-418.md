@@ -22,7 +22,7 @@ From #418's claude-review (2026-11-25, PASS, four lows). All four are taken in o
 2. `--both` had no two-space case. Added `red2sp` with `green2sp` under `--both`, which pins the indented "here FAIL" echo.
 3. `mutation-canary` defaulted `--fail-pattern` to `^FAIL:`, the same bug class as TASK-155: a canary over one of the 32 two-space probes read INCONCLUSIVE instead of caught. The default is now `^FAIL(:|  )`, the same pattern probe-red-check uses, and a probe case runs a two-space probe with the default.
 4. The fixture header in `tests/probe-red-check.probe.sh` said "three" new probes. The count is dropped.
-Sweep: `git grep -n -E "\^FAIL|FAIL:\*|'FAIL:'"` over plugins and tests (non-probe files) found only these two bins and the skill line.
+Sweep: `git grep -n -E "\^FAIL|FAIL:\*|'FAIL:'"` over plugins and tests (non-probe files) found the two bins and the skill line. That sweep missed README.md. #420's review found it there, and `git grep -n -E '\^FAIL:' -- ':!*.probe.sh' ':!backlog/' ':!CHANGELOG.md'` turned up 2 README sites, both stale: the mutation-canary row's default, and the probe-red-check row, stale since #418. Both are fixed. Case 41 pins the `--fail-pattern '^FAIL:'` opt-out (inconclusive, exit 2).
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Implementation Notes
