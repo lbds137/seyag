@@ -26,4 +26,6 @@ Generic ask from a deployment that wraps long-job: three mechanisms so a local w
 Why: without 2 and 3 wrapping regresses every job (slice placement, load wait); without 1, delegating only wait/status breaks the documented "<runner>: ended" wake rule. Until these ship the requester keeps run/wait/status local and uses only long-job-chain-check.
 
 Owner: bin/** lane. Related: TASK-145 (--heavy port).
+
+11-25 (Seyag): item 3 ships with TASK-145 (--heavy runs `load-gate --wait` after the memory wait); this task keeps items 1 and 2. Acceptance for item 2: a --heavy job never lands in a low-weight slice the caller set for plain jobs (heavy jobs run one at a time under the gate lock, and a low CPU weight starved suite timeouts upstream: 1829 s with 2 timeouts vs 672 s outside the slice, same tree).
 <!-- SECTION:DESCRIPTION:END -->
