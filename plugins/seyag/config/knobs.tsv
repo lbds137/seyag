@@ -59,11 +59,13 @@ SYG_ALLOW_ENV_PRINT	user	guards	unset	Set to 1 in a pipeline segment's words in 
 SYG_ALLOW_GREP_DOLLAR	user	guards	unset	Set to 1 in the command text to bypass grep-escaped-dollar-guard.	-
 SYG_ALLOW_HEREDOC_EDIT	user	guards	unset	Set to 1 in the command text to bypass python-heredoc-edit-guard.	-
 SYG_ALLOW_LIVE_CHECKOUT	user	guards	unset	Set to 1 in the command text (git prefix or export) or in the environment to bypass live-checkout-guard.	-
+SYG_ALLOW_NO_PRIORITY	user	guards	unset	Set to 1 in the command text to bypass backlog-priority-guard for an owner-approved priority-less task.	-
 SYG_ALLOW_PRIVATE_TERM	user	guards	unset	Set to 1 in the command's own prefix in the command text to bypass private-term-guard on the owner's word.	-
 SYG_ALLOW_RM	user	guards	unset	Set to 1 in the command text to bypass recursive-rm-guard for an owner-approved deletion.	-
 SYG_ALLOW_SESSION_URL	user	guards	unset	Set to 1 in the command's own prefix in the command text to bypass session-url-gate on the owner's word.	-
 SYG_ALLOW_TEMPORAL	user	guards	unset	Set to 1 in the git commit command's own prefix in the command text to bypass temporal-marker-guard.	-
 SYG_ASK_PRETEXT_MIN_CHARS	user	guards	200	Minimum characters of same-message text before an AskUserQuestion that make ask-pretext-reminder fire.	-
+SYG_BACKLOG_PRIORITY_STATUSES	user	guards	To Do,In Progress	Comma-separated backlog.md statuses (case-insensitive) a task may not land in without a priority; read by backlog-priority-guard.	-
 SYG_BQ_NO_RC_LANES	user	stop-gates	unset	Extended regex matched against ANTHROPIC_BASE_URL for lanes without Remote Control, routing asks to SendMessage.	-
 SYG_BQ_PENDING_MARKERS	user	stop-gates	say the word\b|waiting on you\b|needs? your (yes|go|call|input)\b|for you to (decide|test|check)\b	Case-insensitive Python regex matching pending-ask phrases in the final paragraph; empty disables the pass.	-
 SYG_CHECK_LIB	internal	guards	unset	The hooks/lib directory the hook passes to its python child for shared target/owner resolution in the --check preflight.	-
@@ -251,6 +253,7 @@ SYG_SWEEP	user	guards	1	Set to 0 to silence removed-identifier-sweep without edi
 SYG_SWEEP_EXCLUDE_PATHS	user	guards	unset	Whitespace-separated awk regex fragments added to removed-identifier-sweep's path exclusions.	path
 SYG_SWEEP_FRAG	internal	guards	unset	Internal env variable passing one fragment to awk for regex validation inside removed-identifier-sweep.	-
 SYG_SWEEP_VALID_FRAGMENTS	internal	guards	unset	Internal env variable exporting validated SYG_SWEEP_EXCLUDE_PATHS fragments to awk in removed-identifier-sweep.	-
+SYG_TRACKING_SURFACE	user	guards	unset	Settings env pin marking a project's durable tracking surface; backlog-md activates the backlog-md skill and the backlog-priority-guard hook for that project.	-
 SYG_UPSTREAM_CHECKED	user	guards	unset	Per-command prefix assignment <owner/repo> bypassing upstream-submission-guard after the AI-stance check.	-
 SYG_USER_RULES_DIR	internal	session	$HOME/.claude/rules	Test seam overriding the user rules directory checked by session-start against rules/core.md.	-
 SYG_WEEK_BURN_MARGIN_MIN	user	usage	30	Margin in minutes (integer >= 0) added to the computed burn window in week-burn-window.	-

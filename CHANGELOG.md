@@ -2,6 +2,11 @@
 
 All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY-MM-DD>` section per released version; under it, `###` categories in fixed order — Breaking Changes, Features, Bug Fixes, Improvements, Chores, Tests — empty ones omitted; items are `- **scope:** description (#PR)`, written from the version's merged commit subjects.
 
+## 0.3.228 - 2026-11-25
+
+### Features
+- **backlog-priority-guard:** new PreToolUse Bash guard for backlog.md projects (`SYG_TRACKING_SURFACE=backlog-md`). It blocks `backlog task create` without `--priority`, a `task edit` that moves a priority-less task into a required status, and `draft promote` of a priority-less draft. It covers the `npx`, `pnpm [-s] [exec]`, `yarn` and bare `backlog` forms. Required statuses are set by `SYG_BACKLOG_PRIORITY_STATUSES` (default `To Do,In Progress`), and `SYG_ALLOW_NO_PRIORITY=1` bypasses it. Component `backlog-priority`. The backlog-md skill now states the rule (TASK-72).
+
 ## 0.3.227 - 2026-11-25
 
 ### Features

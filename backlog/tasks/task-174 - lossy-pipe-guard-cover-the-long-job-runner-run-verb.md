@@ -5,7 +5,7 @@ status: Done
 assignee:
   - Seyag
 created_date: '2026-11-25T15:00:00Z'
-updated_date: '2026-11-25T18:36:00Z'
+updated_date: '2026-11-25T20:20:00Z'
 labels:
   - hooks
   - guard
@@ -25,3 +25,9 @@ Evidence it is not covered: `git grep -i 'deck-job\|long-job' plugins/seyag/hook
 
 Before landing: replay with `tests/replay-hook.sh lossy-pipe-guard --since 7` and sample the blocked set. Owner: hooks lane (A).
 <!-- SECTION:DESCRIPTION:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Replay after merge (tests/replay-hook.sh lossy-pipe-guard --since 7, 2026-11-25): 2147 of 70933 Bash commands blocked, 904 of them by the new long-job rule; a 16-row sample of the job-rule blocks was all true positives. The replay output truncates each command at about 200 chars, so judge a block from the full command in the session log.
+<!-- SECTION:NOTES:END -->

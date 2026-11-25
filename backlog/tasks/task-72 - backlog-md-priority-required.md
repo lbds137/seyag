@@ -1,11 +1,11 @@
 ---
 id: TASK-72
 title: 'backlog-md: --priority required when creating or promoting a task'
-status: In Progress
+status: Done
 assignee:
   - Seyag
 created_date: '2026-11-22T05:50:00Z'
-updated_date: '2026-11-25T20:09:00Z'
+updated_date: '2026-11-25T21:43:00Z'
 labels:
   - backlog
 dependencies: []
@@ -24,3 +24,9 @@ Add:
 
 Pin both the create case and the promote case in the probe.
 <!-- SECTION:DESCRIPTION:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Shipped in 0.3.228: backlog-priority-guard (PreToolUse Bash, component backlog-priority) blocks a priority-less task create, a task edit into To Do/In Progress of a priority-less task, and draft promote of a priority-less draft; the backlog-md skill states the rule. The store-check half is TASK-185 (B lane).
+<!-- SECTION:FINAL_SUMMARY:END -->

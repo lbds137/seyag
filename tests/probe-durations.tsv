@@ -3,6 +3,7 @@
 plugins/seyag/hooks/api-credit-ledger.probe.sh	2.2
 plugins/seyag/hooks/ask-pretext-guard.probe.sh	2.0
 plugins/seyag/hooks/ask-pretext-reminder.probe.sh	2.0
+plugins/seyag/hooks/backlog-priority-guard.probe.sh	12.5
 plugins/seyag/hooks/bare-token-binding-reminder.probe.sh	0.9
 plugins/seyag/hooks/blocking-question-channel-check.probe.sh	6.0
 plugins/seyag/hooks/broad-walk-guard.probe.sh	9.9

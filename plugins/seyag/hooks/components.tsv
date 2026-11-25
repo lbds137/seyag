@@ -51,6 +51,7 @@ push-tree-guard	push-tree
 handback-live-task-gate	handback-tasks
 memory-route-gate	memory-route
 lesson-claim-check	lesson-claim
-@profile	full	session rules route turn-shape context context-block guards-shell guards-outbound guards-commit guards-pr pr-watch dispatch api-credit launch-record classifier-ledger handoff-pick-check stale-pick ask-command-echo ask-pretext ask-pretext-reminder status-claim-cite clock-stamp dispatch-spec live-checkout worktree-branch push-tree handback-tasks memory-route security lesson-claim
-@profile	guards	guards-shell guards-outbound guards-commit guards-pr context context-block dispatch route session api-credit launch-record classifier-ledger live-checkout worktree-branch push-tree handback-tasks
+backlog-priority-guard	backlog-priority
+@profile	full	session rules route turn-shape context context-block guards-shell guards-outbound guards-commit guards-pr pr-watch dispatch api-credit launch-record classifier-ledger handoff-pick-check stale-pick ask-command-echo ask-pretext ask-pretext-reminder status-claim-cite clock-stamp dispatch-spec live-checkout worktree-branch push-tree handback-tasks memory-route security lesson-claim backlog-priority
+@profile	guards	guards-shell guards-outbound guards-commit guards-pr context context-block dispatch route session api-credit launch-record classifier-ledger live-checkout worktree-branch push-tree handback-tasks backlog-priority
 @profile	none	session api-credit launch-record classifier-ledger
