@@ -2,6 +2,15 @@
 
 All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY-MM-DD>` section per released version; under it, `###` categories in fixed order — Breaking Changes, Features, Bug Fixes, Improvements, Chores, Tests — empty ones omitted; items are `- **scope:** description (#PR)`, written from the version's merged commit subjects.
 
+## 0.3.225 - 2026-11-25
+
+### Features
+- **fixup-push:** `--resolved` proves a conflict-resolved hand rebase (same subjects in order, files outside the base's changes identical to the remote, base-only files identical to the base, intermediate commits confined to both sides' change sets) and lists the files both sides changed for re-review. The dead-end refusal now names it. Also: probes for the remote merge-commit refusal and the exit-4 "moved by another process" line, and separate wording for those refusals. (TASK-148, TASK-43, #415)
+
+### Bug Fixes
+- **fixup-push:** `--resolved` compares each intermediate rebased commit with the remote's commit at the same position, allowing differences only in the resolved files or the base's own content. Content added in one commit and removed by a later one is now refused. A remote history that adds and later deletes a file no longer gets a false refusal. (TASK-162, #416)
+- **scope-drift:** reads `SYG_SCOPE_DRIFT_MANIFESTS` from the user and project config files, as its knob row always claimed; `--help` and the README list a failed git read as an exit-2 cause and describe the base-ahead note. (TASK-74 follow-up, #413)
+
 ## 0.3.224 - 2026-11-24
 
 ### Features
