@@ -428,7 +428,8 @@ out=$(run --help); rc=$?
     && grep -q '^ *claude-usage --json' <<< "$out" && grep -q '^ *claude-usage --all' <<< "$out" \
     && grep -q 'api_credit_remaining_usd' <<< "$out" && grep -q 'CLAUDE_USAGE_EXTRA_OK=1' <<< "$out" \
     && grep -q 'always exits 0$' <<< "$out" \
-    && ok "--help: exit 2 with the header's usage block" || bad "--help (rc $rc): $out"
+    && [ "$(tail -n 1 <<< "$out")" = "default path stays silent." ] \
+    && ok "--help: exit 2 with the header's usage block, ending on its last line (the sed range tracks the header)" || bad "--help (rc $rc): $out"
 
 # The reported bug: at 95-99% of the week, --wait returned at once. It must block now, and silence inner --ok stderr.
 fixture 10 97 0
@@ -1711,6 +1712,16 @@ out=$(CLAUDE_USAGE_WEEK_RESERVE_CMD='echo 75' run --ok 90 2>"$tmp/err"); rc=$?; 
 [ $rc = 0 ] && [ -z "$out" ] && [ "$err" = "claude-usage: --ok pass lane=anthropic meter=5h 5h=10%<90% week=85%<95% source=api" ] \
     && ok "gates file CMD=echo 95 flips --ok to a pass with week=85%<95%" || bad "gates --ok pass: rc=$rc out=[$out] err=[$err]"
 gates_rm
+# The routed z.ai --ok follows the file too (its own apply_gates_file call, before the quota
+# read): week 85% fails the default reserve 75, the file's ZAI_WEEK_RESERVE=95 flips the verdict.
+route_zai
+zai_stub api 10 85
+gates_print 'CLAUDE_USAGE_ZAI_WEEK_RESERVE=95'
+out=$(run --ok 90 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 0 ] && [ -z "$out" ] && [ "$err" = "claude-usage: --ok pass lane=zai meter=zai-5h 5h=10%<80% week=85%<95% source=api" ] \
+    && ok "gates file ZAI_WEEK_RESERVE=95: the z.ai --ok passes with week=85%<95%" || bad "gates z.ai --ok: rc=$rc out=[$out] err=[$err]"
+gates_rm
+route_anthropic
 # Values accepted from the file are exported, so command children see them (week-burn-window
 # reads its env's reserve as a fallback): a literal $ in the file's value stays literal, expanded
 # only when the _CMD child runs.
@@ -1748,6 +1759,22 @@ out=$(run --posture 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
 [ $rc = 0 ] && [ "$out" = "$(posture_line "" 95 80 50%)" ] \
     && [ "$err" = "claude-usage: gates file $gates_path: PATH ignored: not a gate key" ] \
     && ok "gates file PATH: ignored with a note that never echoes the value, the rest applies" || bad "gates PATH: rc=$rc out=[$out] err=[$err]"
+# The ignored-key note waits for the whole output to parse: a malformed line after it is the one
+# note that prints (nothing applied, defaults).
+gates_print 'PATH=/x' 'garbage'
+out=$(run --posture 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 0 ] && [ "$out" = "$(posture_line "" 75 80 50%)" ] \
+    && [ "$err" = "claude-usage: gates file $gates_path: line 2 is not KEY=VALUE; using the environment's gates" ] \
+    && ok "gates file PATH then a malformed line: only the malformed-line note prints" || bad "gates buffered notes: rc=$rc out=[$out] err=[$err]"
+# Line tolerance: one trailing \r (a CRLF file) and leading spaces before the key both parse.
+gates_write "printf 'CLAUDE_USAGE_WEEK_RESERVE=95\r\n'"
+out=$(run --posture 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 0 ] && [ -z "$err" ] && [ "$out" = "$(posture_line "" 95 80 50%)" ] \
+    && ok "gates file with CRLF output: reserve 95, empty stderr" || bad "gates CRLF: rc=$rc out=[$out] err=[$err]"
+gates_print '  CLAUDE_USAGE_WEEK_RESERVE=95'
+out=$(run --posture 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 0 ] && [ -z "$err" ] && [ "$out" = "$(posture_line "" 95 80 50%)" ] \
+    && ok "gates file line with leading spaces: reserve 95" || bad "gates leading spaces: rc=$rc out=[$out] err=[$err]"
 # Exists but not an executable file: one note, defaults.
 mkdir -p "${gates_path%/*}"
 printf '#!/bin/bash\necho CLAUDE_USAGE_WEEK_RESERVE=95\n' > "$gates_path"
@@ -1769,6 +1796,14 @@ run --json >/dev/null 2>&1
 [ ! -e "$tmp/gates-ran" ] && ok "plain run and --json never run the gates file" || bad "a non-gate run ran the gates file"
 run --posture >/dev/null 2>&1
 [ -e "$tmp/gates-ran" ] && ok "--posture does run the gates file (control for the row)" || bad "gates control: --posture did not run the file"
+# A pass-through lane's gates never run it either (no week gate there): --ok and --posture on an
+# OpenRouter-routed session leave the sentinel untouched (cleared first: the control row made it).
+rm -f "$tmp/gates-ran"
+route_url https://openrouter.ai/api
+run --ok 90 >/dev/null 2>&1
+run --posture >/dev/null 2>&1
+[ ! -e "$tmp/gates-ran" ] && ok "pass-through lane (OpenRouter): --ok and --posture never run the gates file" || bad "a pass-through gate ran the gates file"
+route_anthropic
 gates_rm
 rm -f "$tmp/gates-ran"
 # The path knob is config-file only: the env var is dropped by the bin, config.toml is honoured.
@@ -1783,6 +1818,13 @@ printf 'claude_usage_gates_file = "%s"\n' "$tmp/elsewhere" > "$tmp/.config/seyag
 out=$(run --posture 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
 [ $rc = 0 ] && [ -z "$err" ] && [ "$out" = "$(posture_line "" 95 80 50%)" ] \
     && ok "config.toml's claude_usage_gates_file points the gates file (95)" || bad "gates config path: rc=$rc out=[$out] err=[$err]"
+# A configured path that doesn't exist says so (once per gate call); the default path missing
+# stays silent (the row above the sentinel block).
+printf 'claude_usage_gates_file = "%s/missing-gates"\n' "$tmp" > "$tmp/.config/seyag/config.toml"
+out=$(run --posture 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 0 ] && [ "$out" = "$(posture_line "" 75 80 50%)" ] \
+    && [ "$err" = "claude-usage: gates file $tmp/missing-gates (from config) does not exist; using the environment's gates" ] \
+    && ok "config.toml pointing at a nonexistent path: one note, the environment's gates (defaults)" || bad "gates config missing: rc=$rc out=[$out] err=[$err]"
 rm -f "$tmp/.config/seyag/config.toml" "$tmp/elsewhere"
 # CLAUDE_USAGE_WEEK_STOP_CMD without a gates file: wins in success and failure.
 fixture 10 50 0
