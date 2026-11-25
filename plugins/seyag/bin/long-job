@@ -62,8 +62,8 @@ longer than ~10 minutes (a miner, a full suite, an extract, an OCR pass).
   long-job log NAME [-n N] the log's last N lines (default 40)
   long-job --help
 
-NAME: letters, digits, '.', '_' or '-'. State lives in ${SYG_LONG_JOB_STATE_DIR:-${XDG_STATE_HOME:-~/.local/state}/long-job}/
-(NAME.log, NAME.cmd, NAME.owner, NAME.unit, NAME.exit); unit prefix is ${SYG_LONG_JOB_UNIT_PREFIX:-long-job} (PREFIX-NAME.service). Stop a job with: systemctl --user stop PREFIX-NAME
+NAME: must start with a letter or digit and hold only letters, digits, '.', '_' and '-'. State lives in ${SYG_LONG_JOB_STATE_DIR:-${XDG_STATE_HOME:-~/.local/state}/long-job}/
+(NAME.log, NAME.cmd, NAME.owner, NAME.unit, NAME.exit, NAME.lock); unit prefix is ${SYG_LONG_JOB_UNIT_PREFIX:-long-job} (PREFIX-NAME.service). Stop a job with: systemctl --user stop PREFIX-NAME
 Exit codes for run: 0 started, 1 memory gate failed (without --wait-mem), 2 usage error or the job is
 already running, 5 the state dir or systemd-run failed (a failed start is recorded as exit 5, so status
 and wait report it), 6 mem-gate could not read memory (without --wait-mem; nothing started). status, cmd, rc and log exit 1 on an unknown NAME.
@@ -99,7 +99,7 @@ job_unit() {
 }
 check_name() {
   [ -n "${1:-}" ] || die "needs a job NAME (see --help)"
-  [[ $1 =~ ^[A-Za-z0-9._-]+$ ]] || die "NAME may hold only letters, digits, '.', '_' and '-': '$1'"
+  [[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die "NAME must start with a letter or digit and hold only letters, digits, '.', '_' and '-': '$1'"
 }
 num() { case "$2" in '' | *[!0-9]*) die "$1 needs a whole number, got '$2'" ;; esac; }
 unit_state() { systemctl --user show -p ActiveState --value -- "$(job_unit "$1")" 2>/dev/null; }
@@ -156,6 +156,17 @@ case "$cmd" in
     [ "${1:-}" = -- ] || die "run needs -- before the command"
     shift
     [ $# -gt 0 ] || die "run needs a command after --"
+    # Command lines and logs can carry tokens: 600 files (umask 077), and a 700 state dir only
+    # when long-job creates it in this call or owns the default path (an older default dir may be
+    # 755); an existing user-set SYG_LONG_JOB_STATE_DIR is left as it is.
+    umask 077
+    need_chmod=0
+    [ -d "$state" ] || need_chmod=1
+    [ -z "${SYG_LONG_JOB_STATE_DIR:-}" ] && need_chmod=1
+    mkdir -p "$state" || die "can't create $state" 5
+    if [ "$need_chmod" = 1 ]; then chmod 700 "$state" || die "can't create $state" 5; fi
+    exec 9>"$state/$name.lock" || die "can't lock $state/$name.lock" 5
+    flock -n 9 || die "$name is being started by another long-job run" 2
     running "$name" && die "$name is already running (long-job status $name)"
 
     # The parent shell's command text, when readable: a Bash tool call is `bash -c [-l ...] [--] TEXT`,
@@ -199,9 +210,6 @@ case "$cmd" in
       gate_args=(--gate "$min_mb" "$wait_mem" "$interval" "$here/mem-gate")
     fi
 
-    # Command lines and logs can carry tokens: owner-only dir and files (an older dir may be 755).
-    umask 077
-    { mkdir -p "$state" && chmod 700 "$state"; } || die "can't create $state" 5
     log="$state/$name.log" ex="$state/$name.exit"
     rm -f "$ex"
     printf '%q ' "$@" >"$state/$name.cmd"; echo >>"$state/$name.cmd"
@@ -230,8 +238,10 @@ case "$cmd" in
       # Record the failed start so status and wait don't call it "ended without an exit record".
       echo "long-job: systemd-run failed: $systemctl_out" | tee -a "$log" >&2
       echo "5 $(date +%s)" >"$ex"
+      exec 9>&-
       exit 5
     fi
+    exec 9>&-
     if [ "$min_mb" -gt 0 ] && [ -n "$wait_mem" ]; then
       echo "long-job: started $name as $(unit_of "$name"); it waits for $min_mb MB of memory (up to $wait_mem s) before running; log $log"
     else
