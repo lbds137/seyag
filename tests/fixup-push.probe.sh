@@ -1279,4 +1279,252 @@ assert_refusal "au. untracked collision" "checkout of the rewritten branch faile
   && ok "au. untracked collide.txt survived untouched" \
   || bad "au. collide.txt altered or missing"
 
+# --- Local rebase proof cases r1-r14 ---
+
+# r1. Rebased by hand, no fixups: main moves by an unrelated file; local git rebase origin/main.
+reset_fixture
+git -C "$CLONE" reset -q --hard HEAD~1
+git -C "$CLONE" push -q --force origin feat
+git -C "$CLONE" checkout -q main
+printf 'r1-main\n' > "$CLONE/r1-main.txt"
+git -C "$CLONE" add r1-main.txt
+git -C "$CLONE" commit -qm "r1 main move"
+git -C "$CLONE" push -q origin main
+git -C "$CLONE" checkout -q feat
+git -C "$CLONE" rebase -q origin/main
+rem_before=$(git -C "$ORIGIN" rev-parse refs/heads/feat)
+loc_before=$(git -C "$CLONE" rev-parse HEAD)
+out=$(run_fp 2>&1); rc=$?
+rem_after=$(git -C "$ORIGIN" rev-parse refs/heads/feat)
+loc_after=$(git -C "$CLONE" rev-parse HEAD)
+[ "$rc" -eq 0 ] && ok "r1. rebased by hand, no fixups: exit 0" || bad "r1. exit $rc (out: $out)"
+grep -qxF "fixup-push: pushed feat ${rem_before:0:7}..${loc_after:0:7} (rebased), lease ${rem_before:0:7}; local was ${loc_before:0:7}, 0 local-only commit(s) included" <<<"$out" \
+  && ok "r1. rebased by hand, no fixups: pushed line" || bad "r1. pushed line (out: $out)"
+[ "$rem_after" = "$loc_after" ] && [ "$loc_after" = "$loc_before" ] && [ "$rem_after" != "$rem_before" ] \
+  && ok "r1. rebased by hand, no fixups: remote equals local and local HEAD unchanged" \
+  || bad "r1. refs (rem_before=$rem_before rem_after=$rem_after loc_before=$loc_before loc_after=$loc_after)"
+
+# r2. Rebased + one local-only commit on top -> exit 0, 1 local-only commit(s) included.
+reset_fixture
+git -C "$CLONE" reset -q --hard HEAD~1
+git -C "$CLONE" push -q --force origin feat
+git -C "$CLONE" checkout -q main
+printf 'r2-main\n' > "$CLONE/r2-main.txt"
+git -C "$CLONE" add r2-main.txt
+git -C "$CLONE" commit -qm "r2 main move"
+git -C "$CLONE" push -q origin main
+git -C "$CLONE" checkout -q feat
+git -C "$CLONE" rebase -q origin/main
+printf 'r2-local-only\n' > "$CLONE/r2-extra.txt"
+git -C "$CLONE" add r2-extra.txt
+git -C "$CLONE" commit -qm "r2 local-only commit"
+rem_before=$(git -C "$ORIGIN" rev-parse refs/heads/feat)
+loc_before=$(git -C "$CLONE" rev-parse HEAD)
+out=$(run_fp 2>&1); rc=$?
+rem_after=$(git -C "$ORIGIN" rev-parse refs/heads/feat)
+loc_after=$(git -C "$CLONE" rev-parse HEAD)
+[ "$rc" -eq 0 ] && ok "r2. rebased + 1 local-only: exit 0" || bad "r2. exit $rc (out: $out)"
+grep -qxF "fixup-push: pushed feat ${rem_before:0:7}..${loc_after:0:7} (rebased), lease ${rem_before:0:7}; local was ${loc_before:0:7}, 1 local-only commit(s) included" <<<"$out" \
+  && ok "r2. rebased + 1 local-only: pushed line" || bad "r2. pushed line (out: $out)"
+[ "$rem_after" = "$loc_after" ] && [ "$loc_after" = "$loc_before" ] \
+  && ok "r2. rebased + 1 local-only: remote equals local" \
+  || bad "r2. refs (rem_after=$rem_after loc_after=$loc_after)"
+
+# r3. Rebased + a fixup! commit -> exit 0, shape rebased+squash, squash proof holds.
+reset_fixture
+git -C "$CLONE" reset -q --hard HEAD~1
+git -C "$CLONE" push -q --force origin feat
+git -C "$CLONE" checkout -q main
+printf 'r3-main\n' > "$CLONE/r3-main.txt"
+git -C "$CLONE" add r3-main.txt
+git -C "$CLONE" commit -qm "r3 main move"
+git -C "$CLONE" push -q origin main
+git -C "$CLONE" checkout -q feat
+git -C "$CLONE" rebase -q origin/main
+printf 'feat1-v2\n' > "$CLONE/f1.txt"
+git -C "$CLONE" commit -qam "fixup! first feat commit"
+rem_before=$(git -C "$ORIGIN" rev-parse refs/heads/feat)
+loc_before=$(git -C "$CLONE" rev-parse HEAD)
+old_tree=$(git -C "$CLONE" rev-parse "HEAD^{tree}")
+out=$(run_fp 2>&1); rc=$?
+rem_after=$(git -C "$ORIGIN" rev-parse refs/heads/feat)
+loc_after=$(git -C "$CLONE" rev-parse HEAD)
+rem_tree=$(git -C "$ORIGIN" rev-parse "refs/heads/feat^{tree}")
+subj_after=$(git -C "$ORIGIN" log --format=%s "$rem_after" --not refs/heads/main)
+[ "$rc" -eq 0 ] && ok "r3. rebased + fixup!: exit 0" || bad "r3. exit $rc (out: $out)"
+grep -qxF "fixup-push: pushed feat ${rem_before:0:7}..${loc_after:0:7} (rebased+squash), lease ${rem_before:0:7}; local was ${loc_before:0:7}, 1 local-only commit(s) included" <<<"$out" \
+  && ok "r3. rebased + fixup!: pushed line with rebased+squash" || bad "r3. pushed line (out: $out)"
+[ "$rem_after" = "$loc_after" ] && [ "$rem_tree" = "$old_tree" ] && ! grep -q '^fixup!' <<<"$subj_after" \
+  && ok "r3. rebased + fixup!: squash proof holds on remote" \
+  || bad "r3. squash proof (rem_after=$rem_after loc_after=$loc_after subjects=$subj_after)"
+
+# r4. Rebased onto an older main tip, then main moves again, run with --onto-base -> shape rebased+onto-base B7.
+reset_fixture
+git -C "$CLONE" reset -q --hard HEAD~1
+git -C "$CLONE" push -q --force origin feat
+git -C "$CLONE" checkout -q main
+printf 'r4-main-1\n' > "$CLONE/r4-main-1.txt"
+git -C "$CLONE" add r4-main-1.txt
+git -C "$CLONE" commit -qm "r4 main move 1"
+git -C "$CLONE" push -q origin main
+git -C "$CLONE" checkout -q feat
+git -C "$CLONE" rebase -q origin/main
+git -C "$CLONE" checkout -q main
+printf 'r4-main-2\n' > "$CLONE/r4-main-2.txt"
+git -C "$CLONE" add r4-main-2.txt
+git -C "$CLONE" commit -qm "r4 main move 2"
+git -C "$CLONE" push -q origin main
+new_base=$(git -C "$CLONE" rev-parse HEAD)
+git -C "$CLONE" checkout -q feat
+rem_before=$(git -C "$ORIGIN" rev-parse refs/heads/feat)
+loc_before=$(git -C "$CLONE" rev-parse HEAD)
+out=$(run_fp --onto-base 2>&1); rc=$?
+rem_after=$(git -C "$ORIGIN" rev-parse refs/heads/feat)
+loc_after=$(git -C "$CLONE" rev-parse HEAD)
+[ "$rc" -eq 0 ] && ok "r4. rebased + --onto-base: exit 0" || bad "r4. exit $rc (out: $out)"
+grep -qxF "fixup-push: pushed feat ${rem_before:0:7}..${loc_after:0:7} (rebased+onto-base ${new_base:0:7}), lease ${rem_before:0:7}; local was ${loc_before:0:7}, 0 local-only commit(s) included" <<<"$out" \
+  && ok "r4. rebased + --onto-base: pushed line with rebased+onto-base ${new_base:0:7}" \
+  || bad "r4. pushed line (out: $out)"
+[ "$rem_after" = "$loc_after" ] && [ "$loc_after" != "$loc_before" ] \
+  && ok "r4. rebased + --onto-base: remote and local moved to new onto-base head" \
+  || bad "r4. refs (rem_after=$rem_after loc_before=$loc_before loc_after=$loc_after)"
+
+# r5. Safety: remote has an extra commit absent locally, and local is rebased -> refused.
+reset_fixture
+git -C "$CLONE" reset -q --hard HEAD~2
+git -C "$CLONE" checkout -q main
+printf 'r5-main\n' > "$CLONE/r5-main.txt"
+git -C "$CLONE" add r5-main.txt
+git -C "$CLONE" commit -qm "r5 main move"
+git -C "$CLONE" push -q origin main
+git -C "$CLONE" checkout -q feat
+git -C "$CLONE" rebase -q origin/main
+assert_refusal "r5. remote has extra commit absent locally" "remote branch has commits not in local (no patch-identical" run_fp
+
+# r6. Same count, one rebased commit's patch altered locally -> refused.
+reset_fixture
+git -C "$CLONE" reset -q --hard HEAD~1
+git -C "$CLONE" push -q --force origin feat
+git -C "$CLONE" checkout -q main
+printf 'r6-main\n' > "$CLONE/r6-main.txt"
+git -C "$CLONE" add r6-main.txt
+git -C "$CLONE" commit -qm "r6 main move"
+git -C "$CLONE" push -q origin main
+git -C "$CLONE" checkout -q feat
+git -C "$CLONE" rebase -q origin/main
+printf 'feat2-altered\n' > "$CLONE/f2.txt"
+git -C "$CLONE" commit -qa --amend --no-edit
+assert_refusal "r6. same count, one rebased commit altered" "remote branch has commits not in local (no patch-identical" run_fp
+
+# r7. Order swapped (two remote commits reappear in reverse order locally) -> refused.
+reset_fixture
+git -C "$CLONE" reset -q --hard HEAD~1
+git -C "$CLONE" push -q --force origin feat
+c1=$(git -C "$CLONE" rev-parse HEAD~1)
+c2=$(git -C "$CLONE" rev-parse HEAD)
+git -C "$CLONE" checkout -q main
+printf 'r7-main\n' > "$CLONE/r7-main.txt"
+git -C "$CLONE" add r7-main.txt
+git -C "$CLONE" commit -qm "r7 main move"
+git -C "$CLONE" push -q origin main
+git -C "$CLONE" checkout -q feat
+git -C "$CLONE" reset -q --hard origin/main
+git -C "$CLONE" cherry-pick "$c2" "$c1" >/dev/null
+assert_refusal "r7. order swapped" "remote branch has commits not in local (no patch-identical" run_fp
+
+# r8. Same base point rewrite (local commit --amend of the tip, content change) -> refused with (same base point: not a rebase).
+reset_fixture
+git -C "$CLONE" reset -q --hard HEAD~1
+git -C "$CLONE" push -q --force origin feat
+printf 'feat2-amended-same-base\n' > "$CLONE/f2.txt"
+git -C "$CLONE" commit -qa --amend --no-edit
+assert_refusal "r8. same base point rewrite" "remote branch has commits not in local (same base point: not a rebase)" run_fp
+
+# r9. --dry-run on the r1 setup -> exit 0, exact dry-run line with rebased, no ref moved.
+reset_fixture
+git -C "$CLONE" reset -q --hard HEAD~1
+git -C "$CLONE" push -q --force origin feat
+git -C "$CLONE" checkout -q main
+printf 'r9-main\n' > "$CLONE/r9-main.txt"
+git -C "$CLONE" add r9-main.txt
+git -C "$CLONE" commit -qm "r9 main move"
+git -C "$CLONE" push -q origin main
+git -C "$CLONE" checkout -q feat
+git -C "$CLONE" rebase -q origin/main
+rem_before=$(git -C "$ORIGIN" rev-parse refs/heads/feat)
+loc_before=$(git -C "$CLONE" rev-parse HEAD)
+out=$(run_fp --dry-run 2>&1); rc=$?
+rem_after=$(git -C "$ORIGIN" rev-parse refs/heads/feat)
+loc_after=$(git -C "$CLONE" rev-parse HEAD)
+[ "$rc" -eq 0 ] && ok "r9. --dry-run on r1 setup: exit 0" || bad "r9. exit $rc (out: $out)"
+grep -qxF "fixup-push: dry run: would push feat ${rem_before:0:7}..${loc_before:0:7} (rebased), lease ${rem_before:0:7}, 0 local-only commit(s) included" <<<"$out" \
+  && ok "r9. --dry-run on r1 setup: dry-run line" || bad "r9. dry-run line (out: $out)"
+[ "$rem_after" = "$rem_before" ] && [ "$loc_after" = "$loc_before" ] \
+  && ok "r9. --dry-run on r1 setup: refs unchanged" \
+  || bad "r9. refs changed (rem=$rem_after loc=$loc_after)"
+
+# r10. Push failure with NEW == OLD: pre-push hook exits 1 -> exit 4, exact unchanged-local line, local HEAD unchanged.
+reset_fixture
+git -C "$CLONE" reset -q --hard HEAD~1
+git -C "$CLONE" push -q --force origin feat
+git -C "$CLONE" checkout -q main
+printf 'r10-main\n' > "$CLONE/r10-main.txt"
+git -C "$CLONE" add r10-main.txt
+git -C "$CLONE" commit -qm "r10 main move"
+git -C "$CLONE" push -q origin main
+git -C "$CLONE" checkout -q feat
+git -C "$CLONE" rebase -q origin/main
+cat > "$CLONE/.git/hooks/pre-push" <<'HOOK'
+#!/bin/bash
+echo "pre-push hook: simulated rejection" >&2
+exit 1
+HOOK
+chmod +x "$CLONE/.git/hooks/pre-push"
+rem_before=$(git -C "$ORIGIN" rev-parse refs/heads/feat)
+loc_before=$(git -C "$CLONE" rev-parse HEAD)
+out=$(run_fp 2>&1); rc=$?
+rem_after=$(git -C "$ORIGIN" rev-parse refs/heads/feat)
+loc_after=$(git -C "$CLONE" rev-parse HEAD)
+[ "$rc" -eq 4 ] && ok "r10. push failure with NEW == OLD: exit 4" || bad "r10. exit $rc (out: $out)"
+grep -qxF "fixup-push: push failed; local feat unchanged at ${loc_before:0:7}; remote feat at ${rem_before:0:7}" <<<"$out" \
+  && ok "r10. push failure with NEW == OLD: exact unchanged-local line" \
+  || bad "r10. message (out: $out)"
+[ "$rem_after" = "$rem_before" ] && [ "$loc_after" = "$loc_before" ] \
+  && ok "r10. push failure with NEW == OLD: remote and local unchanged" \
+  || bad "r10. refs changed (rem=$rem_after loc=$loc_after)"
+
+# r11. --help prints the new shape line and the exit-4 line, and its last line is the last header line (no code).
+help_out=$(run_fp --help 2>&1); rc=$?
+help_last=$(tail -n 1 <<<"$help_out")
+[ "$rc" -eq 0 ] && ok "r11. --help: exit 0" || bad "r11. --help exit $rc"
+grep -qF "rebased" <<<"$help_out" && grep -qF "patch-identical and in order" <<<"$help_out" \
+  && ok "r11. --help: prints rebased shape line" || bad "r11. --help shape line (out: $help_out)"
+grep -qxF "  4  push failed or not attempted; this run did not move the local branch" <<<"$help_out" \
+  && ok "r11. --help: prints exit-4 line" || bad "r11. --help exit-4 line (out: $help_out)"
+[ "$help_last" = "  4  push failed or not attempted; this run did not move the local branch" ] \
+  && ok "r11. --help: last line is last header line" || bad "r11. --help last line: [$help_last]"
+
+# r12. Stale local behind a remote rebased forward -> refused with (local is not on a later base point than the remote).
+reset_fixture
+git -C "$CLONE" reset -q --hard HEAD~1
+git -C "$CLONE" push -q --force origin feat
+old_feat=$(git -C "$CLONE" rev-parse HEAD)
+git -C "$CLONE" checkout -q main
+printf 'r12-main\n' > "$CLONE/r12-main.txt"
+git -C "$CLONE" add r12-main.txt
+git -C "$CLONE" commit -qm "r12 main move"
+git -C "$CLONE" push -q origin main
+git -C "$CLONE" checkout -q feat
+git -C "$CLONE" rebase -q origin/main
+git -C "$CLONE" push -q --force origin feat
+git -C "$CLONE" reset -q --hard "$old_feat"
+assert_refusal "r12. stale local behind rebased remote" "remote branch has commits not in local (local is not on a later base point than the remote)" run_fp
+
+# r14. Same base point, message-only reword on the tip -> refused with (same base point: not a rebase).
+reset_fixture
+git -C "$CLONE" reset -q --hard HEAD~1
+git -C "$CLONE" push -q --force origin feat
+git -C "$CLONE" commit -q --amend -m "reworded"
+assert_refusal "r14. same base point message-only reword" "remote branch has commits not in local (same base point: not a rebase)" run_fp
+
 exit $fail
