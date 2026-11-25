@@ -209,7 +209,7 @@ An optional TOML file fills in knobs the environment left unset: user `${XDG_CON
 
 | Name | Default | What it does | Found in | Config |
 | --- | --- | --- | --- | --- |
-| `SYG_GATE_LOCK_FILE` | `/tmp/gate.lock` | Lock file gate-lock holds while a gate runs; one gate at a time machine-wide (keep it on a path every sandbox shares). Default is shared /tmp, so another user can hold it on a multi-user host; set a private path. | `bin/gate-lock`, `bin/gate-sandbox` | user only |
+| `SYG_GATE_LOCK_FILE` | `/tmp/gate.lock` | Lock file gate-lock holds while a gate runs; one gate at a time machine-wide (keep it on a path every sandbox shares). Default is shared /tmp, so another user can hold it on a multi-user host; set a private path. | `bin/gate-lock`, `bin/gate-sandbox`, `bin/long-job` | user only |
 | `SYG_GATE_SANDBOX_ENV` | unset | Space-separated variable names gate-sandbox passes into the sandbox's otherwise cleared environment. Each must be a variable name, or the launch refuses with 125. | `bin/gate-sandbox`, `bin/worker-sandbox` | user + project |
 | `SYG_GATE_SANDBOX_PATH` | the caller's PATH | PATH inside gate-sandbox. | `bin/gate-sandbox`, `bin/worker-sandbox` | user only |
 | `SYG_GATE_SANDBOX_PROFILE` | unset | gate-sandbox profile: unset for a one-gate sandbox, worker for a whole headless worker (set by worker-sandbox). | `bin/gate-sandbox`, `bin/worker-sandbox` | user + project |
@@ -274,8 +274,8 @@ An optional TOML file fills in knobs the environment left unset: user `${XDG_CON
 | `SYG_KEYS_STORE` | `${XDG_DATA_HOME:-~/.local/share}/keys/keys.cred` | Path to the encrypted systemd-creds key store file used by keys. | `bin/keys` | user only |
 | `SYG_KEYS_TIMEOUT_S` | `20` | Seconds one systemd-creds call in keys may take before it is killed (finite number >= 0; an invalid value is a usage error). | `bin/keys`, `bin/zai-usage` | user + project |
 | `SYG_KEYS_WITH_KEY` | `host+tpm2` | Value passed to systemd-creds encrypt --with-key= in keys (for example host on a machine without a TPM). | `bin/keys`, `hooks/lib/config-env.sh`, `lib/config_env.py` | user only |
-| `SYG_LOAD_GATE_1M` | 2x the CPU count | 1-minute load average ceiling for load-gate --ok/--wait; a decimal. | `bin/load-gate` | user only |
-| `SYG_LOAD_GATE_5M` | 2.5x the CPU count | 5-minute load average ceiling for load-gate --ok/--wait; a decimal. | `bin/load-gate` | user only |
+| `SYG_LOAD_GATE_1M` | 2x the CPU count | 1-minute load average ceiling for load-gate --ok/--wait; a decimal. | `bin/load-gate`, `bin/long-job` | user only |
+| `SYG_LOAD_GATE_5M` | 2.5x the CPU count | 5-minute load average ceiling for load-gate --ok/--wait; a decimal. | `bin/load-gate`, `bin/long-job` | user only |
 | `SYG_LONG_JOB_STATE_DIR` | XDG_STATE_HOME/long-job (XDG_STATE_HOME has its XDG default) | Directory holding long-job's per-job NAME.cmd, NAME.owner, NAME.unit, NAME.log and NAME.exit files. | `bin/long-job` | user only |
 | `SYG_LONG_JOB_UNIT_PREFIX` | `long-job` | Prefix of the transient systemd user unit long-job starts (PREFIX-NAME.service); must start with a letter or digit and hold only letters, digits, '.', '_' and '-'. | `bin/long-job` | user only |
 | `SYG_MAX_PARALLEL` | unset | Host cap on parallel jobs, applied by resource-profile on top of any profile. | `bin/resource-profile` | user only |
@@ -330,6 +330,7 @@ An optional TOML file fills in knobs the environment left unset: user `${XDG_CON
 | `SYG_LOAD_GATE_LOADAVG` | `bin/load-gate` | Test seam overriding the loadavg file load-gate reads. |
 | `SYG_LOAD_GATE_NPROC` | `bin/load-gate` | Test seam overriding the CPU count load-gate scales its default ceilings by. |
 | `SYG_LOAD_GATE_PSI` | `bin/load-gate` | Test seam overriding the CPU pressure file load-gate reads. |
+| `SYG_LONG_JOB_LOAD_GATE` | `bin/long-job` | Test seam: the load-gate long-job run --heavy calls inside the unit (a path); empty skips the load wait, with a warning. |
 | `SYG_LONG_JOB_PARENT_CMD` | `bin/long-job` | Test seam giving long-job the parent shell's command text in place of /proc/PPID/cmdline; setting it (even empty) replaces the parent-command read and so disables long-job's own && refusal (for tests only). |
 | `SYG_MEM_GATE_MEMINFO` | `bin/long-job`, `bin/mem-gate`, `bin/resource-profile` | Test seam overriding the meminfo file mem-gate and resource-profile read (long-job forwards it into the unit). |
 | `SYG_MEM_PRESSURE_MEMINFO` | `bin/mem-pressure-log` | Test seam overriding the meminfo file mem-pressure-log reads. |
