@@ -3,8 +3,9 @@ id: TASK-180
 title: >-
   claude-usage: week gates resolve at call time from a non-env source
   (WEEK_STOP_CMD + gates file)
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - Seyag B
 created_date: '2026-11-25T19:03:00Z'
 updated_date: '2026-11-25T19:15:00Z'
 labels:
