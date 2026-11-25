@@ -23,15 +23,16 @@
 #                     order, every file outside the base's own changes
 #                     byte-identical to the remote, every file only the base
 #                     changed byte-identical to the base, and every intermediate
-#                     commit changes only those files or the base's; lists the
+#                     commit matches the remote's commit at the same position,
+#                     except for the resolved files and the base's content; lists the
 #                     files both sides changed for re-review; composes with
 #                     squash and --onto-base.
 #
 # Notes:
 #   patch-ids ignore line numbers, so the proof shows the same hunks at possibly shifted positions;
 #   rebased and --onto-base proofs compare diffs only: a reworded or re-authored commit passes and replaces the remote's message.
-#   --resolved proves where the change can be, not what the resolution is: re-review the listed files.
-#   --resolved checks against the local merge-base; with --onto-base, files the base changed after it are covered only by the onto-base patch-id proof.
+#   --resolved proves where the change can be, not what the resolution is: re-review the listed files in each rebased commit.
+#   --resolved checks against the local merge-base; with --onto-base, files the base changed after the local merge-base are covered only by the onto-base patch-id proof.
 #   the --onto-base local move (`checkout -B`) has no compare-and-swap; HEAD is re-read just before it, and a commit made in that window stays in the reflog.
 #
 # Exit codes:
@@ -42,7 +43,7 @@
 #   4  push failed or not attempted; this run did not move the local branch
 
 set -uo pipefail
-usage() { sed -n '2,42p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,43p' "$0" | sed 's/^# \{0,1\}//'; }
 
 ONTO_BASE=false
 RESOLVED=false
@@ -328,6 +329,14 @@ else
         refuse "resolved proof failed: commit subjects differ from the remote's (same subjects in the same order required)"
       fi
     done
+    rem_list=$(git rev-list --reverse "$mbR..$R" 2>/dev/null) || refuse "git rev-list failed"
+    rem_commits=()
+    if [ -n "$rem_list" ]; then
+      mapfile -t rem_commits <<<"$rem_list"
+    fi
+    if [ "${#rem_commits[@]}" -ne "$k" ]; then
+      refuse "git rev-list failed"
+    fi
     L=${loc_commits[k - 1]}
     base_paths=()
     rem_br_paths=()
@@ -364,26 +373,37 @@ else
         refuse "resolved proof failed: a file only the base changed differs from the base: $qp"
       fi
     done
-    inter_paths=()
-    for ((i = 0; i < k - 1; i++)); do
-      diff_tree_paths inter_paths "$mb" "${loc_commits[i]}"
-      for p in "${inter_paths[@]+"${inter_paths[@]}"}"; do
-        [ -n "$p" ] || continue
-        if [ -z "${base_set["k$p"]:-}" ] && [ -z "${br_set["k$p"]:-}" ]; then
-          printf -v qp '%q' "$p"
-          refuse "resolved proof failed: an intermediate commit changes a file neither side's final change touches: $qp"
-        fi
-      done
-    done
     raw_resolved=()
+    declare -A resolved_set=()
     for p in "${base_paths[@]+"${base_paths[@]}"}"; do
       if [ -n "$p" ] && [ -n "${br_set["k$p"]:-}" ]; then
         raw_resolved+=("$p")
+        resolved_set["k$p"]=1
       fi
     done
     if [ "${#raw_resolved[@]}" -gt 0 ]; then
       mapfile -d '' RESOLVED_FILES < <(printf '%s\0' "${raw_resolved[@]}" | LC_ALL=C sort -z)
     fi
+    inter_paths=()
+    pair_paths=()
+    declare -A inter_set=()
+    for ((i = 0; i < k - 1; i++)); do
+      diff_tree_paths inter_paths "$mb" "${loc_commits[i]}"
+      inter_set=()
+      for p in "${inter_paths[@]+"${inter_paths[@]}"}"; do
+        [ -n "$p" ] && inter_set["k$p"]=1
+      done
+      diff_tree_paths pair_paths "${rem_commits[i]}" "${loc_commits[i]}"
+      for p in "${pair_paths[@]+"${pair_paths[@]}"}"; do
+        [ -n "$p" ] || continue
+        [ -n "${resolved_set["k$p"]:-}" ] && continue
+        if [ -n "${base_set["k$p"]:-}" ] && [ -z "${inter_set["k$p"]:-}" ]; then
+          continue
+        fi
+        printf -v qp '%q' "$p"
+        refuse "resolved proof failed: intermediate commit $((i + 1)) differs from the remote's matching commit outside the resolved files: $qp"
+      done
+    done
     rebased=true
     rebased_shape="resolved"
     ahead=$((n - k))
