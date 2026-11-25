@@ -1292,6 +1292,38 @@ def deep_wrapper_args(text):
     return deep
 
 
+_INTERPRETER_WORD_RE = re.compile(
+    r"(?<![\w.-])"
+    r"(?:bash|sh|zsh|dash|ksh|fish|busybox|eval|source|exec|xargs|env|sudo|trap|watch)"
+    r"(?![\w.-])"
+    r"|(?:^|[;&|({\s])\.(?=\s)"
+)
+
+
+def heredoc_bodies_inert(text):
+    """True when no heredoc body in `text` can execute: `strip_heredoc_bodies`
+    leaves no interpreter word (after stripping backslashes and quotes so
+    backslash- or quote-split words still match), and no unquoted-delimiter
+    heredoc body contains `$(` or a backtick after splicing `\\<newline>`
+    continuations. Wherever a body COULD execute (or on any error), return
+    False so `extract()` runs base's raw `strip_quoted(text)`."""
+    try:
+        stripped, regions = _strip_heredoc(text)
+        if _INTERPRETER_WORD_RE.search(re.sub(r"[\\\\'\"]", "", stripped)):
+            return False
+        openers = heredoc_openers(text)
+        if len(openers) != len(regions):
+            return False
+        for opener, (start, end) in zip(openers, regions):
+            if not any(q in opener.group(0) for q in ("'", '"', "\\")):
+                body = text[start:end].replace("\\\n", "")
+                if "$(" in body or "`" in body:
+                    return False
+        return True
+    except Exception:
+        return False
+
+
 def extract(text):
     """(number, delete_flag, all_numbers, numberless, repo, selector,
     invoke_count, selector_repo, numberless_count, chdir, fanout,
@@ -1301,7 +1333,12 @@ def extract(text):
     1. the precise invocation scan;
     2. the permissive raw scan, when a quote left open anywhere in the
        command makes the splitter drop everything after it (over-arm, never
-       arm-nothing);
+       arm-nothing). A quote inside a heredoc BODY is ignored only when no
+       body can execute (no interpreter word, no substitution in an
+       unquoted-delimiter body) — otherwise the raw check runs as before —
+       so an apostrophe in a `--body-file - <<'EOF'` PR body no longer sends
+       the body text to the raw scan, which had read `gh pr merge <N>` there
+       and armed a number from later prose;
     3. the raw textual scan over strings past the wrapper-depth cap;
     4. nothing — the caller decides on numberless.
 
@@ -1338,8 +1375,10 @@ def extract(text):
     if root_hit:
         return "", first_flag, [], numberless, repo, selector, invoke_count, \
             selector_repo, numberless_count, chdir, fanout, True, branchmove
-    stripped = strip_quoted(text)
-    if stripped is None:
+    quote_target = (
+        strip_heredoc_bodies(text) if heredoc_bodies_inert(text) else text
+    )
+    if strip_quoted(quote_target) is None:
         return legacy_scan(text) + (
             False, "", "", 0, "", 0, False, False, False, False
         )
@@ -1377,6 +1416,7 @@ try:
         _strip_heredoc,
         _tokens,
         _wrapped_strings,
+        heredoc_openers,
         inline_command_count,
         resolve_placeholders,
         simple_commands,

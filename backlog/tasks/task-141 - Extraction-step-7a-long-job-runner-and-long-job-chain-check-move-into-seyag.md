@@ -1,10 +1,11 @@
 ---
 id: TASK-141
 title: 'Extraction step 7a: long-job runner and long-job-chain-check move into seyag'
-status: In Progress
+status: Done
 assignee:
   - Seyag
 created_date: '2026-11-24T17:52:00Z'
+updated_date: '2026-11-25T01:48:00Z'
 labels:
   - extraction
 dependencies: []
