@@ -1743,7 +1743,7 @@ grep -qxF "fixup-push: push failed; local feat now at ${moved_sha:0:7} (moved by
   && ok "v12. exit-4 moved by another process: remote unchanged, local at moved_sha" \
   || bad "v12. refs (rem=$rem_after loc=$loc_after want_loc=$moved_sha)"
 
-# v13. Intermediate commit adds a file outside BASE and BR and tip deletes it -> refused.
+# v13. Intermediate commit adds a file the remote's matching commit lacks (outside BASE and BR) and tip deletes it -> refused.
 setup_conflict_fixture
 old_tip=$(git -C "$CLONE" rev-parse HEAD)
 git -C "$CLONE" checkout -q HEAD~1
@@ -1755,8 +1755,55 @@ git -C "$CLONE" rm -q v13-secret.txt
 git -C "$CLONE" commit -q --amend --no-edit
 git -C "$CLONE" checkout -q -B feat HEAD
 assert_refusal "v13. intermediate commit touches file outside BASE and BR" \
-  "resolved proof failed: an intermediate commit changes a file neither side's final change touches: v13-secret.txt" \
+  "resolved proof failed: intermediate commit 1 differs from the remote's matching commit outside the resolved files: v13-secret.txt" \
   run_fp --resolved
+
+# v15. Intermediate commit 1 changes f2.txt, which only the branch changes, and the tip restores it -> refused.
+setup_conflict_fixture
+old_tip=$(git -C "$CLONE" rev-parse HEAD)
+git -C "$CLONE" checkout -q HEAD~1
+printf 'v15-secret\n' > "$CLONE/f2.txt"
+git -C "$CLONE" add f2.txt
+git -C "$CLONE" commit -q --amend --no-edit
+git -C "$CLONE" cherry-pick -X theirs "$old_tip" >/dev/null
+git -C "$CLONE" checkout -q -B feat HEAD
+assert_refusal "v15. intermediate commit changes a branch-only file the tip restores" \
+  "resolved proof failed: intermediate commit 1 differs from the remote's matching commit outside the resolved files: f2.txt" \
+  run_fp --resolved
+
+# v16. Remote's commit 1 adds a transient file that its commit 2 deletes; a conflict-resolved rebase of that history must pass.
+reset_fixture
+git -C "$CLONE" reset -q --hard HEAD~1
+old_tip=$(git -C "$CLONE" rev-parse HEAD)
+git -C "$CLONE" checkout -q HEAD~1
+printf 'v16-transient\n' > "$CLONE/v16-transient.txt"
+git -C "$CLONE" add v16-transient.txt
+git -C "$CLONE" commit -q --amend --no-edit
+git -C "$CLONE" cherry-pick -X theirs "$old_tip" >/dev/null
+git -C "$CLONE" rm -q v16-transient.txt
+git -C "$CLONE" commit -q --amend --no-edit
+git -C "$CLONE" checkout -q -B feat HEAD
+git -C "$CLONE" push -q --force origin feat
+git -C "$CLONE" checkout -q main
+printf 'main-f1-change\n' > "$CLONE/f1.txt"
+git -C "$CLONE" commit -qam "v16 main changes f1"
+git -C "$CLONE" push -q origin main
+git -C "$CLONE" checkout -q feat
+git -C "$CLONE" rebase -q origin/main >/dev/null 2>&1 || true
+printf 'main-f1-change\nfeat1-v1-resolved\n' > "$CLONE/f1.txt"
+git -C "$CLONE" add f1.txt
+GIT_EDITOR=true git -C "$CLONE" rebase --continue >/dev/null 2>&1
+rem_before=$(git -C "$ORIGIN" rev-parse refs/heads/feat)
+loc_before=$(git -C "$CLONE" rev-parse HEAD)
+out=$(run_fp --resolved 2>&1); rc=$?
+rem_after=$(git -C "$ORIGIN" rev-parse refs/heads/feat)
+loc_after=$(git -C "$CLONE" rev-parse HEAD)
+[ "$rc" -eq 0 ] && ok "v16. --resolved on remote with transient file: exit 0" || bad "v16. exit $rc (out: $out)"
+grep -qxF "fixup-push: pushed feat ${rem_before:0:7}..${loc_after:0:7} (resolved), lease ${rem_before:0:7}; local was ${loc_before:0:7}, 0 local-only commit(s) included" <<<"$out" \
+  && ok "v16. --resolved on transient-file remote: pushed line" || bad "v16. pushed line (out: $out)"
+[ "$rem_after" = "$loc_after" ] && [ "$loc_after" = "$loc_before" ] && [ "$rem_after" != "$rem_before" ] \
+  && ok "v16. --resolved on transient-file remote: remote equals local" \
+  || bad "v16. refs (rem_before=$rem_before rem_after=$rem_after loc_after=$loc_after)"
 
 # v14. Conflict fixture, then main advances by an unrelated file, run with --resolved --onto-base -> (resolved+onto-base B7).
 setup_conflict_fixture
@@ -1781,5 +1828,32 @@ grep -qxF "fixup-push: resolved, re-review: f1.txt" <<<"$out" \
 [ "$rem_after" = "$loc_after" ] && [ "$loc_after" != "$loc_before" ] \
   && ok "v14. --resolved --onto-base: remote equals local" \
   || bad "v14. refs (rem_after=$rem_after loc_before=$loc_before loc_after=$loc_after)"
+
+# v17. Main also adds a base-only file v17-base.txt that the branch never touches; a conflict-resolved rebase keeps it and must pass.
+reset_fixture
+git -C "$CLONE" reset -q --hard HEAD~1
+git -C "$CLONE" push -q --force origin feat
+git -C "$CLONE" checkout -q main
+printf 'main-f1-change\n' > "$CLONE/f1.txt"
+printf 'v17-from-main\n' > "$CLONE/v17-base.txt"
+git -C "$CLONE" add f1.txt v17-base.txt
+git -C "$CLONE" commit -qm "main changes f1 and adds v17-base"
+git -C "$CLONE" push -q origin main
+git -C "$CLONE" checkout -q feat
+git -C "$CLONE" rebase -q origin/main >/dev/null 2>&1 || true
+printf 'main-f1-change\nfeat1-v1-resolved\n' > "$CLONE/f1.txt"
+git -C "$CLONE" add f1.txt
+GIT_EDITOR=true git -C "$CLONE" rebase --continue >/dev/null 2>&1
+rem_before=$(git -C "$ORIGIN" rev-parse refs/heads/feat)
+loc_before=$(git -C "$CLONE" rev-parse HEAD)
+out=$(run_fp --resolved 2>&1); rc=$?
+rem_after=$(git -C "$ORIGIN" rev-parse refs/heads/feat)
+loc_after=$(git -C "$CLONE" rev-parse HEAD)
+[ "$rc" -eq 0 ] && ok "v17. --resolved with base-only file kept: exit 0" || bad "v17. exit $rc (out: $out)"
+grep -qxF "fixup-push: pushed feat ${rem_before:0:7}..${loc_after:0:7} (resolved), lease ${rem_before:0:7}; local was ${loc_before:0:7}, 0 local-only commit(s) included" <<<"$out" \
+  && ok "v17. --resolved with base-only file kept: pushed line" || bad "v17. pushed line (out: $out)"
+[ "$rem_after" = "$loc_after" ] && [ "$loc_after" = "$loc_before" ] && [ "$rem_after" != "$rem_before" ] \
+  && ok "v17. --resolved with base-only file kept: remote equals local" \
+  || bad "v17. refs (rem_before=$rem_before rem_after=$rem_after loc_after=$loc_after)"
 
 exit $fail
