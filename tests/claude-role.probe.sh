@@ -673,7 +673,7 @@ s = open(p).read().replace("## Charter\n", "## Charter\n" + ("x" * k), 1)
 open(p, "w").write(s)
 PY
 fi
-arch_file="$roles/arch-handoff-archive-$today.md"
+arch_file="$roles/archive/arch-handoff-archive-$today.md"
 out=$("$CR" --note "fresh note added at cap $(printf '%0250d' 0)" --file "$roles/arch.md"); rc=$?
 [ $rc = 0 ] && ok "auto-archive write at cap exits 0" || bad "auto-archive rc=$rc out=$out"
 grep -q '^- Curated non-stamped bullet stays$' "$roles/arch.md" \
@@ -693,7 +693,7 @@ grep -q '^# arch Handoff archive$' "$arch_file" \
   && ! grep -q 'Curated non-stamped' "$arch_file" \
   && ok "archive file holds moved notes verbatim under the Moved heading" || bad "archive content: $(cat "$arch_file")"
 nl=$'\n'
-[[ "$out" =~ ^archived\ 2\ oldest\ Handoff\ notes\ to\ arch-handoff-archive-${today}\.md${nl}arch\.md:\ ([0-9]+)/10000\ chars\ at\ session\ start$ ]] \
+[[ "$out" =~ ^archived\ 2\ oldest\ Handoff\ notes\ to\ archive/arch-handoff-archive-${today}\.md${nl}arch\.md:\ ([0-9]+)/10000\ chars\ at\ session\ start$ ]] \
   && [ "${BASH_REMATCH[1]}" -le 10000 ] \
   && ok "auto-archive prints 'archived K ...' before size line with final size <= 10000" || bad "auto-archive stdout: $out"
 
@@ -718,7 +718,7 @@ open(sys.argv[1], "w").write(
 )
 PY
 before_nn=$(cat "$roles/nonotes.md")
-nn_arch="$roles/nonotes-handoff-archive-$today.md"
+nn_arch="$roles/archive/nonotes-handoff-archive-$today.md"   # case 13 already made $roles/archive, so the file check is the signal
 err=$("$CR" --note "$(printf '%0400d' 0)" --file "$roles/nonotes.md" 2>&1); rc=$?
 [ $rc = 1 ] && grep -q 'refused, nothing written' <<< "$err" \
   && [ "$(cat "$roles/nonotes.md")" = "$before_nn" ] && [ ! -e "$nn_arch" ] \
@@ -745,7 +745,7 @@ p, k = sys.argv[1], int(sys.argv[2])
 s = open(p).read().replace("## Charter\n", "## Charter\n" + ("x" * k), 1)
 open(p, "w").write(s)
 PY
-fence_arch="$roles/fence-handoff-archive-$today.md"
+fence_arch="$roles/archive/fence-handoff-archive-$today.md"
 out=$("$CR" --next "pushes over the cap $(printf '%0150d' 0)" --file "$roles/fence.md"); rc=$?
 [ $rc = 0 ] && grep -q '^archived 1 oldest Handoff notes' <<< "$out" \
   && grep -q 'fenced lookalike stays' "$roles/fence.md" && ! grep -q 'fenced lookalike' "$fence_arch" \
@@ -756,6 +756,26 @@ grep -q 'pushes over the cap' <<< "$steps_body" \
   && bad "--next appended into '## Next steps'" || ok "--next ignores '## Next steps' and makes its own ## Next"
 grep -qx '## Next' "$roles/fence.md" && ok "--next created an exact ## Next section" || bad "no exact ## Next: $(grep '^## ' "$roles/fence.md")"
 rm -f "$roles/fence.md" "$fence_arch"
+
+# A dated -archive- copy of a role (a hand-made byte copy named <stem>-archive-YYYY-MM-DD.md, frontmatter and
+# all) is not a second role: --list, --board and --json each count it out. A role whose own name merely
+# contains -archive- (data-archive-owner.md, role Keeper) still lists. Positive control: the same file
+# without -archive- in its name is read as a second role, so the fixture is read at all.
+rd=$(mktemp -d "$home/retired.XXXXXX")
+printf -- '---\nrole: Real\nstatus: "idle"\n---\n\n## Next\n- step\n' > "$rd/real.md"
+cp "$rd/real.md" "$rd/real-retired-archive-2026-01-01.md"
+printf -- '---\nrole: Keeper\nstatus: "idle"\n---\n\n## Next\n- step\n' > "$rd/data-archive-owner.md"
+out=$(SYG_ROLE_DIR="$rd" "$CR" --list)
+[ "$(wc -l <<< "$out")" = 2 ] && grep -qxF $'real\tReal\t\t\t' <<< "$out" && grep -qxF $'data-archive-owner\tKeeper\t\t\t' <<< "$out" \
+  && ok "--list: a dated -archive- copy is not a second role; a -archive- role name still lists" || bad "--list archive copy: $out"
+board=$(SYG_ROLE_DIR="$rd" "$CR" --board)
+grep -q '(real.md,' <<< "$board" && grep -q '(data-archive-owner.md,' <<< "$board" && ! grep -q 'real-retired-archive' <<< "$board" \
+  && ok "--board: shows real.md and data-archive-owner.md, not the dated -archive- copy" || bad "--board archive copy: $board"
+[ "$(SYG_ROLE_DIR="$rd" "$CR" --json | jq '.roles | length')" = 2 ] \
+  && ok "--json: a dated -archive- copy is not a second role" || bad "--json archive copy: $(SYG_ROLE_DIR="$rd" "$CR" --json)"
+cp "$rd/real.md" "$rd/real-copy.md"
+[ "$(SYG_ROLE_DIR="$rd" "$CR" --list | awk -F'\t' '$2 == "Real"' | wc -l)" = 2 ] \
+  && ok "positive control: a copy without -archive- is a second Real row" || bad "positive control: $(SYG_ROLE_DIR="$rd" "$CR" --list)"
 
 # 14. Unknown argument: exit 2, and stderr holds both the error line and a usage line (e.g. claude-role --size).
 err_top=$("$CR" --unknown-top 2>&1); rc_top=$?
