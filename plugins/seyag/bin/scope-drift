@@ -1,0 +1,349 @@
+#!/bin/bash
+# scope-drift: before a worker diff or PR lands, list changed paths outside the spec's
+# files-in-scope section and changed dependency manifests/lockfiles with their changed lines.
+# Probe: tests/scope-drift.probe.sh.
+
+set -uo pipefail
+
+usage() {
+  cat <<'EOF'
+scope-drift: a worker can widen a diff silently (an extra file, a new dependency); this lists
+what the spec never named so the driver amends the spec or signs it off before landing.
+
+  scope-drift --spec FILE [--spec FILE...] [--base REF] [--worktree DIR]
+  scope-drift --help
+
+  --spec FILE      markdown spec carrying a "## Files in scope" (or "## Files") section;
+                   repeatable (the scope set is the union across all given files)
+  --base REF       git base ref to diff against (default: git merge-base HEAD origin/HEAD,
+                   falling back to git merge-base HEAD origin/main)
+  --worktree DIR   git work tree to inspect (default: current directory; every git call
+                   runs from the repo top, so DIR may name any directory inside the tree)
+
+Changed paths are the sorted union of `git diff --name-only --no-renames BASE` (committed,
+staged and unstaged vs BASE, deletions included) and `git ls-files --others --exclude-standard`
+(untracked, not ignored).
+
+Scope entries are `- ` or `* ` bullets under the first `## Files in scope` or `## Files`
+heading up to the next `## ` line: the first backticked span when the entry starts with a
+backtick, else text up to ` (` or end of line, with any trailing `:<digits>[-<digits>]` line
+cite stripped. Entries ending `/` or `/**` cover everything below that directory; entries
+containing `*` match as globs across `/`; all other entries match as exact strings.
+
+Dependency manifests match by basename against the built-in manifest/lockfile list plus the
+whitespace-separated basename globs in $SYG_SCOPE_DRIFT_MANIFESTS (extends, never replaces),
+and are reported even when in scope. Non-lockfile manifests show up to 20 `-`/`+` diff lines
+(then `... K more`); lockfiles show `(+A -D)` line counts only.
+
+Exit codes: 0 clean, 1 drift (out-of-scope paths or changed manifests), 2 usage error,
+unreadable spec, missing section, not a git work tree, or unresolvable base.
+EOF
+}
+
+for a in "$@"; do
+  case "$a" in
+    -h | --help)
+      usage
+      exit 0
+      ;;
+  esac
+done
+
+specs=()
+base_opt=""
+has_base=0
+worktree="."
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --spec)
+      if [ $# -lt 2 ] || [ -z "$2" ]; then
+        echo "scope-drift: --spec needs a file path" >&2
+        exit 2
+      fi
+      specs+=("$2")
+      shift 2
+      ;;
+    --base)
+      if [ $# -lt 2 ] || [ -z "$2" ]; then
+        echo "scope-drift: --base needs a ref" >&2
+        exit 2
+      fi
+      has_base=1
+      base_opt=$2
+      shift 2
+      ;;
+    --worktree)
+      if [ $# -lt 2 ] || [ -z "$2" ]; then
+        echo "scope-drift: --worktree needs a directory" >&2
+        exit 2
+      fi
+      worktree=$2
+      shift 2
+      ;;
+    *)
+      echo "scope-drift: unknown option $1 (see --help)" >&2
+      exit 2
+      ;;
+  esac
+done
+
+if [ "${#specs[@]}" -eq 0 ]; then
+  echo "scope-drift: --spec FILE is required (see --help)" >&2
+  exit 2
+fi
+
+if [ ! -d "$worktree" ] || [ "$(git -C "$worktree" rev-parse --is-inside-work-tree 2>/dev/null)" != "true" ]; then
+  echo "scope-drift: $worktree is not inside a git work tree" >&2
+  exit 2
+fi
+
+if ! top=$(git -C "$worktree" rev-parse --show-toplevel 2>/dev/null) || [ -z "$top" ]; then
+  echo "scope-drift: cannot resolve the top of $worktree" >&2
+  exit 2
+fi
+
+if [ "$has_base" -eq 1 ]; then
+  if ! base_sha=$(git -C "$top" rev-parse --verify --quiet "$base_opt^{commit}" 2>/dev/null); then
+    echo "scope-drift: base '$base_opt' does not resolve" >&2
+    exit 2
+  fi
+else
+  base_sha=$(git -C "$top" merge-base HEAD origin/HEAD 2>/dev/null) || base_sha=""
+  if [ -z "$base_sha" ]; then
+    base_sha=$(git -C "$top" merge-base HEAD origin/main 2>/dev/null) || base_sha=""
+  fi
+  if [ -z "$base_sha" ]; then
+    echo "scope-drift: no base: pass --base REF" >&2
+    exit 2
+  fi
+fi
+base_short=$(git -C "$top" rev-parse --short "$base_sha" 2>/dev/null)
+
+scope_entries=()
+parse_spec() {
+  local file=$1 found=0 in_sec=0 raw line rest entry
+  if [ ! -f "$file" ] || [ ! -r "$file" ]; then
+    echo "scope-drift: cannot read spec: $file" >&2
+    exit 2
+  fi
+  while IFS= read -r raw || [ -n "$raw" ]; do
+    line=${raw%$'\r'}
+    if [ "$in_sec" -eq 0 ]; then
+      if [[ $line =~ ^##\ Files(\ in\ scope)?[[:space:]]*$ ]]; then
+        found=1
+        in_sec=1
+      fi
+      continue
+    fi
+    if [[ $line =~ ^##\  ]]; then
+      break
+    fi
+    case "$line" in
+      "- "* | "* "*)
+        rest=${line:2}
+        rest=${rest#"${rest%%[![:space:]]*}"}
+        if [[ $rest == \`* ]]; then
+          rest=${rest#\`}
+          entry=${rest%%\`*}
+        else
+          if [[ $rest == *" ("* ]]; then
+            entry=${rest%%" ("*}
+          else
+            entry=$rest
+          fi
+          entry=${entry#"${entry%%[![:space:]]*}"}
+          entry=${entry%"${entry##*[![:space:]]}"}
+        fi
+        if [[ $entry =~ ^(.+):[0-9]+(-[0-9]+)?$ ]]; then
+          entry=${BASH_REMATCH[1]}
+        fi
+        [ -n "$entry" ] && scope_entries+=("$entry")
+        ;;
+    esac
+  done <"$file"
+  if [ "$found" -eq 0 ]; then
+    echo "scope-drift: $file has no \"## Files in scope\" section" >&2
+    exit 2
+  fi
+}
+
+for s in "${specs[@]}"; do
+  parse_spec "$s"
+done
+
+in_scope() {
+  local p=$1 entry prefix
+  for entry in "${scope_entries[@]+"${scope_entries[@]}"}"; do
+    if [[ $entry == */ ]]; then
+      prefix=$entry
+      if [[ $prefix == *'*'* ]]; then
+        # shellcheck disable=SC2053
+        [[ $p == $prefix* ]] && return 0
+      else
+        [[ $p == "$prefix"* ]] && return 0
+      fi
+    elif [[ $entry == */'**' ]]; then
+      prefix="${entry%/**}/"
+      if [[ $prefix == *'*'* ]]; then
+        # shellcheck disable=SC2053
+        [[ $p == $prefix* ]] && return 0
+      else
+        [[ $p == "$prefix"* ]] && return 0
+      fi
+    elif [[ $entry == *'*'* ]]; then
+      # shellcheck disable=SC2053
+      [[ $p == $entry ]] && return 0
+    else
+      [[ $p == "$entry" ]] && return 0
+    fi
+  done
+  return 1
+}
+
+manifest_globs=(
+  package.json package-lock.json npm-shrinkwrap.json
+  pnpm-lock.yaml pnpm-workspace.yaml yarn.lock
+  bun.lock bun.lockb
+  pyproject.toml uv.lock poetry.lock
+  Pipfile Pipfile.lock 'requirements*.txt' setup.py setup.cfg
+  Cargo.toml Cargo.lock
+  go.mod go.sum
+  Gemfile Gemfile.lock
+  composer.json composer.lock
+)
+if [ -n "${SYG_SCOPE_DRIFT_MANIFESTS:-}" ]; then
+  set -f
+  # shellcheck disable=SC2206
+  manifest_globs+=(${SYG_SCOPE_DRIFT_MANIFESTS})
+  set +f
+fi
+
+is_manifest() {
+  local b=${1##*/} g
+  for g in "${manifest_globs[@]}"; do
+    # shellcheck disable=SC2053
+    [[ $b == $g ]] && return 0
+  done
+  return 1
+}
+
+is_lockfile() {
+  local b=${1##*/}
+  case "$b" in
+    *.lock | *.lockb | *-lock.json | *-lock.yaml | npm-shrinkwrap.json | go.sum)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+diff_paths=()
+mapfile -d '' diff_paths < <(git -C "$top" diff --name-only --no-renames --no-relative --ignore-submodules=none -z "$base_sha")
+wait $! || {
+  echo "scope-drift: git diff failed in $top" >&2
+  exit 2
+}
+
+untracked_paths=()
+mapfile -d '' untracked_paths < <(git -C "$top" ls-files --others --exclude-standard --full-name -z)
+wait $! || {
+  echo "scope-drift: git ls-files failed in $top" >&2
+  exit 2
+}
+
+declare -A is_untracked=()
+for p in "${untracked_paths[@]+"${untracked_paths[@]}"}"; do
+  [ -n "$p" ] && is_untracked[$p]=1
+done
+
+changed_paths=()
+while IFS= read -r -d '' p; do
+  [ -n "$p" ] && changed_paths+=("$p")
+done < <(
+  {
+    for p in "${diff_paths[@]+"${diff_paths[@]}"}" "${untracked_paths[@]+"${untracked_paths[@]}"}"; do
+      [ -n "$p" ] && printf '%s\0' "$p"
+    done
+  } | LC_ALL=C sort -z -u
+)
+
+out_of_scope=()
+manifests_changed=()
+for p in "${changed_paths[@]+"${changed_paths[@]}"}"; do
+  if ! in_scope "$p"; then
+    out_of_scope+=("$p")
+  fi
+  if is_manifest "$p"; then
+    manifests_changed+=("$p")
+  fi
+done
+
+if [ "${#out_of_scope[@]}" -eq 0 ] && [ "${#manifests_changed[@]}" -eq 0 ]; then
+  printf 'scope-drift: clean (%d changed paths, all in scope; no manifest changes) vs %s\n' "${#changed_paths[@]}" "$base_short"
+  exit 0
+fi
+
+if [ "${#out_of_scope[@]}" -gt 0 ]; then
+  printf 'scope-drift: out of scope (%d):\n' "${#out_of_scope[@]}"
+  for p in "${out_of_scope[@]}"; do
+    printf '  %s\n' "$p"
+  done
+fi
+
+if [ "${#manifests_changed[@]}" -gt 0 ]; then
+  printf 'scope-drift: manifests changed (%d):\n' "${#manifests_changed[@]}"
+  for p in "${manifests_changed[@]}"; do
+    clines=()
+    if [ -n "${is_untracked[$p]+x}" ]; then
+      flines=()
+      [ -r "$top/$p" ] && mapfile -t flines <"$top/$p"
+      add_count=${#flines[@]}
+      del_count=0
+      if ! is_lockfile "$p"; then
+        for fl in "${flines[@]+"${flines[@]}"}"; do
+          clines+=("    + $fl")
+        done
+      fi
+    else
+      numline=$(git -C "$top" diff --numstat --no-renames --no-relative --ignore-submodules=none "$base_sha" -- ":(top,literal)$p")
+      add_count=${numline%%$'\t'*}
+      rest_num=${numline#*$'\t'}
+      del_count=${rest_num%%$'\t'*}
+      if [ "$add_count" = "-" ] || [ -z "$add_count" ]; then add_count=0; fi
+      if [ "$del_count" = "-" ] || [ -z "$del_count" ]; then del_count=0; fi
+      if ! is_lockfile "$p"; then
+        in_hunk=0
+        while IFS= read -r dline; do
+          case "$dline" in
+            "@@ "*)
+              in_hunk=1
+              ;;
+            "+"* | "-"*)
+              if [ "$in_hunk" -eq 1 ]; then
+                clines+=("    ${dline:0:1} ${dline:1}")
+              fi
+              ;;
+          esac
+        done < <(git -C "$top" diff -U0 --no-color --no-ext-diff --no-renames --no-relative --ignore-submodules=none "$base_sha" -- ":(top,literal)$p")
+      fi
+    fi
+    printf '  %s (+%s -%s)\n' "$p" "$add_count" "$del_count"
+    if ! is_lockfile "$p"; then
+      total_c=${#clines[@]}
+      limit=20
+      [ "$total_c" -lt "$limit" ] && limit=$total_c
+      for ((i = 0; i < limit; i++)); do
+        printf '%s\n' "${clines[i]}"
+      done
+      if [ "$total_c" -gt 20 ]; then
+        printf '      ... %d more\n' "$((total_c - 20))"
+      fi
+    fi
+  done
+fi
+
+printf "scope-drift: drift vs %s: amend the spec's ## Files in scope, or record a named reviewer sign-off for each entry\n" "$base_short"
+exit 1
