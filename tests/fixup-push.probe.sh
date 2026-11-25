@@ -1529,15 +1529,21 @@ git -C "$CLONE" push -q --force origin feat
 git -C "$CLONE" commit -q --amend -m "reworded"
 assert_refusal "r14. same base point message-only reword" "remote branch has commits not in local (same base point: not a rebase)" run_fp
 
-# --- Resolved rebase cases v1-v12 ---
+# --- Resolved rebase cases v1-v19 ---
 
-setup_conflict_fixture() {
-  reset_fixture
-  git -C "$CLONE" reset -q --hard HEAD~1
-  git -C "$CLONE" push -q --force origin feat
+# Main changes f1.txt (and adds the base-only file $1 when given), then feat rebases onto it;
+# the rebase must conflict on f1.txt, which is resolved the same way every time.
+conflict_rebase_onto_main() {
+  local extra=${1-}
   git -C "$CLONE" checkout -q main
   printf 'main-f1-change\n' > "$CLONE/f1.txt"
-  git -C "$CLONE" commit -qam "main changes f1"
+  if [ -n "$extra" ]; then
+    printf '%s-from-main\n' "${extra%.txt}" > "$CLONE/$extra"
+    git -C "$CLONE" add "$extra"
+    git -C "$CLONE" commit -qam "main changes f1 and adds $extra"
+  else
+    git -C "$CLONE" commit -qam "main changes f1"
+  fi
   git -C "$CLONE" push -q origin main
   git -C "$CLONE" checkout -q feat
   if git -C "$CLONE" rebase -q origin/main >/dev/null 2>&1; then
@@ -1546,7 +1552,17 @@ setup_conflict_fixture() {
   fi
   printf 'main-f1-change\nfeat1-v1-resolved\n' > "$CLONE/f1.txt"
   git -C "$CLONE" add f1.txt
-  GIT_EDITOR=true git -C "$CLONE" rebase --continue >/dev/null 2>&1
+  if ! GIT_EDITOR=true git -C "$CLONE" rebase --continue >/dev/null 2>&1; then
+    bad "conflict fixture: git rebase --continue failed after resolving f1.txt"
+    return 1
+  fi
+}
+
+setup_conflict_fixture() {
+  reset_fixture
+  git -C "$CLONE" reset -q --hard HEAD~1
+  git -C "$CLONE" push -q --force origin feat
+  conflict_rebase_onto_main "$@"
 }
 
 # v1. No flag on the conflict fixture -> refused with the new not_rebased message (full text).
@@ -1758,6 +1774,30 @@ assert_refusal "v13. intermediate commit touches file outside BASE and BR" \
   "resolved proof failed: intermediate commit 1 differs from the remote's matching commit outside the resolved files: v13-secret.txt" \
   run_fp --resolved
 
+# v14. Conflict fixture, then main advances by an unrelated file, run with --resolved --onto-base -> (resolved+onto-base B7).
+setup_conflict_fixture
+git -C "$CLONE" checkout -q main
+printf 'v14-main-unrelated\n' > "$CLONE/v14-main.txt"
+git -C "$CLONE" add v14-main.txt
+git -C "$CLONE" commit -qm "v14 main advance"
+git -C "$CLONE" push -q origin main
+new_base=$(git -C "$CLONE" rev-parse HEAD)
+git -C "$CLONE" checkout -q feat
+rem_before=$(git -C "$ORIGIN" rev-parse refs/heads/feat)
+loc_before=$(git -C "$CLONE" rev-parse HEAD)
+out=$(run_fp --resolved --onto-base 2>&1); rc=$?
+rem_after=$(git -C "$ORIGIN" rev-parse refs/heads/feat)
+loc_after=$(git -C "$CLONE" rev-parse HEAD)
+[ "$rc" -eq 0 ] && ok "v14. --resolved --onto-base: exit 0" || bad "v14. exit $rc (out: $out)"
+grep -qxF "fixup-push: pushed feat ${rem_before:0:7}..${loc_after:0:7} (resolved+onto-base ${new_base:0:7}), lease ${rem_before:0:7}; local was ${loc_before:0:7}, 0 local-only commit(s) included" <<<"$out" \
+  && ok "v14. --resolved --onto-base: pushed line with (resolved+onto-base ${new_base:0:7})" \
+  || bad "v14. pushed line (out: $out)"
+grep -qxF "fixup-push: resolved, re-review: f1.txt" <<<"$out" \
+  && ok "v14. --resolved --onto-base: re-review line" || bad "v14. re-review line (out: $out)"
+[ "$rem_after" = "$loc_after" ] && [ "$loc_after" != "$loc_before" ] \
+  && ok "v14. --resolved --onto-base: remote equals local" \
+  || bad "v14. refs (rem_after=$rem_after loc_before=$loc_before loc_after=$loc_after)"
+
 # v15. Intermediate commit 1 changes f2.txt, which only the branch changes, and the tip restores it -> refused.
 setup_conflict_fixture
 old_tip=$(git -C "$CLONE" rev-parse HEAD)
@@ -1784,15 +1824,7 @@ git -C "$CLONE" rm -q v16-transient.txt
 git -C "$CLONE" commit -q --amend --no-edit
 git -C "$CLONE" checkout -q -B feat HEAD
 git -C "$CLONE" push -q --force origin feat
-git -C "$CLONE" checkout -q main
-printf 'main-f1-change\n' > "$CLONE/f1.txt"
-git -C "$CLONE" commit -qam "v16 main changes f1"
-git -C "$CLONE" push -q origin main
-git -C "$CLONE" checkout -q feat
-git -C "$CLONE" rebase -q origin/main >/dev/null 2>&1 || true
-printf 'main-f1-change\nfeat1-v1-resolved\n' > "$CLONE/f1.txt"
-git -C "$CLONE" add f1.txt
-GIT_EDITOR=true git -C "$CLONE" rebase --continue >/dev/null 2>&1
+conflict_rebase_onto_main
 rem_before=$(git -C "$ORIGIN" rev-parse refs/heads/feat)
 loc_before=$(git -C "$CLONE" rev-parse HEAD)
 out=$(run_fp --resolved 2>&1); rc=$?
@@ -1805,45 +1837,8 @@ grep -qxF "fixup-push: pushed feat ${rem_before:0:7}..${loc_after:0:7} (resolved
   && ok "v16. --resolved on transient-file remote: remote equals local" \
   || bad "v16. refs (rem_before=$rem_before rem_after=$rem_after loc_after=$loc_after)"
 
-# v14. Conflict fixture, then main advances by an unrelated file, run with --resolved --onto-base -> (resolved+onto-base B7).
-setup_conflict_fixture
-git -C "$CLONE" checkout -q main
-printf 'v14-main-unrelated\n' > "$CLONE/v14-main.txt"
-git -C "$CLONE" add v14-main.txt
-git -C "$CLONE" commit -qm "v14 main advance"
-git -C "$CLONE" push -q origin main
-new_base=$(git -C "$CLONE" rev-parse HEAD)
-git -C "$CLONE" checkout -q feat
-rem_before=$(git -C "$ORIGIN" rev-parse refs/heads/feat)
-loc_before=$(git -C "$CLONE" rev-parse HEAD)
-out=$(run_fp --resolved --onto-base 2>&1); rc=$?
-rem_after=$(git -C "$ORIGIN" rev-parse refs/heads/feat)
-loc_after=$(git -C "$CLONE" rev-parse HEAD)
-[ "$rc" -eq 0 ] && ok "v14. --resolved --onto-base: exit 0" || bad "v14. exit $rc (out: $out)"
-grep -qxF "fixup-push: pushed feat ${rem_before:0:7}..${loc_after:0:7} (resolved+onto-base ${new_base:0:7}), lease ${rem_before:0:7}; local was ${loc_before:0:7}, 0 local-only commit(s) included" <<<"$out" \
-  && ok "v14. --resolved --onto-base: pushed line with (resolved+onto-base ${new_base:0:7})" \
-  || bad "v14. pushed line (out: $out)"
-grep -qxF "fixup-push: resolved, re-review: f1.txt" <<<"$out" \
-  && ok "v14. --resolved --onto-base: re-review line" || bad "v14. re-review line (out: $out)"
-[ "$rem_after" = "$loc_after" ] && [ "$loc_after" != "$loc_before" ] \
-  && ok "v14. --resolved --onto-base: remote equals local" \
-  || bad "v14. refs (rem_after=$rem_after loc_before=$loc_before loc_after=$loc_after)"
-
 # v17. Main also adds a base-only file v17-base.txt that the branch never touches; a conflict-resolved rebase keeps it and must pass.
-reset_fixture
-git -C "$CLONE" reset -q --hard HEAD~1
-git -C "$CLONE" push -q --force origin feat
-git -C "$CLONE" checkout -q main
-printf 'main-f1-change\n' > "$CLONE/f1.txt"
-printf 'v17-from-main\n' > "$CLONE/v17-base.txt"
-git -C "$CLONE" add f1.txt v17-base.txt
-git -C "$CLONE" commit -qm "main changes f1 and adds v17-base"
-git -C "$CLONE" push -q origin main
-git -C "$CLONE" checkout -q feat
-git -C "$CLONE" rebase -q origin/main >/dev/null 2>&1 || true
-printf 'main-f1-change\nfeat1-v1-resolved\n' > "$CLONE/f1.txt"
-git -C "$CLONE" add f1.txt
-GIT_EDITOR=true git -C "$CLONE" rebase --continue >/dev/null 2>&1
+setup_conflict_fixture v17-base.txt
 rem_before=$(git -C "$ORIGIN" rev-parse refs/heads/feat)
 loc_before=$(git -C "$CLONE" rev-parse HEAD)
 out=$(run_fp --resolved 2>&1); rc=$?
@@ -1855,5 +1850,48 @@ grep -qxF "fixup-push: pushed feat ${rem_before:0:7}..${loc_after:0:7} (resolved
 [ "$rem_after" = "$loc_after" ] && [ "$loc_after" = "$loc_before" ] && [ "$rem_after" != "$rem_before" ] \
   && ok "v17. --resolved with base-only file kept: remote equals local" \
   || bad "v17. refs (rem_before=$rem_before rem_after=$rem_after loc_after=$loc_after)"
+
+# v18. Base adds v18-base.txt; intermediate commit 1 changes it and the tip restores it -> refused.
+# (v17 is the pass side: the same base-only file left alone.)
+setup_conflict_fixture v18-base.txt
+old_tip=$(git -C "$CLONE" rev-parse HEAD)
+git -C "$CLONE" checkout -q HEAD~1
+printf 'v18-intermediate\n' > "$CLONE/v18-base.txt"
+git -C "$CLONE" add v18-base.txt
+git -C "$CLONE" commit -q --amend --no-edit
+git -C "$CLONE" cherry-pick "$old_tip" >/dev/null
+printf 'v18-base-from-main\n' > "$CLONE/v18-base.txt"
+git -C "$CLONE" add v18-base.txt
+git -C "$CLONE" commit -q --amend --no-edit
+git -C "$CLONE" checkout -q -B feat HEAD
+assert_refusal "v18. intermediate commit changes a base-only file the tip restores" \
+  "resolved proof failed: intermediate commit 1 differs from the remote's matching commit outside the resolved files: v18-base.txt" \
+  run_fp --resolved
+
+# v19. The remote commit list comes back one line short of the count taken for it -> the bin's own refusal.
+setup_conflict_fixture
+R=$(git -C "$ORIGIN" rev-parse refs/heads/feat)
+B=$(git -C "$ORIGIN" rev-parse refs/heads/main)
+mbR=$(git -C "$CLONE" merge-base "$R" "$B")
+V19_RANGE="$mbR..$R"
+GIT_WRAPPER_DIR="$WORK/git_wrapper_bin"
+mkdir -p "$GIT_WRAPPER_DIR"
+cat > "$GIT_WRAPPER_DIR/git" <<EOF
+#!/bin/bash
+if [ "\$#" -eq 3 ] && [ "\$1" = rev-list ] && [ "\$2" = --reverse ] && [ "\$3" = "\$V19_RANGE" ]; then
+  "$REAL_GIT" "\$@" | sed '\$d'
+  exit "\${PIPESTATUS[0]}"
+fi
+exec "$REAL_GIT" "\$@"
+EOF
+chmod +x "$GIT_WRAPPER_DIR/git"
+
+run_fp_v19() {
+  (cd "$CLONE" && env PATH="$GIT_WRAPPER_DIR:$FAKE_BIN:$PATH" TMPDIR="$WT_TMP" V19_RANGE="$V19_RANGE" bash "$BIN" "$@")
+}
+assert_refusal "v19. remote commit list shorter than its count" \
+  "resolved proof failed: git listed 1 remote commit(s) where it counted 2" \
+  run_fp_v19 --resolved
+rm -rf "$GIT_WRAPPER_DIR"
 
 exit $fail

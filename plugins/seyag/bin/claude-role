@@ -755,7 +755,7 @@ for key, value in values.items():
 def u16(s):
     return len(s.encode("utf-8", "surrogateescape").decode("utf-8", "replace").encode("utf-16-le")) // 2   # as the hook measures: replace bad bytes
 
-# a stamp line the tool adds itself (status_at's first write) is not growth
+# a stamp line the tool adds itself (status_at's first write, or an updated: line the file lacked) is not growth
 stamp_growth = sum(u16(l) + 1 for l in stamp_inserts)
 
 now_ep = int(os.environ["SYG_ROLE_NOW_EPOCH"]) if os.environ.get("SYG_ROLE_NOW_EPOCH") else int(time.time())
