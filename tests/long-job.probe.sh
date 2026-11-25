@@ -2,8 +2,10 @@
 # Hermetic probe for plugins/seyag/bin/long-job: usage errors, unreadable-memory exit 6, owner
 # recording (CLAUDE_JOB_DIR or cwd basename), state-dir permissions, SYG_LONG_JOB_STATE_DIR,
 # SYG_LONG_JOB_UNIT_PREFIX, SYG_LONG_JOB_PARENT_CMD and SYG_LONG_JOB_CMD chain refusals/warnings,
-# --wait-mem gate forwarding, --heavy (gate lock, memory and load waits, nested lock), missing
-# lib/owner.sh, and real transient user units when a user systemd manager is available (explicit SKIP count otherwise).
+# the SYG_LONG_JOB_CMD display name (message prefix, hints, ended sentinel), --slice and
+# -p/--property forwarding, --wait-mem gate forwarding, --heavy (gate lock, memory and load
+# waits, nested lock), missing lib/owner.sh, and real transient user units when a user systemd
+# manager is available (explicit SKIP count otherwise).
 # Usage: tests/long-job.probe.sh   (from anywhere)
 
 set -uo pipefail
@@ -53,6 +55,12 @@ run x -- |run needs a command after --
 run x --bogus -- true|unknown run option --bogus
 run x --wait-mem 0 -- true|--wait-mem needs at least 1 second
 run x --min-mb 0 --wait-mem 5 -- true|--wait-mem needs the memory gate; drop --min-mb 0
+run x --slice|--slice needs a value
+run x --slice bad/s -- true|--slice needs a slice name
+run x -p nokey -- true|-p needs KEY=VALUE
+run x -p StandardOutput=null -- true|is set by long-job
+run x --property StandardError=null -- true|is set by long-job
+run x -p Slice=low.slice -- true|use --slice NAME
 wat|unknown subcommand 'wat'
 EOF
 timeout 5 "$LJ" wait nosuch >/dev/null 2>&1; [ $? = 1 ] && ok "long-job wait on an unknown job exits 1" || bad "long-job wait unknown"
@@ -216,6 +224,46 @@ w=$(awk '/^--gate$/{getline; getline; print; exit}' "$tmp/argv")
 out=$(timeout 5 "$LJ" --help 2>&1)
 grep -qF -- "--heavy" <<<"$out" && ok "--help documents --heavy" || bad "--help lacks --heavy"
 
+# S7: --slice and -p/--property reach systemd-run as --slice=NAME and -p KEY=VALUE pairs.
+rm -f "$tmp/argv"
+out=$(timeout 5 env PATH="$tmp/stub-rec:$PATH" "$LJ" run prop-job --min-mb 0 --no-inhibit --slice jobs.slice -p CPUWeight=20 --property MemoryHigh=1G -- true 2>&1); rc=$?
+p_n=$(awk 'prev=="-p" && ($0=="CPUWeight=20" || $0=="MemoryHigh=1G") {n++} {prev=$0} END{print n+0}' "$tmp/argv")
+[ "$rc" = 0 ] && grep -qxF -- "--slice=jobs.slice" "$tmp/argv" && [ "$p_n" = 2 ] \
+  && ok "run --slice and -p/--property reach systemd-run (--slice=jobs.slice; each KEY=VALUE after a -p line)" \
+  || bad "run --slice/-p (rc=$rc, p_n=$p_n, argv=$(av))"
+
+# S8: --heavy drops --slice with a note but keeps -p properties.
+rm -f "$tmp/argv"
+err=$(timeout 5 env SYG_LONG_JOB_LOAD_GATE='' SYG_GATE_LOCK_FILE="$tmp/gl.lock" PATH="$tmp/stub-rec:$PATH" "$LJ" run hv-slice --heavy --min-mb 0 --no-inhibit --slice jobs.slice -p MemoryHigh=1G -- true 2>&1 >/dev/null); rc=$?
+[ "$rc" = 0 ] && ! grep -qF -- "--slice=" "$tmp/argv" && grep -qxF -- "MemoryHigh=1G" "$tmp/argv" \
+  && grep -qF -- "--slice jobs.slice is ignored for a --heavy job" <<<"$err" \
+  && ok "run --heavy drops --slice with a note while -p MemoryHigh=1G stays" \
+  || bad "run --heavy --slice (rc=$rc, err=[$err], argv=$(av))"
+
+# S9: SYG_LONG_JOB_CMD='/opt/x/myrun run' names messages, hints and the wrapper argv myrun.
+rm -f "$tmp/argv"
+out=$(timeout 5 env SYG_LONG_JOB_CMD='/opt/x/myrun run' PATH="$tmp/stub-rec:$PATH" "$LJ" run dn-job --min-mb 0 --no-inhibit -- true 2>&1); rc=$?
+after_exit=$(awk 'prev ~ /\.exit$/ {print; exit} {prev=$0}' "$tmp/argv")
+[ "$rc" = 0 ] && grep -q "^myrun: started dn-job as " <<<"$out" \
+  && grep -qF 'run "myrun wait dn-job" with Bash run_in_background' <<<"$out" \
+  && ! grep -q "long-job:" <<<"$out" && [ "$after_exit" = "myrun" ] \
+  && ok "SYG_LONG_JOB_CMD='myrun run' renames messages and hints to myrun (no long-job: line; wrapper argv carries myrun after the .exit path)" \
+  || bad "display name myrun (rc=$rc, after_exit=[$after_exit], out=[$out], argv=$(av))"
+out=$(timeout 5 env SYG_LONG_JOB_CMD='/opt/x/myrun run' "$LJ" status nosuch 2>&1); rc=$?
+[ "$rc" = 1 ] && grep -qF "myrun: no job named nosuch" <<<"$out" \
+  && ok "an unknown NAME under the alias dies as myrun: no job named nosuch" \
+  || bad "display name unknown NAME (rc=$rc: $out)"
+
+# S10: an empty or oddly-charactered SYG_LONG_JOB_CMD leaves the long-job name.
+out=$(timeout 5 env SYG_LONG_JOB_CMD='' "$LJ" status nosuch 2>&1); rc=$?
+[ "$rc" = 1 ] && grep -qF "long-job: no job named nosuch" <<<"$out" \
+  && ok "empty SYG_LONG_JOB_CMD keeps the long-job: prefix" \
+  || bad "empty SYG_LONG_JOB_CMD (rc=$rc: $out)"
+out=$(timeout 5 env SYG_LONG_JOB_CMD='bad$name run' "$LJ" status nosuch 2>&1); rc=$?
+[ "$rc" = 1 ] && grep -qF "long-job: no job named nosuch" <<<"$out" \
+  && ok "oddly-charactered SYG_LONG_JOB_CMD keeps the long-job: prefix" \
+  || bad "odd SYG_LONG_JOB_CMD (rc=$rc: $out)"
+
 # SYG_LONG_JOB_UNIT_PREFIX='a b' exits 2 naming the knob; leading '-' exits 2 saying it must start with a letter or digit.
 out=$(timeout 5 env SYG_LONG_JOB_UNIT_PREFIX='a b' PATH="$tmp/stub:$PATH" "$LJ" run bad-pfx --min-mb 0 -- true 2>&1); rc=$?
 [ "$rc" = 2 ] && grep -q "SYG_LONG_JOB_UNIT_PREFIX" <<<"$out" \
@@ -324,7 +372,7 @@ if ! systemctl --user show-environment >/dev/null 2>&1; then
   exit $?
 fi
 p=probe-$$
-cleanup_units() { for s in ok bad stop gate race wq wr dollar heavy heavyq heavymem heavyld heavylf heavyln plainld; do systemctl --user stop "long-job-$p-$s.service" 2>/dev/null; systemctl --user reset-failed "long-job-$p-$s.service" 2>/dev/null; done; rm -rf "$tmp"; }
+cleanup_units() { for s in ok bad stop gate race wq wr dollar heavy heavyq heavymem heavyld heavylf heavyln plainld disp; do systemctl --user stop "long-job-$p-$s.service" 2>/dev/null; systemctl --user reset-failed "long-job-$p-$s.service" 2>/dev/null; done; rm -rf "$tmp"; }
 trap cleanup_units EXIT
 
 timeout 10 "$LJ" run "$p-gate" --min-mb 99999999 -- true >/dev/null 2>&1; rc=$?
@@ -501,11 +549,20 @@ out=$(timeout 25 "$LJ" wait "$p-plainld" --interval 1 --timeout 20 --owner ""); 
 [ "$rc" = 0 ] && [ "$wrc" = 0 ] && grep -qx "cmd-ran" "$LJS/$p-plainld.log" 2>/dev/null && ! grep -q "load-gate-stub" "$LJS/$p-plainld.log" \
   && ok "a plain run does not call the load-gate" \
   || bad "plain run load-gate (rc=$rc, wait=$wrc, log=$(tr '\n' '|' <"$LJS/$p-plainld.log" 2>/dev/null))"
+
+# J: the display name from SYG_LONG_JOB_CMD reaches run's output, the log header and wait's ended sentinel.
+out=$(timeout 10 env SYG_LONG_JOB_CMD='myrun run' "$LJ" run "$p-disp" --min-mb 0 --no-inhibit -- echo cmd-ran 2>&1); rc=$?
+wout=$(timeout 25 env SYG_LONG_JOB_CMD='myrun run' "$LJ" wait "$p-disp" --interval 1 --timeout 20 --owner ""); wrc=$?
+[ "$rc" = 0 ] && [ "$wrc" = 0 ] && grep -q "^myrun: started $p-disp as " <<<"$out" \
+  && grep -qF "=== myrun $p-disp started" "$LJS/$p-disp.log" 2>/dev/null && grep -qx "cmd-ran" "$LJS/$p-disp.log" 2>/dev/null \
+  && [ "$(tail -n 1 <<<"$wout")" = "myrun: ended: act on the result above" ] && ! grep -q "^long-job: " <<<"$wout" \
+  && ok "SYG_LONG_JOB_CMD='myrun run' names run's lines, the log header and the ended sentinel myrun" \
+  || bad "display-name real unit (rc=$rc, wrc=$wrc, out=[$out], wout=[$wout], log=$(tr '\n' '|' <"$LJS/$p-disp.log" 2>/dev/null))"
 unset SYG_GATE_LOCK_FILE SYG_LONG_JOB_LOAD_GATE
 
 # status queries systemd once per recorded job; 5 s ran out under heavy load (0 listed, 11-25).
 n=$(timeout 60 "$LJ" status | grep -c "^$p-")
-[ "$n" = 14 ] && ok "status lists every recorded job" || bad "status lists $n jobs, want 14"
+[ "$n" = 15 ] && ok "status lists every recorded job" || bad "status lists $n jobs, want 15"
 
 echo "long-job probe: $pass passed, $fail failed"
 [ "$fail" = 0 ]
