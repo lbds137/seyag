@@ -14,5 +14,5 @@ ordinal: 178000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-claude-role --list takes ~1.3 s idle and >20 s at load 50 (Deck Platform's measurement, 11-25); consumers' privacy pre-checks (zai-worker, cc-route; 20 s timeout) then fail closed and refuse launches. Third recurrence. Profile first (which step dominates: role-file parse, per-role subprocesses, session lookups), then make --list cheap. The consumer-side retry behind load-gate is tracked outside this repo.
+claude-role --list takes ~1.3 s idle and >20 s at load 50 (a consumer session's measurement, 11-25); consumer launchers' privacy pre-checks (20 s timeout) then fail closed and refuse launches. Third recurrence. Profile first (which step dominates: role-file parse, per-role subprocesses, session lookups), then make --list cheap. The consumer-side retry behind load-gate is tracked outside this repo.
 <!-- SECTION:DESCRIPTION:END -->

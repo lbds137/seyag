@@ -1775,6 +1775,36 @@ gates_print '  CLAUDE_USAGE_WEEK_RESERVE=95'
 out=$(run --posture 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
 [ $rc = 0 ] && [ -z "$err" ] && [ "$out" = "$(posture_line "" 95 80 50%)" ] \
     && ok "gates file line with leading spaces: reserve 95" || bad "gates leading spaces: rc=$rc out=[$out] err=[$err]"
+# Comment lines parse, and a duplicate key's last value wins.
+gates_print '# comment' 'CLAUDE_USAGE_WEEK_RESERVE=90' 'CLAUDE_USAGE_WEEK_RESERVE=95'
+out=$(run --posture 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 0 ] && [ -z "$err" ] && [ "$out" = "$(posture_line "" 95 80 50%)" ] \
+    && ok "gates file: a comment line parses and a duplicate key's last value wins (95)" || bad "gates comment/dup: rc=$rc out=[$out] err=[$err]"
+# Trailing spaces/tabs on a value are stripped (its leading spaces stay): 'KEY=95 ' applies 95,
+# not a dropped env pair plus a failed 1-99 check landing on the default.
+gates_print 'CLAUDE_USAGE_WEEK_RESERVE=95 '
+out=$(run --posture 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 0 ] && [ -z "$err" ] && [ "$out" = "$(posture_line "" 95 80 50%)" ] \
+    && ok "gates file value with a trailing space: stripped, reserve 95, empty stderr" || bad "gates trailing space: rc=$rc out=[$out] err=[$err]"
+# A fallback note for a key the file set names the gates file as the value's source.
+gates_print 'CLAUDE_USAGE_WEEK_RESERVE=abc'
+out=$(run --posture 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 0 ] && [ "$out" = "$(posture_line "" 75 80 50%)" ] \
+    && [ "$err" = "claude-usage: CLAUDE_USAGE_WEEK_RESERVE=abc ignored: not an integer 1-99; using the default 75 (from the gates file)" ] \
+    && ok "gates file with an invalid reserve: the ignored note ends ' (from the gates file)'" || bad "gates invalid reserve note: rc=$rc out=[$out] err=[$err]"
+gates_print 'CLAUDE_USAGE_WEEK_STOP_CMD=false'
+out=$(run --posture 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 0 ] && [ "$out" = "$(posture_line "" 75 80 50%)" ] \
+    && [ "$err" = "claude-usage: CLAUDE_USAGE_WEEK_STOP_CMD gave no usable stop (exit 1); week stop falls back to week_stop (80) (from the gates file)" ] \
+    && ok "gates file WEEK_STOP_CMD=false: the fallback note ends ' (from the gates file)'" || bad "gates stop CMD note: rc=$rc out=[$out] err=[$err]"
+# A file-set _CMD that fails wins its slot in failure (accepted, documented behaviour): the slot
+# rule dropped the env's static 88, so the failed 'false' falls back to the DEFAULT 75, not 88.
+gates_print 'CLAUDE_USAGE_WEEK_RESERVE_CMD=false'
+out=$(CLAUDE_USAGE_WEEK_RESERVE=88 run --posture 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 0 ] && [ "$out" = "$(posture_line "" 75 80 50%)" ] \
+    && [ "$err" = "claude-usage: CLAUDE_USAGE_WEEK_RESERVE_CMD gave no usable reserve (exit 1); plan week reserve falls back to week_reserve (75) (from the gates file)" ] \
+    && ok "gates file RESERVE_CMD=false: falls back to the default 75 (the slot rule dropped the env's 88), note names the file" || bad "gates CMD false: rc=$rc out=[$out] err=[$err]"
+gates_rm
 # Exists but not an executable file: one note, defaults.
 mkdir -p "${gates_path%/*}"
 printf '#!/bin/bash\necho CLAUDE_USAGE_WEEK_RESERVE=95\n' > "$gates_path"
@@ -1826,6 +1856,26 @@ out=$(run --posture 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
     && [ "$err" = "claude-usage: gates file $tmp/missing-gates (from config) does not exist; using the environment's gates" ] \
     && ok "config.toml pointing at a nonexistent path: one note, the environment's gates (defaults)" || bad "gates config missing: rc=$rc out=[$out] err=[$err]"
 rm -f "$tmp/.config/seyag/config.toml" "$tmp/elsewhere"
+# Project scope refuses the path knob (a repo must not aim the machine's gates at its own file):
+# the same claude_usage_gates_file key the user-scope config.toml row above honours is refused
+# from <project>/.claude/seyag.toml, so the default path (absent here) and the defaults apply.
+printf '#!/bin/bash\necho CLAUDE_USAGE_WEEK_RESERVE=95\n' > "$tmp/elsewhere"
+chmod +x "$tmp/elsewhere"
+mkdir -p "$tmp/proj/.claude"
+printf 'claude_usage_gates_file = "%s"\n' "$tmp/elsewhere" > "$tmp/proj/.claude/seyag.toml"
+gates_rm
+out=$(CLAUDE_PROJECT_DIR="$tmp/proj" run --posture 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 0 ] && [ "$out" = "$(posture_line "" 75 80 50%)" ] \
+    && [ "$err" = "seyag config: $tmp/proj/.claude/seyag.toml: line 1: 'CLAUDE_USAGE_GATES_FILE' cannot be set from project scope (path knob)" ] \
+    && ok "project-scope claude_usage_gates_file: refused with the loader's note, defaults apply (75)" || bad "gates project scope: rc=$rc out=[$out] err=[$err]"
+# Positive control: the same file at the default path (project config gone) IS honoured (95).
+rm -f "$tmp/proj/.claude/seyag.toml"
+cp "$tmp/elsewhere" "$gates_path" && chmod +x "$gates_path"
+out=$(CLAUDE_PROJECT_DIR="$tmp/proj" run --posture 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
+[ $rc = 0 ] && [ -z "$err" ] && [ "$out" = "$(posture_line "" 95 80 50%)" ] \
+    && ok "control: the same gates file at the default path is honoured (95)" || bad "gates default-path control: rc=$rc out=[$out] err=[$err]"
+rm -rf "$tmp/proj" "$tmp/elsewhere"
+gates_rm
 # CLAUDE_USAGE_WEEK_STOP_CMD without a gates file: wins in success and failure.
 fixture 10 50 0
 out=$(CLAUDE_USAGE_WEEK_STOP_CMD='echo 97' run --posture 2>"$tmp/err"); rc=$?; err=$(cat "$tmp/err")
@@ -1836,6 +1886,16 @@ out=$(CLAUDE_USAGE_WEEK_STOP_CMD='echo 0' CLAUDE_USAGE_WEEK_STOP=85 run --postur
     && [ "$err" = "claude-usage: CLAUDE_USAGE_WEEK_STOP_CMD gave no usable stop (exit 0); week stop falls back to week_stop (85)" ] \
     && ok "CLAUDE_USAGE_WEEK_STOP_CMD='echo 0': unusable, notes and falls back to the static 85" || bad "WEEK_STOP_CMD 0: rc=$rc out=[$out] err=[$err]"
 gates_rm
+# --wait follows the gates file (each inner --ok re-reads it): at week 85%, which fails the
+# default 75, the file's reserve 95 lets --wait return at once; without the file it blocks.
+fixture 10 85 0
+gates_print 'CLAUDE_USAGE_WEEK_RESERVE=95'
+out=$(timeout 5 env HOME="$tmp" XDG_CACHE_HOME="$tmp" CLAUDE_USAGE_MODEL=claude-opus-5-5 "$CU" --wait 2>/dev/null); rc=$?
+[ $rc = 0 ] && grep -q "week 85%" <<< "$out" \
+    && ok "gates file reserve 95: --wait at week 85% returns at once (rc 0)" || bad "gates --wait: rc=$rc out=[$out]"
+gates_rm
+timeout 5 env HOME="$tmp" XDG_CACHE_HOME="$tmp" CLAUDE_USAGE_MODEL=claude-opus-5-5 "$CU" --wait >/dev/null 2>&1; rc=$?
+[ $rc = 124 ] && ok "no gates file (control): --wait at week 85% blocks past 5 s (rc 124)" || bad "gates --wait control: rc=$rc"
 
 # z.ai lane: its own reserve resolver and week figure.
 route_zai
