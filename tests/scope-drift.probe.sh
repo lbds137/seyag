@@ -10,7 +10,8 @@
 # invariance. Also: bash >= 4.4 guard (static check), unborn HEAD, fork-point label, shallow
 # warning wording, failed ls-files/numstat/-U0 reads (fake git on PATH), index-deleted and tracked
 # nested manifests, the extended manifest and lockfile list, case-insensitive `## files` heading,
-# leading `./` entries, the user config file, and the default-base hint.
+# leading `./` entries, the user config file, binary manifests (untracked-copy and non-lockfile),
+# and the default-base hint.
 # Usage: tests/scope-drift.probe.sh   (from anywhere)
 
 set -uo pipefail
@@ -690,7 +691,8 @@ else
     && grep -qxF "scope-drift: out of scope (1):" <<<"$out36" \
     && grep -qxF "  lib/x/y.sh" <<<"$out36" \
     && grep -qF "shallow clone: no merge-base" <<<"$err36" \
-    && grep -qF "(shallow clone, or unrelated history)" <<<"$err36" \
+    && grep -qF "(or unrelated history)" <<<"$err36" \
+    && ! grep -qF "(shallow clone, or" <<<"$err36" \
     && ! grep -qF "shares no history" <<<"$err36"; then
     ok "case 36: shallow clone with no merge-base falls back to --base ref as given with warning"
   else
@@ -738,6 +740,7 @@ reset_wt
 
 # 39. Bash floor (STATIC check: the guard text is not run under an old bash). The
 # 'needs bash >= 4.4' guard must sit before the first mapfile line.
+# It does not run the version compare itself (no old bash here); it pins only the guard's position.
 guard_ln=$(awk 'index($0, "needs bash >= 4.4") { print NR; exit }' "$SD")
 mapfile_ln=$(awk '/^mapfile/ { print NR; exit }' "$SD")
 if [ -n "$guard_ln" ] && [ -n "$mapfile_ln" ] && [ "$guard_ln" -lt "$mapfile_ln" ]; then
@@ -789,6 +792,9 @@ REAL_GIT=$(command -v git)
 mkdir -p "$tmp/gitbin"
 cat > "$tmp/gitbin/git" <<EOF
 #!/bin/bash
+if [ -n "\${FAKE_GIT_LOG:-}" ]; then
+  printf '%s\n' "\$*" >> "\$FAKE_GIT_LOG"
+fi
 for a in "\$@"; do
   if [ "\$a" = "\${FAKE_GIT_FAIL:-__none__}" ]; then
     echo "fake git: forced failure for \$a" >&2
@@ -903,30 +909,45 @@ else
 fi
 reset_wt
 
-# 48. Extended manifest list: untracked pom.xml, deno.lock, gradle.lockfile and flake.lock, all in
-# scope -> exit 1 with four manifests; pom.xml shows its + line, the three lockfiles counts only.
+# 48. Extended manifest list: untracked pom.xml, deno.lock, gradle.lockfile, flake.lock,
+# Directory.Packages.props, app.fsproj, app.vbproj and gradle/libs.versions.toml, all in
+# scope -> exit 1 with eight manifests, each (+1 -0); the five non-lockfiles (pom.xml and
+# the four new ones) show their + lines, the three lockfiles counts only.
 printf '<project/>\n' > wt/pom.xml
 printf '{"version":1}\n' > wt/deno.lock
 printf 'lockv = 1\n' > wt/gradle.lockfile
 printf '{"nodes":{}}\n' > wt/flake.lock
+printf 'packages\n' > wt/Directory.Packages.props
+printf 'fsproj\n' > wt/app.fsproj
+printf 'vbproj\n' > wt/app.vbproj
+mkdir -p "$wt/gradle"
+printf 'catalog\n' > wt/gradle/libs.versions.toml
 cat > spec48.md <<'EOF'
 ## Files in scope
 - pom.xml
 - deno.lock
 - gradle.lockfile
 - flake.lock
+- Directory.Packages.props
+- app.fsproj
+- app.vbproj
+- gradle/libs.versions.toml
 EOF
 run 5 "$SD" --spec "$tmp/spec48.md" --base "$base" --worktree "$wt"
 rc48=$rc
 out48=$(out)
-if [ "$rc48" = 1 ] && grep -qxF "scope-drift: manifests changed (4):" <<<"$out48" \
+if [ "$rc48" = 1 ] && grep -qxF "scope-drift: manifests changed (8):" <<<"$out48" \
   && grep -qxF "  pom.xml (+1 -0)" <<<"$out48" \
   && grep -qxF "    + <project/>" <<<"$out48" \
   && grep -qxF "  deno.lock (+1 -0)" <<<"$out48" \
   && grep -qxF "  gradle.lockfile (+1 -0)" <<<"$out48" \
   && grep -qxF "  flake.lock (+1 -0)" <<<"$out48" \
-  && [ "$(grep -cE '^    [+-] ' <<<"$out48")" = 1 ]; then
-  ok "case 48: pom.xml, deno.lock, gradle.lockfile and flake.lock are manifests; only pom.xml shows lines"
+  && grep -qxF "  Directory.Packages.props (+1 -0)" <<<"$out48" \
+  && grep -qxF "  app.fsproj (+1 -0)" <<<"$out48" \
+  && grep -qxF "  app.vbproj (+1 -0)" <<<"$out48" \
+  && grep -qxF "  gradle/libs.versions.toml (+1 -0)" <<<"$out48" \
+  && [ "$(grep -cE '^    [+-] ' <<<"$out48")" = 5 ]; then
+  ok "case 48: pom.xml, deno.lock, gradle.lockfile, flake.lock, Directory.Packages.props, app.fsproj, app.vbproj and libs.versions.toml are manifests; the five non-lockfiles show lines"
 else
   bad "case 48: rc=$rc48 out=$out48"
 fi
@@ -978,6 +999,47 @@ if [ "$rc51" = 1 ] && grep -qxF "  bun.lockb (binary)" <<<"$out51" \
   ok "case 51: tracked and untracked binary lockfiles print (binary), not (+0 -0)"
 else
   bad "case 51: rc=$rc51 out=$out51"
+fi
+
+# 52. Index-deleted BINARY lockfile (git rm --cached, file still on disk) -> '(binary)' with the
+# '[untracked copy on disk]' tag, never '(+0 -0)'.
+printf 'bun\000v1\n' > "$wt/bun.lockb"
+git -C "$wt" add bun.lockb
+git -C "$wt" commit -qm "add binary lockfile for case 52"
+base52=$(git -C "$wt" rev-parse HEAD)
+git -C "$wt" rm -q --cached bun.lockb
+printf '## Files in scope\n- bun.lockb\n' > spec52.md
+run 5 "$SD" --spec "$tmp/spec52.md" --base "$base52" --worktree "$wt"
+rc52=$rc
+out52=$(out)
+reset_wt
+if [ "$rc52" = 1 ] && grep -qxF "  bun.lockb (binary) [untracked copy on disk]" <<<"$out52" \
+  && ! grep -qF "(+0 -0)" <<<"$out52"; then
+  ok "case 52: index-deleted binary lockfile on disk shows (binary) [untracked copy on disk], not (+0 -0)"
+else
+  bad "case 52: rc=$rc52 out=$out52"
+fi
+
+# 53. A binary NON-lockfile manifest (tracked pom.xml rewritten with a NUL byte): numstat marks it
+# binary, the -U0 read is skipped (the fake git log shows no '-U0' argv), and only '(binary)' prints.
+printf '<p>\000v1\n' > "$wt/pom.xml"
+git -C "$wt" add pom.xml
+git -C "$wt" commit -qm "add binary pom for case 53"
+base53=$(git -C "$wt" rev-parse HEAD)
+printf '<p>\000v2\n' > "$wt/pom.xml"
+printf '## Files in scope\n- pom.xml\n' > spec53.md
+run 5 env PATH="$tmp/gitbin:$PATH" FAKE_GIT_LOG="$tmp/git53.log" "$SD" --spec "$tmp/spec53.md" --base "$base53" --worktree "$wt"
+rc53=$rc
+out53=$(out)
+if [ -s "$tmp/git53.log" ]; then log53_nonempty=1; else log53_nonempty=0; fi
+reset_wt
+if [ "$rc53" = 1 ] && grep -qxF "  pom.xml (binary)" <<<"$out53" \
+  && ! grep -qE '^    [+-] ' <<<"$out53" \
+  && [ "$log53_nonempty" = 1 ] \
+  && ! grep -qF -- '-U0' "$tmp/git53.log"; then
+  ok "case 53: binary non-lockfile pom.xml prints (binary) only; the -U0 read was skipped (fake git log)"
+else
+  bad "case 53: rc=$rc53 out=$out53 log53_nonempty=$log53_nonempty"
 fi
 
 echo "scope-drift probe: $pass passed, $fail failed"
