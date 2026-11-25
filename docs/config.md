@@ -51,6 +51,7 @@ An optional TOML file fills in knobs the environment left unset: user `${XDG_CON
 | `SYG_LIVE_CHECKOUTS` | unset | Colon-separated absolute paths whose main git working trees are protected by live-checkout-guard. | `hooks/live-checkout-guard.sh` | user only |
 | `SYG_LIVE_CHECKOUT_AUTO` | `1` | Set to 0 to disable auto-detecting the plugin's own marketplace checkout as a protected live root. | `hooks/live-checkout-guard.sh` | user + project |
 | `SYG_LOSSY_PIPE_GH_WRAPPERS` | unset | Whitespace-separated read-wrapper command tokens guarded against head/tail/sed truncation in lossy-pipe-guard. | `hooks/lossy-pipe-guard.sh` | user + project |
+| `SYG_LOSSY_PIPE_JOBS` | `1` | Set to 0 to disable lossy-pipe-guard on long-job runner run commands piped into any filter. | `hooks/lossy-pipe-guard.sh` | user + project |
 | `SYG_LOSSY_PIPE_SUITES` | `1` | Set to 0 to disable lossy-pipe-guard on test and probe suite commands piped into head/tail/sed. | `hooks/lossy-pipe-guard.sh` | user + project |
 | `SYG_OWN_OWNERS` | unset | Whitespace- or comma-separated GitHub owner names unioned with hosts.yml user: as own repos in upstream-submission-guard. | `hooks/lib/upstream_guard_lib.py`, `hooks/upstream-submission-guard.sh` | user + project |
 | `SYG_PRIVATE_TERMS_FILE` | unset | Path to a local file of Python regexes, one per line, blocked from public repos by private-term-guard and pre-push; pre-push also falls back to global git config seyag.privateTermsFile. | `bin/pr-open`, `bin/seyag-git-hooks`, `git-hooks/pre-push`, `hooks/lib/prepush_scan.py`, `hooks/lib/private_terms.py`, `hooks/private-term-guard.sh` | user only |
@@ -107,7 +108,7 @@ An optional TOML file fills in knobs the environment left unset: user `${XDG_CON
 | `SYG_LAUNCH_RECORD_DIR` | unset | Directory path opting in launch-record to write <session_id>.json launch metadata at SessionStart. | `hooks/launch-record.sh` | user only |
 | `SYG_LAUNCH_RECORD_ENV` | unset | Space-separated environment variable names recorded under extra in launch-record JSON files. | `hooks/launch-record.sh` | user + project |
 | `SYG_LAUNCH_RECORD_HYBRID_OK` | unset | Set to 1 to suppress launch-record's warning when model slots mix provider families. | `hooks/launch-record.sh` | user + project |
-| `SYG_LONG_JOB_CMD` | unset | Runner prefix advertised at SessionStart for >10-minute jobs (`long-job run`); long-job-chain-check matches its first word; long-job names itself in messages, hints and its `ended` sentinel by that word's basename. | `bin/long-job`, `bin/long-job-chain-check`, `bin/mem-gate`, `hooks/session-start.sh` | user only |
+| `SYG_LONG_JOB_CMD` | unset | Runner prefix SessionStart advertises for >10-minute jobs (`long-job run`); long-job-chain-check and lossy-pipe-guard match its first word (a generic word like `bash` too); long-job names itself by its basename. | `bin/long-job`, `bin/long-job-chain-check`, `bin/mem-gate`, `hooks/lossy-pipe-guard.sh`, `hooks/session-start.sh` | user only |
 | `SYG_MEM_GATE_CMD` | unset | Single-line command advertised at SessionStart to check free memory before launching workers or test suites. The plugin's own mem-gate (`mem-gate --ok`) is one such command. | `hooks/session-start.sh` | user only |
 | `SYG_NEEDS_OWNER_SECTION` | `Needs Owner` | Heading (without the ##) of the role file section claude-role --need writes and --json reads as .needs: what waits on the owner; relay-ruling names it in its destructive-step line. | `bin/claude-role`, `bin/driver-clone`, `bin/relay-ruling` | user + project |
 | `SYG_OWNER_NAME` | `The owner` | Name relay-ruling prints in the relay header the recipient reads (`<name> said (...)`, `<name> picked (...)`); an empty value falls back to the default. Environment only (not config.toml). | `bin/relay-ruling` | env only |
@@ -203,6 +204,7 @@ An optional TOML file fills in knobs the environment left unset: user `${XDG_CON
 | `SYG_PR_BODY_EXTRA_COMMANDS` | unset | Extended regex of extra command families treated like gh pr create/edit by pr-body-ref-gate. | `hooks/pr-body-ref-gate.sh` | user + project |
 | `SYG_PR_BODY_RULE_REF` | unset | Optional project rule citation printed in pr-body-ref-gate block banners. | `hooks/pr-body-ref-gate.sh` | user + project |
 | `SYG_PR_BODY_TASK_PATHS` | `tracker/tasks tracker/archive/tasks` | Whitespace-separated repo paths searched on SYG_PR_BODY_BASE_REF for TASK-N references in pr-body-ref-gate. | `hooks/pr-body-ref-gate.sh` | user only |
+| `SYG_PR_MONITOR_GH_TIMEOUT` | `2` | Seconds pr-monitor-reminder waits on its gh pr list lookup before skipping the reminder (a positive integer; anything else means 2). | `hooks/pr-monitor-reminder.sh` | user + project |
 | `SYG_PR_OPEN_UPSTREAM_CHECK` | `1` | Set to 0 to skip pr-open's upstream-submission-guard --check preflight; the default judges the publish target first (PASS proceeds; BLOCK or UNKNOWN exits before gh runs). | `bin/pr-open` | user + project |
 
 ## worktrees

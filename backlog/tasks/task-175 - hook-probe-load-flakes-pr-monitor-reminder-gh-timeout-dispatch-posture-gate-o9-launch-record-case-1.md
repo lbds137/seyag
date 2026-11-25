@@ -3,11 +3,11 @@ id: TASK-175
 title: >-
   Hook probe load flakes: pr-monitor-reminder 18ai, dispatch-posture-gate O9,
   launch-record case 1 (TASK-49 hook part)
-status: In Progress
+status: Done
 assignee:
   - Seyag
 created_date: '2026-11-25T15:00:00Z'
-updated_date: '2026-11-25T17:01:00Z'
+updated_date: '2026-11-25T18:36:00Z'
 labels:
   - hooks
   - probes
@@ -28,3 +28,14 @@ The hook-lane share of TASK-49 (lane B shipped its part in #427). Specs from lan
 
 When this lands, tell lane B so TASK-49 can close.
 <!-- SECTION:DESCRIPTION:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Shipped in 0.3.227:
+
+1. A new `SYG_PR_MONITOR_GH_TIMEOUT` knob (default 2 s). The probe runs every case with it at 30 s. Case 16 pins the 2 s default, 16b sets 1 s (the note must read "timed out after 1s"), and 16c checks that an invalid value falls back to 2 s. Each slow fake sleeps 10 s and the bound is under 6 s, so load has margin.
+2. and 3. O9 and launch-record case 1 now feed the hook with here-strings, so no printf writer exists to take SIGPIPE. Before the change, a stress run of 300 per hook with a pipe gave rc 141 once (launch-record); with the here-string it gave 141 zero times. launch-record's `bad()` now prints RC and the stderr file.
+
+The wider class is TASK-179. The knob canary was caught: hardcoding 2 s turned 16b red.
+<!-- SECTION:NOTES:END -->

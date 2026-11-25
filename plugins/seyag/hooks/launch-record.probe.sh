@@ -18,7 +18,13 @@ trap 'rm -rf "$TMP"' EXIT
 
 fail=0
 ok() { echo "ok:   $1"; }
-bad() { echo "FAIL: $1"; [ -n "${2:-}" ] && printf '      got: %s\n' "$2"; fail=1; }
+bad() {
+  echo "FAIL: $1"
+  [ -n "${2:-}" ] && printf '      got: %s\n' "$2"
+  printf '      RC=%s\n' "${RC:-}"
+  [ -s "$TMP/err" ] && sed 's/^/      /' "$TMP/err"
+  fail=1
+}
 
 file_mode() {
   stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1" 2>/dev/null || python3 -c 'import os, sys; print(oct(os.stat(sys.argv[1]).st_mode & 0o777)[2:])' "$1" 2>/dev/null
@@ -28,8 +34,14 @@ run() {
   local sid="${SID-probe-session}"
   local src="${SRC:-startup}"
   local cwd="${CWD_ARG:-$TMP}"
-  OUT=$(printf '{"session_id":"%s","source":"%s","cwd":"%s"}' "$sid" "$src" "$cwd" \
-    | env -i PATH="$PATH" HOME="$TMP" "$@" "$BASH_BIN" "$HOOK" 2>"$TMP/err")
+  local payload
+  # Here-string, not a printf pipe: under `set -o pipefail` a hook that exits
+  # before reading stdin (SYG_LAUNCH_RECORD_DIR unset, case 1) SIGPIPEs the
+  # printf writer and the pipeline reports 141 instead of the hook's 0.
+  # `<<<` appends a newline; the hook reads stdin with `$(cat)`, which strips
+  # trailing newlines, so the payload arrives unchanged.
+  printf -v payload '{"session_id":"%s","source":"%s","cwd":"%s"}' "$sid" "$src" "$cwd"
+  OUT=$(env -i PATH="$PATH" HOME="$TMP" "$@" "$BASH_BIN" "$HOOK" <<<"$payload" 2>"$TMP/err")
   RC=$?
 }
 

@@ -159,12 +159,13 @@ SYG_LOAD_GATE_5M	user	misc	prose:2.5x the CPU count	5-minute load average ceilin
 SYG_LOAD_GATE_LOADAVG	internal	misc	/proc/loadavg	Test seam overriding the loadavg file load-gate reads.	-
 SYG_LOAD_GATE_NPROC	internal	misc	nproc	Test seam overriding the CPU count load-gate scales its default ceilings by.	-
 SYG_LOAD_GATE_PSI	internal	misc	/proc/pressure/cpu	Test seam overriding the CPU pressure file load-gate reads.	-
-SYG_LONG_JOB_CMD	user	session	unset	Runner prefix advertised at SessionStart for >10-minute jobs (`long-job run`); long-job-chain-check matches its first word; long-job names itself in messages, hints and its `ended` sentinel by that word's basename.	-
+SYG_LONG_JOB_CMD	user	session	unset	Runner prefix SessionStart advertises for >10-minute jobs (`long-job run`); long-job-chain-check and lossy-pipe-guard match its first word (a generic word like `bash` too); long-job names itself by its basename.	-
 SYG_LONG_JOB_LOAD_GATE	internal	misc	prose:load-gate beside long-job	Test seam: the load-gate long-job run --heavy calls inside the unit (a path); empty skips the load wait, with a warning.	-
 SYG_LONG_JOB_PARENT_CMD	internal	misc	unset	Test seam giving long-job the parent shell's command text in place of /proc/PPID/cmdline; setting it (even empty) replaces the parent-command read and so disables long-job's own && refusal (for tests only).	-
 SYG_LONG_JOB_STATE_DIR	user	misc	prose:XDG_STATE_HOME/long-job (XDG_STATE_HOME has its XDG default)	Directory holding long-job's per-job NAME.cmd, NAME.owner, NAME.unit, NAME.log and NAME.exit files.	path
 SYG_LONG_JOB_UNIT_PREFIX	user	misc	long-job	Prefix of the transient systemd user unit long-job starts (PREFIX-NAME.service); must start with a letter or digit and hold only letters, digits, '.', '_' and '-'.	host
 SYG_LOSSY_PIPE_GH_WRAPPERS	user	guards	unset	Whitespace-separated read-wrapper command tokens guarded against head/tail/sed truncation in lossy-pipe-guard.	-
+SYG_LOSSY_PIPE_JOBS	user	guards	1	Set to 0 to disable lossy-pipe-guard on long-job runner run commands piped into any filter.	-
 SYG_LOSSY_PIPE_SUITES	user	guards	1	Set to 0 to disable lossy-pipe-guard on test and probe suite commands piped into head/tail/sed.	-
 SYG_MAX_PARALLEL	user	misc	unset	Host cap on parallel jobs, applied by resource-profile on top of any profile.	host
 SYG_MEM_GATE_CMD	user	session	unset	Single-line command advertised at SessionStart to check free memory before launching workers or test suites. The plugin's own mem-gate (`mem-gate --ok`) is one such command.	-
@@ -197,6 +198,7 @@ SYG_PR_BODY_RULE_REF	user	pr	unset	Optional project rule citation printed in pr-
 SYG_PR_BODY_TASK_PATHS	user	pr	tracker/tasks tracker/archive/tasks	Whitespace-separated repo paths searched on SYG_PR_BODY_BASE_REF for TASK-N references in pr-body-ref-gate.	path
 SYG_PR_MERGE_LIB_DIR	internal	pr	<hooks_dir>/lib	Test seam overriding the hooks/lib directory passed to pr-merge-review-check's Python parser.	-
 SYG_PR_OPEN_UPSTREAM_CHECK	user	pr	1	Set to 0 to skip pr-open's upstream-submission-guard --check preflight; the default judges the publish target first (PASS proceeds; BLOCK or UNKNOWN exits before gh runs).	-
+SYG_PR_MONITOR_GH_TIMEOUT	user	pr	2	Seconds pr-monitor-reminder waits on its gh pr list lookup before skipping the reminder (a positive integer; anything else means 2).	-
 SYG_PR_MONITOR_SEEN_FILE	internal	pr	${XDG_RUNTIME_DIR:-/tmp}/.claude_pr_monitor_seen.<uid>	Test seam overriding the deduplication state file for pr-monitor-reminder.	-
 SYG_PUBLISH_CHECKED	user	guards	unset	Colon-separated <owner/repo> list (or any non-empty value for a gist) in the session env unblocking publish-gate.	-
 SYG_PY_CACHE_ARG	internal	guards	unset	Python flag run.sh exports (`-Xpycache_prefix=<dir>`, or `-B`) for hooks' `python3 -I`, which ignores PYTHONPYCACHEPREFIX; unset on a direct run, where hooks fall back to `-B`; a relative caller prefix gives `-B`.	-
