@@ -66,8 +66,9 @@ owner_init "$owner"
 avail_mb() { awk '/^MemAvailable:/{printf "%d", $2/1024}' "$meminfo"; }
 swap_used_mb() { awk '/^SwapTotal:/{t=$2} /^SwapFree:/{f=$2} END{printf "%d", (t-f)/1024}' "$meminfo"; }
 top3() {
-  ps -eo pid,comm,rss --sort=-rss | sed -n '2,4p' |
-    awk '{printf "%s%s %s %d MB", (NR > 1 ? ", " : ""), $1, $2, $3/1024}'
+  # comm goes last and is rebuilt from $3..NF, so a space in it ("Web Content") can't shift rss.
+  ps -eo pid,rss,comm --sort=-rss | sed -n '2,4p' |
+    awk '{c=$3; for (i=4;i<=NF;i++) c=c " " $i; printf "%s%s %s %d MB", (NR > 1 ? ", " : ""), $1, c, $2/1024}'
 }
 
 a=$(avail_mb)

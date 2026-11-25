@@ -285,5 +285,48 @@ run 5 "$LG" --owner abc
   && ok "27b. --owner abc exits 2 with '--owner needs a PID'" \
   || bad "27b. --owner abc rc=$rc err=$(err)"
 
+# 28a. NPROC=3 defaults: 1m limit 2 x 3 = 6, 5m limit 2.5 x 3 = 7.50 printed as 7.5; load 5 1 is under both.
+run 5 env SYG_LOAD_GATE_NPROC=3 SYG_LOAD_GATE_LOADAVG="$tmp/load-5-1" "$LG" --ok
+[ "$rc" = 0 ] && grep -qF "load 1m 5 <= 6, 5m 1 <= 7.5 on 3 cpus" "$tmp/out" \
+  && ok "28a. NPROC=3 defaults print limits 1m 6 and 5m 7.5" \
+  || bad "28a. NPROC=3 defaults rc=$rc out=$(out) err=$(err)"
+
+# 28b. leading zeros in limits: SYG_LOAD_GATE_1M=08 prints 8, SYG_LOAD_GATE_5M=08.50 prints 8.5.
+run 5 env SYG_LOAD_GATE_1M=08 SYG_LOAD_GATE_5M=08.50 SYG_LOAD_GATE_LOADAVG="$tmp/load-5-1" "$LG" --ok
+[ "$rc" = 0 ] && grep -qF "load 1m 5 <= 8, 5m 1 <= 8.5 on 8 cpus" "$tmp/out" \
+  && ok "28b. SYG_LOAD_GATE_1M=08 and 5M=08.50 print limits 8 and 8.5" \
+  || bad "28b. leading-zero limits rc=$rc out=$(out) err=$(err)"
+
+# 28c. --ok never checks the owner: a PID that cannot exist changes nothing (under load 0, over load 1, never 3).
+run 5 "$LG" --ok --owner 999999999; rc_under=$rc
+run 5 env SYG_LOAD_GATE_LOADAVG="$tmp/over1" "$LG" --ok --owner 999999999; rc_over=$rc
+[ "$rc_under" = 0 ] && [ "$rc_over" = 1 ] \
+  && ok "28c. --ok --owner 999999999 exits 0 under load and 1 over load" \
+  || bad "28c. --ok owner ignored under=$rc_under over=$rc_over err=$(err)"
+
+# 28d. pins current behaviour: --wait checks load once before its loop, so a dead owner with low
+# load exits 0 (the pre-loop check passes first), not 3.
+run 5 "$LG" --wait --owner 999999999 --interval 1 --timeout 5
+[ "$rc" = 0 ] \
+  && ok "28d. --wait with a dead owner and low load exits 0 (pre-loop check passes first)" \
+  || bad "28d. --wait dead owner low load rc=$rc out=$(out) err=$(err)"
+
+# 28e. a comm with a space ('Web Content') must not shift the top-3 columns: fake ps prints pid,pcpu,comm.
+mkdir -p "$tmp/psbin"
+cat > "$tmp/psbin/ps" <<'EOF'
+#!/bin/bash
+# Pins the bin's exact call: any other column order or sort fails the case.
+[ "$*" = "-eo pid,pcpu,comm --sort=-pcpu" ] || { echo "fake ps: unexpected args: $*" >&2; exit 99; }
+echo "  PID %CPU COMMAND"
+echo "123 45.6 Web Content"
+echo "7 3.0 bash"
+echo "9 1.0 sleep"
+EOF
+chmod +x "$tmp/psbin/ps"
+run 5 env PATH="$tmp/psbin:$PATH" SYG_LOAD_GATE_LOADAVG="$tmp/over1" "$LG" --ok
+[ "$rc" = 1 ] && [[ $(out) == *"; top 3 CPU: 123 Web Content 45.6%, 7 bash 3.0%, 9 sleep 1.0%" ]] \
+  && ok "28e. spaced comm keeps top 3 CPU columns intact" \
+  || bad "28e. spaced comm rc=$rc out=$(out) err=$(err)"
+
 echo "load-gate probe: $pass passed, $fail failed"
 [ "$fail" = 0 ]

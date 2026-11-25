@@ -189,5 +189,22 @@ if [ -n "$o" ]; then
   esac
 fi
 
+# A comm with a space ('Web Content') must not shift the top-3 RSS columns: fake ps prints pid,rss,comm.
+mkdir -p "$tmp/psbin"
+cat > "$tmp/psbin/ps" <<'EOF'
+#!/bin/bash
+# Pins the bin's exact call: any other column order or sort fails the case.
+[ "$*" = "-eo pid,rss,comm --sort=-rss" ] || { echo "fake ps: unexpected args: $*" >&2; exit 99; }
+echo "  PID   RSS COMMAND"
+echo "123 2048000 Web Content"
+echo "7 102400 bash"
+echo "9 10240 sleep"
+EOF
+chmod +x "$tmp/psbin/ps"
+run 5 env PATH="$tmp/psbin:$PATH" SYG_MEM_GATE_MEMINFO="$tmp/low" "$MG" --ok
+[ "$rc" = 1 ] && [[ $(out) == *"; top 3 RSS: 123 Web Content 2000 MB, 7 bash 100 MB, 9 sleep 10 MB" ]] \
+  && ok "spaced comm keeps top 3 RSS columns intact (123 Web Content 2000 MB)" \
+  || bad "spaced comm top3 rc=$rc out=$(out) err=$(err)"
+
 echo "mem-gate probe: $pass passed, $fail failed"
 [ "$fail" = 0 ]
