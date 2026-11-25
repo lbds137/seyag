@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - Seyag B
 created_date: '2026-11-21T02:47:00Z'
-updated_date: '2026-11-25T14:18:24Z'
+updated_date: '2026-11-25T14:56:13Z'
 labels:
   - probes
   - flake
@@ -49,4 +49,5 @@ Both new failures look timing-dependent; that is an inference, not yet runtime-c
 - Lane B disposition: split the swc probe at its section boundary (single-repo checks / the P1-P48 + PM sweep and apply-hold checks) through a sourced `tests/safe-worktree-clean-fixture.sh` (precedent: `tests/sandbox-capable.sh`). Drop the `-le 2` bound in `tests/long-job.probe.sh`: a --poll that blocked would die at `timeout 5` with rc 124, never 4. Drop `ms < 2000` in worker-sandbox 7c: the "No route to host" vs "timed out" contrast is the proof, and ms includes sandbox startup.
 - Lane A (hook probes), specs sent to Seyag A 2026-11-25. 18ai, hypothesis: `hooks/pr-monitor-reminder.sh:618` gives a fake gh only `timeout 2`, which load can exceed (only the banner assert failed; from code reading, not runtime-confirmed). dispatch-posture-gate O9's 141 is a SIGPIPE race: the hook exits before reading stdin. launch-record case 1 needs RC and err printed before it can be diagnosed.
 - Lane B part merged as #427 (793a167; claude-review PASS with three lows, filed as TASK-173; gate 129/129; council gpt-5.5 review, no defects; mutation parity 150 FAIL / 182 ok old vs split). The task stays In Progress until lane A lands or files the three hook items.
+- 2026-11-25: lane A filed the three hook items as TASK-175, on its 0.3.226 release branch. Close TASK-49 once TASK-175 is on main.
 <!-- SECTION:NOTES:END -->
