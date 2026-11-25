@@ -33,4 +33,9 @@ Related: TASK-30 profiled tests/safe-worktree-clean.probe.sh as the shellcheck m
 11-24 again: lj-gate3 (-j 4) on #404 round 2 hit the 600 s cap (exit 124); solo rerun same tree rc=0 in 279 s.
 
 11-24 (#404 rebased tree, -j 4): worker-sandbox 'wall knob live' failed at ms=2501 against its 2000 ms wall-clock limit (tests/worker-sandbox.probe.sh ~line 503, which times the whole sandboxed call, startup included); the solo rerun passed in 24 s total. Same load class; safe-worktree-clean hit the 600 s cap again (solo 325 s).
+
+2026-11-24 evening (Seyag B), two more `-j 4` gates:
+- bfix (PR #409): only safe-worktree-clean failed (exit 124). Alone it passed: 332 ok, 0 fail, real 5m16s.
+- bscope (TASK-74): three probes failed: safe-worktree-clean (exit 124), `plugins/seyag/hooks/launch-record.probe.sh` case "1. unset dir", and `tests/worker-sandbox.probe.sh` "wall knob live" (rc=0, ms=2231, out=`192.0.2.1 error [Errno 113] No route to host`, ctl=`timed out`). Run alone in the same tree, launch-record passed (rc 0, 13 ok) and worker-sandbox passed (rc 0).
+Both new failures look timing-dependent; that is an inference, not yet runtime-confirmed. launch-record case 1 and worker-sandbox's live wall check join this task's list of probes that fail only under load.
 <!-- SECTION:NOTES:END -->
