@@ -618,5 +618,40 @@ else
   bad "case 33: rc=$rc33 out=$out33"
 fi
 
+# 34. Moved base: branch side forks from $base with an in-scope src/a.sh commit while main moves on
+# with an out-of-scope lib/x/y.sh commit; on side, --base main resolves to the fork point ($short).
+git -C "$wt" checkout -q -b side "$base"
+echo "a2" > "$wt/src/a.sh"
+git -C "$wt" add src/a.sh
+git -C "$wt" commit -qm "side in-scope a"
+git -C "$wt" checkout -q main
+echo "lib2" > "$wt/lib/x/y.sh"
+git -C "$wt" add lib/x/y.sh
+git -C "$wt" commit -qm "main moved on"
+main_short=$(git -C "$wt" rev-parse --short main)
+git -C "$wt" checkout -q side
+run 5 "$SD" --spec "$tmp/spec1.md" --base main --worktree "$wt"
+rc34=$rc
+out34=$(out)
+git -C "$wt" checkout -q main
+reset_wt
+git -C "$wt" branch -q -D side
+if [ "$rc34" = 0 ] && [ "$out34" = "$want_clean1" ] && [ "$main_short" != "$short" ]; then
+  ok "case 34: moved --base main resolves to fork point ($short), not main tip ($main_short)"
+else
+  bad "case 34: rc=$rc34 out=$out34 want=$want_clean1 main_short=$main_short"
+fi
+
+# 35. Unrelated history: --base names an orphan commit with no shared history with HEAD -> exit 2,
+# stderr contains 'shares no history'.
+empty_tree=$(git -C "$wt" hash-object -w -t tree /dev/null)
+orphan=$(git -C "$wt" commit-tree "$empty_tree" -m "orphan")
+run 5 "$SD" --spec "$tmp/spec1.md" --base "$orphan" --worktree "$wt"
+if [ "$rc" = 2 ] && grep -qF "scope-drift: base '$orphan' shares no history with HEAD" err; then
+  ok "case 35: unrelated history --base orphan commit exits 2 with 'shares no history'"
+else
+  bad "case 35: rc=$rc out=$(out) err=$(err)"
+fi
+
 echo "scope-drift probe: $pass passed, $fail failed"
 [ "$fail" = 0 ]
