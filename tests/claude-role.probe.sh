@@ -185,6 +185,42 @@ got=$("$CR" --list | awk -F'\t' '$1 == "kappa" { print $3 "|" $5 }')
 [ "$got" = "|" ] && ok "cleared fields read back empty" || bad "cleared kappa: $got"
 "$CR" --set status="checked" route=lane-two --file "$roles/kappa.md" >/dev/null
 grep -q '  updated: 2026-01-01 00:00' "$roles/kappa.md" && bad "status= with route= didn't stamp updated" || ok "status= still stamps updated alongside route="
+# status_at: its own age stamp, bumped by every status= write (same text included), by no other verb.
+cat > "$roles/lam.md" <<'EOF'
+---
+metadata:
+  role: "Lam role"
+  status: "steady"
+  updated: 2026-01-01 00:00
+  status_at: 2026-01-01 00:00
+---
+
+## Handoff
+
+## Next
+EOF
+"$CR" --set holds="x" --file "$roles/lam.md" >/dev/null
+grep -qx '  status_at: 2026-01-01 00:00' "$roles/lam.md" && ok "holds= leaves status_at alone" || bad "holds= touched status_at"
+"$CR" --note "n" --file "$roles/lam.md" >/dev/null
+grep -qx '  status_at: 2026-01-01 00:00' "$roles/lam.md" && ok "--note leaves status_at alone" || bad "--note touched status_at"
+"$CR" --next "m" --file "$roles/lam.md" >/dev/null
+grep -qx '  status_at: 2026-01-01 00:00' "$roles/lam.md" && ok "--next leaves status_at alone" || bad "--next touched status_at"
+"$CR" --set status="steady" --file "$roles/lam.md" >/dev/null
+[ "$(grep -c '^  status_at: ' "$roles/lam.md")" = 1 ] && ! grep -qx '  status_at: 2026-01-01 00:00' "$roles/lam.md" \
+    && grep -qE '^  status_at: [0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}$' "$roles/lam.md" \
+    && ok "same-text status= restamps status_at" || bad "same-text status= status_at: $(grep status_at "$roles/lam.md")"
+lam_at=$(sed -n 's/^  status_at: //p' "$roles/lam.md")
+json_at=$("$CR" --json | jq -r '.roles[] | select(.file == "lam.md") | .status_at')
+[ -n "$lam_at" ] && [ "$json_at" = "$lam_at" ] && ok "--json carries status_at" || bad "--json status_at '$json_at' vs file '$lam_at'"
+printf -- '---\nrole: "Mu"\n---\n\n## Next\n- none\n' > "$roles/mu.md"
+mu_at=$("$CR" --json | jq -r '.roles[] | select(.file == "mu.md") | .status_at')
+[ "$mu_at" = "" ] && ok "--json status_at is empty for a role without it" || bad "--json status_at for mu: '$mu_at'"
+printf -- '---\nrole: "Nu role"\nstatus: "a"\nupdated: 2026-01-01 00:00\n---\n' > "$roles/nu.md"
+"$CR" --set status="b" --file "$roles/nu.md" >/dev/null
+grep -qE '^status_at: [0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}$' "$roles/nu.md" && ok "top-level status= writes a bare status_at" || bad "top-level status_at: $(cat "$roles/nu.md")"
+cp "$roles/lam.md" "$home/lam.before"
+"$CR" --set status_at="x" --file "$roles/lam.md" >/dev/null 2>&1 && bad "--set accepted status_at=" || ok "--set refuses status_at="
+cmp -s "$roles/lam.md" "$home/lam.before" && ok "refused status_at leaves the file unchanged" || bad "refused status_at changed the file"
 # Through a symlink (as from ~/.local/bin), the tool still finds its sibling lib/next_due.py and
 # hooks/lib/config-env.sh: --size counts the "Due now" line of a due bullet.
 ln -s "$CR" "$home/claude-role-link"
@@ -402,9 +438,17 @@ out=$("$CR" --set route=lane-two parked="parked while over cap" --file "$roles/o
   && ok "route=/parked= pass on an over-cap file" || bad "route/parked on over-cap: rc=$rc $out"
 # Refresh updated to current minute so status change has zero timestamp delta.
 sed -i "s/^updated: .*/updated: $(date '+%F %H:%M')/" "$roles/over.md"
+# The stamp allowance is exact: one character of status growth on the write that inserts status_at refuses.
+cp "$roles/over.md" "$roles/over1.md"
+"$CR" --set status="busyx" --file "$roles/over1.md" >/dev/null 2>&1; rc=$?
+[ $rc = 1 ] && cmp -s "$roles/over.md" "$roles/over1.md" \
+  && ok "first status= write that grows the text by one char still refuses on an over-cap file" || bad "stamp allowance let growth through: rc=$rc"
+rm "$roles/over1.md"
 out=$("$CR" --set status="idle" --file "$roles/over.md" 2>&1); rc=$?
 [ $rc = 0 ] && grep -q '^status: "idle"$' "$roles/over.md" \
   && ok "same-size write on an over-cap file passes" || bad "same-size on over-cap: rc=$rc $out"
+grep -qE '^status_at: [0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}$' "$roles/over.md" \
+  && ok "an over-cap file's first status= write adds status_at" || bad "over-cap first status= wrote no status_at: $(grep status_at "$roles/over.md")"
 out=$("$CR" --set status="ok" --file "$roles/over.md" 2>&1); rc=$?
 [ $rc = 0 ] && grep -q '^status: "ok"$' "$roles/over.md" \
   && ok "shrinking write on an over-cap file passes" || bad "shrinking on over-cap: rc=$rc $out"
@@ -604,7 +648,7 @@ help_out=$("$CR" --help); rc=$?
 
 # 11. --size: line format, N equals a no-op-equivalent --set, file is byte-identical (no write).
 now_stamp=$(date '+%F %H:%M')
-printf -- '---\nrole: "Size role"\nstatus: "steady"\nupdated: %s\n---\n\n## Charter\nsize check\n' "$now_stamp" > "$roles/size.md"
+printf -- '---\nrole: "Size role"\nstatus: "steady"\nupdated: %s\nstatus_at: %s\n---\n\n## Charter\nsize check\n' "$now_stamp" "$now_stamp" > "$roles/size.md"
 before_sz=$(cat "$roles/size.md")
 sz_out=$("$CR" --size --file "$roles/size.md"); rc=$?
 [ $rc = 0 ] && [[ "$sz_out" =~ ^size\.md:\ ([0-9]+)/10000\ chars\ at\ session\ start\ \(headroom\ (-?[0-9]+)\)$ ]] \

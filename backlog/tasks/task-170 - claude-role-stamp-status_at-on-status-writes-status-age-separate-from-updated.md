@@ -3,9 +3,11 @@ id: TASK-170
 title: >-
   claude-role: stamp status_at on status writes (status age separate from
   updated:)
-status: To Do
-assignee: []
+status: Done
+assignee:
+  - Seyag B
 created_date: '2026-11-25T08:06:00Z'
+updated_date: '2026-11-25T10:30:00Z'
 labels:
   - claude-role
   - feature
@@ -40,4 +42,6 @@ Consumer contract (confirmed 2026-11-25 by the consumer, which has already shipp
 - It lives wherever `updated:` lives. The reader accepts it at the top level or under `metadata:`.
 - Every `--set status=` write stamps it, including a write with unchanged text. No other verb touches it.
 - No deadline: without the field, the reader falls back to the 48h `updated:` rule.
+
+Shipped: `--set status=` stamps `status_at` (bare, the `updated:` format, at the role fields' indent) on every write, an unchanged one included; no other verb touches it, and `--set status_at=` is refused. `--json` carries `status_at` (`""` when absent). `--board` is ruled out: its line already shows `updated`, its readers are people, and the machine readers use `--json` or the file. A stamp line the tool inserts itself (the first status= write on a file without status_at) doesn't count as growth for the cap guard, so an over-cap role can still checkpoint.
 <!-- SECTION:NOTES:END -->
