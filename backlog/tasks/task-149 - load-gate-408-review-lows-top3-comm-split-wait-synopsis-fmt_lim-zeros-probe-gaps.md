@@ -3,8 +3,9 @@ id: TASK-149
 title: >-
   load-gate #408 review lows: top3 comm split, --wait synopsis, fmt_lim zeros,
   probe gaps
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - Seyag B
 created_date: '2026-11-24T23:39:00Z'
 labels:
   - bins
