@@ -1491,7 +1491,7 @@ batchable_path() {
 # mode-000 file failing per-file hash-object with rc 128 every run) hashes the same on both
 # runs, and the judge/backup layers are what catch content hidden that way.
 # The stream's field order and sentinels are pinned byte-for-byte by the P38
-# and P38b per-file reference formulas (defined in tests/safe-worktree-clean-fixture.sh, run by
+# and P38b per-file reference formulas (defined and run in
 # tests/safe-worktree-clean-apply-hold.probe.sh):
 # reordering the stream changes this function and both formulas together.
 # SYG_WORKTREE_STATE_BATCH_FAIL=1 is a test seam (internal, ignored unless set to exactly 1):
