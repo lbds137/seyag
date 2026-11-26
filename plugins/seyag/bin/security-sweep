@@ -2,27 +2,29 @@
 """security-sweep: surface open GitHub security alerts (code-scanning, dependabot, secret-scanning).
 
 Usage:
-  security-sweep [-R owner/name ...] [--all-repos-from FILE] [--json] [--strict] [--session-line] [--warm-cache] [--cap SECONDS] [--no-cache]
+  security-sweep [-R owner/name ...] [--all-repos-from FILE] [--json] [--strict] [--session-line] [--warm-cache] [--cap SECONDS] [--no-cache] [--window DAYS]
 
 Options:
   -R, --repo owner/name   Repository to sweep (repeatable).
   --all-repos-from FILE   Read whitespace-separated owner/name tokens from FILE (# starts a comment).
                           With neither -R nor --all-repos-from, uses the cwd's `git remote get-url origin`.
-  --json                  Emit machine-readable JSON summary.
+  --json                  Emit machine-readable JSON summary. JSON carries per-repo `history` (closed code-scanning alerts: windowed `dismissed`/`fixed` counts, `outrun`, all-time `dismissed_by_rule`, and `prior_dismissals` per open alert).
   --strict                Exit 1 on open critical/high code-scanning or any open secret-scanning alert;
                           exit 2 on an uncached surface error, skipped invalid repo, unparseable origin, or internal error
                           (exit 1 wins when both hold: an alert exit can hide fetch errors, which stderr still names per surface and --json marks error).
   --session-line          Print nothing unless >=1 open alert exists; then print a single summary line.
+                          The session line also lists a repo whose code-scanning dismissals outrun fixes in the window (D > F, D >= 2).
                           Silent on errors and off surfaces; never writes to stderr.
   --warm-cache            Populate the cache like --session-line but print nothing; exits 0 at once if another warm run holds the repo-set flock.
   --cap SECONDS           Exit 124 after SECONDS (positive float), no `timeout` binary needed; the run leads its own process group (when setpgid succeeds) and sends SIGTERM to it (gh children included) on expiry, finishing an in-flight cache write first for about 1 s more (past that grace it exits mid-write, which may leave a `.tmp` file); a SIGTERM received during a capped run is handled the same way (group SIGTERM, any in-flight cache write finished first, exit 124); a second SIGTERM exits at once, even mid-write, which may leave a `.tmp` file; SessionStart passes --cap 2. Like GNU timeout, a capped run leaves the terminal's foreground group, so Ctrl-C does not reach it, and it ignores SIGTTIN/SIGTTOU so terminal output under `stty tostop` does not stop it.
   --no-cache              Bypass the 300s fresh cache and fetch live from GitHub.
+  --window DAYS           Window for the dismissed:fixed ratio (default 90; 1..3650).
   -h, --help              Show this help message and exit.
 
 Cache:
   ${XDG_STATE_HOME:-$HOME/.local/state}/seyag/security-sweep/<owner>_<name>.json (fresh <= 300s).
   Only filtered metadata fields are kept at fetch time; secret values and raw remote URLs are
-  never printed, logged or cached.
+  never printed, logged or cached. The cache also holds closed code-scanning metadata (rule, dates, reason, path, comment ≤280 chars).
 
 Test seam (environment):
   SECURITY_SWEEP_GH          Overrides the `gh` binary path.
@@ -32,6 +34,7 @@ Exit codes: 0 by default (1 on internal error; 124 on --cap timeout), except und
 """
 import argparse
 from concurrent.futures import ThreadPoolExecutor, wait as wait_futures
+from datetime import datetime, timezone
 import fcntl
 import hashlib
 import json
@@ -198,10 +201,15 @@ def summarize_code_scanning(raw_items):
         rid = rid if isinstance(rid, str) and rid else "unknown"
         tname = tool.get("name")
         tname = tname if isinstance(tname, str) else ""
+        mri = a.get("most_recent_instance") if isinstance(a.get("most_recent_instance"), dict) else {}
+        loc = mri.get("location") if isinstance(mri.get("location"), dict) else {}
+        lpath = loc.get("path")
+        lpath = lpath if isinstance(lpath, str) else ""
         alerts.append({
             "number": a.get("number"),
             "rule": {"id": rid, "security_severity_level": sev},
             "tool": {"name": tname},
+            "path": lpath,
         })
     for item in alerts:
         sev = item["rule"]["security_severity_level"]
@@ -273,8 +281,51 @@ def summarize_secret_scanning(raw_items):
     }
 
 
-def fetch_surface(repo, surface):
-    endpoint = f"repos/{repo}/{surface}/alerts?state=open&per_page=100"
+def summarize_history(raw_items):
+    items = []
+    seen_numbers = set()
+    for a in raw_items:
+        st = a.get("state")
+        if not isinstance(st, str) or st not in ("dismissed", "fixed"):
+            continue
+        num = a.get("number")
+        num = num if isinstance(num, int) and not isinstance(num, bool) else None
+        if num is not None:
+            if num in seen_numbers:
+                continue
+            seen_numbers.add(num)
+        rule = a.get("rule") if isinstance(a.get("rule"), dict) else {}
+        rid = rule.get("id")
+        rid = rid if isinstance(rid, str) and rid else "unknown"
+        dismissed_at = a.get("dismissed_at")
+        dismissed_at = dismissed_at if isinstance(dismissed_at, str) and dismissed_at else None
+        fixed_at = a.get("fixed_at")
+        fixed_at = fixed_at if isinstance(fixed_at, str) and fixed_at else None
+        reason = a.get("dismissed_reason")
+        reason = reason if isinstance(reason, str) else None
+        comment = a.get("dismissed_comment")
+        comment = comment[:280] if isinstance(comment, str) else None
+        mri = a.get("most_recent_instance") if isinstance(a.get("most_recent_instance"), dict) else {}
+        loc = mri.get("location") if isinstance(mri.get("location"), dict) else {}
+        lpath = loc.get("path")
+        lpath = lpath if isinstance(lpath, str) else ""
+        items.append({
+            "number": num,
+            "state": st,
+            "rule_id": rid,
+            "dismissed_at": dismissed_at,
+            "fixed_at": fixed_at,
+            "dismissed_reason": reason,
+            "dismissed_comment": comment,
+            "path": lpath,
+        })
+    return {
+        "state": "count",
+        "items": items,
+    }
+
+
+def _fetch_alerts(endpoint, summarizer):
     try:
         p = subprocess.run(
             [gh_bin(), "api", "--paginate", endpoint],
@@ -296,11 +347,35 @@ def fetch_surface(repo, surface):
         raw_items = parse_paginated_list(p.stdout or "")
     except ValueError:
         return {"state": "error"}, 0
+    return summarizer(raw_items), None
+
+
+def fetch_surface(repo, surface):
+    endpoint = f"repos/{repo}/{surface}/alerts?state=open&per_page=100"
     if surface == "code-scanning":
-        return summarize_code_scanning(raw_items), None
+        return _fetch_alerts(endpoint, summarize_code_scanning)
     if surface == "dependabot":
-        return summarize_dependabot(raw_items), None
-    return summarize_secret_scanning(raw_items), None
+        return _fetch_alerts(endpoint, summarize_dependabot)
+    return _fetch_alerts(endpoint, summarize_secret_scanning)
+
+
+def fetch_history(repo):
+    endpoint = f"repos/{repo}/code-scanning/alerts?state=closed&per_page=100"
+    return _fetch_alerts(endpoint, summarize_history)
+
+
+def is_valid_cached_history(hdata):
+    if not isinstance(hdata, dict):
+        return False
+    st = hdata.get("state")
+    if st == "off":
+        return True
+    if st != "count":
+        return False
+    items = hdata.get("items")
+    if not isinstance(items, list) or any(not isinstance(it, dict) for it in items):
+        return False
+    return True
 
 
 def read_cache(repo):
@@ -316,7 +391,9 @@ def read_cache(repo):
     surfaces = data.get("surfaces")
     if not isinstance(fetched_at, (int, float)) or not isinstance(surfaces, dict):
         return None
-    return {"fetched_at": float(fetched_at), "surfaces": surfaces}
+    raw_history = data.get("history")
+    history = raw_history if is_valid_cached_history(raw_history) else None
+    return {"fetched_at": float(fetched_at), "surfaces": surfaces, "history": history}
 
 
 _cap_lock = threading.Lock()
@@ -377,7 +454,7 @@ def _install_cap(seconds):
     signal.setitimer(signal.ITIMER_REAL, seconds)
 
 
-def write_cache(repo, fetched_at, surfaces):
+def write_cache(repo, fetched_at, surfaces, history=None):
     global _cap_writes
     with _cap_lock:
         _cap_writes += 1
@@ -391,7 +468,7 @@ def write_cache(repo, fetched_at, surfaces):
                 fd, tmp = tempfile.mkstemp(dir=d, prefix=f".{owner}_{name}.", suffix=".tmp")
                 try:
                     with os.fdopen(fd, "w", encoding="utf-8") as f:
-                        json.dump({"fetched_at": int(fetched_at), "surfaces": surfaces}, f)
+                        json.dump({"fetched_at": int(fetched_at), "surfaces": surfaces, "history": history}, f)
                     os.replace(tmp, os.path.join(d, f"{owner}_{name}.json"))
                 except BaseException:
                     try:
@@ -448,20 +525,123 @@ def is_valid_cached_surface(sdata):
     return True
 
 
-def process_repo(repo, surface_pool, no_cache, now):
+def parse_iso_epoch(ts):
+    if not isinstance(ts, str) or not ts:
+        return None
+    try:
+        dt = datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        return dt.timestamp()
+    except (ValueError, OverflowError):
+        pass
+    try:
+        norm = ts[:-1] + "+00:00" if ts.endswith("Z") else ts
+        dt = datetime.fromisoformat(norm)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.timestamp()
+    except (ValueError, OverflowError):
+        return None
+
+
+def _or_neg_inf(ts):
+    return ts if ts is not None else float("-inf")
+
+
+def history_view(history, open_cs_surface, window_days, now):
+    if not isinstance(history, dict) or history.get("state") != "count":
+        st = history.get("state") if isinstance(history, dict) else "unknown"
+        if st not in ("off", "error", "unknown"):
+            st = "unknown"
+        return {"state": st}
+    items = history.get("items") if isinstance(history.get("items"), list) else []
+    cutoff = now - window_days * 86400
+    dismissed = 0
+    fixed = 0
+    dismissed_by_rule_counts = {}
+    dismissed_items_by_rule = {}
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        st = it.get("state")
+        rid = it.get("rule_id")
+        rid = rid if isinstance(rid, str) and rid else "unknown"
+        if st == "dismissed":
+            ts = parse_iso_epoch(it.get("dismissed_at"))
+            if ts is not None and ts >= cutoff:
+                dismissed += 1
+            dismissed_by_rule_counts[rid] = dismissed_by_rule_counts.get(rid, 0) + 1
+            dismissed_items_by_rule.setdefault(rid, []).append(it)
+        elif st == "fixed":
+            ts = parse_iso_epoch(it.get("fixed_at"))
+            if ts is not None and ts >= cutoff:
+                fixed += 1
+    dismissed_by_rule = {k: dismissed_by_rule_counts[k] for k in sorted(dismissed_by_rule_counts)}
+    prior_dismissals = {}
+    if isinstance(open_cs_surface, dict) and open_cs_surface.get("state") == "count":
+        open_alerts = open_cs_surface.get("alerts")
+        if isinstance(open_alerts, list):
+            for oa in open_alerts:
+                if not isinstance(oa, dict):
+                    continue
+                onum = oa.get("number")
+                if not isinstance(onum, int) or isinstance(onum, bool):
+                    continue
+                orule = oa.get("rule") if isinstance(oa.get("rule"), dict) else {}
+                orid = orule.get("id")
+                if not isinstance(orid, str) or not orid:
+                    continue
+                matches = dismissed_items_by_rule.get(orid)
+                if matches:
+                    sorted_matches = sorted(
+                        matches,
+                        key=lambda x: _or_neg_inf(parse_iso_epoch(x.get("dismissed_at"))),
+                        reverse=True,
+                    )
+                    prior_dismissals[str(onum)] = [
+                        {
+                            "number": m.get("number"),
+                            "dismissed_at": m.get("dismissed_at") if isinstance(m.get("dismissed_at"), str) else None,
+                            "fixed_at": m.get("fixed_at") if isinstance(m.get("fixed_at"), str) else None,
+                            "reason": m.get("dismissed_reason") if isinstance(m.get("dismissed_reason"), str) else None,
+                            "path": m.get("path") if isinstance(m.get("path"), str) else "",
+                            "comment": m.get("dismissed_comment")[:280]
+                            if isinstance(m.get("dismissed_comment"), str)
+                            else None,
+                        }
+                        for m in sorted_matches
+                    ]
+    return {
+        "state": "count",
+        "window_days": window_days,
+        "dismissed": dismissed,
+        "fixed": fixed,
+        "outrun": dismissed > fixed and dismissed >= 2,
+        "dismissed_by_rule": dismissed_by_rule,
+        "prior_dismissals": prior_dismissals,
+    }
+
+
+def process_repo(repo, surface_pool, no_cache, now, window_days=90):
     cached = read_cache(repo)
     if not no_cache and cached is not None:
         age_s = now - cached["fetched_at"]
         csurfs = cached["surfaces"]
         if age_s <= CACHE_TTL_S and all(is_valid_cached_surface(csurfs.get(s)) for s in SURFACES):
+            chist = cached.get("history")
+            hist = chist if is_valid_cached_history(chist) else {"state": "unknown"}
+            smap = {s: csurfs[s] for s in SURFACES}
             return {
                 "repo": repo,
-                "surfaces": {s: csurfs[s] for s in SURFACES},
+                "surfaces": smap,
+                "history": hist,
+                "history_view": history_view(hist, smap["code-scanning"], window_days, now),
                 "stale": {},
                 "errors": [],
+                "history_errors": [],
             }
 
     futures = {s: surface_pool.submit(fetch_surface, repo, s) for s in SURFACES}
+    history_future = surface_pool.submit(fetch_history, repo)
     surfaces = {}
     stale = {}
     errors = []
@@ -477,15 +657,29 @@ def process_repo(repo, surface_pool, no_cache, now):
         else:
             surfaces[s] = sdata
 
+    hdata, herr_rc = history_future.result()
+    history_errors = []
+    if hdata.get("state") == "error":
+        if cached is not None and is_valid_cached_history(cached.get("history")):
+            history = cached["history"]
+        else:
+            history = {"state": "error"}
+            history_errors.append((repo, "code-scanning history", herr_rc if herr_rc is not None else 1))
+    else:
+        history = hdata
+
     if any(is_valid_cached_surface(surfaces[s]) for s in SURFACES):
         stamp = cached["fetched_at"] if (stale and cached is not None) else now
-        write_cache(repo, stamp, surfaces)
+        write_cache(repo, stamp, surfaces, history)
 
     return {
         "repo": repo,
         "surfaces": surfaces,
+        "history": history,
+        "history_view": history_view(history, surfaces["code-scanning"], window_days, now),
         "stale": stale,
         "errors": errors,
+        "history_errors": history_errors,
     }
 
 
@@ -523,6 +717,12 @@ def format_default_line(res):
     repo = res["repo"]
     surfaces = res["surfaces"]
     stale = res["stale"]
+    hview = res.get("history_view")
+    outrun_suffix = ""
+    if isinstance(hview, dict) and hview.get("outrun"):
+        outrun_suffix = (
+            f" · dismissals outrun fixes: {hview['dismissed']} dismissed, {hview['fixed']} fixed in {hview['window_days']}d"
+        )
     if not stale and all(
         surfaces[s].get("state") == "off"
         or (surfaces[s].get("state") == "count" and surfaces[s].get("count", 0) == 0)
@@ -530,7 +730,7 @@ def format_default_line(res):
     ):
         off_list = [s for s in SURFACES if surfaces[s].get("state") == "off"]
         suffix = f" (off: {', '.join(off_list)})" if off_list else ""
-        return f"{repo}: clean{suffix}"
+        return f"{repo}: clean{suffix}{outrun_suffix}"
 
     segs = []
     for s in SURFACES:
@@ -556,7 +756,7 @@ def format_default_line(res):
         if s in stale:
             seg += f" stale age={stale[s]}m"
         segs.append(seg)
-    return f"{repo}: {' · '.join(segs)}"
+    return f"{repo}: {' · '.join(segs)}{outrun_suffix}"
 
 
 def json_surface(surface, sdata):
@@ -624,6 +824,11 @@ def format_session_line(results):
                     s_parts.append(f"{cnt} code-scanning")
             else:
                 s_parts.append(f"{cnt} {s}")
+        hview = res.get("history_view")
+        if isinstance(hview, dict) and hview.get("outrun"):
+            s_parts.append(
+                f"dismissals outrun fixes: {hview['dismissed']} dismissed, {hview['fixed']} fixed in {hview['window_days']}d"
+            )
         if s_parts:
             repo_parts.append(f"{res['repo']}: {', '.join(s_parts)}")
     if not repo_parts:
@@ -674,6 +879,16 @@ def positive_float(raw):
     return val
 
 
+def window_days_int(raw):
+    try:
+        val = int(raw)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"invalid window days: '{raw}'")
+    if not (1 <= val <= 3650):
+        raise argparse.ArgumentTypeError(f"invalid window days: '{raw}'")
+    return val
+
+
 def build_parser(quiet=False):
     p = Parser(
         prog="security-sweep",
@@ -690,6 +905,7 @@ def build_parser(quiet=False):
     p.add_argument("--warm-cache", action="store_true")
     p.add_argument("--cap", type=positive_float, metavar="SECONDS")
     p.add_argument("--no-cache", action="store_true")
+    p.add_argument("--window", type=window_days_int, default=90, metavar="DAYS")
     return p
 
 
@@ -746,12 +962,12 @@ def main(argv):
             return 0
 
     now = time.time()
-    n_workers = min(12, max(1, len(repos) * 3))
+    n_workers = min(16, max(1, len(repos) * 4))
     n_repo_workers = min(12, max(1, len(repos)))
     with ThreadPoolExecutor(max_workers=n_workers) as surface_pool:
         with ThreadPoolExecutor(max_workers=n_repo_workers) as repo_pool:
             repo_futures = [
-                repo_pool.submit(process_repo, r, surface_pool, args.no_cache, now)
+                repo_pool.submit(process_repo, r, surface_pool, args.no_cache, now, args.window)
                 for r in repos
             ]
             # Wait in short slices, not a blocking result(): a cap alarm or SIGTERM the kernel delivers to a worker thread runs its handler only when the main thread next wakes.
@@ -763,6 +979,8 @@ def main(argv):
     if not args.session_line:
         for res in results:
             for repo, surf, err_rc in res["errors"]:
+                print(f"security-sweep: {repo} {surf}: fetch failed (gh exit {err_rc})", file=sys.stderr)
+            for repo, surf, err_rc in res.get("history_errors", ()):
                 print(f"security-sweep: {repo} {surf}: fetch failed (gh exit {err_rc})", file=sys.stderr)
 
     if args.warm_cache:
@@ -778,6 +996,7 @@ def main(argv):
                     "repo": res["repo"],
                     "surfaces": {s: json_surface(s, res["surfaces"][s]) for s in SURFACES},
                     "stale": res["stale"],
+                    "history": res["history_view"],
                 }
                 for res in results
             ]
