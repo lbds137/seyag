@@ -194,6 +194,7 @@ SYG_PLUGIN_MANIFEST	internal	statusline	<script_dir>/../.claude-plugin/plugin.js
 SYG_PRIVATE_TERMS_FILE	user	guards	unset	Path to a local file of Python regexes, one per line, blocked from public repos by private-term-guard and pre-push; pre-push also falls back to global git config seyag.privateTermsFile.	path
 SYG_PROFILE	user	session	full	Base component profile (full, guards, or none) before SYG_ENABLE and SYG_DISABLE are applied.	-
 SYG_PROJECT_NAMES_FILE	user	session	unset	Optional tab-separated table of folder and short name that driver-clone reads for the base short name and appends the new lane to. Unset means the base role file role: field is the short name and no row is written.	path
+SYG_PROSE_PICK_RE	user	stop-gates	prose:the built-in present-pick pattern in the hook	Case-insensitive Python regex replacing the per-sentence pattern of the prose-pick trigger in handoff-pick-check; an invalid regex falls back to the default.	-
 SYG_PR_BODY_ACK_FILE	internal	pr	${XDG_STATE_HOME:-$HOME/.local/state}/seyag/pr-body-claim-ack	Test seam overriding the path to pr-body-ref-gate's per-UTC-day claim-scan acknowledgement file.	-
 SYG_PR_BODY_BASE_REF	user	pr	origin/main	Git ref on which TASK-N and doc-N references in a PR body must resolve in pr-body-ref-gate.	-
 SYG_PR_BODY_CLAIM_SCAN	user	pr	1	Set to 0 to disable pr-body-ref-gate rule 2 (uncited claim-shaped lines) while keeping tracker-reference checks.	-

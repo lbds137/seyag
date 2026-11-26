@@ -1,7 +1,7 @@
 ---
 id: TASK-121
 title: 'handoff-pick-check: block once when a turn names the next unit but neither starts it nor runs the pick command'
-status: In Progress
+status: To Do
 assignee:
   - Seyag
 created_date: '2026-11-23T14:28:00Z'
@@ -47,4 +47,18 @@ Part 2 (text triggers: "X is next" with no start, and a pick claimed as queued b
 Council deferrals from the #384 review (gpt-6.2-sol), recorded as decided:
 - Pick request with no tool_result, or a non-executed `false && pick keep`, counts as a pick: DEFERRED. This is existing emitter-mode behaviour that both triggers share. Trigger: the next emitter-mode touch, or one observed false pass in a replay.
 - Same-entry pick vs handoff ordering (`off >= newest_write_off` at entry granularity): DEFERRED, existing behaviour, same trigger.
+
+Status 2026-11-26: part 2a shipped in 0.3.231, the prose-pick trigger (toggle `prose-pick`, override `SYG_PROSE_PICK_RE`). It blocks once when a no-handoff turn's closing text names `/clear` or `/compact` as a present pick and the turn ran no pick command. It defers while a background shell task is live and carries the obligation forward to the turn where that work ends.
+
+Measured on local replays with `tests/replay-stop-hook.sh` and a prototype of the hook (counts of turn ends; text samples are not recorded here):
+- A naive shape (a pick word anywhere in the closing text with no emitter call) tripped 442 turn ends in 7 days, about 20% of them real prose picks.
+- The shipped per-sentence shape tripped 113 of those 442. About 109 were real prose picks or claimed-queued picks; 4 were forecasts or mentions. All 4 sentences from the originating incident trip.
+- On a held-out week the shape was never tuned on (226 prototype trips), it matched 66: 64 real, and 2 forecasts with a claim word ("stands once/after X"; the claim branches don't check future markers).
+- For scale, trigger (a) (a handoff written without the emitter call) blocked 426 times in the same 7 days, counted from the live "Stop hook feedback" entries in the logs: 280 edit-path writes, 120 command writes, 24 both, 2 neither.
+
+Ruled in as accepted residuals, bounded by block-once: a forecast with a claim word or no future marker can fire; a negated pick ("/clear is not scheduled") can fire; `keep` named only in prose is not detected (too common as an ordinary word); the live-task exemption is blind to Monitor and async-Agent tasks (TASK-254).
+
+Part 2b, the "X is next, nothing started" trigger: DEFERRED, measure-only. No precise shape found: closings that name a next unit while a background agent, CI run or worker is still going are the common case, and the prose-pick trigger now covers the incident shape that left sessions idle (a pick named but not run). Trigger: an observed idle where the closing named a next unit, ran no pick command and named no pick in prose.
+
+Review lows from the 0.3.231 council review (gpt-6.2-sol), carried to the next touch of this hook: a failed live-task lookup reads as "no live tasks"; a failed `.prose` marker write still fires; the regex is a keyword heuristic (negation, quoted examples).
 <!-- SECTION:NOTES:END -->

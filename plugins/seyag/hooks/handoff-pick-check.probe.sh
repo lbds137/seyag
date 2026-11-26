@@ -60,9 +60,11 @@ mktx_file() { # $1=out $2=tool_name $3=file_path $4=text [$5=new_string/content 
 mkfile() { mkdir -p "$(dirname "$1")" && printf '%s' "$2" > "$1"; }
 
 fail=0
-check() { # $1=expected_exit $2=label $3=transcript $4=stop_active $5+=stderr regexes
+check() { # $1=expected_exit $2=label $3=transcript $4=stop_active $5+=stderr regexes (CHECK_LAM optional)
   # Each regex must match the captured stderr; a regex prefixed with "!" must NOT.
-  echo "{\"stop_hook_active\":${4:-false},\"transcript_path\":\"$3\"}" | bash "$HOOK" >/dev/null 2>"$TMP/stderr.out"
+  local lam_field=""
+  [ -n "${CHECK_LAM+x}" ] && lam_field=",\"last_assistant_message\":$(jsonstr "$CHECK_LAM")"
+  echo "{\"stop_hook_active\":${4:-false},\"transcript_path\":\"$3\"$lam_field}" | bash "$HOOK" >/dev/null 2>"$TMP/stderr.out"
   local got=$? pat
   if [ "$got" != "$1" ]; then echo "FAIL [$got≠$1]: $2"; fail=1; return; fi
   for pat in "${@:5}"; do
@@ -830,6 +832,131 @@ export SYG_PICK_CMD='pick-note'
 
 # Case 16: a stop-hook re-stop passes the base fixture.
 XDG_STATE_HOME="$TMP/state18-16" check 0 "stale-pick: stop_hook_active true passes base" "$S18" true
+
+unset SYG_PICK_CMD
+
+# --- 19. Prose-pick trigger: a no-handoff turn that names a pick in prose -----
+export SYG_PICK_CMD='pick-note'
+unset SYG_HANDOFF_CMDS SYG_HANDOFF_PATHS SYG_HANDOFF_SECTIONS SYG_PROSE_PICK_RE CHECK_LAM
+PROSE_S1="The handoff is on disk, so **/clear** is still my pick here."
+mktx_prose() { # $1=out $2=text
+  : > "$1"; tx_human "$1"; tx_text "$1" "$2"
+}
+
+# Case 1: human turn naming /clear as present pick blocks once.
+S19_1="$TMP/s19-1.jsonl"; mktx_prose "$S19_1" "$PROSE_S1"
+XDG_STATE_HOME="$TMP/state19-1" check 2 "prose-pick: case 1 human turn naming /clear in prose blocks once" "$S19_1" "" \
+  'pick named in prose, not run' 'pick-note clear\|compact\|keep' 'SYG_DISABLE=prose-pick'
+
+# Case 2: '/compact is queued' blocks.
+f="$TMP/s19-2.jsonl"; mktx_prose "$f" '`/compact` is queued for when this session goes idle.'
+XDG_STATE_HOME="$TMP/state19-2" check 2 "prose-pick: case 2 '/compact is queued' blocks" "$f" "" \
+  'pick named in prose, not run'
+
+# Case 3: 'Pick: **/compact**.' blocks.
+f="$TMP/s19-3.jsonl"; mktx_prose "$f" 'Pick: **/compact**.'
+XDG_STATE_HOME="$TMP/state19-3" check 2 "prose-pick: case 3 'Pick: **/compact**.' blocks" "$f" "" \
+  'pick named in prose, not run'
+
+# Case 4: 'My pick is `/clear` now' blocks.
+f="$TMP/s19-4.jsonl"; mktx_prose "$f" 'My pick is `/clear` now: the next unit is unrelated.'
+XDG_STATE_HOME="$TMP/state19-4" check 2 "prose-pick: case 4 'My pick is /clear now' blocks" "$f" "" \
+  'pick named in prose, not run'
+
+# Case 4b: a sentence-initial 'Now' reaches the pick across six words; a
+# mid-sentence 'now' that far from it (a mention) does not.
+f="$TMP/s19-4b.jsonl"; mktx_prose "$f" 'Now is a good time to /compact, since the thread continues.'
+XDG_STATE_HOME="$TMP/state19-4b" check 2 "prose-pick: case 4b 'Now is a good time to /compact' blocks" "$f" "" \
+  'pick named in prose, not run'
+f="$TMP/s19-4c.jsonl"; mktx_prose "$f" 'All of this is in my role file now, so it carries across a /compact.'
+XDG_STATE_HOME="$TMP/state19-4c" check 0 "prose-pick: case 4c mid-sentence 'now' far from the pick passes" "$f"
+
+# Case 5: forecast with future markers passes.
+f="$TMP/s19-5.jsonl"; mktx_prose "$f" 'Once the PR merges, my pick will be `/clear`.'
+XDG_STATE_HOME="$TMP/state19-5" check 0 "prose-pick: case 5 forecast with future markers passes" "$f"
+
+# Case 6: mention without a pick claim passes.
+f="$TMP/s19-6.jsonl"; mktx_prose "$f" '`/clear` still doesn'\''t reset the counter.'
+XDG_STATE_HOME="$TMP/state19-6" check 0 "prose-pick: case 6 mention without pick word passes" "$f"
+
+# Case 7: case 1's text with a pick-note clear call in the same turn passes.
+f="$TMP/s19-7.jsonl"; : > "$f"; tx_human "$f"
+tx_bash "$f" t1 "pick-note clear"; tx_result "$f" t1
+tx_text "$f" "$PROSE_S1"
+XDG_STATE_HOME="$TMP/state19-7" check 0 "prose-pick: case 7 emitter call in same turn passes" "$f"
+
+# Case 8: case 1 with SYG_PICK_CMD unset passes.
+unset SYG_PICK_CMD
+XDG_STATE_HOME="$TMP/state19-8" check 0 "prose-pick: case 8 SYG_PICK_CMD unset passes" "$S19_1"
+export SYG_PICK_CMD='pick-note'
+
+# Case 9: case 1 with SYG_DISABLE=prose-pick passes.
+XDG_STATE_HOME="$TMP/state19-9" SYG_DISABLE=prose-pick check 0 "prose-pick: case 9 SYG_DISABLE=prose-pick passes" "$S19_1"
+
+# Case 10: fire-once — case 1's transcript and state dir again passes.
+XDG_STATE_HOME="$TMP/state19-1" check 0 "prose-pick: case 10 fire-once same transcript and state dir passes" "$S19_1"
+
+# Case 11: case 1 with stop_hook_active true passes.
+XDG_STATE_HOME="$TMP/state19-11" check 0 "prose-pick: case 11 stop_hook_active true passes" "$S19_1" true
+
+# Case 12: LAM vs transcript last text — both scanned.
+f="$TMP/s19-12a.jsonl"; mktx_prose "$f" "Done."
+XDG_STATE_HOME="$TMP/state19-12a" CHECK_LAM="$PROSE_S1" check 2 "prose-pick: case 12a LAM has prose pick while transcript has Done. -> blocks" "$f" "" \
+  'pick named in prose, not run'
+XDG_STATE_HOME="$TMP/state19-12b" CHECK_LAM="Done." check 2 "prose-pick: case 12b transcript has prose pick while LAM has Done. -> blocks" "$S19_1" "" \
+  'pick named in prose, not run'
+
+# Case 13: carry-forward across live background work.
+f="$TMP/s19-13ab.jsonl"; : > "$f"; tx_human "$f"
+tx_bash "$f" t9 "sleep 999"
+printf '%s\n' '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t9","content":"started"}]},"toolUseResult":{"backgroundTaskId":"b9"}}' >> "$f"
+tx_text "$f" "$PROSE_S1"
+XDG_STATE_HOME="$TMP/state19-13ab" check 0 "prose-pick: case 13a live background task b9 defers prose pick" "$f"
+
+tx_notif "$f" b9
+tx_text "$f" "b9 finished."
+XDG_STATE_HOME="$TMP/state19-13ab" check 2 "prose-pick: case 13b b9 notification ends live work and blocks with owed message" "$f" "" \
+  'a prose pick is still owed' 'pick-note clear\|compact\|keep' 'SYG_DISABLE=prose-pick'
+
+f="$TMP/s19-13c.jsonl"; : > "$f"; tx_human "$f"
+tx_bash "$f" t9 "sleep 999"
+printf '%s\n' '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t9","content":"started"}]},"toolUseResult":{"backgroundTaskId":"b9"}}' >> "$f"
+tx_text "$f" "$PROSE_S1"
+XDG_STATE_HOME="$TMP/state19-13c" check 0 "prose-pick: case 13c setup (records .prose-owed)" "$f"
+tx_notif "$f" b9
+tx_bash "$f" t10 "pick-note clear"; tx_result "$f" t10
+tx_text "$f" "b9 finished."
+XDG_STATE_HOME="$TMP/state19-13c" check 0 "prose-pick: case 13c notification turn runs pick-note clear -> passes" "$f"
+
+f="$TMP/s19-13d.jsonl"; : > "$f"; tx_human "$f"
+tx_bash "$f" t9 "sleep 999"
+printf '%s\n' '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t9","content":"started"}]},"toolUseResult":{"backgroundTaskId":"b9"}}' >> "$f"
+tx_text "$f" "$PROSE_S1"
+XDG_STATE_HOME="$TMP/state19-13d" check 0 "prose-pick: case 13d setup (records .prose-owed)" "$f"
+tx_human "$f"; tx_text "$f" "ok."
+tx_notif "$f" b9; tx_text "$f" "b9 finished."
+XDG_STATE_HOME="$TMP/state19-13d" check 0 "prose-pick: case 13d intervening human turn cancels .prose-owed -> passes" "$f"
+
+# Case 14: stale-pick takes precedence over prose-pick on a notification turn after an earlier pick.
+f="$TMP/s19-14.jsonl"; : > "$f"; tx_human "$f"
+tx_bash "$f" t1 "pick-note clear"; tx_result "$f" t1
+tx_text "$f" "Done."
+tx_notif "$f" b1
+tx_text "$f" "$PROSE_S1"
+XDG_STATE_HOME="$TMP/state19-14" check 2 "prose-pick: case 14 stale-pick takes precedence over prose-pick" "$f" "" \
+  'the pick went stale on a notification turn' '!pick named in prose'
+
+# Case 15: SYG_PROSE_PICK_RE override and invalid-regex fallback.
+XDG_STATE_HOME="$TMP/state19-15a" SYG_PROSE_PICK_RE='zzz-never' check 0 "prose-pick: case 15a SYG_PROSE_PICK_RE override replaces default" "$S19_1"
+XDG_STATE_HOME="$TMP/state19-15b" SYG_PROSE_PICK_RE='(' check 2 "prose-pick: case 15b invalid SYG_PROSE_PICK_RE falls back to default" "$S19_1" "" \
+  'pick named in prose, not run'
+
+# Case 16: a handoff turn whose closing names a prose pick uses missing:emitter, not prose.
+f="$TMP/s19-16.jsonl"; : > "$f"; tx_human "$f"
+tx_bash "$f" t1 "$HANDOFF_CALL"; tx_result "$f" t1
+tx_text "$f" "$PROSE_S1"
+XDG_STATE_HOME="$TMP/state19-16" SYG_HANDOFF_CMDS='myrole --set' check 2 "prose-pick: case 16 handoff turn uses missing:emitter message, not prose" "$f" "" \
+  'handoff written without running the pick command' '!pick named in prose'
 
 unset SYG_PICK_CMD
 

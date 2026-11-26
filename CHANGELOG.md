@@ -2,6 +2,11 @@
 
 All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY-MM-DD>` section per released version; under it, `###` categories in fixed order — Breaking Changes, Features, Bug Fixes, Improvements, Chores, Tests — empty ones omitted; items are `- **scope:** description (#PR)`, written from the version's merged commit subjects.
 
+## 0.3.231 - 2026-11-26
+
+### Features
+- **handoff-pick-check:** the prose-pick trigger (TASK-121).
+
 ## 0.3.230 - 2026-11-26
 
 ### Breaking Changes

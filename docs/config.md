@@ -82,6 +82,7 @@ An optional TOML file fills in knobs the environment left unset: user `${XDG_CON
 | `SYG_LESSON_FILING_RE` | `\b(?:please\s+)?(?:file\|open\|create\|add)\s+(?:(?:a\|an\|the\|one)\s+)?(?:new\s+)?(?:task\|ticket\|issue\|backlog\s+(?:item\|task)\|hook\|rule\|skill\|guard\|gate\|check)\b\|\bTASK-\d+\b` | Case-insensitive Python regex replacing the default SendMessage pattern credited as a peer enforcement filing in lesson-claim-check. | `hooks/lesson-claim-check.sh` | user + project |
 | `SYG_LESSON_SURFACE_RE` | `(^\|/)(rules/\|skills/\|hooks/\|agents/\|backlog/\|tracker/\|(CLAUDE\|CLAUDE\.local\|BACKLOG\|TODO)\.md$\|settings(\.local)?\.json$)` | Python regex replacing the default enforcement surfaces credited as a same-turn artifact write in lesson-claim-check. | `hooks/lesson-claim-check.sh` | user + project |
 | `SYG_PICK_CMD` | unset | Single-line command a session runs as `<cmd> clear\|compact\|keep` to record its boundary pick (exit 0 recorded, 2 bad usage); SessionStart advertises it and handoff-pick-check requires that call instead of a pick word. | `hooks/handoff-pick-check.sh`, `hooks/session-start.sh` | user only |
+| `SYG_PROSE_PICK_RE` | the built-in present-pick pattern in the hook | Case-insensitive Python regex replacing the per-sentence pattern of the prose-pick trigger in handoff-pick-check; an invalid regex falls back to the default. | `hooks/handoff-pick-check.sh` | user + project |
 
 ## session
 
