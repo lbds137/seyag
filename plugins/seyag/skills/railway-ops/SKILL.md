@@ -17,6 +17,8 @@ description: 'Railway operations through the railway-ops CLI: explicit environme
 ## 2. Traps (each with its fix)
 
 - **`railway redeploy` acts on the LINKED environment** and has no `--environment` flag, so the same keystrokes can bounce prod. Fix: `railway-ops redeploy <env> <service>` (GraphQL with resolved ids).
+- **serviceInstanceRedeploy rebuilds the branch HEAD**: a full image build (1-28 min per service measured) that can ship commits a service's watch paths skipped. Fix: `railway-ops redeploy` reuses the live image (deploymentRedeploy with usePreviousImageTag: 14 s measured, no build, same image digest, current variables taken); `--rebuild` when you mean to build.
+- **A serverless service's latest deployment reads SLEEPING**, not SUCCESS. The image-reusing redeploy refuses it: wake the service with one request first, or pass `--rebuild`.
 - **`railway down` removes the most recent deployment** and now takes `-e`/`--environment` and `-y`. railway-ops has no down verb by design.
 - **The CLI can now set variables** (`railway variables --set "K=V" --skip-deploys`) **but cannot delete them or manage shared ones, and it prints values.** Fix: `railway-ops vars delete`, and `vars set --shared` — and railway-ops prints names only, never values.
 - **Every variable write triggers implicit deploys.** Fix: `vars set` and `rotate-secret` upsert with `skipDeploys: true`; then redeploy explicitly, in the order you choose.
@@ -59,20 +61,22 @@ The value comes from an env var or `--from-stdin`, never argv. argv shows up in 
 railway-ops vars delete dev --service api OLD_KEY
 railway-ops vars delete dev --service api OLD_KEY --yes
 ```
-`VariableDelete` has no skipDeploys, so a delete may trigger deploys of the affected services: the one write here that can.
+`VariableDelete` has no skipDeploys. One observation (a service-scoped delete, 2026-11) triggered no deploy within 90 s; still check the dashboard, and redeploy explicitly when the running containers must drop the value.
 
 **Restart:**
 ```bash
 railway-ops redeploy dev api --yes
 railway-ops redeploy prod api --yes --confirm-protected prod
+railway-ops redeploy dev api --rebuild --yes                # build the branch HEAD instead
 ```
+It refuses unless the service's latest deployment is SUCCESS; nothing changes on a refusal.
 
 **Rotate** (an existing shared variable only; it never creates one):
 ```bash
 railway-ops rotate-secret dev ROT_KEY          # plan: the services that carry the name
 railway-ops rotate-secret dev ROT_KEY --yes    # generate, upsert shared, redeploy each
 ```
-It refuses when no service carries the name. If a redeploy fails, the output names what succeeded. **Do not re-run it**: that mints a third value and widens the split; redeploy the lagging services with `railway-ops redeploy`. A verifier that accepts one value at a time still has a mismatch window during the redeploys; dual-accept staging is project-specific.
+It refuses when no service carries the name. It also refuses, before writing anything, when any carrier's latest deployment is not SUCCESS, and redeploys by reusing each live image. If a redeploy fails, the output names what succeeded. **Do not re-run it**: that mints a third value and widens the split; redeploy the lagging services with `railway-ops redeploy`. A verifier that accepts one value at a time still has a mismatch window during the redeploys; dual-accept staging is project-specific.
 
 ## 6. Which verb
 
@@ -83,7 +87,8 @@ It refuses when no service carries the name. If a redeploy fails, the output nam
 | which variables exist at a scope | `vars list <env> --service S` or `--shared` |
 | set one value | `vars set` (then `redeploy`) |
 | remove one variable | `vars delete` |
-| restart a service | `redeploy <env> <service>` |
+| restart a service (same image) | `redeploy <env> <service>` |
+| build and deploy the branch HEAD | `redeploy <env> <service> --rebuild` |
 | rotate a shared secret | `rotate-secret <env> NAME` |
 | incident dig | `logs <env> [<service>] --lines N --grep RE [--deployment ID]` |
 

@@ -3,11 +3,11 @@ id: TASK-34
 title: >-
   railway-ops: redeploy reuses the live image instead of rebuilding the branch
   HEAD
-status: In Progress
+status: Done
 assignee:
   - Seyag B
 created_date: '2026-11-19T21:08:00Z'
-updated_date: '2026-11-26T11:51:00Z'
+updated_date: '2026-11-26T12:14:00Z'
 labels:
   - bin
   - skills
@@ -37,3 +37,9 @@ Settle-first probe RUN 2026-11-26 ~06:49 EST (Seyag B), reference project develo
 - variableDelete of the service-scoped marker triggered NO deploy within 90 s (one observation, one service).
 - A serverless web service's latestDeployment status is SLEEPING (serverless sleep), not SUCCESS: the refusal rule must decide SLEEPING.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Shipped: railway-ops redeploy reuses the live image (deploymentRedeploy usePreviousImageTag), refused unless latestDeployment is SUCCESS (SLEEPING refused with wake guidance); --rebuild keeps serviceInstanceRedeploy; rotate-secret pre-flights carriers before the upsert and redeploys by reuse. Probe cases 6, 6b-6f, 7g; purpose canary reddened 4. Follow-up stays TASK-35 (wait for healthy + live commit).
+<!-- SECTION:FINAL_SUMMARY:END -->

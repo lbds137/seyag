@@ -7,11 +7,12 @@
 # real railway CLI and the real API are never reached.
 # Covers: ids resolution; names-only listing; vars set dry run (no request) vs
 # --yes (variableUpsert, skipDeploys, Project-Access-Token); no value from
-# argv; the protected-env rule; redeploy via the GQL mutation with resolved
-# ids; rotate-secret (shared-tier upsert, redeploys only the services that
-# carry the name, partial-failure guidance, value never printed); GraphQL
-# errors shown except upsert text; the RAILWAY_TOKEN collision; logs cap and
-# local grep; no fake token or fixture value in any output.
+# argv; the protected-env rule; image-reusing redeploy, --rebuild, and refusal
+# on non-SUCCESS/SLEEPING/missing; rotate-secret (pre-flight, shared-tier
+# upsert, redeploys only the services that carry the name, partial-failure
+# guidance, value never printed); GraphQL errors shown except upsert text; the
+# RAILWAY_TOKEN collision; logs cap and local grep; no fake token or fixture
+# value in any output.
 # Usage: tests/railway-ops.probe.sh
 
 set -uo pipefail
@@ -44,7 +45,7 @@ class H(BaseHTTPRequestHandler):
         m = re.search(r"(?:query|mutation)\s+(\w+)", body.get("query", ""))
         op = m.group(1) if m else "?"
         v = body.get("variables") or {}
-        sid = v.get("serviceId") or (v.get("input") or {}).get("serviceId")
+        sid = v.get("serviceId") or (v.get("input") or {}).get("serviceId") or v.get("id")
         with open(log, "a") as f:
             f.write(json.dumps({"op": op, "token": self.headers.get("Project-Access-Token"),
                                 "auth": self.headers.get("Authorization"), "body": body}) + "\n")
@@ -92,6 +93,10 @@ cat > "$CANNED" <<'EOF'
   "Variables:svc-web": {"data": {"variables": {"PORT": "fixture-port-8080"}}},
   "VariableUpsert": {"data": {"variableUpsert": true}},
   "VariableDelete": {"data": {"variableDelete": true}},
+  "ServiceInstanceDeployment:svc-api": {"data": {"serviceInstance": {"latestDeployment": {"id": "dep-api-ok", "status": "SUCCESS", "meta": {"commitHash": "abcdef1234567890", "imageDigest": "sha256:fixture-digest-zzz"}}}}},
+  "ServiceInstanceDeployment:svc-worker": {"data": {"serviceInstance": {"latestDeployment": {"id": "dep-worker-ok", "status": "SUCCESS", "meta": {"commitHash": "1234567890abcdef", "imageDigest": "sha256:fixture-digest-zzz"}}}}},
+  "ServiceInstanceDeployment:svc-web": {"data": {"serviceInstance": {"latestDeployment": {"id": "dep-web-ok", "status": "SUCCESS", "meta": {"commitHash": "abcdef1234567890", "imageDigest": "sha256:fixture-digest-zzz"}}}}},
+  "DeploymentRedeploy": {"data": {"deploymentRedeploy": {"id": "dep-new-1"}}},
   "ServiceInstanceRedeploy": {"data": {"serviceInstanceRedeploy": true}}
 }
 EOF
@@ -202,36 +207,67 @@ reset; run redeploy prod api --yes --confirm-protected dev
 [ $rc = 2 ] && grep -q "does not match" "$T/err" && [ ! -s "$REQ" ] \
   && ok "5c --confirm-protected dev against prod is refused" || bad "5c: rc=$rc $(cat "$T/err")"
 reset; run redeploy prod api --yes --confirm-protected prod
-[ $rc = 0 ] && [ "$(reqs '[(r["op"], r["token"], r["body"]["variables"]) for r in rows]')" = "[('ServiceInstanceRedeploy', 'fake-prod-token', {'environmentId': 'env-prod', 'serviceId': 'svc-api'})]" ] \
+[ $rc = 0 ] && [ "$(reqs '[(r["op"], r["token"], r["body"]["variables"]) for r in rows]')" = "[('ServiceInstanceDeployment', 'fake-prod-token', {'environmentId': 'env-prod', 'serviceId': 'svc-api'}), ('DeploymentRedeploy', 'fake-prod-token', {'id': 'dep-api-ok', 'usePreviousImageTag': True})]" ] \
   && ok "5d --yes --confirm-protected prod proceeds with the prod token and prod ids" || bad "5d: rc=$rc $(cat "$T/err") $(reqs '[r["op"] for r in rows]')"
 reset; run redeploy prod api
 [ $rc = 0 ] && [ ! -s "$REQ" ] && grep -q -- "--yes --confirm-protected prod to execute" "$T/out" \
   && ok "5e a protected dry run is allowed, sends nothing, and names the confirm flag" || bad "5e: rc=$rc $(cat "$T/out" "$T/err")"
 
-# 6. redeploy: GraphQL mutation with resolved ids, never the CLI's linked env
+# 6. redeploy: image-reusing deploymentRedeploy by default, --rebuild for serviceInstanceRedeploy, refusal on non-SUCCESS
 reset; run redeploy dev api --yes
+[ $rc = 0 ] && [ "$(reqs '[(r["op"], r["body"]["variables"]) for r in rows]')" = "[('ServiceInstanceDeployment', {'environmentId': 'env-dev', 'serviceId': 'svc-api'}), ('DeploymentRedeploy', {'id': 'dep-api-ok', 'usePreviousImageTag': True})]" ] \
+  && grep -q "dep-new-1" "$T/out" && grep -q "abcdef123" "$T/out" && [ ! -e "$T/cli-redeploy" ] \
+  && ok "6 redeploy dev api --yes queries latestDeployment and sends deploymentRedeploy(usePreviousImageTag: true); stdout names dep-new-1 and abcdef123; railway redeploy never runs" \
+  || bad "6 redeploy: rc=$rc $(cat "$T/out" "$T/err") reqs=$(reqs '[(r["op"], r["body"].get("variables")) for r in rows]') cli=$(cat "$T/cli-redeploy" 2>/dev/null)"
+reset; run redeploy dev api --rebuild --yes
 [ $rc = 0 ] && [ "$(reqs '[(r["op"], r["body"]["variables"]) for r in rows]')" = "[('ServiceInstanceRedeploy', {'environmentId': 'env-dev', 'serviceId': 'svc-api'})]" ] \
   && [ ! -e "$T/cli-redeploy" ] \
-  && ok "6 redeploy dev api --yes sends serviceInstanceRedeploy with environmentId env-dev and serviceId svc-api; railway redeploy never runs" \
-  || bad "6 redeploy: rc=$rc $(cat "$T/err") reqs=$(reqs '[(r["op"], r["body"].get("variables")) for r in rows]') cli=$(cat "$T/cli-redeploy" 2>/dev/null)"
+  && ok "6b redeploy dev api --rebuild --yes sends serviceInstanceRedeploy" \
+  || bad "6b --rebuild: rc=$rc $(cat "$T/out" "$T/err") reqs=$(reqs '[(r["op"], r["body"].get("variables")) for r in rows]')"
+reset; over ServiceInstanceDeployment:svc-api '{"data": {"serviceInstance": {"latestDeployment": {"id": "dep-api-b", "status": "BUILDING", "meta": {}}}}}'
+run redeploy dev api --yes
+[ $rc = 2 ] && [ "$(reqs '[r["op"] for r in rows]')" = "['ServiceInstanceDeployment']" ] \
+  && grep -q "BUILDING, not SUCCESS" "$T/err" && grep -q "nothing was changed" "$T/err" \
+  && ok "6c redeploy when latestDeployment is BUILDING exits 2 before any mutation" \
+  || bad "6c BUILDING: rc=$rc ops=$(reqs '[r["op"] for r in rows]') $(cat "$T/err")"
+reset; over ServiceInstanceDeployment:svc-api '{"data": {"serviceInstance": {"latestDeployment": {"id": "dep-api-s", "status": "SLEEPING", "meta": {}}}}}'
+run redeploy dev api --yes
+[ $rc = 2 ] && [ "$(reqs '[r["op"] for r in rows]')" = "['ServiceInstanceDeployment']" ] \
+  && grep -q "SLEEPING (serverless sleep)" "$T/err" && grep -q "Wake it" "$T/err" \
+  && ok "6d redeploy when latestDeployment is SLEEPING exits 2 with wake guidance, no mutation" \
+  || bad "6d SLEEPING: rc=$rc ops=$(reqs '[r["op"] for r in rows]') $(cat "$T/err")"
+reset; over ServiceInstanceDeployment:svc-api '{"data": {"serviceInstance": {"latestDeployment": null}}}'
+run redeploy dev api --yes
+[ $rc = 2 ] && [ "$(reqs '[r["op"] for r in rows]')" = "['ServiceInstanceDeployment']" ] \
+  && grep -q "has no latest deployment" "$T/err" \
+  && ok "6e redeploy when latestDeployment is null exits 2 before any mutation" \
+  || bad "6e null deployment: rc=$rc ops=$(reqs '[r["op"] for r in rows]') $(cat "$T/err")"
+reset; over ServiceInstanceDeployment:svc-api '{"data": {}}'
+run redeploy dev api --yes
+[ $rc = 1 ] && [ "$(reqs '[r["op"] for r in rows]')" = "['ServiceInstanceDeployment']" ] \
+  && grep -q "unexpected shape for a service-instance-deployment response" "$T/err" && ! grep -q Traceback "$T/err" \
+  && ok "6f malformed serviceInstance response exits 1 with shape error, no mutation, no traceback" \
+  || bad "6f shape error: rc=$rc ops=$(reqs '[r["op"] for r in rows]') $(cat "$T/err")"
 
 # 7. rotate-secret
 reset; run rotate-secret dev ROT_KEY
-[ $rc = 0 ] && [ "$(reqs '[r["op"] for r in rows]')" = "['Variables', 'Variables', 'Variables', 'Variables']" ] && grep -q "Affected services (carry the name): api, worker$" "$T/out" \
-  && ok "7a rotate-secret dry run reads names only (no mutation) and plans api, worker" || bad "7a: rc=$rc $(cat "$T/out" "$T/err")"
+[ $rc = 0 ] && [ "$(reqs '[r["op"] for r in rows]')" = "['Variables', 'Variables', 'Variables', 'Variables', 'ServiceInstanceDeployment', 'ServiceInstanceDeployment']" ] \
+  && grep -q "Affected services (carry the name): api, worker$" "$T/out" \
+  && grep -q "Live deployment api: SUCCESS dep-api-ok$" "$T/out" \
+  && ok "7a rotate-secret dry run reads names and carrier deployments (no mutation) and plans api, worker" || bad "7a: rc=$rc $(cat "$T/out" "$T/err")"
 reset; run rotate-secret dev ROT_KEY --yes
-{ read -r SEQ; read -r SKIP; read -r VAL; } < <(reqs '[(r["op"], r["body"]["variables"].get("serviceId") or r["body"]["variables"].get("input", {}).get("serviceId")) for r in rows]' \
-  'rows[4]["body"]["variables"]["input"]["skipDeploys"]' 'rows[4]["body"]["variables"]["input"]["value"]' 2>/dev/null)
-[ $rc = 0 ] && [ "$SEQ" = "[('Variables', None), ('Variables', 'svc-api'), ('Variables', 'svc-worker'), ('Variables', 'svc-web'), ('VariableUpsert', None), ('ServiceInstanceRedeploy', 'svc-api'), ('ServiceInstanceRedeploy', 'svc-worker')]" ] \
+{ read -r SEQ; read -r SKIP; read -r VAL; } < <(reqs '[(r["op"], r["body"]["variables"].get("serviceId") or r["body"]["variables"].get("input", {}).get("serviceId") or r["body"]["variables"].get("id")) for r in rows]' \
+  'rows[6]["body"]["variables"]["input"]["skipDeploys"]' 'rows[6]["body"]["variables"]["input"]["value"]' 2>/dev/null)
+[ $rc = 0 ] && [ "$SEQ" = "[('Variables', None), ('Variables', 'svc-api'), ('Variables', 'svc-worker'), ('Variables', 'svc-web'), ('ServiceInstanceDeployment', 'svc-api'), ('ServiceInstanceDeployment', 'svc-worker'), ('VariableUpsert', None), ('ServiceInstanceDeployment', 'svc-api'), ('DeploymentRedeploy', 'dep-api-ok'), ('ServiceInstanceDeployment', 'svc-worker'), ('DeploymentRedeploy', 'dep-worker-ok')]" ] \
   && [ "$SKIP" = True ] \
-  && ok "7b --yes: shared-tier upsert (no serviceId, skipDeploys), then redeploys only api and worker (web lacks the name)" || bad "7b: rc=$rc seq=$SEQ $(cat "$T/err")"
+  && ok "7b --yes: pre-flight checks, shared-tier upsert (no serviceId, skipDeploys), then image-reusing redeploys for api and worker" || bad "7b: rc=$rc seq=$SEQ $(cat "$T/err")"
 if [ ${#VAL} -ge 40 ]; then
   ok "7c (positive control: the generated value is in the mock's recorded body, ${#VAL} chars)"
   if grep -rqF -- "$VAL" "$ALL" "$T/out" "$T/err"; then bad "7c the generated value leaked into captured output"
   elif grep -rlF --exclude='req.log*' -- "$VAL" "$T" >/dev/null; then bad "7c the generated value appears in a file other than the request log: $(grep -rlF --exclude='req.log*' -- "$VAL" "$T")"
   else ok "7c the generated value appears in no output and no file other than the mock's request log"; fi
 else bad "7c could not read the generated value from the request log (got ${#VAL} chars)"; fi
-reset; over ServiceInstanceRedeploy:svc-worker '{"errors": [{"message": "deploy rate limit"}]}'
+reset; over DeploymentRedeploy:dep-worker-ok '{"errors": [{"message": "deploy rate limit"}]}'
 run rotate-secret dev ROT_KEY --yes
 [ $rc = 1 ] && grep -q "Services redeployed: api$" "$T/out" && grep -q "worker: Railway API returned errors (status 200): deploy rate limit" "$T/err" \
   && grep -q "Do NOT re-run this command" "$T/err" && grep -q "THIRD value" "$T/err" \
@@ -242,6 +278,14 @@ reset; run rotate-secret dev MISSING --yes
 reset; run rotate-secret dev OTHER --yes
 [ $rc = 2 ] && grep -q "No service in Railway development carries \"OTHER\"" "$T/err" && [ "$(reqs '"VariableUpsert" in [r["op"] for r in rows]')" = False ] \
   && ok "7f a shared name no service carries is refused, no upsert" || bad "7f: rc=$rc $(cat "$T/err")"
+reset; over ServiceInstanceDeployment:svc-worker '{"data": {"serviceInstance": {"latestDeployment": {"id": "dep-worker-b", "status": "BUILDING", "meta": {}}}}}'
+run rotate-secret dev ROT_KEY --yes
+r1=$rc; e1=$(cat "$T/err"); u1=$(reqs '"VariableUpsert" in [r["op"] for r in rows]')
+run rotate-secret dev ROT_KEY
+[ $r1 = 2 ] && [ "$u1" = False ] && [[ $e1 == *'"worker"'* ]] && [[ $e1 == *'BUILDING, not SUCCESS'* ]] \
+  && [ $rc = 0 ] && grep -q "^A real run would REFUSE:$" "$T/out" \
+  && ok "7g rotate-secret pre-flight refuses before VariableUpsert when a carrier is BUILDING (dry run prints A real run would REFUSE: and exits 0)" \
+  || bad "7g pre-flight: r1=$r1 u1=$u1 e1=$e1 rc=$rc $(cat "$T/out" "$T/err")"
 
 # 8. GraphQL errors: messages shown, except upsert text (can echo the value)
 reset; over Variables:svc-api '{"errors": [{"message": "service is sleeping"}]}'
@@ -306,7 +350,7 @@ reset; run --config "$T/c.json" redeploy live api --yes
   && ok "12b an alias of a protected env's Railway name is protected too (--yes refused, names --confirm-protected live)" || bad "12b: rc=$rc $(cat "$T/err")"
 cfg '{"envs": {"dev": "development", "prod": "production"}, "protected": []}'
 reset; run --config "$T/c.json" redeploy prod api --yes
-[ $rc = 0 ] && [ "$(reqs '[r["op"] for r in rows]')" = "['ServiceInstanceRedeploy']" ] \
+[ $rc = 0 ] && [ "$(reqs '[r["op"] for r in rows]')" = "['ServiceInstanceDeployment', 'DeploymentRedeploy']" ] \
   && _pipe_out=$("$RO" --help) && grep -q '\[\] UNPROTECTS EVERY env' <<<"$_pipe_out" && grep -qF '`"protected": []` unprotects every env' "$REPO/plugins/seyag/skills/railway-ops/SKILL.md" \
   && ok "12c \"protected\": [] is allowed and unprotects everything, and --help and the skill both say so" || bad "12c: rc=$rc $(cat "$T/err")"
 cfg '{"envs": {"dev": "development", "prod": "production"}, "token_env": {"dev": "SHARED_TOK", "prod": "SHARED_TOK"}}'
@@ -338,7 +382,7 @@ reset; over Variables:svc-api '{"_drop": true}'
 run vars list dev --service api
 [ $rc = 1 ] && grep -q "Railway API connection failed" "$T/err" && ! grep -q Traceback "$T/err" \
   && ok "15a a dropped connection is exit 1 with a fixed message, no traceback" || bad "15a: rc=$rc $(cat "$T/err")"
-reset; over ServiceInstanceRedeploy:svc-worker '{"_drop": true}'
+reset; over DeploymentRedeploy:dep-worker-ok '{"_drop": true}'
 run rotate-secret dev ROT_KEY --yes
 [ $rc = 1 ] && grep -q "Services redeployed: api$" "$T/out" && grep -q "worker: Railway API connection failed" "$T/err" \
   && grep -q "Do NOT re-run this command" "$T/err" && ! grep -q Traceback "$T/err" \
