@@ -1,9 +1,11 @@
 ---
 id: TASK-185
 title: 'backlog store lint: refuse a To Do or In Progress task file with no priority'
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - Seyag B
 created_date: '2026-11-25T20:19:00Z'
+updated_date: '2026-11-26T08:42:00Z'
 labels:
   - bin
   - backlog
