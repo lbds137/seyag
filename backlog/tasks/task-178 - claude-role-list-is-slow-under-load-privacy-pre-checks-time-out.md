@@ -1,7 +1,7 @@
 ---
 id: TASK-178
 title: claude-role --list is slow under load (privacy pre-checks time out)
-status: In Progress
+status: Done
 assignee:
   - seyag-b
 created_date: '2026-11-25T18:48:00Z'
