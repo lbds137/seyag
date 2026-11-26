@@ -2,6 +2,12 @@
 # Hermetic fixture probe for plugins/seyag/bin/security-sweep.
 # Stubs gh via SECURITY_SWEEP_GH and isolates cache state in XDG_STATE_HOME;
 # never reaches the network or the real gh CLI.
+# Covers: open alert surfaces and secret filtering (1-2), off/error mapping and timeouts (3),
+# --strict exit codes and stale cache fallback (4), cache freshness/expiry/validation (5),
+# origin remote and repo token validation (6), --all-repos-from (7), paginated JSON decoding (8),
+# --session-line, --cap, and --warm-cache (9), --help (10), non-executable bin guard (11),
+# closed code-scanning history: bucketing, outrun, threshold, error/off, prior_dismissals,
+# old-format cache, --window, and comment truncation leak check (H1-H9), plus mutation canaries.
 # Usage: tests/security-sweep.probe.sh
 
 set -uo pipefail
@@ -53,6 +59,9 @@ rest="\${rest#*/}"
 name="\${rest%%/*}"
 rest="\${rest#*/}"
 surf="\${rest%%/alerts*}"
+case "\$ep" in
+  *state=closed*) surf="\$surf-closed" ;;
+esac
 dir="$T/fixtures/\${owner}_\${name}"
 if [ -f "\$dir/\$surf.err" ]; then
   cat "\$dir/\$surf.err" >&2
@@ -200,8 +209,8 @@ fi
 
 : > "$T/gh.log"
 run_ss -R example-org/widget --no-cache
-if [ "$rc" -eq 0 ] && [ "$(wc -l <"$T/gh.log")" -eq 3 ]; then
-  ok "5b --no-cache invokes gh stub across all 3 surfaces"
+if [ "$rc" -eq 0 ] && [ "$(wc -l <"$T/gh.log")" -eq 4 ]; then
+  ok "5b --no-cache invokes gh stub across all 3 surfaces plus closed-alert history"
 else
   bad "5b --no-cache (rc=$rc, calls=$(wc -l <"$T/gh.log"))"
 fi
@@ -215,8 +224,8 @@ json.dump(d, open(p, "w"))
 PY
 : > "$T/gh.log"
 run_ss -R example-org/widget
-if [ "$rc" -eq 0 ] && [ "$(wc -l <"$T/gh.log")" -eq 3 ]; then
-  ok "5c expired cache (age > 300 s) refetches all 3 surfaces"
+if [ "$rc" -eq 0 ] && [ "$(wc -l <"$T/gh.log")" -eq 4 ]; then
+  ok "5c expired cache (age > 300 s) refetches all 3 surfaces plus closed-alert history"
 else
   bad "5c expired cache refetch (rc=$rc, calls=$(wc -l <"$T/gh.log"))"
 fi
@@ -236,7 +245,7 @@ json.dump({
 PY
 : > "$T/gh.log"
 run_ss -R example-org/widget
-if [ "$rc" -eq 0 ] && [ "$(wc -l <"$T/gh.log")" -eq 3 ] && [ "$(cat "$T/out")" = "$WANT_LINE" ] && [ ! -s "$T/err" ]; then
+if [ "$rc" -eq 0 ] && [ "$(wc -l <"$T/gh.log")" -eq 4 ] && [ "$(cat "$T/out")" = "$WANT_LINE" ] && [ ! -s "$T/err" ]; then
   ok "5d corrupt cache with count: \"x\" (fresh fetched_at) refetches and prints fixture line"
 else
   bad "5d corrupt cache count: \"x\" (rc=$rc, calls=$(wc -l <"$T/gh.log"))" "out=$(cat "$T/out") err=$(cat "$T/err")"
@@ -256,7 +265,7 @@ json.dump({
 PY
 : > "$T/gh.log"
 run_ss -R example-org/widget
-if [ "$rc" -eq 0 ] && [ "$(wc -l <"$T/gh.log")" -eq 3 ] && [ "$(cat "$T/out")" = "$WANT_LINE" ] && [ ! -s "$T/err" ]; then
+if [ "$rc" -eq 0 ] && [ "$(wc -l <"$T/gh.log")" -eq 4 ] && [ "$(cat "$T/out")" = "$WANT_LINE" ] && [ ! -s "$T/err" ]; then
   ok "5e corrupt cache with by_severity: [] (fresh fetched_at) refetches and prints fixture line"
 else
   bad "5e corrupt cache by_severity: [] (rc=$rc, calls=$(wc -l <"$T/gh.log"))" "out=$(cat "$T/out") err=$(cat "$T/err")"
@@ -276,7 +285,7 @@ json.dump({
 PY
 : > "$T/gh.log"
 run_ss -R example-org/widget
-if [ "$rc" -eq 0 ] && [ "$(wc -l <"$T/gh.log")" -eq 3 ] && [ "$(cat "$T/out")" = "$WANT_LINE" ] && [ ! -s "$T/err" ]; then
+if [ "$rc" -eq 0 ] && [ "$(wc -l <"$T/gh.log")" -eq 4 ] && [ "$(cat "$T/out")" = "$WANT_LINE" ] && [ ! -s "$T/err" ]; then
   ok "5f corrupt cache with alerts: [1] (fresh fetched_at) refetches and prints fixture line"
 else
   bad "5f corrupt cache alerts: [1] (rc=$rc, calls=$(wc -l <"$T/gh.log"))" "out=$(cat "$T/out") err=$(cat "$T/err")"
@@ -296,7 +305,7 @@ json.dump({
 PY
 : > "$T/gh.log"
 run_ss -R example-org/widget
-if [ "$rc" -eq 0 ] && [ "$(wc -l <"$T/gh.log")" -eq 3 ] && [ "$(cat "$T/out")" = "$WANT_LINE" ] && [ ! -s "$T/err" ]; then
+if [ "$rc" -eq 0 ] && [ "$(wc -l <"$T/gh.log")" -eq 4 ] && [ "$(cat "$T/out")" = "$WANT_LINE" ] && [ ! -s "$T/err" ]; then
   ok "5g corrupt cache with rules_by_severity: {\"critical\": [1]} (fresh fetched_at) refetches and prints fixture line"
 else
   bad "5g corrupt cache rules_by_severity: {\"critical\": [1]} (rc=$rc, calls=$(wc -l <"$T/gh.log"))" "out=$(cat "$T/out") err=$(cat "$T/err")"
@@ -1257,6 +1266,226 @@ if [ "$hrc" -eq 0 ] && grep -qF "SECURITY_SWEEP_GH_TIMEOUT" "$T/help"; then
   ok "10b --help documents SECURITY_SWEEP_GH_TIMEOUT"
 else
   bad "10b --help SECURITY_SWEEP_GH_TIMEOUT (rc=$hrc)" "$(cat "$T/help")"
+fi
+
+# H1-H9: closed code-scanning alert history (dismissed:fixed ratio, outrun, prior_dismissals, cache, --window, truncation)
+TS_5D="$(date -u -d '-5 days' +%Y-%m-%dT%H:%M:%SZ)"
+TS_10D="$(date -u -d '-10 days' +%Y-%m-%dT%H:%M:%SZ)"
+TS_200D="$(date -u -d '-200 days' +%Y-%m-%dT%H:%M:%SZ)"
+
+# H1 bucketing: 2 fixed (10d ago), 1 dismissed with BOTH dismissed_at 10d ago and fixed_at 5d ago,
+# 1 dismissed with dismissed_at 200d ago, 1 item with no state, 1 duplicate number.
+reset_state
+mkdir -p "$T/fixtures/example-org_widget"
+cat > "$T/fixtures/example-org_widget/code-scanning-closed.out" <<EOF
+[
+  {"number": 101, "state": "fixed", "rule": {"id": "py/a"}, "fixed_at": "$TS_10D", "dismissed_at": null},
+  {"number": 102, "state": "fixed", "rule": {"id": "py/b"}, "fixed_at": "$TS_10D", "dismissed_at": null},
+  {"number": 103, "state": "dismissed", "rule": {"id": "py/a"}, "dismissed_at": "$TS_10D", "fixed_at": "$TS_5D", "dismissed_reason": "false positive", "dismissed_comment": "in window", "most_recent_instance": {"location": {"path": "a.py"}}},
+  {"number": 104, "state": "dismissed", "rule": {"id": "py/a"}, "dismissed_at": "$TS_200D", "fixed_at": null, "dismissed_reason": "won't fix", "dismissed_comment": "old"},
+  {"number": 105, "rule": {"id": "py/no-state"}},
+  {"number": 103, "state": "dismissed", "rule": {"id": "py/a"}, "dismissed_at": "$TS_10D", "fixed_at": "$TS_5D"}
+]
+EOF
+cp "$T/fixtures/example-org_widget/code-scanning-closed.out" "$T/h1-closed.json"
+run_ss -R example-org/widget --no-cache --json
+if [ "$rc" -eq 0 ] \
+  && jq -e '
+    .repos[0].history == {
+      "state": "count",
+      "window_days": 90,
+      "dismissed": 1,
+      "fixed": 2,
+      "outrun": false,
+      "dismissed_by_rule": {"py/a": 2},
+      "prior_dismissals": {}
+    }
+  ' "$T/out" >/dev/null 2>&1; then
+  ok "H1 closed-alert bucketing uses each item's state, windows dates, skips stateless/duplicate items, and counts all-time dismissed_by_rule"
+else
+  bad "H1 bucketing (rc=$rc)" "$(cat "$T/out" "$T/err")"
+fi
+
+# H2 outrun: 3 dismissed (in window), 1 fixed; zero open alerts on every surface
+reset_state
+mkdir -p "$T/fixtures/example-org_widget"
+cat > "$T/fixtures/example-org_widget/code-scanning-closed.out" <<EOF
+[
+  {"number": 1, "state": "dismissed", "rule": {"id": "py/a"}, "dismissed_at": "$TS_10D"},
+  {"number": 2, "state": "dismissed", "rule": {"id": "py/a"}, "dismissed_at": "$TS_10D"},
+  {"number": 3, "state": "dismissed", "rule": {"id": "py/b"}, "dismissed_at": "$TS_5D"},
+  {"number": 4, "state": "fixed", "rule": {"id": "py/c"}, "fixed_at": "$TS_10D"}
+]
+EOF
+run_ss -R example-org/widget --no-cache --json
+h2_json_ok=0
+if [ "$rc" -eq 0 ] && jq -e '.repos[0].history.outrun == true and .repos[0].history.dismissed == 3 and .repos[0].history.fixed == 1' "$T/out" >/dev/null 2>&1; then
+  h2_json_ok=1
+fi
+run_ss -R example-org/widget
+h2_def_out="$(cat "$T/out")"
+run_ss -R example-org/widget --session-line
+h2_sess_out="$(cat "$T/out")"
+if [ "$h2_json_ok" -eq 1 ] \
+  && [ "$h2_def_out" = "example-org/widget: clean · dismissals outrun fixes: 3 dismissed, 1 fixed in 90d" ] \
+  && [ "$h2_sess_out" = "security: example-org/widget: dismissals outrun fixes: 3 dismissed, 1 fixed in 90d — dispositions per skill seyag:security-sweep" ]; then
+  ok "H2 outrun marks --json outrun true, appends outrun suffix to default line, and lists clean outrun repo on --session-line"
+else
+  bad "H2 outrun (json_ok=$h2_json_ok)" "def=$h2_def_out sess=$h2_sess_out"
+fi
+
+# H3 threshold: 1 dismissed, 0 fixed -> outrun false, session line empty, default line unchanged
+reset_state
+mkdir -p "$T/fixtures/example-org_widget"
+cat > "$T/fixtures/example-org_widget/code-scanning-closed.out" <<EOF
+[
+  {"number": 1, "state": "dismissed", "rule": {"id": "py/a"}, "dismissed_at": "$TS_10D"}
+]
+EOF
+run_ss -R example-org/widget --no-cache --json
+h3_json_ok=0
+if [ "$rc" -eq 0 ] && jq -e '.repos[0].history.dismissed == 1 and .repos[0].history.fixed == 0 and .repos[0].history.outrun == false' "$T/out" >/dev/null 2>&1; then
+  h3_json_ok=1
+fi
+run_ss -R example-org/widget
+h3_def_out="$(cat "$T/out")"
+run_ss -R example-org/widget --session-line
+h3_sess_out="$(cat "$T/out")"
+h3_sess_err="$(cat "$T/err")"
+if [ "$h3_json_ok" -eq 1 ] && [ "$h3_def_out" = "example-org/widget: clean" ] && [ -z "$h3_sess_out" ] && [ -z "$h3_sess_err" ]; then
+  ok "H3 threshold 1 dismissed, 0 fixed keeps outrun false, default line clean, and session line empty"
+else
+  bad "H3 threshold (json_ok=$h3_json_ok)" "def=$h3_def_out sess=$h3_sess_out err=$h3_sess_err"
+fi
+
+# H4 history fetch error (code-scanning-closed.rc = 1) with no open alerts
+reset_state
+mkdir -p "$T/fixtures/example-org_widget"
+printf 'gh: HTTP 502 Bad Gateway\n' > "$T/fixtures/example-org_widget/code-scanning-closed.err"
+printf '1\n' > "$T/fixtures/example-org_widget/code-scanning-closed.rc"
+run_ss -R example-org/widget --no-cache --json
+h4_json_rc=$rc
+h4_json_out="$(cat "$T/out")"
+h4_json_err="$(cat "$T/err")"
+run_ss -R example-org/widget --no-cache --strict
+h4_strict_rc=$rc
+run_ss -R example-org/widget --no-cache --session-line
+h4_sess_rc=$rc
+h4_sess_out="$(cat "$T/out")"
+h4_sess_err="$(cat "$T/err")"
+if [ "$h4_json_rc" -eq 0 ] \
+  && jq -e '.repos[0].history == {"state": "error"}' <<<"$h4_json_out" >/dev/null 2>&1 \
+  && [ "$h4_json_err" = "security-sweep: example-org/widget code-scanning history: fetch failed (gh exit 1)" ] \
+  && [ "$h4_strict_rc" -eq 0 ] \
+  && [ "$h4_sess_rc" -eq 0 ] && [ -z "$h4_sess_out" ] && [ -z "$h4_sess_err" ]; then
+  ok "H4 history fetch error sets history state error, logs stderr in --json/default, exits 0 under --strict, and stays silent under --session-line"
+else
+  bad "H4 history fetch error (json_rc=$h4_json_rc, strict_rc=$h4_strict_rc, sess_rc=$h4_sess_rc)" "out=$h4_json_out err=$h4_json_err sess_out=$h4_sess_out sess_err=$h4_sess_err"
+fi
+
+# H5 history off (code-scanning-closed.err = Code scanning is not enabled, rc 1) -> history state off, no stderr line for it
+reset_state
+mkdir -p "$T/fixtures/example-org_widget"
+printf 'gh: Code scanning is not enabled for this repository. (HTTP 403)\n' > "$T/fixtures/example-org_widget/code-scanning-closed.err"
+printf '1\n' > "$T/fixtures/example-org_widget/code-scanning-closed.rc"
+run_ss -R example-org/widget --no-cache --json
+if [ "$rc" -eq 0 ] && [ ! -s "$T/err" ] && jq -e '.repos[0].history == {"state": "off"}' "$T/out" >/dev/null 2>&1; then
+  ok "H5 history off marker maps history to state off without writing to stderr"
+else
+  bad "H5 history off (rc=$rc)" "out=$(cat "$T/out") err=$(cat "$T/err")"
+fi
+
+# H6 prior_dismissals: open alert number 20 rule js/x path a/new.js; closed: dismissed 10 rule js/x (300-char comment, fixed_at set, path a/old.js), dismissed 11 rule js/y, fixed 12 rule js/x
+reset_state
+mkdir -p "$T/fixtures/example-org_widget"
+H6_C280="$(printf 'c%.0s' $(seq 1 280))"
+H6_C20="TAIL20_NEVER_LEAK_XX"
+H6_C300="${H6_C280}${H6_C20}"
+cat > "$T/fixtures/example-org_widget/code-scanning.out" <<'EOF'
+[
+  {"number": 20, "rule": {"id": "js/x", "security_severity_level": "medium"}, "tool": {"name": "CodeQL"}, "most_recent_instance": {"location": {"path": "a/new.js"}}}
+]
+EOF
+cat > "$T/fixtures/example-org_widget/code-scanning-closed.out" <<EOF
+[
+  {"number": 10, "state": "dismissed", "rule": {"id": "js/x"}, "dismissed_at": "$TS_10D", "fixed_at": "$TS_5D", "dismissed_reason": "false positive", "dismissed_comment": "$H6_C300", "most_recent_instance": {"location": {"path": "a/old.js"}}},
+  {"number": 11, "state": "dismissed", "rule": {"id": "js/y"}, "dismissed_at": "$TS_10D", "fixed_at": null, "dismissed_reason": "won't fix", "dismissed_comment": "other", "most_recent_instance": {"location": {"path": "b/y.js"}}},
+  {"number": 12, "state": "fixed", "rule": {"id": "js/x"}, "dismissed_at": null, "fixed_at": "$TS_10D", "most_recent_instance": {"location": {"path": "a/fixed.js"}}}
+]
+EOF
+run_ss -R example-org/widget --no-cache --json
+cp "$T/out" "$T/h6.out" 2>/dev/null || true
+cp "$CACHE_FILE" "$T/h6.cache.json" 2>/dev/null || true
+if [ "$rc" -eq 0 ] \
+  && jq -e --arg ts10 "$TS_10D" --arg ts5 "$TS_5D" --arg c280 "$H6_C280" '
+    .repos[0].history.prior_dismissals == {
+      "20": [
+        {
+          "number": 10,
+          "dismissed_at": $ts10,
+          "fixed_at": $ts5,
+          "reason": "false positive",
+          "path": "a/old.js",
+          "comment": $c280
+        }
+      ]
+    } and
+    .repos[0].history.dismissed_by_rule == {"js/x": 1, "js/y": 1}
+  ' "$T/out" >/dev/null 2>&1; then
+  ok "H6 prior_dismissals matches open alert rule against dismissed items only with truncated comment, and dismissed_by_rule counts all rules"
+else
+  bad "H6 prior_dismissals (rc=$rc)" "$(cat "$T/out" "$T/err")"
+fi
+
+# H7 old-format cache: fresh cache file with valid surfaces and no history key -> 0 gh calls, exit 0, history {"state":"unknown"}
+reset_state
+mkdir -p "$T/state/seyag/security-sweep" "$T/fixtures/example-org_widget"
+python3 - "$CACHE_FILE" <<'PY'
+import json, sys, time
+json.dump({
+    "fetched_at": time.time(),
+    "surfaces": {
+        "code-scanning": {"state": "off"},
+        "dependabot": {"state": "off"},
+        "secret-scanning": {"state": "off"},
+    },
+}, open(sys.argv[1], "w"))
+PY
+: > "$T/gh.log"
+run_ss -R example-org/widget --json
+if [ "$rc" -eq 0 ] && [ ! -s "$T/gh.log" ] && jq -e '.repos[0].history == {"state": "unknown"}' "$T/out" >/dev/null 2>&1; then
+  ok "H7 fresh old-format cache without history key makes 0 gh calls and returns history state unknown"
+else
+  bad "H7 old-format cache (rc=$rc, calls=$(wc -l <"$T/gh.log"))" "$(cat "$T/out" "$T/err")"
+fi
+
+# H8 --window 5 on H1's fixture -> dismissed 0, fixed 0; --window 0 and --window x exit 2
+reset_state
+mkdir -p "$T/fixtures/example-org_widget"
+cp "$T/h1-closed.json" "$T/fixtures/example-org_widget/code-scanning-closed.out"
+run_ss -R example-org/widget --no-cache --window 5 --json
+h8_rc5=$rc
+h8_out5="$(cat "$T/out")"
+run_ss -R example-org/widget --window 0
+h8_rc0=$rc
+run_ss -R example-org/widget --window x
+h8_rcx=$rc
+if [ "$h8_rc5" -eq 0 ] \
+  && jq -e '.repos[0].history.window_days == 5 and .repos[0].history.dismissed == 0 and .repos[0].history.fixed == 0' <<<"$h8_out5" >/dev/null 2>&1 \
+  && [ "$h8_rc0" -eq 2 ] && [ "$h8_rcx" -eq 2 ]; then
+  ok "H8 --window 5 zeroes 10d-old counts on H1 fixture; --window 0 and --window x exit 2"
+else
+  bad "H8 --window (rc5=$h8_rc5, rc0=$h8_rc0, rcx=$h8_rcx)" "$h8_out5"
+fi
+
+# H9 leak: the H6 300-char comment's last 20 chars never appear in stdout or the cache file
+if [ -s "$T/h6.out" ] && [ -s "$T/h6.cache.json" ] \
+  && grep -qF "$H6_C280" "$T/h6.out" \
+  && grep -qF "$H6_C280" "$T/h6.cache.json" \
+  && ! grep -qF "$H6_C20" "$T/h6.out" "$T/h6.cache.json"; then
+  ok "H9 300-char dismissed_comment's last 20 chars never appear in stdout or the cache file"
+else
+  bad "H9 300-char comment truncation leak check"
 fi
 
 if [ -z "${SECURITY_SWEEP_SKIP_NONEXEC:-}" ]; then
