@@ -8,8 +8,10 @@ syg_can_bwrap() {
   bwrap --die-with-parent --unshare-all --new-session --ro-bind / / --dev /dev --proc /proc true >/dev/null 2>&1
 }
 
-# Can pasta give a bwrap namespace a network here (false inside a nested sandbox)?
+# Can pasta give a bwrap namespace a network here (false inside a nested sandbox)? A tun device the
+# user can't open read-write hangs pasta, so that is checked first, the way gate-sandbox does.
 syg_can_pasta() {
+  [ -e /dev/net/tun ] && ( exec 3<>/dev/net/tun ) 2>/dev/null || return 1
   pasta --config-net --quiet --no-map-gw -t none -u none -T none -U none -- \
     bwrap --unshare-all --share-net --uid "$(id -u)" --gid "$(id -g)" \
     --ro-bind / / --dev /dev --proc /proc true >/dev/null 2>&1

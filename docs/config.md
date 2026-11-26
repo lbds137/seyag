@@ -339,6 +339,7 @@ An optional TOML file fills in knobs the environment left unset: user `${XDG_CON
 | `SYG_DRIVER_CLONE_ROLE_BIN` | `bin/driver-clone` | Test seam: the claude-role binary driver-clone calls to file the folder-trust bullet. |
 | `SYG_EPG_CWD` | `hooks/env-print-guard.sh` | Internal env variable passing the payload cwd from env-print-guard.sh to its embedded Python helper. |
 | `SYG_GATE_LOCK_MEM_POLL_S` | `bin/gate-lock` | Test seam overriding the memory-wait polling interval in seconds for a light gate-lock run. |
+| `SYG_GATE_SANDBOX_TUN` | `bin/gate-sandbox` | Test seam overriding the tun device path gate-sandbox's worker profile opens read-write before launching pasta (missing or unopenable: 125). |
 | `SYG_HEADLESS_OFF` | `hooks/lib/components.sh` | Internal constant listing components disabled automatically in headless (sdk-*) runs. |
 | `SYG_HEADLESS_OFF_HOOKS` | `hooks/lib/components.sh`, `hooks/run.sh` | Internal fallback list of hooks disabled in headless runs when components.tsv cannot be read. |
 | `SYG_HOOK` | `hooks/run.sh` | Internal variable holding the resolved hook script path inside run.sh. |

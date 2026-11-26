@@ -1,7 +1,7 @@
 ---
 id: TASK-252
 title: gate-sandbox worker hangs when /dev/net/tun is not read-writable
-status: In Progress
+status: Done
 assignee:
   - Seyag
 created_date: '2026-11-26T14:18:00Z'
@@ -24,7 +24,7 @@ Fix direction: a sibling of the pasta-presence check (`gate-sandbox:123`) that e
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 The worker profile exits 125 with a clear message when /dev/net/tun cannot be opened read-write, before launching pasta
-- [ ] #2 A probe case covers the unusable-tun path and passes in CI
-- [ ] #3 A usable tun keeps today's behaviour (existing worker probe cases unchanged)
+- [x] #1 The worker profile exits 125 with a clear message when /dev/net/tun cannot be opened read-write, before launching pasta
+- [x] #2 A probe case covers the unusable-tun path and passes in CI
+- [x] #3 A usable tun keeps today's behaviour (existing worker probe cases unchanged)
 <!-- AC:END -->

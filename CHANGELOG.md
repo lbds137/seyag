@@ -2,6 +2,19 @@
 
 All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY-MM-DD>` section per released version; under it, `###` categories in fixed order — Breaking Changes, Features, Bug Fixes, Improvements, Chores, Tests — empty ones omitted; items are `- **scope:** description (#PR)`, written from the version's merged commit subjects.
 
+## 0.3.233 - 2026-11-26
+
+### Features
+- **gate-lock:** writes a holder record into the lock file; a waiter prints the holder (pid, label or command, directory, hold age) and repeats it every `SYG_GATE_LOCK_REPORT_S` seconds (default 300), and past `SYG_GATE_LOCK_HOLD_CAP_S` (default 3600) appends a warning; the lock is never broken (TASK-256) (#449)
+- **gate-lock:** a light class (`SYG_GATE_LOCK_CLASS=light` with `SYG_GATE_LOCK_PEAK_MB`): light gates queue on a derived light lock, not behind heavy suites, and start only when MemAvailable >= floor + peak (`SYG_GATE_LOCK_MEM_WAIT_S`, default 900 s, then exit 125); `gate-lock --light-path` prints its path, and worker sandboxes bind it (#449)
+
+### Bug Fixes
+- **gate-sandbox:** the worker profile exits 125 when the tun device is missing or cannot be opened read-write, instead of hanging in pasta with no child (test seam `SYG_GATE_SANDBOX_TUN`; TASK-252) (#PR)
+
+### Improvements
+- **shellcheck-gate:** runs on the light lock (`SYG_SHELLCHECK_PEAK_MB`, default 874) and passes `-x` to every chunk, so a sourced file in another chunk is still followed (TASK-186) (#449)
+- **long-job:** labels its gate-lock hold `long-job NAME` (#449)
+
 ## 0.3.232 - 2026-11-26
 
 ### Features

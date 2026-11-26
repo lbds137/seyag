@@ -195,6 +195,7 @@ out=$(SYG_GATE_SANDBOX_REPO="$N" "$B/gate-sandbox" "$L" -- true 2>&1); rc=$?
 # G7. Worker profile binds both the heavy lock and the light lock (gate-lock --light-path -> /run/worker/gate.light.lock),
 # and exits 125 when the light lock cannot be created.
 mkdir -p "$T/g7-stub" "$T/g7-scratch"
+: >"$T/g7-tun"
 cat >"$T/g7-stub/bwrap" <<'EOF'
 #!/bin/sh
 if [ "${1:-}" = --help ]; then echo "usage: bwrap --size BYTES"; exit 0; fi
@@ -220,12 +221,12 @@ chmod +x "$T/g7-stub/bwrap" "$T/g7-stub/pasta" "$T/g7-stub/ip"
 g7_lock="$T/g7-gate.lock"
 g7_want_light=$(SYG_GATE_LOCK_FILE="$g7_lock" "$B/gate-lock" --light-path)
 g7_out=$(PATH="$T/g7-stub:$PATH" SYG_GATE_SANDBOX_PROFILE=worker SYG_GATE_SANDBOX_SCRATCH="$T/g7-scratch" \
-  SYG_GATE_LOCK_FILE="$g7_lock" "$B/gate-sandbox" "$R" -- true 2>&1)
+  SYG_GATE_SANDBOX_TUN="$T/g7-tun" SYG_GATE_LOCK_FILE="$g7_lock" "$B/gate-sandbox" "$R" -- true 2>&1)
 g7_rc=$?
 g7_bound_src=$(awk '$0 == "/run/worker/gate.light.lock" {print prev; exit} {prev=$0}' <<<"$g7_out")
 mkdir -p "$T/g7-bad.light.lock"
 g7_bad_out=$(PATH="$T/g7-stub:$PATH" SYG_GATE_SANDBOX_PROFILE=worker SYG_GATE_SANDBOX_SCRATCH="$T/g7-scratch" \
-  SYG_GATE_LOCK_FILE="$T/g7-bad.lock" "$B/gate-sandbox" "$R" -- true 2>&1)
+  SYG_GATE_SANDBOX_TUN="$T/g7-tun" SYG_GATE_LOCK_FILE="$T/g7-bad.lock" "$B/gate-sandbox" "$R" -- true 2>&1)
 g7_bad_rc=$?
 if [ "$g7_rc" = 0 ] && [ -n "$g7_want_light" ] && [ -f "$g7_want_light" ] \
   && [ "$g7_bound_src" = "$g7_want_light" ] && [ "$g7_bad_rc" = 125 ]; then
