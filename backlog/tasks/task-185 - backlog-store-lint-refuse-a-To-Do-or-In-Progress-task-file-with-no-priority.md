@@ -1,11 +1,11 @@
 ---
 id: TASK-185
 title: 'backlog store lint: refuse a To Do or In Progress task file with no priority'
-status: In Progress
+status: Done
 assignee:
   - Seyag B
 created_date: '2026-11-25T20:19:00Z'
-updated_date: '2026-11-26T08:59:00Z'
+updated_date: '2026-11-26T11:52:00Z'
 labels:
   - bin
   - backlog
@@ -27,3 +27,9 @@ Owner ruling 2026-11-26 (AskUserQuestion, "Open it"): once backlog-lint merges, 
 
 Review (Sonnet, cross-family for the Gemini-authored code) lows: fixed summary-line split (unreadable vs priority), --store -h ordering, non-UTF-8 filename print, README probe-hermeticity wording. Ruled out: sharing has_priority via a lib (would edit lane A hooks; probe case 10 pins behaviour, mutation-canary caught a drift). Deferred, shared with backlog-priority-guard (change both together): BOM-prefixed frontmatter is skipped, an indented priority: inside a block scalar counts, a status with a trailing # comment never matches. backlog.md 1.55.3 writes none of these; trigger: a store file in one of those forms.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Shipped in #441 (code af50fb3, merged 2026-11-26 10:37Z via automerge, claude-review PASS). backlog-lint refuses To Do / In Progress task files with no priority. Five review lows carried in the Seyag B role file Next, to ride the next backlog-lint PR.
+<!-- SECTION:FINAL_SUMMARY:END -->

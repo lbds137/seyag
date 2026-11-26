@@ -3,10 +3,11 @@ id: TASK-34
 title: >-
   railway-ops: redeploy reuses the live image instead of rebuilding the branch
   HEAD
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - Seyag B
 created_date: '2026-11-19T21:08:00Z'
-updated_date: '2026-11-20T02:59:00Z'
+updated_date: '2026-11-26T11:51:00Z'
 labels:
   - bin
   - skills
@@ -24,3 +25,15 @@ Needs owner: a dev environment on the reference Railway project to probe the ima
 
 Owner approved the settle-first probe on a dev environment 2026-11-19 (AUQ): one latestDeployment read plus one image-reusing deploymentRedeploy (~19 s), variables snapshot verified. The probe and the follow-up code changes are session work, queued after the python-config PR; nothing waits on the owner here.
 <!-- SECTION:DESCRIPTION:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Settle-first probe RUN 2026-11-26 ~06:49 EST (Seyag B), reference project development env, service api-gateway, per the 11-19 approval:
+- latestDeployment a8c5dd26 SUCCESS, commit b4902c5c, imageDigest sha256:b717af89...; develop HEAD was 358166134 (docs-only, watch paths skipped it), so a rebuild would have moved the commit.
+- Marker variable (service scope, skipDeploys) upserted after that build; deploymentRedeploy(id, usePreviousImageTag: true) -> bce4fdf3: INITIALIZING t+1s, DEPLOYING t+7s, SUCCESS t+14s, never BUILDING; same commitHash and same imageDigest; meta.reason=redeploy.
+- railway ssh printenv in the new container: marker present, RAILWAY_DEPLOYMENT_ID=bce4fdf3. Variables snapshot fresh: VERIFIED.
+- latestDeployment flips to the NEW record at INITIALIZING, so a second caller mid-redeploy reads non-SUCCESS and refuses.
+- variableDelete of the service-scoped marker triggered NO deploy within 90 s (one observation, one service).
+- A serverless web service's latestDeployment status is SLEEPING (serverless sleep), not SUCCESS: the refusal rule must decide SLEEPING.
+<!-- SECTION:NOTES:END -->
