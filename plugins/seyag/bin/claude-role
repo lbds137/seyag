@@ -89,35 +89,42 @@ folder_of() {
 # values, so accept an indented key and strip one layer of quotes. --set writes double-quoted JSON
 # strings, so unescape \\ \" \n \t \/ there in ONE left-to-right pass (sequential gsub calls would
 # read "\\n", an escaped backslash then n, as a newline); any other backslash pair stays as-is.
-# Single-quoted values map YAML's '' to '.
-field() {
-    awk -v k="$2" '
-        function unescape(s,    out, n, i, c, e) {
-            out = ""; n = length(s)
-            for (i = 1; i <= n; i++) {
-                c = substr(s, i, 1)
-                if (c == "\\" && i < n) {
-                    e = substr(s, i + 1, 1)
-                    if (e == "\\")      { out = out "\\"; i++ }
-                    else if (e == "\"") { out = out "\""; i++ }
-                    else if (e == "n")  { out = out "\n"; i++ }
-                    else if (e == "t")  { out = out "\t"; i++ }
-                    else if (e == "/")  { out = out "/";  i++ }
-                    else out = out c
-                } else out = out c
-            }
-            return out
+# Single-quoted values map YAML's '' to '. The parser text lives in FIELD_AWK_LIB (no literal single
+# quotes in it) so --list can run the same parser over every role file in one awk process.
+# shellcheck disable=SC2016  # awk source: the single-quoted shell string is the point
+FIELD_AWK_LIB='
+    function unescape(s,    out, n, i, c, e) {
+        out = ""; n = length(s)
+        for (i = 1; i <= n; i++) {
+            c = substr(s, i, 1)
+            if (c == "\\" && i < n) {
+                e = substr(s, i + 1, 1)
+                if (e == "\\")      { out = out "\\"; i++ }
+                else if (e == "\"") { out = out "\""; i++ }
+                else if (e == "n")  { out = out "\n"; i++ }
+                else if (e == "t")  { out = out "\t"; i++ }
+                else if (e == "/")  { out = out "/";  i++ }
+                else out = out c
+            } else out = out c
         }
+        return out
+    }
+    function fm_value(line) {
+        if (line ~ /^".*"$/) return unescape(substr(line, 2, length(line) - 2))
+        if (line ~ /^\x27.*\x27$/) {
+            line = substr(line, 2, length(line) - 2)
+            gsub(/\x27\x27/, "\x27", line)
+        }
+        return line
+    }
+'
+field() {
+    awk -v k="$2" "$FIELD_AWK_LIB"'
         { sub(/\r$/, "") } NR == 1 && /^---$/ { f = 1; next } f && /^---$/ { exit }
         f { line = $0; sub(/^[ \t]+/, "", line)
             if (index(line, k ":") == 1) {
                 sub(/^[^:]*: */, "", line)
-                if (line ~ /^".*"$/) line = unescape(substr(line, 2, length(line) - 2))
-                else if (line ~ /^\x27.*\x27$/) {
-                    line = substr(line, 2, length(line) - 2)
-                    gsub(/\x27\x27/, "\x27", line)
-                }
-                print line; exit } }' "$1"
+                print fm_value(line); exit } }' "$1"
 }
 
 # flat: field()'s value as one line — a status/holds can carry a newline once \n is unescaped, and
@@ -259,13 +266,38 @@ case "${1:-}" in
         exit 0 ;;
     --list)
         need_role_dir
+        # One pass, one process (TASK-178): callers run --list under short timeouts on a loaded
+        # machine, and the old loop paid 4 awk + 4 cat + 1 basename per role file. Same glob, same
+        # dated-archive skip, rows byte-identical to the per-file `field | flat` loop this replaces.
+        files=()
         for f in "$ROLES"/*.md; do
             case "${f##*/}" in *-archive-[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9].md) continue ;; esac
-            r=$(field "$f" role | flat)
-            [ -n "$r" ] && printf '%s\t%s\t%s\t%s\t%s\n' "$(basename "$f" .md)" "$r" \
-                "$(field "$f" parked | flat)" "$(field "$f" privacy | flat)" \
-                "$(field "$f" route | flat)"
+            files+=("$f")
         done
+        [ "${#files[@]}" -gt 0 ] || exit 0   # awk with no file arguments would read stdin and hang
+        awk "$FIELD_AWK_LIB"'
+            function strip_flat(v) { sub(/\n+$/, "", v); gsub(/[\t\n]/, " ", v); return v }
+            function emit(    name, r, p, y, t) {
+                if (cur == "") return
+                r = strip_flat(v_role)
+                if (r == "") return   # README and handoff notes have no role field
+                name = cur; sub(/.*\//, "", name); sub(/\.md$/, "", name)
+                p = strip_flat(v_parked); y = strip_flat(v_privacy); t = strip_flat(v_route)
+                printf "%s\t%s\t%s\t%s\t%s\n", name, r, p, y, t
+            }
+            FNR == 1 { emit(); cur = FILENAME; v_role = v_parked = v_privacy = v_route = ""
+                       g_role = g_parked = g_privacy = g_route = 0; front = 0 }
+            front == 2 { nextfile }
+            { sub(/\r$/, "") }
+            front == 0 { if ($0 == "---") front = 1; else { front = 2; nextfile }; next }
+            $0 == "---" { front = 2; nextfile }
+            { line = $0; sub(/^[ \t]+/, "", line)
+              if (!g_role && index(line, "role:") == 1) { g_role = 1; sub(/^[^:]*: */, "", line); v_role = fm_value(line) }
+              else if (!g_parked && index(line, "parked:") == 1) { g_parked = 1; sub(/^[^:]*: */, "", line); v_parked = fm_value(line) }
+              else if (!g_privacy && index(line, "privacy:") == 1) { g_privacy = 1; sub(/^[^:]*: */, "", line); v_privacy = fm_value(line) }
+              else if (!g_route && index(line, "route:") == 1) { g_route = 1; sub(/^[^:]*: */, "", line); v_route = fm_value(line) } }
+            END { emit() }
+        ' "${files[@]}"
         exit 0 ;;
     --path)
         echo "$ROLES/$(folder_of "$PWD").md"; exit 0 ;;

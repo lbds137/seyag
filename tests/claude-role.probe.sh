@@ -92,6 +92,61 @@ grep -qxF $'beta\tBeta role\t\t\t' <<< "$out" && ok "--list: plain role has empt
 [ "$(wc -l <<< "$out")" = 8 ] && ok "--list: 8 roles, no README" || bad "--list count: $out"
 rm "$roles/zeta.md" "$roles/eta.md" "$roles/theta.md"
 
+# --list parses escaped and hand-written values exactly as field() does, and only frontmatter counts:
+# a role: line in the body (after the closing ---) is not a role. A CRLF file lists cleanly, and a
+# dated -archive- copy is not listed even with a role.
+printf -- '---\nrole: "A\\tB"\nroute: %s\n---\n' "'it''s'" > "$roles/esc.md"
+printf -- '---\nrole: "X\\n"\n---\n' > "$roles/escnl.md"
+printf -- '---\nnot-a-key: x\n---\n\n## Charter\nrole: body line\n' > "$roles/bodyrole.md"
+printf -- '---\r\nrole: "Old role"\r\n---\r\n' > "$roles/retired-archive-2026-01-01.md"
+out=$("$CR" --list); rc=$?
+[ $rc = 0 ] && ok "--list edge cases exit 0" || bad "--list edge cases rc: $rc"
+grep -qxF $'esc\tA B\t\t\tit\'s' <<< "$out" && ok "--list: an escaped tab flattens to a space and single-quoted '' unquotes" || bad "--list escapes: $out"
+grep -qxF $'escnl\tX\t\t\t' <<< "$out" && ok "--list: an escaped trailing newline flattens away" || bad "--list escnl: $out"
+! grep -q '^bodyrole' <<< "$out" && ok "--list: a role: line in the body is not a role" || bad "--list bodyrole: $out"
+grep -qxF $'epsilon\tEpsilon role\t\t\t' <<< "$out" && ok "--list: a CRLF file lists cleanly" || bad "--list CRLF: $out"
+! grep -q 'Old role' <<< "$out" && ok "--list: a dated -archive- copy with a role is not listed" || bad "--list archive: $out"
+rm "$roles/esc.md" "$roles/escnl.md" "$roles/bodyrole.md" "$roles/retired-archive-2026-01-01.md"
+
+# --list is one awk process for the whole run and no cat or basename, however many roles (TASK-178):
+# wrapper shims first on PATH log every exec of the three tools the old loop forked per file, so the
+# counts must hold while the role files grow.
+shim="$home/shim-bin"; mkdir -p "$shim"
+execlog="$home/exec-count.log"
+for tool in awk cat basename; do
+    real=$(command -v "$tool")   # resolved before the shim dir is ever prepended
+    cat > "$shim/$tool" <<EOF
+#!/bin/bash
+printf '%s\n' $tool >> "$execlog"
+exec "$real" "\$@"
+EOF
+    chmod +x "$shim/$tool"
+done
+: > "$execlog"
+rows1=$(PATH="$shim:$PATH" "$CR" --list | wc -l)
+awk1=$(grep -c '^awk$' "$execlog"); cat1=$(grep -c '^cat$' "$execlog"); base1=$(grep -c '^basename$' "$execlog")
+printf -- '---\nrole: "Extra one"\n---\n' > "$roles/extra1.md"
+printf -- '---\nrole: "Extra two"\n---\n' > "$roles/extra2.md"
+printf -- '---\nrole: "Extra three"\n---\n' > "$roles/extra3.md"
+: > "$execlog"
+rows2=$(PATH="$shim:$PATH" "$CR" --list | wc -l)
+awk2=$(grep -c '^awk$' "$execlog"); cat2=$(grep -c '^cat$' "$execlog"); base2=$(grep -c '^basename$' "$execlog")
+[ "$awk1" = "$awk2" ] && [ "$cat1" = 0 ] && [ "$cat2" = 0 ] && [ "$base1" = 0 ] && [ "$base2" = 0 ] \
+  && [ "$rows1" -gt 0 ] && [ "$rows2" = "$((rows1 + 3))" ] \
+  && ok "--list: one awk process ($awk1) in both runs, no cat ($cat1/$cat2), no basename ($base1/$base2)" \
+  || bad "--list processes: awk $awk1->$awk2 cat $cat1->$cat2 basename $base1->$base2 rows $rows1->$rows2"
+rm "$roles/extra1.md" "$roles/extra2.md" "$roles/extra3.md"
+
+# An empty role dir: --list exits 0 with no output and never reads stdin (awk with no file arguments
+# would sit waiting on it); callers run it with stdin from long-lived pipes (TASK-178). Stdin is a
+# process substitution whose sleep holds it open for 10 s; unlike a pipeline, nothing waits on it,
+# so a hang shows as timeout's 124.
+empty="$home/empty-roles"; mkdir -p "$empty"
+out=$(SYG_ROLE_DIR="$empty" timeout 5 "$CR" --list < <(sleep 10 2>/dev/null) 2>&1); rc=$?
+[ $rc = 0 ] && [ -z "$out" ] && ok "--list: an empty role dir exits 0 with no output, not hanging on stdin" \
+  || bad "--list empty dir stdin: rc=$rc out=$out"
+rmdir "$empty"
+
 # "## Needs Owner": what waits on the owner anywhere (read, rule, answer). --json carries it as .needs,
 # with an optional (due DATE); --in-person stays in-person only.
 cat > "$roles/iota.md" <<'EOF'

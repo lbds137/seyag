@@ -1,8 +1,9 @@
 ---
 id: TASK-178
 title: claude-role --list is slow under load (privacy pre-checks time out)
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - seyag-b
 created_date: '2026-11-25T18:48:00Z'
 labels:
   - claude-role
@@ -17,3 +18,9 @@ ordinal: 178000
 <!-- SECTION:DESCRIPTION:BEGIN -->
 claude-role --list takes ~1.3 s idle and >20 s at load 50 (a consumer session's measurement, 11-25); consumer launchers' privacy pre-checks (20 s timeout) then fail closed and refuse launches. Third recurrence. Profile first (which step dominates: role-file parse, per-role subprocesses, session lookups), then make --list cheap. The consumer-side retry behind load-gate is tracked outside this repo.
 <!-- SECTION:DESCRIPTION:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Profile 11-25 (load 25, 23 role files): 1.5 s; strace 205 execve (92 awk + 92 cat + 17 basename), wait4 86% of syscall time: per file 4 field() awk calls, each piped to flat()'s cat, plus basename. Baseline before the fix, 11-25 21:05 at load 25: 2.85-4.54 s over 3 runs. Fix: --list parses every role file in one awk pass (shared parser text with field()). Deferred: --board and --json keep the per-field shape (5-9 awk per role); trigger to promote: a caller runs either under a timeout, or either shows in a load-time failure.
+<!-- SECTION:NOTES:END -->
