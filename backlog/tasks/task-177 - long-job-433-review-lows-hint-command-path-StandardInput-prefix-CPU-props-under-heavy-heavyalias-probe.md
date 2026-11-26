@@ -3,7 +3,7 @@ id: TASK-177
 title: >-
   long-job: #433 review lows (hint command path, StandardInput* prefix, CPU
   props under --heavy, heavy+alias probe)
-status: In Progress
+status: Done
 assignee:
   - seyag-b
 created_date: '2026-11-25T18:48:00Z'
