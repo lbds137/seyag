@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Probe for plugins/seyag/bin/shellcheck-gate: usage and exit codes, missing binary error,
-# sequential chunking via xargs over tests/shell-files.sh (with ROOT passthrough), flag
-# passthrough, exit-code mapping (123 -> 1), gate-lock serialization, empty file list,
-# and clean env -i execution.
+# sequential chunking via xargs over tests/shell-files.sh (with ROOT passthrough), -x and flag
+# passthrough (including a source/sourcer pair split across chunks with SYG_SHELLCHECK_CHUNK=1),
+# exit-code mapping (123 -> 1), gate-lock light-lock serialization (running while the heavy lock
+# is held, with label=shellcheck-gate), empty file list, and clean env -i execution.
 # Usage: tests/shellcheck-gate.probe.sh   (from anywhere)
 set -u
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -19,6 +20,8 @@ cleanup() {
 }
 trap cleanup EXIT
 export SYG_GATE_LOCK_FILE=$t/gate.lock
+export SYG_MEM_GATE_MIN_MB=0
+export PATH="$BIN:$PATH"
 
 # wait_for COND...: poll a command up to ~5 s (never a bare sleep as the synchronization)
 wait_for() {
@@ -115,12 +118,12 @@ else
   bad "chunking (rc=$rc lines=${#lines3[@]}: $(cat "$log3" 2>/dev/null))"
 fi
 
-# (4) passthrough: -S warning and --fstub-marker reach every stub invocation
+# (4) passthrough: -x, -S warning and --fstub-marker reach every stub invocation
 if [ "${#lines3[@]}" = 3 ] \
-  && [[ ${lines3[0]} == *"args=-S warning --fstub-marker "* ]] \
-  && [[ ${lines3[1]} == *"args=-S warning --fstub-marker "* ]] \
-  && [[ ${lines3[2]} == *"args=-S warning --fstub-marker "* ]]; then
-  ok "passthrough: -S warning and --fstub-marker reached every stub invocation"
+  && [[ ${lines3[0]} == *"args=-x -S warning --fstub-marker "* ]] \
+  && [[ ${lines3[1]} == *"args=-x -S warning --fstub-marker "* ]] \
+  && [[ ${lines3[2]} == *"args=-x -S warning --fstub-marker "* ]]; then
+  ok "passthrough: -x, -S warning and --fstub-marker reached every stub invocation"
 else
   bad "passthrough ($(cat "$log3" 2>/dev/null))"
 fi
@@ -140,11 +143,12 @@ else
   bad "exit propagation (rc_fail=$rc_fail rc_clean=$rc_clean)"
 fi
 
-# (6) lock: busy SYG_GATE_LOCK_FILE blocks stub execution until released, then runs and returns stub code
+# (6) lock: busy light lock blocks stub execution until released, then runs and returns stub code
 lock6="$t/case6.lock"
+lock6_light="$t/case6.light.lock"
 log6="$t/case6.log"
 mkfifo "$t/release"
-( exec 8>>"$lock6"; flock 8; : >"$t/held"; read -r _ <"$t/release" ) &
+( exec 8>>"$lock6_light"; flock 8; : >"$t/held"; read -r _ <"$t/release" ) &
 holder=$!; bg+=("$holder")
 if wait_for exists "$t/held"; then
   SYG_GATE_LOCK_FILE="$lock6" ROOT="$t/fx" SYG_SHELLCHECK_BIN="$STUB" SYG_SHELLCHECK_CHUNK=3 \
@@ -158,7 +162,7 @@ if wait_for exists "$t/held"; then
   wait "$holder" 2>/dev/null
   wait "$sg_pid"; rc6=$?
   if [ "$waited" = 1 ] && [ "$early" = 0 ] && [ -s "$log6" ] && [ "$rc6" = 1 ]; then
-    ok "lock: runner waited while lock held (no stub run within ~1 s), then ran and exited with stub code 1"
+    ok "lock: runner waited while light lock held (no stub run within ~1 s), then ran and exited with stub code 1"
   else
     bad "lock (waited=$waited early=$early rc=$rc6 log=$(cat "$log6" 2>/dev/null) err=$(cat "$t/lock6.err" 2>/dev/null))"
   fi
@@ -180,11 +184,11 @@ fi
 
 # (8) env -i with minimal PATH: bin defaults do not depend on inherited env beyond PATH/HOME
 log8="$t/case8.log"
-env -i PATH="$t/minbin" HOME="$t" ROOT="$t/fx" SYG_GATE_LOCK_FILE="$t/envi.lock" \
+env -i PATH="$t/minbin" HOME="$t" ROOT="$t/fx" SYG_GATE_LOCK_FILE="$t/envi.lock" SYG_MEM_GATE_MIN_MB=0 \
   SYG_SHELLCHECK_BIN="$STUB" STUB_LOG="$log8" "$SG" -S warning
 rc8=$?
 mapfile -t lines8 <"$log8" 2>/dev/null
-if [ "$rc8" = 0 ] && [ "${#lines8[@]}" = 1 ] && [[ ${lines8[0]} == "nargs=7 args=-S warning "* ]]; then
+if [ "$rc8" = 0 ] && [ "${#lines8[@]}" = 1 ] && [[ ${lines8[0]} == "nargs=7 args=-x -S warning "* ]]; then
   ok "env -i with minimal PATH: default chunk=20 ran 7 fixture files in 1 invocation, exit 0"
 else
   bad "env -i (rc=$rc8 lines=${#lines8[@]}: $(cat "$log8" 2>/dev/null))"
@@ -221,7 +225,7 @@ lines11=()
 cp "$STUB" "$t/minbin/shellcheck"
 PATH="$t/minbin" ROOT="$t/fx" STUB_LOG="$log11" "$SG" -S warning >/dev/null 2>&1; rc=$?
 mapfile -t lines11 <"$log11" 2>/dev/null
-if [ "$rc" = 0 ] && [ "${#lines11[@]}" = 1 ] && [[ ${lines11[0]} == "nargs=7 args=-S warning "* ]]; then
+if [ "$rc" = 0 ] && [ "${#lines11[@]}" = 1 ] && [[ ${lines11[0]} == "nargs=7 args=-x -S warning "* ]]; then
   ok "bare name: shellcheck on PATH resolved via command -v and ran (7 files, exit 0)"
 else
   bad "bare name (rc=$rc lines=${#lines11[@]}: $(cat "$log11" 2>/dev/null))"
@@ -259,7 +263,7 @@ SLOW_LOG="$mark" ROOT="$t/sigfx" SYG_SHELLCHECK_BIN="$SSTUB" SYG_SHELLCHECK_CHUN
   SYG_GATE_LOCK_FILE="$lock13" "$SG" -S warning >/dev/null 2>"$t/case13.err" &
 sg13=$!; bg+=("$sg13")
 dead() { local s; s=$(ps -o stat= -p "$1" 2>/dev/null); [ -z "$s" ] || [[ $s == Z* ]]; }
-lockfree13() { ( exec 8>>"$lock13" && flock -n 8 ); }
+lockfree13() { ( exec 8>>"$t/case13.light.lock" && flock -n 8 ); }
 if wait_for test -s "$mark"; then
   kill -TERM "$sg13" 2>/dev/null
   a_gone=0; wait_for dead "$sg13" && a_gone=1
@@ -310,7 +314,7 @@ for i in 1 2 3 4 5 6 7; do printf '#!/usr/bin/env bash\n' >"$t/fxgit/plugins/sey
 log15="$t/case15.log"
 ( cd "$t/fxgit/sub" && PATH="$t/minbin" SYG_SHELLCHECK_BIN="$STUB" STUB_LOG="$log15" "$SG" -S warning )
 rc15=$?
-exp15="nargs=7 args=-S warning"
+exp15="nargs=7 args=-x -S warning"
 for i in 1 2 3 4 5 6 7; do exp15+=" $t/fxgit/plugins/seyag/bin/tool0$i"; done
 mapfile -t lines15 <"$log15" 2>/dev/null
 if [ "$rc15" = 0 ] && [ "${#lines15[@]}" = 1 ] && [ "${lines15[0]}" = "$exp15" ]; then
@@ -321,9 +325,10 @@ fi
 
 # (16) exported SYG_SHELLCHECK_GATE_INNER=1 in the environment must not bypass gate-lock
 lock16="$t/case16.lock"
+lock16_light="$t/case16.light.lock"
 log16="$t/case16.log"
 mkfifo "$t/release16"
-( exec 8>>"$lock16"; flock 8; : >"$t/held16"; read -r _ <"$t/release16" ) &
+( exec 8>>"$lock16_light"; flock 8; : >"$t/held16"; read -r _ <"$t/release16" ) &
 holder16=$!; bg+=("$holder16")
 if wait_for exists "$t/held16"; then
   SYG_SHELLCHECK_GATE_INNER=1 SYG_GATE_LOCK_FILE="$lock16" ROOT="$t/fx" SYG_SHELLCHECK_BIN="$STUB" \
@@ -344,6 +349,76 @@ if wait_for exists "$t/held16"; then
 else
   bad "inner env ignored: background holder never acquired lock"
   echo go >"$t/release16" 2>/dev/null
+fi
+
+# (17) a source/sourcer pair split across chunks (SYG_SHELLCHECK_CHUNK=1) receives -x on every chunk
+# and passes with the real shellcheck (TASK-186)
+mkdir -p "$t/srcfx/tests"
+cat >"$t/srcfx/lib.sh" <<'EOF'
+#!/usr/bin/env bash
+# shellcheck disable=SC2034
+shared_from_lib=42
+EOF
+cat >"$t/srcfx/sourcer.sh" <<'EOF'
+#!/usr/bin/env bash
+# shellcheck source=lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+printf '%s\n' "$shared_from_lib"
+EOF
+cat >"$t/srcfx/tests/shell-files.sh" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' lib.sh sourcer.sh
+EOF
+log17="$t/case17.log"
+ROOT="$t/srcfx" SYG_SHELLCHECK_BIN="$STUB" SYG_SHELLCHECK_CHUNK=1 STUB_LOG="$log17" \
+  "$SG" -S warning
+rc17_stub=$?
+mapfile -t lines17 <"$log17" 2>/dev/null
+real_sc_ok=1
+if command -v shellcheck >/dev/null 2>&1 || command -v uvx >/dev/null 2>&1; then
+  out17=$(ROOT="$t/srcfx" SYG_SHELLCHECK_CHUNK=1 "$SG" -S warning 2>&1)
+  [ $? = 0 ] && [ -z "$out17" ] || real_sc_ok=0
+fi
+if [ "$rc17_stub" = 0 ] && [ "${#lines17[@]}" = 2 ] \
+  && [[ ${lines17[0]} == *"args=-x -S warning "* ]] \
+  && [[ ${lines17[1]} == *"args=-x -S warning "* ]] \
+  && [ "$real_sc_ok" = 1 ]; then
+  ok "split source/sourcer pair (SYG_SHELLCHECK_CHUNK=1): -x reaches every chunk and passes real shellcheck"
+else
+  bad "split source/sourcer (stub_rc=$rc17_stub lines=${#lines17[@]} real_ok=$real_sc_ok out=[${out17:-}])"
+fi
+
+# (18) shellcheck-gate takes the light lock (with label=shellcheck-gate): it runs while the heavy lock is held
+lock18="$t/case18.lock"
+mkfifo "$t/release18"
+( exec 8>>"$lock18"; flock 8; : >"$t/held18"; read -r _ <"$t/release18" ) &
+holder18=$!; bg+=("$holder18")
+if wait_for exists "$t/held18"; then
+  LSTUB="$t/stub-rec-lock"
+  cat >"$LSTUB" <<'EOF'
+#!/usr/bin/env bash
+cp "$LOCK18_LIGHT" "$LOCK18_REC" 2>/dev/null || :
+: >"$LOCK18_DONE"
+exit 0
+EOF
+  chmod +x "$LSTUB"
+  LOCK18_LIGHT="$t/case18.light.lock" LOCK18_REC="$t/case18.rec" LOCK18_DONE="$t/case18.done" \
+    SYG_GATE_LOCK_FILE="$lock18" ROOT="$t/fx" SYG_SHELLCHECK_BIN="$LSTUB" \
+    "$SG" -S warning 2>"$t/case18.err" &
+  sg18=$!; bg+=("$sg18")
+  ran18=0
+  wait_for exists "$t/case18.done" && ran18=1
+  echo go >"$t/release18"
+  wait "$holder18" 2>/dev/null
+  wait "$sg18"; rc18=$?
+  if [ "$ran18" = 1 ] && [ "$rc18" = 0 ] && [ ! -s "$t/case18.err" ] && grep -qxF "label=shellcheck-gate" "$t/case18.rec" 2>/dev/null; then
+    ok "light lock: shellcheck-gate runs without waiting while the heavy lock is held (label=shellcheck-gate)"
+  else
+    bad "light lock (ran=$ran18 rc=$rc18 err=[$(cat "$t/case18.err" 2>/dev/null)] rec=[$(cat "$t/case18.rec" 2>/dev/null)])"
+  fi
+else
+  bad "light lock: heavy holder never took lock"
+  echo go >"$t/release18" 2>/dev/null
 fi
 
 exit "$fail"

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Probe for bin/gate-sandbox offline dependency binds:
+# Probe for bin/gate-sandbox offline dependency binds and worker-profile gate locks:
 # C1 auto-binds a symlinked $wt/node_modules read-only at $wt/node_modules;
-# C2 ro-binds colon-separated SRC or SRC->DST entries from SYG_GATE_SANDBOX_RO_BINDS outside $wt.
+# C2 ro-binds colon-separated SRC or SRC->DST entries from SYG_GATE_SANDBOX_RO_BINDS outside $wt;
+# worker profile binds both the heavy gate lock and the light gate lock (gate-lock --light-path).
 set -u
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 B="$REPO/plugins/seyag/bin"
@@ -190,6 +191,48 @@ out=$(SYG_GATE_SANDBOX_REPO="$N" "$B/gate-sandbox" "$L" -- true 2>&1); rc=$?
 [ $rc = 125 ] && [[ $out == *"worker-tree-check refused"* ]] \
   && ok "G3c: linked worktree of M refused when SYG_GATE_SANDBOX_REPO names another repo N (exit 125)" \
   || bad "G3c wrong repo anchor: rc=$rc out=[$out]"
+
+# G7. Worker profile binds both the heavy lock and the light lock (gate-lock --light-path -> /run/worker/gate.light.lock),
+# and exits 125 when the light lock cannot be created.
+mkdir -p "$T/g7-stub" "$T/g7-scratch"
+cat >"$T/g7-stub/bwrap" <<'EOF'
+#!/bin/sh
+if [ "${1:-}" = --help ]; then echo "usage: bwrap --size BYTES"; exit 0; fi
+printf '%s\n' "$@"
+exit 0
+EOF
+cat >"$T/g7-stub/pasta" <<'EOF'
+#!/bin/sh
+while [ $# -gt 0 ] && [ "$1" != -- ]; do shift; done
+[ "${1:-}" = -- ] && shift
+exec "$@"
+EOF
+cat >"$T/g7-stub/ip" <<'EOF'
+#!/bin/sh
+case "$*" in
+  "-o -4 route show table local type local") echo "local 127.0.0.1 dev lo table local scope host" ;;
+  "-o -6 route show table local type local"|"-o -4 route show table all"|"-o -6 route show table all") ;;
+  "route replace unreachable "*) ;;
+  *) exit 0 ;;
+esac
+EOF
+chmod +x "$T/g7-stub/bwrap" "$T/g7-stub/pasta" "$T/g7-stub/ip"
+g7_lock="$T/g7-gate.lock"
+g7_want_light=$(SYG_GATE_LOCK_FILE="$g7_lock" "$B/gate-lock" --light-path)
+g7_out=$(PATH="$T/g7-stub:$PATH" SYG_GATE_SANDBOX_PROFILE=worker SYG_GATE_SANDBOX_SCRATCH="$T/g7-scratch" \
+  SYG_GATE_LOCK_FILE="$g7_lock" "$B/gate-sandbox" "$R" -- true 2>&1)
+g7_rc=$?
+g7_bound_src=$(awk '$0 == "/run/worker/gate.light.lock" {print prev; exit} {prev=$0}' <<<"$g7_out")
+mkdir -p "$T/g7-bad.light.lock"
+g7_bad_out=$(PATH="$T/g7-stub:$PATH" SYG_GATE_SANDBOX_PROFILE=worker SYG_GATE_SANDBOX_SCRATCH="$T/g7-scratch" \
+  SYG_GATE_LOCK_FILE="$T/g7-bad.lock" "$B/gate-sandbox" "$R" -- true 2>&1)
+g7_bad_rc=$?
+if [ "$g7_rc" = 0 ] && [ -n "$g7_want_light" ] && [ -f "$g7_want_light" ] \
+  && [ "$g7_bound_src" = "$g7_want_light" ] && [ "$g7_bad_rc" = 125 ]; then
+  ok "G7: worker profile creates and binds gate-lock --light-path to /run/worker/gate.light.lock (125 if unopenable)"
+else
+  bad "G7 worker light lock: rc=$g7_rc want=[$g7_want_light] bound=[$g7_bound_src] bad_rc=$g7_bad_rc bad_out=[$g7_bad_out]"
+fi
 
 # The rest need a real sandbox.
 # shellcheck source=tests/sandbox-capable.sh

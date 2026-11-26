@@ -5,7 +5,8 @@
 # SYG_LONG_JOB_CMD chain refusals/warnings, the SYG_LONG_JOB_AS marker display name (message
 # prefix, hints, ended sentinel; empty, invalid or unset keeps long-job), --slice and
 # -p/--property forwarding (CPUWeight/StartupCPUWeight/CPUQuota dropped under --heavy), --wait-mem
-# gate forwarding, --heavy (gate lock, memory and load waits, nested lock), missing lib/owner.sh,
+# gate forwarding, --heavy (gate lock with label=long-job <NAME> in the lock record, memory and load
+# waits, nested lock), missing lib/owner.sh,
 # and real transient user units when a user systemd manager is available (explicit SKIP count
 # otherwise).
 # Usage: tests/long-job.probe.sh   (from anywhere)
@@ -186,11 +187,32 @@ out=$(timeout 5 env SYG_GATE_LOCK_FILE="$tmp/gl" SYG_LONG_JOB_LOAD_GATE="$tmp/lo
   && grep -qxF -- "--setenv=SYG_LOAD_GATE_1M=7" "$tmp/argv" \
   && grep -qxF -- "--lock" "$tmp/argv" && grep -qxF -- "$GL" "$tmp/argv" \
   && grep -qxF -- "$XDG_STATE_HOME/long-job/hv-job@gate.lock" "$tmp/argv" \
+  && grep -qxF -- "long-job hv-job" "$tmp/argv" \
   && grep -qxF -- "--gate" "$tmp/argv" && grep -qxF -- "900" "$tmp/argv" \
   && grep -qxF -- "--load" "$tmp/argv" && grep -qxF -- "$tmp/load-gate-stub" "$tmp/argv" \
   && grep -qF "queues for the gate lock, then waits for 2048 MB of memory (up to 900 s), then for the CPU load (load-gate)" <<<"$out" \
-  && ok "run --heavy locks, defaults --wait-mem to 900, loads the load-gate and forwards the lock file and load limits" \
+  && ok "run --heavy locks (with label long-job NAME), defaults --wait-mem to 900, loads the load-gate and forwards the lock file and load limits" \
   || bad "run --heavy defaults (rc=$rc, out=[$out], argv=$(av))"
+
+# S1b: --heavy's lock record carries label=long-job <NAME>, and CMD does not see SYG_GATE_LOCK_LABEL.
+mkdir -p "$tmp/stub-exec"
+cat >"$tmp/stub-exec/systemd-run" <<'EOF'
+#!/bin/sh
+while [ $# -gt 0 ] && [ "$1" != -- ]; do shift; done
+[ "${1:-}" = -- ] && shift
+"$@" >/dev/null 2>&1
+EOF
+cp "$tmp/stub-rec/systemctl" "$tmp/stub-exec/systemctl"
+chmod +x "$tmp/stub-exec/systemd-run" "$tmp/stub-exec/systemctl"
+timeout 5 env SYG_GATE_LOCK_FILE="$tmp/hv-rec.lock" SYG_LONG_JOB_LOAD_GATE='' PATH="$tmp/stub-exec:$PATH" \
+  "$LJ" run hv-rec --heavy --min-mb 0 --no-inhibit -- \
+  bash -c 'cp "$1" "$2"; printf "%s\n" "${SYG_GATE_LOCK_LABEL-unset}" >"$3"' _ "$tmp/hv-rec.lock" "$tmp/hv-rec.record" "$tmp/hv-rec.lbl" >/dev/null 2>&1
+if grep -qxF "label=long-job hv-rec" "$tmp/hv-rec.record" 2>/dev/null \
+  && [ "$(cat "$tmp/hv-rec.lbl" 2>/dev/null)" = unset ]; then
+  ok "run --heavy writes label=long-job <NAME> into the lock record and unsets SYG_GATE_LOCK_LABEL for CMD"
+else
+  bad "run --heavy lock record label (rec=[$(cat "$tmp/hv-rec.record" 2>/dev/null)] lbl=[$(cat "$tmp/hv-rec.lbl" 2>/dev/null)])"
+fi
 
 # S2: --heavy --min-mb 0 skips the memory wait but keeps the lock.
 rm -f "$tmp/argv"
@@ -528,13 +550,18 @@ l_lock=$(lineno "$LJS/$p-heavymem.log" "holding the gate lock"); l_mem=$(lineno 
 timeout 10 systemctl --user stop "long-job-$p-heavymem.service" 2>/dev/null
 unset SYG_MEM_GATE_MEMINFO
 
-# D: a gate-lock call inside the job takes the per-job lock instead of waiting on the job's own.
-timeout 10 "$LJ" run "$p-heavy" --heavy --min-mb 0 --no-inhibit -- bash -c 'exec "$1" echo nested-ran' _ "$REPO/plugins/seyag/bin/gate-lock" >/dev/null 2>&1; rc=$?
+# D: a gate-lock call inside the job takes the per-job lock instead of waiting on the job's own,
+# and the outer lock record carries label=long-job <NAME> while CMD sees SYG_GATE_LOCK_LABEL unset.
+timeout 10 "$LJ" run "$p-heavy" --heavy --min-mb 0 --no-inhibit -- bash -c 'cp "$2" "$3"; printf "lbl=%s\n" "${SYG_GATE_LOCK_LABEL-unset}" >"$4"; exec "$1" echo nested-ran' _ "$REPO/plugins/seyag/bin/gate-lock" "$SYG_GATE_LOCK_FILE" "$tmp/heavy-record" "$tmp/heavy-lbl" >/dev/null 2>&1; rc=$?
 out=$(timeout 25 "$LJ" wait "$p-heavy" --interval 1 --timeout 20 --owner ""); wrc=$?
 grep -qx "nested-ran" "$LJS/$p-heavy.log" 2>/dev/null \
   && [ "$rc" = 0 ] && [ "$wrc" = 0 ] \
   && ok "a gate-lock call inside a --heavy job does not deadlock on the job's own lock" \
   || bad "heavy nested gate-lock (rc=$rc, wait=$wrc, out=$out, log=$(tr '\n' '|' <"$LJS/$p-heavy.log" 2>/dev/null))"
+grep -qxF "label=long-job $p-heavy" "$tmp/heavy-record" 2>/dev/null \
+  && [ "$(cat "$tmp/heavy-lbl" 2>/dev/null)" = "lbl=unset" ] \
+  && ok "real --heavy unit's lock record carries label=long-job <NAME> and CMD does not see SYG_GATE_LOCK_LABEL" \
+  || bad "real --heavy lock record label (rec=[$(cat "$tmp/heavy-record" 2>/dev/null)] lbl=[$(cat "$tmp/heavy-lbl" 2>/dev/null)])"
 # A deadlocked job would hold the gate lock for the cases below: release it.
 timeout 10 systemctl --user stop "long-job-$p-heavy.service" 2>/dev/null
 
