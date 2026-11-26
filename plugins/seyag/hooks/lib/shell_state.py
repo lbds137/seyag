@@ -486,6 +486,7 @@ def walk(text, depth, state, ctx, run_command, *, skip_single_quoted_spans=False
             elif scan_text[s - 2 : s] == "$(":
                 opener = s - 2
             else:
+                # An unclassified opener is kept (walked), which fails closed; do not "fix" into a skip.
                 opener = -1
             if opener >= 0 and any(o < opener < c - 1 for o, c in sq_regions):
                 continue

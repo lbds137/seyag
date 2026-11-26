@@ -1207,7 +1207,14 @@ _BACKLOG_ZONE = re.compile(
 )
 _ZONE_END = re.compile(r"[;&|\n)]")
 _FUNC_OR_ALIAS = re.compile(
-    r"\(\s*\)|(?<![\w.-])(?:function|alias)(?![\w.-])|\$_(?![A-Za-z0-9_])|\$\{_\}"
+    r"\(\s*\)|(?<![\w.-])(?:function|alias)(?![\w.-])"
+)
+# Deliberate fail-closed reads on the raw text (`$_` expands inside `"…"` and
+# `$(…)`): `$_` carries the previous command's last argument (a discounted
+# backlog-title word), `${!x}` can read `_` indirectly, and `$0`, `$BASH` and
+# `$SHELL` expand to a shell. Over-blocking `'$_'` only restores pre-TASK-191.
+_SHELL_VALUE_READ = re.compile(
+    r"\$\{?(?:_|0|BASH|SHELL)(?![A-Za-z0-9_])|\$\{!"
 )
 
 
@@ -1240,13 +1247,16 @@ def prose_skip_safe(text):
     A shell word or `<<` inside a quoted argument of a `backlog … task create|edit` or
     `draft promote` command (the command running up to the next unquoted `;`, `&`, `|`, `)` or
     newline) no longer sends the scan to extract-everything; every other occurrence is honoured
-    as before. A command that defines a function or alias, or reads `$_`, keeps the old
+    as before. A command that defines a function or alias, or reads `$_`, `$0`, `$BASH`,
+    `$SHELL` (any form, even as literal text inside single quotes) or a `${!…}` indirection, keeps the old
     behaviour. A shell word outside a backlog argument still catches what it caught before;
     one inside a backlog argument no longer arms the catch for a wrapper the scanner does not
-    know (`$SHELL -c '…'`, `source`, `flock -c`; an accepted gap in the guard's header)."""
+    know (`source`, `flock -c`; an accepted gap in the guard's header)."""
     try:
         regions = _quoted_regions(text)
         if regions is None:
+            return False
+        if _SHELL_VALUE_READ.search(text):
             return False
         fully = list(text)
         for o, c in regions:
@@ -1266,6 +1276,7 @@ def prose_skip_safe(text):
                 for i in range(o, c):
                     blanked[i] = " "
         for start, end, _ in substitution_span_offsets(text):
+            # A wrong opener only fails to restore the span, so the gate over-arms (the safe direction).
             opener = start - 1 if text[start - 1] == "`" else start - 2
             if any(o < opener < c - 1 for o, c in sq_regions):
                 continue
