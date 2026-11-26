@@ -9,7 +9,7 @@ All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY
 - **gate-lock:** a light class (`SYG_GATE_LOCK_CLASS=light` with `SYG_GATE_LOCK_PEAK_MB`): light gates queue on a derived light lock, not behind heavy suites, and start only when MemAvailable >= floor + peak (`SYG_GATE_LOCK_MEM_WAIT_S`, default 900 s, then exit 125); `gate-lock --light-path` prints its path, and worker sandboxes bind it (#449)
 
 ### Bug Fixes
-- **gate-sandbox:** the worker profile exits 125 when the tun device is missing or cannot be opened read-write, instead of hanging in pasta with no child (test seam `SYG_GATE_SANDBOX_TUN`; TASK-252) (#PR)
+- **gate-sandbox:** the worker profile exits 125 when the tun device is missing or cannot be opened read-write, instead of hanging in pasta with no child (test seam `SYG_GATE_SANDBOX_TUN`; TASK-252) (#450)
 
 ### Improvements
 - **shellcheck-gate:** runs on the light lock (`SYG_SHELLCHECK_PEAK_MB`, default 874) and passes `-x` to every chunk, so a sourced file in another chunk is still followed (TASK-186) (#449)
