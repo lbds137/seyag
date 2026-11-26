@@ -1,9 +1,11 @@
 ---
 id: TASK-252
 title: gate-sandbox worker hangs when /dev/net/tun is not read-writable
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - Seyag
 created_date: '2026-11-26T14:18:00Z'
+updated_date: '2026-11-26T21:31:00Z'
 labels:
   - gate-sandbox
   - bug
