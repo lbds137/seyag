@@ -39,8 +39,18 @@
 # publish-gate — `cd X && backlog …`, newlines, `bash -c '…'` and `$(…)`
 # included; the store is looked up per command by walking up from that
 # command's effective cwd (state.cwd) to the first directory holding
-# backlog/config.yml (stop at /). No store, or an unresolvable (None/relative)
-# cwd, allows the command. Block if any walked world yields a violation.
+# backlog/config.yml (stop at /). A `$(…)`/backtick span opening inside single
+# quotes is prose and is not walked when `shell_quotes.prose_skip_safe` holds,
+# decided once per command. Its rule: a shell word or `<<` inside a quoted
+# argument of a `backlog … task create|edit` or `draft promote` command (the
+# command running up to the next unquoted `;`, `&`, `|`, `)` or newline) no
+# longer sends the scan to extract-everything; every other occurrence is
+# honoured as before. A command that defines a function or alias, or reads
+# `$_`, keeps the old behaviour. A shell word outside a backlog argument still
+# catches what it caught before; one inside a backlog argument no longer
+# arms the catch for a wrapper the scanner does not know (accepted gap below).
+# No store, or an unresolvable (None/relative) cwd, allows the command.
+# Block if any walked world yields a violation.
 #
 # ACTIVATION: the session env SYG_TRACKING_SURFACE must equal backlog-md (the
 # project's backlog.md opt-in pin in .claude/settings.json env); anything else
@@ -63,6 +73,18 @@
 #   - a `task create`/`task edit` with any argument word starting with $ (`"$@"`,
 #     `$A`, `"${args[@]}"`, `$1`) is never judged: the expansion may carry
 #     --priority (a word merely containing $ later, like "costs $5", is judged);
+#   - a variable-held program (`B=…/backlog; $B task create …`) is never judged
+#     (TASK-196);
+#   - single-quoted text piped into a shell (`printf %s '…backlog task create…' | bash`)
+#     is not judged (TASK-196 notes);
+#   - a single-quoted `$(…)` create run by a wrapper the scanner does not know
+#     (`$SHELL -c '…'`, `source /dev/stdin <<< '…'`, `flock F -c '…'`) is not
+#     judged; before TASK-191 it was judged only when a shell word sat elsewhere
+#     in the command, and a shell word inside a backlog argument no longer counts
+#     (TASK-196 notes);
+#   - over-block: a shell word or `<<` outside a backlog argument (`python3 -c
+#     '…bash…'`, `echo 'bash runs'`) still makes quoted prose elsewhere in the
+#     command judged, as before TASK-191;
 #   - the CLI's MCP/browser surfaces.
 #
 # Fixture check: run hooks/backlog-priority-guard.probe.sh after ANY edit.
@@ -97,7 +119,7 @@ import sys
 
 # An import failure exits non-zero, which the caller treats as allow (fail-open).
 sys.path.insert(0, os.environ["HOOK_LIB"])
-from shell_quotes import strip_redirections, unwrap_runners
+from shell_quotes import prose_skip_safe, strip_redirections, unwrap_runners
 from shell_state import State, apply_dir_builtin, resolve_cd, walk
 
 cmd = os.fsdecode(open(3, "rb").read()).removesuffix("\n")
@@ -352,7 +374,10 @@ def run_command(argv, state, ctx):
 
 
 ctx = Context()
-walk(cmd, 0, State(payload_cwd, payload_cwd=payload_cwd), ctx, run_command)
+# Decided once on the whole command; nested and leftover walks inherit it.
+prose_gate = prose_skip_safe(cmd)
+walk(cmd, 0, State(payload_cwd, payload_cwd=payload_cwd), ctx, run_command,
+     skip_single_quoted_spans=prose_gate)
 
 # A substitution span the walk couldn't place at a command (its text doesn't
 # survive into any word as written) is judged against EVERY state the text
@@ -366,7 +391,8 @@ while ctx.leftovers:
         continue
     done.add((span, depth))
     for cwd, env in states:
-        walk(span, depth, State(cwd, dict(env), payload_cwd), ctx, run_command)
+        walk(span, depth, State(cwd, dict(env), payload_cwd), ctx, run_command,
+             skip_single_quoted_spans=prose_gate)
 
 if not ctx.lines:
     sys.exit(0)

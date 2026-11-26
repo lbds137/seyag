@@ -1188,6 +1188,96 @@ def substitution_span_offsets(text, regions=None):
     return _extract_spans(text, skip_single_quoted=False, regions=regions)
 
 
+def single_quoted_regions(text):
+    """Return `(open, close)` offsets of every closed single-quoted region in
+    `text` that the bash-words scanner `_scan` reports (`open` = the opening `'`,
+    `close` = one past the closing `'`). Built on `_scan`, which models
+    word-start `#` comments, `'"'"'` quote splices and backtick spans. ANSI-C
+    `$'…'` regions are excluded on purpose (the over-arm direction)."""
+    return [
+        (pos, pos + 1 + len(payload) + 1)
+        for kind, payload, pos, _ctx in _scan(text)
+        if kind == "quoted" and text[pos] == "'" and (pos == 0 or text[pos - 1] != "$")
+    ]
+
+
+_BACKLOG_ZONE = re.compile(
+    r"(?:^|(?<=[\s;&|(]))(?:npx\s+)?(?:\S*/)?(?:backlog|\$\{?[A-Za-z_][A-Za-z0-9_]*\}?)"
+    r"\s+(?:task\s+(?:create|edit)|draft\s+promote)\b"
+)
+_ZONE_END = re.compile(r"[;&|\n)]")
+_FUNC_OR_ALIAS = re.compile(
+    r"\(\s*\)|(?<![\w.-])(?:function|alias)(?![\w.-])|\$_(?![A-Za-z0-9_])|\$\{_\}"
+)
+
+
+def _quoted_regions(text):
+    """Return `(open, close)` offsets of every single- or double-quoted region
+    `_scan(text)` emits (ANSI-C `$'…'` and `$"…"` excluded), with `close` taken
+    from the next event's `pos` (or `len(text)`), or `None` if any region does
+    not end on its opening quote character."""
+    events = list(_scan(text))
+    regions = []
+    for idx, (kind, _payload, pos, _ctx) in enumerate(events):
+        quote = text[pos]
+        if (
+            kind != "quoted"
+            or quote not in "'\""
+            or (pos > 0 and text[pos - 1] == "$")
+        ):
+            continue
+        close = events[idx + 1][2] if idx + 1 < len(events) else len(text)
+        if text[close - 1] != quote:
+            return None
+        regions.append((pos, close))
+    return regions
+
+
+def prose_skip_safe(text):
+    """Gate for `shell_state.walk`'s `skip_single_quoted_spans` drop; any
+    exception or unexpected scanner shape returns False (fail closed).
+
+    A shell word or `<<` inside a quoted argument of a `backlog … task create|edit` or
+    `draft promote` command (the command running up to the next unquoted `;`, `&`, `|`, `)` or
+    newline) no longer sends the scan to extract-everything; every other occurrence is honoured
+    as before. A command that defines a function or alias, or reads `$_`, keeps the old
+    behaviour. A shell word outside a backlog argument still catches what it caught before;
+    one inside a backlog argument no longer arms the catch for a wrapper the scanner does not
+    know (`$SHELL -c '…'`, `source`, `flock -c`; an accepted gap in the guard's header)."""
+    try:
+        regions = _quoted_regions(text)
+        if regions is None:
+            return False
+        fully = list(text)
+        for o, c in regions:
+            for i in range(o, c):
+                fully[i] = " "
+        fully = "".join(fully)
+        if _FUNC_OR_ALIAS.search(fully):
+            return False
+        zones = []
+        for m in _BACKLOG_ZONE.finditer(fully):
+            e = _ZONE_END.search(fully, m.end())
+            zones.append((m.start(), e.start() if e else len(text)))
+        sq_regions = single_quoted_regions(text)
+        blanked = list(text)
+        for o, c in regions:
+            if any(zs <= o < ze for zs, ze in zones):
+                for i in range(o, c):
+                    blanked[i] = " "
+        for start, end, _ in substitution_span_offsets(text):
+            opener = start - 1 if text[start - 1] == "`" else start - 2
+            if any(o < opener < c - 1 for o, c in sq_regions):
+                continue
+            stop = len(text) if end is None else end + 1
+            for i in range(max(opener, 0), stop):
+                if i < len(text):
+                    blanked[i] = text[i]
+        return not _SKIP_UNSAFE_TEXT.search("".join(blanked))
+    except Exception:
+        return False
+
+
 # Constructs the single-quote skip cannot model. Any match anywhere in the text
 # turns the skip off for the WHOLE text, which restores extract-everything:
 #

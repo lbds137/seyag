@@ -2,6 +2,19 @@
 
 All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY-MM-DD>` section per released version; under it, `###` categories in fixed order — Breaking Changes, Features, Bug Fixes, Improvements, Chores, Tests — empty ones omitted; items are `- **scope:** description (#PR)`, written from the version's merged commit subjects.
 
+## 0.3.230 - 2026-11-26
+
+### Breaking Changes
+- **long-job:** the runner name in messages, hints and the `ended` sentinel comes only from `SYG_LONG_JOB_AS`, which an exec wrapper sets (basename for messages, the whole value in command hints). Unset, it is `long-job`. This replaces the 0.3.227 rule that read the first word of `SYG_LONG_JOB_CMD`. **Wrapper contract:** an exec wrapper over `long-job` must set `SYG_LONG_JOB_AS` (TASK-177, #439).
+
+### Features
+- **backlog-lint:** a new bin that fails any To Do or In Progress backlog.md task file with no priority. It uses the same rule and knob as `backlog-priority-guard`, and closes the guard's file-state gaps (hand-edited frontmatter, `task restore`). Its probe also lints this repo's own store in CI (TASK-185, #441).
+
+### Bug Fixes
+- **long-job:** `-p StandardInput*` is refused by prefix. Under `--heavy`, the CPU-throttling `-p` properties (`CPUWeight`, `StartupCPUWeight`, `CPUShares`, `StartupCPUShares`, `CPUQuota`) are dropped with a note (TASK-177, #439).
+- **claude-role:** `--list` parses every role file in one awk pass (about 14× faster at load 25; output unchanged), so privacy pre-checks under short timeouts stop failing closed on a loaded machine. An unreadable or dangling role file is skipped with a note instead of cutting off the list (TASK-178, #440).
+- **backlog-priority-guard:** A shell word or `<<` inside a quoted argument of a `backlog … task create|edit` or `draft promote` command (the command running up to the next unquoted `;`, `&`, `|`, `)` or newline) no longer sends the scan to extract-everything; every other occurrence is honoured as before. A command that defines a function or alias, or reads `$_`, keeps the old behaviour. A shell word outside a backlog argument still catches what it caught before. New accepted gap: a single-quoted `$(…)` create run by a wrapper the scanner does not know (`$SHELL -c '…'`, `source /dev/stdin <<< '…'`, `flock F -c '…'`) was judged before only when a shell word sat elsewhere in the command, and a shell word inside a backlog argument no longer counts (TASK-196 notes). Also, a shell word outside a backlog argument (`python3 -c '…bash…'`) still over-blocks as before. The fix is a new keyword-only `walk(..., skip_single_quoted_spans=True)` opt-in, gated on `shell_quotes.prose_skip_safe()`, decided once per command and built on `shell_quotes.single_quoted_regions()`. Other walk callers keep the fail-closed default (TASK-191).
+
 ## 0.3.229 - 2026-11-25
 
 ### Features
