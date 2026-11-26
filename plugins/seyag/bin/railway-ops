@@ -7,7 +7,7 @@ Usage:
   railway-ops [--config FILE] vars list   <env> (--service S | --shared)
   railway-ops [--config FILE] vars set    <env> (--service S | --shared) NAME (--from-env VAR | --from-stdin) [WRITE]
   railway-ops [--config FILE] vars delete <env> (--service S | --shared) NAME [WRITE]
-  railway-ops [--config FILE] redeploy <env> <service> [WRITE]
+  railway-ops [--config FILE] redeploy <env> <service> [--rebuild] [WRITE]
   railway-ops [--config FILE] rotate-secret <env> NAME [--length N] [WRITE]
   railway-ops [--config FILE] logs <env> [<service>] [--lines N] [--grep RE] [--deployment ID]
 
@@ -22,11 +22,16 @@ Verbs:
   vars set       upsert one variable with skipDeploys, then print which services need a redeploy
                  (no automatic redeploy). The value comes only from an env var or stdin, never argv.
   vars delete    delete one variable (the railway CLI cannot).
-  redeploy       GraphQL serviceInstanceRedeploy with explicitly resolved environment and service
-                 ids; never the CLI's `railway redeploy`, which acts on the LINKED environment.
+  redeploy       reuse the live image: GraphQL deploymentRedeploy of serviceInstance.latestDeployment
+                 with usePreviousImageTag, which skips the build and takes the current variables;
+                 refused unless that deployment is SUCCESS. --rebuild instead calls
+                 serviceInstanceRedeploy, which builds the branch HEAD. Explicitly resolved ids;
+                 never the CLI's `railway redeploy`, which acts on the LINKED environment.
   rotate-secret  rotate an EXISTING shared variable: generate a value (secrets.token_urlsafe of
                  --length random bytes, default 32), upsert it to the shared tier with skipDeploys,
-                 then redeploy each service that carries NAME. Refuses when no service carries it.
+                 then redeploy (reusing the image) each service that carries NAME; refused before
+                 any write unless every carrier's latest deployment is SUCCESS. Refuses when no
+                 service carries it.
   logs           `railway logs` with explicit --environment and --service; --lines is capped at
                  5000 (above it the CLI returns zero rows); --grep is a Python regex applied locally.
                  With no <service>, sweeps the config's "services" list.
@@ -93,6 +98,18 @@ VARIABLE_UPSERT_MUTATION = """
 VARIABLE_DELETE_MUTATION = """
   mutation VariableDelete($input: VariableDeleteInput!) {
     variableDelete(input: $input)
+  }
+"""
+SERVICE_INSTANCE_DEPLOYMENT_QUERY = """
+  query ServiceInstanceDeployment($environmentId: String!, $serviceId: String!) {
+    serviceInstance(environmentId: $environmentId, serviceId: $serviceId) {
+      latestDeployment { id status meta }
+    }
+  }
+"""
+DEPLOYMENT_REDEPLOY_MUTATION = """
+  mutation DeploymentRedeploy($id: String!, $usePreviousImageTag: Boolean) {
+    deploymentRedeploy(id: $id, usePreviousImageTag: $usePreviousImageTag) { id }
   }
 """
 SERVICE_INSTANCE_REDEPLOY_MUTATION = """
@@ -430,7 +447,57 @@ def delete(cfg, short, ids, service_id, name):
         raise OpsError(f'Railway rejected the delete for variable "{name}"')
 
 
-def redeploy_service(cfg, short, environment_id, service_id, service_name):
+def latest_deployment(cfg, short, environment_id, service_id):
+    data = gql(cfg, short, SERVICE_INSTANCE_DEPLOYMENT_QUERY,
+               {"environmentId": environment_id, "serviceId": service_id})
+    if not isinstance(data, dict) or not isinstance(data.get("serviceInstance"), dict):
+        raise shape_error("service-instance-deployment")
+    si = data["serviceInstance"]
+    if "latestDeployment" not in si:
+        raise shape_error("service-instance-deployment")
+    dep = si["latestDeployment"]
+    if dep is None:
+        return None
+    if (not isinstance(dep, dict)
+            or not isinstance(dep.get("id"), str)
+            or not isinstance(dep.get("status"), str)):
+        raise shape_error("service-instance-deployment")
+    meta = dep.get("meta")
+    commit = (meta.get("commitHash")
+              if isinstance(meta, dict) and isinstance(meta.get("commitHash"), str)
+              else None)
+    return {"id": dep["id"], "status": dep["status"], "commit": commit}
+
+
+def live_refusal(service_name, env_label, dep):
+    if dep is not None and dep["status"] == "SUCCESS":
+        return None
+    if dep is None:
+        return (f'service "{service_name}" in Railway {env_label} has no latest deployment; '
+                "nothing was changed. Deploy it once (or pass --rebuild to build the branch HEAD).")
+    if dep["status"] == "SLEEPING":
+        return (f'service "{service_name}" in Railway {env_label}: its latest deployment is SLEEPING '
+                "(serverless sleep), not SUCCESS; nothing was changed. Wake it with one request, "
+                "wait for SUCCESS, then re-run (or pass --rebuild).")
+    return (f'service "{service_name}" in Railway {env_label}: its latest deployment is {dep["status"]}, '
+            "not SUCCESS; nothing was changed. Wait for it to settle (or fix it), then re-run "
+            "(or pass --rebuild to build the branch HEAD instead).")
+
+
+def redeploy_reusing_image(cfg, short, environment_id, service_id, service_name, env_label):
+    dep = latest_deployment(cfg, short, environment_id, service_id)
+    refusal = live_refusal(service_name, env_label, dep)
+    if refusal is not None:
+        raise UsageError(refusal)
+    data = gql(cfg, short, DEPLOYMENT_REDEPLOY_MUTATION,
+               {"id": dep["id"], "usePreviousImageTag": True})
+    res = data.get("deploymentRedeploy") if isinstance(data, dict) else None
+    if not isinstance(res, dict) or not isinstance(res.get("id"), str):
+        raise shape_error("deployment-redeploy")
+    return dep, res["id"]
+
+
+def rebuild_service(cfg, short, environment_id, service_id, service_name):
     data = gql(cfg, short, SERVICE_INSTANCE_REDEPLOY_MUTATION,
                {"environmentId": environment_id, "serviceId": service_id})
     if not isinstance(data, dict) or not isinstance(data.get("serviceInstanceRedeploy"), bool):
@@ -548,7 +615,7 @@ def cmd_vars_set(cfg, args):
                   f"railway-ops vars list {args.env} --service <S>, then redeploy the ones that carry it.")
             return 0
     if need:
-        print("Redeploy needed for the new value to take effect: " + ", ".join(need))
+        print("Redeploy needed for the new value to take effect (reuses the running image): " + ", ".join(need))
         for s in need:
             print(f"  railway-ops redeploy {args.env} {s} --yes"
                   + confirm_suffix(cfg, args.env))
@@ -579,15 +646,26 @@ def cmd_redeploy(cfg, args):
     if args.yes:
         require_token(cfg, args.env)
     ids = resolve(cfg, args.env, args.service)
+    if args.rebuild:
+        via = "Via: GraphQL serviceInstanceRedeploy with these explicit ids (rebuilds the branch HEAD; not the CLI's linked env)"
+    else:
+        via = "Via: GraphQL deploymentRedeploy of the latest deployment with usePreviousImageTag (no build; checked SUCCESS at --yes)"
     print_head(f'About to redeploy service "{args.service}"', ids,
                [f"Service: {args.service} ({ids['serviceId']})",
                 token_line(cfg, args.env),
-                "Via: GraphQL serviceInstanceRedeploy with these explicit ids (not the CLI's linked env)"])
+                via])
     if not args.yes:
         dry_run_footer(args.env, cfg)
         return 0
-    redeploy_service(cfg, args.env, ids["environmentId"], ids["serviceId"], args.service)
-    print(f'\nRedeploy requested for "{args.service}" in Railway {ids["envName"]}.')
+    if args.rebuild:
+        rebuild_service(cfg, args.env, ids["environmentId"], ids["serviceId"], args.service)
+        print(f'\nRedeploy requested for "{args.service}" in Railway {ids["envName"]}.')
+    else:
+        dep, new_id = redeploy_reusing_image(
+            cfg, args.env, ids["environmentId"], ids["serviceId"], args.service, ids["envName"])
+        commit = dep["commit"][:9] if dep["commit"] else "unknown"
+        print(f'\nRedeploy requested for "{args.service}" in Railway {ids["envName"]}: '
+              f'new deployment {new_id} reuses the image of {dep["id"]} (commit {commit}; no build).')
     return 0
 
 
@@ -602,10 +680,21 @@ def cmd_rotate(cfg, args):
         raise UsageError(f'"{args.name}" is not a shared (project-level) variable in Railway {ids["envName"]}; '
                          "rotate-secret ROTATES an existing shared variable, it does not create one.")
     affected = carrying_services(cfg, args.env, ids, args.name)
+    live_lines, refusals = [], []
+    for svc in affected:
+        dep = latest_deployment(cfg, args.env, ids["environmentId"], svc["id"])
+        if dep is None:
+            live_lines.append(f'Live deployment {svc["name"]}: (none)')
+        else:
+            live_lines.append(f'Live deployment {svc["name"]}: {dep["status"]} {dep["id"]}')
+        ref = live_refusal(svc["name"], ids["envName"], dep)
+        if ref is not None:
+            refusals.append(ref)
     print_head(f'About to rotate Railway variable "{args.name}"', ids,
                ["Tier: shared (project-level)",
                 f"New value: token_urlsafe({args.length}) (never printed)",
                 "Affected services (carry the name): " + (", ".join(s["name"] for s in affected) or "(none)"),
+                *live_lines,
                 "Note: a service-level override also carries the name and keeps its own value."])
     if not affected:
         msg = (f'No service in Railway {ids["envName"]} carries "{args.name}"; rotating it now would change '
@@ -615,6 +704,14 @@ def cmd_rotate(cfg, args):
             print("\n[DRY RUN] No changes made.")
             return 0
         raise UsageError(msg)
+    if refusals:
+        if not args.yes:
+            print("\nA real run would REFUSE:")
+            for r in refusals:
+                print(f"  {r}")
+            print("\n[DRY RUN] No changes made.")
+            return 0
+        raise UsageError("; ".join(refusals))
     if not args.yes:
         dry_run_footer(args.env, cfg)
         return 0
@@ -627,9 +724,9 @@ def cmd_rotate(cfg, args):
     failures, done = [], []
     for svc in affected:
         try:
-            redeploy_service(cfg, args.env, ids["environmentId"], svc["id"], svc["name"])
+            redeploy_reusing_image(cfg, args.env, ids["environmentId"], svc["id"], svc["name"], ids["envName"])
             done.append(svc["name"])
-        except OpsError as e:
+        except (OpsError, UsageError) as e:
             failures.append((svc["name"], str(e)))
         except Exception as e:  # after a good upsert, any failure takes the partial-failure path
             failures.append((svc["name"], f"unexpected {type(e).__name__}"))
@@ -763,6 +860,8 @@ def build_parser():
     p = sub.add_parser("redeploy", help="redeploy one service by explicit ids")
     p.add_argument("env")
     p.add_argument("service")
+    p.add_argument("--rebuild", action="store_true",
+                   help="build the branch HEAD (serviceInstanceRedeploy) instead of reusing the live image")
     add_write_flags(p)
     p.set_defaults(fn=cmd_redeploy)
 
