@@ -71,6 +71,7 @@ if [ "$class" = light ]; then
   min_mb=${SYG_MEM_GATE_MIN_MB:-2048}
   case $min_mb in ''|*[!0-9]*) echo "gate-lock: invalid SYG_MEM_GATE_MIN_MB: $min_mb" >&2; exit 125 ;; esac
   min_mb=$((10#$min_mb))
+  bar_mb=$((min_mb + peak_mb))
   mem_wait_s=${SYG_GATE_LOCK_MEM_WAIT_S:-900}
   case $mem_wait_s in ''|*[!0-9]*) echo "gate-lock: invalid SYG_GATE_LOCK_MEM_WAIT_S: $mem_wait_s" >&2; exit 125 ;; esac
   mem_wait_s=$((10#$mem_wait_s))
@@ -101,7 +102,7 @@ base_of() {
 # Field N (N >= 3) of /proc/PID/stat, stripping through the last ') ' of comm first.
 stat_field() {
   local s
-  IFS= read -r s <"/proc/$1/stat" 2>/dev/null || return 1
+  IFS= read -r s 2>/dev/null <"/proc/$1/stat" || return 1
   local -a f
   read -r -a f <<<"${s##*\) }"
   printf '%s' "${f[$(( $2 - 3 ))]:-}"
@@ -136,32 +137,40 @@ open_fd_fallback() {
   local list='' count=0 p fd_path di p_ppid p_start p_cmd p_age_s
   local -A seen_p=()
   if [ -n "$target_di" ]; then
-    while read -r fd_path di; do
-      [ "$di" = "$target_di" ] || continue
-      p=${fd_path#/proc/}
-      p=${p%%/*}
-      [[ $p =~ ^[0-9]+$ ]] || continue
-      if [ "$p" = "$gl_pid" ] || [ "$p" = "${reporter:-}" ] || [ "$p" = "${BASHPID:-}" ]; then
-        continue
-      fi
-      [ -z "${seen_p[$p]+x}" ] || continue
-      seen_p[$p]=1
-      p_ppid=$(stat_field "$p" 4) || p_ppid=''
-      [ "$p_ppid" = "$gl_pid" ] && continue
-      p_cmd=''
-      IFS= read -r p_cmd <"/proc/$p/comm" 2>/dev/null || p_cmd='?'
-      p_cmd=$(sanitize_val "$p_cmd")
-      [ -n "$p_cmd" ] || p_cmd='?'
-      p_age_s=0
-      p_start=$(stat_field "$p" 22) || p_start=''
-      if [[ $up =~ ^[0-9]+$ ]] && [[ $p_start =~ ^[0-9]+$ ]]; then
-        p_age_s=$((10#$up - (10#$p_start / 100)))
-        [ "$p_age_s" -ge 0 ] || p_age_s=0
-      fi
-      list+="${list:+, }$p $p_cmd $(fmt_age "$p_age_s")"
-      count=$((count + 1))
-      [ "$count" -ge 5 ] && break
-    done < <("$st_bin" -L -c '%n %d:%i' /proc/[0-9]*/fd/* 2>/dev/null)
+    local ng=0
+    shopt -q nullglob && ng=1
+    shopt -s nullglob
+    local -a fds=(/proc/[0-9]*/fd/*)
+    [ "$ng" = 1 ] || shopt -u nullglob
+    # timeout 10 also bounds the post-acquire wait on an in-flight reporter scan to ~10 s worst case.
+    if [ "${#fds[@]}" -gt 0 ]; then
+      while read -r fd_path di; do
+        [ "$di" = "$target_di" ] || continue
+        p=${fd_path#/proc/}
+        p=${p%%/*}
+        [[ $p =~ ^[0-9]+$ ]] || continue
+        if [ "$p" = "$gl_pid" ] || [ "$p" = "${reporter:-}" ] || [ "$p" = "${BASHPID:-}" ]; then
+          continue
+        fi
+        [ -z "${seen_p[$p]+x}" ] || continue
+        seen_p[$p]=1
+        p_ppid=$(stat_field "$p" 4) || p_ppid=''
+        [ "$p_ppid" = "$gl_pid" ] && continue
+        p_cmd=''
+        IFS= read -r p_cmd 2>/dev/null <"/proc/$p/comm" || continue
+        p_cmd=$(sanitize_val "$p_cmd")
+        [ -n "$p_cmd" ] || p_cmd='?'
+        p_age_s=0
+        p_start=$(stat_field "$p" 22) || p_start=''
+        if [[ $up =~ ^[0-9]+$ ]] && [[ $p_start =~ ^[0-9]+$ ]]; then
+          p_age_s=$((10#$up - (10#$p_start / 100)))
+          [ "$p_age_s" -ge 0 ] || p_age_s=0
+        fi
+        list+="${list:+, }$p $p_cmd $(fmt_age "$p_age_s")"
+        count=$((count + 1))
+        [ "$count" -ge 5 ] && break
+      done < <(printf '%s\0' "${fds[@]}" | timeout 10 xargs -0 -r "$st_bin" -L -c '%n %d:%i' 2>/dev/null)
+    fi
   fi
   printf 'holder or waiter; age includes queue time: %s' "${list:-none}"
 }
@@ -229,7 +238,7 @@ write_record() {
   my_start=$(stat_field "$gl_pid" 22) || my_start=''
   printf -v rec 'pid=%s\nstart=%s\npidns=%s\nsince=%s\nlabel=%s\ncmd=%s\ndir=%s\n' \
     "$gl_pid" "$my_start" "$my_pidns" "$(now_s)" "$(sanitize_val "${SYG_GATE_LOCK_LABEL:-}")" \
-    "$(base_of "$1")" "$(base_of "$PWD")"
+    "$(sanitize_val "$(base_of "$1")")" "$(sanitize_val "$(base_of "$PWD")")"
   held_record=1
   if ! printf '%s' "$rec" >"$lock" 2>/dev/null; then
     [ "$record_warned" = 1 ] || { echo "gate-lock: warning: cannot write holder record to $lock" >&2; record_warned=1; }
@@ -293,8 +302,6 @@ on_sig() {
   [ -z "$mem_sp" ] || kill "$mem_sp" 2>/dev/null
   if [ -n "$child" ]; then
     kill -TERM "$child" 2>/dev/null
-  else
-    clear_record
   fi
 }
 trap 'on_sig 15' TERM
@@ -307,8 +314,7 @@ if [ -n "$got" ]; then
   exit $((128 + got))
 fi
 
-if [ "$class" = light ] && [ "$min_mb" -gt 0 ]; then
-  bar_mb=$((min_mb + peak_mb))
+if [ "$class" = light ] && [ "$bar_mb" -gt 0 ]; then
   meminfo=${SYG_MEM_GATE_MEMINFO:-/proc/meminfo}
   avail_mb() {
     local k v _
