@@ -93,8 +93,47 @@ out=$(timeout 5 "$CHK" 'long-job run $N -- make && echo hi' 2>&1); rc=$?
 refuse "(long-job run x -- a)&&b refuses (no spaces)" '(long-job run x -- a)&&b'
 refuse "{ long-job run x -- foo; } && echo refuses (brace group)" '{ long-job run x -- foo; } && echo'
 refuse "x=\$(foo) long-job run x -- a && b refuses (x=\$(...) fold intact)" 'x=$(foo) long-job run x -- a && b'
-clean "x=\$(long-job run x -- a && b) folds \$(...) into one word (clean)" 'x=$(long-job run x -- a && b)'
+refuse "x=\$(long-job run x -- a && b) refuses (substitution interior)" 'x=$(long-job run x -- a && b)'
 clean "long-job run x -- make; echo hi is not refused (control)" 'long-job run x -- make; echo hi'
+
+# Substitution interiors are shell text of their own, plus the unquoted operators
+# after them (the $( ) waits only for the start); single-quoted prose is data.
+refuse "echo \"\$(long-job run x -- a && b)\" refuses (quoted substitution)" 'echo "$(long-job run x -- a && b)"'
+refuse "echo \`long-job run x -- a && b\` refuses (backtick)" 'echo `long-job run x -- a && b`'
+clean "echo '\$(long-job run x -- a && b)' is data (single-quoted prose)" "echo '\$(long-job run x -- a && b)'"
+wq="'\"'\"'"
+printf -v prose_ok 'source /etc/profile && eval '\''echo %s$(long-job run x -- a && b)%s'\'' && pwd -P >| /tmp/claude-cwd' "$wq" "$wq"
+clean "Bash-tool eval wrapper around single-quoted substitution prose is data" "$prose_ok"
+refuse "x=\$(long-job run x -- a) && b refuses (\$( ) waits only for the start)" 'x=$(long-job run x -- a) && b'
+refuse "cat <(long-job run x -- a && b) refuses (process substitution)" 'cat <(long-job run x -- a && b)'
+refuse "cat <(long-job run x -- a) && b refuses (procsub tail)" 'cat <(long-job run x -- a) && b'
+clean "cat <(long-job run x -- a; echo b) is clean (seq ends the interior)" 'cat <(long-job run x -- a; echo b)'
+clean "echo > >(long-job run x -- a; echo b) is clean (procsub seq)" 'echo > >(long-job run x -- a; echo b)'
+
+# Heredoc bodies are data; a shell reading its script from stdin runs them as code.
+clean "cat <<'EOF' body quoting a chain is clean" "$(printf 'cat <<'"'"'EOF'"'"'\nlong-job run x -- a && b\nEOF\n')"
+clean "cat <<EOF unquoted-delimiter body is clean" "$(printf 'cat <<EOF\nlong-job run x -- a && b\nEOF\n')"
+clean "cat <<-EOF tab-indented terminator body is clean" "$(printf 'cat <<-EOF\n\tlong-job run x -- a && b\n\tEOF\n')"
+clean "gh pr create --body-file - <<'EOF' body is clean" "$(printf 'gh pr create --body-file - <<'"'"'EOF'"'"'\nlong-job run x -- a && b\nEOF\n')"
+refuse "cat <<EOF | bash runs the body as code (stdin-shell)" "$(printf 'cat <<EOF | bash\nlong-job run x -- a && b\nEOF\n')"
+refuse "bash <<EOF runs the body as code (stdin-shell)" "$(printf 'bash <<EOF\nlong-job run x -- a && b\nEOF\n')"
+refuse "sh -s <<EOF runs the body as code (stdin-shell)" "$(printf 'sh -s <<EOF\nlong-job run x -- a && b\nEOF\n')"
+refuse "&& on the heredoc opener line still refuses" "$(printf "long-job run x -- a && b <<'EOF'\nbody\nEOF\n")"
+
+# Leading reserved words hide argv[0].
+refuse "if long-job run x -- a && b; then :; fi refuses" 'if long-job run x -- a && b; then :; fi'
+refuse "! long-job run x -- a && b refuses" '! long-job run x -- a && b'
+refuse "while long-job run x -- a && b; do :; done refuses" 'while long-job run x -- a && b; do :; done'
+refuse "for f in 1; do long-job run \$f -- a && b; done refuses (do)" 'for f in 1; do long-job run $f -- a && b; done'
+refuse "until long-job run x -- a && b; do :; done refuses" 'until long-job run x -- a && b; do :; done'
+clean "if long-job run x -- a; then b; fi is clean" 'if long-job run x -- a; then b; fi'
+
+# A quoted operator is an ordinary word, never an operator.
+clean "long-job run x -- grep \"&&\" f is clean (quoted operator)" 'long-job run x -- grep "&&" f'
+clean "long-job run x -- echo '||' ';' is clean (quoted operators)" "long-job run x -- echo '||' ';'"
+clean "long-job run x -- grep 'a&&b' f is clean (quoted operator glued to word)" "long-job run x -- grep 'a&&b' f"
+refuse "long-job run x -- grep 'a&&b' f && echo c refuses (real && after quoted operator)" \
+  "long-job run x -- grep 'a&&b' f && echo c"
 
 # Bash tool eval-wrapper shape: <wrapper> && eval '<user command>' && pwd -P >| /tmp/...
 q="'\"'\"'"
@@ -189,6 +228,34 @@ out=$(timeout 5 env SYG_LONG_JOB_CMD='other run' XDG_CONFIG_HOME="$tmp/cfg-cc" "
 [ "$rc" = 0 ] && [ -z "$out" ] \
   && ok "env SYG_LONG_JOB_CMD='other run' overrides config.toml so jobrun line is not refused" \
   || bad "env overrides config.toml syg_long_job_cmd (rc $rc: $out)"
+
+# Linear in the substitution count: 40 substitutions ahead of the chain must answer inside the timeout.
+many=$(printf 'echo $(date) %.0s' $(seq 40))
+refuse "40 substitutions then a chained job refuses in time" "$many; long-job run x -- a && b"
+clean "40 substitutions then a clean job is silent in time" "$many; long-job run x -- a"
+
+# 640 spans (about 9 KB): spans whose interior names no runner cost nothing.
+big=$(printf 'echo $(date) %.0s' $(seq 640))
+refuse "640 substitutions then a chained job refuses in time" "$big; long-job run x -- a && b"
+clean "640 substitutions then a clean job is silent in time" "$big; long-job run x -- a"
+bigq=$(printf 'echo "$(date) $(date)" %.0s' $(seq 640))
+refuse "640 quoted double substitutions then a chained job refuses in time" "$bigq; long-job run x -- a && b"
+
+# The refusal names the job as typed, not the quote-mask placeholders.
+out=$(timeout 5 "$CHK" "long-job run 'a;b' -- x && y" 2>&1); rc=$?
+[ "$rc" = 3 ] && grep -q "long-job run a;b" <<<"$out" \
+  && ok "refusal names a quoted job name unmasked (a;b)" || bad "unmasked name (rc $rc: $out)"
+
+# Nesting, substitution tails, groups and reserved words.
+refuse 'nested $( ) around a chained job refuses' 'echo $(echo $(long-job run x -- a)) && bar'
+refuse 'job then a quoted substitution then && refuses' 'echo $(long-job run x -- a) "$(date)" && b'
+refuse 'backtick job then $( ) then && refuses' 'echo `long-job run x -- a` $(date) && b'
+clean 'eval of a quoted && inside the job is silent' "eval 'long-job run x -- grep \"&&\" f'"
+refuse 'brace group around a chained job refuses' '{ long-job run x -- a && b; }'
+refuse 'time long-job run x -- a && b refuses' 'time long-job run x -- a && b'
+refuse 'elif condition with a chained job refuses' 'if true; then :; elif long-job run x -- a && b; then :; fi'
+refuse "quote-split runner name (lo''ng-job) still refuses" "lo''ng-job run x -- a && b"
+refuse 'quote-split runner inside a substitution refuses' "printf %s \"\$(lo''ng-job run x -- a)\" && echo done"
 
 echo "long-job-chain-check probe: $pass passed, $fail failed"
 [ "$fail" = 0 ]

@@ -1,11 +1,11 @@
 ---
 id: TASK-142
 title: Wire long-job-chain-check --hook as a toggleable plugin PreToolUse hook
-status: In Progress
+status: Done
 assignee:
   - Seyag
 created_date: '2026-11-24T17:52:00Z'
-updated_date: '2026-11-25T23:51:00Z'
+updated_date: '2026-11-26T03:31:00Z'
 labels:
   - extraction
   - hooks
@@ -30,4 +30,6 @@ Second known gap (#404 round-3 review): heredoc bodies are parsed as commands. I
 #404 final-review gaps (11-24): (1) `if long-job run … && …`, `while …` and `! long-job run … && …` are missed: shell keywords hide argv[0] from the chain check. (2) eval with several args re-joins the unquoted words, so the check sees a different argv than bash; note the limit in the docstring.
 
 Claimed by Seyag (lane A) 2026-11-25. Touches B-owned plugins/seyag/bin/long-job-chain-check and its shared probe tests/long-job-chain-check.probe.sh (B told by SendMessage); bin/long-job's parent-command check inherits the fixes.
+
+Shipped in 0.3.229: checker gaps fixed, hook long-job-chain-guard wired (component long-job-chain). Review dispositions: Sonnet fresh-context BLOCK (quadratic cost, hook exit-2 fail-closed) fixed in round 2; council gpt-6.2 quote-split regression fixed; deferred findings in TASK-189, 190, 192.
 <!-- SECTION:NOTES:END -->
