@@ -270,6 +270,23 @@ out=$(PATH=$T/oldbwrap SYG_GATE_SANDBOX_PROFILE=worker SYG_GATE_SANDBOX_SCRATCH=
 [ "$rc" = 125 ] && [[ $out == *"bubblewrap >= 0.10"* ]] && ok "a bwrap without --size refuses (125) naming >= 0.10" \
   || bad "old bwrap: rc=$rc out=[$out]"
 
+# 11b. A tun device pasta can't open read-write refuses (125) before pasta runs; a usable one passes
+# (stubs: pasta records that it ran; the fixture ip host; SYG_GATE_SANDBOX_TUN points at the case)
+mkdir -p "$T/tunstub" "$T/tun-dir"
+printf '#!/bin/sh\n: >"$TUN_PASTA_RAN"\nexit 0\n' >"$T/tunstub/pasta"; chmod +x "$T/tunstub/pasta"
+for tc in missing dir; do
+  case $tc in missing) tunp=$T/no-such-tun ;; dir) tunp=$T/tun-dir ;; esac
+  rm -f "$T/tun-ran"
+  out=$(PATH=$T/tunstub:$SB:$T/ipstub:$PATH TUN_PASTA_RAN=$T/tun-ran SYG_GATE_SANDBOX_TUN=$tunp SYG_GATE_SANDBOX_PROFILE=worker SYG_GATE_SANDBOX_SCRATCH=$SYG_WORKER_SANDBOX_SCRATCH "$B/gate-sandbox" "$W" -- /usr/bin/true 2>&1); rc=$?
+  want="cannot be opened read-write"; [ "$tc" = missing ] && want="is missing"
+  [ "$rc" = 125 ] && [[ $out == *"$tunp $want"* ]] && [ ! -e "$T/tun-ran" ] && [ ! -e "$T/no-such-tun" ] \
+    && ok "tun $tc: the worker profile refuses (125) before pasta runs" \
+    || bad "tun $tc: rc=$rc ran=$([ -e "$T/tun-ran" ] && echo y) out=[$out]"
+done
+: >"$T/tun-ok"; rm -f "$T/tun-ran"
+PATH=$T/tunstub:$SB:$T/ipstub:$PATH TUN_PASTA_RAN=$T/tun-ran SYG_GATE_SANDBOX_TUN=$T/tun-ok SYG_GATE_SANDBOX_PROFILE=worker SYG_GATE_SANDBOX_SCRATCH=$SYG_WORKER_SANDBOX_SCRATCH "$B/gate-sandbox" "$W" -- /usr/bin/true >/dev/null 2>&1
+[ -e "$T/tun-ran" ] && ok "a read-writable tun passes the check and pasta runs" || bad "usable tun: pasta never ran"
+
 # The rest build a real sandbox, with pasta for the network.
 # shellcheck source=tests/sandbox-capable.sh
 . "$REPO/tests/sandbox-capable.sh"

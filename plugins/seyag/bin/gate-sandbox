@@ -159,6 +159,13 @@ case $profile in
     wall_sh='ip=$1 n=$2; shift 2
 for ((i = 0; i < n; i++)); do "$ip" route replace unreachable "$1" || { echo "gate-sandbox: cannot wall $1" >&2; exit 125; }; shift; done
 exec "$@"'
+    # pasta builds the namespace's network on the tun device; one it can't open read-write hangs it
+    # with no child (seen on a VM with a root-only crw------- /dev/net/tun), so refuse before launch.
+    # A real O_RDWR open, not permission bits (ACLs and LSMs make those lie); -e first, since <> creates.
+    tun=${SYG_GATE_SANDBOX_TUN:-/dev/net/tun}
+    [ -e "$tun" ] || { echo "$me: $tun is missing; pasta needs it to give the worker sandbox a network" >&2; exit 125; }
+    ( exec 3<>"$tun" ) 2>/dev/null \
+      || { echo "$me: $tun cannot be opened read-write; pasta needs it to give the worker sandbox a network" >&2; exit 125; }
     # --dns none: pasta only uses its DNS list for its own DNS mapping; the namespace reads the
     # host's resolv.conf/nss itself, and without it every run prints "Couldn't get any nameserver
     # address"

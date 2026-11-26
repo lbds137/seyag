@@ -136,6 +136,7 @@ SYG_GATE_SANDBOX_RO_BINDS	user	worktrees	unset	Colon-separated SRC or SRC->DST r
 SYG_GATE_SANDBOX_SCRATCH	user	worktrees	unset	Worker profile only: host directory bound writable at ~/.claude inside the sandbox (required).	path
 SYG_GATE_SANDBOX_TOOLCHAIN	user	worktrees	$HOME/.local/bin/mise:$HOME/.local/share/mise:$HOME/.local/state/mise:$HOME/.config/mise:$HOME/.local/share/pnpm	Colon-separated read-only toolchain paths; entries or non-hidden child symlinks (prefix inside or resolving in/through the worktree or cyclic/unresolvable) refuse 125; absent-outside skips. $HOME widens; empty: none.	path
 SYG_GATE_SANDBOX_TREE	user	worktrees	rw	Worker profile only: rw or ro mount of the worktree.	-
+SYG_GATE_SANDBOX_TUN	internal	worktrees	/dev/net/tun	Test seam overriding the tun device path gate-sandbox's worker profile opens read-write before launching pasta (missing or unopenable: 125).	-
 SYG_GATE_SANDBOX_WALL	user	worktrees	unset	Worker profile only: extra space-separated CIDRs or addresses gate-sandbox walls off with unreachable routes, on top of every host address and every route (any routing table) through an interface with no default route.	-
 SYG_GH_WRAPPERS	user	guards	unset	Whitespace-separated wrapper command prefix tokens scanned as gh invocations by session-url-gate and private-term-guard.	-
 SYG_HANDBACK_GATE_MAX_DENIES	user	guards	3	Positive integer: how many times handback-live-task-gate refuses one agent's hand-back while its background tasks run, before the hand-back passes.	-
