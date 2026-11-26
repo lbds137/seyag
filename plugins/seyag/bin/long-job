@@ -30,7 +30,8 @@ longer than ~10 minutes (a miner, a full suite, an extract, an OCR pass).
       -p, --property KEY=VALUE
                        repeatable; passed to systemd-run as -p; StandardInput*, StandardOutput,
                        StandardError and Slice refused; applies to --heavy too, except CPUWeight,
-                       StartupCPUWeight and CPUQuota (dropped with a note there)
+                       StartupCPUWeight, CPUShares, StartupCPUShares and CPUQuota (dropped with
+                       a note there)
       --env NAME       also pass the caller's NAME into the unit (repeatable)
       --heavy          for a suite, gate or e2e run: inside the unit, first queue for the
                        machine-wide gate lock (${SYG_GATE_LOCK_FILE:-/tmp/gate.lock}, the one
@@ -209,7 +210,7 @@ case "$cmd" in
         _pv=${props[_pi + 1]}
         _pk=${_pv%%=*}
         case $_pk in
-          CPUWeight|StartupCPUWeight|CPUQuota)
+          CPUWeight|StartupCPUWeight|CPUShares|StartupCPUShares|CPUQuota)
             echo "$disp: -p $_pv is ignored for a --heavy job: it would throttle the one job the gate lock lets run" >&2 ;;
           *) keep_props+=("${props[_pi]}" "$_pv") ;;
         esac

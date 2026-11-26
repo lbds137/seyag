@@ -289,13 +289,14 @@ done
 # S12: --heavy drops -p CPUWeight/CPUQuota/StartupCPUWeight with a note; other props stay.
 # The -p options come before --heavy, so the drop must happen after the option loop.
 rm -f "$tmp/argv"
-err=$(timeout 5 env SYG_LONG_JOB_LOAD_GATE='' SYG_GATE_LOCK_FILE="$tmp/gl.lock" PATH="$tmp/stub-rec:$PATH" "$LJ" run hv-cpu -p CPUWeight=20 -p CPUQuota=50% --property StartupCPUWeight=5 -p MemoryHigh=1G --heavy --min-mb 0 --no-inhibit -- true 2>&1 >/dev/null); rc=$?
+err=$(timeout 5 env SYG_LONG_JOB_LOAD_GATE='' SYG_GATE_LOCK_FILE="$tmp/gl.lock" PATH="$tmp/stub-rec:$PATH" "$LJ" run hv-cpu -p CPUWeight=20 -p CPUQuota=50% --property StartupCPUWeight=5 -p CPUShares=64 -p MemoryHigh=1G --heavy --min-mb 0 --no-inhibit -- true 2>&1 >/dev/null); rc=$?
 [ "$rc" = 0 ] && grep -qxF -- "MemoryHigh=1G" "$tmp/argv" \
   && ! grep -qF -- "CPUWeight=20" "$tmp/argv" && ! grep -qF -- "CPUQuota=50%" "$tmp/argv" && ! grep -qF -- "StartupCPUWeight=5" "$tmp/argv" \
   && grep -qF -- "-p CPUWeight=20 is ignored for a --heavy job" <<<"$err" \
   && grep -qF -- "-p CPUQuota=50% is ignored for a --heavy job" <<<"$err" \
   && grep -qF -- "-p StartupCPUWeight=5 is ignored for a --heavy job" <<<"$err" \
-  && ok "run --heavy drops -p CPUWeight/CPUQuota/StartupCPUWeight with a note while -p MemoryHigh=1G stays" \
+  && ! grep -qF -- "CPUShares=64" "$tmp/argv" && grep -qF -- "-p CPUShares=64 is ignored for a --heavy job" <<<"$err" \
+  && ok "run --heavy drops -p CPUWeight/CPUQuota/StartupCPUWeight/CPUShares with a note while -p MemoryHigh=1G stays" \
   || bad "run --heavy CPU props (rc=$rc, err=[$err], argv=$(av))"
 
 # SYG_LONG_JOB_UNIT_PREFIX='a b' exits 2 naming the knob; leading '-' exits 2 saying it must start with a letter or digit.
