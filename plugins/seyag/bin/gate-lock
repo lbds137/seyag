@@ -336,7 +336,7 @@ if [ "$class" = light ] && [ "$min_mb" -gt 0 ]; then
         [ "$left" -lt "$nap" ] && nap=$left
         [ "$nap" -lt 1 ] && nap=1
       fi
-      sleep "$nap" 9>&- </dev/null &
+      sleep "$nap" 9>&- &
       mem_sp=$!
       wait "$mem_sp" 2>/dev/null
       mem_sp=''
