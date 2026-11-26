@@ -257,6 +257,7 @@ SYG_SWEEP	user	guards	1	Set to 0 to silence removed-identifier-sweep without edi
 SYG_SWEEP_EXCLUDE_PATHS	user	guards	unset	Whitespace-separated awk regex fragments added to removed-identifier-sweep's path exclusions.	path
 SYG_SWEEP_FRAG	internal	guards	unset	Internal env variable passing one fragment to awk for regex validation inside removed-identifier-sweep.	-
 SYG_SWEEP_VALID_FRAGMENTS	internal	guards	unset	Internal env variable exporting validated SYG_SWEEP_EXCLUDE_PATHS fragments to awk in removed-identifier-sweep.	-
+SYG_TASK_CLAIM_CMD	user	session	unset	Single-line command advertised at SessionStart that claims a backlog task as `<cmd> <task id>` (exit 0 claimed, else no claim); backlog-md runs it instead of its push-based claim protocol.	-
 SYG_TRACKING_SURFACE	user	guards	unset	Settings env pin marking a project's durable tracking surface; backlog-md activates the backlog-md skill and the backlog-priority-guard hook for that project.	-
 SYG_UPSTREAM_CHECKED	user	guards	unset	Per-command prefix assignment <owner/repo> bypassing upstream-submission-guard after the AI-stance check.	-
 SYG_USER_RULES_DIR	internal	session	$HOME/.claude/rules	Test seam overriding the user rules directory checked by session-start against rules/core.md.	-

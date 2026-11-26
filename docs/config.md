@@ -135,6 +135,7 @@ An optional TOML file fills in knobs the environment left unset: user `${XDG_CON
 | `SYG_SESSION_LOG_HISTORY` | the history.jsonl in the Claude config dir | Prompt-history file (one JSON object per line) session-log grep searches; the value off excludes it. | `bin/session-log` | user only |
 | `SYG_STALLED_ZAI_TZ` | `Asia/Shanghai` | IANA time zone in which session-stalled reads the z.ai quota-reset stamp (`Your limit will reset at YYYY-MM-DD HH:MM:SS`); an unknown zone leaves the reset unparsed. | `bin/session-stalled` | user + project |
 | `SYG_STATE_MAX_DAYS` | `7` | Age in whole days after which session-start deletes stale prompt-hook state files in SYG_STATE_DIR. | `hooks/dispatch-posture-gate.sh`, `hooks/session-start.sh` | user + project |
+| `SYG_TASK_CLAIM_CMD` | unset | Single-line command advertised at SessionStart that claims a backlog task as `<cmd> <task id>` (exit 0 claimed, else no claim); backlog-md runs it instead of its push-based claim protocol. | `hooks/session-start.sh` | user only |
 
 ## statusline
 
