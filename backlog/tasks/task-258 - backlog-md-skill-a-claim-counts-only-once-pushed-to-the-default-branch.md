@@ -1,9 +1,11 @@
 ---
 id: TASK-258
 title: 'backlog-md skill: a claim counts only once pushed to the default branch'
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - Seyag
 created_date: '2026-11-26T18:44:00Z'
+updated_date: '2026-11-26T20:23:00Z'
 labels:
   - skills
   - lane-a
