@@ -8,6 +8,7 @@ labels:
   - claude-role
   - performance
 dependencies: []
+priority: medium
 ordinal: 178000
 ---
 
