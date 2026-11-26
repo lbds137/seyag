@@ -1293,6 +1293,7 @@ if [ "$rc" -eq 0 ] \
   && jq -e '
     .repos[0].history == {
       "state": "count",
+      "age_minutes": 0,
       "window_days": 90,
       "dismissed": 1,
       "fixed": 2,
@@ -1486,6 +1487,144 @@ if [ -s "$T/h6.out" ] && [ -s "$T/h6.cache.json" ] \
   ok "H9 300-char dismissed_comment's last 20 chars never appear in stdout or the cache file"
 else
   bad "H9 300-char comment truncation leak check"
+fi
+
+# H10: --session-line --cap 2 reuses fresh cached history (younger than 6h) when surface cache is expired,
+# skipping the state=closed call even when the closed stub sleeps 5s.
+rm -rf "$T/state-h10" "$T/fixtures/example-org_widget"
+mkdir -p "$T/state-h10" "$T/fixtures/example-org_widget"
+cat > "$T/fixtures/example-org_widget/code-scanning.out" <<'EOF'
+[
+  {"number": 1, "rule": {"id": "py/a", "security_severity_level": "high"}, "tool": {"name": "CodeQL"}}
+]
+EOF
+cat > "$T/fixtures/example-org_widget/code-scanning-closed.out" <<EOF
+[
+  {"number": 10, "state": "dismissed", "rule": {"id": "py/a"}, "dismissed_at": "$TS_10D"},
+  {"number": 11, "state": "dismissed", "rule": {"id": "py/a"}, "dismissed_at": "$TS_10D"},
+  {"number": 12, "state": "dismissed", "rule": {"id": "py/b"}, "dismissed_at": "$TS_5D"},
+  {"number": 13, "state": "fixed", "rule": {"id": "py/c"}, "fixed_at": "$TS_10D"}
+]
+EOF
+cat > "$T/bin/gh-h10" <<EOF
+#!/bin/bash
+case "\$*" in
+  *state=closed*)
+    printf '%s\n' "\$*" >> "$T/gh.log"
+    sleep 5
+    ;;
+esac
+exec "$T/bin/gh" "\$@"
+EOF
+chmod +x "$T/bin/gh-h10"
+SECURITY_SWEEP_GH="$T/bin/gh" XDG_STATE_HOME="$T/state-h10" "$SS" -R example-org/widget --no-cache >"$T/out" 2>"$T/err"
+CACHE_H10="$T/state-h10/seyag/security-sweep/example-org_widget.json"
+python3 - "$CACHE_H10" <<'PY'
+import json, sys, time
+p = sys.argv[1]
+now = time.time()
+d = json.load(open(p))
+d["fetched_at"] = int(now - 1000)
+d["history"]["fetched_at"] = now - 60
+json.dump(d, open(p, "w"))
+PY
+: > "$T/gh.log"
+SECURITY_SWEEP_GH="$T/bin/gh-h10" XDG_STATE_HOME="$T/state-h10" "$SS" -R example-org/widget --session-line --cap 2 >"$T/out" 2>"$T/err"
+h10_rc=$?
+h10_out="$(cat "$T/out")"
+h10_err="$(cat "$T/err")"
+h10_calls="$(wc -l <"$T/gh.log")"
+WANT_H10="security: example-org/widget: 1 code-scanning (1 high), dismissals outrun fixes: 3 dismissed, 1 fixed in 90d — dispositions per skill seyag:security-sweep"
+if [ "$h10_rc" -eq 0 ] \
+  && [ "$h10_out" = "$WANT_H10" ] \
+  && [ -z "$h10_err" ] \
+  && [ "$h10_calls" -eq 3 ] \
+  && ! grep -qF "state=closed" "$T/gh.log"; then
+  ok "H10 --session-line --cap 2 reuses cached history younger than 6h (3 gh calls, none state=closed)"
+else
+  bad "H10 --session-line history reuse (rc=$h10_rc, calls=$h10_calls)" "out=$h10_out err=$h10_err log=$(cat "$T/gh.log")"
+fi
+
+# H11: expired history (now - 7*3600) is refetched under --session-line (4 calls, history.fetched_at within 60s of now);
+# fresh history (now - 60) is still refetched on a default (non-session) run (4 calls).
+rm -rf "$T/state-h11"
+mkdir -p "$T/state-h11"
+SECURITY_SWEEP_GH="$T/bin/gh" XDG_STATE_HOME="$T/state-h11" "$SS" -R example-org/widget --no-cache >"$T/out" 2>"$T/err"
+CACHE_H11="$T/state-h11/seyag/security-sweep/example-org_widget.json"
+python3 - "$CACHE_H11" <<'PY'
+import json, sys, time
+p = sys.argv[1]
+now = time.time()
+d = json.load(open(p))
+d["fetched_at"] = int(now - 1000)
+d["history"]["fetched_at"] = now - 7 * 3600
+json.dump(d, open(p, "w"))
+PY
+: > "$T/gh.log"
+SECURITY_SWEEP_GH="$T/bin/gh" XDG_STATE_HOME="$T/state-h11" "$SS" -R example-org/widget --session-line >"$T/out" 2>"$T/err"
+h11a_rc=$?
+h11a_calls="$(wc -l <"$T/gh.log")"
+h11a_fresh=$(python3 - "$CACHE_H11" <<'PY'
+import json, sys, time
+d = json.load(open(sys.argv[1]))
+fa = d.get("history", {}).get("fetched_at")
+print("1" if isinstance(fa, (int, float)) and not isinstance(fa, bool) and 0 <= time.time() - fa <= 60 else "0")
+PY
+)
+python3 - "$CACHE_H11" <<'PY'
+import json, sys, time
+p = sys.argv[1]
+now = time.time()
+d = json.load(open(p))
+d["fetched_at"] = int(now - 1000)
+d["history"]["fetched_at"] = now - 60
+json.dump(d, open(p, "w"))
+PY
+: > "$T/gh.log"
+SECURITY_SWEEP_GH="$T/bin/gh" XDG_STATE_HOME="$T/state-h11" "$SS" -R example-org/widget >"$T/out" 2>"$T/err"
+h11b_rc=$?
+h11b_calls="$(wc -l <"$T/gh.log")"
+if [ "$h11a_rc" -eq 0 ] && [ "$h11a_calls" -eq 4 ] && [ "$h11a_fresh" = "1" ] \
+  && [ "$h11b_rc" -eq 0 ] && [ "$h11b_calls" -eq 4 ]; then
+  ok "H11 --session-line refetches history older than 6h (restamping history.fetched_at), and default run refetches even fresh history"
+else
+  bad "H11 history expiry and default refetch (rc_a=$h11a_rc calls_a=$h11a_calls fresh_a=$h11a_fresh rc_b=$h11b_rc calls_b=$h11b_calls)"
+fi
+
+# H12: history fetch error falls back to cached history without restamping history.fetched_at,
+# and --json reports history.age_minutes from that preserved stamp.
+rm -rf "$T/state-h12"
+mkdir -p "$T/state-h12"
+SECURITY_SWEEP_GH="$T/bin/gh" XDG_STATE_HOME="$T/state-h12" "$SS" -R example-org/widget --no-cache >"$T/out" 2>"$T/err"
+CACHE_H12="$T/state-h12/seyag/security-sweep/example-org_widget.json"
+H12_X=$(python3 - "$CACHE_H12" <<'PY'
+import json, sys, time
+p = sys.argv[1]
+now = time.time()
+x = int(now - 7200)
+d = json.load(open(p))
+d["fetched_at"] = int(now - 1000)
+d["history"]["fetched_at"] = x
+json.dump(d, open(p, "w"))
+print(x)
+PY
+)
+printf 'gh: HTTP 502 Bad Gateway\n' > "$T/fixtures/example-org_widget/code-scanning-closed.err"
+printf '1\n' > "$T/fixtures/example-org_widget/code-scanning-closed.rc"
+SECURITY_SWEEP_GH="$T/bin/gh" XDG_STATE_HOME="$T/state-h12" "$SS" -R example-org/widget >"$T/out" 2>"$T/err"
+h12_def_rc=$?
+h12_stamp_kept=$(jq -r --argjson x "$H12_X" 'if .history.fetched_at == $x then "1" else "0" end' "$CACHE_H12" 2>/dev/null)
+SECURITY_SWEEP_GH="$T/bin/gh" XDG_STATE_HOME="$T/state-h12" "$SS" -R example-org/widget --json >"$T/out" 2>"$T/err"
+h12_json_rc=$?
+h12_json_out="$(cat "$T/out")"
+rm -f "$T/fixtures/example-org_widget/code-scanning-closed.err" "$T/fixtures/example-org_widget/code-scanning-closed.rc"
+if [ "$h12_def_rc" -eq 0 ] \
+  && [ "$h12_stamp_kept" = "1" ] \
+  && [ "$h12_json_rc" -eq 0 ] \
+  && jq -e '.repos[0].history.age_minutes >= 119 and .repos[0].history.age_minutes <= 121' <<<"$h12_json_out" >/dev/null 2>&1; then
+  ok "H12 history fetch-error fallback preserves history.fetched_at == X and reports history.age_minutes ~120 in --json"
+else
+  bad "H12 history fallback stamp and age_minutes (def_rc=$h12_def_rc kept=$h12_stamp_kept json_rc=$h12_json_rc)" "$h12_json_out"
 fi
 
 if [ -z "${SECURITY_SWEEP_SKIP_NONEXEC:-}" ]; then

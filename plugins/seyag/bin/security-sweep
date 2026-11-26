@@ -8,7 +8,7 @@ Options:
   -R, --repo owner/name   Repository to sweep (repeatable).
   --all-repos-from FILE   Read whitespace-separated owner/name tokens from FILE (# starts a comment).
                           With neither -R nor --all-repos-from, uses the cwd's `git remote get-url origin`.
-  --json                  Emit machine-readable JSON summary. JSON carries per-repo `history` (closed code-scanning alerts: windowed `dismissed`/`fixed` counts, `outrun`, all-time `dismissed_by_rule`, and `prior_dismissals` per open alert).
+  --json                  Emit machine-readable JSON summary. JSON carries per-repo `history` (closed code-scanning alerts: windowed `dismissed`/`fixed` counts, `outrun`, all-time `dismissed_by_rule`, and `prior_dismissals` per open alert; history is refetched on every run except `--session-line`/`--warm-cache`, which reuse a cached history younger than 6 h; `history.age_minutes` gives its age).
   --strict                Exit 1 on open critical/high code-scanning or any open secret-scanning alert;
                           exit 2 on an uncached surface error, skipped invalid repo, unparseable origin, or internal error
                           (exit 1 wins when both hold: an alert exit can hide fetch errors, which stderr still names per surface and --json marks error).
@@ -61,6 +61,7 @@ except Exception:
 SURFACES = ("code-scanning", "dependabot", "secret-scanning")
 SEVERITIES = ("critical", "high", "medium", "low", "none")
 CACHE_TTL_S = 300
+HISTORY_TTL_S = 6 * 3600
 GH_TIMEOUT_S = 60
 # The first two code-scanning, the secret-scanning and the archived-dependabot markers
 # were observed live; `Advanced Security must be enabled` and `Dependabot alerts are disabled`
@@ -610,8 +611,14 @@ def history_view(history, open_cs_surface, window_days, now):
                         }
                         for m in sorted_matches
                     ]
+    fetched_at = history.get("fetched_at")
+    if isinstance(fetched_at, (int, float)) and not isinstance(fetched_at, bool):
+        age_minutes = max(0, int((now - fetched_at) // 60))
+    else:
+        age_minutes = None
     return {
         "state": "count",
+        "age_minutes": age_minutes,
         "window_days": window_days,
         "dismissed": dismissed,
         "fixed": fixed,
@@ -621,7 +628,7 @@ def history_view(history, open_cs_surface, window_days, now):
     }
 
 
-def process_repo(repo, surface_pool, no_cache, now, window_days=90):
+def process_repo(repo, surface_pool, no_cache, now, window_days=90, reuse_history=False):
     cached = read_cache(repo)
     if not no_cache and cached is not None:
         age_s = now - cached["fetched_at"]
@@ -640,8 +647,18 @@ def process_repo(repo, surface_pool, no_cache, now, window_days=90):
                 "history_errors": [],
             }
 
+    chist = cached.get("history") if cached is not None else None
+    h_fetched_at = chist.get("fetched_at") if isinstance(chist, dict) else None
+    keep_history = (
+        reuse_history
+        and not no_cache
+        and is_valid_cached_history(chist)
+        and isinstance(h_fetched_at, (int, float))
+        and not isinstance(h_fetched_at, bool)
+        and 0 <= now - h_fetched_at <= HISTORY_TTL_S
+    )
     futures = {s: surface_pool.submit(fetch_surface, repo, s) for s in SURFACES}
-    history_future = surface_pool.submit(fetch_history, repo)
+    history_future = None if keep_history else surface_pool.submit(fetch_history, repo)
     surfaces = {}
     stale = {}
     errors = []
@@ -657,16 +674,19 @@ def process_repo(repo, surface_pool, no_cache, now, window_days=90):
         else:
             surfaces[s] = sdata
 
-    hdata, herr_rc = history_future.result()
     history_errors = []
-    if hdata.get("state") == "error":
-        if cached is not None and is_valid_cached_history(cached.get("history")):
-            history = cached["history"]
-        else:
-            history = {"state": "error"}
-            history_errors.append((repo, "code-scanning history", herr_rc if herr_rc is not None else 1))
+    if history_future is None:
+        history = chist
     else:
-        history = hdata
+        hdata, herr_rc = history_future.result()
+        if hdata.get("state") == "error":
+            if cached is not None and is_valid_cached_history(cached.get("history")):
+                history = cached["history"]
+            else:
+                history = {"state": "error"}
+                history_errors.append((repo, "code-scanning history", herr_rc if herr_rc is not None else 1))
+        else:
+            history = dict(hdata, fetched_at=now)
 
     if any(is_valid_cached_surface(surfaces[s]) for s in SURFACES):
         stamp = cached["fetched_at"] if (stale and cached is not None) else now
@@ -967,7 +987,9 @@ def main(argv):
     with ThreadPoolExecutor(max_workers=n_workers) as surface_pool:
         with ThreadPoolExecutor(max_workers=n_repo_workers) as repo_pool:
             repo_futures = [
-                repo_pool.submit(process_repo, r, surface_pool, args.no_cache, now, args.window)
+                repo_pool.submit(
+                    process_repo, r, surface_pool, args.no_cache, now, args.window, reuse_history=args.session_line
+                )
                 for r in repos
             ]
             # Wait in short slices, not a blocking result(): a cap alarm or SIGTERM the kernel delivers to a worker thread runs its handler only when the main thread next wakes.

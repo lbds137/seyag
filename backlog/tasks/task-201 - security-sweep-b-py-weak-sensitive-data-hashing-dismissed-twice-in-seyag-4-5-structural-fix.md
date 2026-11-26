@@ -17,9 +17,9 @@ ordinal: 199000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-TASK-144 rule (b): a rule's second dismissal files a structural fix. Live `security-sweep --json -R lbds137/seyag` (2026-11-26) shows dismissed_by_rule {"py/weak-sensitive-data-hashing": 2}: alerts #4 and #5, both dismissed 2026-10-18 as false positive ("SHA-256 of a random high-entropy API key used only as a cache..."), path plugins/seyag/bin/api-credit; both now carry fixed_at (code moved/changed since).
+TASK-144 rule (b): a rule's second dismissal files a structural fix. Live `security-sweep --json` on this repo (2026-11-26) shows dismissed_by_rule {"py/weak-sensitive-data-hashing": 2}: alerts #4 and #5, both dismissed 2026-10-18 as false positive ("SHA-256 of a random high-entropy API key used only as a cache..."), path plugins/seyag/bin/api-credit; both now carry fixed_at (code moved/changed since).
 
 Options in the skill's order: (1) not test-only, so no paths-ignore; (2) by-design sink: hash the key through a construct CodeQL does not treat as password hashing (e.g. hmac with a fixed label, or hashlib.blake2b keyed) or add a models-as-data barrier; (3) else record an accepted risk (won't fix). Check the current api-credit code first: if the hashing is gone, close as obsolete with the evidence.
 
-Also seen (other repo, not filed here): tzurot js/incomplete-url-substring-sanitization dismissed 3x (#8-#10, won't fix, tzurot-legacy/). That repo's own session owns it.
+Also seen in a consumer repo (not filed here): another rule dismissed 3x as won't fix in a legacy tree; that repo's own session owns it.
 <!-- SECTION:DESCRIPTION:END -->
