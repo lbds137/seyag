@@ -1,0 +1,210 @@
+#!/usr/bin/env -S python3 -I -B
+"""backlog-lint: scan a backlog.md store and refuse priority-required tasks without a priority.
+
+Usage:
+  backlog-lint [--store DIR]
+  backlog-lint -h | --help
+
+Scans <store>/backlog/tasks/*.md (sorted by name) and checks that every task
+whose frontmatter status (defaulting to backlog/config.yml default_status, else
+"To Do") is in the required set (SYG_BACKLOG_PRIORITY_STATUSES, comma-separated,
+case-insensitive; default "To Do,In Progress") carries a non-empty priority: key
+in its YAML frontmatter (same has_priority rule as hooks/backlog-priority-guard.sh).
+Files without YAML frontmatter are skipped; unreadable task files are reported
+as findings.
+
+Options:
+  --store DIR   Store root directory (must hold backlog/config.yml). Without
+                --store, walks up from the current directory to the nearest
+                ancestor holding backlog/config.yml.
+  -h, --help    Show this help message and exit 0.
+
+Exit codes:
+  0  No findings (stdout is empty).
+  1  One or more task files in a required status lack a priority (or cannot be
+     read); findings and a summary line are printed to stdout.
+  2  Usage error, no backlog/config.yml found, or backlog/tasks/ is missing or
+     unreadable (message on stderr).
+"""
+import os
+import posixpath
+import re
+import sys
+
+# config.toml knobs (config_env, the Python twin of hooks/lib/config-env.sh), so
+# SYG_BACKLOG_PRIORITY_STATUSES set in a config file reaches the lint as it reaches
+# the guard (hooks/run.sh loads the same files); a wiring error proceeds env-only.
+try:
+    _SYG_ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+    sys.path.insert(0, os.path.join(_SYG_ROOT, "lib"))
+    import config_env
+
+    config_env.syg_config_env(_SYG_ROOT)
+except Exception:
+    pass
+
+REQUIRED = {
+    w.strip().casefold()
+    for w in (os.environ.get("SYG_BACKLOG_PRIORITY_STATUSES")
+              or "To Do,In Progress").split(",")
+    if w.strip()
+}
+CONFIG_CACHE = {}
+
+
+def config_value(store, key):
+    """One `key: value` line of the store's backlog/config.yml, unquoted; None
+    when the file or the key is missing (or the value is empty)."""
+    if store not in CONFIG_CACHE:
+        try:
+            with open(posixpath.join(store, "backlog", "config.yml"),
+                      encoding="utf-8", errors="replace") as f:
+                CONFIG_CACHE[store] = f.read().splitlines()
+        except OSError:
+            CONFIG_CACHE[store] = []
+    for line in CONFIG_CACHE[store]:
+        m = re.match(r"^\s*[A-Za-z0-9_]+:\s*(.*?)\s*$", line)
+        if m and line.split(":", 1)[0].strip() == key:
+            return m.group(1).strip("\"'") or None
+    return None
+
+
+def find_store(cwd):
+    """Nearest ancestor of cwd (inclusive) holding backlog/config.yml; the store
+    root directory, or None at / without a hit."""
+    d = posixpath.normpath(cwd)
+    while True:
+        if os.path.isfile(posixpath.join(d, "backlog", "config.yml")):
+            return d
+        if d == "/":
+            return None
+        d = posixpath.dirname(d)
+
+
+# Copied from plugins/seyag/hooks/backlog-priority-guard.sh; pinned in step with
+# the guard by tests/backlog-lint.probe.sh case 10 (guard parity check).
+def has_priority(path):
+    """True when the file's YAML frontmatter (between the first two --- lines)
+    holds a priority: key with a non-empty value."""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return True  # unreadable: the CLI will complain, not this guard
+    if not lines or lines[0].strip() != "---":
+        return True  # no frontmatter to judge
+    for line in lines[1:]:
+        if line.strip() == "---":
+            break
+        m = re.match(r"^\s*priority:\s*(\S.*?)\s*$", line)
+        if m and m.group(1).strip().strip("\"'"):
+            return True
+    return False
+
+
+def usage_err():
+    print(__doc__.strip(), file=sys.stderr)
+    return 2
+
+
+def main(argv):
+    store_arg = None
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+        if arg in ("-h", "--help"):
+            print(__doc__.strip())
+            return 0
+        if arg == "--store":
+            if i + 1 >= len(argv) or not argv[i + 1] or argv[i + 1].startswith("-"):
+                return usage_err()
+            store_arg = argv[i + 1]
+            i += 2
+        elif arg.startswith("--store="):
+            val = arg.split("=", 1)[1]
+            if not val:
+                return usage_err()
+            store_arg = val
+            i += 1
+        else:
+            return usage_err()
+
+    if store_arg is not None:
+        d = posixpath.normpath(os.path.abspath(store_arg))
+        if not os.path.isfile(posixpath.join(d, "backlog", "config.yml")):
+            print(
+                f"backlog-lint: no backlog/config.yml in --store {store_arg}",
+                file=sys.stderr,
+            )
+            return 2
+        store = d
+    else:
+        cwd = os.getcwd()
+        store = find_store(cwd)
+        if store is None:
+            print(
+                f"backlog-lint: no backlog/config.yml at or above {cwd}",
+                file=sys.stderr,
+            )
+            return 2
+
+    tasks_dir = posixpath.join(store, "backlog", "tasks")
+    try:
+        names = sorted(n for n in os.listdir(tasks_dir) if n.endswith(".md"))
+    except OSError as e:
+        print(f"backlog-lint: cannot read {tasks_dir}: {e}", file=sys.stderr)
+        return 2
+
+    default_status = config_value(store, "default_status") or "To Do"
+    findings = []
+    unprioritized = 0
+
+    for name in names:
+        path = posixpath.join(tasks_dir, name)
+        try:
+            with open(path, encoding="utf-8", errors="replace") as f:
+                lines = f.read().splitlines()
+        except OSError:
+            findings.append(f"backlog-lint: backlog/tasks/{name}: cannot read")
+            continue
+
+        if not lines or lines[0].strip() != "---":
+            continue
+
+        status = None
+        for line in lines[1:]:
+            if line.strip() == "---":
+                break
+            m = re.match(r"^status:\s*(.*?)\s*$", line)
+            if m:
+                status = m.group(1).strip().strip("\"'")
+                break
+        if not status:
+            status = default_status
+
+        if status.strip().casefold() in REQUIRED and not has_priority(path):
+            unprioritized += 1
+            findings.append(
+                f'backlog-lint: backlog/tasks/{name}: status "{status}" has no priority'
+            )
+
+    if not findings:
+        return 0
+
+    # A non-UTF-8 filename must not turn a finding into a traceback.
+    sys.stdout.reconfigure(errors="replace")
+    for line in findings:
+        print(line)
+    if unprioritized:
+        print(
+            f"backlog-lint: {unprioritized} task file(s) need a priority: "
+            "backlog task edit <ID> --priority high|medium|low"
+        )
+    unreadable = len(findings) - unprioritized
+    if unreadable:
+        print(f"backlog-lint: {unreadable} task file(s) could not be read")
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

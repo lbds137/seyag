@@ -67,7 +67,7 @@ SYG_ALLOW_RM	user	guards	unset	Set to 1 in the command text to bypass recursive-
 SYG_ALLOW_SESSION_URL	user	guards	unset	Set to 1 in the command's own prefix in the command text to bypass session-url-gate on the owner's word.	-
 SYG_ALLOW_TEMPORAL	user	guards	unset	Set to 1 in the git commit command's own prefix in the command text to bypass temporal-marker-guard.	-
 SYG_ASK_PRETEXT_MIN_CHARS	user	guards	200	Minimum characters of same-message text before an AskUserQuestion that make ask-pretext-reminder fire.	-
-SYG_BACKLOG_PRIORITY_STATUSES	user	guards	To Do,In Progress	Comma-separated backlog.md statuses (case-insensitive) a task may not land in without a priority; read by backlog-priority-guard.	-
+SYG_BACKLOG_PRIORITY_STATUSES	user	guards	To Do,In Progress	Comma-separated backlog.md statuses (case-insensitive) a task may not land in without a priority; read by backlog-priority-guard and backlog-lint.	-
 SYG_BQ_NO_RC_LANES	user	stop-gates	unset	Extended regex matched against ANTHROPIC_BASE_URL for lanes without Remote Control, routing asks to SendMessage.	-
 SYG_BQ_PENDING_MARKERS	user	stop-gates	say the word\b|waiting on you\b|needs? your (yes|go|call|input)\b|for you to (decide|test|check)\b	Case-insensitive Python regex matching pending-ask phrases in the final paragraph; empty disables the pass.	-
 SYG_CHECK_LIB	internal	guards	unset	The hooks/lib directory the hook passes to its python child for shared target/owner resolution in the --check preflight.	-
