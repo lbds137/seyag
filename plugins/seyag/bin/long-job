@@ -28,8 +28,9 @@ longer than ~10 minutes (a miner, a full suite, an extract, an OCR pass).
       --slice NAME     systemd slice for the unit (e.g. a weighted slice for plain jobs;
                        ignored, with a note, under --heavy)
       -p, --property KEY=VALUE
-                       repeatable; passed to systemd-run as -p; StandardInput/Output/Error
-                       and Slice refused; applies to --heavy too
+                       repeatable; passed to systemd-run as -p; StandardInput*, StandardOutput,
+                       StandardError and Slice refused; applies to --heavy too, except CPUWeight,
+                       StartupCPUWeight and CPUQuota (dropped with a note there)
       --env NAME       also pass the caller's NAME into the unit (repeatable)
       --heavy          for a suite, gate or e2e run: inside the unit, first queue for the
                        machine-wide gate lock (${SYG_GATE_LOCK_FILE:-/tmp/gate.lock}, the one
@@ -77,10 +78,11 @@ longer than ~10 minutes (a miner, a full suite, an extract, an OCR pass).
   long-job log NAME [-n N] the log's last N lines (default 40)
   long-job --help
 
-Messages, hints and the wait sentinel name the runner as the basename of the first word of
-SYG_LONG_JOB_CMD when it is set (letters, digits, '.', '_', '-'; else long-job), so a wrapper
-that execs long-job keeps its own "<runner>: ended" line. A direct long-job call uses that
-name too.
+Messages, hints and the wait sentinel name the runner as the basename of SYG_LONG_JOB_AS, and
+its command hints the whole value, when an exec wrapper sets it (a bare name, or an absolute
+path; characters letters, digits, '.', '_', '-'); otherwise long-job. A wrapper that execs
+long-job sets it so its callers see "<runner>: ended" and runnable hints; long-job takes its
+name from nothing else (the SessionStart runner knob does not rename it).
 
 NAME: must start with a letter or digit and hold only letters, digits, '.', '_' and '-'. State lives in ${SYG_LONG_JOB_STATE_DIR:-${XDG_STATE_HOME:-~/.local/state}/long-job}/
 (NAME.log, NAME.cmd, NAME.owner, NAME.unit, NAME.exit, NAME.lock, NAME@gate.lock); unit prefix is ${SYG_LONG_JOB_UNIT_PREFIX:-long-job} (PREFIX-NAME.service). Stop a job with: systemctl --user stop PREFIX-NAME
@@ -103,14 +105,16 @@ if [ -r "$here/../hooks/lib/config-env.sh" ] \
   syg_config_env "$(readlink -f "$here/..")"
 fi
 
-# Messages and hints name the runner the caller uses: the basename of SYG_LONG_JOB_CMD's first
-# word (long-job-chain-check's rule), so a wrapper that execs long-job keeps "<runner>: ended".
-# A value that is empty, multi-line or oddly-charactered leaves "long-job".
-disp=long-job
-if [[ ${SYG_LONG_JOB_CMD:-} != *$'\n'* ]]; then
-  read -r _lj_first _ <<<"${SYG_LONG_JOB_CMD:-}"
-  _lj_first=${_lj_first##*/}
-  [[ $_lj_first =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] && disp=$_lj_first
+# An exec wrapper over long-job sets SYG_LONG_JOB_AS to the runner as its callers type it (a
+# name, or an absolute path when it is off PATH): messages and the ended sentinel use its
+# basename, command hints the whole value. A direct call has no marker and says long-job,
+# because the runner knob SessionStart advertises may name a different runner with its own jobs;
+# long-job reads no other knob for its name.
+disp=long-job run_as=long-job
+_lj_as_re='^(/([A-Za-z0-9._-]+/)*)?[A-Za-z0-9][A-Za-z0-9._-]*$'
+if [[ ${SYG_LONG_JOB_AS:-} != *$'\n'* && ${SYG_LONG_JOB_AS:-} =~ $_lj_as_re ]]; then
+  disp=${SYG_LONG_JOB_AS##*/}
+  run_as=$SYG_LONG_JOB_AS
 fi
 
 die() { echo "$disp: $1" >&2; exit "${2:-2}"; }
@@ -181,7 +185,7 @@ case "$cmd" in
           [[ $2 =~ ^[A-Za-z][A-Za-z0-9]*= ]] || die "$1 needs KEY=VALUE (a systemd unit property)"
           _pkey=${2%%=*}
           case $_pkey in
-            StandardInput|StandardOutput|StandardError) die "$1 $_pkey is set by $disp (the job's log); not allowed" ;;
+            StandardInput*|StandardOutput|StandardError) die "$1 $_pkey is set by $disp (the job's log); not allowed" ;;
             Slice) die "$1 Slice: use --slice NAME (it is dropped for --heavy jobs)" ;;
           esac
           props+=(-p "$2"); shift ;;
@@ -195,6 +199,22 @@ case "$cmd" in
     if [ "$heavy" = 1 ] && [ -n "$slice" ]; then
       echo "$disp: --slice $slice is ignored for a --heavy job: heavy jobs run one at a time under the gate lock and keep the default slice" >&2
       slice=""
+    fi
+    if [ "$heavy" = 1 ]; then
+      # Like --slice above, dropped after the option loop (--heavy may come after the -p options):
+      # a CPU weight or quota would throttle the one job the gate lock lets run. Other props
+      # (MemoryMax, Nice, MemoryHigh, ...) stay.
+      keep_props=()
+      for ((_pi = 0; _pi < ${#props[@]}; _pi += 2)); do
+        _pv=${props[_pi + 1]}
+        _pk=${_pv%%=*}
+        case $_pk in
+          CPUWeight|StartupCPUWeight|CPUQuota)
+            echo "$disp: -p $_pv is ignored for a --heavy job: it would throttle the one job the gate lock lets run" >&2 ;;
+          *) keep_props+=("${props[_pi]}" "$_pv") ;;
+        esac
+      done
+      props=("${keep_props[@]}")
     fi
     [ "$min_mb" -eq 0 ] && [ -n "$wait_mem" ] && die "--wait-mem needs the memory gate; drop --min-mb 0"
     # A heavy job's memory check belongs after the lock (memory read before a long queue is stale),
@@ -214,7 +234,7 @@ case "$cmd" in
     if [ "$need_chmod" = 1 ]; then chmod 700 "$state" || die "can't create $state" 5; fi
     exec 9>"$state/$name.lock" || die "can't lock $state/$name.lock" 5
     flock -n 9 || die "$name is being started by another $disp run" 2
-    running "$name" && die "$name is already running ($disp status $name)"
+    running "$name" && die "$name is already running ($run_as status $name)"
 
     # The parent shell's command text, when readable: a Bash tool call is `bash -c [-l ...] [--] TEXT`,
     # where TEXT is the first non-option word after the -c option (or the word after --), and TEXT
@@ -318,7 +338,7 @@ case "$cmd" in
     else
       echo "$disp: started $name as $(unit_of "$name"); log $log"
     fi
-    echo "$disp: to be woken when it ends, run \"$disp wait $name\" with Bash run_in_background; on the wake, a last line \"$disp: ended: …\" is the result, anything else means run \"$disp wait $name --poll\" and follow its last line (see --help)"
+    echo "$disp: to be woken when it ends, run \"$run_as wait $name\" with Bash run_in_background; on the wake, a last line \"$disp: ended: …\" is the result, anything else means run \"$run_as wait $name --poll\" and follow its last line (see --help)"
     ;;
   wait)
     name=${1:-}; check_name "$name"; shift
@@ -337,10 +357,10 @@ case "$cmd" in
     done
     [ "$interval" -gt 0 ] || die "--interval must be at least 1"
     owner_init "$owner"
-    [ -e "$state/$name.cmd" ] || die "no job named $name ($disp status lists them)" 1
+    [ -e "$state/$name.cmd" ] || die "no job named $name ($run_as status lists them)" 1
     # --poll is the post-wake and cron-tick check (see --help): each outcome names the next step.
     if [ $poll = 1 ] && unknown "$name"; then echo "$disp: state unknown: systemctl show failed for $name; check again shortly (not an end)"; exit 4; fi
-    if [ $poll = 1 ] && running "$name"; then describe "$name"; echo "$disp: still running: with no live waiter for $name, start \"$disp wait $name\" in the background; otherwise, and on a cron tick, say nothing"; exit 4; fi
+    if [ $poll = 1 ] && running "$name"; then describe "$name"; echo "$disp: still running: with no live waiter for $name, start \"$run_as wait $name\" in the background; otherwise, and on a cron tick, say nothing"; exit 4; fi
     start=$SECONDS
     if running "$name"; then echo "$disp: waiting for $name; pid $$, checking every $interval s"; fi
     warned_unknown=0

@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-# Hermetic probe for plugins/seyag/bin/long-job: usage errors, unreadable-memory exit 6, owner
-# recording (CLAUDE_JOB_DIR or cwd basename), state-dir permissions, SYG_LONG_JOB_STATE_DIR,
-# SYG_LONG_JOB_UNIT_PREFIX, SYG_LONG_JOB_PARENT_CMD and SYG_LONG_JOB_CMD chain refusals/warnings,
-# the SYG_LONG_JOB_CMD display name (message prefix, hints, ended sentinel), --slice and
-# -p/--property forwarding, --wait-mem gate forwarding, --heavy (gate lock, memory and load
-# waits, nested lock), missing lib/owner.sh, and real transient user units when a user systemd
-# manager is available (explicit SKIP count otherwise).
+# Hermetic probe for plugins/seyag/bin/long-job: usage errors (StandardInput* refused by prefix),
+# unreadable-memory exit 6, owner recording (CLAUDE_JOB_DIR or cwd basename), state-dir
+# permissions, SYG_LONG_JOB_STATE_DIR, SYG_LONG_JOB_UNIT_PREFIX, SYG_LONG_JOB_PARENT_CMD and
+# SYG_LONG_JOB_CMD chain refusals/warnings, the SYG_LONG_JOB_AS marker display name (message
+# prefix, hints, ended sentinel; empty, invalid or unset keeps long-job), --slice and
+# -p/--property forwarding (CPUWeight/StartupCPUWeight/CPUQuota dropped under --heavy), --wait-mem
+# gate forwarding, --heavy (gate lock, memory and load waits, nested lock), missing lib/owner.sh,
+# and real transient user units when a user systemd manager is available (explicit SKIP count
+# otherwise).
 # Usage: tests/long-job.probe.sh   (from anywhere)
 
 set -uo pipefail
@@ -22,7 +24,7 @@ pass=0; fail=0
 ok()  { pass=$((pass + 1)); echo "PASS  $1"; }
 bad() { fail=$((fail + 1)); echo "FAIL  $1"; }
 
-unset SYG_LONG_JOB_STATE_DIR SYG_LONG_JOB_UNIT_PREFIX SYG_LONG_JOB_PARENT_CMD SYG_LONG_JOB_CMD
+unset SYG_LONG_JOB_STATE_DIR SYG_LONG_JOB_UNIT_PREFIX SYG_LONG_JOB_PARENT_CMD SYG_LONG_JOB_CMD SYG_LONG_JOB_AS
 unset SYG_LONG_JOB_LOAD_GATE SYG_GATE_LOCK_FILE SYG_LOAD_GATE_1M SYG_LOAD_GATE_5M
 unset SYG_MEM_GATE_MIN_MB SYG_MEM_GATE_MEMINFO
 export XDG_STATE_HOME="$tmp/state"
@@ -240,29 +242,61 @@ err=$(timeout 5 env SYG_LONG_JOB_LOAD_GATE='' SYG_GATE_LOCK_FILE="$tmp/gl.lock" 
   && ok "run --heavy drops --slice with a note while -p MemoryHigh=1G stays" \
   || bad "run --heavy --slice (rc=$rc, err=[$err], argv=$(av))"
 
-# S9: SYG_LONG_JOB_CMD='/opt/x/myrun run' names messages, hints and the wrapper argv myrun.
+# S9: SYG_LONG_JOB_AS='/opt/x/myrun' names messages and the wrapper argv myrun, hints the whole value.
 rm -f "$tmp/argv"
-out=$(timeout 5 env SYG_LONG_JOB_CMD='/opt/x/myrun run' PATH="$tmp/stub-rec:$PATH" "$LJ" run dn-job --min-mb 0 --no-inhibit -- true 2>&1); rc=$?
+out=$(timeout 5 env SYG_LONG_JOB_AS='/opt/x/myrun' PATH="$tmp/stub-rec:$PATH" "$LJ" run dn-job --min-mb 0 --no-inhibit -- true 2>&1); rc=$?
 after_exit=$(awk 'prev ~ /\.exit$/ {print; exit} {prev=$0}' "$tmp/argv")
 [ "$rc" = 0 ] && grep -q "^myrun: started dn-job as " <<<"$out" \
-  && grep -qF 'run "myrun wait dn-job" with Bash run_in_background' <<<"$out" \
+  && grep -qF 'run "/opt/x/myrun wait dn-job" with Bash run_in_background' <<<"$out" \
+  && grep -qF '"/opt/x/myrun wait dn-job --poll"' <<<"$out" \
   && ! grep -q "long-job:" <<<"$out" && [ "$after_exit" = "myrun" ] \
-  && ok "SYG_LONG_JOB_CMD='myrun run' renames messages and hints to myrun (no long-job: line; wrapper argv carries myrun after the .exit path)" \
+  && ok "SYG_LONG_JOB_AS='/opt/x/myrun' renames messages to myrun, hints carry the whole value (no long-job: line; wrapper argv carries myrun after the .exit path)" \
   || bad "display name myrun (rc=$rc, after_exit=[$after_exit], out=[$out], argv=$(av))"
-out=$(timeout 5 env SYG_LONG_JOB_CMD='/opt/x/myrun run' "$LJ" status nosuch 2>&1); rc=$?
+out=$(timeout 5 env SYG_LONG_JOB_AS=myrun "$LJ" status nosuch 2>&1); rc=$?
 [ "$rc" = 1 ] && grep -qF "myrun: no job named nosuch" <<<"$out" \
-  && ok "an unknown NAME under the alias dies as myrun: no job named nosuch" \
+  && ok "an unknown NAME under the marker dies as myrun: no job named nosuch" \
   || bad "display name unknown NAME (rc=$rc: $out)"
 
-# S10: an empty or oddly-charactered SYG_LONG_JOB_CMD leaves the long-job name.
-out=$(timeout 5 env SYG_LONG_JOB_CMD='' "$LJ" status nosuch 2>&1); rc=$?
-[ "$rc" = 1 ] && grep -qF "long-job: no job named nosuch" <<<"$out" \
-  && ok "empty SYG_LONG_JOB_CMD keeps the long-job: prefix" \
-  || bad "empty SYG_LONG_JOB_CMD (rc=$rc: $out)"
-out=$(timeout 5 env SYG_LONG_JOB_CMD='bad$name run' "$LJ" status nosuch 2>&1); rc=$?
-[ "$rc" = 1 ] && grep -qF "long-job: no job named nosuch" <<<"$out" \
-  && ok "oddly-charactered SYG_LONG_JOB_CMD keeps the long-job: prefix" \
-  || bad "odd SYG_LONG_JOB_CMD (rc=$rc: $out)"
+# S9b (the TASK-177 regression): SYG_LONG_JOB_CMD alone — a runner with its own job store —
+# must not rename long-job.
+rm -f "$tmp/argv"
+out=$(timeout 5 env SYG_LONG_JOB_CMD='myrun run' PATH="$tmp/stub-rec:$PATH" "$LJ" run dn-job2 --min-mb 0 --no-inhibit -- true 2>&1); rc=$?
+after_exit=$(awk 'prev ~ /\.exit$/ {print; exit} {prev=$0}' "$tmp/argv")
+[ "$rc" = 0 ] && grep -q "^long-job: started dn-job2 as " <<<"$out" \
+  && grep -qF 'run "long-job wait dn-job2"' <<<"$out" \
+  && ! grep -q "myrun" <<<"$out" && [ "$after_exit" = "long-job" ] \
+  && ok "SYG_LONG_JOB_CMD='myrun run' without the marker keeps long-job's name and hints (no myrun anywhere; wrapper argv carries long-job)" \
+  || bad "SYG_LONG_JOB_CMD does not rename (rc=$rc, after_exit=[$after_exit], out=[$out], argv=$(av))"
+
+# S10: an empty or invalid SYG_LONG_JOB_AS keeps the long-job name.
+for v in '' 'bad$name' 'rel/myrun' 'myrun run' '/opt/x/'; do
+  out=$(timeout 5 env SYG_LONG_JOB_AS="$v" "$LJ" status nosuch 2>&1); rc=$?
+  [ "$rc" = 1 ] && grep -qF "long-job: no job named nosuch" <<<"$out" \
+    && ok "SYG_LONG_JOB_AS='$v' keeps the long-job: prefix" \
+    || bad "SYG_LONG_JOB_AS='$v' (rc=$rc: $out)"
+done
+
+# S11: -p StandardInputText/StandardInputData are refused by the StandardInput* prefix (the job's
+# log owns stdin); nothing starts.
+for pv in StandardInputText=hi StandardInputData=aGk=; do
+  rm -f "$tmp/argv"
+  out=$(timeout 5 env PATH="$tmp/stub-rec:$PATH" "$LJ" run sin-job -p "$pv" -- true 2>&1); rc=$?
+  [ "$rc" = 2 ] && grep -qF "is set by long-job (the job's log); not allowed" <<<"$out" && [ ! -e "$tmp/argv" ] \
+    && ok "-p $pv exits 2 with the stdio refusal, nothing started" \
+    || bad "-p $pv (rc=$rc, out=[$out], argv=$(av))"
+done
+
+# S12: --heavy drops -p CPUWeight/CPUQuota/StartupCPUWeight with a note; other props stay.
+# The -p options come before --heavy, so the drop must happen after the option loop.
+rm -f "$tmp/argv"
+err=$(timeout 5 env SYG_LONG_JOB_LOAD_GATE='' SYG_GATE_LOCK_FILE="$tmp/gl.lock" PATH="$tmp/stub-rec:$PATH" "$LJ" run hv-cpu -p CPUWeight=20 -p CPUQuota=50% --property StartupCPUWeight=5 -p MemoryHigh=1G --heavy --min-mb 0 --no-inhibit -- true 2>&1 >/dev/null); rc=$?
+[ "$rc" = 0 ] && grep -qxF -- "MemoryHigh=1G" "$tmp/argv" \
+  && ! grep -qF -- "CPUWeight=20" "$tmp/argv" && ! grep -qF -- "CPUQuota=50%" "$tmp/argv" && ! grep -qF -- "StartupCPUWeight=5" "$tmp/argv" \
+  && grep -qF -- "-p CPUWeight=20 is ignored for a --heavy job" <<<"$err" \
+  && grep -qF -- "-p CPUQuota=50% is ignored for a --heavy job" <<<"$err" \
+  && grep -qF -- "-p StartupCPUWeight=5 is ignored for a --heavy job" <<<"$err" \
+  && ok "run --heavy drops -p CPUWeight/CPUQuota/StartupCPUWeight with a note while -p MemoryHigh=1G stays" \
+  || bad "run --heavy CPU props (rc=$rc, err=[$err], argv=$(av))"
 
 # SYG_LONG_JOB_UNIT_PREFIX='a b' exits 2 naming the knob; leading '-' exits 2 saying it must start with a letter or digit.
 out=$(timeout 5 env SYG_LONG_JOB_UNIT_PREFIX='a b' PATH="$tmp/stub:$PATH" "$LJ" run bad-pfx --min-mb 0 -- true 2>&1); rc=$?
@@ -372,7 +406,7 @@ if ! systemctl --user show-environment >/dev/null 2>&1; then
   exit $?
 fi
 p=probe-$$
-cleanup_units() { for s in ok bad stop gate race wq wr dollar heavy heavyq heavymem heavyld heavylf heavyln plainld disp; do systemctl --user stop "long-job-$p-$s.service" 2>/dev/null; systemctl --user reset-failed "long-job-$p-$s.service" 2>/dev/null; done; rm -rf "$tmp"; }
+cleanup_units() { for s in ok bad stop gate race wq wr dollar heavy heavyq heavymem heavyld heavylf heavyln plainld disp heavydisp; do systemctl --user stop "long-job-$p-$s.service" 2>/dev/null; systemctl --user reset-failed "long-job-$p-$s.service" 2>/dev/null; done; rm -rf "$tmp"; }
 trap cleanup_units EXIT
 
 timeout 10 "$LJ" run "$p-gate" --min-mb 99999999 -- true >/dev/null 2>&1; rc=$?
@@ -550,19 +584,30 @@ out=$(timeout 25 "$LJ" wait "$p-plainld" --interval 1 --timeout 20 --owner ""); 
   && ok "a plain run does not call the load-gate" \
   || bad "plain run load-gate (rc=$rc, wait=$wrc, log=$(tr '\n' '|' <"$LJS/$p-plainld.log" 2>/dev/null))"
 
-# J: the display name from SYG_LONG_JOB_CMD reaches run's output, the log header and wait's ended sentinel.
-out=$(timeout 10 env SYG_LONG_JOB_CMD='myrun run' "$LJ" run "$p-disp" --min-mb 0 --no-inhibit -- echo cmd-ran 2>&1); rc=$?
-wout=$(timeout 25 env SYG_LONG_JOB_CMD='myrun run' "$LJ" wait "$p-disp" --interval 1 --timeout 20 --owner ""); wrc=$?
+# J: the marker SYG_LONG_JOB_AS reaches run's output, the log header and wait's ended sentinel.
+out=$(timeout 10 env SYG_LONG_JOB_AS=myrun "$LJ" run "$p-disp" --min-mb 0 --no-inhibit -- echo cmd-ran 2>&1); rc=$?
+wout=$(timeout 25 env SYG_LONG_JOB_AS=myrun "$LJ" wait "$p-disp" --interval 1 --timeout 20 --owner ""); wrc=$?
 [ "$rc" = 0 ] && [ "$wrc" = 0 ] && grep -q "^myrun: started $p-disp as " <<<"$out" \
   && grep -qF "=== myrun $p-disp started" "$LJS/$p-disp.log" 2>/dev/null && grep -qx "cmd-ran" "$LJS/$p-disp.log" 2>/dev/null \
   && [ "$(tail -n 1 <<<"$wout")" = "myrun: ended: act on the result above" ] && ! grep -q "^long-job: " <<<"$wout" \
-  && ok "SYG_LONG_JOB_CMD='myrun run' names run's lines, the log header and the ended sentinel myrun" \
+  && ok "SYG_LONG_JOB_AS=myrun names run's lines, the log header and the ended sentinel myrun" \
   || bad "display-name real unit (rc=$rc, wrc=$wrc, out=[$out], wout=[$wout], log=$(tr '\n' '|' <"$LJS/$p-disp.log" 2>/dev/null))"
+
+# J2: the marker survives --heavy's --lock re-exec: the wrapper's gate-lock line, the job's output
+# and wait's ended sentinel all say myrun.
+out=$(timeout 10 env SYG_LONG_JOB_AS=myrun SYG_LONG_JOB_LOAD_GATE='' "$LJ" run "$p-heavydisp" --heavy --min-mb 0 --no-inhibit -- echo heavy-ran 2>&1); rc=$?
+wout=$(timeout 25 env SYG_LONG_JOB_AS=myrun "$LJ" wait "$p-heavydisp" --interval 1 --timeout 20 --owner ""); wrc=$?
+grep -q "^myrun: .* holding the gate lock" "$LJS/$p-heavydisp.log" 2>/dev/null && grep -qx "heavy-ran" "$LJS/$p-heavydisp.log" 2>/dev/null \
+  && [ "$rc" = 0 ] && [ "$wrc" = 0 ] \
+  && [ "$(tail -n 1 <<<"$wout")" = "myrun: ended: act on the result above" ] \
+  && ok "SYG_LONG_JOB_AS=myrun survives --heavy's --lock re-exec (gate-lock line, CMD output, ended sentinel all myrun)" \
+  || bad "display-name heavy real unit (rc=$rc, wrc=$wrc, out=[$out], wout=[$wout], log=$(tr '\n' '|' <"$LJS/$p-heavydisp.log" 2>/dev/null))"
+timeout 10 systemctl --user stop "long-job-$p-heavydisp.service" 2>/dev/null
 unset SYG_GATE_LOCK_FILE SYG_LONG_JOB_LOAD_GATE
 
 # status queries systemd once per recorded job; 5 s ran out under heavy load (0 listed, 11-25).
 n=$(timeout 60 "$LJ" status | grep -c "^$p-")
-[ "$n" = 15 ] && ok "status lists every recorded job" || bad "status lists $n jobs, want 15"
+[ "$n" = 16 ] && ok "status lists every recorded job" || bad "status lists $n jobs, want 16"
 
 echo "long-job probe: $pass passed, $fail failed"
 [ "$fail" = 0 ]
