@@ -162,6 +162,92 @@ run 0 'npx backlog task create x "${args[@]}"'
 run 0 'npx backlog task edit 2 -s "To Do" "$@"'
 run 2 'npx backlog task create x -d "costs $5"'
 run 2 'c(){ npx backlog task create --plain; }; c'
+# quoted prose: a create spelled inside a single-quoted argument is prose when the fallback trigger sits inside a backlog argument zone (TASK-191).
+Q="'\"'\"'"
+# a shell word outside a backlog argument is honoured (round 4)
+run 2 "echo 'bash runs'; npx backlog task edit 1 --append-notes 'x \`npx backlog task create foo\` y'"
+run 2 "echo 'bash runs'; npx backlog task edit 1 --append-notes 'x \$(npx backlog task create foo) y'"
+run 2 "echo 'see <<EOF'; npx backlog task edit 1 --append-notes 'x \`npx backlog task create foo\` y'"
+run 2 "echo 'eval is risky'; npx backlog task edit 1 --append-notes 'x \`npx backlog task create foo\` y'"
+run 0 "npx backlog task create x --priority low -d 'a \`# it${Q}s\` b bash'; npx backlog task edit 1 --append-notes 'x \`npx backlog task create foo\` y'"
+# ...while every executed form of the same create still blocks.
+run 2 "bash -c 'x=\$(npx backlog task create foo)'"
+run 2 "eval 'npx backlog task create foo'"
+run 2 "echo bash; x=\"\$(npx backlog task create foo)\""
+run 2 "echo bash; x=\`npx backlog task create foo\`"
+run 2 $'bash <<EOF\necho \'a `npx backlog task create foo` b\'\nEOF'
+run 2 $'cat <<EOF | sh\nit\'s `npx backlog task create foo`\nEOF'
+run 2 $'cat <<EOF | sh\necho \'a `npx backlog task create foo` b\'\nEOF'
+# ...and single-quoted text that something later EXECUTES is not prose: a shell
+# word outside quotes keeps every span judged (TASK-191 review).
+S="'x=\$(npx backlog task create foo)'"
+run 2 "bash -c -- $S"
+run 2 "bash -cx $S"
+run 2 "find . -maxdepth 0 -exec sh -c $S ';'"
+run 2 "bash <(echo $S)"
+run 2 "cmd=$S; eval \"\$cmd\""
+run 2 "echo $S | tee /dev/null | bash"
+run 2 "b=bash; \$b -c $S"
+run 2 "f(){ eval \"\$1\"; }; f $S"
+d='x=$(npx backlog task create foo)'; sq="'"; rep="'\"'\"'"
+for _ in 1 2 3 4; do d="bash -c '${d//"$sq"/"$rep"}'"; done
+run 2 "$d"
+run 2 $'bash <<EOF\ncat <<IN\nit\'s\nIN\nEOF\nx=$(npx backlog task create foo); echo \'k\''
+run 2 "'bash' -c $S"
+run 2 "ba'sh' -c $S"
+run 2 "\"bash\" -c $S"
+run 2 "x=\"bash\"; \$x -c $S"
+run 2 "y=\"\$(echo $S | bash)\""
+run 2 "c=\"bash -c\"; \$c $S"
+run 2 "export c='sh -c'; \$c $S"
+# A shell word inside a double-quoted title is prose too (the real TASK-191 shape).
+run 0 "npx backlog task create \"a title about unquoted eval\" --priority low; npx backlog task edit 1 --append-notes 'x \`npx backlog task create foo\` y'"
+run 0 "npx backlog task create \"while bash runs the chain\" --priority low; npx backlog task edit 1 --append-notes 'x \`npx backlog task create foo\` y'"
+# a shell word outside a backlog argument is honoured (round 4)
+run 2 "msg='see bash'; echo \"\$msg\"; npx backlog task edit 1 --append-notes 'x \`npx backlog task create foo\` y'"
+# Round 4: backlog-argument zone gate; executors and zone-escape attacks stay judged (TASK-191).
+ED="npx backlog task edit 1"
+run 2 "\"\${SHELL:-/bin/sh}\" -c $S"
+run 2 "c=\"env bash -c\"; \$c $S"
+run 2 "c=\"exec bash -c\"; \$c $S"
+run 2 "e=\"builtin eval\"; \$e $S"
+run 2 "for c in 'bash -c'; do \$c $S; done"
+run 2 "set -- \"bash -c\"; \$1 $S"
+run 2 "r(){ \$1 \"\$2\"; }; r \"bash -c\" $S"
+run 2 "read -r c <<< \"bash -c\"; \$c $S"
+run 2 "printf -v c %s 'bash -c'; \$c $S"
+run 2 ": \"\${c:=bash -c}\"; \$c $S"
+run 2 "arr[0]=bash; \${arr[0]} -c $S"
+run 2 "arr[0]=\"bash\"; \${arr[0]} -c $S"
+run 2 "c+=\"bash -c\"; \$c $S"
+run 2 "b=ba; \"\${b}sh\" -c $S"
+run 2 "\"\$(printf ba)sh\" -c $S"
+run 2 "y=\$(c=\"env bash\"; echo $S | \$c)"
+run 2 "B='eval /x/backlog'; \$B $S"
+run 2 "B='sh'; B=/x/backlog true; \$B -c $S"
+run 2 "B='sh'; (B=/x/backlog); \$B -c $S"
+run 2 "B='sh'; true || B=/x/backlog; \$B -c $S"
+run 2 "_=/x/backlog; true 'sh'; \$_ -c $S"
+run 2 "echo(){ B='sh'; }; B=/x/backlog; echo; \$B -c $S"
+run 2 "c='sh'; echo $S | echo \"\$(echo ')'; \$c)\""
+run 2 "B=/x/node_modules/.bin/backlog; B=bash; \$B -c $S"
+run 2 "B=\$(echo bash); \$B -c $S"
+run 2 "$ED -t \"bash\"; \$_ -c $S"
+run 2 "$ED -t 'bash' -d $S; \$_ -c $S"
+run 2 "backlog(){ \$1 -c \"\$2\"; }; backlog task edit \"bash\" $S"
+run 2 "B=eval; \$B task edit 1 $S"
+run 2 "B='eval'; \$B task edit 1 $S"
+run 2 "$ED -t \"x\" | bash -c $S"
+run 2 "$ED -t \"a\"; bash -c $S"
+run 2 "$ED -d $S && eval \"\$(echo $S)\""
+run 2 "npx backlog task edit \"\$(bash -c $S)\""
+run 2 "$ED -t \"bash\" -d \"\$(echo $S | bash)\""
+run 2 "x=\$($ED -t \"bash\"); bash -c $S"
+run 0 "B=/x/node_modules/.bin/backlog; ls \$B >/dev/null && \$B task edit 1 -t \"a bash title\" -d 'x \`npx backlog task create foo\` y'"
+run 0 "B=node_modules/.bin/backlog; \$B task edit 1 -t \"eval title\" --append-notes 'x \$(npx backlog task create foo) y'"
+run 0 'B=/x/node_modules/.bin/backlog; $B task create "under-arms: heredoc inside a substitution, unquoted eval" --priority low --labels hooks -d '\''From review: `bash -c "$(cat <<EOF ...)"` and `npx backlog task create foo` with eval'\''; ls backlog/tasks | grep -E '\''task-1'\'''
+run 0 'B=node_modules/.bin/backlog; ls $B >/dev/null && $B task edit 1 -s "In Progress" -a S -t "false-blocks a create when a shell word or heredoc marker appears" -d '\''Seen: `npx backlog task create foo` near `bash -c` and `<<EOF`; it'\''"'\''"'\''s quoted'\''; echo rc=$?'
+run 0 'cd sub && B=node_modules/.bin/backlog; $B task edit 1 --append-notes '\''r4: `eval "$(npx backlog task create foo)"` is prose here'\'''
 # draft: promote lands in To Do; the draft's priority is judged first.
 run 2 'npx backlog draft promote DRAFT-1'
 run 0 'npx backlog draft promote 2'

@@ -28,7 +28,9 @@ from shell_quotes import (  # noqa: E402
     heredoc_openers,
     inline_command_count,
     masked_view,
+    prose_skip_safe,
     resolve_placeholders,
+    single_quoted_regions,
     strip_backtick_glue,
     strip_heredoc_bodies,
     strip_quoted,
@@ -313,6 +315,111 @@ _OVERRUN_CASES = [
 ]
 for label, inp, want in _OVERRUN_CASES:
     check_equal(label, span_overruns_quotes(inp), want)
+
+_SINGLE_QUOTED_REGION_CASES = [
+    (
+        'single_quoted_regions: records a plain single-quoted region',
+        "echo 'abc' z",
+        [(5, 10)],
+    ),
+    (
+        'single_quoted_regions: records both halves of a \'"\'"\' splice',
+        'echo \'it\'"\'"\'s\'',
+        [(5, 9), (12, 15)],
+    ),
+    (
+        "single_quoted_regions: excludes ANSI-C $'…' regions",
+        "echo $'ansi' 'plain'",
+        [(13, 20)],
+    ),
+    (
+        'single_quoted_regions: returns no region for an unterminated single quote',
+        "echo 'unterminated",
+        [],
+    ),
+    (
+        'single_quoted_regions: ignores an apostrophe inside a word-start # comment',
+        "# it's a comment\necho 'ok'",
+        [(22, 26)],
+    ),
+]
+for label, inp, want in _SINGLE_QUOTED_REGION_CASES:
+    check_equal(label, single_quoted_regions(inp), want)
+
+_PROSE_SKIP_SAFE_CASES = [
+    (
+        'prose_skip_safe: npx backlog task create with eval in double-quoted title',
+        'npx backlog task create "an eval title" --priority low',
+        True,
+    ),
+    (
+        'prose_skip_safe: variable-held backlog task edit with bash and <<EOF in quoted args',
+        'B=/a/backlog; $B task edit 1 -t "bash title" -d \'see <<EOF and `npx backlog task create foo`\'',
+        True,
+    ),
+    (
+        'prose_skip_safe: backlog draft promote with shell word in quoted arg',
+        'backlog draft promote 1 -d "mentions bash and sh"',
+        True,
+    ),
+    (
+        'prose_skip_safe: real chain with create carrying bash/<<EOF/eval in quoted prose and trailing pipeline',
+        'B=/x/node_modules/.bin/backlog; $B task create "under-arms: heredoc inside a substitution, unquoted eval" --priority low -d \'From review: `bash -c "$(cat <<EOF ...)"` with eval\'; ls backlog/tasks | grep -E \'task-1\'',
+        True,
+    ),
+    (
+        'prose_skip_safe: shell word in quoted arg outside backlog zone closes the gate',
+        "echo 'bash runs'; npx backlog task edit 1 -t 'ok'",
+        False,
+    ),
+    (
+        'prose_skip_safe: shell word in variable assignment outside backlog zone closes the gate',
+        'c="env bash -c"; $c \'a\'',
+        False,
+    ),
+    (
+        'prose_skip_safe: reading $_ after a backlog zone closes the gate',
+        'npx backlog task edit 1 -t "bash"; $_ -c \'a\'',
+        False,
+    ),
+    (
+        'prose_skip_safe: reading ${_} after a backlog zone closes the gate',
+        'npx backlog task edit 1 -t "bash"; ${_} -c \'a\'',
+        False,
+    ),
+    (
+        'prose_skip_safe: function definition f(){...} closes the gate',
+        'backlog(){ $1 -c "$2"; }; backlog task edit "bash" \'a\'',
+        False,
+    ),
+    (
+        'prose_skip_safe: function keyword closes the gate',
+        'function f { :; }; npx backlog task edit 1 -t "bash"',
+        False,
+    ),
+    (
+        'prose_skip_safe: alias keyword closes the gate',
+        'alias b=bash; npx backlog task edit 1 -t "bash"',
+        False,
+    ),
+    (
+        'prose_skip_safe: unbalanced quote closes the gate',
+        'npx backlog task create "eval title --priority low',
+        False,
+    ),
+    (
+        'prose_skip_safe: zone ended by ; then unquoted bash -c closes the gate',
+        'npx backlog task edit 1 -t "a"; bash -c \'a\'',
+        False,
+    ),
+    (
+        'prose_skip_safe: live command substitution with bash inside backlog zone double quotes closes the gate',
+        'npx backlog task edit 1 -t "bash" -d "$(echo \'a\' | bash)"',
+        False,
+    ),
+]
+for label, inp, want in _PROSE_SKIP_SAFE_CASES:
+    check_equal(label, prose_skip_safe(inp), want)
 
 # ---------------------------------------------------------------------------
 # strip_heredoc_bodies — [label, input, expected]

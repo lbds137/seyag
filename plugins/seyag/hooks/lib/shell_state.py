@@ -31,8 +31,10 @@ from shell_quotes import (
     _pipelines,
     _reads_script_from_stdin,
     _tokens,
+    single_quoted_regions,
     strip_heredoc_bodies,
     strip_redirections,
+    substitution_span_offsets,
     substitution_spans,
     unwrap_runners,
     wrapped_command_strings,
@@ -458,16 +460,38 @@ def _track_vars(argv, state):
                 state.vars[v] = None
 
 
-def walk(text, depth, state, ctx, run_command):
+def walk(text, depth, state, ctx, run_command, *, skip_single_quoted_spans=False):
     """Walk `text`'s commands in EXECUTION order across possible states
     ("worlds", capped at MAX_WORLDS), updating `state` to the final S-path
     world. A command substitution runs just before the command whose word
     holds it; a wrapper's string (`bash -c`, `eval`, …) runs as the pipeline
     does. Both run in a child shell, so each walks a COPY of the world. At
     MAX_WRAPPER_DEPTH a substitution is not walked inline but left over, so
-    the caller's replay still judges it."""
+    the caller's replay still judges it.
+
+    With `skip_single_quoted_spans=True` (the caller decides the gate on the
+    top-level text, e.g. via `prose_skip_safe`, and `walk` threads the boolean
+    unchanged to every recursive walk), a `$(…)` or backtick span whose opener
+    sits strictly inside a `single_quoted_regions(scan_text)` region is dropped
+    from `pending` as inert prose; otherwise `pending` comes from
+    `substitution_spans(scan_text)` unchanged. Defaults to `False` so other
+    callers keep the fail-closed extract-everything fallback."""
     tokens, _, scan_text = _tokens_of(text)
-    pending = list(substitution_spans(scan_text))
+    if skip_single_quoted_spans:
+        sq_regions = single_quoted_regions(scan_text)
+        pending = []
+        for s, e, _ in substitution_span_offsets(scan_text):
+            if scan_text[s - 1] == "`":
+                opener = s - 1
+            elif scan_text[s - 2 : s] == "$(":
+                opener = s - 2
+            else:
+                opener = -1
+            if opener >= 0 and any(o < opener < c - 1 for o, c in sq_regions):
+                continue
+            pending.append(scan_text[s:e])
+    else:
+        pending = list(substitution_spans(scan_text))
     merged = []
     t_idx = 0
     while t_idx < len(tokens):
@@ -535,7 +559,14 @@ def walk(text, depth, state, ctx, run_command):
 
     def _run_one(argv, w, matched_spans):
         for span in matched_spans:
-            walk(span, depth + 1, w.copy(), ctx, run_command)
+            walk(
+                span,
+                depth + 1,
+                w.copy(),
+                ctx,
+                run_command,
+                skip_single_quoted_spans=skip_single_quoted_spans,
+            )
         before = w.copy()
         w.uncertain = False
         ctx.visited.add(w.snapshot())
@@ -579,7 +610,14 @@ def walk(text, depth, state, ctx, run_command):
                 wrap_worlds = _dedup(p_f + p_s) or [w.copy() for w in in_worlds]
                 for inner in wrapped_command_strings(joined):
                     for w in wrap_worlds:
-                        walk(inner, depth + 1, w.copy(), ctx, run_command)
+                        walk(
+                            inner,
+                            depth + 1,
+                            w.copy(),
+                            ctx,
+                            run_command,
+                            skip_single_quoted_spans=skip_single_quoted_spans,
+                        )
             return p_s, p_f
 
         acc = [w.copy() for w in in_worlds]
@@ -595,7 +633,14 @@ def walk(text, depth, state, ctx, run_command):
             joined = " | ".join(shlex.join(a) for a in stages)
             for inner in wrapped_command_strings(joined):
                 for w in acc:
-                    walk(inner, depth + 1, w.copy(), ctx, run_command)
+                    walk(
+                        inner,
+                        depth + 1,
+                        w.copy(),
+                        ctx,
+                        run_command,
+                        skip_single_quoted_spans=skip_single_quoted_spans,
+                    )
         return [w.copy() for w in acc], [w.copy() for w in acc]
 
     for piece, op in pieces:
