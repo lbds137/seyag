@@ -70,15 +70,20 @@ Ensure `example-app` bounds retry intervals when downstream endpoints return 503
 
 ### Claiming across sessions
 
-When several driver sessions share one store, a session claims a task before starting it: set
-`assignee` to that session's name (e.g. `assignee: [project-a]`) and move `status` to
-`In Progress` in the same CLI pass that starts the work, and move it off `In Progress` when the
-unit ends. A session never edits another session's in-progress task body; coordination notes go
-in the task's own description or the project's session role files. Role files keep each
-session's handoff and progress; the store keeps the queue.
+When several driver sessions share one store, a session claims a task before starting it: `assignee` set to that session's name (e.g. `assignee: [project-a]`) and `status` moved to `In Progress`. **An unpushed claim is not a claim:** it counts only once that one-file change is on the integration branch's remote copy (`origin/<integration>`, the copy every session reads the store from), so a claim never rides a feature branch, where no other session can see it.
+
+1. `git fetch origin`, then capture the tip once (`base=$(git rev-parse origin/<integration>)`) and read the task at that commit (`git show "$base:<task path>"`), never from the working tree. Other worktrees of the same repository share `origin/<integration>` and can move it at any moment, so every later step uses `$base`, never the ref.
+2. `In Progress` under a different assignee: stop and name that assignee; the task is taken. `In Progress` under the same assignee: the claim already stands; do nothing. Anything other than unassigned `To Do`: not claimable; say why.
+3. In a temporary detached worktree cut from `$base`, so the session's own branch stays untouched, make the claim through the CLI, commit only that task file, run the project's store lint, and push `origin HEAD:<integration>`.
+4. A rejected push: re-fetch. If the tip moved, another push landed first (a lost race shows as a non-fast-forward or as a remote ref-lock error; a push that landed but lost its reply shows up at step 2 as your own claim): restart at step 1 from the new tip, three attempts at most; never rebase and replay the edit. A fetch failure, a rejection on a tip that did not move, or a spent retry budget means no claim; do not start the work.
+5. Remove the temporary worktree, then cut the unit's branch from the new `origin/<integration>` so it carries the claim.
+
+Releasing a claim without finishing (status back to `To Do`, assignee cleared) takes the same path, and only for a task step 2 shows as your own; the move to Done rides the unit's PR as usual. Where the backlog-only direct path is closed (no store lint, the project forbids it, or the branch refuses direct pushes), step 3 cannot land, so no claim exists: the project names its own claim path in `SYG_TASK_CLAIM_CMD`. When that is set (SessionStart announces it), run `<cmd> <task id>` from the repository instead of steps 1–5: exit 0 is the claim; any other exit is no claim, and its output names the holder when the task is taken.
+
+A session never edits another session's in-progress task body; coordination notes go in the task's own description or the project's session role files. Role files keep each session's handoff and progress; the store keeps the queue.
 
 ## 6. Guardrails
 
 - **Stale opt-in check:** If `SYG_TRACKING_SURFACE=backlog-md` is pinned in settings but `backlog/` or `backlog/config.yml` is missing, the opt-in is stale — report the missing store and do not initialize or create one.
-- **Commit discipline:** Store changes ride the session's working branch: a filed task or written disposition lands in the same PR as the change that prompted it, or in its own commit on that branch, so it survives the merge. Never commit outside the session's own branch — the backlog-only direct commit in this section is the one exception — and never leave store changes as uncommitted files that a worktree cleanup or transfer could discard.
+- **Commit discipline:** Store changes ride the session's working branch: a filed task or written disposition lands in the same PR as the change that prompted it, or in its own commit on that branch, so it survives the merge. Never commit outside the session's own branch — a claim (§ Claiming across sessions) and the backlog-only direct commit below are the two exceptions — and never leave store changes as uncommitted files that a worktree cleanup or transfer could discard.
 - **Backlog-only direct commits:** A commit that touches only `backlog/**` may go straight to the project's integration branch (the branch the project merges work into) without a PR, after the project's store lint passes. The direct path needs both conditions: the project has a store lint to pass, and the branch accepts direct pushes — where the project has no lint, its CLAUDE.md forbids the path, or a technical block (branch protection, push rulesets) closes the branch, the change rides the working branch or PR as usual. A store change made as part of other work still rides that work's branch or PR, and the project wins.

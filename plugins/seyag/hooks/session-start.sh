@@ -17,8 +17,9 @@
 #   keep recurring; component `rules`). Adapted from Tzurot's session-start.sh.
 # - startup / clear / compact: appends the memory-gate (SYG_MEM_GATE_CMD),
 #   long-job runner (SYG_LONG_JOB_CMD), cross-family reviewer route
-#   (SYG_CROSS_REVIEW_CMD) and boundary-pick command (SYG_PICK_CMD) lines
-#   when set (single-line values only; not gated by `rules`).
+#   (SYG_CROSS_REVIEW_CMD), task-claim command (SYG_TASK_CLAIM_CMD) and
+#   boundary-pick command (SYG_PICK_CMD) lines when set (single-line values
+#   only; not gated by `rules`).
 # - resume: outputs nothing.
 # - every source: deletes prompt-hook state files older than 7 days (below),
 #   and runs `seyag-git-hooks relink` (adds one line only when it rewrote
@@ -177,6 +178,13 @@ case "$SOURCE" in
       *)
         TEXT="${TEXT:+$TEXT
 }Cross-family review: run \`$SYG_CROSS_REVIEW_CMD\` for the reviewer route when a review is due; same-family fresh context is a labelled fallback only when that route is closed."
+        ;;
+    esac
+    case "${SYG_TASK_CLAIM_CMD:-}" in
+      '' | *$'\n'* | *$'\r'*) ;;
+      *[![:space:]]*)
+        TEXT="${TEXT:+$TEXT
+}Task claims: claim a backlog task by running \`$SYG_TASK_CLAIM_CMD <task id>\` from the repository instead of a CLI edit; exit 0 is the claim, any other exit is no claim."
         ;;
     esac
     case "${SYG_PICK_CMD:-}" in
