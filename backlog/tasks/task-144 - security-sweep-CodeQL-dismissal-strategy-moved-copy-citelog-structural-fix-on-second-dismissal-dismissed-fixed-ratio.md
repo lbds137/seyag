@@ -3,9 +3,9 @@ id: TASK-144
 title: >-
   security-sweep: CodeQL dismissal strategy (moved-copy cite+log, structural fix
   on second dismissal, dismissed:fixed ratio)
-status: To Do
+status: In Progress
 assignee:
-  - Seyag
+  - Seyag B
 created_date: '2026-11-24T18:08:00Z'
 updated_date: '2026-11-26T14:40:00Z'
 labels:
@@ -25,4 +25,6 @@ Owner ruling 2026-11-24 (relayed by the machine session via relay-ruling, the ow
 
 <!-- SECTION:NOTES:BEGIN -->
 2026-11-26 (Seyag A, from the machine session's CodeQL advanced-setup switch in a consumer repo; part (b) depends on advanced setup): (1) A repo whose PRs are merged by a workflow using GITHUB_TOKEN gets no push-triggered workflow runs on main (GITHUB_TOKEN events trigger no workflows), so an advanced-setup analysis on push never runs after such a merge: the CodeQL workflow needs a workflow_dispatch trigger and the merging workflow a post-merge dispatch of it. (2) Turn default setup off before the first push of the advanced workflow; the two cannot run together. (3) Measured scale: that consumer carried 36 test-path dismissals before the switch, the case paths-ignore is for. Skill text written from these stays generic (no repo or session names).
+
+Claimed by Seyag B 2026-11-26 (A handed all three parts, incl. bin/security-sweep --json part c). Shared probe: tests/security-sweep.probe.sh. Branch worktree-agent-b144.
 <!-- SECTION:NOTES:END -->
