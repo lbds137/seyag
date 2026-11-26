@@ -16,8 +16,26 @@ Also checks the runner named by the first word of SYG_LONG_JOB_CMD when set (the
 the runner itself, not an interpreter such as `bash`), past leading prefix words (time, nice, nohup,
 command, sudo, env, timeout, stdbuf) and their options/arguments.
 Text that does not parse (unbalanced quotes) has no findings.
-Recursion: the argument of `eval` is parsed as shell text (the Bash tool wraps commands in eval).
+Heredoc bodies are data and come off before parsing (shell_quotes.strip_heredoc_bodies) — except
+when a command in the body-stripped text runs a shell on its stdin (`cat <<EOF | bash`, `bash <<EOF`,
+`sh -s <<EOF`): the body is that shell's script, so the text is parsed with bodies kept.
+Recursion: the argument of `eval` is parsed as shell text (the Bash tool wraps commands in eval), and
+so is the interior of every command/process substitution — $( ), <( ), >( ), backticks — together with
+the unquoted text after it, since the $( ) waits only for the start (like `( … )&&b`, which refuses).
+Interiors are located in the raw text by a quote-aware scanner, so single-quoted prose mentioning a
+substitution (`echo '$(long-job run x -- a && b)'`, including the Bash tool's eval wrapper) is data,
+not a target.
 Not recursed: `bash -c` bodies (a chain inside them after `long-job run N --` is the correct form).
+Eval join-and-reparse matches bash's own eval: measured `bash -c 'eval echo "a  &&  echo" B'` prints
+a then B, exactly the join of eval's arguments with single spaces re-parsed. Inputs tried for a
+divergence: `eval long-job run x -- a '\\&\\&' b` (measured: the escaped `&`s stay literal words through
+eval's re-parse; the checker reads them the same way), and a folded substitution word — the token
+fold joins interior tokens with no separators, so `$(a  b)` folds to a word whose interior reads
+`ab)` and `eval $(long-job run x -- a && b)` used to reach the eval recursion as a non-command; the
+substitution interiors are read from the raw text, so no verdict rides on the folded form. What does
+differ (both then and now): the checker parses the substitution SOURCE, bash's eval re-parses its
+OUTPUT — `eval $(echo "long-job run x -- a && b")` prints the text and bash then runs it, while the
+checker sees only `echo`; output-to-code flow is out of this checker's model.
 """
 import json
 import os
@@ -34,6 +52,22 @@ try:
     config_env.syg_config_env(_SYG_ROOT)
 except Exception:
     pass
+
+# hooks/lib/shell_quotes: heredoc bodies are data (stripped before parsing) and the
+# reserved words that can lead a simple command. The path is inserted explicitly
+# because python3 -I drops the script directory and every PYTHON* path; if the
+# import fails the checker proceeds without stripping — quoted heredoc bodies are
+# then parsed as commands, which over-arms (the accepted failure direction).
+try:
+    sys.path.insert(0, os.path.join(_SYG_ROOT, "hooks", "lib"))
+    import shell_quotes as _sq
+
+    _strip_heredoc_bodies = getattr(_sq, "strip_heredoc_bodies", None)
+    _reads_script_from_stdin = getattr(_sq, "_reads_script_from_stdin", None)
+except Exception:
+    _sq = None
+    _strip_heredoc_bodies = None
+    _reads_script_from_stdin = None
 
 REFUSE = ("{r}: refusing: '&& …' after '{r} run {n}' runs outside the job, at once, against "
           "the tree as it is now. Put the chain inside the job: {r} run {n} -- bash -c 'a && b' "
@@ -59,6 +93,237 @@ PREFIX_WORDS = {
 }
 PUNCT = "();<>|&\n"
 OPS = ("&&", "||", "|&", ";;", "<(", ">(", ">>", "<<", ">&", "<&")
+# Reserved words that can lead a simple command and hide argv[0] (`if long-job
+# run N -- a && b; then :; fi`, `! long-job run N -- a && b`): the same set
+# shell_quotes._LEADING_KEYWORDS strips, minus `time` — time stays for the
+# PREFIX_WORDS loop in command_word(), which consumes its options (`time -f x`);
+# a bare keyword run would leave `-f x` in front of the runner.
+KEYWORDS = frozenset(
+    ("!", "{", "}", "if", "then", "elif", "else", "while", "until", "do")
+)
+if _sq is not None and getattr(_sq, "_LEADING_KEYWORDS", None):
+    KEYWORDS = frozenset(_sq._LEADING_KEYWORDS) - {"time"}
+# Quoted punctuation is data (`long-job run x -- grep "&&" f`), but shlex's
+# punctuation_chars lexer hands back the same token for a quoted "&&" as for an
+# operator. Mask it before lexing: every punctuation character inside a quoted
+# span becomes a private-use placeholder no operator test can match, while the
+# quote characters themselves stay, so word gluing (`a'&&'b`) reads as bash
+# reads it. The eval recursion reverses the mask, because bash's eval re-parses
+# its arguments with the outer quotes gone.
+_QMAP = {
+    "&": "",
+    "|": "",
+    ";": "",
+    "(": "",
+    ")": "",
+    "<": "",
+    ">": "",
+    "\n": "",
+}
+_QREV = {v: k for k, v in _QMAP.items()}
+
+
+def _mask_quoted_ops(text):
+    """`text` with every punctuation character inside a quoted span replaced by
+    its _QMAP placeholder; unquoted text, escapes and quote marks untouched."""
+    if "'" not in text and '"' not in text:
+        return text
+    out = []
+    i, n = 0, len(text)
+    while i < n:
+        c = text[i]
+        if c == "\\":
+            out.append(text[i:i + 2])
+            i += 2
+        elif c == "'":
+            j = text.find("'", i + 1)
+            if j == -1:
+                out.append(text[i:])
+                break
+            out.append("".join(_QMAP.get(ch, ch) for ch in text[i:j + 1]))
+            i = j + 1
+        elif c == '"':
+            j = i + 1
+            while j < n:
+                if text[j] == "\\":
+                    j += 2
+                elif text[j] == '"':
+                    j += 1
+                    break
+                else:
+                    j += 1
+            out.append("".join(_QMAP.get(ch, ch) for ch in text[i:min(j, n)]))
+            i = min(j, n)
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out)
+
+
+def _skip_single(text, i):
+    """Index past the single-quoted span opening at i; the end when unterminated."""
+    j = text.find("'", i + 1)
+    return len(text) if j == -1 else j + 1
+
+
+def _backtick_span(text, i):
+    """(interior, index past the closing backtick) for the span opening at i-1;
+    the rest of the text when unterminated."""
+    start = i
+    n = len(text)
+    while i < n:
+        c = text[i]
+        if c == "\\":
+            i += 2
+        elif c == "`":
+            return text[start:i], i + 1
+        else:
+            i += 1
+    return text[start:], n
+
+
+def _paren_span(text, i):
+    """(interior, index past the matching close paren) for the substitution
+    opening at i-1; the rest of the text when unterminated. Quoted spans are
+    skipped whole, so a quoted `)` never closes the substitution."""
+    depth = 1
+    start = i
+    n = len(text)
+    while i < n:
+        c = text[i]
+        if c == "\\":
+            i += 2
+        elif c == "'":
+            i = _skip_single(text, i)
+        elif c == '"':
+            _, i = _dquote_spans(text, i + 1)
+        elif c == "`":
+            _, i = _backtick_span(text, i + 1)
+        elif c == "(":
+            depth += 1
+            i += 1
+        elif c == ")":
+            depth -= 1
+            i += 1
+            if depth == 0:
+                return text[start:i - 1], i
+        else:
+            i += 1
+    return text[start:], n
+
+
+def _dquote_spans(text, i, names=()):
+    """(span interiors with tails, index past the closing quote) found inside
+    the double-quoted span starting at i; `$( )` and backticks stay live there,
+    process substitution does not."""
+    out = []
+    n = len(text)
+    while i < n:
+        c = text[i]
+        if c == "\\":
+            i += 2
+        elif c == '"':
+            return out, i + 1
+        elif c == "$" and text[i + 1:i + 2] == "(":
+            interior, i = _paren_span(text, i + 2)
+            out.append(_span(interior, text, i, True, names))
+        elif c == "`":
+            interior, i = _backtick_span(text, i + 1)
+            out.append(_span(interior, text, i, True, names))
+        else:
+            i += 1
+    return out, n
+
+
+def _tail(text, i, in_dquote):
+    """What bash still runs as shell syntax once a substitution closes: the raw
+    text from i, with an enclosing double quote skipped to its close (its
+    contents are an argument, not operators), other quoted spans masked, and
+    escapes kept — the `$( )` waits only for the start, so an `&&` out here
+    runs while the job does. Later substitutions collapse to one placeholder
+    word, so a tail never holds a span and each span is checked once per
+    nesting level."""
+    out = []
+    n = len(text)
+    while i < n:
+        c = text[i]
+        if in_dquote:
+            if c == "\\":
+                i += 2
+            elif c == '"':
+                in_dquote = False
+                i += 1
+            else:
+                i += 1
+        elif c == "\\":
+            out.append(text[i:i + 2])
+            i += 2
+        elif c == "'":
+            j = text.find("'", i + 1)
+            if j == -1:
+                break
+            out.append(" ")
+            i = j + 1
+        elif c == '"':
+            j = i + 1
+            while j < n:
+                if text[j] == "\\":
+                    j += 2
+                elif text[j] == '"':
+                    j += 1
+                    break
+                else:
+                    j += 1
+            out.append(_mask_quoted_ops(text[i:min(j, n)]))
+            i = min(j, n)
+        elif c in "$<>" and text[i + 1:i + 2] == "(":
+            _, i = _paren_span(text, i + 2)
+            out.append("_")
+        elif c == "`":
+            _, i = _backtick_span(text, i + 1)
+            out.append("_")
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out)
+
+
+def _span(interior, text, i, in_dquote, names):
+    """(interior, tail); the O(n) tail is built only when the interior names a
+    runner, since only a runner call can be refused for what follows it."""
+    if names_runner(interior, names):
+        return interior, _tail(text, i, in_dquote)
+    return interior, ""
+
+
+def substitution_spans(text, names=()):
+    """(interior, tail) for every substitution bash runs, in text order: $(),
+    <(), >() and backticks, live outside single quotes and, for $() and
+    backticks, inside double quotes. The tail is empty unless the interior
+    contains one of `names`."""
+    out = []
+    i, n = 0, len(text)
+    while i < n:
+        c = text[i]
+        if c == "\\":
+            i += 2
+        elif c == "'":
+            i = _skip_single(text, i)
+        elif c == '"':
+            spans, i = _dquote_spans(text, i + 1, names)
+            out.extend(spans)
+        elif c == "$" and text[i + 1:i + 2] == "(":
+            interior, i = _paren_span(text, i + 2)
+            out.append(_span(interior, text, i, False, names))
+        elif c in "<>" and text[i + 1:i + 2] == "(":
+            interior, i = _paren_span(text, i + 2)
+            out.append(_span(interior, text, i, False, names))
+        elif c == "`":
+            interior, i = _backtick_span(text, i + 1)
+            out.append(_span(interior, text, i, False, names))
+        else:
+            i += 1
+    return out
 
 
 def runner_names():
@@ -71,15 +336,23 @@ def runner_names():
     return names
 
 
+def names_runner(text, names, _drop=str.maketrans("", "", "'\"\\")):
+    """A runner name in text once quote and backslash characters are removed, so lo''ng-job (bash's long-job) still counts."""
+    return any(r in text.translate(_drop) for r in names)
+
+
 def tokens(text):
+    # Quoted punctuation is masked first, so a quoted "&&" reaches the lexer as
+    # placeholder characters inside the word, never as pure punctuation.
     # shlex with punctuation_chars="();<>|&\n" and whitespace_split=True keeps $, :, /, =, {, }
     # and similar inside words while splitting shell operators; a newline becomes its own token
     # (not whitespace) and comments are off, so `#` mid-word and `# ...` both stay visible.
     # Every all-punctuation token is then split into shell operators, longest match first from
     # OPS (&&, ||, |&, ;;, <(, >(, >>, <<, >&, <&), then single characters (so `)&&` becomes `)`
-    # and `&&`; `;\n` becomes `;` and `\n`).
+    # and `&&`; `;\n` becomes `;` and `\n`). Only unquoted punctuation can produce such a token:
+    # shlex keeps quoted characters inside words regardless of punctuation_chars.
     # A backslash-newline is a line continuation, not a command break (wrong inside single quotes; rare).
-    lex = shlex.shlex(text.replace("\\\n", ""), posix=True, punctuation_chars=PUNCT)
+    lex = shlex.shlex(_mask_quoted_ops(text.replace("\\\n", "")), posix=True, punctuation_chars=PUNCT)
     lex.whitespace = " \t\r"
     lex.commenters = ""
     lex.whitespace_split = True
@@ -187,6 +460,11 @@ def parse(text):
 
 def command_word(words):
     """Split a simple command into (assignments, argv), argv past any PREFIX_WORDS chain, its options/args, and env assignments."""
+    # Leading reserved words first (`if long-job run N -- a && b; then :; fi`,
+    # `! long-job run N -- a && b`, the `do` of a `for`/`while`/`until` body):
+    # they precede any assignment a command could carry.
+    while words and words[0] in KEYWORDS:
+        words = words[1:]
     k = 0
     while k < len(words) and ASSIGN.match(words[k]):
         k += 1
@@ -227,13 +505,50 @@ def terminator(evs, i):
     return None
 
 
+def _dedup(findings):
+    seen, out = set(), []
+    for f in findings:
+        if f not in seen:
+            seen.add(f)
+            out.append(f)
+    return out
+
+
 def check(text, depth=0):
-    """Return a list of (level, message); level is 'refuse' or 'warn'. Unparseable text gives []."""
-    try:
-        evs = parse(text)
-    except ValueError:
+    """Return a list of (level, message); level is 'refuse' or 'warn'. Unparseable text gives [].
+
+    Cost: text naming no runner returns at once, and only a substitution whose
+    interior names the runner is re-checked (with its tail), so each such span
+    costs O(n). Nesting past MAX_EVAL_DEPTH is not checked; it fails open."""
+    if depth > MAX_EVAL_DEPTH:
         return []
     runners = runner_names()
+    if not names_runner(text, runners):
+        return []
+    # A heredoc BODY is data (quoted delimiter) or an accepted under-arm
+    # (unquoted delimiter): strip it before parsing, except when a command in
+    # the stripped text reads its script from stdin — then the body is that
+    # shell's code and the text parses with bodies kept. An import failure
+    # keeps the text whole, which over-arms.
+    stripped = text
+    if _strip_heredoc_bodies is not None:
+        try:
+            stripped = _strip_heredoc_bodies(text)
+        except Exception:
+            stripped = text
+    src = stripped
+    try:
+        evs = parse(stripped)
+    except ValueError:
+        return []
+    if stripped != text and _reads_script_from_stdin is not None and any(
+        _reads_script_from_stdin(words) for kind, words in evs if kind == "cmd"
+    ):
+        try:
+            evs = parse(text)
+            src = text
+        except ValueError:
+            return []
     findings = []
     for i, (kind, val) in enumerate(evs):
         if kind != "cmd":
@@ -241,14 +556,17 @@ def check(text, depth=0):
         assigns, argv = command_word(val)
         if argv and argv[0] == "eval" and depth < MAX_EVAL_DEPTH:
             # The eval argument is shell text of its own; the operators around the eval do not apply inside it.
-            findings += check(" ".join(argv[1:]), depth + 1)
+            # bash re-parses the args with the outer quotes gone, so masked
+            # punctuation comes back as the operators it was.
+            arg = " ".join(argv[1:])
+            findings += check("".join(_QREV.get(c, c) for c in arg), depth + 1)
             continue
         if not argv or len(argv) < 2 or argv[1] != "run":
             continue
         runner = argv[0].rsplit("/", 1)[-1]
         if runner not in runners:
             continue
-        name = argv[2] if len(argv) > 2 else "?"
+        name = "".join(_QREV.get(c, c) for c in argv[2]) if len(argv) > 2 else "?"
         envs = set()
         j = 3
         while j < len(argv) and argv[j] != "--":
@@ -265,7 +583,13 @@ def check(text, depth=0):
             findings.append(("refuse", REFUSE.format(r=runner, n=name)))
         elif term == "or":
             findings.append(("warn", WARN_OR.format(r=runner, n=name)))
-    return findings
+    # Every substitution bash runs is shell text of its own, plus whatever
+    # unquoted operators follow it: the $( ) waits only for the start.
+    if depth < MAX_EVAL_DEPTH:
+        for interior, tail in substitution_spans(src, runners):
+            if names_runner(interior, runners):
+                findings += check(interior + tail, depth + 1)
+    return _dedup(findings)
 
 
 def main(argv):

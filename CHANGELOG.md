@@ -2,6 +2,12 @@
 
 All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY-MM-DD>` section per released version; under it, `###` categories in fixed order — Breaking Changes, Features, Bug Fixes, Improvements, Chores, Tests — empty ones omitted; items are `- **scope:** description (#PR)`, written from the version's merged commit subjects.
 
+## 0.3.229 - 2026-11-25
+
+### Features
+- **long-job-chain-guard:** new PreToolUse Bash hook (component `long-job-chain`, on in the `full` and `guards` profiles) that runs `long-job-chain-check --hook`. It refuses a `long-job run … && tail` chain at the top level, inside `eval`, inside `$( )`, backticks and process substitution, behind leading reserved words, and in heredoc bodies piped to a shell. A quoted operator or a data heredoc no longer refuses. Text that never names the runner exits early, and only substitutions that name it are checked further. Nesting deeper than 8 levels is not checked (TASK-142).
+- **claude-usage:** week gates resolve per call: an optional gates file (an executable printing gate `KEY=VALUE` lines, path config-only via `claude_usage_gates_file`) overrides the launch-frozen env for each `--ok`/`--posture` call, and `CLAUDE_USAGE_WEEK_STOP_CMD` gives the week stop a command source. (TASK-180)
+
 ## 0.3.228 - 2026-11-25
 
 ### Features
