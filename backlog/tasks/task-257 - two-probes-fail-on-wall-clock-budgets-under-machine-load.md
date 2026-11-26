@@ -1,6 +1,6 @@
 ---
 id: TASK-257
-title: 'probes: turn-end-shape-gate and mutation-canary fail on wall-clock budgets under machine load'
+title: 'probes: wall-clock budgets fail under machine load (turn-end-shape-gate, mutation-canary, lossy-pipe-guard)'
 status: To Do
 assignee: []
 created_date: '2026-11-26T17:22:00Z'
@@ -20,5 +20,7 @@ A full `bash tests/run-probes.sh -j 4` run on 2026-11-26 (load average about 30â
 - `turn-end-shape-gate` case (payload-y), "a 200000-space text run finishes inside 5 s": exit 124 (its timeout) where 0 was expected.
 - `mutation-canary` case 15, "TERM mid-run": exit 143 after 3232 ms, while the probe's timing window expected something else (the child was then Killed).
 
-Both assert a wall-clock budget, so a loaded machine turns them red with no defect, and a red gate on unrelated code costs a re-run. Fix shape: keep each budget's intent (catching a quadratic regex, catching a restore that never runs) without the wall clock, for example by measuring CPU time of the child instead of elapsed time, scaling the budget by a measured baseline, or retrying once only on a timeout exit. Pin it by re-running both probes under artificial load (e.g. `stress-ng`-free: N busy loops) before and after.
+- `lossy-pipe-guard`, "20k nested $( around a pushed pipeline is backtracking": 2355 ms against its < 2000 ms bound (reported by a consumer session, same day, a full -j 4 run at load about 30; it passed alone at load about 28).
+
+All three assert a wall-clock budget, so a loaded machine turns them red with no defect, and a red gate on unrelated code costs a re-run. Fix shape: sweep the probes for every wall-clock bound (this list is a sample, not an inventory), and keep each budget's intent (catching a quadratic regex, catching a restore that never runs) without the wall clock. For example, measure the child's CPU time instead of elapsed time, scale the budget by a measured baseline, or retry once only on a timeout exit. Pin it by re-running the probes under artificial load (N busy loops) before and after.
 <!-- SECTION:DESCRIPTION:END -->
