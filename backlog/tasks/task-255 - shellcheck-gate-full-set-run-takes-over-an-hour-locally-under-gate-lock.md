@@ -1,7 +1,7 @@
 ---
 id: TASK-255
 title: 'shellcheck-gate: full-set run takes over an hour locally under gate-lock'
-status: To Do
+status: Deferred
 assignee: []
 created_date: '2026-11-26T16:15:00Z'
 labels:
@@ -30,3 +30,9 @@ So shellcheck-gate itself costs about 3–4 min, not an hour. A likely confound:
 
 Counter data point (the machine-management session's 11:07 read; the holder mapping is its inference from pid adjacency, not checked): the `/proc/locks` holder was an exited flock child, probably of a gate-lock whose shellcheck child had then been running for 28 min, after about 50 min of waiting. If that mapping is right, one shellcheck phase did hold the lock for 28+ min, against 3 min unlocked. A candidate cause is swap pressure (about 6.8 GB of swap in use that morning). Before closing, reproduce under memory pressure, or time the next real run's shellcheck phase while it holds the lock.
 <!-- SECTION:DESCRIPTION:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Deferred, not obsolete (Seyag B, 2026-11-26). The 28-min counter data point has not been ruled out. The TASK-256 PR gives the trigger: gate-lock now writes a holder record, and a waiter prints the holder's label (`shellcheck-gate`) and hold age. shellcheck-gate also now runs on the light lock, after a memory bar of floor + its 874 MB peak, so it no longer starts under swap pressure. Promote this task when a waiter's line shows a `shellcheck-gate` holder held for more than ~10 min. Close it as obsolete if a week of fleet runs shows none.
+<!-- SECTION:NOTES:END -->

@@ -3,8 +3,9 @@ id: TASK-186
 title: >-
   shellcheck-gate: local run flags SC2154 in safe-worktree-clean.probe.sh that
   CI passes
-status: To Do
-assignee: []
+status: Done
+assignee:
+  - Seyag B
 created_date: '2026-11-25T21:05:00Z'
 labels:
   - probes
@@ -24,4 +25,6 @@ Found by Seyag A on 2026-11-25 at base 1a642fb. Running 'bash plugins/seyag/bin/
 
 <!-- SECTION:NOTES:BEGIN -->
 Root cause (Seyag B, 2026-11-26, probed): chunking, not versions. shellcheck follows a sourced file only when it is named in the same invocation or -x is given. CI runs one invocation over all of tests/shell-files.sh; shellcheck-gate runs xargs -n 20, and the fixture is file 160 and the probe file 161 of that list, so they land in different chunks. Probe: `uvx --from shellcheck-py shellcheck -S warning tests/safe-worktree-clean.probe.sh` exits 1; adding the fixture to the same call exits 0. The source= directive is already at probe line 12. Fix shape: run each chunk with -x (external sources; the directive then resolves whatever the chunking), and add a probe that puts a source/sourcer pair across a chunk boundary (SYG_SHELLCHECK_CHUNK=1).
+
+Done in the TASK-256 PR. shellcheck-gate passes -x on every chunk. Probe case (17) in tests/shellcheck-gate.probe.sh splits a source/sourcer pair across chunks with SYG_SHELLCHECK_CHUNK=1, and asserts that -x reaches both chunks and that real shellcheck passes. -x costs about 7% in time and 2% in peak memory (262 s / 874 MB against 244 s / 853 MB on 233 files, 2026-11-26).
 <!-- SECTION:NOTES:END -->
