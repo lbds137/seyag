@@ -5,7 +5,7 @@ All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY
 ## 0.3.231 - 2026-11-26
 
 ### Features
-- **handoff-pick-check:** in emitter mode, a turn that wrote no handoff and ran no pick command blocks once when its closing text names `/clear` or `/compact` as a present pick; it defers while a background shell task is live and fires when that work ends (component `prose-pick`, override `SYG_PROSE_PICK_RE`; TASK-121) (#PRNUM)
+- **handoff-pick-check:** in emitter mode, a turn that wrote no handoff and ran no pick command blocks once when its closing text names `/clear` or `/compact` as a present pick; it defers while a background shell task is live and fires when that work ends (component `prose-pick`, override `SYG_PROSE_PICK_RE`; TASK-121) (#447)
 - **security-sweep:** `--json` reports per-repo dismissal history (`history`: windowed dismissed/fixed, `outrun`, `dismissed_by_rule`, `prior_dismissals`); `--window DAYS` sets the window; the default and session lines flag a repo whose dismissals outrun its fixes (#445)
 - **security-sweep skill:** a prior-dismissal lookup comes before any ask; a verified moved copy of a dismissed alert is dismissed citing the original and logged; a rule's second dismissal files a structural fix (paths-ignore under advanced setup, a sanitizer or models-as-data, or an accepted risk dismissed as won't fix) (#445)
 
