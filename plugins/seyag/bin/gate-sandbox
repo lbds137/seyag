@@ -178,8 +178,8 @@ exec "$@"'
     : >>"$lock" || { echo "$me: can't open the gate lock: $lock" >&2; exit 125; }
     light_lock=$(SYG_GATE_LOCK_FILE="$lock" "$(dirname "$(readlink -f "$0")")/gate-lock" --light-path) \
       && [ -n "$light_lock" ] \
-      && : >>"$light_lock" \
-      || { echo "$me: can't open the light gate lock: ${light_lock:-$lock.light}" >&2; exit 125; }
+      || { echo "$me: can't derive the light gate lock from $lock" >&2; exit 125; }
+    : >>"$light_lock" || { echo "$me: can't open the light gate lock: $light_lock" >&2; exit 125; }
     args+=(--bind "$lock" /run/worker/gate.lock --bind "$light_lock" /run/worker/gate.light.lock) ;;
   *) echo "$me: unknown SYG_GATE_SANDBOX_PROFILE: $profile" >&2; exit 125 ;;
 esac

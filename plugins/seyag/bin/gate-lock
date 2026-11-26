@@ -2,9 +2,11 @@
 # gate-lock: run one gate command (tests, lint, typecheck, build) under the machine-wide gate locks.
 # Heavy gates (SYG_GATE_LOCK_CLASS=heavy, the default: test suites) run one at a time on
 # SYG_GATE_LOCK_FILE (default /tmp/gate.lock: /tmp is writable and shared with the host inside
-# common agent sandboxes where $HOME is read-only). Light gates (SYG_GATE_LOCK_CLASS=light: short
-# gates such as shellcheck-gate) run one at a time on the derived light lock (.light.lock / .light)
-# after a memory wait, so short gates stop queueing behind 50-minute suites.
+# common agent sandboxes where $HOME is read-only). Light gates (SYG_GATE_LOCK_CLASS=light with a
+# non-negative integer SYG_GATE_LOCK_PEAK_MB: short gates such as shellcheck-gate) run one at a
+# time on the derived light lock (.light.lock / .light) after waiting for MemAvailable >=
+# SYG_MEM_GATE_MIN_MB + SYG_GATE_LOCK_PEAK_MB, so short gates stop queueing behind 50-minute suites
+# while the memory floor still holds at the gate's peak (light without a valid peak runs as heavy).
 # On acquire, writes a key=value holder record into the lock file and truncates it before release; a
 # waiter reports the holder on stderr (and periodically every SYG_GATE_LOCK_REPORT_S seconds),
 # appending a hold-cap warning past SYG_GATE_LOCK_HOLD_CAP_S without ever breaking the lock.
@@ -33,10 +35,28 @@ if [ "$1" = --light-path ]; then
 fi
 
 class=${SYG_GATE_LOCK_CLASS:-heavy}
+peak_mb=${SYG_GATE_LOCK_PEAK_MB:-}
 case $class in
-  heavy) lock=$heavy_lock ;;
-  light) lock=$(light_path_of "$heavy_lock") ;;
-  *) echo "gate-lock: SYG_GATE_LOCK_CLASS must be heavy or light: $class" >&2; exit 125 ;;
+  heavy)
+    lock=$heavy_lock
+    ;;
+  light)
+    case $peak_mb in
+      ''|*[!0-9]*)
+        echo "gate-lock: light needs a recorded peak (SYG_GATE_LOCK_PEAK_MB); running as heavy" >&2
+        class=heavy
+        lock=$heavy_lock
+        ;;
+      *)
+        peak_mb=$((10#$peak_mb))
+        lock=$(light_path_of "$heavy_lock")
+        ;;
+    esac
+    ;;
+  *)
+    echo "gate-lock: SYG_GATE_LOCK_CLASS must be heavy or light: $class" >&2
+    exit 125
+    ;;
 esac
 
 report_s=${SYG_GATE_LOCK_REPORT_S:-300}
@@ -46,6 +66,19 @@ report_s=$((10#$report_s))
 hold_cap_s=${SYG_GATE_LOCK_HOLD_CAP_S:-3600}
 case $hold_cap_s in ''|*[!0-9]*) echo "gate-lock: invalid SYG_GATE_LOCK_HOLD_CAP_S: $hold_cap_s" >&2; exit 125 ;; esac
 hold_cap_s=$((10#$hold_cap_s))
+
+if [ "$class" = light ]; then
+  min_mb=${SYG_MEM_GATE_MIN_MB:-2048}
+  case $min_mb in ''|*[!0-9]*) echo "gate-lock: invalid SYG_MEM_GATE_MIN_MB: $min_mb" >&2; exit 125 ;; esac
+  min_mb=$((10#$min_mb))
+  mem_wait_s=${SYG_GATE_LOCK_MEM_WAIT_S:-900}
+  case $mem_wait_s in ''|*[!0-9]*) echo "gate-lock: invalid SYG_GATE_LOCK_MEM_WAIT_S: $mem_wait_s" >&2; exit 125 ;; esac
+  mem_wait_s=$((10#$mem_wait_s))
+  mem_poll_s=${SYG_GATE_LOCK_MEM_POLL_S:-5}
+  case $mem_poll_s in ''|*[!0-9]*) echo "gate-lock: invalid SYG_GATE_LOCK_MEM_POLL_S: $mem_poll_s" >&2; exit 125 ;; esac
+  mem_poll_s=$((10#$mem_poll_s))
+  [ "$mem_poll_s" -gt 0 ] || mem_poll_s=1
+fi
 
 gl_pid=$$
 my_pidns=$(readlink /proc/self/ns/pid 2>/dev/null) || my_pidns=''
@@ -197,15 +230,14 @@ write_record() {
   printf -v rec 'pid=%s\nstart=%s\npidns=%s\nsince=%s\nlabel=%s\ncmd=%s\ndir=%s\n' \
     "$gl_pid" "$my_start" "$my_pidns" "$(now_s)" "$(sanitize_val "${SYG_GATE_LOCK_LABEL:-}")" \
     "$(base_of "$1")" "$(base_of "$PWD")"
+  held_record=1
   if ! printf '%s' "$rec" >"$lock" 2>/dev/null; then
     [ "$record_warned" = 1 ] || { echo "gate-lock: warning: cannot write holder record to $lock" >&2; record_warned=1; }
   fi
-  held_record=1
 }
 
 clear_record() {
   [ "$held_record" = 1 ] || return 0
-  held_record=0
   if ! : >"$lock" 2>/dev/null; then
     [ "$record_warned" = 1 ] || { echo "gate-lock: warning: cannot clear holder record in $lock" >&2; record_warned=1; }
   fi
@@ -250,81 +282,85 @@ if ! flock -n 9; then
   reporter=''
 fi
 
-write_record "$1"
-
 # The command runs without the lock fd (a stray grandchild can't hold the lock forever) and with
 # gate-lock's own stdin (bash would give a background job /dev/null). The trap is installed before
-# the memory wait and fork, so a TERM/INT/HUP to gate-lock (a caller's timeout) is never lost: it
-# clears the record if still in the memory wait, or is passed on and waited out so the lock is
-# released only once the command is gone. SIGKILL can't be caught; then the lock goes early.
+# write_record, the memory wait and the fork, so a TERM/INT/HUP to gate-lock (a caller's timeout)
+# never leaves a stale holder record: before the fork it clears the record and exits 128+N (143/130/129);
+# once the child runs, it forwards TERM and waits the child out before clearing the record.
 child='' got='' mem_sp=''
-trap 'got=1; [ -z "$mem_sp" ] || kill "$mem_sp" 2>/dev/null; [ -z "$child" ] || kill -TERM "$child" 2>/dev/null' TERM INT HUP
+on_sig() {
+  got=$1
+  [ -z "$mem_sp" ] || kill "$mem_sp" 2>/dev/null
+  if [ -n "$child" ]; then
+    kill -TERM "$child" 2>/dev/null
+  else
+    clear_record
+  fi
+}
+trap 'on_sig 15' TERM
+trap 'on_sig 2' INT
+trap 'on_sig 1' HUP
 
-if [ "$class" = light ]; then
-  min_mb=${SYG_MEM_GATE_MIN_MB:-2048}
-  case $min_mb in ''|*[!0-9]*) echo "gate-lock: invalid SYG_MEM_GATE_MIN_MB: $min_mb" >&2; clear_record; exit 125 ;; esac
-  min_mb=$((10#$min_mb))
-  if [ "$min_mb" -gt 0 ]; then
-    meminfo=${SYG_MEM_GATE_MEMINFO:-/proc/meminfo}
-    mem_wait_s=${SYG_GATE_LOCK_MEM_WAIT_S:-900}
-    case $mem_wait_s in ''|*[!0-9]*) echo "gate-lock: invalid SYG_GATE_LOCK_MEM_WAIT_S: $mem_wait_s" >&2; clear_record; exit 125 ;; esac
-    mem_wait_s=$((10#$mem_wait_s))
-    mem_poll_s=${SYG_GATE_LOCK_MEM_POLL_S:-5}
-    case $mem_poll_s in ''|*[!0-9]*) echo "gate-lock: invalid SYG_GATE_LOCK_MEM_POLL_S: $mem_poll_s" >&2; clear_record; exit 125 ;; esac
-    mem_poll_s=$((10#$mem_poll_s))
-    [ "$mem_poll_s" -gt 0 ] || mem_poll_s=1
-    avail_mb() {
-      local k v _
-      [ -r "$meminfo" ] || return 1
-      while read -r k v _; do
-        if [ "$k" = "MemAvailable:" ] && [[ $v =~ ^[0-9]+$ ]]; then
-          printf '%d' "$((10#$v / 1024))"
-          return 0
-        fi
-      done <"$meminfo" 2>/dev/null
-      return 1
-    }
-    avail=$(avail_mb) || { echo "gate-lock: cannot read MemAvailable from $meminfo" >&2; clear_record; exit 125; }
-    if [ "$avail" -lt "$min_mb" ]; then
-      echo "gate-lock: waiting for memory ($avail MB available, need $min_mb MB)" >&2
-      mem_start=$SECONDS
-      while :; do
-        if [ -n "$got" ]; then
-          clear_record
-          exit 143
-        fi
-        nap=$mem_poll_s
-        if [ "$mem_wait_s" -gt 0 ]; then
-          left=$((mem_wait_s - (SECONDS - mem_start)))
-          [ "$left" -lt "$nap" ] && nap=$left
-          [ "$nap" -lt 1 ] && nap=1
-        fi
-        sleep "$nap" 9>&- </dev/null &
-        mem_sp=$!
-        wait "$mem_sp" 2>/dev/null
-        mem_sp=''
-        if [ -n "$got" ]; then
-          clear_record
-          exit 143
-        fi
-        avail=$(avail_mb) || { echo "gate-lock: cannot read MemAvailable from $meminfo" >&2; clear_record; exit 125; }
-        [ "$avail" -ge "$min_mb" ] && break
-        if [ "$mem_wait_s" -gt 0 ] && [ $((SECONDS - mem_start)) -ge "$mem_wait_s" ]; then
-          echo "gate-lock: memory stayed below $min_mb MB for $mem_wait_s s; not running" >&2
-          clear_record
-          exit 125
-        fi
-      done
-    fi
+write_record "$1"
+if [ -n "$got" ]; then
+  clear_record
+  exit $((128 + got))
+fi
+
+if [ "$class" = light ] && [ "$min_mb" -gt 0 ]; then
+  bar_mb=$((min_mb + peak_mb))
+  meminfo=${SYG_MEM_GATE_MEMINFO:-/proc/meminfo}
+  avail_mb() {
+    local k v _
+    [ -r "$meminfo" ] || return 1
+    while read -r k v _; do
+      if [ "$k" = "MemAvailable:" ] && [[ $v =~ ^[0-9]+$ ]]; then
+        printf '%d' "$((10#$v / 1024))"
+        return 0
+      fi
+    done <"$meminfo" 2>/dev/null
+    return 1
+  }
+  avail=$(avail_mb) || { echo "gate-lock: cannot read MemAvailable from $meminfo" >&2; clear_record; exit 125; }
+  if [ "$avail" -lt "$bar_mb" ]; then
+    echo "gate-lock: waiting for memory ($avail MB available, need $bar_mb MB (floor $min_mb + peak $peak_mb))" >&2
+    mem_start=$SECONDS
+    while :; do
+      if [ -n "$got" ]; then
+        clear_record
+        exit $((128 + got))
+      fi
+      nap=$mem_poll_s
+      if [ "$mem_wait_s" -gt 0 ]; then
+        left=$((mem_wait_s - (SECONDS - mem_start)))
+        [ "$left" -lt "$nap" ] && nap=$left
+        [ "$nap" -lt 1 ] && nap=1
+      fi
+      sleep "$nap" 9>&- </dev/null &
+      mem_sp=$!
+      wait "$mem_sp" 2>/dev/null
+      mem_sp=''
+      if [ -n "$got" ]; then
+        clear_record
+        exit $((128 + got))
+      fi
+      avail=$(avail_mb) || { echo "gate-lock: cannot read MemAvailable from $meminfo" >&2; clear_record; exit 125; }
+      [ "$avail" -ge "$bar_mb" ] && break
+      if [ "$mem_wait_s" -gt 0 ] && [ $((SECONDS - mem_start)) -ge "$mem_wait_s" ]; then
+        echo "gate-lock: memory stayed below $bar_mb MB for $mem_wait_s s; not running" >&2
+        clear_record
+        exit 125
+      fi
+    done
   fi
 fi
 
 if [ -n "$got" ]; then
   clear_record
-  exit 143
+  exit $((128 + got))
 fi
 
-unset SYG_GATE_LOCK_CLASS SYG_GATE_LOCK_LABEL
+unset SYG_GATE_LOCK_CLASS SYG_GATE_LOCK_LABEL SYG_GATE_LOCK_PEAK_MB
 "$@" 9>&- <&0 &
 child=$!
 [ -z "$got" ] || kill -TERM "$child" 2>/dev/null   # a signal that landed before $child was known

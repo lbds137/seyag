@@ -7,7 +7,8 @@
 # heavy test suites. Run root: ROOT when set (must contain tests/shell-files.sh), else the caller's
 # git toplevel when it has tests/shell-files.sh, else this script's own repo; the pipeline cds to
 # the run root so the enumerator's relative paths resolve.
-# Knobs: SYG_SHELLCHECK_CHUNK (default 20), SYG_SHELLCHECK_BIN (default shellcheck, uvx fallback).
+# Knobs: SYG_SHELLCHECK_CHUNK (default 20), SYG_SHELLCHECK_BIN (default shellcheck, uvx fallback),
+# SYG_SHELLCHECK_PEAK_MB (default 874, passed as SYG_GATE_LOCK_PEAK_MB).
 # Exit: 0 clean; 1 findings or an invocation that died (the pipeline's xargs 123/125 mapped to 1);
 # 128+N on a forwarded TERM/INT/HUP; other codes propagate; 125 for own errors (bad knob, no
 # binary, a missing or failing file enumerator, gate-lock not found).
@@ -64,7 +65,8 @@ else
     echo "shellcheck-gate: gate-lock not found" >&2
     exit 125
   fi
-  export SYG_GATE_LOCK_CLASS=light SYG_GATE_LOCK_LABEL=shellcheck-gate
+  export SYG_GATE_LOCK_CLASS=light SYG_GATE_LOCK_LABEL=shellcheck-gate \
+    SYG_GATE_LOCK_PEAK_MB=${SYG_SHELLCHECK_PEAK_MB:-874}
   exec "$gl" bash "$0" "--inner=$$" "$@"
 fi
 
