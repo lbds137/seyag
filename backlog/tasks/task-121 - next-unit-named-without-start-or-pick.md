@@ -1,8 +1,9 @@
 ---
 id: TASK-121
 title: 'handoff-pick-check: block once when a turn names the next unit but neither starts it nor runs the pick command'
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - Seyag
 created_date: '2026-11-23T14:28:00Z'
 labels:
   - hooks
