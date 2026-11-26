@@ -5,9 +5,11 @@
 # command reads gate-lock's own stdin, the old unprefixed GATE_LOCK_FILE does not override
 # SYG_GATE_LOCK_FILE, holder record write/clear (R1, R2), waiter holder report with unverified
 # pidns and stale record fallbacks (R3), control-char stripping in forged labels (R4), no-record
-# open-fd fallback without cap suffix (R5), hold-cap warning suffix without signalling the holder
-# (R6), reporter exit on SIGKILL of waiting gate-lock without holding the lock fd (R7), and light
-# lock class (--light-path, L1-L7, including SYG_GATE_LOCK_PEAK_MB floor+peak bar and heavy fallback).
+# open-fd fallback without cap suffix or walker stderr leak (R5), hold-cap warning suffix without
+# signalling the holder (R6), reporter exit on SIGKILL of waiting gate-lock without holding the
+# lock fd (R7), record sanitize shape at write for cmd/dir (R8), and light lock class
+# (--light-path, L1-L8, including SYG_GATE_LOCK_PEAK_MB floor+peak bar, heavy fallback, and signal
+# during the light memory wait).
 # Usage: tests/gate-lock.probe.sh   (from anywhere)
 set -u
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -285,6 +287,12 @@ if wait_for exists "$t/r5-held"; then
   else
     bad "R5 fallback (h=$r5_h err=[$r5_err])"
   fi
+  # The transient race itself is load-dependent and not deterministically probeable; this pins that walker errors stay suppressed when a race does fire, and the field verification is the deck-platform probe re-run without its filter.
+  if [[ $r5_err != *"No such file or directory"* ]]; then
+    ok "R5: open-fd fallback stderr contains no 'No such file or directory' walker error"
+  else
+    bad "R5 walker stderr leak (err=[$r5_err])"
+  fi
 else
   bad "R5: holder never took lock"
   echo go >"$t/r5-fifo" 2>/dev/null
@@ -338,10 +346,10 @@ if wait_for exists "$t/r7-held"; then
   r7_rep=''
   for pdir in /proc/[0-9]*; do
     cpid=${pdir#/proc/}
-    IFS= read -r cstat <"$pdir/stat" 2>/dev/null || continue
+    IFS= read -r cstat 2>/dev/null <"$pdir/stat" || continue
     read -r -a cf <<<"${cstat##*\) }"
     if [ "${cf[1]:-}" = "$r7_w" ]; then
-      IFS= read -r ccomm <"$pdir/comm" 2>/dev/null || ccomm=''
+      IFS= read -r ccomm 2>/dev/null <"$pdir/comm" || ccomm=''
       [ "$ccomm" = flock ] || r7_rep=$cpid
     fi
   done
@@ -365,6 +373,45 @@ else
   echo go >"$t/r7-fifo" 2>/dev/null
 fi
 
+# (R8) write_record sanitizes cmd= and dir= at write: running from a directory whose basename
+# contains a newline produces exactly 7 key= lines and cmd/dir values with no control characters
+r8_lock=$t/r8.lock
+r8_dir=$t/$'dir\nforged=1\r\007box'
+r8_cmd=$'cmd\ninj=1\r\033run'
+mkdir -p "$r8_dir"
+mkfifo "$t/r8-fifo"
+cat >"$r8_dir/$r8_cmd" <<'EOF'
+#!/usr/bin/env bash
+: >"$1"
+read -r _ <"$2"
+EOF
+chmod +x "$r8_dir/$r8_cmd"
+(
+  cd "$r8_dir" && SYG_GATE_LOCK_FILE=$r8_lock SYG_GATE_LOCK_LABEL=r8-holder \
+    "$GL" "./$r8_cmd" "$t/r8-held" "$t/r8-fifo"
+) &
+r8_h=$!; bg+=("$r8_h")
+if wait_for exists "$t/r8-held"; then
+  cp "$r8_lock" "$t/r8.rec"
+  echo go >"$t/r8-fifo"
+  wait "$r8_h"; r8_rc=$?
+  mapfile -t r8_lines <"$t/r8.rec"
+  r8_keys=$(printf '%s\n' "${r8_lines[@]}" | sed 's/=.*//')
+  r8_cmd_v=$(sed -n 's/^cmd=//p' "$t/r8.rec")
+  r8_dir_v=$(sed -n 's/^dir=//p' "$t/r8.rec")
+  if [ "$r8_rc" = 0 ] && [ "${#r8_lines[@]}" = 7 ] \
+    && [ "$r8_keys" = $'pid\nstart\npidns\nsince\nlabel\ncmd\ndir' ] \
+    && [ "$r8_cmd_v" = "cmdinj=1run" ] && [ "$r8_dir_v" = "dirforged=1box" ] \
+    && [[ $r8_cmd_v != *[[:cntrl:]]* ]] && [[ $r8_dir_v != *[[:cntrl:]]* ]]; then
+    ok "R8: write_record sanitizes cmd= and dir= at write (7 key= lines, no control characters)"
+  else
+    bad "R8 sanitize write (rc=$r8_rc n=${#r8_lines[@]} keys=[$r8_keys] cmd=[$r8_cmd_v] dir=[$r8_dir_v] rec=[$(cat "$t/r8.rec" 2>/dev/null)])"
+  fi
+else
+  bad "R8: holder never started"
+  echo go >"$t/r8-fifo" 2>/dev/null
+fi
+
 # (L1) --light-path follows the suffix rule for .lock and non-.lock names and takes no lock
 lp1=$(SYG_GATE_LOCK_FILE=$t/a.lock "$GL" --light-path); lp1_rc=$?
 lp2=$(SYG_GATE_LOCK_FILE=$t/b.gate "$GL" --light-path); lp2_rc=$?
@@ -377,11 +424,13 @@ fi
 
 # (L2) a light gate and a held HEAVY lock: the light gate runs without waiting
 l2_lock=$t/l2.lock
+printf 'MemTotal: 8388608 kB\nMemAvailable: 2621440 kB\n' >"$t/meminfo-l2"
 mkfifo "$t/l2-fifo"
 SYG_GATE_LOCK_FILE=$l2_lock "$GL" sh -c ': >"$1"; read -r _ <"$2"' _ "$t/l2-held" "$t/l2-fifo" &
 l2_h=$!; bg+=("$l2_h")
 if wait_for exists "$t/l2-held"; then
-  SYG_GATE_LOCK_FILE=$l2_lock SYG_GATE_LOCK_CLASS=light SYG_GATE_LOCK_PEAK_MB=256 SYG_MEM_GATE_MIN_MB=0 \
+  SYG_GATE_LOCK_FILE=$l2_lock SYG_GATE_LOCK_CLASS=light SYG_GATE_LOCK_PEAK_MB=256 \
+    SYG_MEM_GATE_MEMINFO=$t/meminfo-l2 SYG_MEM_GATE_MIN_MB=0 \
     "$GL" sh -c ': >"$1"' _ "$t/l2-ran" 2>"$t/l2.err" &
   l2_p=$!; bg+=("$l2_p")
   l2_ok=0
@@ -401,12 +450,15 @@ fi
 
 # (L3) two light gates serialize
 l3_lock=$t/l3.lock
+printf 'MemTotal: 8388608 kB\nMemAvailable: 2621440 kB\n' >"$t/meminfo-l3"
 mkfifo "$t/l3-fifo"
-SYG_GATE_LOCK_FILE=$l3_lock SYG_GATE_LOCK_CLASS=light SYG_GATE_LOCK_PEAK_MB=256 SYG_GATE_LOCK_LABEL=light-one SYG_MEM_GATE_MIN_MB=0 \
+SYG_GATE_LOCK_FILE=$l3_lock SYG_GATE_LOCK_CLASS=light SYG_GATE_LOCK_PEAK_MB=256 SYG_GATE_LOCK_LABEL=light-one \
+  SYG_MEM_GATE_MEMINFO=$t/meminfo-l3 SYG_MEM_GATE_MIN_MB=0 \
   "$GL" sh -c ': >"$1"; read -r _ <"$2"' _ "$t/l3-held" "$t/l3-fifo" &
 l3_h=$!; bg+=("$l3_h")
 if wait_for exists "$t/l3-held"; then
-  SYG_GATE_LOCK_FILE=$l3_lock SYG_GATE_LOCK_CLASS=light SYG_GATE_LOCK_PEAK_MB=256 SYG_MEM_GATE_MIN_MB=0 \
+  SYG_GATE_LOCK_FILE=$l3_lock SYG_GATE_LOCK_CLASS=light SYG_GATE_LOCK_PEAK_MB=256 \
+    SYG_MEM_GATE_MEMINFO=$t/meminfo-l3 SYG_MEM_GATE_MIN_MB=0 \
     "$GL" sh -c ': >"$1"' _ "$t/l3-ran" 2>"$t/l3.err" &
   l3_w=$!; bg+=("$l3_w")
   l3_waited=0
@@ -483,7 +535,9 @@ else
 fi
 
 # (L6) child does not see SYG_GATE_LOCK_CLASS, SYG_GATE_LOCK_LABEL or SYG_GATE_LOCK_PEAK_MB
-l6_out=$(SYG_GATE_LOCK_CLASS=light SYG_GATE_LOCK_LABEL=my-label SYG_GATE_LOCK_PEAK_MB=512 SYG_MEM_GATE_MIN_MB=0 \
+printf 'MemTotal: 8388608 kB\nMemAvailable: 2621440 kB\n' >"$t/meminfo-l6"
+l6_out=$(SYG_GATE_LOCK_CLASS=light SYG_GATE_LOCK_LABEL=my-label SYG_GATE_LOCK_PEAK_MB=512 \
+  SYG_MEM_GATE_MEMINFO=$t/meminfo-l6 SYG_MEM_GATE_MIN_MB=0 \
   "$GL" sh -c 'printf "class=%s label=%s peak=%s\n" "${SYG_GATE_LOCK_CLASS-unset}" "${SYG_GATE_LOCK_LABEL-unset}" "${SYG_GATE_LOCK_PEAK_MB-unset}"')
 if [ "$l6_out" = "class=unset label=unset peak=unset" ]; then
   ok "L6: child does not inherit SYG_GATE_LOCK_CLASS, SYG_GATE_LOCK_LABEL or SYG_GATE_LOCK_PEAK_MB"
@@ -518,6 +572,51 @@ if wait_for exists "$t/l7-held"; then
 else
   bad "L7: heavy holder never started"
   echo go >"$t/l7-fifo" 2>/dev/null
+fi
+
+# (L8) signal during the light memory wait (forced with min 0 + peak 512 on a low-MemAvailable fixture):
+# TERM exits 143 and INT exits 130, clearing the lock record and never running the command.
+# HUP shares the same on_sig / got code path (exits 129).
+l8_lock=$t/l8.lock
+l8_light=$t/l8.light.lock
+printf 'MemTotal: 8388608 kB\nMemAvailable: 102400 kB\n' >"$t/meminfo-l8"
+SYG_GATE_LOCK_FILE=$l8_lock SYG_GATE_LOCK_CLASS=light SYG_GATE_LOCK_PEAK_MB=512 \
+  SYG_MEM_GATE_MEMINFO=$t/meminfo-l8 SYG_MEM_GATE_MIN_MB=0 \
+  SYG_GATE_LOCK_MEM_WAIT_S=20 SYG_GATE_LOCK_MEM_POLL_S=1 \
+  "$GL" sh -c ': >"$1"' _ "$t/l8-term-ran" 2>"$t/l8-term.err" &
+l8_term_p=$!; bg+=("$l8_term_p")
+l8_term_waited=0
+if wait_for grep -q "waiting for memory" "$t/l8-term.err"; then
+  l8_term_waited=1
+  kill -TERM "$l8_term_p" 2>/dev/null
+else
+  kill -KILL "$l8_term_p" 2>/dev/null
+fi
+wait "$l8_term_p" 2>/dev/null; l8_term_rc=$?
+l8_term_empty=0
+[ -e "$l8_light" ] && [ ! -s "$l8_light" ] && l8_term_empty=1
+
+env --default-signal=INT SYG_GATE_LOCK_FILE=$l8_lock SYG_GATE_LOCK_CLASS=light SYG_GATE_LOCK_PEAK_MB=512 \
+  SYG_MEM_GATE_MEMINFO=$t/meminfo-l8 SYG_MEM_GATE_MIN_MB=0 \
+  SYG_GATE_LOCK_MEM_WAIT_S=20 SYG_GATE_LOCK_MEM_POLL_S=1 \
+  "$GL" sh -c ': >"$1"' _ "$t/l8-int-ran" 2>"$t/l8-int.err" &
+l8_int_p=$!; bg+=("$l8_int_p")
+l8_int_waited=0
+if wait_for grep -q "waiting for memory" "$t/l8-int.err"; then
+  l8_int_waited=1
+  kill -INT "$l8_int_p" 2>/dev/null
+else
+  kill -KILL "$l8_int_p" 2>/dev/null
+fi
+wait "$l8_int_p" 2>/dev/null; l8_int_rc=$?
+l8_int_empty=0
+[ -e "$l8_light" ] && [ ! -s "$l8_light" ] && l8_int_empty=1
+
+if [ "$l8_term_waited" = 1 ] && [ "$l8_term_rc" = 143 ] && [ "$l8_term_empty" = 1 ] && [ ! -e "$t/l8-term-ran" ] \
+  && [ "$l8_int_waited" = 1 ] && [ "$l8_int_rc" = 130 ] && [ "$l8_int_empty" = 1 ] && [ ! -e "$t/l8-int-ran" ]; then
+  ok "L8: TERM (143) and INT (130) during light memory wait clear the lock record and do not run the command"
+else
+  bad "L8 signal in mem wait (term: waited=$l8_term_waited rc=$l8_term_rc empty=$l8_term_empty ran=$([ -e "$t/l8-term-ran" ] && echo 1 || echo 0) err=[$(cat "$t/l8-term.err" 2>/dev/null)]; int: waited=$l8_int_waited rc=$l8_int_rc empty=$l8_int_empty ran=$([ -e "$t/l8-int-ran" ] && echo 1 || echo 0) err=[$(cat "$t/l8-int.err" 2>/dev/null)])"
 fi
 
 exit "$fail"

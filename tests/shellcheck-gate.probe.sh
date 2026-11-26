@@ -20,7 +20,7 @@ cleanup() {
 }
 trap cleanup EXIT
 export SYG_GATE_LOCK_FILE=$t/gate.lock
-export SYG_MEM_GATE_MIN_MB=0
+export SYG_MEM_GATE_MIN_MB=0 SYG_SHELLCHECK_PEAK_MB=0
 export PATH="$BIN:$PATH"
 
 # wait_for COND...: poll a command up to ~5 s (never a bare sleep as the synchronization)
@@ -185,7 +185,7 @@ fi
 # (8) env -i with minimal PATH: bin defaults do not depend on inherited env beyond PATH/HOME
 log8="$t/case8.log"
 env -i PATH="$t/minbin" HOME="$t" ROOT="$t/fx" SYG_GATE_LOCK_FILE="$t/envi.lock" SYG_MEM_GATE_MIN_MB=0 \
-  SYG_SHELLCHECK_BIN="$STUB" STUB_LOG="$log8" "$SG" -S warning
+  SYG_SHELLCHECK_PEAK_MB=0 SYG_SHELLCHECK_BIN="$STUB" STUB_LOG="$log8" "$SG" -S warning
 rc8=$?
 mapfile -t lines8 <"$log8" 2>/dev/null
 if [ "$rc8" = 0 ] && [ "${#lines8[@]}" = 1 ] && [[ ${lines8[0]} == "nargs=7 args=-x -S warning "* ]]; then
@@ -391,8 +391,9 @@ else
   bad "split source/sourcer (stub_rc=$rc17_stub lines=${#lines17[@]} real_ok=$real_sc_ok out=[${out17:-}])"
 fi
 
-# (18) shellcheck-gate takes the light lock (with label=shellcheck-gate and default SYG_SHELLCHECK_PEAK_MB=874):
-# it runs while the heavy lock is held, and its memory wait bar is floor + SYG_SHELLCHECK_PEAK_MB
+# (18) shellcheck-gate takes the light lock (with label=shellcheck-gate; the shared env runs the
+# first half at SYG_SHELLCHECK_PEAK_MB=0 while the heavy lock is held, and the second half clears
+# SYG_SHELLCHECK_PEAK_MB='' to pin the 874 default on the floor + SYG_SHELLCHECK_PEAK_MB bar)
 lock18="$t/case18.lock"
 mkfifo "$t/release18"
 ( exec 8>>"$lock18"; flock 8; : >"$t/held18"; read -r _ <"$t/release18" ) &
@@ -418,7 +419,7 @@ EOF
   # Default peak 874 + floor 2048 = 2922 MB; at 2921 MB (2991104 kB) it waits and names floor 2048 + peak 874
   printf 'MemTotal: 8388608 kB\nMemAvailable: 2991104 kB\n' >"$t/meminfo-18"
   out18_peak=$(SYG_GATE_LOCK_FILE="$lock18" SYG_MEM_GATE_MEMINFO="$t/meminfo-18" SYG_MEM_GATE_MIN_MB=2048 \
-    SYG_GATE_LOCK_MEM_WAIT_S=1 SYG_GATE_LOCK_MEM_POLL_S=1 ROOT="$t/fx" SYG_SHELLCHECK_BIN="$STUB" \
+    SYG_SHELLCHECK_PEAK_MB='' SYG_GATE_LOCK_MEM_WAIT_S=1 SYG_GATE_LOCK_MEM_POLL_S=1 ROOT="$t/fx" SYG_SHELLCHECK_BIN="$STUB" \
     "$SG" -S warning 2>&1)
   rc18_peak=$?
   if [ "$ran18" = 1 ] && [ "$rc18" = 0 ] && [ ! -s "$t/case18.err" ] \
