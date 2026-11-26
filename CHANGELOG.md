@@ -5,8 +5,8 @@ All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY
 ## 0.3.232 - 2026-11-26
 
 ### Features
-- **backlog-md skill:** a claim counts only once its one-file change is pushed to the integration branch; the skill gives the fetch, check, push and retry protocol, a release path, and what to do where direct pushes are closed (#PRNUM)
-- **session-start:** `SYG_TASK_CLAIM_CMD` names a project's claim command; SessionStart advertises it before the pick line, and the backlog-md skill runs it instead of the push protocol (#PRNUM)
+- **backlog-md skill:** a claim counts only once its one-file change is pushed to the integration branch; the skill gives the fetch, check, push and retry protocol, a release path, and what to do where direct pushes are closed (#448)
+- **session-start:** `SYG_TASK_CLAIM_CMD` names a project's claim command; SessionStart advertises it before the pick line, and the backlog-md skill runs it instead of the push protocol (#448)
 
 ## 0.3.231 - 2026-11-26
 
