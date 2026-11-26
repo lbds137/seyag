@@ -131,7 +131,7 @@ printf -- '---\nrole: "Extra three"\n---\n' > "$roles/extra3.md"
 : > "$execlog"
 rows2=$(PATH="$shim:$PATH" "$CR" --list | wc -l)
 awk2=$(grep -c '^awk$' "$execlog"); cat2=$(grep -c '^cat$' "$execlog"); base2=$(grep -c '^basename$' "$execlog")
-[ "$awk1" = "$awk2" ] && [ "$cat1" = 0 ] && [ "$cat2" = 0 ] && [ "$base1" = 0 ] && [ "$base2" = 0 ] \
+[ "$awk1" = 1 ] && [ "$awk1" = "$awk2" ] && [ "$cat1" = 0 ] && [ "$cat2" = 0 ] && [ "$base1" = 0 ] && [ "$base2" = 0 ] \
   && [ "$rows1" -gt 0 ] && [ "$rows2" = "$((rows1 + 3))" ] \
   && ok "--list: one awk process ($awk1) in both runs, no cat ($cat1/$cat2), no basename ($base1/$base2)" \
   || bad "--list processes: awk $awk1->$awk2 cat $cat1->$cat2 basename $base1->$base2 rows $rows1->$rows2"
@@ -146,6 +146,26 @@ out=$(SYG_ROLE_DIR="$empty" timeout 5 "$CR" --list < <(sleep 10 2>/dev/null) 2>&
 [ $rc = 0 ] && [ -z "$out" ] && ok "--list: an empty role dir exits 0 with no output, not hanging on stdin" \
   || bad "--list empty dir stdin: rc=$rc out=$out"
 rmdir "$empty"
+
+# An unreadable or dangling role file mid-list: gawk would die on it and drop every later row (and the
+# one before it, flushed late) with exit 0. --list skips it with a note and still lists the rest.
+bdir="$home/bad-roles"; mkdir -p "$bdir"
+for n in a c e h; do printf -- '---\nrole: "R %s"\n---\n' "$n" > "$bdir/$n.md"; done
+printf -- '---\nrole: "Unread"\n---\n' > "$bdir/d-unread.md"; chmod 000 "$bdir/d-unread.md"
+ln -s "$bdir/missing-target.md" "$bdir/f-dangling.md"
+err=$(SYG_ROLE_DIR="$bdir" "$CR" --list 2>&1 >"$home/bad.out"); rc=$?
+want=$(printf 'a\tR a\t\t\t\nc\tR c\t\t\t\ne\tR e\t\t\t\nh\tR h\t\t\t')
+if [ "$(id -u)" = 0 ]; then
+    grep -q 'f-dangling.md: not a readable file' <<<"$err" && grep -q '^h	R h' "$home/bad.out" \
+      && ok "--list: a dangling role file is skipped with a note (unreadable case skipped as root)" \
+      || bad "--list bad files (root): rc=$rc err=[$err] out=[$(cat "$home/bad.out")]"
+else
+    [ $rc = 0 ] && [ "$(cat "$home/bad.out")" = "$want" ] \
+      && grep -q 'd-unread.md: not a readable file' <<<"$err" && grep -q 'f-dangling.md: not a readable file' <<<"$err" \
+      && ok "--list: unreadable and dangling role files are skipped with a note; the other four rows stay" \
+      || bad "--list bad files: rc=$rc err=[$err] out=[$(cat "$home/bad.out")]"
+fi
+chmod 600 "$bdir/d-unread.md"; rm -f "$bdir"/*.md "$home/bad.out"; rmdir "$bdir"
 
 # "## Needs Owner": what waits on the owner anywhere (read, rule, answer). --json carries it as .needs,
 # with an optional (due DATE); --in-person stays in-person only.
