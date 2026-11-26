@@ -1,9 +1,10 @@
 ---
 id: TASK-132
-title: 'Pre-push lane guard for direct ledger pushes (TASK-130 unit B)'
+title: Pre-push lane guard for direct ledger pushes (TASK-130 unit B)
 status: To Do
 assignee: []
 created_date: '2026-11-24T01:02:02Z'
+updated_date: '2026-11-26T14:40:00Z'
 labels:
   - policy
   - git-hooks
@@ -31,3 +32,9 @@ v1 checks path and mode confinement only. A validator picked by ID stays deferre
 <!-- AC:BEGIN -->
 - [ ] #1 pre-push lane guard is opt-in (toggle), chains the repo hook, and its probe covers create/delete/non-FF/merge/revert-hiding/config-widening cases
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+2026-11-26 (Seyag A): the deferred validator trigger has fired here: this repo's CLAUDE.md now opens the backlog-only direct path with plugins/seyag/bin/backlog-lint as its store lint (owner ruling 2026-11-26). Until this guard ships the lint run is the pushing session's manual step, not enforced; when unit B lands, backlog-lint is the first validator-by-ID candidate.
+<!-- SECTION:NOTES:END -->
