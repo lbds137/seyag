@@ -17,7 +17,7 @@ ordinal: 197000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-The Claude review lows from PR #439 (TASK-177), which merged as dea8810 with verdict PASS. Each one is still open on main:
+The Claude review lows from PR #439 (TASK-177), which landed as 943ba4f..dea8810 (code d430e8f, 514d2a4, 4e45c46) with verdict PASS. Each one is still open on main:
 (1) tests/long-job.probe.sh S12 does not pass or assert `-p StartupCPUShares`. The drop arm at plugins/seyag/bin/long-job:213 lists it, so a typo in that arm would go unnoticed. Add it to S12's command and assertions.
 (2) The probe's header comment, the S12 comment and S12's `ok` label still list only CPUWeight/StartupCPUWeight/CPUQuota. List all five dropped properties.
 (3) `-p AllowedCPUs`/`StartupAllowedCPUs` still reach a --heavy unit, and pinning the job to a CPU subset recreates the starvation the drop prevents. CPUQuotaPeriodSec does nothing without the dropped quota. Either add AllowedCPUs|StartupAllowedCPUs to the drop with a probe case (preferred), or document in --help that only weight, share and quota properties are dropped.
