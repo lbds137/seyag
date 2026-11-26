@@ -283,7 +283,7 @@ An optional TOML file fills in knobs the environment left unset: user `${XDG_CON
 | `SYG_KEYS_WITH_KEY` | `host+tpm2` | Value passed to systemd-creds encrypt --with-key= in keys (for example host on a machine without a TPM). | `bin/keys`, `hooks/lib/config-env.sh`, `lib/config_env.py` | user only |
 | `SYG_LOAD_GATE_1M` | 2x the CPU count | 1-minute load average ceiling for load-gate --ok/--wait; a decimal. | `bin/load-gate`, `bin/long-job` | user only |
 | `SYG_LOAD_GATE_5M` | 2.5x the CPU count | 5-minute load average ceiling for load-gate --ok/--wait; a decimal. | `bin/load-gate`, `bin/long-job` | user only |
-| `SYG_LONG_JOB_AS` | unset | Set by an exec wrapper over long-job to the runner as its callers type it (a name or an absolute path off PATH): long-job's messages and wait sentinel use its basename, command hints the whole value; unset, long-job. | `bin/long-job` | env only |
+| `SYG_LONG_JOB_AS` | unset | Set by an exec wrapper over long-job to its runner name or absolute path: messages and the wait sentinel use the basename, command hints the whole value; unset, long-job. Environment only (not config.toml). | `bin/long-job` | env only |
 | `SYG_LONG_JOB_STATE_DIR` | XDG_STATE_HOME/long-job (XDG_STATE_HOME has its XDG default) | Directory holding long-job's per-job NAME.cmd, NAME.owner, NAME.unit, NAME.log and NAME.exit files. | `bin/long-job` | user only |
 | `SYG_LONG_JOB_UNIT_PREFIX` | `long-job` | Prefix of the transient systemd user unit long-job starts (PREFIX-NAME.service); must start with a letter or digit and hold only letters, digits, '.', '_' and '-'. | `bin/long-job` | user only |
 | `SYG_MAX_PARALLEL` | unset | Host cap on parallel jobs, applied by resource-profile on top of any profile. | `bin/resource-profile` | user only |
