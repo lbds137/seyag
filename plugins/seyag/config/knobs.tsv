@@ -120,12 +120,13 @@ SYG_EXTRA_USAGE_BUDGET_CMD	user	usage	unset	Shell command printing the extra-usa
 SYG_EXTRA_USAGE_BUDGET_CMD_TIMEOUT	user	usage	10	Timeout in seconds (positive integer) for SYG_EXTRA_USAGE_BUDGET_CMD in claude-usage.	-
 SYG_EXTRA_USAGE_BUDGET_USD	user	usage	unset	Static extra-usage budget in USD (non-negative decimal) for claude-usage and statusline.	-
 SYG_EXTRA_USAGE_TOML	user	statusline	unset	Path to a TOML file with bought_usd and optional used_usd_at_anchor read on each statusline render.	path
-SYG_GATE_LOCK_CLASS	user	worktrees	heavy	Lock class for gate-lock: heavy queues on the main gate lock; light queues on the derived light lock and waits for MemAvailable >= SYG_MEM_GATE_MIN_MB (anything else exits 125). Unset before the child runs.	-
-SYG_GATE_LOCK_FILE	user	worktrees	/tmp/gate.lock	Lock file gate-lock holds: heavy gates (suites) run one at a time; light gates run one at a time on the derived light lock (.light.lock) after a memory wait, so short gates stop queueing behind 50-minute suites.	path
+SYG_GATE_LOCK_CLASS	user	worktrees	heavy	Lock class for gate-lock: heavy queues on the main gate lock; light (requires SYG_GATE_LOCK_PEAK_MB, else runs as heavy) queues on the light lock and waits for floor + peak MB. Unset before the child runs.	-
+SYG_GATE_LOCK_FILE	user	worktrees	/tmp/gate.lock	Lock file gate-lock holds: heavy suites one at a time; light gates on .light.lock after memory wait. Default is shared /tmp: another user can hold it (and read its holder record) on a multi-user host; set a private path.	path
 SYG_GATE_LOCK_HOLD_CAP_S	user	worktrees	3600	Hold-time warning cap in seconds for gate-lock (0 disables): when a verified or unverified holder record is at or past this age, waiter reports append a past-the-hold-cap warning (never signals or breaks the lock).	host
 SYG_GATE_LOCK_LABEL	user	worktrees	unset	Optional label gate-lock writes into the holder record so waiters see a caller name (for example shellcheck-gate or long-job NAME) instead of the raw command name. Unset before the child runs.	-
 SYG_GATE_LOCK_MEM_POLL_S	internal	worktrees	5	Test seam overriding the memory-wait polling interval in seconds for a light gate-lock run.	-
-SYG_GATE_LOCK_MEM_WAIT_S	user	worktrees	900	Maximum seconds a light gate-lock run waits for MemAvailable >= SYG_MEM_GATE_MIN_MB after acquiring the light lock before exiting 125 (0 waits forever).	host
+SYG_GATE_LOCK_MEM_WAIT_S	user	worktrees	900	Maximum seconds a light gate-lock run waits for MemAvailable >= SYG_MEM_GATE_MIN_MB + SYG_GATE_LOCK_PEAK_MB after acquiring the light lock before exiting 125 (0 waits forever).	host
+SYG_GATE_LOCK_PEAK_MB	user	worktrees	unset	Measured peak RSS in MB of a light gate-lock command: required for SYG_GATE_LOCK_CLASS=light (without a non-negative integer it runs as heavy) and added to SYG_MEM_GATE_MIN_MB for the memory bar. Unset before the child.	-
 SYG_GATE_LOCK_REPORT_S	user	worktrees	300	Seconds between periodic still-waiting holder reports on stderr while gate-lock waits for a busy lock (0 disables periodic lines; the initial holder line still prints).	host
 SYG_GATE_SANDBOX_ENV	user	worktrees	unset	Space-separated variable names gate-sandbox passes into the sandbox's otherwise cleared environment. Each must be a variable name, or the launch refuses with 125.	-
 SYG_GATE_SANDBOX_PATH	user	worktrees	prose:the caller's PATH	PATH inside gate-sandbox.	path
@@ -245,6 +246,7 @@ SYG_SESSION_LOG_HISTORY	user	session	prose:the history.jsonl in the Claude confi
 SYG_SESSION_LOG_POOL_MIN_BYTES	internal	session	33554432	Test seam and tuning: total input bytes below which session-log grep scans files in-process instead of in a fork pool.	-
 SYG_SHELLCHECK_BIN	user	worktrees	shellcheck	Binary bin/shellcheck-gate invokes; a name on PATH or a path, with a `uvx --from shellcheck-py shellcheck` fallback.	path
 SYG_SHELLCHECK_CHUNK	user	worktrees	20	Scripts per shellcheck invocation in bin/shellcheck-gate; bounds one invocation's memory (shellcheck follows sources), chunks run sequentially under the gate lock.	-
+SYG_SHELLCHECK_PEAK_MB	user	worktrees	874	The gate's measured peak RSS (874 MB on 233 scripts with -x, measured 2026-11-26); re-measure when the script set grows.	-
 SYG_STALLED_NOW	internal	misc	unset	Test seam: ISO-8601 timestamp with a UTC offset that session-stalled uses as the current time; a value without an offset is a usage error.	-
 SYG_STALLED_ZAI_TZ	user	session	Asia/Shanghai	IANA time zone in which session-stalled reads the z.ai quota-reset stamp (`Your limit will reset at YYYY-MM-DD HH:MM:SS`); an unknown zone leaves the reset unparsed.	-
 SYG_STATE_DIR	internal	session	/tmp/claude-<uid>	Test seam overriding the directory session-start prunes and the prompt hooks (queued-message-receipt, context-size-reminder, context-block-gate) write their per-session state into.	-

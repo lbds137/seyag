@@ -596,7 +596,7 @@ out=$( { flock 9; inside; } 9>>"$SYG_GATE_LOCK_FILE"); rc=$?
   || bad "gate-lock shared: rc=$rc out=[$out]"
 host_light=$("$B/gate-lock" --light-path 2>/dev/null)
 light_probe='lp=$(gate-lock --light-path 2>/dev/null); [ -n "$lp" ] && flock -n -E 75 "$lp" true; case $? in 0) echo "light-free:$lp" ;; 75) echo "light-busy:$lp" ;; *) echo "light-unusable:$lp" ;; esac'
-fake "$light_probe; [ \"\$lp\" = /run/worker/gate.light.lock ] && SYG_GATE_LOCK_CLASS=light SYG_MEM_GATE_MIN_MB=0 gate-lock echo light-ran; exit 0"
+fake "$light_probe; [ \"\$lp\" = /run/worker/gate.light.lock ] && SYG_GATE_LOCK_CLASS=light SYG_GATE_LOCK_PEAK_MB=0 SYG_MEM_GATE_MIN_MB=0 gate-lock echo light-ran; exit 0"
 out=$( { flock 9; inside; } 9>>"$SYG_GATE_LOCK_FILE"); rc=$?
 [ -f "$host_light" ] && [ "$host_light" = "$T/gate.light.lock" ] \
   && [ "$out" = $'light-free:/run/worker/gate.light.lock\nlight-ran' ] \

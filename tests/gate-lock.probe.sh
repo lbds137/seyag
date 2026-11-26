@@ -7,7 +7,7 @@
 # pidns and stale record fallbacks (R3), control-char stripping in forged labels (R4), no-record
 # open-fd fallback without cap suffix (R5), hold-cap warning suffix without signalling the holder
 # (R6), reporter exit on SIGKILL of waiting gate-lock without holding the lock fd (R7), and light
-# lock class (--light-path, L1-L6).
+# lock class (--light-path, L1-L7, including SYG_GATE_LOCK_PEAK_MB floor+peak bar and heavy fallback).
 # Usage: tests/gate-lock.probe.sh   (from anywhere)
 set -u
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -353,7 +353,7 @@ if wait_for exists "$t/r7-held"; then
   fi
   echo go >"$t/r7-fifo"
   wait "$r7_h" 2>/dev/null
-  SYG_GATE_LOCK_FILE=$r7_lock "$GL" sh -c ': >"$1"' _ "$t/r7-third" 2>"$t/r7-third.err"
+  timeout 20 env SYG_GATE_LOCK_FILE=$r7_lock "$GL" sh -c ': >"$1"' _ "$t/r7-third" 2>"$t/r7-third.err"
   r7_rc=$?
   if [ "$rep_gone" = 1 ] && [ "$r7_rc" = 0 ] && [ -e "$t/r7-third" ]; then
     ok "R7: reporter exits when waiting gate-lock is killed with SIGKILL; third locker acquires after release"
@@ -381,7 +381,7 @@ mkfifo "$t/l2-fifo"
 SYG_GATE_LOCK_FILE=$l2_lock "$GL" sh -c ': >"$1"; read -r _ <"$2"' _ "$t/l2-held" "$t/l2-fifo" &
 l2_h=$!; bg+=("$l2_h")
 if wait_for exists "$t/l2-held"; then
-  SYG_GATE_LOCK_FILE=$l2_lock SYG_GATE_LOCK_CLASS=light SYG_MEM_GATE_MIN_MB=0 \
+  SYG_GATE_LOCK_FILE=$l2_lock SYG_GATE_LOCK_CLASS=light SYG_GATE_LOCK_PEAK_MB=256 SYG_MEM_GATE_MIN_MB=0 \
     "$GL" sh -c ': >"$1"' _ "$t/l2-ran" 2>"$t/l2.err" &
   l2_p=$!; bg+=("$l2_p")
   l2_ok=0
@@ -402,11 +402,11 @@ fi
 # (L3) two light gates serialize
 l3_lock=$t/l3.lock
 mkfifo "$t/l3-fifo"
-SYG_GATE_LOCK_FILE=$l3_lock SYG_GATE_LOCK_CLASS=light SYG_GATE_LOCK_LABEL=light-one SYG_MEM_GATE_MIN_MB=0 \
+SYG_GATE_LOCK_FILE=$l3_lock SYG_GATE_LOCK_CLASS=light SYG_GATE_LOCK_PEAK_MB=256 SYG_GATE_LOCK_LABEL=light-one SYG_MEM_GATE_MIN_MB=0 \
   "$GL" sh -c ': >"$1"; read -r _ <"$2"' _ "$t/l3-held" "$t/l3-fifo" &
 l3_h=$!; bg+=("$l3_h")
 if wait_for exists "$t/l3-held"; then
-  SYG_GATE_LOCK_FILE=$l3_lock SYG_GATE_LOCK_CLASS=light SYG_MEM_GATE_MIN_MB=0 \
+  SYG_GATE_LOCK_FILE=$l3_lock SYG_GATE_LOCK_CLASS=light SYG_GATE_LOCK_PEAK_MB=256 SYG_MEM_GATE_MIN_MB=0 \
     "$GL" sh -c ': >"$1"' _ "$t/l3-ran" 2>"$t/l3.err" &
   l3_w=$!; bg+=("$l3_w")
   l3_waited=0
@@ -425,54 +425,99 @@ else
   echo go >"$t/l3-fifo" 2>/dev/null
 fi
 
-# (L4) light gate with low memory waits and prints the memory line, then runs once raised;
+# (L4) light gate uses the floor + peak bar: a fixture at floor+peak-1 (2559 MB = 2048 + 512 - 1)
+# waits and prints "need 2560 MB (floor 2048 + peak 512)", and floor+peak (2560 MB) runs;
 # with SYG_GATE_LOCK_MEM_WAIT_S=1 and low memory it exits 125 (and unreadable meminfo exits 125)
 l4_lock=$t/l4.lock
-printf 'MemTotal: 8388608 kB\nMemAvailable: 1048576 kB\n' >"$t/meminfo-l4"
-SYG_GATE_LOCK_FILE=$l4_lock SYG_GATE_LOCK_CLASS=light SYG_MEM_GATE_MEMINFO=$t/meminfo-l4 \
-  SYG_MEM_GATE_MIN_MB=2048 SYG_GATE_LOCK_MEM_POLL_S=1 \
+printf 'MemTotal: 8388608 kB\nMemAvailable: 2620416 kB\n' >"$t/meminfo-l4"
+timeout 20 env SYG_GATE_LOCK_FILE=$l4_lock SYG_GATE_LOCK_CLASS=light SYG_GATE_LOCK_PEAK_MB=512 \
+  SYG_MEM_GATE_MEMINFO=$t/meminfo-l4 SYG_MEM_GATE_MIN_MB=2048 SYG_GATE_LOCK_MEM_POLL_S=1 \
   "$GL" sh -c ': >"$1"' _ "$t/l4-ran" 2>"$t/l4.err" &
 l4_p=$!; bg+=("$l4_p")
 l4_waited=0
-wait_for grep -qF "gate-lock: waiting for memory (1024 MB available, need 2048 MB)" "$t/l4.err" && l4_waited=1
+wait_for grep -qF "gate-lock: waiting for memory (2559 MB available, need 2560 MB (floor 2048 + peak 512))" "$t/l4.err" && l4_waited=1
 [ -e "$t/l4-ran" ] && l4_early=1 || l4_early=0
-printf 'MemTotal: 8388608 kB\nMemAvailable: 3145728 kB\n' >"$t/meminfo-l4.high"
+printf 'MemTotal: 8388608 kB\nMemAvailable: 2621440 kB\n' >"$t/meminfo-l4.high"
 mv "$t/meminfo-l4.high" "$t/meminfo-l4"
 wait "$l4_p"; l4_rc=$?
 
-printf 'MemTotal: 8388608 kB\nMemAvailable: 1048576 kB\n' >"$t/meminfo-l4-low"
-l4_to_out=$(SYG_GATE_LOCK_FILE=$l4_lock SYG_GATE_LOCK_CLASS=light SYG_MEM_GATE_MEMINFO=$t/meminfo-l4-low \
-  SYG_MEM_GATE_MIN_MB=2048 SYG_GATE_LOCK_MEM_WAIT_S=1 SYG_GATE_LOCK_MEM_POLL_S=1 \
+printf 'MemTotal: 8388608 kB\nMemAvailable: 2620416 kB\n' >"$t/meminfo-l4-low"
+l4_to_out=$(timeout 20 env SYG_GATE_LOCK_FILE=$l4_lock SYG_GATE_LOCK_CLASS=light SYG_GATE_LOCK_PEAK_MB=512 \
+  SYG_MEM_GATE_MEMINFO=$t/meminfo-l4-low SYG_MEM_GATE_MIN_MB=2048 SYG_GATE_LOCK_MEM_WAIT_S=1 SYG_GATE_LOCK_MEM_POLL_S=1 \
   "$GL" sh -c ': >"$1"' _ "$t/l4-to-ran" 2>&1)
 l4_to_rc=$?
 
-l4_bad_out=$(SYG_GATE_LOCK_FILE=$l4_lock SYG_GATE_LOCK_CLASS=light SYG_MEM_GATE_MEMINFO=$t/no-such-meminfo \
+l4_bad_out=$(timeout 20 env SYG_GATE_LOCK_FILE=$l4_lock SYG_GATE_LOCK_CLASS=light SYG_GATE_LOCK_PEAK_MB=512 \
+  SYG_MEM_GATE_MEMINFO=$t/no-such-meminfo \
   "$GL" sh -c ': >"$1"' _ "$t/l4-bad-ran" 2>&1)
 l4_bad_rc=$?
 
 if [ "$l4_waited" = 1 ] && [ "$l4_early" = 0 ] && [ "$l4_rc" = 0 ] && [ -e "$t/l4-ran" ] \
-  && [ "$l4_to_rc" = 125 ] && [[ $l4_to_out == *"gate-lock: memory stayed below 2048 MB for 1 s; not running"* ]] && [ ! -e "$t/l4-to-ran" ] \
+  && [ "$l4_to_rc" = 125 ] && [[ $l4_to_out == *"gate-lock: memory stayed below 2560 MB for 1 s; not running"* ]] && [ ! -e "$t/l4-to-ran" ] \
   && [ "$l4_bad_rc" = 125 ] && [ ! -e "$t/l4-bad-ran" ]; then
-  ok "L4: light gate waits for memory and runs when raised; exits 125 on timeout or unreadable meminfo"
+  ok "L4: light gate waits at floor+peak-1 (need 2560 MB (floor 2048 + peak 512)) and runs at floor+peak; exits 125 on timeout or unreadable meminfo"
 else
-  bad "L4 memory wait (waited=$l4_waited early=$l4_early rc=$l4_rc to_rc=$l4_to_rc to_out=[$l4_to_out] bad_rc=$l4_bad_rc bad_out=[$l4_bad_out])"
+  bad "L4 memory wait (waited=$l4_waited early=$l4_early rc=$l4_rc err=[$(cat "$t/l4.err" 2>/dev/null)] to_rc=$l4_to_rc to_out=[$l4_to_out] bad_rc=$l4_bad_rc bad_out=[$l4_bad_out])"
 fi
 
-# (L5) bad SYG_GATE_LOCK_CLASS exits 125
+# (L5) bad SYG_GATE_LOCK_CLASS exits 125; bad SYG_GATE_LOCK_MEM_WAIT_S on light class exits 125 before opening/taking the lock
 l5_out=$(SYG_GATE_LOCK_CLASS=bogus "$GL" true 2>&1); l5_rc=$?
-if [ "$l5_rc" = 125 ] && [[ $l5_out == *SYG_GATE_LOCK_CLASS* ]]; then
-  ok "L5: invalid SYG_GATE_LOCK_CLASS exits 125 with a message"
+l5_lock=$t/l5.lock
+l5_light=$t/l5.light.lock
+mkfifo "$t/l5-fifo"
+( exec 8>>"$l5_light"; flock 8; : >"$t/l5-held"; read -r _ <"$t/l5-fifo" ) &
+l5_h=$!; bg+=("$l5_h")
+l5_mw_rc=0 l5_mw_out=''
+if wait_for exists "$t/l5-held"; then
+  l5_mw_out=$(timeout 5 env SYG_GATE_LOCK_FILE=$l5_lock SYG_GATE_LOCK_CLASS=light SYG_GATE_LOCK_PEAK_MB=256 \
+    SYG_GATE_LOCK_MEM_WAIT_S=bad "$GL" true 2>&1)
+  l5_mw_rc=$?
+fi
+echo go >"$t/l5-fifo" 2>/dev/null
+wait "$l5_h" 2>/dev/null
+if [ "$l5_rc" = 125 ] && [[ $l5_out == *SYG_GATE_LOCK_CLASS* ]] \
+  && [ "$l5_mw_rc" = 125 ] && [[ $l5_mw_out == *SYG_GATE_LOCK_MEM_WAIT_S* ]] && [[ $l5_mw_out != *"waiting for"* ]]; then
+  ok "L5: invalid SYG_GATE_LOCK_CLASS and bad SYG_GATE_LOCK_MEM_WAIT_S exit 125 at once without waiting on a held light lock"
 else
-  bad "L5 invalid class (rc=$l5_rc out=[$l5_out])"
+  bad "L5 invalid class/mem_wait (rc=$l5_rc out=[$l5_out] mw_rc=$l5_mw_rc mw_out=[$l5_mw_out])"
 fi
 
-# (L6) child does not see SYG_GATE_LOCK_CLASS or SYG_GATE_LOCK_LABEL
-l6_out=$(SYG_GATE_LOCK_CLASS=light SYG_GATE_LOCK_LABEL=my-label SYG_MEM_GATE_MIN_MB=0 \
-  "$GL" sh -c 'printf "class=%s label=%s\n" "${SYG_GATE_LOCK_CLASS-unset}" "${SYG_GATE_LOCK_LABEL-unset}"')
-if [ "$l6_out" = "class=unset label=unset" ]; then
-  ok "L6: child does not inherit SYG_GATE_LOCK_CLASS or SYG_GATE_LOCK_LABEL"
+# (L6) child does not see SYG_GATE_LOCK_CLASS, SYG_GATE_LOCK_LABEL or SYG_GATE_LOCK_PEAK_MB
+l6_out=$(SYG_GATE_LOCK_CLASS=light SYG_GATE_LOCK_LABEL=my-label SYG_GATE_LOCK_PEAK_MB=512 SYG_MEM_GATE_MIN_MB=0 \
+  "$GL" sh -c 'printf "class=%s label=%s peak=%s\n" "${SYG_GATE_LOCK_CLASS-unset}" "${SYG_GATE_LOCK_LABEL-unset}" "${SYG_GATE_LOCK_PEAK_MB-unset}"')
+if [ "$l6_out" = "class=unset label=unset peak=unset" ]; then
+  ok "L6: child does not inherit SYG_GATE_LOCK_CLASS, SYG_GATE_LOCK_LABEL or SYG_GATE_LOCK_PEAK_MB"
 else
   bad "L6 child env ([$l6_out])"
+fi
+
+# (L7) light without a peak (unset, empty or non-integer) runs on the heavy lock: waits behind a held heavy lock and prints the note
+l7_lock=$t/l7.lock
+mkfifo "$t/l7-fifo"
+SYG_GATE_LOCK_FILE=$l7_lock "$GL" sh -c ': >"$1"; read -r _ <"$2"' _ "$t/l7-held" "$t/l7-fifo" &
+l7_h=$!; bg+=("$l7_h")
+if wait_for exists "$t/l7-held"; then
+  env -u SYG_GATE_LOCK_PEAK_MB SYG_GATE_LOCK_FILE=$l7_lock SYG_GATE_LOCK_CLASS=light \
+    "$GL" sh -c ': >"$1"' _ "$t/l7-ran" 2>"$t/l7.err" &
+  l7_w=$!; bg+=("$l7_w")
+  l7_waited=0
+  wait_for grep -q "waiting for $l7_lock" "$t/l7.err" && l7_waited=1
+  [ -e "$t/l7-ran" ] && l7_early=1 || l7_early=0
+  echo go >"$t/l7-fifo"
+  wait "$l7_h" 2>/dev/null
+  wait "$l7_w"; l7_rc=$?
+  l7_bad_err=$(SYG_GATE_LOCK_FILE=$l7_lock SYG_GATE_LOCK_CLASS=light SYG_GATE_LOCK_PEAK_MB=notanint "$GL" true 2>&1)
+  l7_err=$(cat "$t/l7.err" 2>/dev/null)
+  if [ "$l7_waited" = 1 ] && [ "$l7_early" = 0 ] && [ "$l7_rc" = 0 ] && [ -e "$t/l7-ran" ] \
+    && [[ $l7_err == *"gate-lock: light needs a recorded peak (SYG_GATE_LOCK_PEAK_MB); running as heavy"* ]] \
+    && [[ $l7_bad_err == *"gate-lock: light needs a recorded peak (SYG_GATE_LOCK_PEAK_MB); running as heavy"* ]]; then
+    ok "L7: light without a recorded peak prints note and runs as heavy (waits behind held heavy lock)"
+  else
+    bad "L7 light without peak (waited=$l7_waited early=$l7_early rc=$l7_rc err=[$l7_err] bad_err=[$l7_bad_err])"
+  fi
+else
+  bad "L7: heavy holder never started"
+  echo go >"$t/l7-fifo" 2>/dev/null
 fi
 
 exit "$fail"

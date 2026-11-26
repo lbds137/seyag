@@ -375,20 +375,24 @@ ROOT="$t/srcfx" SYG_SHELLCHECK_BIN="$STUB" SYG_SHELLCHECK_CHUNK=1 STUB_LOG="$log
 rc17_stub=$?
 mapfile -t lines17 <"$log17" 2>/dev/null
 real_sc_ok=1
-if command -v shellcheck >/dev/null 2>&1 || command -v uvx >/dev/null 2>&1; then
-  out17=$(ROOT="$t/srcfx" SYG_SHELLCHECK_CHUNK=1 "$SG" -S warning 2>&1)
+# Real shellcheck: a runnable binary, else uvx from its local cache only (UV_OFFLINE: an offline
+# sandbox with no cached shellcheck-py skips this half instead of failing on the network).
+if { command -v shellcheck >/dev/null 2>&1 && shellcheck --version >/dev/null 2>&1; } \
+  || { command -v uvx >/dev/null 2>&1 && UV_OFFLINE=1 uvx --from shellcheck-py shellcheck --version >/dev/null 2>&1; }; then
+  out17=$(UV_OFFLINE=1 ROOT="$t/srcfx" SYG_SHELLCHECK_CHUNK=1 "$SG" -S warning 2>&1)
   [ $? = 0 ] && [ -z "$out17" ] || real_sc_ok=0
 fi
 if [ "$rc17_stub" = 0 ] && [ "${#lines17[@]}" = 2 ] \
   && [[ ${lines17[0]} == *"args=-x -S warning "* ]] \
   && [[ ${lines17[1]} == *"args=-x -S warning "* ]] \
   && [ "$real_sc_ok" = 1 ]; then
-  ok "split source/sourcer pair (SYG_SHELLCHECK_CHUNK=1): -x reaches every chunk and passes real shellcheck"
+  ok "split source/sourcer pair (SYG_SHELLCHECK_CHUNK=1): -x reaches every chunk"
 else
   bad "split source/sourcer (stub_rc=$rc17_stub lines=${#lines17[@]} real_ok=$real_sc_ok out=[${out17:-}])"
 fi
 
-# (18) shellcheck-gate takes the light lock (with label=shellcheck-gate): it runs while the heavy lock is held
+# (18) shellcheck-gate takes the light lock (with label=shellcheck-gate and default SYG_SHELLCHECK_PEAK_MB=874):
+# it runs while the heavy lock is held, and its memory wait bar is floor + SYG_SHELLCHECK_PEAK_MB
 lock18="$t/case18.lock"
 mkfifo "$t/release18"
 ( exec 8>>"$lock18"; flock 8; : >"$t/held18"; read -r _ <"$t/release18" ) &
@@ -411,10 +415,19 @@ EOF
   echo go >"$t/release18"
   wait "$holder18" 2>/dev/null
   wait "$sg18"; rc18=$?
-  if [ "$ran18" = 1 ] && [ "$rc18" = 0 ] && [ ! -s "$t/case18.err" ] && grep -qxF "label=shellcheck-gate" "$t/case18.rec" 2>/dev/null; then
-    ok "light lock: shellcheck-gate runs without waiting while the heavy lock is held (label=shellcheck-gate)"
+  # Default peak 874 + floor 2048 = 2922 MB; at 2921 MB (2991104 kB) it waits and names floor 2048 + peak 874
+  printf 'MemTotal: 8388608 kB\nMemAvailable: 2991104 kB\n' >"$t/meminfo-18"
+  out18_peak=$(SYG_GATE_LOCK_FILE="$lock18" SYG_MEM_GATE_MEMINFO="$t/meminfo-18" SYG_MEM_GATE_MIN_MB=2048 \
+    SYG_GATE_LOCK_MEM_WAIT_S=1 SYG_GATE_LOCK_MEM_POLL_S=1 ROOT="$t/fx" SYG_SHELLCHECK_BIN="$STUB" \
+    "$SG" -S warning 2>&1)
+  rc18_peak=$?
+  if [ "$ran18" = 1 ] && [ "$rc18" = 0 ] && [ ! -s "$t/case18.err" ] \
+    && grep -qxF "label=shellcheck-gate" "$t/case18.rec" 2>/dev/null \
+    && [ "$rc18_peak" = 125 ] \
+    && [[ $out18_peak == *"need 2922 MB (floor 2048 + peak 874)"* ]]; then
+    ok "light lock: shellcheck-gate runs while heavy lock is held (label=shellcheck-gate, default peak 874 MB)"
   else
-    bad "light lock (ran=$ran18 rc=$rc18 err=[$(cat "$t/case18.err" 2>/dev/null)] rec=[$(cat "$t/case18.rec" 2>/dev/null)])"
+    bad "light lock (ran=$ran18 rc=$rc18 err=[$(cat "$t/case18.err" 2>/dev/null)] rec=[$(cat "$t/case18.rec" 2>/dev/null)] peak_rc=$rc18_peak peak_out=[$out18_peak])"
   fi
 else
   bad "light lock: heavy holder never took lock"
