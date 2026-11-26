@@ -1,18 +1,19 @@
 #!/usr/bin/env bash
-# bin/shellcheck-gate runs shellcheck over the run root's shell files (tests/shell-files.sh) in
-# sequential chunks under the machine-wide gate lock (gate-lock, re-entering itself in an
-# argv-authenticated inner mode "--inner=$$" checked against $PPID), so one invocation never holds
-# every file in memory at once and shellcheck never overlaps another gate run. Run root: ROOT when
-# set (must contain tests/shell-files.sh), else the caller's git toplevel when it has
-# tests/shell-files.sh, else this script's own repo; the pipeline cds to the run root so the
-# enumerator's relative paths resolve.
+# bin/shellcheck-gate runs shellcheck -x over the run root's shell files (tests/shell-files.sh) in
+# sequential chunks under gate-lock's light lock (SYG_GATE_LOCK_CLASS=light,
+# SYG_GATE_LOCK_LABEL=shellcheck-gate; re-entering itself in an argv-authenticated inner mode
+# "--inner=$$" checked against $PPID), so one invocation never holds every file in memory at once,
+# sourced files across chunk boundaries are followed (-x), and shellcheck does not queue behind
+# heavy test suites. Run root: ROOT when set (must contain tests/shell-files.sh), else the caller's
+# git toplevel when it has tests/shell-files.sh, else this script's own repo; the pipeline cds to
+# the run root so the enumerator's relative paths resolve.
 # Knobs: SYG_SHELLCHECK_CHUNK (default 20), SYG_SHELLCHECK_BIN (default shellcheck, uvx fallback).
 # Exit: 0 clean; 1 findings or an invocation that died (the pipeline's xargs 123/125 mapped to 1);
 # 128+N on a forwarded TERM/INT/HUP; other codes propagate; 125 for own errors (bad knob, no
 # binary, a missing or failing file enumerator, gate-lock not found).
 set -u
 if [ $# = 0 ] || [ "$1" = -h ] || [ "$1" = --help ]; then
-  echo "usage: shellcheck-gate SHELLCHECK_ARG...   run shellcheck in chunks under gate-lock" >&2
+  echo "usage: shellcheck-gate SHELLCHECK_ARG...   run shellcheck -x in chunks under gate-lock's light lock" >&2
   if [ $# = 0 ]; then exit 125; fi
   exit 0
 fi
@@ -63,6 +64,7 @@ else
     echo "shellcheck-gate: gate-lock not found" >&2
     exit 125
   fi
+  export SYG_GATE_LOCK_CLASS=light SYG_GATE_LOCK_LABEL=shellcheck-gate
   exec "$gl" bash "$0" "--inner=$$" "$@"
 fi
 
@@ -107,7 +109,9 @@ trap 'fwd 15' TERM
 trap 'fwd 2' INT
 trap 'fwd 1' HUP
 set -m
-xargs -r -n "$chunk" -P 1 "${sc_cmd[@]}" "$@" <"$list" &
+# Pass -x on every chunk: a sourced file can land in another chunk, and without -x shellcheck only
+# follows a source= target that is named in the same invocation.
+xargs -r -n "$chunk" -P 1 "${sc_cmd[@]}" -x "$@" <"$list" &
 child=$!
 [ "$sig" = 0 ] || kill -TERM -- "-$child" 2>/dev/null   # a signal that landed before $child was known
 while :; do

@@ -284,7 +284,7 @@ case "$cmd" in
       # must reach the gate-lock inside it, or the job queues on a different lock.
       [ -n "${SYG_GATE_LOCK_FILE+x}" ] && envs+=("--setenv=SYG_GATE_LOCK_FILE=$SYG_GATE_LOCK_FILE")
       # NAME@gate.lock: '@' is not a NAME character, so no job's NAME.lock start lock can collide.
-      lock_args=(--lock "$here/gate-lock" "$state/$name@gate.lock")
+      lock_args=(--lock "$here/gate-lock" "$state/$name@gate.lock" "long-job $name")
       # The load wait runs inside the lock, after the memory wait: a reading taken before a long
       # queue is stale. SYG_LONG_JOB_LOAD_GATE (a path, or empty for none) is the probe's seam.
       lg=${SYG_LONG_JOB_LOAD_GATE-$here/load-gate}
@@ -323,7 +323,7 @@ case "$cmd" in
     if ! systemctl_out=$(systemd-run --user --quiet --expand-environment=no --unit="$(unit_of "$name")" "${slice_args[@]}" \
         --working-directory="$PWD" --setenv=PATH="$PATH" "${envs[@]}" \
         -p StandardOutput="append:$log" -p StandardError="append:$log" "${props[@]}" \
-        -- bash -c 'ex=$1; disp=$2; shift 2; if [ "$1" = --lock ]; then bin=$2; priv=$3; shift 3; "$bin" bash -c "$BASH_EXECUTION_STRING" long-job-wrap "$ex" "$disp" --locked "$priv" "$@"; rc=$?; [ -e "$ex" ] || echo "$rc $(date +%s)" >"$ex"; exit $rc; fi; if [ "$1" = --locked ]; then export SYG_GATE_LOCK_FILE=$2; shift 2; echo "$disp: $(date +%T) holding the gate lock; gate-lock inside the job uses $SYG_GATE_LOCK_FILE"; fi; if [ "$1" = --gate ]; then mem=$2; s=$3; i=$4; bin=$5; shift 5; "$bin" --wait "$mem" --timeout "$s" --interval "$i" --owner "" || { rc=$?; echo "$rc $(date +%s)" >"$ex"; exit $rc; }; elif [ "$1" = --no-gate ]; then shift; fi; if [ "$1" = --load ]; then lg=$2; shift 2; "$lg" --wait --owner ""; rc=$?; [ $rc = 0 ] || echo "$disp: $(date +%T) load-gate exited $rc; running anyway"; elif [ "$1" = --no-load ]; then shift; fi; "$@"; rc=$?; echo "$rc $(date +%s)" >"$ex"; exit $rc' \
+        -- bash -c 'ex=$1; disp=$2; shift 2; if [ "$1" = --lock ]; then bin=$2; priv=$3; lbl=$4; shift 4; SYG_GATE_LOCK_LABEL=$lbl "$bin" bash -c "$BASH_EXECUTION_STRING" long-job-wrap "$ex" "$disp" --locked "$priv" "$@"; rc=$?; [ -e "$ex" ] || echo "$rc $(date +%s)" >"$ex"; exit $rc; fi; if [ "$1" = --locked ]; then export SYG_GATE_LOCK_FILE=$2; shift 2; echo "$disp: $(date +%T) holding the gate lock; gate-lock inside the job uses $SYG_GATE_LOCK_FILE"; fi; if [ "$1" = --gate ]; then mem=$2; s=$3; i=$4; bin=$5; shift 5; "$bin" --wait "$mem" --timeout "$s" --interval "$i" --owner "" || { rc=$?; echo "$rc $(date +%s)" >"$ex"; exit $rc; }; elif [ "$1" = --no-gate ]; then shift; fi; if [ "$1" = --load ]; then lg=$2; shift 2; "$lg" --wait --owner ""; rc=$?; [ $rc = 0 ] || echo "$disp: $(date +%T) load-gate exited $rc; running anyway"; elif [ "$1" = --no-load ]; then shift; fi; "$@"; rc=$?; echo "$rc $(date +%s)" >"$ex"; exit $rc' \
         long-job-wrap "$ex" "$disp" "${lock_args[@]}" "${gate_args[@]}" "${load_args[@]}" "${pre[@]}" "$@" 2>&1); then
       # Record the failed start so status and wait don't call it "ended without an exit record".
       echo "$disp: systemd-run failed: $systemctl_out" | tee -a "$log" >&2

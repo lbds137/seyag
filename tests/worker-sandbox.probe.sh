@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Probe for bin/worker-sandbox and gate-sandbox's worker profile: real bwrap and pasta and a fake
-# claude for the walls. The refusal cases run anywhere; the rest skip where pasta+bwrap can't build a
-# sandbox (SYG_PROBE_REQUIRE_SANDBOX=1 makes that a failure).
+# claude for the walls, plus heavy and light gate-lock binds (gate-lock --light-path). The refusal
+# cases run anywhere; the rest skip where pasta+bwrap can't build a sandbox
+# (SYG_PROBE_REQUIRE_SANDBOX=1 makes that a failure).
 set -u
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 B="$REPO/plugins/seyag/bin"
@@ -581,7 +582,8 @@ else
   echo "SKIP: this host is offline, so internet from inside wasn't checked"
 fi
 
-# 9. The gate lock is the host's: held there, it's busy inside
+# 9. The gate lock is the host's: held there, it's busy inside (and the light lock is bound at
+# gate-lock --light-path -> /run/worker/gate.light.lock)
 # flock -E names "busy" apart from "couldn't open the file", which must not read as a held lock.
 lock_probe='flock -n -E 75 "$SYG_GATE_LOCK_FILE" true; case $? in 0) echo lock-free ;; 75) echo lock-busy ;; *) echo lock-unusable ;; esac'
 fake "$lock_probe; gate-lock echo gate-lock-ran; exit 0"
@@ -592,6 +594,19 @@ fake "$lock_probe; exit 0"
 out=$( { flock 9; inside; } 9>>"$SYG_GATE_LOCK_FILE"); rc=$?
 [ "$out" = lock-busy ] && ok "a lock held on the host is busy inside: workers queue with every other gate" \
   || bad "gate-lock shared: rc=$rc out=[$out]"
+host_light=$("$B/gate-lock" --light-path 2>/dev/null)
+light_probe='lp=$(gate-lock --light-path 2>/dev/null); [ -n "$lp" ] && flock -n -E 75 "$lp" true; case $? in 0) echo "light-free:$lp" ;; 75) echo "light-busy:$lp" ;; *) echo "light-unusable:$lp" ;; esac'
+fake "$light_probe; [ \"\$lp\" = /run/worker/gate.light.lock ] && SYG_GATE_LOCK_CLASS=light SYG_MEM_GATE_MIN_MB=0 gate-lock echo light-ran; exit 0"
+out=$( { flock 9; inside; } 9>>"$SYG_GATE_LOCK_FILE"); rc=$?
+[ -f "$host_light" ] && [ "$host_light" = "$T/gate.light.lock" ] \
+  && [ "$out" = $'light-free:/run/worker/gate.light.lock\nlight-ran' ] \
+  && ok "light gate lock is bound from gate-lock --light-path and runs inside while the heavy lock is held on the host" \
+  || bad "light gate-lock free under heavy lock: host_light=[$host_light] rc=$rc out=[$out] err=[$(cat "$T/err")]"
+fake "$light_probe; exit 0"
+out=$( { flock 9; inside; } 9>>"${host_light:-$T/gate.light.lock}"); rc=$?
+[ "$out" = "light-busy:/run/worker/gate.light.lock" ] \
+  && ok "a light lock held on the host (gate-lock --light-path) is busy inside at /run/worker/gate.light.lock" \
+  || bad "light gate-lock shared: rc=$rc out=[$out] err=[$(cat "$T/err")]"
 
 echo "pass=$pass fail=$fail"
 [ "$fail" = 0 ]

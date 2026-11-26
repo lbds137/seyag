@@ -216,7 +216,12 @@ An optional TOML file fills in knobs the environment left unset: user `${XDG_CON
 
 | Name | Default | What it does | Found in | Config |
 | --- | --- | --- | --- | --- |
-| `SYG_GATE_LOCK_FILE` | `/tmp/gate.lock` | Lock file gate-lock holds while a gate runs; one gate at a time machine-wide (keep it on a path every sandbox shares). Default is shared /tmp, so another user can hold it on a multi-user host; set a private path. | `bin/gate-lock`, `bin/gate-sandbox`, `bin/long-job` | user only |
+| `SYG_GATE_LOCK_CLASS` | `heavy` | Lock class for gate-lock: heavy queues on the main gate lock; light queues on the derived light lock and waits for MemAvailable >= SYG_MEM_GATE_MIN_MB (anything else exits 125). Unset before the child runs. | `bin/gate-lock`, `bin/shellcheck-gate` | user + project |
+| `SYG_GATE_LOCK_FILE` | `/tmp/gate.lock` | Lock file gate-lock holds: heavy gates (suites) run one at a time; light gates run one at a time on the derived light lock (.light.lock) after a memory wait, so short gates stop queueing behind 50-minute suites. | `bin/gate-lock`, `bin/gate-sandbox`, `bin/long-job` | user only |
+| `SYG_GATE_LOCK_HOLD_CAP_S` | `3600` | Hold-time warning cap in seconds for gate-lock (0 disables): when a verified or unverified holder record is at or past this age, waiter reports append a past-the-hold-cap warning (never signals or breaks the lock). | `bin/gate-lock` | user only |
+| `SYG_GATE_LOCK_LABEL` | unset | Optional label gate-lock writes into the holder record so waiters see a caller name (for example shellcheck-gate or long-job NAME) instead of the raw command name. Unset before the child runs. | `bin/gate-lock`, `bin/long-job`, `bin/shellcheck-gate` | user + project |
+| `SYG_GATE_LOCK_MEM_WAIT_S` | `900` | Maximum seconds a light gate-lock run waits for MemAvailable >= SYG_MEM_GATE_MIN_MB after acquiring the light lock before exiting 125 (0 waits forever). | `bin/gate-lock` | user only |
+| `SYG_GATE_LOCK_REPORT_S` | `300` | Seconds between periodic still-waiting holder reports on stderr while gate-lock waits for a busy lock (0 disables periodic lines; the initial holder line still prints). | `bin/gate-lock` | user only |
 | `SYG_GATE_SANDBOX_ENV` | unset | Space-separated variable names gate-sandbox passes into the sandbox's otherwise cleared environment. Each must be a variable name, or the launch refuses with 125. | `bin/gate-sandbox`, `bin/worker-sandbox` | user + project |
 | `SYG_GATE_SANDBOX_PATH` | the caller's PATH | PATH inside gate-sandbox. | `bin/gate-sandbox`, `bin/worker-sandbox` | user only |
 | `SYG_GATE_SANDBOX_PROFILE` | unset | gate-sandbox profile: unset for a one-gate sandbox, worker for a whole headless worker (set by worker-sandbox). | `bin/gate-sandbox`, `bin/worker-sandbox` | user + project |
@@ -287,7 +292,7 @@ An optional TOML file fills in knobs the environment left unset: user `${XDG_CON
 | `SYG_LONG_JOB_STATE_DIR` | XDG_STATE_HOME/long-job (XDG_STATE_HOME has its XDG default) | Directory holding long-job's per-job NAME.cmd, NAME.owner, NAME.unit, NAME.log and NAME.exit files. | `bin/long-job` | user only |
 | `SYG_LONG_JOB_UNIT_PREFIX` | `long-job` | Prefix of the transient systemd user unit long-job starts (PREFIX-NAME.service); must start with a letter or digit and hold only letters, digits, '.', '_' and '-'. | `bin/long-job` | user only |
 | `SYG_MAX_PARALLEL` | unset | Host cap on parallel jobs, applied by resource-profile on top of any profile. | `bin/resource-profile` | user only |
-| `SYG_MEM_GATE_MIN_MB` | `2048` | Default MemAvailable floor in MB for mem-gate --ok/--wait; an explicit MB argument wins. | `bin/mem-gate` | user only |
+| `SYG_MEM_GATE_MIN_MB` | `2048` | Default MemAvailable floor in MB for mem-gate --ok/--wait; an explicit MB argument wins. | `bin/gate-lock`, `bin/mem-gate` | user only |
 | `SYG_MEM_PRESSURE_MAX_BYTES` | `5242880` | Size in bytes past which mem-pressure-log rotates log.jsonl to log.jsonl.1 (one generation kept). | `bin/mem-pressure-log` | user + project |
 | `SYG_MEM_PRESSURE_STATE_DIR` | `$HOME/.local/state/mem-pressure` | Directory holding mem-pressure-log's log.jsonl. | `bin/mem-pressure-log` | user only |
 | `SYG_MEM_WATCH_CGROUP_ROOT` | `/sys/fs/cgroup/user.slice` | Directory mem-watch searches, up to four levels deep, for this user's app.slice/memory.events oom_kill counter (user-<uid>.slice preferred; a root below the user slice also works; another uid's slice never). | `bin/mem-watch` | user only |
@@ -329,6 +334,7 @@ An optional TOML file fills in knobs the environment left unset: user `${XDG_CON
 | `SYG_DISPATCH_ACK_FILE` | `hooks/dispatch-posture-gate.sh` | Test seam overriding the path to dispatch-posture-gate's per-commit acknowledgement and cumulative line ledger file. |
 | `SYG_DRIVER_CLONE_ROLE_BIN` | `bin/driver-clone` | Test seam: the claude-role binary driver-clone calls to file the folder-trust bullet. |
 | `SYG_EPG_CWD` | `hooks/env-print-guard.sh` | Internal env variable passing the payload cwd from env-print-guard.sh to its embedded Python helper. |
+| `SYG_GATE_LOCK_MEM_POLL_S` | `bin/gate-lock` | Test seam overriding the memory-wait polling interval in seconds for a light gate-lock run. |
 | `SYG_HEADLESS_OFF` | `hooks/lib/components.sh` | Internal constant listing components disabled automatically in headless (sdk-*) runs. |
 | `SYG_HEADLESS_OFF_HOOKS` | `hooks/lib/components.sh`, `hooks/run.sh` | Internal fallback list of hooks disabled in headless runs when components.tsv cannot be read. |
 | `SYG_HOOK` | `hooks/run.sh` | Internal variable holding the resolved hook script path inside run.sh. |
@@ -340,7 +346,7 @@ An optional TOML file fills in knobs the environment left unset: user `${XDG_CON
 | `SYG_LOAD_GATE_PSI` | `bin/load-gate` | Test seam overriding the CPU pressure file load-gate reads. |
 | `SYG_LONG_JOB_LOAD_GATE` | `bin/long-job` | Test seam: the load-gate long-job run --heavy calls inside the unit (a path); empty skips the load wait, with a warning. |
 | `SYG_LONG_JOB_PARENT_CMD` | `bin/long-job` | Test seam giving long-job the parent shell's command text in place of /proc/PPID/cmdline; setting it (even empty) replaces the parent-command read and so disables long-job's own && refusal (for tests only). |
-| `SYG_MEM_GATE_MEMINFO` | `bin/long-job`, `bin/mem-gate`, `bin/resource-profile` | Test seam overriding the meminfo file mem-gate and resource-profile read (long-job forwards it into the unit). |
+| `SYG_MEM_GATE_MEMINFO` | `bin/gate-lock`, `bin/long-job`, `bin/mem-gate`, `bin/resource-profile` | Test seam overriding the meminfo file mem-gate and resource-profile read (long-job forwards it into the unit). |
 | `SYG_MEM_PRESSURE_MEMINFO` | `bin/mem-pressure-log` | Test seam overriding the meminfo file mem-pressure-log reads. |
 | `SYG_MEM_PRESSURE_PSI` | `bin/mem-pressure-log` | Test seam overriding the PSI memory file mem-pressure-log reads. |
 | `SYG_MEM_WATCH_MEMINFO` | `bin/mem-watch` | Test seam overriding the meminfo file mem-watch reads. |

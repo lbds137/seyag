@@ -1,27 +1,330 @@
 #!/usr/bin/env bash
-# gate-lock: run one gate command (tests, lint, typecheck, build) under the machine-wide gate lock,
-# so only one gate run uses the machine's RAM at a time. A busy lock waits; it never fails.
-# The lock file is SYG_GATE_LOCK_FILE, default /tmp/gate.lock: /tmp is writable and shared with the
-# host inside common agent sandboxes where $HOME is read-only.
+# gate-lock: run one gate command (tests, lint, typecheck, build) under the machine-wide gate locks.
+# Heavy gates (SYG_GATE_LOCK_CLASS=heavy, the default: test suites) run one at a time on
+# SYG_GATE_LOCK_FILE (default /tmp/gate.lock: /tmp is writable and shared with the host inside
+# common agent sandboxes where $HOME is read-only). Light gates (SYG_GATE_LOCK_CLASS=light: short
+# gates such as shellcheck-gate) run one at a time on the derived light lock (.light.lock / .light)
+# after a memory wait, so short gates stop queueing behind 50-minute suites.
+# On acquire, writes a key=value holder record into the lock file and truncates it before release; a
+# waiter reports the holder on stderr (and periodically every SYG_GATE_LOCK_REPORT_S seconds),
+# appending a hold-cap warning past SYG_GATE_LOCK_HOLD_CAP_S without ever breaking the lock.
 # Exit: the command's own code; 125 for gate-lock's own errors (2 would read as a lint failure).
 set -u
+
+light_path_of() {
+  case $1 in
+    *.lock) printf '%s.light.lock\n' "${1%.lock}" ;;
+    *)      printf '%s.light\n' "$1" ;;
+  esac
+}
+
 if [ $# = 0 ] || [ "$1" = -h ] || [ "$1" = --help ]; then
-  echo "usage: gate-lock CMD [ARG...]   run CMD holding \${SYG_GATE_LOCK_FILE:-/tmp/gate.lock}; waits if busy" >&2
+  echo "usage: gate-lock CMD [ARG...]   run CMD holding \${SYG_GATE_LOCK_FILE:-/tmp/gate.lock} (or its light lock under SYG_GATE_LOCK_CLASS=light); waits if busy" >&2
+  echo "       gate-lock --light-path   print the light lock path for \${SYG_GATE_LOCK_FILE:-/tmp/gate.lock}" >&2
   [ $# = 0 ] && exit 125 || exit 0
 fi
-lock=${SYG_GATE_LOCK_FILE:-/tmp/gate.lock}
+
+# Inside a --heavy long-job, SYG_GATE_LOCK_FILE is the per-job NAME@gate.lock, so a nested light
+# gate derives NAME@gate.light.lock; that is intended.
+heavy_lock=${SYG_GATE_LOCK_FILE:-/tmp/gate.lock}
+if [ "$1" = --light-path ]; then
+  light_path_of "$heavy_lock"
+  exit 0
+fi
+
+class=${SYG_GATE_LOCK_CLASS:-heavy}
+case $class in
+  heavy) lock=$heavy_lock ;;
+  light) lock=$(light_path_of "$heavy_lock") ;;
+  *) echo "gate-lock: SYG_GATE_LOCK_CLASS must be heavy or light: $class" >&2; exit 125 ;;
+esac
+
+report_s=${SYG_GATE_LOCK_REPORT_S:-300}
+case $report_s in ''|*[!0-9]*) echo "gate-lock: invalid SYG_GATE_LOCK_REPORT_S: $report_s" >&2; exit 125 ;; esac
+report_s=$((10#$report_s))
+
+hold_cap_s=${SYG_GATE_LOCK_HOLD_CAP_S:-3600}
+case $hold_cap_s in ''|*[!0-9]*) echo "gate-lock: invalid SYG_GATE_LOCK_HOLD_CAP_S: $hold_cap_s" >&2; exit 125 ;; esac
+hold_cap_s=$((10#$hold_cap_s))
+
+gl_pid=$$
+my_pidns=$(readlink /proc/self/ns/pid 2>/dev/null) || my_pidns=''
+
+now_s() {
+  if [ -n "${EPOCHSECONDS:-}" ]; then
+    printf '%s' "$EPOCHSECONDS"
+  else
+    printf '%(%s)T' -1
+  fi
+}
+
+base_of() {
+  local p=$1
+  [ "$p" != / ] && p=${p%/}
+  p=${p##*/}
+  printf '%s' "${p:-/}"
+}
+
+# Field N (N >= 3) of /proc/PID/stat, stripping through the last ') ' of comm first.
+stat_field() {
+  local s
+  IFS= read -r s <"/proc/$1/stat" 2>/dev/null || return 1
+  local -a f
+  read -r -a f <<<"${s##*\) }"
+  printf '%s' "${f[$(( $2 - 3 ))]:-}"
+}
+
+sanitize_val() {
+  local v=${1//[[:cntrl:]]/}
+  local LC_ALL=C
+  printf '%s' "${v:0:120}"
+}
+
+fmt_age() {
+  local s=$1
+  [ "$s" -ge 0 ] 2>/dev/null || s=0
+  if [ "$s" -lt 120 ]; then
+    printf '%ds' "$s"
+  elif [ "$s" -lt 7200 ]; then
+    printf '%dm' "$((s / 60))"
+  else
+    printf '%dh%dm' "$((s / 3600))" "$(((s % 3600) / 60))"
+  fi
+}
+
+open_fd_fallback() {
+  local st_bin=stat
+  command -v stat >/dev/null 2>&1 || st_bin=/usr/bin/stat
+  local target_di
+  target_di=$("$st_bin" -L -c '%d:%i' -- "$lock" 2>/dev/null) || target_di=''
+  local up=''
+  IFS=' ' read -r up _ </proc/uptime 2>/dev/null || up=''
+  up=${up%%.*}
+  local list='' count=0 p fd_path di p_ppid p_start p_cmd p_age_s
+  local -A seen_p=()
+  if [ -n "$target_di" ]; then
+    while read -r fd_path di; do
+      [ "$di" = "$target_di" ] || continue
+      p=${fd_path#/proc/}
+      p=${p%%/*}
+      [[ $p =~ ^[0-9]+$ ]] || continue
+      if [ "$p" = "$gl_pid" ] || [ "$p" = "${reporter:-}" ] || [ "$p" = "${BASHPID:-}" ]; then
+        continue
+      fi
+      [ -z "${seen_p[$p]+x}" ] || continue
+      seen_p[$p]=1
+      p_ppid=$(stat_field "$p" 4) || p_ppid=''
+      [ "$p_ppid" = "$gl_pid" ] && continue
+      p_cmd=''
+      IFS= read -r p_cmd <"/proc/$p/comm" 2>/dev/null || p_cmd='?'
+      p_cmd=$(sanitize_val "$p_cmd")
+      [ -n "$p_cmd" ] || p_cmd='?'
+      p_age_s=0
+      p_start=$(stat_field "$p" 22) || p_start=''
+      if [[ $up =~ ^[0-9]+$ ]] && [[ $p_start =~ ^[0-9]+$ ]]; then
+        p_age_s=$((10#$up - (10#$p_start / 100)))
+        [ "$p_age_s" -ge 0 ] || p_age_s=0
+      fi
+      list+="${list:+, }$p $p_cmd $(fmt_age "$p_age_s")"
+      count=$((count + 1))
+      [ "$count" -ge 5 ] && break
+    done < <("$st_bin" -L -c '%n %d:%i' /proc/[0-9]*/fd/* 2>/dev/null)
+  fi
+  printf 'holder or waiter; age includes queue time: %s' "${list:-none}"
+}
+
+holder_report() {
+  local rec_pid='' rec_start='' rec_pidns='' rec_since='' rec_label='' rec_cmd='' rec_dir=''
+  local n=0 k v
+  if [ ! -s "$lock" ]; then
+    sleep 0.05 2>/dev/null || :
+  fi
+  if [ -r "$lock" ] && [ -s "$lock" ]; then
+    while [ "$n" -lt 20 ] && IFS='=' read -r k v; do
+      n=$((n + 1))
+      v=$(sanitize_val "$v")
+      case $k in
+        pid)   rec_pid=$v ;;
+        start) rec_start=$v ;;
+        pidns) rec_pidns=$v ;;
+        since) rec_since=$v ;;
+        label) rec_label=$v ;;
+        cmd)   rec_cmd=$v ;;
+        dir)   rec_dir=$v ;;
+      esac
+    done <"$lock" 2>/dev/null
+  fi
+  if [ -z "$rec_pid" ] || ! [[ $rec_pid =~ ^[0-9]+$ ]]; then
+    printf 'no holder record (an older gate-lock?); %s' "$(open_fd_fallback)"
+    return 0
+  fi
+  local now age_s=0 age who cap_sfx=''
+  now=$(now_s)
+  if [[ $rec_since =~ ^[0-9]+$ ]]; then
+    age_s=$((now - 10#$rec_since))
+    [ "$age_s" -ge 0 ] || age_s=0
+  fi
+  age=$(fmt_age "$age_s")
+  who=${rec_label:-${rec_cmd:-?}}
+  # Never kill, signal or unlock anything: a waiter cannot release another process's flock;
+  # breaking means killing another session's gate, which stays a human decision.
+  if [ "$hold_cap_s" -gt 0 ] && [ "$age_s" -ge "$hold_cap_s" ]; then
+    cap_sfx="; past the hold cap ($(fmt_age "$hold_cap_s"))"
+  fi
+  if [ -n "$rec_pidns" ] && [ -n "$my_pidns" ] && [ "$rec_pidns" != "$my_pidns" ]; then
+    printf 'pid %s, %s, in %s, held %s (unverified: another pid namespace)%s' \
+      "$rec_pid" "$who" "${rec_dir:-?}" "$age" "$cap_sfx"
+    return 0
+  fi
+  local cur_start full_cwd=''
+  cur_start=$(stat_field "$rec_pid" 22) || cur_start=''
+  if [ -n "$cur_start" ] && [ -n "$rec_start" ] && [ "$cur_start" = "$rec_start" ]; then
+    full_cwd=$(readlink "/proc/$rec_pid/cwd" 2>/dev/null) || full_cwd=''
+    full_cwd=$(sanitize_val "$full_cwd")
+    printf 'pid %s, %s, in %s%s, held %s%s' \
+      "$rec_pid" "$who" "${rec_dir:-?}" "${full_cwd:+ ($full_cwd)}" "$age" "$cap_sfx"
+    return 0
+  fi
+  # Fallback ages never trigger the hold cap.
+  printf 'stale record (pid %s gone); %s' "$rec_pid" "$(open_fd_fallback)"
+}
+
+record_warned=0
+held_record=0
+write_record() {
+  local my_start rec
+  my_start=$(stat_field "$gl_pid" 22) || my_start=''
+  printf -v rec 'pid=%s\nstart=%s\npidns=%s\nsince=%s\nlabel=%s\ncmd=%s\ndir=%s\n' \
+    "$gl_pid" "$my_start" "$my_pidns" "$(now_s)" "$(sanitize_val "${SYG_GATE_LOCK_LABEL:-}")" \
+    "$(base_of "$1")" "$(base_of "$PWD")"
+  if ! printf '%s' "$rec" >"$lock" 2>/dev/null; then
+    [ "$record_warned" = 1 ] || { echo "gate-lock: warning: cannot write holder record to $lock" >&2; record_warned=1; }
+  fi
+  held_record=1
+}
+
+clear_record() {
+  [ "$held_record" = 1 ] || return 0
+  held_record=0
+  if ! : >"$lock" 2>/dev/null; then
+    [ "$record_warned" = 1 ] || { echo "gate-lock: warning: cannot clear holder record in $lock" >&2; record_warned=1; }
+  fi
+}
+
 exec 9>>"$lock" || { echo "gate-lock: can't open $lock" >&2; exit 125; }
+reporter=''
 if ! flock -n 9; then
   echo "gate-lock: waiting for $lock (another gate run holds it)" >&2
-  flock 9 || { echo "gate-lock: flock $lock failed" >&2; exit 125; }
+  echo "gate-lock: holder: $(holder_report 9>&-)" >&2
+  (
+    sp=''
+    trap '[ -z "$sp" ] || kill "$sp" 2>/dev/null; exit 0' TERM INT HUP
+    wait_start=$SECONDS
+    elapsed_ticks=0
+    report_ticks=$((report_s * 5))
+    while :; do
+      sleep 0.2 &
+      sp=$!
+      wait "$sp" 2>/dev/null
+      sp=''
+      kill -0 "$gl_pid" 2>/dev/null || exit 0
+      if [ "$report_s" -gt 0 ]; then
+        elapsed_ticks=$((elapsed_ticks + 1))
+        if [ $((elapsed_ticks % report_ticks)) -eq 0 ]; then
+          wait_s=$((SECONDS - wait_start))
+          [ "$wait_s" -ge "$((elapsed_ticks / 5))" ] || wait_s=$((elapsed_ticks / 5))
+          echo "gate-lock: still waiting ($(fmt_age "$wait_s")); holder: $(holder_report)" >&2
+        fi
+      fi
+    done
+  ) 9>&- </dev/null &
+  reporter=$!
+  if ! flock 9; then
+    kill "$reporter" 2>/dev/null
+    wait "$reporter" 2>/dev/null
+    echo "gate-lock: flock $lock failed" >&2
+    exit 125
+  fi
+  kill "$reporter" 2>/dev/null
+  wait "$reporter" 2>/dev/null
+  reporter=''
 fi
+
+write_record "$1"
+
 # The command runs without the lock fd (a stray grandchild can't hold the lock forever) and with
 # gate-lock's own stdin (bash would give a background job /dev/null). The trap is installed before
-# the fork, so a TERM/INT/HUP to gate-lock (a caller's timeout) is never lost: it is passed on and
-# waited out, so the lock is released only once the command is gone. SIGKILL can't be caught; then
-# the lock goes early.
-child='' got=''
-trap 'got=1; [ -z "$child" ] || kill -TERM "$child" 2>/dev/null' TERM INT HUP
+# the memory wait and fork, so a TERM/INT/HUP to gate-lock (a caller's timeout) is never lost: it
+# clears the record if still in the memory wait, or is passed on and waited out so the lock is
+# released only once the command is gone. SIGKILL can't be caught; then the lock goes early.
+child='' got='' mem_sp=''
+trap 'got=1; [ -z "$mem_sp" ] || kill "$mem_sp" 2>/dev/null; [ -z "$child" ] || kill -TERM "$child" 2>/dev/null' TERM INT HUP
+
+if [ "$class" = light ]; then
+  min_mb=${SYG_MEM_GATE_MIN_MB:-2048}
+  case $min_mb in ''|*[!0-9]*) echo "gate-lock: invalid SYG_MEM_GATE_MIN_MB: $min_mb" >&2; clear_record; exit 125 ;; esac
+  min_mb=$((10#$min_mb))
+  if [ "$min_mb" -gt 0 ]; then
+    meminfo=${SYG_MEM_GATE_MEMINFO:-/proc/meminfo}
+    mem_wait_s=${SYG_GATE_LOCK_MEM_WAIT_S:-900}
+    case $mem_wait_s in ''|*[!0-9]*) echo "gate-lock: invalid SYG_GATE_LOCK_MEM_WAIT_S: $mem_wait_s" >&2; clear_record; exit 125 ;; esac
+    mem_wait_s=$((10#$mem_wait_s))
+    mem_poll_s=${SYG_GATE_LOCK_MEM_POLL_S:-5}
+    case $mem_poll_s in ''|*[!0-9]*) echo "gate-lock: invalid SYG_GATE_LOCK_MEM_POLL_S: $mem_poll_s" >&2; clear_record; exit 125 ;; esac
+    mem_poll_s=$((10#$mem_poll_s))
+    [ "$mem_poll_s" -gt 0 ] || mem_poll_s=1
+    avail_mb() {
+      local k v _
+      [ -r "$meminfo" ] || return 1
+      while read -r k v _; do
+        if [ "$k" = "MemAvailable:" ] && [[ $v =~ ^[0-9]+$ ]]; then
+          printf '%d' "$((10#$v / 1024))"
+          return 0
+        fi
+      done <"$meminfo" 2>/dev/null
+      return 1
+    }
+    avail=$(avail_mb) || { echo "gate-lock: cannot read MemAvailable from $meminfo" >&2; clear_record; exit 125; }
+    if [ "$avail" -lt "$min_mb" ]; then
+      echo "gate-lock: waiting for memory ($avail MB available, need $min_mb MB)" >&2
+      mem_start=$SECONDS
+      while :; do
+        if [ -n "$got" ]; then
+          clear_record
+          exit 143
+        fi
+        nap=$mem_poll_s
+        if [ "$mem_wait_s" -gt 0 ]; then
+          left=$((mem_wait_s - (SECONDS - mem_start)))
+          [ "$left" -lt "$nap" ] && nap=$left
+          [ "$nap" -lt 1 ] && nap=1
+        fi
+        sleep "$nap" 9>&- </dev/null &
+        mem_sp=$!
+        wait "$mem_sp" 2>/dev/null
+        mem_sp=''
+        if [ -n "$got" ]; then
+          clear_record
+          exit 143
+        fi
+        avail=$(avail_mb) || { echo "gate-lock: cannot read MemAvailable from $meminfo" >&2; clear_record; exit 125; }
+        [ "$avail" -ge "$min_mb" ] && break
+        if [ "$mem_wait_s" -gt 0 ] && [ $((SECONDS - mem_start)) -ge "$mem_wait_s" ]; then
+          echo "gate-lock: memory stayed below $min_mb MB for $mem_wait_s s; not running" >&2
+          clear_record
+          exit 125
+        fi
+      done
+    fi
+  fi
+fi
+
+if [ -n "$got" ]; then
+  clear_record
+  exit 143
+fi
+
+unset SYG_GATE_LOCK_CLASS SYG_GATE_LOCK_LABEL
 "$@" 9>&- <&0 &
 child=$!
 [ -z "$got" ] || kill -TERM "$child" 2>/dev/null   # a signal that landed before $child was known
@@ -34,4 +337,5 @@ trap '' TERM INT HUP  # the child is gone: a signal must not interrupt the final
 # bash remembers a reaped background child's status, and this wait returns the real code (127 =
 # a bash that forgot it: keep the loop's code)
 r0=$rc; wait "$child"; rc=$?; [ "$rc" != 127 ] || rc=$r0
+clear_record
 exit "$rc"
