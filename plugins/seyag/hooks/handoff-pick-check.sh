@@ -72,6 +72,28 @@
 # newer than the turn start reads an earlier pick as stale on such a turn, and the
 # session sits idle. The block asks for the pick to be re-run as the turn's last call.
 #
+# Prose-pick trigger (component `prose-pick`, on in `full`; `SYG_DISABLE=prose-pick`
+# turns it off). Emitter mode only, and only when the turn wrote no handoff; when the
+# stale-pick trigger's preconditions (a)-(c) apply, stale-pick takes precedence and
+# this trigger does not run. Otherwise, if the turn ran no pick command, it scans
+# each sentence (capped at 2000 chars) of `last_assistant_message` and the transcript
+# turn's last text block for `/clear` or `/compact` named as a present pick — near a
+# claim word (`stands`, `queued`, `recorded`, `scheduled`) or `now`, or, in a sentence
+# with no future marker, paired with `still`/`already`/`now` and a
+# `pick`/`recommend`/`suggest` word or a leading `Pick:` label (`SYG_PROSE_PICK_RE`
+# replaces the per-sentence case-insensitive Python regex; an invalid regex falls
+# back to the default). If a background shell task is still live
+# (`handback_tasks.live_task_ids`), the stop passes and records the turn start's byte
+# offset in `<transcript basename>.prose-owed`; a later no-handoff turn without an
+# emitter call carries the obligation forward and fires `prose:owed` once live work
+# has ended, unless an emitter call, a genuine owner turn, a `compact_boundary` after
+# that offset, or aging out of the 4 MB tail cancels `.prose-owed`. Fire-once memory:
+# `<transcript basename>.prose` holds the turn start's byte offset once `prose:emitter`
+# or `prose:owed` has fired, so the next stop of that turn proceeds. Known residuals,
+# accepted: a forecast without a future marker can fire (block-once bounds it), a
+# pick named only as `keep` is not detected, and the live-task check is blind to
+# Monitor and async-Agent tasks (TASK-254).
+#
 # Known false negative, accepted: a closing using `keep` in an ordinary sense
 # (e.g. "I will keep the old flag") counts as a pick under the word-bounded
 # match; the convention states the pick explicitly ("Pick: keep"), block-once
@@ -143,15 +165,17 @@ case "$PICK_CMD" in *$'\n'* | *$'\r'*) PICK_CMD="" ;; esac
 HOOKS_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 HOOK_LIB="$HOOKS_DIR/lib"
 
-# The stale-pick trigger (see the header) is its own component; the same guarded
-# source as context-size-reminder.sh. Unreadable components.sh leaves it on.
+# The stale-pick and prose-pick triggers (see the header) are their own components;
+# the same guarded source as context-size-reminder.sh. Unreadable components.sh leaves them on.
 STALE_ON=1
+PROSE_ON=1
 if [ -r "$HOOKS_DIR/lib/components.sh" ] && source "$HOOKS_DIR/lib/components.sh" 2>/dev/null \
     && declare -F syg_enabled >/dev/null; then
     syg_enabled stale-pick || STALE_ON=0
+    syg_enabled prose-pick || PROSE_ON=0
 fi
 
-VERDICT=$(PICK_CMD="$PICK_CMD" STALE_ON="$STALE_ON" HOOK_LIB="$HOOK_LIB" TRANSCRIPT="$TRANSCRIPT" LAM="$LAM" python3 -I "${SYG_PY_CACHE_ARG:--B}" << 'PYEOF'
+VERDICT=$(PICK_CMD="$PICK_CMD" STALE_ON="$STALE_ON" PROSE_ON="$PROSE_ON" PROSE_RE="${SYG_PROSE_PICK_RE:-}" HOOK_LIB="$HOOK_LIB" TRANSCRIPT="$TRANSCRIPT" LAM="$LAM" python3 -I "${SYG_PY_CACHE_ARG:--B}" << 'PYEOF'
 import json, os, re, shlex, sys
 
 
@@ -445,6 +469,15 @@ def genuine_text(entry):
 COMMAND_PREFIXES = ("<command-name>", "<local-command", "<bash-input>")
 
 
+def is_owner_turn(entry):
+    if not is_genuine_user(entry):
+        return False
+    kind = origin_kind(entry)
+    if kind == "human":
+        return True
+    return kind != "task-notification" and not genuine_text(entry).lstrip().startswith(COMMAND_PREFIXES)
+
+
 def earlier_pick_is_latest():
     """True when the newest pick before this turn is an earlier clear or compact,
     with no owner turn, compaction or keep call between them."""
@@ -453,10 +486,7 @@ def earlier_pick_is_latest():
         if entry.get("type") == "system" and entry.get("subtype") == "compact_boundary":
             return False
         if is_genuine_user(entry):
-            kind = origin_kind(entry)
-            if kind == "human":
-                return False
-            if kind != "task-notification" and not genuine_text(entry).lstrip().startswith(COMMAND_PREFIXES):
+            if is_owner_turn(entry):
                 return False
             continue
         if entry.get("type") == "assistant":
@@ -470,23 +500,27 @@ def earlier_pick_is_latest():
     return False
 
 
-def stale_pick_verdict():
-    """Print the stale-pick verdict and exit. See the hook header, trigger (a) to (e)."""
-    origin = records[turn_start][1].get("origin")
-    if not (isinstance(origin, dict) and origin.get("kind") == "task-notification"):
-        print("ok"); sys.exit()
-    if any(True for _ in emitter_calls(turn)):
-        print("ok"); sys.exit()
-    if not earlier_pick_is_latest():
-        print("ok"); sys.exit()
+def live_tasks():
     # Live background tasks: the module reads HT_TRANSCRIPT when set, so pop it.
     os.environ.pop("HT_TRANSCRIPT", None)
     try:
         import handback_tasks  # noqa: E402
-        live = handback_tasks.live_task_ids(e for _, e in records)
+        return handback_tasks.live_task_ids(e for _, e in records)
     except Exception:
-        live = []
-    if live:
+        return []
+
+
+def stale_pick_verdict():
+    """When the stale-pick preconditions (a)-(c) hold, print the stale-pick
+    verdict and exit; otherwise return. See the hook header, trigger (a) to (e)."""
+    origin = records[turn_start][1].get("origin")
+    if not (isinstance(origin, dict) and origin.get("kind") == "task-notification"):
+        return
+    if any(True for _ in emitter_calls(turn)):
+        return
+    if not earlier_pick_is_latest():
+        return
+    if live_tasks():
         print("ok"); sys.exit()
     stale_file = os.path.join(state_dir, os.path.basename(path) + ".stale")
     marker = str(records[turn_start][0])
@@ -505,9 +539,125 @@ def stale_pick_verdict():
     print("stale:emitter"); sys.exit()
 
 
+_TOK = r"(?<![\w/])/(?:clear|compact)\b"
+_CLAIM = r"(?:stands|queued|recorded|scheduled)"
+_FUT = r"(?:\b(?:once|after|when|then|there|will|later|until|before)\b|'ll\b)"
+_GAP4 = r"[^\w/]+(?:\w+[^\w/]+){0,4}?"
+_GAP2 = r"[^\w/]+(?:\w+[^\w/]+){0,2}?"
+_GAP6 = r"[^\w/]+(?:\w+[^\w/]+){0,6}?"
+DEFAULT_PROSE_RE = (
+    r"\b" + _CLAIM + r"\b" + _GAP4 + _TOK
+    + r"|" + _TOK + _GAP4 + _CLAIM + r"\b"
+    + r"|" + _TOK + _GAP2 + r"now\b"
+    + r"|\bnow\b" + _GAP4 + _TOK
+    + r"|\A[\s*_>-]*now\b" + _GAP6 + _TOK  # sentence-initial "Now is a good time to /compact"
+    + r"|\A(?=[^\n]*" + _TOK + r")(?![^\n]*" + _FUT + r")"
+    r"(?:(?=[^\n]*\b(?:still|already|now)\b)(?=[^\n]*\b(?:pick|picks|picked|recommend\w*|suggest\w*)\b)"
+    r"|[\s*_>-]*(?:next-session\s+|context\s+)?pick\s*\**\s*:)"
+)
+SENT = re.compile(r"[^.!?\n]*(?:[.!?]+|\n|$)")
+
+
+def unlink_quiet(p):
+    try:
+        os.unlink(p)
+    except OSError:
+        pass
+
+
+def fire_once_prose(marker):
+    prose_file = os.path.join(state_dir, os.path.basename(path) + ".prose")
+    try:
+        with open(prose_file) as f:
+            if f.read().strip() == marker:
+                return False
+    except OSError:
+        pass
+    try:
+        os.makedirs(state_dir, exist_ok=True)
+        with open(prose_file, "w") as f:
+            f.write(marker)
+    except OSError:
+        pass
+    return True
+
+
+def prose_pick_verdict():
+    """Print the prose-pick verdict and exit. See the hook header."""
+    owed_file = os.path.join(state_dir, os.path.basename(path) + ".prose-owed")
+    if any(True for _ in emitter_calls(turn)):
+        unlink_quiet(owed_file)
+        print("ok"); sys.exit()
+    marker = str(records[turn_start][0])
+    owed_off = None
+    try:
+        with open(owed_file) as f:
+            owed_off = int(f.read().strip())
+    except (OSError, ValueError):
+        owed_off = None
+    if owed_off is not None:
+        has_owed = any(off == owed_off for off, _ in records)
+        cancelled = not has_owed or any(
+            off > owed_off
+            and (
+                is_owner_turn(e)
+                or (e.get("type") == "system" and e.get("subtype") == "compact_boundary")
+            )
+            for off, e in records
+        )
+        if cancelled:
+            unlink_quiet(owed_file)
+        elif live_tasks():
+            print("ok"); sys.exit()
+        else:
+            if fire_once_prose(marker):
+                unlink_quiet(owed_file)
+                print("prose:owed"); sys.exit()
+            print("ok"); sys.exit()
+    prose_re = re.compile(DEFAULT_PROSE_RE, re.I)
+    override = os.environ.get("PROSE_RE", "")
+    if override:
+        try:
+            prose_re = re.compile(override, re.I)
+        except (re.error, TypeError, ValueError, RecursionError, OverflowError):
+            pass
+    scan_text = lam + "\n" + turn_last_text
+    if not any(prose_re.search(s[:2000]) for s in SENT.findall(scan_text)):
+        print("ok"); sys.exit()
+    if live_tasks():
+        try:
+            os.makedirs(state_dir, exist_ok=True)
+            with open(owed_file, "w") as f:
+                f.write(marker)
+        except OSError:
+            pass
+        print("ok"); sys.exit()
+    if not fire_once_prose(marker):
+        print("ok"); sys.exit()
+    print("prose:emitter"); sys.exit()
+
+
+# Closing text: the Stop envelope's last_assistant_message when present, else
+# the turn's last text block from the transcript.
+turn_last_text = ""
+for _, entry in turn:
+    if entry.get("type") != "assistant":
+        continue
+    for block in entry.get("message", {}).get("content", []) or []:
+        if isinstance(block, dict) and block.get("type") == "text":
+            turn_last_text = block.get("text", "")
+lam = os.environ.get("LAM", "")
+if lam.strip():
+    final_text = lam
+else:
+    final_text = turn_last_text
+
 if newest_write_off is None:
-    if emitter_words is not None and os.environ.get("STALE_ON") == "1":
-        stale_pick_verdict()
+    if emitter_words is not None:
+        if os.environ.get("STALE_ON") == "1":
+            stale_pick_verdict()
+        if os.environ.get("PROSE_ON") == "1":
+            prose_pick_verdict()
     print("ok"); sys.exit()
 
 state_file = os.path.join(state_dir, os.path.basename(path) + ".offset")
@@ -529,20 +679,6 @@ try:
 except OSError:
     pass  # fail-open: no memory → every turn-end re-fires, as before
 
-# Closing text: the Stop envelope's last_assistant_message when present, else
-# the turn's last text block from the transcript.
-lam = os.environ.get("LAM", "")
-if lam.strip():
-    final_text = lam
-else:
-    final_text = ""
-    for _, entry in turn:
-        if entry.get("type") != "assistant":
-            continue
-        for block in entry.get("message", {}).get("content", []) or []:
-            if isinstance(block, dict) and block.get("type") == "text":
-                final_text = block.get("text", "")
-
 PICK_RE = re.compile(r"(?<![\w/])/(?:clear|compact)\b|\bkeep\b", re.I)
 
 if emitter_words is not None:
@@ -560,9 +696,49 @@ PYEOF
 ) || exit 0
 
 case "$VERDICT" in
-  missing | missing:unwired | missing:emitter | stale:emitter) ;;
+  missing | missing:unwired | missing:emitter | stale:emitter | prose:emitter | prose:owed) ;;
   *) exit 0 ;;
 esac
+
+if [ "$VERDICT" = "prose:emitter" ]; then
+  cat >&2 << 'MSG'
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+HANDOFF PICK — pick named in prose, not run
+The closing message names /clear or /compact as the boundary pick,
+but this turn ran no pick command. A host that acts on the command's
+record never sees a pick named only in prose, and the session sits
+idle. Run it as the turn's last Bash call:
+MSG
+  printf '  %s clear|compact|keep\n' "$PICK_CMD" >&2
+  cat >&2 << 'MSG2'
+If that sentence was a forecast or a mention, not a pick, say so in one
+line and stop again (this gate fires only once per turn — the next stop
+proceeds). Off switch: SYG_DISABLE=prose-pick.
+(the seyag rules, rules/core.md § "Sessions and handoffs")
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+MSG2
+  exit 2
+fi
+
+if [ "$VERDICT" = "prose:owed" ]; then
+  cat >&2 << 'MSG'
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+HANDOFF PICK — a prose pick is still owed
+An earlier turn named a pick in prose while background work was still
+running; that work has ended, and no pick command has run since. A host
+that acts on the command's record never sees a pick named only in prose,
+and the session sits idle. Run it as the turn's last Bash call:
+MSG
+  printf '  %s clear|compact|keep\n' "$PICK_CMD" >&2
+  cat >&2 << 'MSG2'
+If that sentence was a forecast or a mention, not a pick, say so in one
+line and stop again (this gate fires only once per turn — the next stop
+proceeds). Off switch: SYG_DISABLE=prose-pick.
+(the seyag rules, rules/core.md § "Sessions and handoffs")
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+MSG2
+  exit 2
+fi
 
 if [ "$VERDICT" = "stale:emitter" ]; then
   cat >&2 << 'MSG'
