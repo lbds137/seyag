@@ -417,6 +417,66 @@ _PROSE_SKIP_SAFE_CASES = [
         'npx backlog task edit 1 -t "bash" -d "$(echo \'a\' | bash)"',
         False,
     ),
+    (
+        'prose_skip_safe: double-quoted "$_" after a backlog zone closes the gate',
+        'npx backlog task edit 1 -t "bash"; "$_" -c \'x=$(npx backlog task create foo)\'',
+        False,
+    ),
+    (
+        'prose_skip_safe: double-quoted "${_}" after a backlog zone closes the gate',
+        'npx backlog task edit 1 -t "bash"; "${_}" -c \'x=$(npx backlog task create foo)\'',
+        False,
+    ),
+    (
+        'prose_skip_safe: parameter expansion ${_%} after a backlog zone closes the gate',
+        'npx backlog task edit 1 -t "bash"; ${_%} -c \'x=$(npx backlog task create foo)\'',
+        False,
+    ),
+    (
+        'prose_skip_safe: parameter expansion ${_:-} after a backlog zone closes the gate',
+        'npx backlog task edit 1 -t "bash"; ${_:-} -c \'x=$(npx backlog task create foo)\'',
+        False,
+    ),
+    (
+        'prose_skip_safe: command substitution "$(echo $_)" after a backlog zone closes the gate',
+        'npx backlog task edit 1 -t "bash"; "$(echo $_)" -c \'x=$(npx backlog task create foo)\'',
+        False,
+    ),
+    (
+        'prose_skip_safe: reading "$0" after a backlog zone closes the gate',
+        'npx backlog task edit 1 -t "bash"; "$0" -c \'x=$(npx backlog task create foo)\'',
+        False,
+    ),
+    (
+        'prose_skip_safe: reading $BASH after a backlog zone closes the gate',
+        'npx backlog task edit 1 -t "bash"; $BASH -c \'x=$(npx backlog task create foo)\'',
+        False,
+    ),
+    (
+        'prose_skip_safe: reading ${SHELL} after a backlog zone closes the gate',
+        'npx backlog task edit 1 -t "bash"; ${SHELL} -c \'x=$(npx backlog task create foo)\'',
+        False,
+    ),
+    (
+        'prose_skip_safe: indirect expansion ${!x} after a backlog zone closes the gate',
+        'x=_; npx backlog task edit 1 -t "bash"; ${!x} -c \'x=$(npx backlog task create foo)\'',
+        False,
+    ),
+    (
+        'prose_skip_safe: $_x and $BASH_VERSION prefix lookalikes stay open',
+        'npx backlog task create "costs $_x and $BASH_VERSION" --priority low',
+        True,
+    ),
+    (
+        'prose_skip_safe: zone ended by ) then unquoted bash -c closes the gate',
+        '(npx backlog task edit 1 -t "a") bash -c \'x\'',
+        False,
+    ),
+    (
+        'prose_skip_safe: zone ended by newline then unquoted bash -c closes the gate',
+        'npx backlog task edit 1 -t "a"\nbash -c \'x\'',
+        False,
+    ),
 ]
 for label, inp, want in _PROSE_SKIP_SAFE_CASES:
     check_equal(label, prose_skip_safe(inp), want)

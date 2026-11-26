@@ -45,9 +45,10 @@
 # argument of a `backlog … task create|edit` or `draft promote` command (the
 # command running up to the next unquoted `;`, `&`, `|`, `)` or newline) no
 # longer sends the scan to extract-everything; every other occurrence is
-# honoured as before. A command that defines a function or alias, or reads
-# `$_`, keeps the old behaviour. A shell word outside a backlog argument still
-# catches what it caught before; one inside a backlog argument no longer
+# honoured as before. A command that defines a function or alias, or
+# reads `$_`, `$0`, `$BASH`, `$SHELL` (any form, even as literal text inside single quotes) or a `${!…}`
+# indirection, keeps the old behaviour. A shell word outside a backlog argument
+# still catches what it caught before; one inside a backlog argument no longer
 # arms the catch for a wrapper the scanner does not know (accepted gap below).
 # No store, or an unresolvable (None/relative) cwd, allows the command.
 # Block if any walked world yields a violation.
@@ -78,7 +79,7 @@
 #   - single-quoted text piped into a shell (`printf %s '…backlog task create…' | bash`)
 #     is not judged (TASK-196 notes);
 #   - a single-quoted `$(…)` create run by a wrapper the scanner does not know
-#     (`$SHELL -c '…'`, `source /dev/stdin <<< '…'`, `flock F -c '…'`) is not
+#     (`source /dev/stdin <<< '…'`, `flock F -c '…'`) is not
 #     judged; before TASK-191 it was judged only when a shell word sat elsewhere
 #     in the command, and a shell word inside a backlog argument no longer counts
 #     (TASK-196 notes);
