@@ -2,6 +2,15 @@
 
 All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY-MM-DD>` section per released version; under it, `###` categories in fixed order — Breaking Changes, Features, Bug Fixes, Improvements, Chores, Tests — empty ones omitted; items are `- **scope:** description (#PR)`, written from the version's merged commit subjects.
 
+## 0.3.237 - 2026-11-27
+
+### Features
+- **claude-role:** `--set week-exempt=true|false` manages the role file's `week-exempt:` flag — `true` writes the bare boolean `week-exempt: true`, false or empty removes the line, any other value is refused before the file is touched; the flag never stamps `updated` and stays out of the `--list`/`--json` shapes (#NNN)
+- **rules:** core.md's driver-choice bullet exempts a week-exempt role (role-file flag, owner ruling 2026-11-27) from the wind-down trigger only — its usage gates run it to the week's hard stop, heavy work still goes to another agent; seven compensating cuts keep core.md under the lines-check rules budget (22957 bytes = 21457 baseline + 1500 grace; file measures 22916) (#NNN)
+
+### Tests
+- **claude-role:** the probe pins the week-exempt forms — exact written bytes (nested and top-level layouts), removal on false/empty, the six refusal values with the file left byte-identical, persistence across a later status write, and the unchanged `--list` shape (#NNN)
+
 ## 0.3.236 - 2026-11-27
 
 ### Bug Fixes

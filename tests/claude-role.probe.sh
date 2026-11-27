@@ -260,6 +260,126 @@ got=$("$CR" --list | awk -F'\t' '$1 == "kappa" { print $3 "|" $5 }')
 [ "$got" = "|" ] && ok "cleared fields read back empty" || bad "cleared kappa: $got"
 "$CR" --set status="checked" route=lane-two --file "$roles/kappa.md" >/dev/null
 grep -q '  updated: 2026-01-01 00:00' "$roles/kappa.md" && bad "status= with route= didn't stamp updated" || ok "status= still stamps updated alongside route="
+
+# --set week-exempt=: bare boolean config field; true writes bare `week-exempt: true`, false/empty
+# removes the line, any other value is refused with exit 2 and the file untouched.
+cat > "$roles/wkex.md" <<'EOF'
+---
+metadata:
+  role: "Wkex role"
+  status: "idle"
+  updated: 2026-01-01 00:00
+---
+EOF
+"$CR" --set week-exempt=true --file "$roles/wkex.md" >/dev/null \
+    && ok "--set accepts week-exempt=true" || bad "--set refused week-exempt=true"
+grep -qx '  week-exempt: true' "$roles/wkex.md" \
+    && ok "week-exempt=true writes bare boolean at the role fields' indent" \
+    || bad "week-exempt line: $(grep week-exempt "$roles/wkex.md")"
+grep -qx '  updated: 2026-01-01 00:00' "$roles/wkex.md" \
+    && ok "week-exempt=true leaves updated alone" || bad "week-exempt=true stamped updated"
+"$CR" --set week-exempt=true --file "$roles/wkex.md" >/dev/null
+[ "$(grep -c 'week-exempt:' "$roles/wkex.md")" = 1 ] && grep -qx '  week-exempt: true' "$roles/wkex.md" \
+    && ok "re-setting week-exempt=true keeps a single line" \
+    || bad "re-setting week-exempt=true count: $(grep -c 'week-exempt:' "$roles/wkex.md")"
+"$CR" --set status="active" --file "$roles/wkex.md" >/dev/null
+grep -qx '  week-exempt: true' "$roles/wkex.md" && ! grep -qx '  updated: 2026-01-01 00:00' "$roles/wkex.md" \
+    && ok "status= preserves bare week-exempt: true and stamps updated" \
+    || bad "after status=: $(cat "$roles/wkex.md")"
+wkex_upd=$(grep '^  updated: ' "$roles/wkex.md")
+"$CR" --set week-exempt=false --file "$roles/wkex.md" >/dev/null; rc=$?
+[ $rc = 0 ] && [ "$(grep -c 'week-exempt:' "$roles/wkex.md")" = 0 ] \
+    && grep -qx '  role: "Wkex role"' "$roles/wkex.md" \
+    && grep -qx '  status: "active"' "$roles/wkex.md" \
+    && [ "$(grep '^  updated: ' "$roles/wkex.md")" = "$wkex_upd" ] \
+    && ok "week-exempt=false removes the line and leaves neighboring fields unchanged" \
+    || bad "week-exempt=false: rc=$rc $(cat "$roles/wkex.md")"
+"$CR" --set week-exempt=true --file "$roles/wkex.md" >/dev/null
+"$CR" --set week-exempt= --file "$roles/wkex.md" >/dev/null; rc=$?
+[ $rc = 0 ] && [ "$(grep -c 'week-exempt:' "$roles/wkex.md")" = 0 ] \
+    && grep -qx '  role: "Wkex role"' "$roles/wkex.md" \
+    && grep -qx '  status: "active"' "$roles/wkex.md" \
+    && [ "$(grep '^  updated: ' "$roles/wkex.md")" = "$wkex_upd" ] \
+    && ok "week-exempt= (empty) removes the line and leaves neighboring fields unchanged" \
+    || bad "week-exempt= empty: rc=$rc $(cat "$roles/wkex.md")"
+"$CR" --set week-exempt=true --file "$roles/wkex.md" >/dev/null
+cp "$roles/wkex.md" "$home/wkex.before"
+for v in maybe 1 0 TRUE True yes; do
+    err=$("$CR" --set week-exempt="$v" --file "$roles/wkex.md" 2>&1 >/dev/null); rc=$?
+    [ $rc = 2 ] && [ -n "$err" ] \
+        && grep -q 'week-exempt' <<< "$err" && grep -q 'true or false' <<< "$err" \
+        && ! grep -q 'unknown argument' <<< "$err" \
+        && cmp -s "$roles/wkex.md" "$home/wkex.before" \
+        && ok "--set refuses week-exempt=$v (rc 2, names week-exempt and true/false, file untouched)" \
+        || bad "week-exempt=$v: rc=$rc err=[$err]"
+done
+printf -- '---\nrole: "Wkex top"\nstatus: "idle"\nupdated: 2026-01-01 00:00\n---\n' > "$roles/wkex-top.md"
+"$CR" --set week-exempt=true --file "$roles/wkex-top.md" >/dev/null; rc=$?
+[ $rc = 0 ] && grep -qx 'week-exempt: true' "$roles/wkex-top.md" \
+    && ok "top-level week-exempt=true writes bare week-exempt: true with no indent" \
+    || bad "top-level week-exempt=true: rc=$rc $(cat "$roles/wkex-top.md")"
+"$CR" --set week-exempt=false --file "$roles/wkex-top.md" >/dev/null; rc=$?
+[ $rc = 0 ] && [ "$(grep -c 'week-exempt:' "$roles/wkex-top.md")" = 0 ] \
+    && ok "top-level week-exempt=false removes week-exempt:" \
+    || bad "top-level week-exempt=false: rc=$rc $(cat "$roles/wkex-top.md")"
+# MED follow-up: a stray top-level week-exempt line above `metadata:` (no hit at the role
+# fields' indent) is dropped whole, and the set takes the normal insert path inside the block.
+cat > "$roles/wkex-stray.md" <<'EOF'
+---
+week-exempt: false
+metadata:
+  role: "Wkex stray"
+  status: "busy"
+---
+
+## Handoff
+- nothing pending
+EOF
+"$CR" --set week-exempt=true --file "$roles/wkex-stray.md" >/dev/null; rc=$?
+[ $rc = 0 ] && [ "$(sed -n '2p' "$roles/wkex-stray.md")" = "metadata:" ] \
+    && [ "$(grep -c 'week-exempt' "$roles/wkex-stray.md")" = 1 ] \
+    && ok "stray top-level week-exempt line is dropped (no week-exempt above metadata:)" \
+    || bad "stray week-exempt drop: rc=$rc $(cat "$roles/wkex-stray.md")"
+grep -qx '  week-exempt: true' "$roles/wkex-stray.md" \
+    && ok "week-exempt=true on the stray fixture writes the bare boolean at the role fields' indent" \
+    || bad "stray fixture insert: $(grep -n week-exempt "$roles/wkex-stray.md")"
+# Removal normalization: duplicates at other indents don't confuse --set =false; body lines stay.
+cat > "$roles/wkex-mixed.md" <<'EOF'
+---
+week-exempt: true
+metadata:
+  role: "Wkex mixed"
+  status: "idle"
+  week-exempt: true
+---
+
+## Handoff
+- week-exempt: true
+EOF
+"$CR" --set week-exempt=false --file "$roles/wkex-mixed.md" >/dev/null; rc=$?
+[ $rc = 0 ] && [ "$(grep -c 'week-exempt:' "$roles/wkex-mixed.md")" = 1 ] \
+    && grep -qx -- '- week-exempt: true' "$roles/wkex-mixed.md" \
+    && ok "week-exempt=false removes every frontmatter duplicate, body bullet untouched" \
+    || bad "week-exempt=false mixed: rc=$rc $(cat "$roles/wkex-mixed.md")"
+# Absent-key no-op: week-exempt=false with no week-exempt line writes nothing at all.
+printf -- '---\nmetadata:\n  role: "Wkex absent"\n  status: "idle"\n---\n\n## Handoff\n- note\n' > "$roles/wkex-absent.md"
+cp "$roles/wkex-absent.md" "$home/wkex-absent.before"
+"$CR" --set week-exempt=false --file "$roles/wkex-absent.md" >/dev/null; rc=$?
+[ $rc = 0 ] && cmp -s "$roles/wkex-absent.md" "$home/wkex-absent.before" \
+    && ok "week-exempt=false with no week-exempt line leaves the file byte-identical" \
+    || bad "week-exempt=false absent-key: rc=$rc $(cat "$roles/wkex-absent.md")"
+# --json shape: week-exempt is config, not part of the board document.
+printf -- '---\nmetadata:\n  role: "Wkex json"\n  status: "idle"\n  week-exempt: true\n---\n' > "$roles/wkex-json.md"
+wkex_has=$("$CR" --json | jq -r '.roles[] | select(.file == "wkex-json.md") | has("week-exempt")')
+[ "$wkex_has" = "false" ] \
+    && ok "--json role object carries no week-exempt field" \
+    || bad "--json week-exempt field: has=$wkex_has"
+wkex_row=$("$CR" --list | awk -F'\t' '$1 == "wkex" { print NF ":" $0 }')
+[ "$wkex_row" = $'5:wkex\tWkex role\t\t\t' ] \
+    && ok "--list row for role with week-exempt set keeps the 5-column TSV shape" \
+    || bad "--list wkex row: '$wkex_row'"
+rm "$roles/wkex.md" "$roles/wkex-top.md" "$roles/wkex-stray.md" "$roles/wkex-mixed.md" \
+    "$roles/wkex-absent.md" "$roles/wkex-json.md" "$home/wkex.before" "$home/wkex-absent.before"
 # status_at: its own age stamp, bumped by every status= write (same text included), by no other verb.
 cat > "$roles/lam.md" <<'EOF'
 ---

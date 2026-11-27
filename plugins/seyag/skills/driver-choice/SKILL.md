@@ -26,7 +26,7 @@ The plan meter (`claude-usage` here; the memory names it) prints the weekly usag
 
 1. **Drain units** always go to the orchestrator lane (recommend a switch if you are the big-picture driver).
 2. **A big-picture unit** goes to the big-picture lane only when the orchestrator lane would do it clearly worse, and the recommendation names why. Otherwise it goes to the orchestrator.
-3. **At or past the weekly wind-down threshold** (`--posture`), everything goes to the orchestrator lane, and LARGE units are held per the memory.
+3. **At or past the weekly wind-down threshold** (`--posture`), everything goes to the orchestrator lane, and LARGE units are held per the memory. This rule does not hold a role whose role file sets `week-exempt: true` (toggled per role via `claude-role --set`): its gates run it to the week's hard stop instead, heavy work still going to workers (the `delegation` skill).
 
 For "will the next units fit the week" questions, run usage-sweep --since <session start> --points for this project's meter points, instead of eyeballing from the live percentage.
 
