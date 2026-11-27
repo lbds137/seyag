@@ -30,7 +30,13 @@
 # With the Stop envelope's last_assistant_message as the closing text: the
 # harness truncates long values (they end "… [+N chars]"), and a closing
 # question cut by the truncation no longer ends the message — missed, the
-# fail-open direction this hook already accepts.
+# fail-open direction this hook already accepts. With a blank or absent field,
+# the fallback reads the last text block anywhere in the tail, and that text
+# can be from a PRIOR turn: a trailing `?` or a pending marker there can block
+# once on prose this turn did not write. One measured trigger (TASK-67): a
+# closing recorded only as signed-empty thinking blocks leaves the
+# search to older text. Accepted: the older-version path (the field is probed
+# present on current Claude Code).
 #
 # The seyag rules (rules/core.md): blocking questions go through a formal
 # channel.

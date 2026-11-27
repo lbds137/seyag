@@ -19,7 +19,13 @@
 # "… [+N chars]"), and a trailing promise cut by the truncation turns a
 # should-block turn into a pass. Accepted: judging the transcript instead when
 # the field is present re-reads stale prior-turn closings — the false fires
-# that motivated the field.
+# that motivated the field. A blind spot on the fallback path (TASK-67): with
+# the field blank or absent, the fallback reads the last text block in the
+# whole tail, which can be a PRIOR turn's closing — a promise shape there
+# blocks once on prose this turn did not write. One measured trigger: a
+# closing recorded only as signed-empty thinking blocks, an
+# Anthropic-lane recording shape. Accepted: the field is probed present on
+# current Claude Code, so the fallback is the older-version path.
 #
 # What counts as a ledger write (same turn only):
 #   - an Edit / Write / MultiEdit whose file_path matches the ledger regex.
