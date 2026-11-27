@@ -2,7 +2,7 @@
 
 All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY-MM-DD>` section per released version; under it, `###` categories in fixed order — Breaking Changes, Features, Bug Fixes, Improvements, Chores, Tests — empty ones omitted; items are `- **scope:** description (#PR)`, written from the version's merged commit subjects.
 
-## 0.3.235 - 2026-11-27
+## 0.3.236 - 2026-11-27
 
 ### Bug Fixes
 - **claude-role:** the auto-archiver recognizes all four Handoff note-stamp forms in use (bold/plain, with or without the MM-DD date) and rolls the true oldest note — a file whose only bold-dated note was the newest had that note archived while older plain-stamped notes stayed; selection stays document order (#PR)
