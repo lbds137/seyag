@@ -1,9 +1,11 @@
 ---
 id: TASK-56
 title: 'worktree-add guard: deny branch names the cleaner will HOLD'
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - Seyag B
 created_date: '2026-11-21T05:10:00Z'
+updated_date: '2026-11-27T04:48:00Z'
 labels:
   - guards
   - worktrees
