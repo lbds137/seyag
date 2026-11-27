@@ -42,7 +42,7 @@ On the Anthropic lane she drives from her phone, often by voice (Remote Control)
 - Reading ~4+ files just for a conclusion goes to an `Explore` agent on a cheap `model`; your own diff reads and premise checks stay inline.
 - New or changed logic (code, rules, hooks, scripts) gets a fresh-context review agent before push — another model family where one is reachable, same-family a labelled fallback; a typo or one-line fix with a green gate doesn't.
 - Pass `model` on every non-fork Agent call: named agents default to their definition's model (alias-resolved on the active lane), others to yours. Role split and budgets: memory "Model roles + usage posture".
-- Her `/model` picks the driver. When the next unit's class (big-picture vs drain) mismatches it or the week crosses its wind-down threshold (`claude-usage --posture`), run `driver-choice` at the next clean boundary and recommend; never switch yourself.
+- Her `/model` picks the driver. When the next unit's class (big-picture vs drain) mismatches it or the week crosses its wind-down threshold (`claude-usage --posture`), run `driver-choice` at the next clean boundary and recommend; never switch yourself. A role whose role file sets `week-exempt: true` (toggled per role via `claude-role --set week-exempt=true|false`) skips only the wind-down trigger above — its usage gates run it to the week's hard stop, and heavy work still goes to another agent.
 - Where a project has adopted the `delegation` skill, implementation over ~5 lines goes through it; elsewhere, dispatch when the spec costs less than the edit.
 - Launch independent agents in parallel, in one message.
 
@@ -54,7 +54,7 @@ On the Anthropic lane she drives from her phone, often by voice (Remote Control)
 - A low or nit finding from a PR review is the filing exception: it is not filed — it rides the next PR in the same area, carried as one line on the session's handoff surface (role-file Next or the project status file) naming the source PR and its area, and listed in the fixing PR's body. Still filed as before: medium and above, user-visible, security- or data-touching, cannot-fit-same-area, and flaky-probe or incident findings (those are not review lows).
 - Before pushing a PR, check the tracking surface and the handoff surface's carried lows for items in the same files or area and fold the easy ones in under that PR's own review and gate, closing each citing the PR. Never widen the PR into unrelated areas, and never let the fold delay a high-priority item.
 - Never dismiss a problem as "pre-existing". That explains how it got there; it is not a reason to ignore it.
-- A deliberate design choice you decline to refactor (current code is fine, the extraction would be over-abstraction) needs no entry. A known defect you are not fixing now always needs one (except review lows, carried per above). When unsure which it is, file it.
+- A deliberate design choice you decline to refactor needs no entry. A known defect you are not fixing now always needs one (except review lows, carried per above). When unsure which it is, file it.
 
 ### Everything not done gets a disposition when you decide
 - "Not doing this" has four honest states: **shipped**, **obsolete** (checked against the code, not assumed), **ruled out** (reason recorded where the next session will look), or **deferred** (with a trigger that promotes it).
@@ -75,7 +75,7 @@ On the Anthropic lane she drives from her phone, often by voice (Remote Control)
 ### Measure, then decide
 - Prefer a cheap measurement over both guessing and expensive probes: count before sweeping, profile before building, project from existing data before running a long experiment. State each decision with its numbers so it can be rechecked when the data changes.
 - If she gives a value with a hedge ("probably X", "I doubt it's over X"), treat it as an instruction to measure, not a spec. Measure before building X in.
-- A probe's own side effects are part of its cost. One the owner would see (a window opening on her screen), one that ends sessions (Game Mode, a reboot) or one that walks a large mount waits for the owning session's own test or her go-ahead.
+- A probe's own side effects are part of its cost. One the owner would see, one that ends sessions or one that walks a large mount waits for the owning session's own test or her go-ahead.
 
 ### Advisors give the principle; the code gives the target
 - Reviewers, bots, council and design docs can be wrong, and they name the right principle more often than the right target. Check the source, schema and tests, take the target from the code you read, and record the correction. Never implement a sketch against code you haven't read.
@@ -106,7 +106,7 @@ On the Anthropic lane she drives from her phone, often by voice (Remote Control)
 - **Positive-control a pattern before trusting its absence.** Run it against one instance you KNOW exists and confirm it matches; without that, an empty result means nothing. Do this before any absence, zero or count goes into a durable surface. Vocabulary variants don't substitute for it: they can all share a broken boundary (`\bfoo\b` never matches `foo_bar`).
 
 ### Lossy steps are for known output shapes
-- Any lossy step between fresh data and your eyes can turn a failure into "no data": grep/head/tail/sed pipes, `2>/dev/null`, encoding transforms (`json.dumps` escapes `—` to `\u2014`), or searching for a form you normalized rather than the form on disk. Run a first or diagnostic command raw with stderr attached. Add filters only once you know the output shape, including its failure shape.
+- Any lossy step between fresh data and your eyes can turn a failure into "no data": grep/head/tail/sed pipes, `2>/dev/null`, encoding transforms, or searching for a form you normalized rather than the form on disk. Run a first or diagnostic command raw with stderr attached. Add filters only once you know the output shape, including its failure shape.
 - When a result is empty or oddly short, suspect your invocation first. Check in order: did I suppress stderr? Am I searching for a form I produced? Is every argument complete? Am I querying the branch or checkout I mean? A working-tree read answers only for the current checkout. Name a ref (`git show <ref>:<path>`) when the answer must hold elsewhere. List why it could come back empty before blaming the store.
 - The Bash tool's `grep` is a shell function running ugrep with `--ignore-files`, so a recursive grep skips gitignored paths; hooks, scripts and `bash -c` children get GNU grep, and the two can disagree. Check with `type grep`, use `git grep` for tracked files or `/usr/bin/grep -r` when gitignored paths matter, and name the engine in any grep count.
 - Before stating what a file says or doesn't say, read it whole or say which part you read. Derive counts and totals from the full result set, not the visible part, and re-derive them when the underlying set changes.
@@ -116,7 +116,7 @@ On the Anthropic lane she drives from her phone, often by voice (Remote Control)
 - After any scripted or multi-site edit, grep for a distinctive token of the NEW text before trusting a green test run. A passing suite can't prove an edit applied. Below ~5 replacements, prefer the Edit tool.
 - After a rename or move, also grep for the OLD token in its variant forms (bare name, each path depth, backticked mention).
 - A line number computed before an edit to the same file is stale. Find the target again by its content.
-- In `sed` replacements, `&` inserts the matched text, so a literal `&&` in the replacement corrupts the file. Use the Edit tool for long or `&`-bearing replacements, then grep for the old token.
+- In `sed` replacements, `&` inserts the matched text, so a literal `&&` in the replacement corrupts the file; use the Edit tool for long or `&`-bearing replacements.
 - An Edit target is Read with the Read tool first, even in auto mode, whose prompt prefers cat and sed for reading: Edit refuses a file this conversation hasn't Read, and a Bash view doesn't count. Bash edits stay for the shapes the guards allow.
 - After a blocked compound command, the fix on disk is not the fix in the index: a hook block cancels the whole chain, and earlier staging survives it — `git status --short` / `git diff --cached` before retrying.
 
@@ -132,7 +132,7 @@ On the Anthropic lane she drives from her phone, often by voice (Remote Control)
 ## Safety
 
 These add to the global ask-first list in `~/.claude/CLAUDE.md`.
-- Also ask before: a local `git merge` where the project is rebase-only (a PR whose CI and review gates pass, merged via the repo's merge path, Dependabot's too, needs no ask), `git push --force` (except through `fixup-push`, which proves the rewrite and refuses otherwise; announce it), and `git stash pop` (stashes are one global stack, not per branch; `git stash list` first).
+- Also ask before: a local `git merge` on a rebase-only project (a PR merged via the repo's own path — CI and review green, Dependabot's too — needs no ask), `git push --force` (except through `fixup-push`, which proves the rewrite and refuses otherwise; announce it), and `git stash pop` (one global stack, not per branch; `git stash list` first).
 - In repos other sessions also write (claude-memory, dev-docs), stage explicit paths and read `git status --short` (untracked files included) before committing; never `git add -A` or `commit -a` blind. The `claude-memory-backup` job commits everything in the memory repo by design.
 - Before querying configs or API objects that can embed secrets (Discord webhook URLs carry the token; so do git remotes with tokens), select the safe fields (id, name, events, `last_response`, host) in the first call instead of printing the object.
 - **Never kill by pattern.** List, then kill by PID; stop a background waiter by its exact PID or a sentinel file it polls. A `ps | grep` liveness probe matches itself and reports the work as running forever.
@@ -147,7 +147,7 @@ These add to the global ask-first list in `~/.claude/CLAUDE.md`.
 - Apply this to yourself mid-session, at the moment of the miss. Fix the failure's class, not only the symptom, kept small: one hook check, skill paragraph or rule line.
 - Prefer a systematic fix over an ad hoc one when reuse repays its cost. Complexity must serve a purpose: when a piece serves none, ask the owner whether it is worth keeping before building on it.
 - Always-loaded text (rules, CLAUDE.md, memory index) holds only hard constraints, safety included, and pointers; procedures go to skills, domain detail to `paths:`-scoped rules or skills. Cut before adding.
-- A tool with no named moment for its use goes unused: when you build or adopt one, name its trigger ("before asserting X", "after every push").
+- A tool with no named moment for its use goes unused: when you build or adopt one, name its trigger.
 - When a memory is promoted into a rule, skill or hook, propose deleting the memory and its index line; delete only on her yes. Memory is shared by every session.
 
 ### Command blocks are code
