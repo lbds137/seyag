@@ -39,7 +39,7 @@ reading() { printf '{"as_of":%s,"verdict":"%s","week_pct":%s,"wind_down_pct":75}
 # pins the body digest (first 16 hex of sha256 over every line after the marker). deck-platform
 # bin/cloud-gate changes first, this copy re-vendors after, and this constant moves in the same PR
 # as the re-copy (canonical also pins it as CLOUD_GATE_BODY_DIGEST in deck-platform bin/cloud-launch).
-want_digest=c24563808b610e7f
+want_digest=78ef44b1974c194e
 markers=$(grep -c '^# body-sha256: [0-9a-f]\{16\}' "$GATE")
 [ "$markers" = 1 ] && ok "the vendored copy carries exactly one body-sha256 marker" || bad "body-sha256 marker count: $markers"
 hdr=$(sed -n 's/^# body-sha256: \([0-9a-f]\{16\}\).*/\1/p' "$GATE")
@@ -97,20 +97,40 @@ CLOUD_GATE_FETCH_S=41 "$GATE" --file "$j" >/dev/null 2>&1; [ $? = 2 ] && ok "CLO
 CLOUD_GATE_WEEK_STOP=0 "$GATE" --file "$j" >/dev/null 2>&1; [ $? = 2 ] && ok "CLOUD_GATE_WEEK_STOP=0 exits 2" || bad "week_stop lower bound"
 CLOUD_GATE_WEEK_STOP=100 "$GATE" --file "$j" >/dev/null 2>&1; [ $? = 2 ] && ok "CLOUD_GATE_WEEK_STOP=100 exits 2" || bad "week_stop upper bound"
 
-# --class test-only judges week_pct against the week hard stop (CLOUD_GATE_WEEK_STOP > the
-# reading's stop_pct > 98) and ignores the verdict: the cloud-test exemption.
-reading go 60 88 >"$j"
+# --class test-only judges week_pct >= the effective stop -- the CLOUD_GATE_WEEK_STOP seam when
+# set, else the fleet hard stop 98 -- and ignores the verdict: the cloud-test exemption. The
+# reading's own stop_pct is validated for reading integrity but judges nothing here and is never
+# displayed; the displayed stop is always the effective stop.
+printf '{"as_of":%s,"verdict":"go","week_pct":88,"wind_down_pct":75,"stop_pct":80}' "$(($(date +%s) - 60))" >"$j"
 out=$(CLOUD_GATE_WEEK_STOP=50 "$GATE" --class test-only --file "$j" 2>&1); rc=$?
 [ $rc = 1 ] && grep -q "week=88% stop 50%, test-only" <<<"$out" && ok "test-only refuses a go reading over the seam" || bad "test-only over (rc $rc: $out)"
-reading stop 60 40 >"$j"
+printf '{"as_of":%s,"verdict":"stop","week_pct":40,"wind_down_pct":75,"stop_pct":90}' "$(($(date +%s) - 60))" >"$j"
 out=$(CLOUD_GATE_WEEK_STOP=50 "$GATE" --class test-only --file "$j" 2>&1); rc=$?
 [ $rc = 0 ] && grep -q "go week=40% stop 50%, test-only" <<<"$out" && ok "test-only passes under the seam, ignoring a stop verdict" || bad "test-only under (rc $rc: $out)"
 printf '{"as_of":%s,"verdict":"go","week_pct":70,"wind_down_pct":75,"stop_pct":60}' "$(($(date +%s) - 60))" >"$j"
 out=$("$GATE" --class test-only --file "$j" 2>&1); rc=$?
-[ $rc = 1 ] && grep -q "week=70% stop 60%, test-only" <<<"$out" && ok "test-only judges the reading's own stop_pct without the seam" || bad "test-only stop_pct (rc $rc: $out)"
+[ $rc = 0 ] && grep -q "go week=70% stop 98%, test-only" <<<"$out" && ok "test-only without a seam judges the fleet hard stop 98" || bad "test-only no seam (rc $rc: $out)"
+printf '{"as_of":%s,"verdict":"go","week_pct":90,"wind_down_pct":75,"stop_pct":80}' "$(($(date +%s) - 60))" >"$j"
+out=$("$GATE" --class test-only --file "$j" 2>&1); rc=$?
+[ $rc = 0 ] && grep -q "go week=90% stop 98%, test-only" <<<"$out" && ok "F3: stop_pct 80 must not refuse week 90 (the old chain's red case)" || bad "test-only F3 (rc $rc: $out)"
+printf '{"as_of":%s,"verdict":"go","week_pct":50,"wind_down_pct":75,"stop_pct":10}' "$(($(date +%s) - 60))" >"$j"
+out=$(CLOUD_GATE_WEEK_STOP=50 "$GATE" --class test-only --file "$j" 2>&1); rc=$?
+[ $rc = 1 ] && grep -q "week=50% stop 50%, test-only" <<<"$out" && ok "test-only at the seam still refuses (week >= eff)" || bad "test-only at seam (rc $rc: $out)"
+printf '{"as_of":%s,"verdict":"go","week_pct":98,"wind_down_pct":75,"stop_pct":5}' "$(($(date +%s) - 60))" >"$j"
+out=$("$GATE" --class test-only --file "$j" 2>&1); rc=$?
+[ $rc = 1 ] && grep -q "week=98% stop 98%, test-only" <<<"$out" && ok "test-only at the fleet 98 still refuses (week >= eff)" || bad "test-only at 98 (rc $rc: $out)"
 printf '{"as_of":%s,"verdict":"go","week_pct":45,"wind_down_pct":75,"stop_pct":40}' "$(($(date +%s) - 60))" >"$j"
 out=$(CLOUD_GATE_WEEK_STOP=50 "$GATE" --class test-only --file "$j" 2>&1); rc=$?
 [ $rc = 0 ] && grep -q "go week=45% stop 50%, test-only" <<<"$out" && ok "test-only: the seam overrides the reading's stop_pct" || bad "seam over stop_pct (rc $rc: $out)"
+printf '{"as_of":%s,"verdict":"go","week_pct":40,"wind_down_pct":75,"stop_pct":80}' "$(($(date +%s) - 2400))" >"$j"
+err=$t/stale-under.err
+out=$(CLOUD_GATE_WEEK_STOP=50 "$GATE" --class test-only --file "$j" 2>"$err"); rc=$?
+[ $rc = 0 ] && grep -q "go (stale) week=40% stop 50%, test-only" <<<"$out" && grep -q "week under the test-only stop" "$err" \
+  && ok "test-only stale under the seam passes, warning on stderr only" || bad "test-only stale under (rc $rc: $out / stderr: $(cat "$err"))"
+printf '{"as_of":%s,"verdict":"go","week_pct":60,"wind_down_pct":75}' "$(($(date +%s) - 2400))" >"$j"
+out=$(CLOUD_GATE_WEEK_STOP=50 "$GATE" --class test-only --file "$j" 2>&1); rc=$?
+[ $rc = 1 ] && grep -q "is over the test-only stop 50%" <<<"$out" && grep -q "meter stale since" <<<"$out" \
+  && ok "test-only stale over the seam still refuses" || bad "test-only stale over (rc $rc: $out)"
 
 # --session-start: silent off the VM, an instruction on stop on the VM, exit 0 either way.
 reading stop 60 >"$j"
