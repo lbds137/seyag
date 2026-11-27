@@ -117,7 +117,8 @@
 # same fail-closed block-once follows when the envelope field is blank and no
 # usable pick token exists in the turn's transcript text (one measured trigger,
 # TASK-67: closings recorded only as signed-empty thinking blocks, an
-# Anthropic-lane shape); the retry is then judged again like any other block.
+# Anthropic-lane shape); the retry passes on `stop_hook_active` without being
+# judged again — every block here is bounded to one.
 #
 # Enforcement geometry mirrors the sibling Stop hooks: a deterministic scan of
 # the current turn in a bounded transcript tail, blocking at most once per

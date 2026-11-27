@@ -28,10 +28,13 @@
 # entry per block. Such an entry carries neither text nor tool_use and can
 # coexist with a separate text entry for the same response — prose is not lost
 # to the shape (the payload's `last_assistant_message` carried the probe's
-# text verbatim). A tail ending on such entries therefore passes (no tool_use),
-# and `text_of_tool_ending_message` then finds no text, so `lam_is_own_message`
-# returns 1; with a non-blank payload field the caller passes the stop at the
-# LAM-not-own branch (fail-open, like every other external doubt here).
+# text verbatim). A tail ending on such entries passes at the tool_use check —
+# the loop exits there before any text is read. Separately, when the LAST
+# entry is a `tool_use` but the other entries sharing its `message.id` are only
+# such empty-signed thinking entries, `text_of_tool_ending_message` finds no
+# text, `lam_is_own_message` returns 1, and with a non-blank payload field the
+# caller passes the stop at the LAM-not-own branch (fail-open, like every
+# other external doubt here).
 #
 # Primary signal: the Stop payload's `last_assistant_message` (the turn's final
 # assistant text, absent when empty). The transcript can lag the payload — the
