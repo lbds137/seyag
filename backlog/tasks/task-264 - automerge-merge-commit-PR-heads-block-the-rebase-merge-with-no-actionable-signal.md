@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-27T16:12:00Z'
+updated_date: '2026-11-27T16:19:00Z'
 labels:
   - ci
   - automerge
@@ -28,4 +29,6 @@ Fix shapes to weigh (engineering call at pickup time, not all required):
 Also worth deciding deliberately: should PR branches ever merge main in when the automerge path expects linear heads, or should the convention be "cut a fresh branch" with the job's error message teaching it?
 
 Owner: lane A (.github/workflows automerge job); `fixup-push` is bin/** (lane B) and relevant only as context for the refused-head shape. Priority low: one occurrence so far, recovery exists, and the failure is visible in CI rather than silent.
+
+Pickup note 2026-11-27 (the Deck Platform session, which observed the case live on #457): weigh the pair "early failure in the job" + "pr-ci-wait unrebaseable sentinel" first; the supersession path (fresh linear branch, new PR, close old) is the verified no-force-push remedy, and #457's dropped-dispatch event self-healed on a synchronize push without a rerun.
 <!-- SECTION:DESCRIPTION:END -->
