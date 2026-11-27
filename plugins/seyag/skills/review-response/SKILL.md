@@ -101,8 +101,8 @@ Compare the reviewer's severity label against the edit shape from rule 1:
 | Future work in **this file or diff** ("next time you touch this")                                            | **Do it now**         |
 | A **named batch across files** ("next tooling-DRY pass", "next `.claude/rules` PR", "a follow-up sweep")     | **File the batch**    |
 | An observable outside our control (a user report, a metric threshold, a provider change, a feature arriving) | **Backlog candidate** (medium+; a low/nit carries instead — the lows-carry row below) |
-| **A low or nit** left open after the rows above | **Rides the next same-area PR** — the lows-carry disposition |
 | Nothing — taste, or a self-dismissal ("actually fine", "could be cleaner someday")                           | **Dismissed**         |
+| **A low or nit** left open after the rows above | **Rides the next same-area PR** — the lows-carry disposition (the ruling's still-filed cases file as before) |
 
 **Lows and nits ride the next PR in their area — the lows-carry disposition** (owner ruling 2026-11-26, core.md § Fix what you touch). A low/nit this PR leaves open is never filed as a task: carry it as ONE line on the session's handoff surface naming the source PR, mirror it under Carried lows in the round report, and list it in the fixing PR's body. The rows above keep their destinations at every severity — a low fixed now never carries, a named batch files its one entry with the low as a member, a low resting on nothing still dismisses; the carry replaces only the never-fixed destination. The next PR in the area folds easy carried lows in before it pushes (the pre-PR fold, seyag:pr-monitoring). Medium+ and the ruling's still-filed cases file as before.
 
@@ -118,7 +118,7 @@ Do-it-now sends the finding back through **rule 1**, not around it: a trivial-sh
 
 **Backlog candidate** is the honest deferral at medium+ — a low/nit rides the next same-area PR instead (the lows-carry disposition). File it on the project's tracking surface at the granularity-appropriate destination, capturing both the concern and the criterion. (A promote-when trigger is optional metadata on the item, never a filing gate — the disposition is honest because the criterion is written down, not because a date was promised.)
 
-**On a process-work PR, a low-priority backlog candidate is not filed as a task.** The residue of hook, skill, rule, tooling, and CI PRs (substance under `.claude/`, scripts, workflows, bookkeeping riding along, no runtime or test-infra file touched) can carry its disposition in the PR body instead — fixed here, declined with the technical reason, or filed only when it earns the weight. In the round summary it lands under Backlog candidates tagged `[residue]` with that disposition, so the routing stays checkable; the fails-closed owner-call boundary from core.md § Everything not done gets a disposition applies unchanged, and "if declining feels wrong, file it" is the signal to file. This is the process-work face of the lows-carry disposition (above): the PR-body disposition covers review lows too, the handoff-surface carry line is its not-fixed-now case between PRs, and the fixing PR's body lists what it folded in.
+**On a process-work PR, a low-priority backlog candidate is not filed as a task.** The residue of hook, skill, rule, tooling, and CI PRs (substance under `.claude/`, scripts, workflows, bookkeeping riding along, no runtime or test-infra file touched) can carry its disposition in the PR body instead — fixed here, declined with the technical reason, or filed only when it earns the weight. In the round summary it lands under Backlog candidates tagged `[residue]` with that disposition, so the routing stays checkable; the fails-closed owner-call boundary from core.md § Everything not done gets a disposition applies unchanged, and "if declining feels wrong, file it" is the signal to file. This is the process-work face of the lows-carry disposition (above): the PR-body disposition covers review lows too, the handoff-surface carry line is its not-fixed-now case between PRs, and the fixing PR's body lists what it folded in. A process-work review low reports `[residue]` when this PR's body disposition closes it, `[carried #<N>]` when it stays open for the next PR in the area.
 
 **Dismissed** closes the matter; note it in the summary and move on. A reviewer self-dismissal ("non-issue," "current is correct") that the agent agrees with has no trigger, and neither does a vague preference with no named event.
 
@@ -275,7 +275,7 @@ The five sections (Auto-applied / Asks / Dismissed / Backlog candidates / Carrie
 - A **do-it-now** item lands under Auto-applied or Asks depending on its shape, tagged `[do-it-now:trivial]` / `[do-it-now:semantic]` with the reviewer's deferral quoted — that pairing is the whole justification for fixing it here instead of filing it, so it belongs in the report.
 - A **file-the-batch** item lands under Backlog candidates tagged `[batch]`, naming which batch entry now owns the pass.
 - A **residue** item (process-work PR, low priority) lands under Backlog candidates tagged `[residue]` with its PR-body disposition — declined with the reason, or filed with the sentence that earns it.
-- A **carried low** (the lows-carry disposition, rule 2) lands under Carried lows tagged `[carried]`, one line naming the source PR and the area — the same line the session's handoff surface carries.
+- A **carried low** (the lows-carry disposition, rule 2) lands under Carried lows tagged `[carried #<N>]`, one line naming the source PR and the area — the same line the session's handoff surface carries.
 
 Every Auto-applied and Asks item carries its `sweep:` line from rule 2a, as `command → N sites, M defective` or `n/a` with rule 2a's checkable reason.
 
@@ -302,7 +302,7 @@ PR #N has completed 3 rounds of review-respond. Remaining unresolved items:
 2. [semantic:contract] ...     (raised round 3, new)
 
 Each round's fixes have surfaced new findings. Options:
-- Merge as-is (remaining items → dispositions per rule 2 — lows carried, the rest filed)
+- Merge as-is (remaining items → dispositions per rule 2)
 - Rewrite the PR to address remaining items differently
 - Review the loop — maybe the PR scope is wrong
 ```
@@ -374,13 +374,13 @@ Before each round's consolidated message:
 - [ ] If the claude-review check failed with the is_error quota-wall signature, the substitute review ran and its verdict comment is on the PR (rule 0) — before any findings processing
 - [ ] Every review item classified against trivial / non-trivial / unknown (rule 1), and every semantic item routed by decision owner — `[semantic:decided]` only when no product, user-visible, spend, data, taste, or security dimension exists and no existing test assertion or external contract changes; an async boundary change is decided only with a cited second opinion; one without a reachable opinion is held open as `[held:second-opinion]` with the PR held from merging (an Ask with the round's push withheld if the repo's automerge job does not skip drafts), or filed as a Backlog candidate if the PR already merged
 - [ ] Every auto-apply candidate checked against reviewer label for signal conflict (rule 2)
-- [ ] Every "no action now" item routed by what would reopen it — Do it now (this file/diff) / File the batch (a named cross-file pass) / Backlog candidate (a named observable) / Dismissed (nothing) per rule 2's deferral rows; a Do-it-now item re-enters rule 1 and lands under Auto-applied or Asks; on a process-work PR a low-priority Backlog candidate becomes a `[residue]` line in the PR body instead of a task; a low/nit left open is carried one line on the handoff surface instead of filed (the lows-carry row)
+- [ ] Every "no action now" item routed by what would reopen it — Do it now (this file/diff) / File the batch (a named cross-file pass) / Backlog candidate (a named observable) / Dismissed (nothing) per rule 2's deferral rows; a Do-it-now item re-enters rule 1 and lands under Auto-applied or Asks; on a process-work PR a low-priority Backlog candidate becomes a `[residue]` line in the PR body instead of a task; a low/nit left open is carried one line on the handoff surface instead of filed (the lows-carry row; the ruling's still-filed cases file as before)
 - [ ] Every auto-applied, decided, asked or held finding swept per rule 2a before it was applied or asked: one recorded command, positive-controlled on the reported instance, its `N sites, M defective` listed in the round summary, every defective site fixed, asked, held or dispositioned per rule 2's deferral rows; in a dispatched round, re-run against the worker's worktree before the push (rule 2a)
 - [ ] Every origin-scoped finding ("pre-existing" / "not a regression") given a merits disposition — never Dismissed on origin alone (rule 2's origin-language row)
 - [ ] Every auto-applied fix commit has a green package-level test run (rule 3)
 - [ ] Automerge repo: the round's fixes are plain commits, held for one final gate and one push (rule 3)
 - [ ] Round-N message contains all five sections, even empty ones (rule 4)
-- [ ] Every low/nit left open is carried: ONE line on the session's handoff surface naming the source PR, mirrored under Carried lows (rule 2's lows-carry row) — never filed as a task
+- [ ] Every low/nit left open is carried: ONE line on the session's handoff surface naming the source PR, mirrored under Carried lows (rule 2's lows-carry row); the ruling's still-filed cases file as before (core.md § Fix what you touch)
 - [ ] If this is round 4+, consolidated status menu presented instead of another iteration (rule 5)
 - [ ] If this is round 7+, findings handed off to a fresh-context implementer or the owner instead of fixed directly (rule 5a)
 
