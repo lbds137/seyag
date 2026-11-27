@@ -271,7 +271,16 @@ restore_targets() {
     t_mode=$(stat -c %a -- "$tpath" 2>/dev/null || true)
     o_mode=$(stat -c %a -- "$orig" 2>/dev/null || true)
     if cmp -s -- "$tpath" "$orig" && [ -n "$t_mode" ] && [ "$t_mode" = "$o_mode" ]; then
+      # Matching bytes can still carry a stale mtime: a prior restore attempt may
+      # have landed its mv without its touch, or CMD may have restored the file
+      # itself with a timestamp-preserving copy after building mutant output.
+      # The touch costs one unnecessary rebuild in the rare path where the mtime
+      # was already fresh.
       echo "restore: byte-identical $tpath"
+      if ! touch -- "$tpath" 2>/dev/null; then
+        echo "mutation-canary: failed to set a fresh mtime on $tpath after restore; mtime-keyed build caches may serve stale mutant output" >&2
+        RESTORE_RC=3
+      fi
       i=$((i + 1))
       continue
     fi
@@ -309,6 +318,14 @@ restore_targets() {
     o_mode=$(stat -c %a -- "$orig" 2>/dev/null || true)
     if cmp -s -- "$tpath" "$orig" && [ -n "$t_mode" ] && [ "$t_mode" = "$o_mode" ]; then
       echo "restore: byte-identical $tpath"
+      # cp -p carries the pre-run mtime onto the restored file; touch it so
+      # mtime-keyed incremental builds (make, tsc -b) rebuild instead of serving
+      # output built from the mutant. Verified branch only: a failed verification
+      # means wrong content, which is the bigger problem.
+      if ! touch -- "$tpath" 2>/dev/null; then
+        echo "mutation-canary: failed to set a fresh mtime on $tpath after restore; mtime-keyed build caches may serve stale mutant output" >&2
+        RESTORE_RC=3
+      fi
     else
       echo "mutation-canary: restore of $tpath is not byte-identical; original kept at $orig" >&2
       RESTORE_RC=3
