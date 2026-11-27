@@ -1,9 +1,13 @@
 ---
 id: TASK-67
-title: 'Transcript readers: assistant prose recorded as signed empty thinking blocks is invisible'
-status: To Do
-assignee: []
+title: >-
+  Transcript readers: assistant prose recorded as signed empty thinking blocks
+  is invisible
+status: In Progress
+assignee:
+  - Seyag B
 created_date: '2026-11-21T15:23:00Z'
+updated_date: '2026-11-27T11:55:00Z'
 labels:
   - hooks
   - transcripts
