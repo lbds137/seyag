@@ -42,6 +42,8 @@
 # 39. --restore with journal dir holding 0.path, 0.orig, 0.mutant and a live pid written during the retry window -> refused exit 2, subject still mutated, journal kept
 # 40. default --fail-pattern with a two-space "FAIL  " probe line (tests/twosp.probe.sh) -> caught, exit 0, subject intact
 # 41. the same probe with the opt-out --fail-pattern '^FAIL:' -> INCONCLUSIVE, exit 2, subject intact
+# 42. mtime restore over a Makefile fixture -> restored src.txt is newer than out.txt (make -q exits 1), rebuild output holds no mutant token
+# 43. mtime restore on the already-restored path: CMD rebuilds mutant output then restores the original with cp -p (stale mtime, bytes equal) -> make -q exits 1, rebuild holds the original token only
 #
 # Usage: tests/mutation-canary.probe.sh   (from anywhere)
 
@@ -868,5 +870,74 @@ out=$( (cd "$FIX" && bash "$TOOL" --fail-pattern '^FAIL:' --file tools/subject.s
 [ "$rc" -eq 2 ] && grep -qF "INCONCLUSIVE: bash tests/twosp.probe.sh failed (rc 1) with no new line matching ^FAIL:;" <<<"$out" \
   && ok "41. --fail-pattern '^FAIL:' opt-out: two-space line inconclusive exit 2" || bad "41. opt-out: rc=$rc (out: $out)"
 check_intact "41. --fail-pattern opt-out"
+
+# 42. mtime restore: a canary run over a Makefile project must leave the restored src.txt newer than any output built during the run, so make rebuilds instead of serving mutant output
+MFIX="$T/mtime-fixture"
+git init -q -b main "$MFIX"
+git -C "$MFIX" config user.email t@t
+git -C "$MFIX" config user.name t
+SRC_TOKEN="b253-source-token-original"
+MUT_TOKEN="b253-source-token-mutant"
+printf '%s\n' "$SRC_TOKEN" >"$MFIX/src.txt"
+printf 'out.txt: src.txt\n\t@cp src.txt out.txt\n' >"$MFIX/Makefile"
+git -C "$MFIX" add -A
+git -C "$MFIX" commit -qm "base make fixture"
+make -s -C "$MFIX"
+grep -qF "$SRC_TOKEN" "$MFIX/out.txt" \
+  && ok "42. mtime restore: baseline build holds the original token" \
+  || bad "42. mtime restore: baseline build failed (out.txt: $(cat "$MFIX/out.txt" 2>/dev/null))"
+out=$( (cd "$MFIX" && bash "$TOOL" --file src.txt --old "$SRC_TOKEN" --new "$MUT_TOKEN" -- make -s) 2>&1 ); rc=$?
+grep -q '^mutation-canary: survived$' <<<"$out" \
+  && ok "42. mtime restore: canary ran (survived, as expected)" \
+  || bad "42. mtime restore: canary verdict rc=$rc (out: $out)"
+make -q -C "$MFIX"; qrc=$?
+[ "$qrc" -eq 1 ] \
+  && ok "42. mtime restore: make -q exits 1 (rebuild pending after restore)" \
+  || bad "42. mtime restore: make -q rc=$qrc expected 1 (rebuild pending); src mtime $(stat -c %y "$MFIX/src.txt" 2>/dev/null) vs out $(stat -c %y "$MFIX/out.txt" 2>/dev/null)"
+make -s -C "$MFIX"; mrc=$?
+if [ "$mrc" -eq 0 ] && grep -qF "$SRC_TOKEN" "$MFIX/out.txt" && ! grep -qF "$MUT_TOKEN" "$MFIX/out.txt"; then
+  ok "42. mtime restore: make -s rc 0, rebuilt out.txt holds the original and no mutant token"
+else
+  bad "42. mtime restore: make -s rc=$mrc, rebuilt out.txt: $(cat "$MFIX/out.txt" 2>/dev/null)"
+fi
+
+
+# 43. mtime restore on the already-restored path: the probe builds mutant output, then restores the original bytes with cp -p (stale mtime, bytes and mode equal) -> the early-continue restore path must still touch the file
+MFIX2="$T/mtime-fixture-cmd-restore"
+git init -q -b main "$MFIX2"
+git -C "$MFIX2" config user.email t@t
+git -C "$MFIX2" config user.name t
+SRC_TOKEN2="b253-cmd-restore-token-original"
+MUT_TOKEN2="b253-cmd-restore-token-mutant"
+printf '%s\n' "$SRC_TOKEN2" >"$MFIX2/src.txt"
+printf 'out.txt: src.txt\n\t@cp src.txt out.txt\n' >"$MFIX2/Makefile"
+cp -p "$MFIX2/src.txt" "$MFIX2/src.orig"
+cat >"$MFIX2/runner.sh" <<'RUNNER'
+#!/bin/bash
+set -uo pipefail
+cd "$(dirname "${BASH_SOURCE[0]}")"
+make -s
+cp -p src.orig src.txt
+RUNNER
+git -C "$MFIX2" add -A
+git -C "$MFIX2" commit -qm "base make fixture"
+make -s -C "$MFIX2"
+grep -qF "$SRC_TOKEN2" "$MFIX2/out.txt" \
+  && ok "43. mtime restore (cmd-restore): baseline build holds the original token" \
+  || bad "43. mtime restore (cmd-restore): baseline build failed (out.txt: $(cat "$MFIX2/out.txt" 2>/dev/null))"
+out=$( (cd "$MFIX2" && bash "$TOOL" --file src.txt --old "$SRC_TOKEN2" --new "$MUT_TOKEN2" -- bash runner.sh) 2>&1 ); rc=$?
+grep -q '^mutation-canary: survived$' <<<"$out" \
+  && ok "43. mtime restore (cmd-restore): canary ran (survived, as expected)" \
+  || bad "43. mtime restore (cmd-restore): canary verdict rc=$rc (out: $out)"
+make -q -C "$MFIX2"; qrc=$?
+[ "$qrc" -eq 1 ] \
+  && ok "43. mtime restore (cmd-restore): make -q exits 1 (rebuild pending after stale-mtime restore)" \
+  || bad "43. mtime restore (cmd-restore): make -q rc=$qrc expected 1 (rebuild pending); src mtime $(stat -c %y "$MFIX2/src.txt" 2>/dev/null) vs out $(stat -c %y "$MFIX2/out.txt" 2>/dev/null)"
+make -s -C "$MFIX2"; mrc=$?
+if [ "$mrc" -eq 0 ] && grep -qF "$SRC_TOKEN2" "$MFIX2/out.txt" && ! grep -qF "$MUT_TOKEN2" "$MFIX2/out.txt"; then
+  ok "43. mtime restore (cmd-restore): make -s rc 0, rebuilt out.txt holds the original and no mutant token"
+else
+  bad "43. mtime restore (cmd-restore): make -s rc=$mrc, rebuilt out.txt: $(cat "$MFIX2/out.txt" 2>/dev/null)"
+fi
 
 exit "$fail"
