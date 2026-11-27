@@ -149,29 +149,27 @@
 #
 # Deny channel: delivers via stderr + exit 2, same as the repo's other Bash guards.
 # Fail-open on missing jq/python3 or an unexpected core error (allowance helpers fail closed).
+# Batch mode (SYG_EPG_BATCH=1): internal batch/verdict-record affordance for the probe and
+# tooling (production wiring never sets SYG_EPG_BATCH); reads NDJSON payloads on stdin and
+# emits one `<rc><TAB><base64(stderr-text)>` record line per input payload on stdout (exit 0;
+# stderr text is base64-encoded because jq-file deny messages embed filter and file text that
+# may contain newlines or tabs, while env-dump deny messages embed only a fixed command word).
 
 set -uo pipefail
 
 command -v jq >/dev/null 2>&1 || exit 0
 command -v python3 >/dev/null 2>&1 || exit 0
 
-INPUT=$(cat 2>/dev/null) || exit 0
-[ -n "$INPUT" ] || exit 0
-
-COMMAND=$(printf '%s' "$INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null) || exit 0
-[ -n "$COMMAND" ] || exit 0
-CWD=$(printf '%s' "$INPUT" | jq -r '.cwd // empty' 2>/dev/null) || CWD=""
 TRUSTED_VARS="${SYG_EPG_TRUSTED_VARS:-}"
 
 # Pure-bash admission: no pipe, so no SIGPIPE-vs-pipefail interaction — the
 # pipeline form could fail OPEN when grep -q's early exit killed a large
 # printf mid-write. A here-string is not needed; =~ reads the variable.
 _ADMIT_RE='(^|[^A-Za-z0-9_])(env|printenv|set|jq)([^A-Za-z0-9_]|$)'
-[[ "$COMMAND" =~ $_ADMIT_RE ]] || exit 0
 
 LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib"
 
-REASON=$(SYG_LIB_DIR="$LIB_DIR" SYG_EPG_CWD="$CWD" SYG_EPG_TRUSTED_VARS="$TRUSTED_VARS" python3 -I "${SYG_PY_CACHE_ARG:--B}" - 3<<<"$COMMAND" <<'PY' 2>/dev/null
+SCAN_SRC=$(cat <<'PY'
 import os
 import re
 import shlex
@@ -1162,7 +1160,218 @@ for pipeline in pipelines:
                 )
                 sys.exit(0)
 PY
-) || exit 0
+)
+
+if [ "${SYG_EPG_BATCH:-}" = "1" ]; then
+  _RAW_LINES=()
+  mapfile -t _RAW_LINES 2>/dev/null || exit 0
+  _total="${#_RAW_LINES[@]}"
+  [ "$_total" -gt 0 ] || exit 0
+
+  # EXTRACT phase: one interpreter spawn parses NDJSON lines from fd 3 (NUL-framed)
+  # and emits NUL-framed `status NUL command NUL cwd NUL` records on stdout.
+  _EXT=()
+  mapfile -d '' _EXT < <(
+    SYG_LIB_DIR="$LIB_DIR" python3 -I "${SYG_PY_CACHE_ARG:--B}" -c '
+import json, sys
+for raw in open(3, "rb").read().split(b"\0")[:-1]:
+    try:
+        obj = json.loads(raw.decode("utf-8"))
+        if not isinstance(obj, dict):
+            sys.stdout.buffer.write(b"F\0\0\0")
+            continue
+        ti = obj.get("tool_input")
+        if ti is None or ti is False:
+            cmd = ""
+        elif not isinstance(ti, dict):
+            sys.stdout.buffer.write(b"F\0\0\0")
+            continue
+        else:
+            cv = ti.get("command")
+            if cv is None or cv is False:
+                cmd = ""
+            elif not isinstance(cv, str):
+                # Documented divergences from single-path jq -r:
+                # 1. jq stringifies non-string command values; batch treats non-string
+                #    command as out-of-contract input (the probe never sends one) and
+                #    emits the F marker (per-payload fail-open).
+                # 2. Ill-formed JSON or lone-surrogate UTF-8 encode errors (caught by
+                #    the outer per-payload except) fail open per payload via F without
+                #    aborting later payloads in the batch (jq replaces lone surrogates
+                #    with U+FFFD).
+                sys.stdout.buffer.write(b"F\0\0\0")
+                continue
+            else:
+                cmd = cv
+        cwv = obj.get("cwd")
+        cwd = cwv if isinstance(cwv, str) else ""
+        cmd = cmd.replace("\0", "").rstrip("\n")
+        cwd = cwd.replace("\0", "").rstrip("\n")
+        out_rec = b"O\0" + cmd.encode("utf-8") + b"\0" + cwd.encode("utf-8") + b"\0"
+    except Exception:
+        out_rec = b"F\0\0\0"
+    sys.stdout.buffer.write(out_rec)
+' 3< <(printf '%s\0' "${_RAW_LINES[@]}") 2>/dev/null
+  )
+
+  # Admission loop: F -> allow; O -> existing _ADMIT_RE check. If the extract record
+  # count does not equal _total * 3 (batch-level extract failure or framing mismatch),
+  # fail open with all-allow records for the whole flush rather than shifting verdicts.
+  _ADMITTED_FLAG=()
+  _ADMITTED_PAIRS=()
+  _ext_len="${#_EXT[@]}"
+  if [ "$_ext_len" -ne $((_total * 3)) ]; then
+    for ((_i = 0; _i < _total; _i++)); do
+      printf '0\t\n'
+    done
+    exit 0
+  fi
+  for ((_i = 0; _i < _total; _i++)); do
+    _base=$((_i * 3))
+    if [ "${_EXT[$_base]}" = "O" ]; then
+      cmd="${_EXT[$((_base + 1))]}"
+      cwd="${_EXT[$((_base + 2))]}"
+      if [ -n "$cmd" ] && [[ "$cmd" =~ $_ADMIT_RE ]]; then
+        _ADMITTED_FLAG[_i]=1
+        _ADMITTED_PAIRS+=("$cwd" "$cmd")
+      else
+        _ADMITTED_FLAG[_i]=0
+      fi
+    else
+      _ADMITTED_FLAG[_i]=0
+    fi
+  done
+
+  # SCAN phase: one interpreter spawn executes the unmodified scanner source (fd 4)
+  # across NUL-framed (cwd, command) pairs of admitted payloads (fd 3), emitting
+  # NUL-framed base64(REASON + "\n") per admitted payload on stdout (empty if allowed).
+  _SCAN_OUT=()
+  if [ "${#_ADMITTED_PAIRS[@]}" -gt 0 ]; then
+    mapfile -d '' _SCAN_OUT < <(
+      SYG_LIB_DIR="$LIB_DIR" SYG_EPG_TRUSTED_VARS="$TRUSTED_VARS" python3 -I "${SYG_PY_CACHE_ARG:--B}" -c '
+import base64, fcntl, os, sys, tempfile
+sys.stdout.flush()
+saved_out = os.dup(1)
+with open(4, "rb") as _f4:
+    scanner_src = _f4.read().decode("utf-8")
+with open(3, "rb") as _f3:
+    raw_pairs = _f3.read().split(b"\0")[:-1]
+for idx in range(0, len(raw_pairs), 2):
+    cwd_s = raw_pairs[idx].decode("utf-8")
+    cmd_b = raw_pairs[idx + 1] + b"\n"
+    os.environ["SYG_EPG_CWD"] = cwd_s
+    r_fd, w_fd = os.pipe()
+    if len(cmd_b) > 32768:
+        try:
+            fcntl.fcntl(w_fd, fcntl.F_SETPIPE_SZ, len(cmd_b) + 4096)
+            os.write(w_fd, cmd_b)
+            os.close(w_fd)
+        except Exception:
+            os.close(r_fd)
+            os.close(w_fd)
+            try:
+                if len(cmd_b) > 1048576:
+                    raise ValueError("above pipe-max-size")
+                with tempfile.TemporaryFile() as _tf:
+                    _tf.write(cmd_b)
+                    _tf.flush()
+                    _tf.seek(0)
+                    r_fd = os.dup(_tf.fileno())
+            except Exception:
+                os.write(saved_out, b"\0")
+                continue
+    else:
+        os.write(w_fd, cmd_b)
+        os.close(w_fd)
+    cap_r, cap_w = os.pipe()
+    if len(cmd_b) > 32768:
+        try:
+            fcntl.fcntl(cap_w, fcntl.F_SETPIPE_SZ, len(cmd_b) + 4096)
+        except Exception:
+            os.close(cap_r)
+            os.close(cap_w)
+            try:
+                if len(cmd_b) > 1048576:
+                    raise ValueError("above pipe-max-size")
+                with tempfile.TemporaryFile() as _ctf:
+                    cap_r = os.dup(_ctf.fileno())
+                    cap_w = os.dup(_ctf.fileno())
+            except Exception:
+                os.close(r_fd)
+                os.write(saved_out, b"\0")
+                continue
+    if r_fd != 3:
+        os.dup2(r_fd, 3)
+        os.close(r_fd)
+    os.dup2(cap_w, 1)
+    if cap_w != 1:
+        os.close(cap_w)
+    crashed = False
+    try:
+        fresh_globals = {"__name__": "__main__", "__builtins__": __builtins__}
+        exec(compile(scanner_src, "<env-print-guard>", "exec"), fresh_globals)
+    except SystemExit as exc:
+        if exc.code not in (None, 0):
+            crashed = True
+    except Exception:
+        crashed = True
+    finally:
+        try:
+            sys.stdout.flush()
+        except Exception:
+            pass
+        os.dup2(saved_out, 1)
+        try:
+            os.close(3)
+        except OSError:
+            pass
+    try:
+        os.lseek(cap_r, 0, os.SEEK_SET)
+    except OSError:
+        pass
+    with os.fdopen(cap_r, "rb") as _cf:
+        out_b = _cf.read()
+    reason_b = b"" if crashed else out_b.replace(b"\0", b"").rstrip(b"\n")
+    if reason_b:
+        b64_b = base64.b64encode(reason_b + b"\n")
+    else:
+        b64_b = b""
+    os.write(saved_out, b64_b + b"\0")
+' 3< <(printf '%s\0' "${_ADMITTED_PAIRS[@]}") 4<<<"$SCAN_SRC" 2>/dev/null
+    )
+  fi
+
+  # Record composition: walk payload index order interleaving pre-admission allows
+  # with scan results. A missing scan result (batch-level scan failure) fails open
+  # to an allow record (`0<TAB>`), mirroring single-path `|| exit 0`; probe anchors
+  # catch any drift.
+  _scan_idx=0
+  _scan_len="${#_SCAN_OUT[@]}"
+  for ((_i = 0; _i < _total; _i++)); do
+    if [ "${_ADMITTED_FLAG[$_i]}" -eq 1 ]; then
+      if [ "$_scan_idx" -lt "$_scan_len" ] && [ -n "${_SCAN_OUT[$_scan_idx]}" ]; then
+        printf '2\t%s\n' "${_SCAN_OUT[$_scan_idx]}"
+      else
+        printf '0\t\n'
+      fi
+      _scan_idx=$((_scan_idx + 1))
+    else
+      printf '0\t\n'
+    fi
+  done
+  exit 0
+fi
+
+INPUT=$(cat 2>/dev/null) || exit 0
+[ -n "$INPUT" ] || exit 0
+
+COMMAND=$(printf '%s' "$INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null) || exit 0
+[ -n "$COMMAND" ] || exit 0
+CWD=$(printf '%s' "$INPUT" | jq -r '.cwd // empty' 2>/dev/null) || CWD=""
+
+[[ "$COMMAND" =~ $_ADMIT_RE ]] || exit 0
+
+REASON=$(printf '%s\n' "$SCAN_SRC" | SYG_LIB_DIR="$LIB_DIR" SYG_EPG_CWD="$CWD" SYG_EPG_TRUSTED_VARS="$TRUSTED_VARS" python3 -I "${SYG_PY_CACHE_ARG:--B}" - 3<<<"$COMMAND" 2>/dev/null) || exit 0
 
 if [ -n "$REASON" ]; then
   printf '%s\n' "$REASON" >&2
