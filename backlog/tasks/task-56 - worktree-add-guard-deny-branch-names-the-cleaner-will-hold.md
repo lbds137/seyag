@@ -1,11 +1,11 @@
 ---
 id: TASK-56
 title: 'worktree-add guard: deny branch names the cleaner will HOLD'
-status: In Progress
+status: Done
 assignee:
   - Seyag B
 created_date: '2026-11-21T05:10:00Z'
-updated_date: '2026-11-27T04:48:00Z'
+updated_date: '2026-11-27T04:52:00Z'
 labels:
   - guards
   - worktrees
@@ -26,4 +26,6 @@ The pattern is the knob SYG_WORKTREE_BRANCH_RE (plugins/seyag/bin/safe-worktree-
 Build, hook by fit: a PreToolUse Bash clause in live-checkout-guard (it already parses `worktree add`) or a sibling guard with its own toggle. When a `git worktree add` (any -C/cwd form) targets a path under `.claude/worktrees/` and creates a branch (-b/-B NAME) that fails the pattern, deny with the fix ("name it worktree-agent-<slug>", rendered from the active pattern where possible). An invalid regex stays allowed and warns, matching the cleaner's own "not a valid extended regex" hold.
 Probes: bad name under .claude/worktrees → deny; a matching name → pass; no -b on an existing branch → pass; a path outside .claude/worktrees → pass; the knob set to a custom pattern → follows it.
 Replay against local logs first (tests/replay-hook.sh live-checkout-guard --since 7) and sample the blocked set.
+
+**Shipped before this entry was closed (store went stale): `53fe3ba`, release 0.3.202, 2026-11-21 — `plugins/seyag/hooks/worktree-branch-guard.sh` (sibling guard, own toggle `SYG_DISABLE=worktree-branch`) + `hooks/lib/worktree_branch.py`/`worktree_add.py`. Verified against the spec by Seyag B, 2026-11-27 UTC: knob read matches the cleaner's (`${SYG_WORKTREE_BRANCH_RE:-}`, same empty-means-`^worktree-agent-`, cleaner now at bin line 737); deny + Fix line renders the active pattern; invalid regex allows with an additionalContext warning; probe `hooks/worktree-branch-guard.probe.sh` covers all five required cases plus explicit/attached/clustered/-C/implied/detach/var-expansion variants. No code change needed; entry closed by the verifying session.**
 <!-- SECTION:DESCRIPTION:END -->
