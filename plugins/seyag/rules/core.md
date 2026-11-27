@@ -51,14 +51,14 @@ On the Anthropic lane she drives from her phone, often by voice (Remote Control)
 
 ### Fix what you touch, file what you find
 - Inside the change, fix missing tests, unclear names, stale comments and smells in the lines you edit. Beyond it, file a task in the project's tracking surface (backlog, board, TODO file, the report, or the skill named by settings env `SYG_TRACKING_SURFACE`); never silently do it or drop it.
-- A low or nit finding from a PR review is the filing exception: it is not filed as a task — it rides the next PR in the same area, carried until then as one line on the session's handoff surface (role-file Next or the project status file) naming the source PR, and listed in the fixing PR's body. Still filed as before: medium and above, anything user-visible, security- or data-touching, anything that cannot fit a same-area PR, and flaky-probe or incident findings (those are not review lows).
-- Before pushing a PR, check the tracking surface for low-priority items in the same files or area and fold the easy ones in under that PR's own review and gate, closing each citing the PR. Never widen the PR into unrelated areas to carry one, and never let the fold delay a high-priority item.
+- A low or nit finding from a PR review is the filing exception: it is not filed — it rides the next PR in the same area, carried as one line on the session's handoff surface (role-file Next or the project status file) naming the source PR and its area, and listed in the fixing PR's body. Still filed as before: medium and above, user-visible, security- or data-touching, cannot-fit-same-area, and flaky-probe or incident findings (those are not review lows).
+- Before pushing a PR, check the tracking surface and the handoff surface's carried lows for items in the same files or area and fold the easy ones in under that PR's own review and gate, closing each citing the PR. Never widen the PR into unrelated areas, and never let the fold delay a high-priority item.
 - Never dismiss a problem as "pre-existing". That explains how it got there; it is not a reason to ignore it.
-- A deliberate design choice you decline to refactor (current code is fine, the extraction would be over-abstraction) needs no entry. A known defect you are not fixing now always needs one (review lows except: carried, see above). When unsure which it is, file it.
+- A deliberate design choice you decline to refactor (current code is fine, the extraction would be over-abstraction) needs no entry. A known defect you are not fixing now always needs one (except review lows, carried per above). When unsure which it is, file it.
 
 ### Everything not done gets a disposition when you decide
 - "Not doing this" has four honest states: **shipped**, **obsolete** (checked against the code, not assumed), **ruled out** (reason recorded where the next session will look), or **deferred** (with a trigger that promotes it).
-- Write the disposition to the tracking surface in the same session as the decision; a promise that only exists in chat doesn't survive compaction.
+- Write the disposition to the tracking surface in the same session as the decision (review lows: carried on the handoff surface, see above); a promise that only exists in chat doesn't survive compaction.
 - A code comment like `TODO: later` doesn't count as tracking.
 - Rule items out on merit, never on cost; "it would take a while" is a reason to schedule, not to drop. Anything with user-visible, taste, security or data impact is her call. If you aren't sure something is a nit, it isn't one.
 - Nothing leaves a backlog because of its age. Stale items get a conscious decision, not deletion.
