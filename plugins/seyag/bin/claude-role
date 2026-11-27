@@ -41,6 +41,8 @@
 #                          # session start (UTF-16 units), and past 10000 move the oldest stamped
 #                          # Handoff notes to archive/<stem>-handoff-archive-<YYYY-MM-DD>.md beside the role
 #                          # file (refusing --handoff FILE or when no notes are left).
+#                          # A stamped note is a bullet opening with a time stamp: bold **HH:MM:** or
+#                          # **MM-DD HH:MM:**, or the same without the ** and/or the MM-DD date.
 #
 # Role files are $SYG_ROLE_DIR/<folder>.md (default ${XDG_DATA_HOME:-~/.local/share}/seyag/roles),
 # named after the project folder (the main checkout's name, so agent worktrees find it too).
@@ -804,7 +806,7 @@ text = "\n".join(lines)
 old_size = rendered_u16(raw)
 new_size = rendered_u16(text)
 guarded = bool({"status", "holds"} & values.keys() or handoff_path or has_need or has_note or has_next)
-NOTE_RE = re.compile(r"^- \*\*\d{2}-\d{2} \d{2}:\d{2}:\*\*")
+NOTE_RE = re.compile(r"^- (?:\*\*)?(?:\d{2}-\d{2} )?\d{2}:\d{2}:(?:\*\*)?")   # bold/plain, dated or bare time; document order is age order (the tool appends) — never sort by the stamp
 arch_write = None
 if guarded and new_size > cap and new_size > old_size + stamp_growth and not handoff_path:
     heads, unfenced, _ = body_scan()
@@ -887,7 +889,7 @@ if text != raw:
     os.replace(tmp, path)
 for msg in out_msgs:
     print(msg)
-print(f"{os.path.basename(path)}: {new_size}/{cap} chars at session start")
+print(f"{os.path.basename(path)}: {new_size}/{cap} chars at session start (rendered, not wc bytes)")
 PYEOF
         exit 0 ;;
     "") ;;
