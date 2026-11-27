@@ -5,7 +5,7 @@ All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY
 ## 0.3.234 - 2026-11-26
 
 ### Improvements
-- **rules:** core.md encodes the lows-carry disposition: a low or nit PR-review finding rides the next PR in the same area instead of being filed as a task — carried on the session's handoff surface (role-file Next or the project status file) naming the source PR and listed in the fixing PR's body; medium-and-above, user-visible/security/data, cannot-fit-same-area and flaky-probe/incident findings still file as before, and before each push a PR folds in easy low tasks from the same files or area under its own review and gate. Paid for by tightening the fresh-context-review line; the Autonomy dimension list now reads "spend", matching the formal-channel bullet. core.md grows 764 bytes net. (TASK-259) (#452)
+- **rules:** core.md encodes the lows-carry disposition: a low or nit PR-review finding rides the next PR in the same area instead of being filed as a task — carried on the session's handoff surface (role-file Next or the project status file) naming the source PR and listed in the fixing PR's body; medium-and-above, user-visible/security/data, cannot-fit-same-area and flaky-probe/incident findings still file as before, and before each push a PR folds in easy low tasks from the same files or area under its own review and gate. Partly offset by tightening the fresh-context-review line; the Autonomy dimension list now reads "spend", matching the formal-channel bullet. core.md grows 825 bytes net. (TASK-259) (#452)
 
 ## 0.3.233 - 2026-11-26
 
