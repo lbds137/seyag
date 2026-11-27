@@ -17,7 +17,7 @@ On the Anthropic lane she drives from her phone, often by voice (Remote Control)
 - A check-in names the ONE decision of hers you need and gives a recommended answer with its reason. "What do you want to do?" and option menus without a pick push your job onto her.
 
 ### Autonomy is the default for engineering calls
-- A choice between technical options that has no product, user-visible, spending, data, taste or security dimension is yours, recommendation in hand or not: decide, proceed, report the reasoning and evidence. Never ask her to ratify it, by question or plan mode; unsure, take an optional council or advisor opinion first.
+- A choice between technical options that has no product, user-visible, spend, data, taste or security dimension is yours, recommendation in hand or not: decide, proceed, report the reasoning and evidence. Never ask her to ratify it, by question or plan mode; unsure, take an optional council or advisor opinion first.
 
 ### Her directives are session state
 - Once she has made a call (a gate, a scope decision, a design choice), don't re-propose the alternative later. Genuinely new information can justify raising the tradeoff once, framed as new information. Convenience or effort never does.
@@ -40,7 +40,7 @@ On the Anthropic lane she drives from her phone, often by voice (Remote Control)
 
 ### Subagents by default
 - Reading ~4+ files just for a conclusion goes to an `Explore` agent on a cheap `model`; your own diff reads and premise checks stay inline.
-- New or changed logic (code, rules, hooks, scripts) gets a fresh-context review agent before push, from another model family where one is reachable; same-family is a labelled fallback. A typo or a one-line fix with a green gate doesn't.
+- New or changed logic (code, rules, hooks, scripts) gets a fresh-context review agent before push — another model family where one is reachable, same-family a labelled fallback; a typo or one-line fix with a green gate doesn't.
 - Pass `model` on every non-fork Agent call: named agents default to their definition's model (alias-resolved on the active lane), others to yours. Role split and budgets: memory "Model roles + usage posture".
 - Her `/model` picks the driver. When the next unit's class (big-picture vs drain) mismatches it or the week crosses its wind-down threshold (`claude-usage --posture`), run `driver-choice` at the next clean boundary and recommend; never switch yourself.
 - Where a project has adopted the `delegation` skill, implementation over ~5 lines goes through it; elsewhere, dispatch when the spec costs less than the edit.
@@ -51,6 +51,8 @@ On the Anthropic lane she drives from her phone, often by voice (Remote Control)
 
 ### Fix what you touch, file what you find
 - Inside the change, fix missing tests, unclear names, stale comments and smells in the lines you edit. Beyond it, file a task in the project's tracking surface (backlog, board, TODO file, the report, or the skill named by settings env `SYG_TRACKING_SURFACE`); never silently do it or drop it.
+- A low or nit finding from a PR review is the filing exception: it is not filed as a task — it rides the next PR in the same area, carried until then as one line on the session's handoff surface (role-file Next or the project status file) naming the source PR, and listed in that PR's body. Still filed as before: medium and above, anything user-visible, security- or data-touching, anything that cannot fit a same-area PR, and flaky-probe or incident findings (those are not review lows).
+- Before pushing a PR, check the tracking surface for low-priority items in the same files or area and fold the easy ones in under that PR's own review and gate, closing each citing the PR. Never widen the PR into unrelated areas to carry one, and never let the fold delay a high.
 - Never dismiss a problem as "pre-existing". That explains how it got there; it is not a reason to ignore it.
 - A deliberate design choice you decline to refactor (current code is fine, the extraction would be over-abstraction) needs no entry. A known defect you are not fixing now always needs one. When unsure which it is, file it.
 
