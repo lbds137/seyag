@@ -804,7 +804,7 @@ text = "\n".join(lines)
 old_size = rendered_u16(raw)
 new_size = rendered_u16(text)
 guarded = bool({"status", "holds"} & values.keys() or handoff_path or has_need or has_note or has_next)
-NOTE_RE = re.compile(r"^- \*\*\d{2}-\d{2} \d{2}:\d{2}:\*\*")
+NOTE_RE = re.compile(r"^- (?:\*\*)?(?:\d{2}-\d{2} )?\d{2}:\d{2}:(?:\*\*)?")   # bold/plain, dated or bare time
 arch_write = None
 if guarded and new_size > cap and new_size > old_size + stamp_growth and not handoff_path:
     heads, unfenced, _ = body_scan()
@@ -887,7 +887,7 @@ if text != raw:
     os.replace(tmp, path)
 for msg in out_msgs:
     print(msg)
-print(f"{os.path.basename(path)}: {new_size}/{cap} chars at session start")
+print(f"{os.path.basename(path)}: {new_size}/{cap} chars at session start (rendered, not wc bytes)")
 PYEOF
         exit 0 ;;
     "") ;;

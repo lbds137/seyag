@@ -314,10 +314,10 @@ out=$("$CR" --set --handoff "$home/h.md" --file "$roles/kappa.md")
 grep -q 'old line' "$roles/kappa.md" && bad "--handoff kept the old section" || ok "--handoff drops the old section"
 [ "$(sed -n '/^## Charter/,$p' "$roles/kappa.md")" = "$(printf '## Charter\nkeep me\n\n## Handoff (new)\n- new line\n\n## Next\n1. keep me too')" ] \
     && ok "--handoff replaces only its section" || bad "--handoff body: $(sed -n '/^## Charter/,$p' "$roles/kappa.md")"
-[[ "$out" =~ ^kappa\.md:\ [0-9]+/10000\ chars\ at\ session\ start$ ]] && ok "--set prints chars/10000 at session start" || bad "--set size line: $out"
+[[ "$out" =~ ^kappa\.md:\ [0-9]+/10000\ chars\ at\ session\ start\ \(rendered,\ not\ wc\ bytes\)$ ]] && ok "--set prints chars/10000 at session start" || bad "--set size line: $out"
 hook_u16=$(echo '{"source":"startup","cwd":"'"$home"'/Projects/kappa"}' | "$CR" \
     | python3 -c 'import sys; print(len(sys.stdin.buffer.read().decode("utf-8").encode("utf-16-le")) // 2)')
-[ "$out" = "kappa.md: $hook_u16/10000 chars at session start" ] \
+[ "$out" = "kappa.md: $hook_u16/10000 chars at session start (rendered, not wc bytes)" ] \
     && ok "size line N equals UTF-16 length of actual hook stdout" || bad "size $out vs hook $hook_u16"
 printf 'no heading\n' > "$home/bad.md"
 "$CR" --set --handoff "$home/bad.md" --file "$roles/kappa.md" 2>/dev/null && bad "--handoff took a file without a Handoff heading" || ok "--handoff needs its heading"
@@ -465,7 +465,7 @@ grep -qF 'EMDASH_MARKER' <<< "$out" && ! grep -qF 'replaces hook output' <<< "$o
 sz_line=$("$CR" --set status="ok" --file "$roles/emdash.md")
 hook_u16=$(echo '{"source":"startup","cwd":"'"$home"'/Projects/emdash"}' | "$CR" \
     | python3 -c 'import sys; print(len(sys.stdin.buffer.read().decode("utf-8").encode("utf-16-le")) // 2)')
-[ "$sz_line" = "emdash.md: $hook_u16/10000 chars at session start" ] \
+[ "$sz_line" = "emdash.md: $hook_u16/10000 chars at session start (rendered, not wc bytes)" ] \
   && ok "emdash size line matches hook stdout UTF-16 units" || bad "emdash size '$sz_line' vs $hook_u16"
 
 printf -- '---\nrole: "Emoji role"\nstatus: "base"\n---\n\n## Charter\nhi\n' > "$roles/emoji.md"
@@ -755,7 +755,7 @@ sz_out=$("$CR" --size --file "$roles/size.md"); rc=$?
 sz_n=${BASH_REMATCH[1]:-0}; sz_h=${BASH_REMATCH[2]:-0}
 [ "$(cat "$roles/size.md")" = "$before_sz" ] && ok "--size does not modify the role file" || bad "--size modified size.md"
 set_out=$("$CR" --set status="steady" --file "$roles/size.md")
-[ "$set_out" = "size.md: $sz_n/10000 chars at session start" ] && [ "$sz_h" = "$((10000 - sz_n))" ] \
+[ "$set_out" = "size.md: $sz_n/10000 chars at session start (rendered, not wc bytes)" ] && [ "$sz_h" = "$((10000 - sz_n))" ] \
   && ok "--size N and headroom match no-op --set size line" || bad "--size N=$sz_n H=$sz_h vs --set '$set_out'"
 "$CR" --size --file "$roles/nonexistent.md" 2>/dev/null; rc=$?
 [ $rc = 1 ] && ok "--size exits 1 when there is no role file" || bad "--size missing file rc=$rc"
@@ -836,7 +836,7 @@ grep -q '^# arch Handoff archive$' "$arch_file" \
   && ! grep -q 'Curated non-stamped' "$arch_file" \
   && ok "archive file holds moved notes verbatim under the Moved heading" || bad "archive content: $(cat "$arch_file")"
 nl=$'\n'
-[[ "$out" =~ ^archived\ 2\ oldest\ Handoff\ notes\ to\ archive/arch-handoff-archive-${today}\.md${nl}arch\.md:\ ([0-9]+)/10000\ chars\ at\ session\ start$ ]] \
+[[ "$out" =~ ^archived\ 2\ oldest\ Handoff\ notes\ to\ archive/arch-handoff-archive-${today}\.md${nl}arch\.md:\ ([0-9]+)/10000\ chars\ at\ session\ start\ \(rendered,\ not\ wc\ bytes\)$ ]] \
   && [ "${BASH_REMATCH[1]}" -le 10000 ] \
   && ok "auto-archive prints 'archived K ...' before size line with final size <= 10000" || bad "auto-archive stdout: $out"
 
@@ -868,6 +868,121 @@ err=$("$CR" --note "$(printf '%0400d' 0)" --file "$roles/nonotes.md" 2>&1); rc=$
   && ok "no-stamped-notes fixture over cap is refused with file and archive untouched" || bad "no-stamped-notes: rc=$rc $err"
 rm "$roles/nonotes.md"
 
+# Mixed-stamp Handoffs: the archiver must see all four stamp forms (bold/plain, with or without the
+# MM-DD date) and roll the oldest note in document order, not just the bold dated ones (TASK-405).
+# Pad a fixture's Charter so it sits just under the 10000 cap before the write: the rendered head
+# grows over time, so the fixture is measured, never hard-coded.
+pad_under_cap() {
+    local f=$1 target=${2:-9990} sz cur pad
+    sz=$("$CR" --size --file "$f"); cur=${sz#*: }; cur=${cur%/10000*}
+    pad=$((target - cur))
+    if [ "$pad" -lt 0 ]; then bad "fixture $(basename "$f") renders at $cur, already past $target"; return 1; fi
+    if [ "$pad" -gt 0 ]; then
+        python3 - "$f" "$pad" <<'PY'
+import sys
+p, k = sys.argv[1], int(sys.argv[2])
+s = open(p).read().replace("## Charter\n", "## Charter\n" + ("x" * k), 1)
+open(p, "w").write(s)
+PY
+    fi
+}
+# The regression itself: an OLD PLAIN dated note followed by a NEWER BOLD dated note used to roll
+# only the bold one. The first note in document order — here the plain one — must move.
+mmdd_stamp=$(date '+%m-%d %H:%M')
+python3 - "$roles/mixed.md" "$mmdd_stamp" <<'PY'
+import sys
+path, stamp = sys.argv[1], sys.argv[2]
+open(path, "w").write(
+    '---\nrole: "Mixed role"\nstatus: "busy"\n---\n\n'
+    f'## Charter\n{"x" * 6500}\n\n'
+    '## Handoff\n'
+    f'- 11-20 08:00: old plain note {"a" * 400}\n'
+    '  indented continuation, archived verbatim\n'
+    f'- **{stamp}:** newer bold note {"b" * 400}\n\n'
+    '## Next\n- keep going\n'
+)
+PY
+pad_under_cap "$roles/mixed.md"
+mixed_arch="$roles/archive/mixed-handoff-archive-$today.md"
+out=$("$CR" --note "pushes mixed over the cap $(printf '%0250d' 0)" --file "$roles/mixed.md"); rc=$?
+[ $rc = 0 ] && grep -q '^archived 1 oldest Handoff notes' <<< "$out" \
+  && ! grep -q 'old plain note' "$roles/mixed.md" \
+  && grep -q 'newer bold note' "$roles/mixed.md" \
+  && grep -q '^- 11-20 08:00: old plain note ' "$mixed_arch" \
+  && grep -q '^  indented continuation, archived verbatim$' "$mixed_arch" \
+  && ! grep -q 'newer bold note' "$mixed_arch" \
+  && ok "mixed stamps: the oldest (plain) note is archived, the newer bold note stays" \
+  || bad "mixed stamps: rc=$rc out=$out arch=$(cat "$mixed_arch" 2>/dev/null)"
+[[ "$out" =~ ^archived\ 1\ oldest\ Handoff\ notes\ to\ archive/mixed-handoff-archive-${today}\.md${nl}mixed\.md:\ [0-9]+/10000\ chars\ at\ session\ start\ \(rendered,\ not\ wc\ bytes\)$ ]] \
+  && ok "mixed-stamp archive stdout matches the updated size-line shape" || bad "mixed stdout: $out"
+rm -f "$roles/mixed.md" "$mixed_arch"
+# A file whose notes are ALL plain dated still rolls its oldest, with no cap refusal.
+python3 - "$roles/plain.md" <<'PY'
+import sys
+open(sys.argv[1], "w").write(
+    '---\nrole: "Plain role"\nstatus: "busy"\n---\n\n'
+    f'## Charter\n{"p" * 6500}\n\n'
+    '## Handoff\n'
+    f'- 11-18 07:30: plain oldest {"c" * 400}\n'
+    f'- 11-19 09:45: plain newer {"d" * 400}\n\n'
+    '## Next\n- step\n'
+)
+PY
+pad_under_cap "$roles/plain.md"
+plain_arch="$roles/archive/plain-handoff-archive-$today.md"
+out=$("$CR" --note "pushes plain over the cap $(printf '%0250d' 0)" --file "$roles/plain.md"); rc=$?
+[ $rc = 0 ] && grep -q '^archived 1 oldest Handoff notes' <<< "$out" \
+  && grep -q '^- 11-18 07:30: plain oldest ' "$plain_arch" \
+  && ! grep -q 'plain oldest' "$roles/plain.md" \
+  && grep -q 'plain newer' "$roles/plain.md" \
+  && ok "plain-only notes roll the oldest without a cap refusal" || bad "plain-only: rc=$rc out=$out"
+rm -f "$roles/plain.md" "$plain_arch"
+# Bare-time notes (no MM-DD date), plain and bold, are candidates too: the first one moves.
+python3 - "$roles/bare.md" <<'PY'
+import sys
+open(sys.argv[1], "w").write(
+    '---\nrole: "Bare role"\nstatus: "busy"\n---\n\n'
+    f'## Charter\n{"q" * 6500}\n\n'
+    '## Handoff\n'
+    f'- 09:15: bare plain note {"e" * 400}\n'
+    f'- **10:30:** bare bold note {"f" * 400}\n\n'
+    '## Next\n- step\n'
+)
+PY
+pad_under_cap "$roles/bare.md"
+bare_arch="$roles/archive/bare-handoff-archive-$today.md"
+out=$("$CR" --note "pushes bare over the cap $(printf '%0250d' 0)" --file "$roles/bare.md"); rc=$?
+[ $rc = 0 ] && grep -q '^archived 1 oldest Handoff notes' <<< "$out" \
+  && grep -q '^- 09:15: bare plain note ' "$bare_arch" \
+  && ! grep -q 'bare plain note' "$roles/bare.md" \
+  && grep -q '^- \*\*10:30:\*\* bare bold note' "$roles/bare.md" \
+  && ok "bare-time notes (plain and bold) are archive candidates" || bad "bare-time: rc=$rc out=$out"
+rm -f "$roles/bare.md" "$bare_arch"
+# Non-stamp bullets in the Handoff — a bold word, a "Fix: ..." line — are never rolled.
+python3 - "$roles/curated.md" <<'PY'
+import sys
+open(sys.argv[1], "w").write(
+    '---\nrole: "Curated role"\nstatus: "busy"\n---\n\n'
+    f'## Charter\n{"r" * 6500}\n\n'
+    '## Handoff\n'
+    '- **State**\n'
+    '- Fix: parse things later\n'
+    f'- 11-21 12:00: the only stamped note {"g" * 400}\n\n'
+    '## Next\n- step\n'
+)
+PY
+pad_under_cap "$roles/curated.md"
+curated_arch="$roles/archive/curated-handoff-archive-$today.md"
+out=$("$CR" --note "pushes curated over the cap $(printf '%0250d' 0)" --file "$roles/curated.md"); rc=$?
+[ $rc = 0 ] && grep -q '^archived 1 oldest Handoff notes' <<< "$out" \
+  && grep -q '^- \*\*State\*\*$' "$roles/curated.md" \
+  && grep -q '^- Fix: parse things later$' "$roles/curated.md" \
+  && ! grep -q 'State' "$curated_arch" && ! grep -q 'parse things' "$curated_arch" \
+  && grep -q 'the only stamped note' "$curated_arch" \
+  && ok "non-stamp bullets stay in the role file; only the stamped note moves" \
+  || bad "non-stamp: rc=$rc out=$out arch=$(cat "$curated_arch" 2>/dev/null)"
+rm -f "$roles/curated.md" "$curated_arch"
+
 # A --next that pushes the file over the cap archives too; a note lookalike inside a code fence
 # in the Handoff is never moved; `## Next steps` is not the Next section.
 python3 - "$roles/fence.md" <<'PY'
@@ -875,7 +990,7 @@ import sys
 open(sys.argv[1], "w").write(
     '---\nrole: "Fence role"\nstatus: "busy"\n---\n\n'
     f'## Charter\n{"x" * 7000}\n\n'
-    '## Handoff\n```\n- **10-30 08:00:** fenced lookalike stays\n```\n'
+    '## Handoff\n```\n- **10-30 08:00:** fenced lookalike stays\n- 10-15 12:00: fenced plain lookalike stays\n```\n'
     f'- **11-01 09:00:** real old note {"r" * 300}\n\n'
     '## Next steps\n- not the Next section\n'
 )
@@ -892,8 +1007,10 @@ fence_arch="$roles/archive/fence-handoff-archive-$today.md"
 out=$("$CR" --next "pushes over the cap $(printf '%0150d' 0)" --file "$roles/fence.md"); rc=$?
 [ $rc = 0 ] && grep -q '^archived 1 oldest Handoff notes' <<< "$out" \
   && grep -q 'fenced lookalike stays' "$roles/fence.md" && ! grep -q 'fenced lookalike' "$fence_arch" \
+  && grep -q '^- 10-15 12:00: fenced plain lookalike stays$' "$roles/fence.md" \
+  && ! grep -q 'fenced plain lookalike' "$fence_arch" \
   && grep -q 'real old note' "$fence_arch" && ! grep -q 'real old note' "$roles/fence.md" \
-  && ok "--next over the cap archives the oldest real note and never a fenced lookalike" || bad "--next archive/fence: rc=$rc $out"
+  && ok "--next over the cap archives the oldest real note and never a fenced lookalike (bold or plain)" || bad "--next archive/fence: rc=$rc $out"
 steps_body=$(awk '/^## Next steps$/{s=1;next} /^## /{s=0} s' "$roles/fence.md")
 grep -q 'pushes over the cap' <<< "$steps_body" \
   && bad "--next appended into '## Next steps'" || ok "--next ignores '## Next steps' and makes its own ## Next"
@@ -1104,7 +1221,7 @@ latin_size=$(SYG_ROLE_PREAMBLE_FILE="$home/tpl-latin" "$CR" --size --file "$role
   && ok "non-UTF-8 template: --size exits 0 and equals the hook's own measure ($latin_hook)" || bad "latin --size: rc=$rc '$latin_size' vs hook $latin_hook"
 latin_set=$(SYG_ROLE_PREAMBLE_FILE="$home/tpl-latin" "$CR" --set status=x --file "$roles/latin.md" 2>&1); rc=$?
 latin_after=$(echo '{"source":"startup","cwd":"'"$home"'/Projects/latin"}' | SYG_ROLE_PREAMBLE_FILE="$home/tpl-latin" "$CR" | python3 -c 'import sys; print(len(sys.stdin.buffer.read().decode("utf-8", "replace").encode("utf-16-le")) // 2)')
-[ $rc = 0 ] && [ "$latin_set" = "latin.md: $latin_after/10000 chars at session start" ] && grep -q 'status: "x"' "$roles/latin.md" \
+[ $rc = 0 ] && [ "$latin_set" = "latin.md: $latin_after/10000 chars at session start (rendered, not wc bytes)" ] && grep -q 'status: "x"' "$roles/latin.md" \
   && ok "non-UTF-8 template: --set succeeds and prints the hook's count for the rewritten file" || bad "latin --set: rc=$rc $latin_set"
 rm "$roles/latin.md"
 
@@ -1197,7 +1314,7 @@ shadow="$home/shadow"; mkdir -p "$shadow"
 for m in json re datetime; do printf 'open("%s/marker-%s", "a").close()\n' "$shadow" "$m" > "$shadow/$m.py"; done
 printf -- '---\nrole: "Iso role"\nstatus: "idle"\n---\n\n## Next\n- overdue (due 2020-01-01)\n' > "$roles/iso.md"
 iso_set=$(cd "$shadow" && "$CR" --set status=x --file "$roles/iso.md" 2>&1); rc=$?
-[ $rc = 0 ] && [[ "$iso_set" =~ ^iso\.md:\ [0-9]+/10000\ chars\ at\ session\ start$ ]] && grep -q 'status: "x"' "$roles/iso.md" \
+[ $rc = 0 ] && [[ "$iso_set" =~ ^iso\.md:\ [0-9]+/10000\ chars\ at\ session\ start\ \(rendered,\ not\ wc\ bytes\)$ ]] && grep -q 'status: "x"' "$roles/iso.md" \
   && ok "isolation: --set from a cwd with json.py/re.py/datetime.py works" || bad "isolation --set: rc=$rc $iso_set"
 iso_size=$(cd "$shadow" && "$CR" --size --file "$roles/iso.md" 2>&1); rc=$?
 [ $rc = 0 ] && [[ "$iso_size" =~ ^iso\.md:\ [0-9]+/10000\ chars ]] && ok "isolation: --size from the shadowed cwd works" || bad "isolation --size: rc=$rc $iso_size"
