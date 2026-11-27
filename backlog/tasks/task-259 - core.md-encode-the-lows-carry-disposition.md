@@ -3,7 +3,7 @@ id: TASK-259
 title: 'core.md: encode the lows-carry disposition'
 status: Done
 assignee:
-  - Seyag
+  - Seyag A
 created_date: '2026-11-26T22:37:00Z'
 updated_date: '2026-11-27T00:23:00Z'
 labels:
