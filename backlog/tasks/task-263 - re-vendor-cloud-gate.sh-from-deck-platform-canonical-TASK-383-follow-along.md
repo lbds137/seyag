@@ -1,9 +1,11 @@
 ---
 id: TASK-263
 title: re-vendor cloud-gate.sh from deck-platform canonical (TASK-383 follow-along)
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - Seyag
 created_date: '2026-11-27T15:52:00Z'
+updated_date: '2026-11-27T16:40:00Z'
 labels:
   - hooks
   - lane-a
