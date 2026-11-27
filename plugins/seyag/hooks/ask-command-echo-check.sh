@@ -29,7 +29,13 @@
 # The command match is loose: a fenced line that CONTAINS the key satisfies it,
 # and so does a fenced line of at least 6 chars that is a whole-word prefix of
 # the key (the ask's unbackticked line can run on into prose), so a shorter echo
-# can pass; accepted under fail-open.
+# can pass; accepted under fail-open. With a blank or absent envelope field
+# (the fallback path), the judged closing is the last transcript text after the
+# last ask; when that search finds no text — for instance when the closing was
+# recorded only as signed-empty thinking blocks, an Anthropic-lane shape
+# (TASK-67) — the fenced list comes out empty and the gate
+# blocks once. Accepted: fail-closed on an unreadable closing, bounded by the
+# block-once guard; the retry is not guaranteed readable text.
 #
 # Enforcement geometry mirrors blocking-question-channel-check.sh: a tail read of
 # the transcript, a strict turn boundary (no genuine user entry found → silent),

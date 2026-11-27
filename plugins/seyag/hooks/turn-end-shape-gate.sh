@@ -22,7 +22,16 @@
 # indexes. Block types observed: `thinking`, `text`, `tool_use`. Reading "the
 # last block of the last assistant entry" is therefore correct under BOTH the
 # split shape and a multi-block shape, which is why it is written that way
-# rather than as "the last entry's only block".
+# rather than as "the last entry's only block". One more recorded ENTRY shape
+# (TASK-67): on Anthropic lanes a response's thinking
+# blocks can record with an empty `thinking` field and only a `signature`, one
+# entry per block. Such an entry carries neither text nor tool_use and can
+# coexist with a separate text entry for the same response — prose is not lost
+# to the shape (the payload's `last_assistant_message` carried the probe's
+# text verbatim). A tail ending on such entries therefore passes (no tool_use),
+# and `text_of_tool_ending_message` then finds no text, so `lam_is_own_message`
+# returns 1; with a non-blank payload field the caller passes the stop at the
+# LAM-not-own branch (fail-open, like every other external doubt here).
 #
 # Primary signal: the Stop payload's `last_assistant_message` (the turn's final
 # assistant text, absent when empty). The transcript can lag the payload — the
