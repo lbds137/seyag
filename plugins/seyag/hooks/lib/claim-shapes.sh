@@ -27,6 +27,6 @@ CLAIM_SHAPE_CORE_REGEX='\balways\b|\bnever\b|\bcannot\b|\bguaranteed\b|\bonly (p
 
 CLAIM_CLOSING_REF_REGEX='\b(close[sd]?|fix(es|ed)?|resolve[sd]?):? (TASK|doc)-[0-9]+'
 
-CLAIM_SHAPE_PR_BODY_EXTRA_REGEX='\bevery (call ?sites?|callers?|files?|modules?|tests?|consumers?|paths?)\b|'"$CLAIM_CLOSING_REF_REGEX"'|\b(verified|confirmed|measured)\b'
+CLAIM_SHAPE_PR_BODY_EXTRA_REGEX='\bevery (call ?sites?|callers?|files?|modules?|tests?|consumers?|paths?)\b|'"$CLAIM_CLOSING_REF_REGEX"'|\b(verified|confirmed|measured)\b|\b[0-9]+(\.[0-9]+)? ?(ms|seconds?|secs?|s|minutes?|mins?|hours?|h|days?|kib|mib|gib|bytes?|kb|mb|gb|b|cases?|probes?|lines?|hits?|rows?|sessions?|items?|tokens?|runs?|transcripts?)([^0-9A-Za-z]|$)|\b[0-9]+(\.[0-9]+)? ?(x|×)([^0-9A-Za-z_]|$)|\b[0-9]+(\.[0-9]+)? ?%'
 
-CLAIM_CITE_EXEMPT_REGEX='`[^`]*[/:][^`]*`|`(pnpm|git|grep|npx|gh|rg|node|npm|yarn|curl|docker|bash|sh|make|python[0-9.]*) [^`]*`|unverified|not verified|not runtime-confirmed|code-read|hypothesis'
+CLAIM_CITE_EXEMPT_REGEX='`[^`]*[/:][^`]*`|`(pnpm|git|grep|npx|gh|rg|node|npm|yarn|curl|docker|bash|sh|make|python[0-9.]*) [^`]*`|unverified|not verified|not runtime-confirmed|code-read|hypothesis|\bnot re-measured\b|\bestimated\b'
