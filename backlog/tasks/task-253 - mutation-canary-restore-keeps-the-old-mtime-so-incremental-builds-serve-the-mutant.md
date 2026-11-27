@@ -3,10 +3,11 @@ id: TASK-253
 title: >-
   mutation-canary: --patch restore keeps the old mtime, so incremental builds
   serve the mutant
-status: To Do
-assignee: []
+status: Done
+assignee:
+  - Seyag B
 created_date: '2026-11-26T15:20:00Z'
-updated_date: '2026-11-27T15:19:00Z'
+updated_date: '2026-11-27T22:24:00Z'
 labels:
   - bin
   - lane-b
@@ -27,4 +28,6 @@ Fix shape: after a successful restore, set each restored file's mtime to now, so
 Owner: lane B (bin/**). The consumer has a workaround (touch after restore), so this is not urgent.
 
 Update 2026-11-27 (the machine-management session re-reported the same defect, apparently without connecting it to this entry): second consumer occurrence — 3 phantom test failures for ~80 min before the cause was traced (mutated emit left in the build output with a newer mtime than the restored source). Requested fix menu: rebuild, or delete the affected emit / tsbuildinfo, after restore — or at minimum warn that build outputs may be stale. Priority raised medium -> high: the touch workaround did not prevent this burn, and the fix is small.
+
+Done (2026-11-27, #464, merge aae241c6): `restore_targets` touches each restored target to now after the byte+mode verification, in both the verified branch and the already-restored early-continue branch; a failed touch keeps the journal and exits 3. Runtime repro confirmed the mtime mechanism before the fix; class sweep found one member (the in-tree restore); probe cases 42 (make fixture, red-first) and 43 (stale-mtime restore) pin it; full suite 133/133 (deck-job b253-gate2) and shellcheck clean. Review PASS (claude-review, 4 lows): gate the early-continue touch on mutation-applied (the journal goes active before the mutation, so a never-mutated run also touches), a `command -v make` guard in the probe, factoring the duplicated touch block, a stray blank line — carried on lane B's handoff surface; the PR body's never-mutated-path claim corrected by PR-body edit.
 <!-- SECTION:DESCRIPTION:END -->
