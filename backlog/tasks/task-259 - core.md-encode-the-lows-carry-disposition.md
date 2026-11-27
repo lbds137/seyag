@@ -24,3 +24,9 @@ Owner ruling 2026-11-26: a low/nit PR-review finding is not filed as a task - it
 <!-- SECTION:PLAN:BEGIN -->
 One PR: two core.md bullets in 'Fix what you touch, file what you find' + the two folds + version bump 0.3.234 + CHANGELOG section; agy gemini worker; cross-family fresh-context review; bash tests/run-probes.sh -j 4
 <!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Done in two halves, both merged 2026-11-27. Seyag A's core.md half: PR #452 (merge commit e827009, release 0.3.234) — the lows-carry exception and pre-PR fold bullets in 'Fix what you touch, file what you find'; the ride-along folds verified landed: 'spend' at plugins/seyag/rules/core.md:10 and :20, the tightened fresh-context-review line at :43. Seyag B's skill half: PR #454 (merge commit cefc74d) — the lows-carry disposition in plugins/seyag/skills/review-response/SKILL.md, the pre-PR fold in plugins/seyag/skills/pr-monitoring/SKILL.md, five-section round report; its PASS round carried five wording lows, riding the next same-area PR per this task's own ruling. Memory-deletion proposal (feedback_review_lows_ride_next_pr) was made 2026-11-26 per this entry; delete on the owner's yes.
+<!-- SECTION:NOTES:END -->
