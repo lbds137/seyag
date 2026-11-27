@@ -5,8 +5,8 @@ All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY
 ## 0.3.236 - 2026-11-27
 
 ### Bug Fixes
-- **claude-role:** the auto-archiver recognizes all four Handoff note-stamp forms in use (bold/plain, with or without the MM-DD date) and rolls the true oldest note — a file whose only bold-dated note was the newest had that note archived while older plain-stamped notes stayed; selection stays document order (#459)
-- **claude-role:** the per-write size line says its figure is rendered (head + due-now block + body, UTF-16 units), not wc bytes (#459)
+- **claude-role:** the auto-archiver recognizes all four Handoff note-stamp forms in use (bold/plain, with or without the MM-DD date) and rolls the true oldest note — a file whose only bold-dated note was the newest had that note archived while older plain-stamped notes stayed; selection stays document order (#460)
+- **claude-role:** the per-write size line says its figure is rendered (head + due-now block + body, UTF-16 units), not wc bytes (#460)
 
 ## 0.3.235 - 2026-11-27
 
