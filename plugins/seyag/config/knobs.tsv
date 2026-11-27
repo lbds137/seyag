@@ -113,6 +113,7 @@ SYG_DRIVER_CLONE_PROJECTS	user	session	`$HOME/Projects`	Directory holding the ba
 SYG_DRIVER_CLONE_ROLE_BIN	internal	misc	prose:the claude-role beside driver-clone	Test seam: the claude-role binary driver-clone calls to file the folder-trust bullet.	-
 SYG_DRIVER_CLONE_START_HINT	user	session	prose:start a session in the clone	Text driver-clone prints after "then:" as the last step once the lane exists.	-
 SYG_ENABLE	user	session	unset	Whitespace- or comma-separated components or hook names to enable on top of SYG_PROFILE.	-
+SYG_EPG_BATCH	internal	guards	unset	Internal env variable enabling NDJSON batch verdict-record mode in env-print-guard.sh for probes and tooling.	-
 SYG_EPG_CWD	internal	guards	unset	Internal env variable passing the payload cwd from env-print-guard.sh to its embedded Python helper.	-
 SYG_EPG_TRUSTED_VARS	user	guards	unset	Space-separated variable names trusted as $VAR prefixes on file-sink redirection targets in env-print-guard.	-
 SYG_EVENT_HOOK_TIMEOUT	user	session	45	Per-hook timeout in seconds when run.sh --event runs hooks in parallel.	-

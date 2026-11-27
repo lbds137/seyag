@@ -13,53 +13,175 @@ HOOK="$(cd "$(dirname "$0")" && pwd)/env-print-guard.sh"
 pass=0
 fail=0
 
+PROBE_TMP=$(mktemp -d)
+trap 'rm -rf "$PROBE_TMP" "${TROW:-}"' EXIT
+
 payload_for() {
   jq -nc --arg cmd "$1" '{tool_name:"Bash",cwd:"/tmp/proj",tool_input:{command:$cmd}}'
 }
 
-expect_allow() {
-  local label="$1" cmd="$2" out err rc tmp_err
-  tmp_err=$(mktemp)
-  out=$(payload_for "$cmd" | env -i PATH="$PATH" HOME="$HOME" PYTHONDONTWRITEBYTECODE=1 SYG_EPG_TRUSTED_VARS="${SYG_EPG_TRUSTED_VARS:-}" bash "$HOOK" 2>"$tmp_err")
-  rc=$?
-  err=$(cat "$tmp_err")
-  rm -f "$tmp_err"
-  if [ "$rc" -eq 0 ] && [ -z "$out" ] && [ -z "$err" ]; then
-    pass=$((pass + 1))
-  else
-    echo "FAIL [$label]: expected allow (rc=0, silent), got rc=$rc stdout=$out stderr=$err" >&2
-    fail=$((fail + 1))
+CASE_KIND=()
+CASE_LABEL=()
+CASE_INPUT=()
+CASE_REASON=()
+CURRENT_OVERLAY=""
+
+_build_ndjson() {
+  local in_bin="$1" ndjson="$2"
+  python3 -I -B - "$in_bin" "$ndjson" <<'PY'
+import json
+import sys
+
+raw = open(sys.argv[1], "rb").read().split(b"\0")
+pairs = raw[:-1]
+with open(sys.argv[2], "w", encoding="utf-8") as out:
+    for i in range(0, len(pairs), 2):
+        kind = pairs[i].decode("utf-8")
+        val = pairs[i + 1].decode("utf-8")
+        if kind == "deny_payload":
+            out.write(val + "\n")
+        else:
+            out.write(
+                json.dumps(
+                    {
+                        "tool_name": "Bash",
+                        "cwd": "/tmp/proj",
+                        "tool_input": {"command": val},
+                    },
+                    separators=(",", ":"),
+                )
+                + "\n"
+            )
+PY
+}
+
+_decode_records() {
+  local rec_file="$1" dec_file="$2"
+  python3 -I -B - "$rec_file" "$dec_file" <<'PY'
+import base64
+import sys
+
+lines = open(sys.argv[1], "rb").read().splitlines()
+with open(sys.argv[2], "wb") as out:
+    for line in lines:
+        parts = line.split(b"\t")
+        if len(parts) != 2 or parts[0] not in (b"0", b"2"):
+            out.write(b"M\0\0\0" + line.replace(b"\0", b"") + b"\0")
+            continue
+        rc_b, b64_b = parts
+        if rc_b == b"0" and b64_b != b"":
+            out.write(b"M\0" + rc_b + b"\0\0" + line.replace(b"\0", b"") + b"\0")
+            continue
+        try:
+            dec = base64.b64decode(b64_b, validate=True) if b64_b else b""
+            if dec.endswith(b"\n"):
+                dec = dec[:-1]
+            out.write(
+                b"V\0"
+                + rc_b
+                + b"\0"
+                + b64_b.replace(b"\0", b"")
+                + b"\0"
+                + dec.replace(b"\0", b"")
+                + b"\0"
+            )
+        except Exception:
+            out.write(b"M\0" + rc_b + b"\0\0" + line.replace(b"\0", b"") + b"\0")
+PY
+}
+
+flush_cases() {
+  local n="${#CASE_KIND[@]}"
+  [ "$n" -eq 0 ] && return 0
+
+  local in_bin="$PROBE_TMP/in.bin"
+  local ndjson="$PROBE_TMP/ndjson"
+  local rec_file="$PROBE_TMP/rec"
+  local err_file="$PROBE_TMP/err"
+  local dec_file="$PROBE_TMP/dec"
+  local i
+
+  for ((i = 0; i < n; i++)); do
+    printf '%s\0%s\0' "${CASE_KIND[$i]}" "${CASE_INPUT[$i]}"
+  done >"$in_bin"
+
+  _build_ndjson "$in_bin" "$ndjson"
+
+  env -i PATH="$PATH" HOME="$HOME" PYTHONDONTWRITEBYTECODE=1 SYG_EPG_BATCH=1 SYG_EPG_TRUSTED_VARS="$CURRENT_OVERLAY" bash "$HOOK" <"$ndjson" >"$rec_file" 2>"$err_file"
+  local batch_rc=$?
+  local batch_err
+  batch_err=$(cat "$err_file")
+
+  _decode_records "$rec_file" "$dec_file"
+
+  local _recs=()
+  mapfile -d '' _recs <"$dec_file"
+  local rec_count=$(( ${#_recs[@]} / 4 ))
+  local stream_ok=1
+  if [ "$batch_rc" -ne 0 ] || [ -n "$batch_err" ] || [ "$rec_count" -ne "$n" ]; then
+    stream_ok=0
   fi
+
+  local kind label reason_sub st rc err
+  for ((i = 0; i < n; i++)); do
+    kind="${CASE_KIND[$i]}"
+    label="${CASE_LABEL[$i]}"
+    reason_sub="${CASE_REASON[$i]}"
+    if [ "$stream_ok" -eq 1 ]; then
+      st="${_recs[$((i * 4))]}"
+      rc="${_recs[$((i * 4 + 1))]}"
+      err="${_recs[$((i * 4 + 3))]}"
+    else
+      st="M"
+      rc="batch_rc=$batch_rc"
+      err="${batch_err:-record_count=$rec_count/$n}"
+    fi
+
+    if [ "$kind" = "allow" ]; then
+      if [ "$st" = "V" ] && [ "$rc" = "0" ] && [ -z "$err" ]; then
+        pass=$((pass + 1))
+      else
+        echo "FAIL [$label]: expected allow (rc=0, silent), got rc=$rc stdout= stderr=$err" >&2
+        fail=$((fail + 1))
+      fi
+    else
+      if [ "$st" = "V" ] && [ "$rc" = "2" ] && [[ "$err" == *"ENV-PRINT BLOCKED"* ]] && [[ "$err" == *"$reason_sub"* ]]; then
+        pass=$((pass + 1))
+      else
+        echo "FAIL [$label]: expected deny (rc=2, ENV-PRINT BLOCKED + '$reason_sub' on stderr, no permissionDecision in stdout), got rc=$rc stdout= stderr=$err" >&2
+        fail=$((fail + 1))
+      fi
+    fi
+  done
+
+  CASE_KIND=()
+  CASE_LABEL=()
+  CASE_INPUT=()
+  CASE_REASON=()
+}
+
+_queue_case() {
+  local kind="$1" label="$2" input="$3" reason="$4" ov="${SYG_EPG_TRUSTED_VARS:-}"
+  if [ "${#CASE_KIND[@]}" -gt 0 ] && [ "$ov" != "$CURRENT_OVERLAY" ]; then
+    flush_cases
+  fi
+  CURRENT_OVERLAY="$ov"
+  CASE_KIND+=("$kind")
+  CASE_LABEL+=("$label")
+  CASE_INPUT+=("$input")
+  CASE_REASON+=("$reason")
+}
+
+expect_allow() {
+  _queue_case "allow" "$1" "$2" ""
 }
 
 expect_deny() {
-  local label="$1" cmd="$2" reason_sub="$3" out err rc tmp_err
-  tmp_err=$(mktemp)
-  out=$(payload_for "$cmd" | env -i PATH="$PATH" HOME="$HOME" PYTHONDONTWRITEBYTECODE=1 SYG_EPG_TRUSTED_VARS="${SYG_EPG_TRUSTED_VARS:-}" bash "$HOOK" 2>"$tmp_err")
-  rc=$?
-  err=$(cat "$tmp_err")
-  rm -f "$tmp_err"
-  if [ "$rc" -eq 2 ] && grep -q "ENV-PRINT BLOCKED" <<<"$err" && grep -qF -- "$reason_sub" <<<"$err" && ! grep -q "permissionDecision" <<<"$out"; then
-    pass=$((pass + 1))
-  else
-    echo "FAIL [$label]: expected deny (rc=2, ENV-PRINT BLOCKED + '$reason_sub' on stderr, no permissionDecision in stdout), got rc=$rc stdout=$out stderr=$err" >&2
-    fail=$((fail + 1))
-  fi
+  _queue_case "deny" "$1" "$2" "$3"
 }
 
 expect_deny_payload() {
-  local label="$1" payload="$2" reason_sub="$3" out err rc tmp_err
-  tmp_err=$(mktemp)
-  out=$(printf '%s' "$payload" | env -i PATH="$PATH" HOME="$HOME" PYTHONDONTWRITEBYTECODE=1 bash "$HOOK" 2>"$tmp_err")
-  rc=$?
-  err=$(cat "$tmp_err")
-  rm -f "$tmp_err"
-  if [ "$rc" -eq 2 ] && grep -q "ENV-PRINT BLOCKED" <<<"$err" && grep -qF -- "$reason_sub" <<<"$err" && ! grep -q "permissionDecision" <<<"$out"; then
-    pass=$((pass + 1))
-  else
-    echo "FAIL [$label]: expected deny (rc=2, ENV-PRINT BLOCKED + '$reason_sub' on stderr, no permissionDecision in stdout), got rc=$rc stdout=$out stderr=$err" >&2
-    fail=$((fail + 1))
-  fi
+  _queue_case "deny_payload" "$1" "$2" "$3"
 }
 
 # --- Denies: direct & non-names-only pipelines ---
@@ -833,6 +955,140 @@ printf '%s' "env; printf '%s' '$BIGADMIT'" > "$TROW/longcmd.txt"
 expect_deny_payload "match at the start, 200 KB of tail still in flight" \
   "$(jq -nc --rawfile c "$TROW/longcmd.txt" '{tool_name:"Bash",cwd:"/tmp/proj",tool_input:{command:$c}}')" \
   "bulk environment dump via"
+
+flush_cases
+
+# Single-mode anchor on the same 200 KB payload: pins pure-bash (=~) admission on the
+# single path directly so the printf | grep -q early-exit pipe race cannot regress.
+tmp_err=$(mktemp)
+out=$(jq -nc --rawfile c "$TROW/longcmd.txt" '{tool_name:"Bash",cwd:"/tmp/proj",tool_input:{command:$c}}' | env -i PATH="$PATH" HOME="$HOME" PYTHONDONTWRITEBYTECODE=1 bash "$HOOK" 2>"$tmp_err")
+rc=$?
+err=$(cat "$tmp_err")
+rm -f "$tmp_err"
+if [ "$rc" -eq 2 ] && [ -z "$out" ] && grep -q "ENV-PRINT BLOCKED" <<<"$err" && grep -qF -- "bulk environment dump via" <<<"$err"; then
+  pass=$((pass + 1))
+else
+  echo "FAIL [single-mode 200 KB big-admission anchor]: expected rc=2 + empty stdout + ENV-PRINT BLOCKED + 'bulk environment dump via' on stderr, got rc=$rc stdout=$out stderr=$err" >&2
+  fail=$((fail + 1))
+fi
+
+# --- Equivalence: batch vs single ---
+EQ_KIND=()
+EQ_LABEL=()
+EQ_INPUT=()
+EQ_REASON=()
+EQ_OVERLAY=""
+
+flush_equiv() {
+  local n="${#EQ_KIND[@]}"
+  [ "$n" -eq 0 ] && return 0
+
+  local in_bin="$PROBE_TMP/eq_in.bin"
+  local ndjson="$PROBE_TMP/eq_ndjson"
+  local rec_file="$PROBE_TMP/eq_rec"
+  local err_file="$PROBE_TMP/eq_err"
+  local dec_file="$PROBE_TMP/eq_dec"
+  local s_err_file="$PROBE_TMP/eq_s_err"
+  local i
+
+  for ((i = 0; i < n; i++)); do
+    printf '%s\0%s\0' "${EQ_KIND[$i]}" "${EQ_INPUT[$i]}"
+  done >"$in_bin"
+
+  _build_ndjson "$in_bin" "$ndjson"
+
+  env -i PATH="$PATH" HOME="$HOME" PYTHONDONTWRITEBYTECODE=1 SYG_EPG_BATCH=1 SYG_EPG_TRUSTED_VARS="$EQ_OVERLAY" bash "$HOOK" <"$ndjson" >"$rec_file" 2>"$err_file"
+  local batch_rc=$?
+  local batch_err
+  batch_err=$(cat "$err_file")
+
+  _decode_records "$rec_file" "$dec_file"
+
+  local _recs=()
+  mapfile -d '' _recs <"$dec_file"
+  local rec_count=$(( ${#_recs[@]} / 4 ))
+  local stream_ok=1
+  if [ "$batch_rc" -ne 0 ] || [ -n "$batch_err" ] || [ "$rec_count" -ne "$n" ]; then
+    stream_ok=0
+  fi
+
+  local payload_lines=()
+  mapfile -t payload_lines <"$ndjson"
+
+  local kind label reason_sub st b_rc b_b64 b_err s_out s_rc s_b64 s_err single_ok
+  for ((i = 0; i < n; i++)); do
+    kind="${EQ_KIND[$i]}"
+    label="${EQ_LABEL[$i]}"
+    reason_sub="${EQ_REASON[$i]}"
+
+    s_out=$(printf '%s' "${payload_lines[$i]}" | env -i PATH="$PATH" HOME="$HOME" PYTHONDONTWRITEBYTECODE=1 SYG_EPG_TRUSTED_VARS="$EQ_OVERLAY" bash "$HOOK" 2>"$s_err_file")
+    s_rc=$?
+    s_b64=$(base64 -w0 <"$s_err_file")
+    s_err=$(cat "$s_err_file")
+
+    if [ "$stream_ok" -eq 1 ]; then
+      st="${_recs[$((i * 4))]}"
+      b_rc="${_recs[$((i * 4 + 1))]}"
+      b_b64="${_recs[$((i * 4 + 2))]}"
+      b_err="${_recs[$((i * 4 + 3))]}"
+    else
+      st="M"
+      b_rc="batch_rc=$batch_rc"
+      b_b64=""
+      b_err="${batch_err:-record_count=$rec_count/$n}"
+    fi
+
+    single_ok=0
+    if [ "$kind" = "allow" ]; then
+      if [ "$s_rc" -eq 0 ] && [ -z "$s_out" ] && [ -z "$s_err" ]; then
+        single_ok=1
+      fi
+    else
+      if [ "$s_rc" -eq 2 ] && [ -z "$s_out" ] && [[ "$s_err" == *"ENV-PRINT BLOCKED"* ]] && [[ "$s_err" == *"$reason_sub"* ]]; then
+        single_ok=1
+      fi
+    fi
+
+    if [ "$single_ok" -eq 1 ] && [ "$st" = "V" ] && [ "$b_rc" = "$s_rc" ] && [ "$b_b64" = "$s_b64" ]; then
+      pass=$((pass + 1))
+    else
+      echo "FAIL [$label]: expected batch==single (${kind}), got single(rc=$s_rc stderr=$s_err) batch(rc=$b_rc stderr=$b_err)" >&2
+      fail=$((fail + 1))
+    fi
+  done
+
+  EQ_KIND=()
+  EQ_LABEL=()
+  EQ_INPUT=()
+  EQ_REASON=()
+}
+
+queue_equiv() {
+  local kind="$1" label="$2" input="$3" reason="$4" ov="${SYG_EPG_TRUSTED_VARS:-}"
+  if [ "${#EQ_KIND[@]}" -gt 0 ] && [ "$ov" != "$EQ_OVERLAY" ]; then
+    flush_equiv
+  fi
+  EQ_OVERLAY="$ov"
+  EQ_KIND+=("$kind")
+  EQ_LABEL+=("$label")
+  EQ_INPUT+=("$input")
+  EQ_REASON+=("$reason")
+}
+
+queue_equiv "deny" "equiv: direct deny bare env" "env" "bulk environment dump via"
+queue_equiv "deny" "equiv: direct deny printenv -0" "printenv -0" "bulk environment dump via"
+queue_equiv "allow" "equiv: pipeline-selector allow cut" "env | cut -s -d= -f1" ""
+queue_equiv "allow" "equiv: pipeline-selector allow wc" "printenv | wc -l" ""
+queue_equiv "allow" "equiv: admission-miss heredoc-body allow" $'cat > f <<EOF\nexport FOO=1\nEOF' ""
+queue_equiv "deny" "equiv: jq-file deny" "jq . settings.json" "bulk jq filter"
+# shellcheck disable=SC2016
+queue_equiv "deny" "equiv: double-quoted substitution deny" 'echo "$(env)"' "bulk environment dump via"
+queue_equiv "deny" "equiv: multi-line command deny" $'echo start\nenv\necho end' "bulk environment dump via"
+queue_equiv "deny_payload" "equiv: payload-variant deny (cwd /dev)" "$(jq -nc --arg cmd 'env > stderr' '{tool_name:"Bash",cwd:"/dev",tool_input:{command:$cmd}}')" "bulk environment dump via"
+# shellcheck disable=SC2016
+SYG_EPG_TRUSTED_VARS='A-B OUT' queue_equiv "deny" "equiv: TRUSTED_VARS overlay deny" 'env > $AB/x' "bulk environment dump via"
+
+flush_equiv
 
 [ "$fail" -eq 0 ] || exit 1
 echo "PASS: env-print-guard ($pass cases)"
