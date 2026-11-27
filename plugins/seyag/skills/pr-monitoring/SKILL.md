@@ -19,7 +19,7 @@ findings).
   upstream-submission-guard --check, the session-link and private-term
   scans, and the body ref gate — creates the PR, and prints the arm line.
 - **The pre-PR fold, before `pr-open`** (owner ruling 2026-11-26): check
-  the tracking surface and the handoff surface's carried lows for items
+  the tracking surface and the handoff surface's carried lows for low items
   in the same files or area this PR touches and fold the easy ones in,
   under core.md § Fix what you touch's constraints. A carried low folds
   in here or re-carries.
