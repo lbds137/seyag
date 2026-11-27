@@ -2,6 +2,16 @@
 
 All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY-MM-DD>` section per released version; under it, `###` categories in fixed order — Breaking Changes, Features, Bug Fixes, Improvements, Chores, Tests — empty ones omitted; items are `- **scope:** description (#PR)`, written from the version's merged commit subjects.
 
+## 0.3.235 - 2026-11-27
+
+### Bug Fixes
+- **pr-body-ref-gate:** unresolved `--body-file`/`-F` words now block the push with a banner naming the raw word and its Fix, instead of passing unscanned; `extract_pr_body` documents its rc contract (0/2/3) and the header notes the stale-view hazard. (#455)
+
+### Improvements
+- **pr-body-ref-gate:** numeric claim shapes in PR bodies (counts like "209/91701", ranges, versions) classify as claims needing cites, like the rest; claim-cite exemptions gain word-anchored "not re-measured" / "estimated". Real-body replay (7 days): 209 blocks — 143 from the new fail-closed path (mostly the deck-job `--body-file` pattern), 66 pre-existing; the numeric branches fired zero times on real bodies. (TASK-87) (#455)
+- **review-response:** carries the lows-carry disposition end to end, matching core.md's landed wording: the deferral table gains the lows-carry row and scopes its observable rows to medium+, the round report gains a fifth Carried section with a `[carried #<N>]` template, residue-filing clauses are scoped to the ruling's still-filed cases (medium-and-above, user-visible/security/data, cannot-fit-same-area, flaky-probe/incident), and rejected fix-now items name their report home. (TASK-259 half B) (#454)
+- **pr-monitoring:** the pre-push fold check scans the tracking surface and the handoff surface for carried low items — "for low items", mirroring core.md's fold bullet. (TASK-259 half B) (#454)
+
 ## 0.3.234 - 2026-11-26
 
 ### Improvements
