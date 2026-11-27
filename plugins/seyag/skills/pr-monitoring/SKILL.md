@@ -18,6 +18,11 @@ findings).
 - **Opening a PR:** `pr-open` (plugin bin) runs the preflight chain — the
   upstream-submission-guard --check, the session-link and private-term
   scans, and the body ref gate — creates the PR, and prints the arm line.
+- **The pre-PR fold, before `pr-open`** (owner ruling 2026-11-26): check
+  the tracking surface for low-priority items in the same files or area
+  this PR touches and fold the easy ones in, under core.md § Fix what you
+  touch's constraints. Lows carried from earlier PRs in the area
+  (review-response's lows-carry row) fold in here or re-carry.
 - **Verify the push landed first** (the `-> <branch>` ref-update line, or
   `git status -sb` showing the branch in sync with its upstream) — a watcher
   armed on a push that never landed reports a stale run as fresh.
