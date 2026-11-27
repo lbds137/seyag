@@ -2,7 +2,8 @@
 # Fixture check for .claude/hooks/cloud-gate.sh (the cloud session's usage gate) and its SessionStart hook line
 # in .claude/settings.json — run after ANY edit to either. A local bare repo stands in for GitHub: each case
 # writes a usage.json onto its usage-meter branch, or hands the gate a file with --file. Never touches the
-# network or the real branch.
+# network or the real branch. Also pins the vendored copy's body-sha256 marker against the deck-platform
+# canonical digest as the re-vendor guard.
 #
 # Usage: tests/cloud-gate.probe.sh   (from anywhere)
 
@@ -33,6 +34,18 @@ meter() {
   git -C "$R" update-ref refs/heads/usage-meter "$(git -C "$R" commit-tree "$tree" -m meter)"
 }
 reading() { printf '{"as_of":%s,"verdict":"%s","week_pct":%s,"wind_down_pct":75}' $(($(date +%s) - $2)) "$1" "${3:-44}"; }
+
+# Re-vendor guard: the copy is byte-identical to deck-platform's canonical body. The marker line
+# pins the body digest (first 16 hex of sha256 over every line after the marker). deck-platform
+# bin/cloud-gate changes first, this copy re-vendors after, and this constant moves in the same PR
+# as the re-copy (canonical also pins it as CLOUD_GATE_BODY_DIGEST in deck-platform bin/cloud-launch).
+want_digest=c24563808b610e7f
+markers=$(grep -c '^# body-sha256: [0-9a-f]\{16\}' "$GATE")
+[ "$markers" = 1 ] && ok "the vendored copy carries exactly one body-sha256 marker" || bad "body-sha256 marker count: $markers"
+hdr=$(sed -n 's/^# body-sha256: \([0-9a-f]\{16\}\).*/\1/p' "$GATE")
+got=$(sed '1,/^# body-sha256:/d' "$GATE" | sha256sum | cut -c1-16)
+[ -n "$hdr" ] && [ "$hdr" = "$got" ] && ok "the vendored body hashes to its own marker ($hdr)" || bad "body/marker mismatch (marker '$hdr', body '$got')"
+[ "$hdr" = "$want_digest" ] && ok "the vendored body matches the canonical digest" || bad "stale vendor: body '$hdr' != canonical '$want_digest' (re-copy from deck-platform bin/cloud-gate)"
 
 # Through git, as on the VM: a clone's origin carries the branch.
 git init -q "$t/vm" && git -C "$t/vm" remote add origin "$R"
@@ -76,6 +89,28 @@ done
 "$GATE" --bogus >/dev/null 2>&1; [ $? = 2 ] && ok "'--bogus' exits 2" || bad "usage error"
 "$GATE" --file "" >/dev/null 2>&1; [ $? = 2 ] && ok "--file '' exits 2" || bad "empty --file"
 CLOUD_GATE_WARN_S=x "$GATE" --file "$j" >/dev/null 2>&1; [ $? = 2 ] && ok "a non-integer CLOUD_GATE_WARN_S exits 2" || bad "warn validation"
+"$GATE" --class bogus --file "$j" >/dev/null 2>&1; [ $? = 2 ] && ok "--class bogus exits 2" || bad "--class validation"
+"$GATE" --class >/dev/null 2>&1; [ $? = 2 ] && ok "--class without a value exits 2" || bad "--class arity"
+CLOUD_GATE_WARN_S=7201 CLOUD_GATE_MAX_S=7200 "$GATE" --file "$j" >/dev/null 2>&1; [ $? = 2 ] && ok "CLOUD_GATE_WARN_S exceeding CLOUD_GATE_MAX_S exits 2" || bad "warn>max validation"
+CLOUD_GATE_FETCH_S=0 "$GATE" --file "$j" >/dev/null 2>&1; [ $? = 2 ] && ok "CLOUD_GATE_FETCH_S=0 exits 2" || bad "fetch_s lower bound"
+CLOUD_GATE_FETCH_S=41 "$GATE" --file "$j" >/dev/null 2>&1; [ $? = 2 ] && ok "CLOUD_GATE_FETCH_S=41 exits 2" || bad "fetch_s upper bound"
+CLOUD_GATE_WEEK_STOP=0 "$GATE" --file "$j" >/dev/null 2>&1; [ $? = 2 ] && ok "CLOUD_GATE_WEEK_STOP=0 exits 2" || bad "week_stop lower bound"
+CLOUD_GATE_WEEK_STOP=100 "$GATE" --file "$j" >/dev/null 2>&1; [ $? = 2 ] && ok "CLOUD_GATE_WEEK_STOP=100 exits 2" || bad "week_stop upper bound"
+
+# --class test-only judges week_pct against the week hard stop (CLOUD_GATE_WEEK_STOP > the
+# reading's stop_pct > 98) and ignores the verdict: the cloud-test exemption.
+reading go 60 88 >"$j"
+out=$(CLOUD_GATE_WEEK_STOP=50 "$GATE" --class test-only --file "$j" 2>&1); rc=$?
+[ $rc = 1 ] && grep -q "week=88% stop 50%, test-only" <<<"$out" && ok "test-only refuses a go reading over the seam" || bad "test-only over (rc $rc: $out)"
+reading stop 60 40 >"$j"
+out=$(CLOUD_GATE_WEEK_STOP=50 "$GATE" --class test-only --file "$j" 2>&1); rc=$?
+[ $rc = 0 ] && grep -q "go week=40% stop 50%, test-only" <<<"$out" && ok "test-only passes under the seam, ignoring a stop verdict" || bad "test-only under (rc $rc: $out)"
+printf '{"as_of":%s,"verdict":"go","week_pct":70,"wind_down_pct":75,"stop_pct":60}' "$(($(date +%s) - 60))" >"$j"
+out=$("$GATE" --class test-only --file "$j" 2>&1); rc=$?
+[ $rc = 1 ] && grep -q "week=70% stop 60%, test-only" <<<"$out" && ok "test-only judges the reading's own stop_pct without the seam" || bad "test-only stop_pct (rc $rc: $out)"
+printf '{"as_of":%s,"verdict":"go","week_pct":45,"wind_down_pct":75,"stop_pct":40}' "$(($(date +%s) - 60))" >"$j"
+out=$(CLOUD_GATE_WEEK_STOP=50 "$GATE" --class test-only --file "$j" 2>&1); rc=$?
+[ $rc = 0 ] && grep -q "go week=45% stop 50%, test-only" <<<"$out" && ok "test-only: the seam overrides the reading's stop_pct" || bad "seam over stop_pct (rc $rc: $out)"
 
 # --session-start: silent off the VM, an instruction on stop on the VM, exit 0 either way.
 reading stop 60 >"$j"
