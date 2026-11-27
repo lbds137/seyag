@@ -26,6 +26,9 @@
 # closing recorded only as signed-empty thinking blocks, an
 # Anthropic-lane recording shape. Accepted: the field is probed present on
 # current Claude Code, so the fallback is the older-version path.
+# The fallback hardening this blind spot motivates (turn-sliced reads,
+# empty-closing disposition) is filed as TASK-262 — check it before reshaping
+# this path.
 #
 # What counts as a ledger write (same turn only):
 #   - an Edit / Write / MultiEdit whose file_path matches the ledger regex.
