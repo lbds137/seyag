@@ -5,8 +5,18 @@ All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY
 ## 0.3.236 - 2026-11-27
 
 ### Bug Fixes
-- **claude-role:** the auto-archiver recognizes all four Handoff note-stamp forms in use (bold/plain, with or without the MM-DD date) and rolls the true oldest note — a file whose only bold-dated note was the newest had that note archived while older plain-stamped notes stayed; selection stays document order (#PR)
-- **claude-role:** the per-write size line says its figure is rendered (head + due-now block + body, UTF-16 units), not wc bytes (#PR)
+- **claude-role:** the auto-archiver recognizes all four Handoff note-stamp forms in use (bold/plain, with or without the MM-DD date) and rolls the true oldest note — a file whose only bold-dated note was the newest had that note archived while older plain-stamped notes stayed; selection stays document order (#457)
+- **claude-role:** the per-write size line says its figure is rendered (head + due-now block + body, UTF-16 units), not wc bytes (#457)
+
+## 0.3.235 - 2026-11-27
+
+### Bug Fixes
+- **pr-body-ref-gate:** unresolved `--body-file`/`-F` words now block the push with a banner naming the raw word and its Fix, instead of passing unscanned; `extract_pr_body` documents its rc contract (0/2/3) and the header notes the stale-view hazard. (#455)
+
+### Improvements
+- **pr-body-ref-gate:** bare numbers with a unit (durations, sizes, counted nouns like `8 probes`), percentages and `3x`/`3×` multipliers now classify as PR-body claims needing cites, like the rest; versions, issue numbers, dates and TASK ids stay prose. The "not re-measured" / "estimated" hedges are word-anchored, so "underestimated" no longer exempts a line. Real-body replay (7 days): 209 blocks — 143 from the new fail-closed path (mostly a job runner's `--body-file` pattern), 66 pre-existing; the numeric branches fired zero times on real bodies. (TASK-87) (#455)
+- **review-response:** carries the lows-carry disposition end to end, matching core.md's landed wording: the deferral table gains the lows-carry row and scopes its observable rows to medium+, the round report gains a fifth Carried section with a `[carried #<N>]` template, residue-filing clauses are scoped to the ruling's still-filed cases (medium-and-above, user-visible/security/data, cannot-fit-same-area, flaky-probe/incident), and rejected fix-now items name their report home. (TASK-259 half B) (#454)
+- **pr-monitoring:** the pre-push fold check scans the tracking surface and the handoff surface for carried low items — "for low items", mirroring core.md's fold bullet. (TASK-259 half B) (#454)
 
 ## 0.3.234 - 2026-11-26
 

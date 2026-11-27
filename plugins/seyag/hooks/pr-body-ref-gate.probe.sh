@@ -251,17 +251,15 @@ run_hook "$REPO" 'gh pr create --base develop --body-file $E8_BODY_DIR/e8-bare.t
 assert_blocks "bare \$VAR --body-file path is read (blocks)" "task-99999"
 run_hook "$REPO" "gh pr create --base develop --body-file '$E8_BODY_DIR/e8-single.txt'"
 assert_blocks "single-quoted literal --body-file path is read (blocks)" "task-99999"
-# Single quotes do not expand: the literal text names no file, so the body is
-# dropped (degraded) and the command passes. Guard row: green on the unfixed
-# code too, because the degraded path is today's behavior.
+# Single quotes do not expand: the literal `$` leaves the path unresolved, so
+# the gate blocks (fail-closed) naming the raw word.
 # shellcheck disable=SC2016
 run_hook "$REPO" "gh pr create --base develop --body-file '\$E8_BODY_DIR/e8-dq.txt'"
-assert_pass "single-quoted \$VAR --body-file path is literal (degrades, passes)"
-# Degraded rows. Each names a path a WRONG implementation (one that expands an
+assert_blocks "single-quoted \$VAR --body-file path is literal (unresolved, blocks)" "'\$E8_BODY_DIR/e8-dq.txt'"
+# Unresolved rows. Each names a path a WRONG implementation (one that expands an
 # unset or empty variable to nothing, or evaluates the substitution) would read:
 # a blocking file sits there, relative to the hook's cwd ($E8REPO). Correct
-# behavior degrades and passes. Green on the base code by design: base reads no
-# quoted word at all, so these pin the degraded path, not a change.
+# behavior blocks fail-closed on the unresolved path without reading the file.
 E8REPO=$(make_repo e8repo)
 mkdir -p "$E8REPO/e8"
 echo "Closes TASK-99999" >"$E8REPO/e8-unset.txt"
@@ -270,15 +268,27 @@ cp "$E8REPO/e8-unset.txt" "$E8REPO/e8/e8-sub.txt"
 unset E8_UNSET
 # shellcheck disable=SC2016
 run_hook "$E8REPO" 'gh pr create --base develop --body-file "${E8_UNSET}e8-unset.txt"'
-assert_pass "unset \${VAR} prefix degrades, does not read the empty-expansion path (passes)"
+assert_blocks "unset \${VAR} prefix blocks fail-closed, does not read the empty-expansion path" '"${E8_UNSET}e8-unset.txt"'
 export E8_EMPTY=""
 # shellcheck disable=SC2016
 run_hook "$E8REPO" 'gh pr create --base develop --body-file "${E8_EMPTY}e8-empty.txt"'
-assert_pass "empty-but-set \${VAR} prefix degrades, does not read the empty-expansion path (passes)"
+assert_blocks "empty-but-set \${VAR} prefix blocks fail-closed, does not read the empty-expansion path" '"${E8_EMPTY}e8-empty.txt"'
 unset E8_EMPTY
 # shellcheck disable=SC2016
 run_hook "$E8REPO" 'gh pr create --base develop --body-file "$(printf e8)/e8-sub.txt"'
-assert_pass "\$(...) path degrades, does not evaluate the substitution (passes)"
+assert_blocks "\$(...) path blocks fail-closed, does not evaluate the substitution" '"$(printf e8)/e8-sub.txt"'
+unset E8_SAME_CMD_F
+# shellcheck disable=SC2016
+run_hook "$E8REPO" 'E8_SAME_CMD_F=e8-unset.txt; gh pr create --base develop --body-file "$E8_SAME_CMD_F"'
+assert_blocks "same-command VAR=val; gh pr create --body-file \"\$VAR\" blocks fail-closed naming the raw word" '"$E8_SAME_CMD_F"'
+unset E8_FVAR
+# shellcheck disable=SC2016
+run_hook "$E8REPO" 'gh pr create --base develop -F "$E8_FVAR/e8-f.txt"'
+assert_blocks "unset \$VAR on -F blocks fail-closed naming the raw word" '"$E8_FVAR/e8-f.txt"'
+unset E8_SAME_CMD_F
+# shellcheck disable=SC2016
+run_hook "$E8REPO" 'gh pr create --base develop --body-file "$E8_SAME_CMD_F" --body "all good"'
+assert_blocks "unresolvable --body-file with inline --body blocks fail-closed naming the raw word" '"$E8_SAME_CMD_F"'
 
 # Item 6 fix-coverage rows: other spellings of a variable path. Each FAILS on
 # the base code (base reads no quoted or ${NAME} word); they pin the new read.
@@ -474,9 +484,9 @@ export E8_VAR="$REPO/dir/lit"
 run_hook "$REPO" 'gh pr create --base develop --body-file "$E8_VAR"'
 assert_blocks '--body-file "$E8_VAR": the variable expands to the dirty file (blocks)' "task-99999"
 run_hook "$REPO" 'gh pr create --base develop --body-file "\$E8_VAR"'
-assert_pass '--body-file "\$E8_VAR": escaped $ stays literal, unresolved (passes)'
+assert_blocks '--body-file "\$E8_VAR": escaped $ stays literal, unresolved (blocks)' '"\$E8_VAR"'
 run_hook "$REPO" 'gh pr create --base develop --body-file \$E8_VAR'
-assert_pass '--body-file \$E8_VAR: bare escaped $ stays literal, unresolved (passes)'
+assert_blocks '--body-file \$E8_VAR: bare escaped $ stays literal, unresolved (blocks)' '\$E8_VAR'
 run_hook "$REPO" 'gh pr create --base develop --body-file "\\$E8_VAR"'
 assert_pass '--body-file "\\$E8_VAR": \\ de-escapes to \ then the variable expands to \<path>, which does not exist (passes)'
 unset E8_VAR
@@ -1085,6 +1095,72 @@ CLAIM_ACK_SEQ=$((CLAIM_ACK_SEQ + 1))
 OUT=$(jq -n --arg c 'gh pr create --base develop --body "Filed as TASK-99999 for the follow-up."' '{tool_name:"Bash",tool_input:{command:$c}}' | (cd "$REPO" && SYG_PR_BODY_CLAIM_SCAN=0 SYG_PR_BODY_ACK_FILE="$TMPDIR_PROBE/claim-ack-seq-$CLAIM_ACK_SEQ" bash "$HOOK") 2>&1)
 RC=$?
 assert_blocks "SYG_PR_BODY_CLAIM_SCAN=0 still blocks an unresolved tracker ref (rule 1)" "task-99999"
+
+# ---- Case ll: numeric claim shapes in PR body (EXTRA only) + hedges ---------
+run_hook "$REPO" 'gh pr create --base develop --body "Suite time drops from 135 s to 54 s."'
+assert_blocks "uncited duration numeric claim (135 s to 54 s) blocks (rule 2)" "135 s to 54 s"
+
+run_hook "$REPO" 'gh pr create --base develop --body "Cold run takes 135.5 s."'
+assert_blocks "uncited decimal duration numeric claim (135.5 s) blocks (rule 2)" "135.5 s"
+
+run_hook "$REPO" 'gh pr create --base develop --body "Cuts the payload by 40%."'
+assert_blocks "uncited percentage numeric claim (40%) blocks (rule 2)" "40%"
+
+run_hook "$REPO" 'gh pr create --base develop --body "3x faster on the real set."'
+assert_blocks "uncited ratio numeric claim (3x) blocks (rule 2)" "3x faster"
+
+run_hook "$REPO" 'gh pr create --base develop --body "3× faster on the real set."'
+assert_blocks "uncited unicode ratio numeric claim (3×) blocks (rule 2)" "3× faster"
+
+run_hook "$REPO" 'gh pr create --base develop --body "Scans 380 transcripts."'
+assert_blocks "uncited counted-noun numeric claim (380 transcripts) blocks (rule 2)" "380 transcripts"
+
+run_hook "$REPO" 'gh pr create --base develop --body "Trims 12 KiB across 8 probes in 250 ms."'
+assert_blocks "uncited byte-size/probe/ms numeric claim blocks (rule 2)" "12 KiB"
+
+run_hook "$REPO" 'gh pr create --base develop --body "Covers 8 probes on the new runner."'
+assert_blocks "uncited probe-count numeric claim (8 probes) blocks (rule 2)" "8 probes"
+
+run_hook "$REPO" 'gh pr create --base develop --body "Cold start takes 250 ms."'
+assert_blocks "uncited ms duration numeric claim (250 ms) blocks (rule 2)" "250 ms"
+
+run_hook "$REPO" 'gh pr create --base develop --body "Suite time drops from 135 s to 54 s (see the #371 commit body)."'
+assert_blocks "prose-source pointer on a numeric claim is not a checkable cite (blocks)" "135 s to 54 s"
+
+run_hook "$REPO" 'gh pr create --base develop --body "We underestimated the queue by 40%."'
+assert_blocks "nested word underestimated does not exempt a numeric claim (40%)" "40%"
+
+# shellcheck disable=SC2016
+run_hook "$REPO" 'gh pr create --base develop --body "Suite time drops from 135 s to 54 s (`bash tests/run-probes.sh -j 4`)."'
+assert_pass "numeric claim with a backticked command cite passes"
+
+# shellcheck disable=SC2016
+run_hook "$REPO" 'gh pr create --base develop --body "Scans 380 transcripts (`plugins/seyag/hooks/pr-body-ref-gate.sh:1055`)."'
+assert_pass "numeric claim with a file:line cite passes"
+
+run_hook "$REPO" 'gh pr create --base develop --body "Suite time drops from 135 s to 54 s — not verified."'
+assert_pass "numeric claim with a not verified hedge passes"
+
+run_hook "$REPO" 'gh pr create --base develop --body "Suite time drops from 135 s to 54 s — not re-measured."'
+assert_pass "numeric claim with a not re-measured hedge passes"
+
+run_hook "$REPO" 'gh pr create --base develop --body "Cuts the payload by 40% (estimated)."'
+assert_pass "numeric claim with an estimated hedge passes"
+
+run_hook "$REPO" 'gh pr create --base develop --body "Release 0.3.205."'
+assert_pass "version string (0.3.205) is not flagged as a numeric claim"
+
+run_hook "$REPO" 'gh pr create --base develop --body "Follows #371."'
+assert_pass "issue/PR ref (#371) is not flagged as a numeric claim"
+
+run_hook "$REPO" 'gh pr create --base develop --body "Merged 2026-11-24 at 13:50Z."'
+assert_pass "date (2026-11-24) and clock time (13:50Z) are not flagged as numeric claims"
+
+run_hook "$REPO" 'gh pr create --base develop --body "Covers TASK-56 with 5bit tokens in a 3x2 grid and item 42."'
+assert_pass "task id (TASK-56), 5bit, 3x2, and bare number (42) stay unmatched by the trailing guard"
+
+run_hook "$REPO" 'gh pr create --base develop --body "Rename 3x_grid to grid."'
+assert_pass "underscore after a ratio token (3x_grid) is not flagged as a numeric claim"
 
 # ============================================================================
 # --check <body-file> preflight cases

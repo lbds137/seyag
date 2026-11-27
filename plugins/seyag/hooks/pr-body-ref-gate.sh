@@ -75,19 +75,28 @@
 #     by rule 1; that is a claim too, so it's deliberate rather than an
 #     over-block to apologize for. Rule 2 does NOT share this gap — it never
 #     sees the command text at all, only extract_pr_body's parsed output.
-#   - A --body-file path that names no readable file without a shell is not
-#     read: a `$(...)` or backtick in it, an unset or empty `$NAME` / `${NAME}`,
-#     or a `$` kept literal by single quotes or backslash (`--body-file '$F'`,
-#     `--body-file "\$F"`). Its FILE's
-#     content goes unscanned (fail-open direction, same family as the
-#     short-flag gap). Rule 1's command-text scan still covers the rest of the
-#     command; an inline `--body` in the same command is separately picked up
-#     by extract_pr_body's own inline-value parsing, so rule 2 still sees it.
-#     Bare, "double-quoted" and 'single-quoted' paths without a `$` are read,
-#     and bare or double-quoted `$NAME` / `${NAME}` expand from the hook's own
-#     environment (the session's, not the live shell's): a variable set earlier
-#     in the same command (`F=x; gh pr create --body-file "$F"`) is not seen,
-#     and the session's value, if any, is used instead. A word that starts
+#   - Bare, "double-quoted" and 'single-quoted' `--body-file` / `-F` paths
+#     without a `$` are read, and bare or double-quoted `$NAME` / `${NAME}`
+#     expand from the hook's own environment (the session's, not the live
+#     shell's): a variable set earlier in the same command
+#     (`F=x; gh pr create --body-file "$F"`) is not seen, and the session's
+#     value, if any, is used instead. When `resolve_body_word` cannot resolve
+#     the word (`BODY_PATH_UNRESOLVED=1`: a `$(...)` or backtick, an unset or
+#     empty `$NAME` / `${NAME}`, or a `$` kept literal by single quotes or
+#     backslash such as `--body-file '$F'` or `--body-file "\$F"`), the hook
+#     BLOCKS (fail-closed, exit 2) with the
+#     `PR BODY REF GATE — --body-file path not resolvable` banner rather than
+#     passing the file unscanned. A resolved-but-missing literal path (a
+#     typo'd or nonexistent file after expansion) stays fail-open and is
+#     intentionally out of scope (rule 1's command-text scan and any inline
+#     `--body` in the same command still run; `python3`-missing shapes also
+#     stay fail-open as documented in the next bullet). A resolved path is not
+#     guaranteed to name the same file the live shell opens: a variable
+#     pre-set in the hook environment but reassigned earlier in the same
+#     command, or a relative path after an in-command cd, resolves to the
+#     stale view (both pinned by rows in this hook's probe: the
+#     same-command reassignment row and the E8_VAR escaped-$ rows). A word
+#     that starts
 #     bare stops at its first quote (`$D/"sub"/x.md` reads `$D/`), so a
 #     wrapper's closing quote is never taken into the path; that word degrades.
 #   - When `python3` is missing or fails, the hook itself still runs — only its
@@ -598,17 +607,21 @@ extract_pr_body() {
   BODY_TEXT=""
   BODY_FROM_FILE=0
   BODY_PATH_UNRESOLVED=0
+  BODY_UNRESOLVED_WORD=""
   local body_file rc body sub_file
   BODY_TILDE_OK=0
   body_file=""
   find_body_file_flag
-  # The matched word names a file through its quotes and $NAMEs. An
-  # unresolvable word keeps its raw text (so the fallbacks below stay skipped,
-  # as an unreadable path always has) and sets BODY_PATH_UNRESOLVED, which
-  # keeps read_body_path from being tried.
+  # The matched word names a file through its quotes and $NAMEs. When
+  # resolve_body_word sets BODY_PATH_UNRESOLVED=1, preserve the raw word in
+  # BODY_UNRESOLVED_WORD and return 2 so the caller blocks fail-closed.
   if [ -n "$body_file" ]; then
     resolve_body_word "$body_file" "$BODY_TILDE_OK"
-    [ "$BODY_PATH_UNRESOLVED" -eq 1 ] || body_file="$BODY_PATH"
+    if [ "$BODY_PATH_UNRESOLVED" -eq 1 ]; then
+      BODY_UNRESOLVED_WORD="$body_file"
+      return 2
+    fi
+    body_file="$BODY_PATH"
   fi
   # --body-file - / -F - reads from stdin: look in order for gh's own heredoc
   # body (inline, BODY_FROM_FILE stays 0), then `< PATH` after `-`, then
@@ -729,6 +742,8 @@ extract_pr_body() {
   body=$(printf '%s' "$CMD" | grep -zoP -- '(-f|-F|--field|--raw-field)[[:space:]]+body=\K\S+' | head -zn1 | tr -d '\0')
   if [ -n "$body" ]; then BODY_TEXT="$body"; return 0; fi
 
+  # Return codes: 0 = BODY_TEXT set (possibly empty); 2 = unresolved --body-file
+  # word (BODY_UNRESOLVED_WORD holds the raw word); 3 = grep error, fail-open.
   return 0
 }
 
@@ -827,6 +842,24 @@ else
   EXTRACT_RC=$?
   if [ "$EXTRACT_RC" -eq 3 ]; then
     exit 0
+  fi
+  if [ "$EXTRACT_RC" -eq 2 ]; then
+    {
+      echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+      echo "PR BODY REF GATE — --body-file path not resolvable"
+      echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+      echo "This PR command passes a --body-file / -F path that cannot be"
+      echo "resolved from the hook environment:"
+      printf '  %s\n' "$BODY_UNRESOLVED_WORD"
+      echo
+      echo "Unset or empty variables, command substitutions, and literal \$ tokens"
+      echo "are path expressions this hook does not resolve, so the file"
+      echo "cannot be scanned."
+      echo
+      echo "Fix: use a literal path, or pass the body with --body."
+      echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    } >&2
+    exit 2
   fi
 
   SCAN_TEXT="$CMD"
