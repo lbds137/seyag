@@ -1,9 +1,11 @@
 ---
 id: TASK-87
 title: 'pr-open claim-shape: numeric claims need a cite'
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - Seyag B
 created_date: '2026-11-22T16:45:00Z'
+updated_date: '2026-11-27T04:54:00Z'
 labels:
   - pr
   - claims
