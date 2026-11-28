@@ -5,12 +5,12 @@ All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY
 ## 0.3.239 - 2026-11-27
 
 ### Improvements
-- **env-print-guard:** the bulk-jq block's example shell-quotes the hit's file path, and uses the `.hooks` / `.PreToolUse[]` example for `settings*.json` files and a generic `.FIELD` / `.SUBFIELD[]` one otherwise (#PR)
-- **dispatch-posture-gate:** the next-call line in both blocks applies once the spec is written and the unit's worktree is cut (#PR)
-- **recursive-rm-guard:** the no-job-dir line names both cases, `CLAUDE_JOB_DIR` unset or not a directory, and says the `$CLAUDE_JOB_DIR/tmp` exemption does not apply (#PR)
+- **env-print-guard:** the bulk-jq block's example shell-quotes the hit's file path, and uses the `.hooks` / `.PreToolUse[]` example for `settings*.json` files and a generic `.FIELD` / `.SUBFIELD[]` one otherwise (#467)
+- **dispatch-posture-gate:** the next-call line in both blocks applies once the spec is written and the unit's worktree is cut (#467)
+- **recursive-rm-guard:** the no-job-dir line names both cases, `CLAUDE_JOB_DIR` unset or not a directory, and says the `$CLAUDE_JOB_DIR/tmp` exemption does not apply (#467)
 
 ### Tests
-- **env-print-guard, dispatch-posture-gate, recursive-rm-guard:** probes pin the quoted-path and generic-field examples, the reworded next-call line, and three rm cases: job dir set with a worktree target, a nonexistent job dir, the literal `$CLAUDE_JOB_DIR/tmp` in the line (#PR)
+- **env-print-guard, dispatch-posture-gate, recursive-rm-guard:** probes pin the quoted-path and generic-field examples, the reworded next-call line, and three rm cases: job dir set with a worktree target, a nonexistent job dir, the literal `$CLAUDE_JOB_DIR/tmp` in the line (#467)
 
 ## 0.3.238 - 2026-11-27
 
