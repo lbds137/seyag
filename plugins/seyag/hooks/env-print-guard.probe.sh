@@ -230,6 +230,12 @@ expect_deny "jq .env|to_entries settings.json" "jq '.env|to_entries' settings.js
 expect_deny "jq non-env field settings.json: remedy example uses the hit's path" \
   "jq -r '.hooks.PreToolUse[] | .matcher' settings.json" \
   "for a non-env field, select it with a plain dotted path and filter that output with a second jq on stdin (e.g. \`jq '.hooks' settings.json | jq '.PreToolUse[]'\`)"
+expect_deny "jq . prod.env: a non-settings file gets the generic FIELD example" \
+  "jq . prod.env" \
+  "(e.g. \`jq '.FIELD' prod.env | jq '.SUBFIELD[]'\`)"
+expect_deny "jq . path with a space: the example path is shell-quoted" \
+  "jq . '/tmp/my dir/prod.env'" \
+  "(e.g. \`jq '.FIELD' '/tmp/my dir/prod.env' | jq '.SUBFIELD[]'\`)"
 expect_deny "jq .env|tostring settings.json" "jq '.env|tostring' settings.json" "bulk jq filter"
 expect_deny "jq to_entries settings.json" "jq 'to_entries' settings.json" "bulk jq filter"
 expect_deny "jq {env} settings.json" "jq '{env}' settings.json" "bulk jq filter"
