@@ -161,7 +161,9 @@ if not relinked and all(
 for h in hits:
     line = h["line"]
     print(line if len(line) <= 160 else line[:157] + "...")
-sys.exit(11 if worktree_target(hits) else 0)
+# Exit code carries the hints: 11 = worktree target, 12 = no usable job dir, 13 = both.
+wt = worktree_target(hits)
+sys.exit((13 if wt else 12) if not job_dir else (11 if wt else 0))
 PYEOF
 )
 PY_RC=$?
@@ -170,12 +172,14 @@ if [ "$PY_RC" = 10 ]; then
     '{hookSpecificOutput: {hookEventName: "PreToolUse", additionalContext: $ctx}}'
   exit 0
 fi
-[ "$PY_RC" = 0 ] || [ "$PY_RC" = 11 ] || exit 0
+case "$PY_RC" in 0 | 11 | 12 | 13) ;; *) exit 0 ;; esac
 
 [ -n "$HITS" ] || exit 0
 
+NOJOB_HINT=""
+case "$PY_RC" in 12 | 13) NOJOB_HINT=$'\n'"    (this session has no job dir: CLAUDE_JOB_DIR is unset or not a directory in the hook, so only the scratch-dir path is exempt)" ;; esac
 WORKTREE_HINT=""
-[ "$PY_RC" = 11 ] && WORKTREE_HINT=$'\n'"  - agent worktrees: safe-worktree-clean --repo <repo> [--apply] (it judges its SAFE criteria first)."
+[ "$PY_RC" = 11 ] || [ "$PY_RC" = 13 ] && WORKTREE_HINT=$'\n'"  - agent worktrees: safe-worktree-clean --repo <repo> [--apply] (it judges its SAFE criteria first)."
 
 cat >&2 <<EOF
 RECURSIVE-RM GUARD — a recursive or mass delete needs the owner's approval
@@ -186,7 +190,7 @@ $(printf '%s\n' "$HITS" | sed 's/^/  - /')
 Gitignored data is unrecoverable once deleted, so every such delete waits for the
 owner's approval, scratch included. Instead:
   - put scratch in the dir \`scratch-dir NAME\` prints (\$CLAUDE_JOB_DIR/tmp/NAME in a job); rm -r there is
-    allowed when each target is a literal path inside it (absolute, or \$CLAUDE_JOB_DIR/tmp/<name>), not \$T or \$(mktemp -d);
+    allowed when each target is a literal path inside it (absolute, or \$CLAUDE_JOB_DIR/tmp/<name>), not \$T or \$(mktemp -d);${NOJOB_HINT}
   - anywhere else, leave scratch where it is or make a NEW directory rather than emptying one;
   - regenerable caches: safe-clean <path> (safe-clean --dry-run shows what would go).${WORKTREE_HINT}
 Prefix SYG_ALLOW_RM=1 ONLY for a deletion the owner approved in this conversation

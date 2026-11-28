@@ -226,6 +226,10 @@ expect_deny "jq .env ~/.claude/settings.json" "jq .env ~/.claude/settings.json" 
 expect_deny "jq .env|.[] settings.json" "jq '.env|.[]' settings.json" "bulk jq filter"
 expect_deny "jq .[\"env\"] settings.json" 'jq '\''.["env"]'\'' settings.json' "bulk jq filter"
 expect_deny "jq .env|to_entries settings.json" "jq '.env|to_entries' settings.json" "bulk jq filter"
+# The remedy names a non-env route that passes, with the hit's own file path in the example.
+expect_deny "jq non-env field settings.json: remedy example uses the hit's path" \
+  "jq -r '.hooks.PreToolUse[] | .matcher' settings.json" \
+  "for a non-env field, select it with a plain dotted path and filter that output with a second jq on stdin (e.g. \`jq '.hooks' settings.json | jq '.PreToolUse[]'\`)"
 expect_deny "jq .env|tostring settings.json" "jq '.env|tostring' settings.json" "bulk jq filter"
 expect_deny "jq to_entries settings.json" "jq 'to_entries' settings.json" "bulk jq filter"
 expect_deny "jq {env} settings.json" "jq '{env}' settings.json" "bulk jq filter"

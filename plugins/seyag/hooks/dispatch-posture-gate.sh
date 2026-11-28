@@ -187,6 +187,7 @@ Retrying will NOT pass: no ack is recorded for an over-size edit.
 Do one of:
   - dispatch the unit per the \`delegation\` skill (driver specs, worker
     implements), or hand a review round's batch to the unit's worker.
+  Next call: the Agent tool with subagent_type "seyag:implementer", model passed, and the spec as its prompt.
 
 If you are a dispatched worker editing the main tree, stop and report:
 your dispatch was meant to be worktree-isolated.
@@ -233,6 +234,7 @@ Retrying will NOT pass: no state is recorded for an over-size edit.
 A split that lands one change over several calls counts as one edit —
 dispatch the unit per the \`delegation\` skill (driver specs, worker
 implements), or hand a review round's batch to the unit's worker.
+  Next call: the Agent tool with subagent_type "seyag:implementer", model passed, and the spec as its prompt.
 
 If you are a dispatched worker editing the main tree, stop and report:
 your dispatch was meant to be worktree-isolated.

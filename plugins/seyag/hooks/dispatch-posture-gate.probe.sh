@@ -317,6 +317,12 @@ run_sized 0 "5-line Edit: retry passes (boundary is >5, not >=5)" "$P_IB" "$ACK_
 ACK_IC="$TMPDIR_PROBE/ack_ic"
 P_IC=$(edit_payload "$SRC" "$(lines 6)" "$(lines 6)")
 run_sized 2 "6-line Edit: hard block" "$P_IC" "$ACK_IC"
+if grep -qF 'Next call: the Agent tool with subagent_type "seyag:implementer"' <<<"$ERR"; then
+  printf 'PASS  (stderr)  over-size block names the next call\n'
+else
+  printf 'FAIL  (stderr)  over-size block lacks the next-call line: %s\n' "$ERR"
+  FAILURES=$((FAILURES + 1))
+fi
 run_sized 2 "6-line Edit: retry blocks AGAIN (no ack)" "$P_IC" "$ACK_IC"
 
 # --- case i-d: 5 lines WITH a trailing newline is still inside the exemption -
@@ -392,6 +398,12 @@ if grep -qF "cumulative inline source edit of 6 lines in services/x/a.ts since t
   printf 'PASS  (stderr)  cumulative block message states per-file cumulative count\n'
 else
   printf 'FAIL  (stderr)  missing cumulative count line: %s\n' "$ERR"
+  FAILURES=$((FAILURES + 1))
+fi
+if grep -qF 'Next call: the Agent tool with subagent_type "seyag:implementer"' <<<"$ERR"; then
+  printf 'PASS  (stderr)  cumulative block names the next call\n'
+else
+  printf 'FAIL  (stderr)  cumulative block lacks the next-call line: %s\n' "$ERR"
   FAILURES=$((FAILURES + 1))
 fi
 

@@ -297,7 +297,9 @@ print(f"blocked: a private term (#{min(hit_terms)} in $SYG_PRIVATE_TERMS_FILE) w
       f"to a public repo; matched in: {'; '.join(shown)}{more}.")
 for line in context:
     print(line)
-print("Remove it. Only on the owner's word: prefix the command itself with SYG_ALLOW_PRIVATE_TERM=1.")
+print("Retry with the term reworded to a generic description (the masked lines above show where; "
+      "for a body file, edit the file first). "
+      "Only on the owner's word: prefix the command itself with SYG_ALLOW_PRIVATE_TERM=1.")
 PYEOF
 ) || exit 0
 
