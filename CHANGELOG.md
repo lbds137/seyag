@@ -2,6 +2,11 @@
 
 All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY-MM-DD>` section per released version; under it, `###` categories in fixed order — Breaking Changes, Features, Bug Fixes, Improvements, Chores, Tests — empty ones omitted; items are `- **scope:** description (#PR)`, written from the version's merged commit subjects.
 
+## 0.3.242 - 2026-11-28
+
+### Tests
+- **run-probes:** exports a per-run `SYG_PY_CACHE_ARG=-Xpycache_prefix=$TMP/pycache` when the caller left it empty and TMP is absolute, so directly-invoked hooks stop recompiling hooks/lib on every call (full suite -j 4: 762.4 s → 482.8 s wall, 2495 → 1898 s CPU); the `SYG_PY_CACHE_ARG` knob row and docs/config.md note it (#473)
+
 ## 0.3.241 - 2026-11-28
 
 ### Bug Fixes

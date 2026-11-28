@@ -220,7 +220,7 @@ SYG_PR_OPEN_UPSTREAM_CHECK	user	pr	1	Set to 0 to skip pr-open's upstream-submiss
 SYG_PR_MONITOR_GH_TIMEOUT	user	pr	2	Seconds pr-monitor-reminder waits on its gh pr list lookup before skipping the reminder (a positive integer; anything else means 2).	-
 SYG_PR_MONITOR_SEEN_FILE	internal	pr	${XDG_RUNTIME_DIR:-/tmp}/.claude_pr_monitor_seen.<uid>	Test seam overriding the deduplication state file for pr-monitor-reminder.	-
 SYG_PUBLISH_CHECKED	user	guards	unset	Colon-separated <owner/repo> list (or any non-empty value for a gist) in the session env unblocking publish-gate.	-
-SYG_PY_CACHE_ARG	internal	guards	unset	Python flag run.sh exports (`-Xpycache_prefix=<dir>`, or `-B`) for hooks' `python3 -I`, which ignores PYTHONPYCACHEPREFIX; unset on a direct run, where hooks fall back to `-B`; a relative caller prefix gives `-B`.	-
+SYG_PY_CACHE_ARG	internal	guards	unset	Python flag run.sh exports (`-Xpycache_prefix=<dir>` or `-B`) for hooks' `python3 -I`, which ignores PYTHONPYCACHEPREFIX; unset on a direct run (hooks use `-B`; run-probes.sh sets a prefix); relative prefix gives `-B`.	-
 SYG_RESOURCE_CPU_PSI_MAX	user	misc	50	CPU pressure (some avg60) at or above which SYG_RESOURCE_PROFILE=auto caps jobs at 1.	host
 SYG_RESOURCE_JOB_MB	user	misc	1024	MB of MemAvailable budgeted per parallel job under SYG_RESOURCE_PROFILE=auto.	host
 SYG_RESOURCE_PROFILE	user	misc	unset	Host resource profile for resource-profile and tests/run-probes.sh: low (job ceiling 1), normal (no ceiling) or auto (ceiling from MemAvailable per SYG_RESOURCE_JOB_MB, 1 while CPU pressure is high); unset: no ceiling.	host
