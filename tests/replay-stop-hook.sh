@@ -110,6 +110,16 @@
 #   <files> and <live> are both modes combined. Nothing else on stdout. Exit 0
 #   even with trips — a report, not a gate.
 #
+#   Closing shape: the payload carries no last_assistant_message, so every
+#   replay measures a hook's LAM-absent fallback path. Each tripped section
+#   gains `closing: signed-empty` when the last main-lane assistant entry
+#   before the cut holds only thinking blocks with blank thinking text (a
+#   closing whose prose the transcript does not carry), else `closing:
+#   visible`. When any turn end has a signed-empty closing, the summary gains
+#   `; signed-empty closings: <est_tripped>/<est_total> tripped` right after
+#   the live-blocks count (before any INERT suffix); with none, the line is
+#   unchanged.
+#
 #   Inert switches: a hook that exits 0 unless a switch is set trips nothing in
 #   a run without it, so its header may carry `# REPLAY-ARMED-BY: VAR [VAR...]`.
 #   The field names only the variables, not every condition, so an armed replay
@@ -215,6 +225,8 @@ LIVE=0
 TOTAL_INF=0
 TRIPPED_INF=0
 FILES_INF=0
+EST_TRIPPED=0
+EST_TOTAL=0
 
 # Epoch cutoff, not `find -mtime`: -mtime's day-bucket semantics differ across
 # find implementations. --since 0 means "modified after right now" — no
@@ -282,6 +294,21 @@ def is_summary(entry):
     return entry.get("type") == "system" and entry.get("subtype") == "stop_hook_summary"
 
 
+def is_signed_empty(entry):
+    # Twin of turn_scan.is_signed_empty (plugins/seyag/hooks/lib): content is
+    # only thinking blocks, each with blank thinking text — a closing whose
+    # prose the transcript does not carry.
+    content = (entry.get("message") or {}).get("content")
+    if not isinstance(content, list) or not content:
+        return False
+    return all(
+        isinstance(b, dict)
+        and b.get("type") in ("thinking", "redacted_thinking")
+        and not str(b.get("thinking") or "").strip()
+        for b in content
+    )
+
+
 def feedback_text(entry):
     # The text of a "Stop hook feedback:" entry, string or list-text content;
     # None if this entry isn't one.
@@ -313,6 +340,8 @@ basename = os.path.basename(file_path)
 session_id = basename[:-6] if basename.endswith(".jsonl") else basename
 offsets = deque()  # (line_no, start_offset); bounded to the last TAIL_LINES+1
 tripped = total = live = 0
+est_tripped = est_total = 0
+last_main_est = False
 have_assistant = False
 have_summary_since_last_assistant = False
 prev_ending_is_feedback = False
@@ -321,7 +350,7 @@ last_main_cwd = None
 
 
 def run_turn_end(cut_offset, cut_line_display, window_start, stop_hook_active):
-    global tripped, total
+    global tripped, total, est_tripped, est_total
     with open(file_path, "rb") as rf:
         rf.seek(window_start)
         data = rf.read(cut_offset - window_start)
@@ -342,14 +371,19 @@ def run_turn_end(cut_offset, cut_line_display, window_start, stop_hook_active):
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
     )
     total += 1
+    if last_main_est:
+        est_total += 1
     if proc.returncode != 0:
         tripped += 1
+        if last_main_est:
+            est_tripped += 1
         txt = last_main_text.replace("\n", " ").replace("\t", " ")[:200]
         out_lines = proc.stdout.decode("utf-8", "replace").splitlines()
         print("--- tripped ---")
         print(f"text: {txt}")
         print(f"entry: {slug_name}/{basename}:{cut_line_display}")
         print(f"mode: {mode}")
+        print(f"closing: {'signed-empty' if last_main_est else 'visible'}")
         for ln in out_lines[:3]:
             print(ln)
         print()
@@ -376,6 +410,7 @@ with open(file_path, "rb") as f:
         if is_main_assistant(entry):
             have_assistant = True
             have_summary_since_last_assistant = False
+            last_main_est = is_signed_empty(entry)
             if "cwd" in entry:
                 last_main_cwd = entry.get("cwd")
             content = (entry.get("message") or {}).get("content")
@@ -408,7 +443,7 @@ with open(file_path, "rb") as f:
         run_turn_end(file_size, "EOF", window_start, prev_ending_is_feedback)
 
 with open(results_path, "w") as rf:
-    rf.write(f"{tripped} {total} {live} {1 if mode == 'inferred' else 0}\n")
+    rf.write(f"{tripped} {total} {live} {1 if mode == 'inferred' else 0} {est_tripped} {est_total}\n")
 PYEOF
   py_rc=$?
   if [ "$py_rc" -ne 0 ] || [ ! -f "$RESULTS" ]; then
@@ -416,7 +451,9 @@ PYEOF
     exit 1
   fi
 
-  read -r file_tripped file_total file_live file_inferred < "$RESULTS"
+  read -r file_tripped file_total file_live file_inferred file_est_tripped file_est_total < "$RESULTS"
+  EST_TRIPPED=$((EST_TRIPPED + file_est_tripped))
+  EST_TOTAL=$((EST_TOTAL + file_est_total))
   TRIPPED=$((TRIPPED + file_tripped))
   TOTAL=$((TOTAL + file_total))
   LIVE=$((LIVE + file_live))
@@ -427,5 +464,9 @@ PYEOF
   fi
 done <<<"$FILE_LIST"
 
-echo "replay-stop-hook: $HOOK_NAME: $TRIPPED/$TOTAL turn ends tripped across $FILES files ($TRIPPED_INF/$TOTAL_INF inferred in $FILES_INF files without Stop records); $LIVE live blocks in the logs$INERT_SUFFIX"
+EST_SUFFIX=""
+if [ "$EST_TOTAL" -gt 0 ]; then
+  EST_SUFFIX="; signed-empty closings: $EST_TRIPPED/$EST_TOTAL tripped"
+fi
+echo "replay-stop-hook: $HOOK_NAME: $TRIPPED/$TOTAL turn ends tripped across $FILES files ($TRIPPED_INF/$TOTAL_INF inferred in $FILES_INF files without Stop records); $LIVE live blocks in the logs$EST_SUFFIX$INERT_SUFFIX"
 exit 0

@@ -118,6 +118,29 @@ _pipe_out=$(tail -1 <<<"$out") && grep -qxF "replay-stop-hook: blocking-question
   && ok "purpose canary: other-slug (INFERRED, no summaries) — 2/4 tripped across 1 files, all 4 inferred; 0 live blocks" \
   || bad "purpose canary: $(echo "$out" | tail -1)"
 
+# Closing-shape attribution: the second turn ends on a signed-empty thinking
+# entry after a visible "?" closing written past the last tool call, so bq
+# trips there both before and after its fallback hardening; the first turn's
+# closing is visible text. Pins the per-trip `closing:` line and the summary
+# suffix; files with no signed-empty closing keep the bare summary (above).
+mkdir -p "$T/est-slug"
+cat > "$T/est-slug/session3.jsonl" <<'EOF'
+{"type":"user","message":{"role":"user","content":"start"}}
+{"type":"assistant","isSidechain":false,"cwd":"/tmp/fixture-project","message":{"role":"assistant","content":[{"type":"text","text":"Should I proceed with the rename?"}]}}
+{"type":"user","message":{"role":"user","content":"go"}}
+{"type":"assistant","isSidechain":false,"cwd":"/tmp/fixture-project","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"ls"}}]}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"ok"}]}}
+{"type":"assistant","isSidechain":false,"cwd":"/tmp/fixture-project","message":{"role":"assistant","content":[{"type":"text","text":"Which branch should I use?"}]}}
+{"type":"assistant","isSidechain":false,"cwd":"/tmp/fixture-project","message":{"role":"assistant","content":[{"type":"thinking","thinking":"","signature":"sig"}]}}
+EOF
+out=$("$RSH" blocking-question-channel-check --since 1 --slug est-slug --projects-dir "$T")
+_pipe_out=$(tail -1 <<<"$out") && grep -qxF "replay-stop-hook: blocking-question-channel-check: 2/2 turn ends tripped across 1 files (2/2 inferred in 1 files without Stop records); 0 live blocks in the logs; signed-empty closings: 1/1 tripped" <<<"$_pipe_out" \
+  && ok "est summary: suffix counts 1/1 signed-empty closings tripped" || bad "est summary: $(echo "$out" | tail -1)"
+_est_trip=$(grep -A4 -xF "entry: est-slug/session3.jsonl:EOF" <<<"$out") && grep -qxF "closing: signed-empty" <<<"$_est_trip" \
+  && ok "est trip section carries closing: signed-empty" || bad "est trip section lacks closing: signed-empty"
+_vis_trip=$(grep -A4 -xF "entry: est-slug/session3.jsonl:3" <<<"$out") && grep -qxF "closing: visible" <<<"$_vis_trip" \
+  && ok "visible trip section carries closing: visible" || bad "visible trip section lacks closing: visible"
+
 # Argument handling, mirroring replay-hook.probe.sh's exit-code checks.
 "$RSH" lossy-pipe-guard --slug proj-slug --projects-dir "$T" >/dev/null 2>&1; rc=$?
 [ "$rc" -eq 2 ] && ok "a PreToolUse hook name (lossy-pipe-guard) is refused, exit 2" || bad "lossy-pipe-guard exit=$rc"
