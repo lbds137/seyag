@@ -1,9 +1,10 @@
 ---
 id: TASK-117
 title: 'guard block-text audit: every block prints a runnable compliant retry'
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-11-23T03:31:00Z'
+updated_date: '2026-11-28T04:36:00Z'
 labels:
   - mining
   - guards
@@ -62,3 +63,9 @@ Owner ruling 2026-11-27 (AskUserQuestion, on the measurement above): narrow it. 
 4. Reproduce the recursive-rm report.
 The full per-guard rewrite is ruled out on that measurement.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Shipped the narrowed scope (owner ruling 2026-11-27) in two PRs: #466 (0.3.238, landed as eb1a2d6 + 8d500e4; its automerge pushed main and then failed on a GraphQL error, so the PR was closed by hand) and #467 (0.3.239, c4029f1, the claude-review round-1 fixes). Items 1-3: env-print's jq remedy names a non-env route (plain dotted path, then a second jq on stdin, path shell-quoted); private-term and both dispatch-posture blocks print a retry line; probes pin each. Item 4: recursive-rm reproduced (block correct, text misleading), fixed by a no-usable-job-dir line. The full per-guard rewrite stays ruled out on the measurement in the notes above.
+<!-- SECTION:FINAL_SUMMARY:END -->
