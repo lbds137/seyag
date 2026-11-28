@@ -53,8 +53,10 @@
 # start), SYG_ROLE_PREAMBLE_FILE (template for the instruction block; {role} {path} {needs}
 # {in_person} are replaced), SYG_NEEDS_OWNER_SECTION, SYG_IN_PERSON_SECTION, SYG_ROLE_CONTEXT_CMD
 # (prints [{folder,tokens,flagged,flag_at}] JSON for the board), SYG_ROUTE_SHOW_CMD,
-# SYG_ROLE_HEADLESS_ROUTES. A launcher of headless runs sets SYG_ROLE_HEADLESS=1; a launcher of a
-# named task session sets SYG_ROLE_TASK=<name>.
+# SYG_ROLE_HEADLESS_ROUTES, SYG_ROLE_WORKER_BRANCHES (comma- or whitespace-separated branch globs;
+# a session in a linked worktree on a matching branch is not a role session; default
+# worktree-agent-*; set to the empty string to never skip). A launcher of headless runs sets
+# SYG_ROLE_HEADLESS=1; a launcher of a named task session sets SYG_ROLE_TASK=<name>.
 
 set -u
 
@@ -942,6 +944,24 @@ fi
 if [ -n "${SYG_ROLE_TASK:-}" ]; then
     echo "[Role] This is the \"$SYG_ROLE_TASK\" task session, not a role session. Your prompt is your whole brief; leave every role file under $ROLES alone unless it tells you to write one."
     exit 0
+fi
+# A worker in a linked worktree on an agent branch (SYG_ROLE_WORKER_BRANCHES, shell globs) borrows the
+# main checkout's folder name, not its role. Any git failure falls through to the role as before.
+wdir=${cwd:-$PWD}
+wb=${SYG_ROLE_WORKER_BRANCHES-worktree-agent-*}
+if [ -n "$wb" ] && wgit=$(git -C "$wdir" rev-parse --path-format=absolute --git-dir 2>/dev/null) \
+    && wcommon=$(git -C "$wdir" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) \
+    && [ "$wgit" != "$wcommon" ] && wref=$(git -C "$wdir" symbolic-ref -q HEAD 2>/dev/null) \
+    && [[ $wref == refs/heads/?* ]] && wbranch=${wref#refs/heads/}; then
+    IFS=$' \t' read -ra wglobs <<< "${wb//,/ }"
+    for wg in "${wglobs[@]}"; do
+        # shellcheck disable=SC2254  # the knob's entries are globs on purpose
+        case "$wbranch" in
+            $wg)
+                echo "[Role] Worker worktree (branch $wbranch): not a role session. Your prompt is your whole brief; leave every role file under $ROLES alone."
+                exit 0 ;;
+        esac
+    done
 fi
 file="$ROLES/$(folder_of "${cwd:-$PWD}").md"
 [ -f "$file" ] || exit 0
