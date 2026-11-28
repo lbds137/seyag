@@ -3,8 +3,9 @@ id: TASK-262
 title: >-
   Stop-hook LAM-absent fallback hardening: turn-sliced closing reads and
   empty-closing pass (TASK-67 follow-up)
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - Seyag
 created_date: '2026-11-27T14:41:00Z'
 labels:
   - hooks
