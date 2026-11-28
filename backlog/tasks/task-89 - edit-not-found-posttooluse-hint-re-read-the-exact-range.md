@@ -21,7 +21,7 @@ Mining row w1115-16 (counts 39/30: items/sessions). After an Edit fails with str
 ## Disposition
 
 <!-- SECTION:NOTES:BEGIN -->
-Deferred 2026-11-27 (Seyag; owner asked to confirm by AskUserQuestion the same night). No hook surface exists on Claude Code 2.1.332.
+Deferred 2026-11-27 (Seyag); owner confirmed "Deferred" by AskUserQuestion 2026-11-27, over a core.md rule line or dropping it. No hook surface exists on Claude Code 2.1.332.
 
 Probe, headless haiku in a scratch dir with `--settings` logging hooks (PreToolUse Edit, PostToolUse Read|Edit, PostToolUseFailure with no matcher):
 - An Edit whose old_string is absent: the transcript shows `<tool_use_error>String to replace not found in file.\nString: …`. No hook fired: no PreToolUse, no PostToolUse, no PostToolUseFailure. Reproduced in 2 runs.
