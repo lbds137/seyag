@@ -5,7 +5,7 @@ All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY
 ## 0.3.244 - 2026-11-28
 
 ### Tests
-- **security-sweep probe:** nine presence-only canaries stop once every FAIL row their eval names has printed (`SECURITY_SWEEP_STOP_AFTER`), and canary r2-6 runs only check 11, whose nested run stops after the `[ -x ]` verdict; no eval block changed (probe 171.4 → 129.9 s, mean of 3 alternating runs)
+- **security-sweep probe:** nine presence-only canaries stop once every FAIL row their eval names has printed (`SECURITY_SWEEP_STOP_AFTER`), and canary r2-6 runs only check 11, whose nested run stops after the `[ -x ]` verdict; no eval block changed (probe 171.4 → 129.9 s, mean of 3 alternating runs) (#476)
 
 ## 0.3.243 - 2026-11-28
 
