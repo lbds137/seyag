@@ -27,7 +27,8 @@ substitute, don't loop.
   lane — never the authoring session, read-only, adversarial. Its report
   ranks findings BLOCKER / SHOULD-FIX / NIT and carries an intent-match
   paragraph (what the diff is FOR, in the reviewer's own words, so a
-  mismatch is itself a finding).
+  mismatch is itself a finding). Its brief names its scratch: under the
+  dir `scratch-dir <unit>-review` prints, where deletes need no approval.
 - **The dispatching session posts the verdict as a comment on the PR
   itself** — the audit trail lives on the PR, not in session chat, and the
   read-only subagent cannot post it — stating explicitly that it
