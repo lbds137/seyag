@@ -5,10 +5,10 @@ All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY
 ## 0.3.245 - 2026-11-28
 
 ### Improvements
-- **safe-worktree-clean:** resolves the seven in-progress-operation paths with one `git rev-parse --git-path` call per tree instead of seven. The batch is trusted only on rc 0 with exactly one line per op, each ending in `/<op>`; anything else runs the old per-op loop, whose messages are unchanged (#PR)
+- **safe-worktree-clean:** resolves the seven in-progress-operation paths with one `git rev-parse --git-path` call per tree instead of seven. The batch is trusted only on rc 0 with exactly one line per op, each ending in `/<op>`; anything else runs the old per-op loop, whose messages are unchanged (#477)
 
 ### Tests
-- **safe-worktree-clean probes:** PM2(f) builds its gh-less PATH with one `ln -s -t` instead of 3,295 forks and fails setup if that call fails. New rows pin the batched fast path (a call-count wrapper: no per-op calls) and its fallback (a 6-line stub and an rc-1 stub with absent paths, both mutation-checked). Apply-hold probe 131.0 → 110.1 s; single-repo probe 88.9 → 91.5 s from the three added tool runs (means of 3 alternating serial runs) (#PR)
+- **safe-worktree-clean probes:** PM2(f) builds its gh-less PATH with one `ln -s -t` instead of 3,295 forks and fails setup if that call fails. New rows pin the batched fast path (a call-count wrapper: no per-op calls) and its fallback (a 6-line stub and an rc-1 stub with absent paths, both mutation-checked). Apply-hold probe 131.0 → 110.1 s; single-repo probe 88.9 → 91.5 s from the three added tool runs (means of 3 alternating serial runs) (#477)
 
 ## 0.3.244 - 2026-11-28
 
