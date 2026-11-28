@@ -19,7 +19,9 @@ TOKENS=('gdrive' 'lbds137' 'Lila' \
 PATHSPEC=(':(exclude)tests/coupling-lint.probe.sh' ":(exclude)$ALLOW")
 SEP=$'\x1f'   # token/path key separator; never occurs in a repo path
 
-declare -A HITS SEEN FILES   # HITS["tok<SEP>path"]=matching-line count
+# Initialised empty: a bare `declare -A` stays unset, and `${#FILES[@]}`
+# then dies under `set -u` when the allowlist licenses nothing.
+declare -A HITS=() SEEN=() FILES=()   # HITS["tok<SEP>path"]=matching-line count
 total=0 n_new=0 n_stale=0 grep_failed=0
 
 # Measured hits per token across TRACKED files only: git grep -F, fixed
