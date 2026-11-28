@@ -1511,20 +1511,22 @@ PY
 # -R/--repo/GH_REPO= value. Line 13: "branchmove" when a branch switch
 # precedes a numberless merge in the same command. All empty when the
 # extraction produced nothing.
-PR_NUM=$(printf '%s\n' "$MERGE_EXTRACT" | sed -n '1p')
-MERGE_DELETES_BRANCH=$(printf '%s\n' "$MERGE_EXTRACT" | sed -n '2p')
-MERGE_ALL_PRS=$(printf '%s\n' "$MERGE_EXTRACT" | sed -n '3p')
-MERGE_NUMBERLESS=$(printf '%s\n' "$MERGE_EXTRACT" | sed -n '4p')
-MERGE_COUNT=$(printf '%s\n' "$MERGE_ALL_PRS" | wc -w)
-REPO_ARG=$(printf '%s\n' "$MERGE_EXTRACT" | sed -n '5p')
-MERGE_SELECTOR=$(printf '%s\n' "$MERGE_EXTRACT" | sed -n '6p')
-MERGE_INVOKE_COUNT=$(printf '%s\n' "$MERGE_EXTRACT" | sed -n '7p')
-SELECTOR_REPO=$(printf '%s\n' "$MERGE_EXTRACT" | sed -n '8p')
-MERGE_NUMBERLESS_COUNT=$(printf '%s\n' "$MERGE_EXTRACT" | sed -n '9p')
-MERGE_CHDIR=$(printf '%s\n' "$MERGE_EXTRACT" | sed -n '10p')
-MERGE_FANOUT=$(printf '%s\n' "$MERGE_EXTRACT" | sed -n '11p')
-MERGE_UNRESOLVABLE=$(printf '%s\n' "$MERGE_EXTRACT" | sed -n '12p')
-MERGE_BRANCHMOVE=$(printf '%s\n' "$MERGE_EXTRACT" | sed -n '13p')
+mapfile -t _EXTRACT_LINES <<<"$MERGE_EXTRACT"
+PR_NUM=${_EXTRACT_LINES[0]:-}
+MERGE_DELETES_BRANCH=${_EXTRACT_LINES[1]:-}
+MERGE_ALL_PRS=${_EXTRACT_LINES[2]:-}
+MERGE_NUMBERLESS=${_EXTRACT_LINES[3]:-}
+read -ra _ALL_PRS_WORDS <<<"$MERGE_ALL_PRS"
+MERGE_COUNT=${#_ALL_PRS_WORDS[@]}
+REPO_ARG=${_EXTRACT_LINES[4]:-}
+MERGE_SELECTOR=${_EXTRACT_LINES[5]:-}
+MERGE_INVOKE_COUNT=${_EXTRACT_LINES[6]:-}
+SELECTOR_REPO=${_EXTRACT_LINES[7]:-}
+MERGE_NUMBERLESS_COUNT=${_EXTRACT_LINES[8]:-}
+MERGE_CHDIR=${_EXTRACT_LINES[9]:-}
+MERGE_FANOUT=${_EXTRACT_LINES[10]:-}
+MERGE_UNRESOLVABLE=${_EXTRACT_LINES[11]:-}
+MERGE_BRANCHMOVE=${_EXTRACT_LINES[12]:-}
 
 # A URL selector carries its OWN repository, and gh resolves the PR there
 # even beside a -R (the URL wins). Mirror that here: the URL's repo OVERRIDES
@@ -1891,8 +1893,10 @@ resolve_pr_view() {
     view=$(timeout 10 gh pr view "${REPO_SCOPE_ARGS[@]}" "$PR_NUM" --json baseRefName,headRefName \
         --jq '(.baseRefName // ""), (.headRefName // "")' \
         2>/dev/null || echo "")
-    PR_BASE=$(printf '%s\n' "$view" | sed -n '1p')
-    PR_HEAD=$(printf '%s\n' "$view" | sed -n '2p')
+    local view_lines
+    mapfile -t view_lines <<<"$view"
+    PR_BASE=${view_lines[0]:-}
+    PR_HEAD=${view_lines[1]:-}
     return 0
 }
 
@@ -1916,8 +1920,10 @@ resolve_repo() {
     view=$(timeout 10 gh repo view "${REPO_SCOPE_ARGS[@]}" --json nameWithOwner,defaultBranchRef \
         --jq '(.nameWithOwner // ""), (.defaultBranchRef.name // "")' \
         2>/dev/null || echo "")
-    REPO=$(printf '%s\n' "$view" | sed -n '1p')
-    DEFAULT_BRANCH=$(printf '%s\n' "$view" | sed -n '2p')
+    local view_lines
+    mapfile -t view_lines <<<"$view"
+    REPO=${view_lines[0]:-}
+    DEFAULT_BRANCH=${view_lines[1]:-}
     RELEASE_REPO="${REPO:-unresolved}"
     RELEASE_KEY="RELEASE:${RELEASE_REPO}:${PR_NUM}"
     return 0
@@ -2280,8 +2286,10 @@ no_review_reason() {
         --jq "(.author.login // \"\"),
               ([.files[]?.path] | any(. == ${REVIEW_WF_JSON}) | tostring)" \
         2>/dev/null) || facts=""
-    pr_author=$(printf '%s\n' "$facts" | sed -n '1p')
-    pr_edits_review_workflow=$(printf '%s\n' "$facts" | sed -n '2p')
+    local facts_lines
+    mapfile -t facts_lines <<<"$facts"
+    pr_author=${facts_lines[0]:-}
+    pr_edits_review_workflow=${facts_lines[1]:-}
     if [ "$pr_edits_review_workflow" = "true" ]; then
         NO_REVIEW_HEADER="no review comment (most likely skipped itself)"
         NO_REVIEW_DETAIL="This PR changes $REVIEW_WORKFLOW_PATH. A review action commonly skips
@@ -2303,9 +2311,10 @@ if [ -z "$REVIEW_JSON" ] || [ "$REVIEW_JSON" = "null" ]; then
     release_block_then_exit "$NO_REVIEW_HEADER"
 fi
 
-REVIEW_ID=$(jq -r '.id // empty' <<<"$REVIEW_JSON")
-REVIEW_CREATED=$(jq -r '.created_at // empty' <<<"$REVIEW_JSON")
-REVIEW_TS=$(jq -r '.updated_at // empty' <<<"$REVIEW_JSON")
+mapfile -t _REVIEW_FIELDS < <(jq -r '(.id // "" | tostring), (.created_at // ""), (.updated_at // "")' <<<"$REVIEW_JSON")
+REVIEW_ID=${_REVIEW_FIELDS[0]:-}
+REVIEW_CREATED=${_REVIEW_FIELDS[1]:-}
+REVIEW_TS=${_REVIEW_FIELDS[2]:-}
 REVIEW_BODY=$(jq -r '.body // empty' <<<"$REVIEW_JSON")
 
 if [ -z "$REVIEW_ID" ] || [ -z "$REVIEW_BODY" ]; then

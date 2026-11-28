@@ -2,6 +2,11 @@
 
 All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY-MM-DD>` section per released version; under it, `###` categories in fixed order — Breaking Changes, Features, Bug Fixes, Improvements, Chores, Tests — empty ones omitted; items are `- **scope:** description (#PR)`, written from the version's merged commit subjects.
 
+## 0.3.243 - 2026-11-28
+
+### Improvements
+- **pr-merge-review-check:** splits its multi-line extract, view, facts and review-field results with `mapfile`/`read -ra` instead of 17 `sed` and `wc` forks, and reads the three scalar review fields with one `jq` instead of three; no message or control-flow change (its two probes: 57.8 → 37.0 s and 48.3 → 30.2 s) (#474)
+
 ## 0.3.242 - 2026-11-28
 
 ### Tests
