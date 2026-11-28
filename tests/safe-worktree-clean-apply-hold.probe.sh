@@ -2133,17 +2133,23 @@ pm_json "$PMJ" "$PMH" develop '"2026-11-20T00:00:00Z"'; pm_neg "(c) other base.r
 pm_json "$PMJ" "$PMH" main '"2026-11-20T00:00:00Z"'
 GH_STUB_RC=1 pm_neg "(d) gh exits 1" any
 printf 'not json\n' > "$PMJ"; pm_neg "(e) non-JSON" any
-# (f) no gh at all: a PATH of symlinks to every executable on the real PATH except gh. The
-# method is checked first: `command -v gh` must fail in that PATH.
+# (f) no gh at all: a PATH of symlinks to every executable on the real PATH except gh, made by
+# one batched `ln -s -t` (the first PATH directory wins per basename). The method is checked
+# first: `command -v gh` must fail in that PATH.
 mkdir -p "$T/pmnogh"
+declare -A pm_seen=()
+pm_targets=()
 for d in ${PATH//:/ }; do
   [ -d "$d" ] || continue
   for f in "$d"/*; do
     [ -x "$f" ] && [ -f "$f" ] || continue
     [ "${f##*/}" = gh ] && continue
-    [ -e "$T/pmnogh/${f##*/}" ] || ln -s "$f" "$T/pmnogh/${f##*/}"
+    [ -n "${pm_seen[${f##*/}]:-}" ] && continue
+    pm_seen[${f##*/}]=1
+    pm_targets+=("$f")
   done
 done
+[ ${#pm_targets[@]} -eq 0 ] || ln -s -t "$T/pmnogh" -- "${pm_targets[@]}" || bad "PM2(f) setup: batched ln failed"
 pm_json "$PMJ" "$PMH" main '"2026-11-20T00:00:00Z"'
 if PATH="$T/pmnogh" bash -c 'command -v gh' >/dev/null 2>&1; then bad "PM2(f) setup: gh still on the filtered PATH"; fi
 PM_PATH="$T/pmnogh" pm_neg "(f) no gh on PATH" any

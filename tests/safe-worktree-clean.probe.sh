@@ -547,6 +547,59 @@ expect "$J" midcherry HOLD:in-progress "mid-cherry-pick worktree holds"
 expect "$J" midseq HOLD:in-progress "sequencer with no CHERRY_PICK_HEAD holds"
 expect "$J" pytestcache SAFE ".pytest_cache self-ignored stays SAFE"
 expect "$J" cleanlinked SAFE "main-tree rebase does not hold a linked tree"
+# Batched --git-path fallback: a git stub answers a multi-`--git-path` call with 6 lines (one short
+# of the 7 ops) and passes everything else to the real git; the per-op loop must still run and
+# keep the in-progress verdicts.
+mkdir -p "$T/gitstub"
+REAL_GIT=$(command -v git)
+cat > "$T/gitstub/git" <<STUB
+#!/usr/bin/env bash
+n=0
+for a in "\$@"; do [ "\$a" = --git-path ] && n=\$((n + 1)); done
+if [ "\$n" -ge 2 ]; then printf 'x\n%.0s' 1 2 3 4 5 6; exit 0; fi
+exec "$REAL_GIT" "\$@"
+STUB
+chmod +x "$T/gitstub/git"
+J=$(PATH="$T/gitstub:$PATH" "$TOOL" --repo "$B1" --json)
+expect "$J" midrebase HOLD:in-progress "batched --git-path with a wrong line count falls back to the per-op loop (mid-rebase)"
+expect "$J" midmerge HOLD:in-progress "batched --git-path with a wrong line count falls back to the per-op loop (mid-merge)"
+expect "$J" pytestcache SAFE "batched --git-path fallback keeps a clean tree SAFE"
+# Fast path: a pass-through wrapper logs each git call ("multi" with >=2 --git-path args, "single"
+# with exactly 1); the batch must detect the ops itself, with no per-op fallback call.
+mkdir -p "$T/gitlog"
+cat > "$T/gitlog/git" <<STUB
+#!/usr/bin/env bash
+n=0
+for a in "\$@"; do [ "\$a" = --git-path ] && n=\$((n + 1)); done
+if [ "\$n" -ge 2 ]; then echo multi >> "$T/gitlog.txt"; elif [ "\$n" -eq 1 ]; then echo single >> "$T/gitlog.txt"; fi
+exec "$REAL_GIT" "\$@"
+STUB
+chmod +x "$T/gitlog/git"
+: > "$T/gitlog.txt"
+J=$(PATH="$T/gitlog:$PATH" "$TOOL" --repo "$B1" --json)
+expect "$J" midrebase HOLD:in-progress "batched --git-path fast path detects mid-rebase"
+expect "$J" midmerge HOLD:in-progress "batched --git-path fast path detects mid-merge"
+expect "$J" pytestcache SAFE "batched --git-path fast path keeps a clean tree SAFE"
+n_multi=$(grep -c '^multi$' "$T/gitlog.txt")
+n_single=$(grep -c '^single$' "$T/gitlog.txt")
+if [ "$n_multi" -ge 1 ] && [ "$n_single" -eq 0 ]; then
+  ok "batched --git-path fast path: $n_multi multi calls, no per-op single calls"
+else
+  bad "batched --git-path fast path: expected >=1 multi and 0 single calls, got multi=$n_multi single=$n_single"
+fi
+# rc-nonzero: the stub prints 7 well-formed paths that do not exist for a multi call, then exits 1;
+# trusting them would turn mid-rebase/mid-merge SAFE, so the HOLDs prove the per-op loop ran.
+cat > "$T/gitstub/git" <<STUB
+#!/usr/bin/env bash
+n=0
+for a in "\$@"; do [ "\$a" = --git-path ] && n=\$((n + 1)); done
+if [ "\$n" -ge 2 ]; then printf '$T/absent/%s\n' rebase-merge rebase-apply MERGE_HEAD CHERRY_PICK_HEAD REVERT_HEAD BISECT_LOG sequencer; exit 1; fi
+exec "$REAL_GIT" "\$@"
+STUB
+J=$(PATH="$T/gitstub:$PATH" "$TOOL" --repo "$B1" --json)
+expect "$J" midrebase HOLD:in-progress "batched --git-path with rc 1 and absent paths falls back (mid-rebase)"
+expect "$J" midmerge HOLD:in-progress "batched --git-path with rc 1 and absent paths falls back (mid-merge)"
+expect "$J" pytestcache SAFE "batched --git-path rc 1 fallback keeps a clean tree SAFE"
 
 mk_repo submod
 SM="$T/submod"
