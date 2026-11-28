@@ -16,7 +16,9 @@
 # pr-ci-wait runs THIS hook through hooks/run.sh with a synthetic `gh pr merge N`
 # payload, before it prints the CI_COMPLETE line, so the block, and its acks,
 # land in pr-ci-wait's output ahead of that line and the
-# session's own first `gh pr merge` proceeds. Residuals: (a) a runner that does
+# session's own first `gh pr merge` proceeds. The default-branch reminder below
+# is excluded from priming (pr-ci-wait sets SYG_MERGE_REVIEW_PRIMING=1): it and
+# its RELEASE ack stay for the real merge call. Residuals: (a) a runner that does
 # not stream pr-ci-wait's stdout into the agent's context (the pr-monitoring
 # skill's background-Bash fallback) acks a review nobody read; (b) the ack is
 # per user, not per session, so another session, or a post-/clear context, then
@@ -1940,6 +1942,9 @@ resolve_repo() {
 # answer here reproduces the exact silent-drop class this hook exists to
 # prevent.
 release_reminder_due() {
+    # A priming call (pr-ci-wait) surfaces only the review; the reminder and its
+    # RELEASE ack stay for the real merge call.
+    [ "${SYG_MERGE_REVIEW_PRIMING:-}" = 1 ] && return 1
     resolve_repo
     if ack_state_holds "$RELEASE_KEY"; then
         return 1

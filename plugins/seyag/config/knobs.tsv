@@ -43,6 +43,7 @@ PR_CI_WAIT_GRACE_S	user	pr	300	Review-run grace window in seconds after CI settl
 PR_CI_WAIT_HEARTBEAT_S	user	pr	600	Interval in seconds between progress heartbeat log lines while pr-ci-wait is polling.	-
 PR_CI_WAIT_MAX_S	user	pr	1500	Maximum total wait time in seconds before pr-ci-wait gives up with CI_GATE_TIMEOUT.	-
 PR_CI_WAIT_POLL_S	user	pr	30	Interval in seconds between workflow-run polls in pr-ci-wait.	-
+PR_CI_WAIT_PRIME_TIMEOUT_S	internal	pr	60	Probe seam: seconds pr-ci-wait lets the merge-gate priming child run before killing its process group.	-
 PR_CI_WAIT_QUIET_S	user	pr	90	Quiet-window duration in seconds with an unchanged, all-completed run set required to settle pr-ci-wait when SYG_CI_ANCHOR is unset.	-
 PR_CI_WAIT_SETTLE_S	user	pr	5	Pause in seconds after gh pr checks --watch finishes and before pr-ci-wait prints CI_COMPLETE (only when CI is releasable).	-
 RAILWAY_OPS_CLI	internal	misc	railway	Test seam overriding the railway CLI binary path in railway-ops.	-
@@ -194,6 +195,7 @@ SYG_MEM_PRESSURE_STATE_DIR	user	misc	$HOME/.local/state/mem-pressure	Directory h
 SYG_MEM_WATCH_CGROUP_ROOT	user	misc	/sys/fs/cgroup/user.slice	Directory mem-watch searches, up to four levels deep, for this user's app.slice/memory.events oom_kill counter (user-<uid>.slice preferred; a root below the user slice also works; another uid's slice never).	path
 SYG_MEM_WATCH_MEMINFO	internal	misc	/proc/meminfo	Test seam overriding the meminfo file mem-watch reads.	-
 SYG_MERGE_REVIEW_LOGIN	user	pr	claude[bot]	GitHub login whose latest PR comment must be surfaced before pr-merge-review-check allows gh pr merge.	-
+SYG_MERGE_REVIEW_PRIMING	internal	pr	unset	Set to 1 by pr-ci-wait on its priming call: the merge-review hook then skips the default-branch release reminder and its RELEASE ack, leaving both for the real merge.	-
 SYG_MERGE_REVIEW_RELEASE_REMINDER	user	pr	prose:This PR merges into the repository's default branch — run this project's post-merge steps (version bump, release, deploy) before starting other work.	Custom reminder text shown once when merging a PR into the repository's default branch.	-
 SYG_MERGE_REVIEW_WORKFLOW	user	pr	.github/workflows/claude-code-review.yml	Review workflow file path whose self-edit in a PR explains a missing review comment in pr-merge-review-check.	path
 SYG_NEEDS_OWNER_SECTION	user	session	Needs Owner	Heading (without the ##) of the role file section claude-role --need writes and --json reads as .needs: what waits on the owner; relay-ruling names it in its destructive-step line.	-

@@ -821,6 +821,8 @@ before_in_out "$PRIME_LINE" "STUB-REVIEW-BLOCK" && before_in_out "STUB-REVIEW-BL
   || { fail "P1: order is priming line, stub block, sentinel, checks report"; printf '%s\n' "$OUT" | sed 's/^/      /'; }
 
 # P1b. a block written to STDERR still reaches pr-ci-wait's stdout, in order.
+# NOTE: the env below mirrors run()'s (env -i + the PR_CI_WAIT_* defaults) and
+# must change with it.
 rm -f "$WORK/p1b.stdin" "$WORK/p1b.calls"
 OUT_ONLY=$(cd "$FIXTURE_REPO" && timeout "$CASE_TIMEOUT" env -i \
   PATH="$FAKE_BIN:$PATH" HOME="$HOME" PYTHONDONTWRITEBYTECODE=1 FIXTURE_HEAD_SHA="$FIXTURE_HEAD_SHA" \
@@ -946,6 +948,62 @@ run "P7: integration, no review comment" 0 \
   && [[ "$OUT" == *"$PRIME_LINE"* && "$OUT" == *"CI_COMPLETE"* ]] \
   && pass "P7: no review ack line written when there was no review" \
   || { fail "P7: no review ack line written when there was no review"; printf '%s\n' "$OUT" | sed 's/^/      /'; }
+
+# P9. INTEGRATION, default-branch PR: priming shows the review but leaves the
+# release reminder (and its RELEASE ack) for the real merge call.
+XDG_P9="$WORK/xdg-p9"
+P9_ACK="$XDG_P9/seyag/pr-merge-review-check/ack"
+run "P9: integration, default-branch PR" 0 \
+  PATH="$INT_BIN:$FAKE_BIN:$PATH" FAKE_BIN_REAL="$FAKE_BIN" FAKE_INT_BASE=main \
+  FAKE_INT_REVIEW_JSON="$INT_REVIEW" FAKE_GH_SEQ_DIR="$D_REL" SYG_CI_REVIEW= SYG_CI_ANCHOR=CI \
+  SYG_CONFIG=0 XDG_STATE_HOME="$XDG_P9" SYG_CI_WAIT_PRIME_REVIEW=1
+[[ "$OUT" == *"PR MERGE GATE"* && "$OUT" == *"INT-REVIEW-BODY"* && "$OUT" != *"DEFAULT-BRANCH MERGE"* ]] \
+  && pass "P9: priming prints the review block but not the default-branch reminder" \
+  || { fail "P9: priming prints the review block but not the default-branch reminder"; printf '%s\n' "$OUT" | sed 's/^/      /'; }
+{ grep -qxF "8:4242:$INT_UPDATED" "$P9_ACK" 2>/dev/null && ! grep -q '^RELEASE:' "$P9_ACK" 2>/dev/null; } \
+  && pass "P9: ack file holds the review line and no RELEASE line" \
+  || { fail "P9: ack file holds the review line and no RELEASE line (file: $(cat "$P9_ACK" 2>/dev/null))"; }
+p9_real() { # the session's own merge call: no priming marker, same state dir
+  printf '%s' "$PRIME_PAYLOAD" | (cd "$FIXTURE_REPO" && env -i \
+    PATH="$INT_BIN:$FAKE_BIN:$PATH" HOME="$HOME" FAKE_BIN_REAL="$FAKE_BIN" FAKE_INT_BASE=main \
+    FAKE_INT_REVIEW_JSON="$INT_REVIEW" SYG_CONFIG=0 XDG_STATE_HOME="$XDG_P9" \
+    bash "$SCRIPT_DIR/../plugins/seyag/hooks/run.sh" pr-merge-review-check >"$WORK/p9.out" 2>&1)
+}
+p9_real; P9_RC=$?
+[ "$P9_RC" -eq 2 ] && grep -qF 'DEFAULT-BRANCH MERGE' "$WORK/p9.out" \
+  && pass "P9: the real merge call then blocks with the default-branch reminder (rc 2)" \
+  || { fail "P9: the real merge call then blocks with the default-branch reminder (rc $P9_RC)"; sed 's/^/      /' "$WORK/p9.out"; }
+p9_real; P9_RC=$?
+[ "$P9_RC" -eq 0 ] \
+  && pass "P9: a third call proceeds (rc 0)" \
+  || { fail "P9: a third call proceeds (rc $P9_RC)"; sed 's/^/      /' "$WORK/p9.out"; }
+
+# P10. a hung priming child with a surviving grandchild: the timeout kills the
+# whole process group. The capture waits on the shared pipe, so a grandchild that
+# outlived the kill would print LATE-GRANDCHILD into the output.
+GRANDCHILD_STUB="$WORK/grandchild-stub.sh"
+printf '#!/bin/bash\ncat >/dev/null\n(sleep 3; echo LATE-GRANDCHILD) &\nsleep 30\n' > "$GRANDCHILD_STUB"
+chmod +x "$GRANDCHILD_STUB"
+run "P10: hung priming child plus grandchild still exits 0" 0 \
+  FAKE_GH_SEQ_DIR="$D_REL" SYG_CI_REVIEW= SYG_CI_ANCHOR=CI \
+  SYG_CI_WAIT_PRIME_REVIEW=1 SYG_CI_WAIT_PRIME_CMD="$GRANDCHILD_STUB" PR_CI_WAIT_PRIME_TIMEOUT_S=1
+[[ "$OUT" == *"timed out after 1s; ack state unknown"* && "$OUT" == *"CI_COMPLETE"* && "$OUT" != *"LATE-GRANDCHILD"* ]] \
+  && pass "P10: timeout warned, CI_COMPLETE printed, grandchild killed with the group" \
+  || { fail "P10: timeout warned, CI_COMPLETE printed, grandchild killed with the group"; printf '%s\n' "$OUT" | sed 's/^/      /'; }
+
+# P11. a project that ships its own pr-merge-review-check hook is not primed
+# (run.sh would silently defer to that copy): warns, never runs the command.
+P11_PROJ="$WORK/p11-proj"
+mkdir -p "$P11_PROJ/.claude/hooks"
+: > "$P11_PROJ/.claude/hooks/pr-merge-review-check.sh"
+rm -f "$WORK/p11.stdin" "$WORK/p11.calls"
+run "P11: project-owned hook copy is not primed" 0 \
+  FAKE_GH_SEQ_DIR="$D_REL" SYG_CI_REVIEW= SYG_CI_ANCHOR=CI \
+  SYG_CI_WAIT_PRIME_REVIEW=1 SYG_CI_WAIT_PRIME_CMD="$PRIME_STUB" CLAUDE_PROJECT_DIR="$P11_PROJ" \
+  STUB_STDIN="$WORK/p11.stdin" STUB_CALLS="$WORK/p11.calls"
+[[ "$OUT" == *"ships its own pr-merge-review-check hook"* && "$OUT" == *"CI_COMPLETE"* ]] && [ ! -e "$WORK/p11.calls" ] \
+  && pass "P11: skip warned, stub never called, CI_COMPLETE printed" \
+  || { fail "P11: skip warned, stub never called, CI_COMPLETE printed"; printf '%s\n' "$OUT" | sed 's/^/      /'; }
 
 echo "---"
 echo "$FAILURES failed"
