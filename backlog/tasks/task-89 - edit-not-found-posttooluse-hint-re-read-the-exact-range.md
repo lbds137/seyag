@@ -33,10 +33,13 @@ Measured need, 7 days of transcripts, deduped by tool_use_id: 115 not-found Edit
 
 | Next call on the file | Count |
 |---|---|
-| Another Edit that failed again | 44 |
-| A successful Edit | 52 |
-| Bash | 12 |
-| A Read | 7 |
+| Another Edit that failed again | 6 |
+| A successful Edit | 59 |
+| Bash | 26 |
+| A Read | 21 |
+| None | 3 |
+
+Correction, same night: the first count (44 failed again, 52 ok, 12 Bash, 7 Read) also read the `api-request-blob` transcript entries, which replay earlier history. The owner's AskUserQuestion carried that wrong 44. The table above reads only `assistant`/`user` entries, deduped by tool_use id. The need is small: a blind re-guess follows about 1 in 19 not-found Edits.
 
 Promotion trigger: Claude Code emits a hook event (PostToolUseFailure or a new one) for input-validation-rejected tool calls. Re-run the probe on each Claude Code minor bump that mentions hooks. A product-feedback draft is queued asking for that event. Built then: a PostToolUseFailure hint for Edit not-found, naming the line range nearest the old_string's first line.
 <!-- SECTION:NOTES:END -->
