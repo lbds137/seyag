@@ -8,7 +8,7 @@ labels:
   - context
   - rules
 dependencies: []
-priority: high
+priority: medium
 ordinal: 70000
 ---
 
@@ -24,3 +24,9 @@ Missing: a trigger that fires without anyone remembering it.
 2. Restate the rule in the warning or CI message text itself, not as new rule text: always-loaded text holds hard constraints and pointers; procedures go to skills; domain detail goes to `paths:`-scoped rules. core.md:147 and doc-audit already carry it; do not add a third copy or grow core.md.
 3. The owner's principle that complexity must serve a purpose: keep a piece only where it earns its place, and show each piece next to its purpose. core.md:146 already carries the first half. Add "show each piece next to its purpose", for example as a purpose column in weigh's output or doc-audit's table, without growing core.md (see TASK-71).
 <!-- SECTION:DESCRIPTION:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Priority high → medium 2026-11-27 (owner priorities, relayed by Deck; triage pass 11-27, score 1.12, suggested "later"): about 48k up-front tokens measured but no friction count, and `weigh --budget` (815463c) already covers part of the need. What remains is the SessionStart warn component, the purpose column and a probe.
+<!-- SECTION:NOTES:END -->

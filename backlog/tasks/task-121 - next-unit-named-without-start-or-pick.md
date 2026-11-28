@@ -1,10 +1,11 @@
 ---
 id: TASK-121
-title: 'handoff-pick-check: block once when a turn names the next unit but neither starts it nor runs the pick command'
+title: 'handoff-pick-check part 2b: the "X is next, nothing started" trigger (deferred, measure-only)'
 status: To Do
 assignee:
   - Seyag
 created_date: '2026-11-23T14:28:00Z'
+updated_date: '2026-11-28T04:45:00Z'
 labels:
   - hooks
   - stop-gate
@@ -59,6 +60,8 @@ Measured on local replays with `tests/replay-stop-hook.sh` and a prototype of th
 Ruled in as accepted residuals, bounded by block-once: a forecast with a claim word or no future marker can fire; a negated pick ("/clear is not scheduled") can fire; `keep` named only in prose is not detected (too common as an ordinary word); the live-task exemption is blind to Monitor and async-Agent tasks (TASK-254).
 
 Part 2b, the "X is next, nothing started" trigger: DEFERRED, measure-only. No precise shape found: closings that name a next unit while a background agent, CI run or worker is still going are the common case, and the prose-pick trigger now covers the incident shape that left sessions idle (a pick named but not run). Trigger: an observed idle where the closing named a next unit, ran no pick command and named no pick in prose.
+
+Scope narrowed 2026-11-27 (owner priorities, relayed by Deck; triage pass 11-27): parts 1 and 2a are shipped, so this task now covers only part 2b, measure-only until the trigger above fires. The carried review lows below stay attached to it.
 
 Review lows from the 0.3.231 council review (gpt-6.2-sol), carried to the next touch of this hook: a failed live-task lookup reads as "no live tasks"; a failed `.prose` marker write still fires; the regex is a keyword heuristic (negation, quoted examples).
 <!-- SECTION:NOTES:END -->

@@ -8,7 +8,7 @@ labels:
   - rules
   - context
 dependencies: []
-priority: high
+priority: medium
 ordinal: 71000
 ---
 
@@ -27,3 +27,9 @@ Done when: a probe pins the budget, and the measured consumers are under their l
 
 Related: TASK-70.
 <!-- SECTION:DESCRIPTION:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Priority high → medium 2026-11-27 (owner priorities, relayed by Deck; triage pass 11-27, score 0.88, suggested "later"): core.md is 22,916 B on origin/main and still growing, under the lines-check cap of 22,957. It pushes at least one consumer past its limit, but that is not counted. Measure first, then pick option (a) probe + cut or (b) split with toggles.
+<!-- SECTION:NOTES:END -->
