@@ -30,13 +30,14 @@
 # With the Stop envelope's last_assistant_message as the closing text: the
 # harness truncates long values (they end "… [+N chars]"), and a closing
 # question cut by the truncation no longer ends the message — missed, the
-# fail-open direction this hook already accepts. With a blank or absent field,
-# the fallback reads the last text block anywhere in the tail, and that text
-# can be from a PRIOR turn: a trailing `?` or a pending marker there can block
-# once on prose this turn did not write. One measured trigger (TASK-67): a
-# closing recorded only as signed-empty thinking blocks leaves the
-# search to older text. Accepted: the older-version path (the field is probed
-# present on current Claude Code).
+# fail-open direction this hook already accepts. With a blank or absent field
+# (the older-version path; current Claude Code carries it), the fallback reads
+# the current turn only, and only text written after its last tool call
+# (TASK-262): a closing recorded only as signed-empty thinking blocks
+# (TASK-67) leaves no visible closing, and the turn passes rather than judging
+# older prose. Remaining bound: with no turn boundary in an untruncated
+# window, the whole window is read (the lenient no-boundary case below), so a
+# prior turn's closing can still be judged there.
 #
 # The seyag rules (rules/core.md): blocking questions go through a formal
 # channel.
@@ -149,18 +150,23 @@ if used_formal_channel:
     print("ok"); sys.exit()
 
 # Closing text: the Stop envelope's last_assistant_message when present, else
-# the last text block anywhere (robust to the boundary-not-found case; it is
-# always the closing message we read to end).
+# the turn's last text block after its last tool call (a tool_use resets the
+# candidate: earlier text is mid-turn narration). Twin of
+# lib/turn_scan.py closing_text; keep the two in step.
 lam = os.environ.get("LAM", "")
 if lam.strip():
     final_text = lam
 else:
     final_text = ""
-    for entry in records:
+    for entry in turn:
         if entry.get("type") != "assistant":
             continue
         for block in entry.get("message", {}).get("content", []) or []:
-            if block.get("type") == "text":
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "tool_use":
+                final_text = ""
+            elif block.get("type") == "text":
                 final_text = block.get("text", "")
 
 # Question shape: the LAST non-empty line ends with a question mark. Position is

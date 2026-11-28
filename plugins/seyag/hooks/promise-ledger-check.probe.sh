@@ -424,4 +424,14 @@ got=$?
 if [ "$got" != 0 ] || grep -q Traceback "$TMP/stderr.out"; then echo "FAIL [$got≠0]: truncated last_assistant_message with the marker cut passes (accepted residual)"; fail=1
 else echo "ok   [0]: truncated last_assistant_message with the marker cut passes (accepted residual)"; fi
 
+# TASK-262: LAM-absent fallback reads only this turn's text after its last tool call.
+. "$SCRIPT_DIR/../../../tests/stop-turn-fixture.sh" || { echo "FAIL: cannot source tests/stop-turn-fixture.sh"; exit 1; }
+P="I'll add the sync gate later once the schema settles."
+mkseq "$TMP/t262a.jsonl" "u:start" "a:$P" "u:go" "tool" "est"
+check 0 "LAM-absent: prior turn's promise closing is not judged when this turn ends signed-empty" "$TMP/t262a.jsonl"
+mkseq "$TMP/t262b.jsonl" "u:go" "a:$P" "tool" "est"
+check 0 "LAM-absent: promise in mid-turn narration before the last tool call is not the closing" "$TMP/t262b.jsonl"
+mkseq "$TMP/t262c.jsonl" "u:go" "tool" "a:$P" "est"
+check 2 "LAM-absent: visible promise after the last tool call still blocks" "$TMP/t262c.jsonl"
+
 [ "$fail" = 0 ] && echo "ALL PASS" || { echo "FAILURES"; exit 1; }

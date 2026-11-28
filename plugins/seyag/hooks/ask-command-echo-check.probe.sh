@@ -249,4 +249,13 @@ NCASE=$((NCASE + 1))
 if [ ! -e "$PDIR/stale-sess" ] && [ -e "$PDIR/fresh-sess" ]; then echo "ok   [prune]: stale state file pruned, fresh kept"
 else echo "FAIL [prune]: stale present=$([ -e "$PDIR/stale-sess" ] && echo y || echo n) fresh present=$([ -e "$PDIR/fresh-sess" ] && echo y || echo n)"; fail=1; fi
 
+# TASK-262: empty-closing disposition (a visible unfenced closing still blocks: case 1).
+. "$SCRIPT_DIR/../../../tests/stop-turn-fixture.sh" || { echo "FAIL: cannot source tests/stop-turn-fixture.sh"; exit 1; }
+mkseq "$TMP/t262a.jsonl" "u:go" "ask:$Q1" "est"
+check 0 "LAM-absent: a signed-empty closing after the ask passes (unreadable, fail open)" "$TMP/t262a.jsonl"
+mkseq "$TMP/t262c.jsonl" "u:go" "ask:$Q1" "a:Checking the branch first." "est"
+check 0 "LAM-absent: visible text before a signed-empty closing is not the closing (policy pin)" "$TMP/t262c.jsonl"
+mkseq "$TMP/t262b.jsonl" "u:go" "ask:$Q1"
+check 2 "LAM-absent: nothing after the ask is still judged and blocks" "$TMP/t262b.jsonl" "" 'ASK-DIALOG COMMAND' "$CMD"
+
 [ "$fail" = 0 ] && echo "ALL PASS" || { echo "FAILURES"; exit 1; }

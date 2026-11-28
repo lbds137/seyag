@@ -381,4 +381,14 @@ got=$?
 if [ "$got" != 0 ] || grep -q Traceback "$TMP/stderr.out"; then echo "FAIL [$got≠0]: truncated last_assistant_message misses the cut question (accepted fail-open)"; fail=1
 else echo "ok   [0]: truncated last_assistant_message misses the cut question (accepted fail-open)"; fi
 
+# TASK-262: LAM-absent fallback reads only this turn's text after its last tool call.
+. "$SCRIPT_DIR/../../../tests/stop-turn-fixture.sh" || { echo "FAIL: cannot source tests/stop-turn-fixture.sh"; exit 1; }
+BQQ="Both approaches work here. Should I use X or Y?"
+mkseq "$TMP/t262a.jsonl" "u:start" "a:$BQQ" "u:go" "tool" "est"
+check 0 "LAM-absent: prior turn's closing question is not judged when this turn ends signed-empty" "$TMP/t262a.jsonl"
+mkseq "$TMP/t262b.jsonl" "u:go" "a:$BQQ" "tool" "est"
+check 0 "LAM-absent: a question in mid-turn narration before the last tool call is not the closing" "$TMP/t262b.jsonl"
+mkseq "$TMP/t262c.jsonl" "u:go" "tool" "a:$BQQ" "est"
+check 2 "LAM-absent: visible closing question after the last tool call still blocks" "$TMP/t262c.jsonl"
+
 [ "$fail" = 0 ] && echo "ALL PASS" || { echo "FAILURES"; exit 1; }

@@ -347,4 +347,11 @@ bwt_check $'echo x > hooks/a.sh\n# it\'s step 1' "[]"
 bwt_check $'PYTHONDONTWRITEBYTECODE=1 python3 - <<\'EOF\'\nopen(\'hooks/a.sh\', \'w\')\nEOF' "['hooks/a.sh']"
 bwt_check "cat b >'backlog/tasks/task-9 - x.md'" "['backlog/tasks/task-9 - x.md']"
 
+# TASK-262: LAM-absent fallback reads only this turn's text after its last tool call.
+. "$SCRIPT_DIR/../../../tests/stop-turn-fixture.sh" || { echo "FAIL: cannot source tests/stop-turn-fixture.sh"; exit 1; }
+mkseq "$TMP/t262a.jsonl" "u:start" "a:$CLAIM" "u:go" "tool" "est"
+check 0 "LAM-absent: prior turn's claim closing is not judged when this turn ends signed-empty" "$TMP/t262a.jsonl"
+mkseq "$TMP/t262c.jsonl" "u:go" "tool" "a:$CLAIM" "est"
+check 2 "LAM-absent: visible claim after the last tool call still blocks" "$TMP/t262c.jsonl"
+
 [ "$fail" = 0 ] && echo "ALL PASS" || { echo "FAILURES"; exit 1; }

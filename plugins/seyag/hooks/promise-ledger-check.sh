@@ -19,16 +19,13 @@
 # "… [+N chars]"), and a trailing promise cut by the truncation turns a
 # should-block turn into a pass. Accepted: judging the transcript instead when
 # the field is present re-reads stale prior-turn closings — the false fires
-# that motivated the field. A blind spot on the fallback path (TASK-67): with
-# the field blank or absent, the fallback reads the last text block in the
-# whole tail, which can be a PRIOR turn's closing — a promise shape there
-# blocks once on prose this turn did not write. One measured trigger: a
-# closing recorded only as signed-empty thinking blocks, an
-# Anthropic-lane recording shape. Accepted: the field is probed present on
-# current Claude Code, so the fallback is the older-version path.
-# The fallback hardening this blind spot motivates (turn-sliced reads,
-# empty-closing disposition) is filed as TASK-262 — check it before reshaping
-# this path.
+# that motivated the field. With the field blank or absent (the older-version
+# path; current Claude Code carries it), the fallback reads the current turn
+# only, and only text written after its last tool call (TASK-262): a closing
+# recorded only as signed-empty thinking blocks (TASK-67) leaves no visible
+# closing, and the turn passes instead of judging older prose. Remaining
+# bound: with no turn boundary in the window, the whole tail is read (the
+# strict posture below), so a prior turn's closing can still be judged there.
 #
 # What counts as a ledger write (same turn only):
 #   - an Edit / Write / MultiEdit whose file_path matches the ledger regex.
@@ -160,9 +157,9 @@ def is_ledger_write(block):
 wrote_ledger = any(is_ledger_write(block) for block in tool_uses(turn))
 
 # (b) closing text: the Stop envelope's last_assistant_message when present,
-# else the last text block ANYWHERE (robust to the boundary-not-found case;
-# it's always the closing message we read to end).
-final_text = closing_text(records, os.environ.get("LAM", ""))
+# else the current turn's text after its last tool call. `turn or records`:
+# a found boundary is never empty; with none, the whole tail is read (strict).
+final_text = closing_text(turn or records, os.environ.get("LAM", ""))
 
 if wrote_ledger or not final_text.strip():
     print("ok"); sys.exit()
