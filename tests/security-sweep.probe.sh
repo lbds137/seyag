@@ -16,6 +16,10 @@ export PYTHONDONTWRITEBYTECODE=1
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SS="${SECURITY_SWEEP_BIN:-$REPO/plugins/seyag/bin/security-sweep}"
 fail=0
+# SECURITY_SWEEP_STOP_AFTER: newline- or |-separated prefixes of bad()'s $1; exit 1 once each has been seen
+# (a presence-only canary needs nothing past its named FAIL rows).
+stop_after_env="${SECURITY_SWEEP_STOP_AFTER:-}"
+stop_pending="${stop_after_env//|/$'\n'}"
 ok() { echo "ok:   $1"; }
 bad() {
   echo "FAIL: $1"
@@ -24,13 +28,27 @@ bad() {
   if [ -n "${SECURITY_SWEEP_STOP_AT_FAIL:-}" ]; then
     exit 1
   fi
+  if [ -n "$stop_pending" ]; then
+    local p rest=""
+    while IFS= read -r p; do
+      [ -z "$p" ] && continue
+      case "$1" in "$p"*) ;; *) rest+="$p"$'\n' ;; esac
+    done <<<"$stop_pending"
+    stop_pending="$rest"
+    [ -z "$stop_pending" ] && exit 1
+  fi
+  return 0
 }
 
 [ -x "$SS" ] || { bad "security-sweep is not executable at $SS"; exit 1; }
+# Check 11's nested run only needs the [ -x ] verdict above; a probe whose chmod mutation passed it stops here.
+[ -z "${SECURITY_SWEEP_EXEC_CHECK_ONLY:-}" ] || exit 0
 
 T="$(mktemp -d)"
 trap 'rm -rf "$T"' EXIT
 mkdir -p "$T/bin" "$T/state" "$T/fixtures"
+# SECURITY_SWEEP_NONEXEC_ONLY=1 skips every base row and runs only check 11 (canary r2-6).
+if [ -z "${SECURITY_SWEEP_NONEXEC_ONLY:-}" ]; then
 
 cat > "$T/bin/gh" <<EOF
 #!/bin/bash
@@ -1626,11 +1644,12 @@ if [ "$h12_def_rc" -eq 0 ] \
 else
   bad "H12 history fallback stamp and age_minutes (def_rc=$h12_def_rc kept=$h12_stamp_kept json_rc=$h12_json_rc)" "$h12_json_out"
 fi
+fi
 
 if [ -z "${SECURITY_SWEEP_SKIP_NONEXEC:-}" ]; then
   # 11: probe must not chmod +x a non-executable target bin; it must fail the [ -x ] assertion instead
   cp "$SS" "$T/nonexec-ss" && chmod 644 "$T/nonexec-ss"
-  nonexec_out=$(SECURITY_SWEEP_BIN="$T/nonexec-ss" SECURITY_SWEEP_SKIP_NONEXEC=1 SECURITY_SWEEP_SKIP_CANARIES=1 bash "${BASH_SOURCE[0]}" 2>&1); nonexec_rc=$?
+  nonexec_out=$(SECURITY_SWEEP_BIN="$T/nonexec-ss" SECURITY_SWEEP_SKIP_NONEXEC=1 SECURITY_SWEEP_EXEC_CHECK_ONLY=1 SECURITY_SWEEP_SKIP_CANARIES=1 bash "${BASH_SOURCE[0]}" 2>&1); nonexec_rc=$?
   if [ "$nonexec_rc" -ne 0 ] && [ ! -x "$T/nonexec-ss" ] && grep -qF "FAIL: security-sweep is not executable" <<<"$nonexec_out"; then
     ok "11 non-executable SECURITY_SWEEP_BIN fails [ -x ] check without chmodding the file"
   else
@@ -1642,12 +1661,12 @@ fi
 if [ -z "${SECURITY_SWEEP_SKIP_CANARIES:-}" ] && [ "$fail" -eq 0 ]; then
   canary_running=0
   launch_canary() {
-    local id="$1" bin="$2" stop_flag="$3" probe="${4:-${BASH_SOURCE[0]}}"
+    local id="$1" bin="$2" stop_flag="$3" stop_after="${4:-}" probe="${5:-${BASH_SOURCE[0]}}"
     (
       if [ "$stop_flag" -eq 1 ]; then
         SECURITY_SWEEP_BIN="$bin" SECURITY_SWEEP_SKIP_CANARIES=1 SECURITY_SWEEP_STOP_AT_FAIL=1 bash "$probe" >"$T/canary-$id.out" 2>&1
       else
-        SECURITY_SWEEP_BIN="$bin" SECURITY_SWEEP_SKIP_CANARIES=1 bash "$probe" >"$T/canary-$id.out" 2>&1
+        SECURITY_SWEEP_BIN="$bin" SECURITY_SWEEP_SKIP_CANARIES=1 SECURITY_SWEEP_STOP_AFTER="$stop_after" bash "$probe" >"$T/canary-$id.out" 2>&1
       fi
       echo $? >"$T/canary-$id.rc"
     ) &
@@ -1721,29 +1740,29 @@ if [ -z "${SECURITY_SWEEP_SKIP_CANARIES:-}" ] && [ "$fail" -eq 0 ]; then
   if command -v script >/dev/null 2>&1; then
     launch_canary "r5-3" "$T/mut-r5-3" 1
   fi
-  launch_canary "1a" "$T/mut-1a" 0
-  launch_canary "purpose" "$T/mut-purpose" 0
+  launch_canary "1a" "$T/mut-1a" 0 '1a default line|1b --json shape'
+  launch_canary "purpose" "$T/mut-purpose" 0 '9b --session-line one repo|9c --session-line two repos'
   launch_canary "r2-1" "$T/mut-r2-1" 0
   launch_canary "r1-3" "$T/mut-r1-3" 1
-  launch_canary "r2-3" "$T/mut-r2-3" 0
-  launch_canary "r2-4" "$T/mut-r2-4" 0
+  launch_canary "r2-3" "$T/mut-r2-3" 0 '7b non-UTF-8 --all-repos-from --strict|9e internal error default exit|9f internal error --strict exit'
+  launch_canary "r2-4" "$T/mut-r2-4" 0 '6f skip invalid repo|6g skip invalid repo --strict clean|6h skip invalid repo --strict alert wins'
   launch_canary "r7-1" "$T/mut-r7-1" 1
-  launch_canary "r2-5" "$T/mut-r2-5" 0
-  launch_canary "r3-6" "$T/mut-r3-6" 0
+  launch_canary "r2-5" "$T/mut-r2-5" 0 '1b --json shape|1c --json dedup identifiers'
+  launch_canary "r3-6" "$T/mut-r3-6" 0 '5d corrupt cache count: "x"|5e corrupt cache by_severity: []|5f corrupt cache alerts: [1]|5g corrupt cache rules_by_severity: {"critical": [1]}'
   launch_canary "r3-2" "$T/mut-r3-2" 1
-  launch_canary "r5-1" "$T/mut-r5-1" 0
-  launch_canary "r5-2" "$T/mut-r5-2" 0
+  launch_canary "r5-1" "$T/mut-r5-1" 0 '9r external SIGTERM mid-write|9s external SIGTERM worker-thread mid-write'
+  launch_canary "r5-2" "$T/mut-r5-2" 0 '9r'
   launch_canary "r8-1" "$T/mut-r8-1" 1
   launch_canary "r6-2" "$T/mut-r6-2" 1
   launch_canary "r6-1" "$T/mut-r6-1" 1
   launch_canary "r7-2" "$T/mut-r7-2" 0
-  launch_canary "r2-6" "$SS" 1 "$T/mut-probe-r2-6.sh"
+  SECURITY_SWEEP_NONEXEC_ONLY=1 launch_canary "r2-6" "$SS" 1 "" "$T/mut-probe-r2-6.sh"
   launch_canary "r3-7" "$T/mut-r3-7" 1
   launch_canary "r3-3" "$T/mut-r3-3" 1
   launch_canary "r4-4" "$T/mut-r4-4" 1
   launch_canary "r4-3" "$T/mut-r4-3" 1
   launch_canary "r4-1" "$T/mut-r4-1" 1
-  launch_canary "r4-2" "$T/mut-r4-2" 0
+  launch_canary "r4-2" "$T/mut-r4-2" 0 '9n --cap 1 expiry stops the held gh children'
   launch_canary "r3-1" "$T/mut-r3-1" 1
   launch_canary "r1-4" "$T/mut-r1-4" 1
   launch_canary "r1-2" "$T/mut-r1-2" 1
