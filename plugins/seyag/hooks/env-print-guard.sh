@@ -1155,6 +1155,8 @@ for pipeline in pipelines:
                     "exposes secret/environment values in the transcript. "
                     "Query only variable names (`jq 'keys'` / `jq '.env | keys'`) or a "
                     "specific field path (e.g. `jq -r '.env.VAR_NAME'`), "
+                    "or, for a non-env field, select it with a plain dotted path and filter that "
+                    f"output with a second jq on stdin (e.g. `jq '.hooks' {fpath} | jq '.PreToolUse[]'`), "
                     f"{sink_clause}"
                     "or prefix with `SYG_ALLOW_ENV_PRINT=1` if intentional."
                 )

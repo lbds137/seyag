@@ -156,6 +156,8 @@ run 0 "not public: a non-repo cwd" "$PLAIN" "${T[@]}" -- \
 run 2 "public: term in git commit -m" "$PUB" "${T[@]}" -- \
   "git commit -m 'add zorbleflux'"
 assert_out "message names the command text" present "matched in: the command text"
+assert_out "retry line names the reword remedy" present "Retry with the term reworded"
+assert_out "the old bare 'Remove it.' line is gone" absent "Remove it."
 assert_out "2nd term line after a comment is #2 (header)" present "(#2 in \$SYG_PRIVATE_TERMS_FILE)"
 assert_out "context masks the term as #2" present "[private term #2]"
 run 0 "near-miss: clean git commit -m" "$PUB" "${T[@]}" -- \

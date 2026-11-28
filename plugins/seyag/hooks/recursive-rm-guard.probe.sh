@@ -427,6 +427,25 @@ run 2 "rm -rf $TMP/sroot/$SID/x" "" $SID                              # root kno
 # Bypass: the owner approved this deletion.
 run 0 'SYG_ALLOW_RM=1 rm -rf build'
 
+# The no-job-dir line: printed only when the hook has no usable job dir, so a block never
+# implies an exemption that could not apply.
+NOJOB_LINE='this session has no job dir'
+msg=$(jq -nc --arg c 'rm -r "$CLAUDE_JOB_DIR/tmp/x"' '{tool_input: {command: $c}}' | CLAUDE_JOB_DIR="" bash "$HOOK" 2>&1 >/dev/null)
+case "$msg" in
+  *RECURSIVE-RM*"$NOJOB_LINE"*) echo "ok   no job dir: the block says so" ;;
+  *) echo "FAIL no job dir: the block lacks the no-job-dir line: $msg"; fail=1 ;;
+esac
+msg=$(jq -nc --arg c 'rm -rf .claude/worktrees/agent-x' '{tool_input: {command: $c}}' | CLAUDE_JOB_DIR="" bash "$HOOK" 2>&1 >/dev/null)
+case "$msg" in
+  *"$NOJOB_LINE"*safe-worktree-clean*) echo "ok   no job dir + worktree target: both hints" ;;
+  *) echo "FAIL no job dir + worktree target lacks a hint: $msg"; fail=1 ;;
+esac
+msg=$(jq -nc --arg c 'rm -rf $CLAUDE_JOB_DIR/tmp' '{tool_input: {command: $c}}' | CLAUDE_JOB_DIR="$TMP/job" bash "$HOOK" 2>&1 >/dev/null)
+case "$msg" in
+  *"$NOJOB_LINE"*) echo "FAIL job dir set: the block wrongly says there is no job dir: $msg"; fail=1 ;;
+  *RECURSIVE-RM*) echo "ok   job dir set: a still-blocked target omits the no-job-dir line" ;;
+  *) echo "FAIL job dir set: not blocked: $msg"; fail=1 ;;
+esac
 # The message names the target and carries the pinned phrases.
 msg=$(jq -nc --arg c 'cd /tmp && rm -rf build-output' '{tool_input: {command: $c}}' | CLAUDE_JOB_DIR="" bash "$HOOK" 2>&1 >/dev/null)
 for phrase in 'RECURSIVE-RM GUARD' 'rm -rf build-output' 'unrecoverable' 'NEW directory' \

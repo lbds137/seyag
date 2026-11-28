@@ -48,7 +48,12 @@ Reading:
 
 Inventory of every wired PreToolUse guard's block text (verdict per message: as-is / generic / no-retry; probe pins): a driver-side Explore pass, 2026-11-27, summarised in the owner AskUserQuestion that night. NO-RETRY messages: private-term "Remove it."; dispatch-posture over-size and cumulative; upstream "don't submit" (deliberate); publish-gate unresolvable-repo branch; lossy-pipe job "Run it UNFILTERED"; pr-merge ack-state faults.
 
-recursive-rm known instance, by code-reading only (not reproduced): a single literal path under `$CLAUDE_JOB_DIR/tmp/<name>` passes when CLAUDE_JOB_DIR is set in the hook's environment and names an existing directory (lib/delete_commands.py scratch_target / in_scratch; probe expects 0 for that case). Likely trigger of the reported block: a worker with CLAUDE_JOB_DIR unset, or the tmp dir itself as the target. Still to reproduce.
+recursive-rm known instance, by code-reading only (not reproduced): a single literal path under `$CLAUDE_JOB_DIR/tmp/<name>` passes when CLAUDE_JOB_DIR is set in the hook's environment and names an existing directory (lib/delete_commands.py scratch_target / in_scratch; probe expects 0 for that case). Likely trigger of the reported block: a worker with CLAUDE_JOB_DIR unset, or the tmp dir itself as the target.
+
+Reproduced 2026-11-27 by replaying the guard:
+- Both `rm -r <jobs>/<id>/tmp/t57` and `rm -r "$CLAUDE_JOB_DIR/tmp/t57"` block (rc 2) when CLAUDE_JOB_DIR is unset in the hook's environment, and pass (rc 0) when it names that existing job dir.
+- The blocking session was not a job (`printenv CLAUDE_JOB_DIR` gives rc 1); the dir was another job's scratch.
+- So the block was correct and the text misled. The fix is text: a line saying the session has no job dir.
 
 Owner ruling 2026-11-27 (AskUserQuestion, on the measurement above): narrow it. One PR, then close this task citing the measurement:
 1. Fix env-print's jq remedy so it names the non-env selectors that pass.
