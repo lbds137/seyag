@@ -17,7 +17,7 @@ bad() { fail=$((fail + 1)); echo "FAIL  $1"; }
 unset CLAUDE_PID CLAUDE_ROLE_HEADLESS CLAUDE_ROLE_TASK CLAUDE_ROLE_NOW_EPOCH XDG_DATA_HOME \
       SYG_ROLE_CONTEXT_LINE SYG_ROLE_PREAMBLE_FILE SYG_NEEDS_OWNER_SECTION SYG_IN_PERSON_SECTION \
       SYG_ROLE_CONTEXT_CMD SYG_ROUTE_SHOW_CMD SYG_ROLE_HEADLESS_ROUTES SYG_ROLE_HEADLESS SYG_ROLE_TASK \
-      SYG_ROLE_NOW_EPOCH
+      SYG_ROLE_NOW_EPOCH SYG_ROLE_WORKER_BRANCHES
 export SYG_CONFIG=0
 
 home=$(mktemp -d "${TMPDIR:-/tmp}/claude-role-probe.XXXXXX")
@@ -522,6 +522,34 @@ out=$(echo '{"source":"startup","cwd":"'"$home"'/Projects/alpha"}' | SYG_ROLE_CO
   && ! grep -qF 'You are the' <<< "$out" && grep -qF '"Weekly mining" task session' <<< "$out" \
   && grep -qF 'not a role session' <<< "$out" && ! grep -qF 'Alpha role' <<< "$out" \
   && ok "hook: a task session hears its task name and the context line, never the role file" || bad "hook task: $out"
+# A worker in a linked worktree on an agent branch is not the role; main checkouts and other branches are.
+wt="$home/wtfix"; mkdir -p "$wt"
+git init -q -b main "$wt/alpha" && git -C "$wt/alpha" -c user.name=t -c user.email=t@example.invalid commit -q --allow-empty -m i
+git -C "$wt/alpha" config user.name t; git -C "$wt/alpha" config user.email t@example.invalid
+git -C "$wt/alpha" worktree add -q -b worktree-agent-x "$wt/w-agent" && git -C "$wt/alpha" worktree add -q -b feature-y "$wt/w-feat" \
+  && git -C "$wt/alpha" worktree add -q -b lane-3 "$wt/w-lane" && git -C "$wt/alpha" worktree add -q --detach "$wt/w-det"
+hk() { echo '{"source":"startup","cwd":"'"$1"'"}' | env "${@:2}" SYG_ROLE_CONTEXT_LINE='[Ctx] machine line' "$CR"; }
+wl='Worker worktree (branch worktree-agent-x): not a role session'
+# A tag sharing the branch's name makes `symbolic-ref --short` print heads/worktree-agent-x; the skip must still match.
+git -C "$wt/alpha" tag worktree-agent-x
+out=$(hk "$wt/w-agent")
+[ "$(wc -l <<< "$out")" -eq 2 ] && [ "$(sed -n 1p <<< "$out")" = '[Ctx] machine line' ] && grep -qF "$wl" <<< "$out" && ! grep -qF 'Alpha role' <<< "$out" \
+  && ok "hook: linked worktree on worktree-agent-* gets the context line and the worker line only" || bad "hook worker skip: $out"
+out=$(hk "$wt/w-feat"); grep -qF 'Alpha role' <<< "$out" && ! grep -qF 'Worker worktree' <<< "$out" \
+  && ok "hook: linked worktree on another branch gets the role" || bad "hook feature worktree: $out"
+git -C "$wt/alpha" checkout -q -b worktree-agent-main
+out=$(hk "$wt/alpha"); grep -qF 'Alpha role' <<< "$out" && ! grep -qF 'Worker worktree' <<< "$out" \
+  && ok "hook: main checkout on an agent branch gets the role" || bad "hook main checkout: $out"
+git -C "$wt/alpha" checkout -q main
+out=$(hk "$wt/w-lane" SYG_ROLE_WORKER_BRANCHES='lane-*, other-*')
+grep -qF 'Worker worktree (branch lane-3)' <<< "$out" && ! grep -qF 'Alpha role' <<< "$out" \
+  && ok "hook: SYG_ROLE_WORKER_BRANCHES globs (comma and space separated) skip a matching branch" || bad "hook custom glob skip: $out"
+out=$(hk "$wt/w-agent" SYG_ROLE_WORKER_BRANCHES='lane-*, other-*'); grep -qF 'Alpha role' <<< "$out" \
+  && ok "hook: a custom SYG_ROLE_WORKER_BRANCHES replaces the default glob" || bad "hook custom glob replaces default: $out"
+out=$(hk "$wt/w-agent" SYG_ROLE_WORKER_BRANCHES=''); grep -qF 'Alpha role' <<< "$out" && ! grep -qF 'Worker worktree' <<< "$out" \
+  && ok "hook: an empty SYG_ROLE_WORKER_BRANCHES never skips" || bad "hook empty knob: $out"
+out=$(hk "$wt/w-det"); grep -qF 'Alpha role' <<< "$out" && ! grep -qF 'Worker worktree' <<< "$out" \
+  && ok "hook: a detached-HEAD linked worktree gets the role" || bad "hook detached: $out"
 # The pre-0.3.176 names are not read any more.
 out=$(echo '{"source":"startup","cwd":"'"$home"'/Projects/alpha"}' | CLAUDE_ROLE_HEADLESS=1 "$CR")
 grep -qF 'You are the "Alpha role" session' <<< "$out" && ! grep -qF 'Headless run' <<< "$out" \

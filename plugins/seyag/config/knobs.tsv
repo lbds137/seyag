@@ -229,6 +229,7 @@ SYG_ROLE_HEADLESS_ROUTES	user	session	unset	Whitespace- or comma-separated route
 SYG_ROLE_NOW_EPOCH	internal	misc	unset	Test seam overriding the clock (epoch seconds) claude-role uses to decide which Next items are due.	-
 SYG_ROLE_PREAMBLE_FILE	user	session	unset	Template file for the instruction block claude-role prints at session start; the placeholders {role}, {path}, {needs} and {in_person} are replaced literally. Unset, empty or unreadable means the built-in text.	path
 SYG_ROLE_TASK	internal	misc	unset	Set by a launcher of a named task session: claude-role hook mode then prints the task name and a "not a role session" line and never the role file.	-
+SYG_ROLE_WORKER_BRANCHES	user	session	`worktree-agent-*`	Comma- or whitespace-separated branch name patterns (shell wildcards): claude-role hook mode skips the role in a linked worktree on a matching branch. Unset is the default; set to the empty string, never skip.	-
 SYG_ROUTE_CHECK_CMD	user	routing	unset	Shell command run by route-check at SessionStart when a session requires an approved model route.	-
 SYG_ROUTE_CHECK_OK	user	routing	unset	Exact first word that SYG_ROUTE_CHECK_CMD's first stdout line must match for route-check to pass.	-
 SYG_ROUTE_CHECK_TIMEOUT	internal	routing	10	Test seam overriding the timeout in seconds (positive integer) for SYG_ROUTE_CHECK_CMD in route-check.	-
