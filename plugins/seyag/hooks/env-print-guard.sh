@@ -1150,13 +1150,19 @@ for pipeline in pipelines:
                     if _JQ_STDERR_BUILTIN_RE.search(filt or "")
                     else "or sink both fds (`>/dev/null 2>&1`), "
                 )
+                _base = os.path.basename(fpath)
+                _fields = (
+                    ".hooks' %s | jq '.PreToolUse[]"
+                    if _base.startswith("settings") and _base.endswith(".json")
+                    else ".FIELD' %s | jq '.SUBFIELD[]"
+                ) % shlex.quote(fpath)
                 print(
                     f"ENV-PRINT BLOCKED: bulk jq filter '{shown_filt}' on '{fpath}' "
                     "exposes secret/environment values in the transcript. "
                     "Query only variable names (`jq 'keys'` / `jq '.env | keys'`) or a "
                     "specific field path (e.g. `jq -r '.env.VAR_NAME'`), "
                     "or, for a non-env field, select it with a plain dotted path and filter that "
-                    f"output with a second jq on stdin (e.g. `jq '.hooks' {fpath} | jq '.PreToolUse[]'`), "
+                    f"output with a second jq on stdin (e.g. `jq '{_fields}'`), "
                     f"{sink_clause}"
                     "or prefix with `SYG_ALLOW_ENV_PRINT=1` if intentional."
                 )

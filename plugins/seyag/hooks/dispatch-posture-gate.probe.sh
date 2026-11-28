@@ -317,7 +317,7 @@ run_sized 0 "5-line Edit: retry passes (boundary is >5, not >=5)" "$P_IB" "$ACK_
 ACK_IC="$TMPDIR_PROBE/ack_ic"
 P_IC=$(edit_payload "$SRC" "$(lines 6)" "$(lines 6)")
 run_sized 2 "6-line Edit: hard block" "$P_IC" "$ACK_IC"
-if grep -qF 'Next call: the Agent tool with subagent_type "seyag:implementer"' <<<"$ERR"; then
+if grep -qF 'the Agent tool with subagent_type "seyag:implementer", model passed.' <<<"$ERR"; then
   printf 'PASS  (stderr)  over-size block names the next call\n'
 else
   printf 'FAIL  (stderr)  over-size block lacks the next-call line: %s\n' "$ERR"
@@ -400,7 +400,7 @@ else
   printf 'FAIL  (stderr)  missing cumulative count line: %s\n' "$ERR"
   FAILURES=$((FAILURES + 1))
 fi
-if grep -qF 'Next call: the Agent tool with subagent_type "seyag:implementer"' <<<"$ERR"; then
+if grep -qF 'the Agent tool with subagent_type "seyag:implementer", model passed.' <<<"$ERR"; then
   printf 'PASS  (stderr)  cumulative block names the next call\n'
 else
   printf 'FAIL  (stderr)  cumulative block lacks the next-call line: %s\n' "$ERR"

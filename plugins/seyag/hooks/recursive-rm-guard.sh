@@ -177,7 +177,7 @@ case "$PY_RC" in 0 | 11 | 12 | 13) ;; *) exit 0 ;; esac
 [ -n "$HITS" ] || exit 0
 
 NOJOB_HINT=""
-case "$PY_RC" in 12 | 13) NOJOB_HINT=$'\n'"    (this session has no job dir: CLAUDE_JOB_DIR is unset or not a directory in the hook, so only the scratch-dir path is exempt)" ;; esac
+case "$PY_RC" in 12 | 13) NOJOB_HINT=$'\n'"    (this session has no usable job dir: CLAUDE_JOB_DIR is unset or not a directory in the hook, so the \$CLAUDE_JOB_DIR/tmp exemption does not apply)" ;; esac
 WORKTREE_HINT=""
 [ "$PY_RC" = 11 ] || [ "$PY_RC" = 13 ] && WORKTREE_HINT=$'\n'"  - agent worktrees: safe-worktree-clean --repo <repo> [--apply] (it judges its SAFE criteria first)."
 
