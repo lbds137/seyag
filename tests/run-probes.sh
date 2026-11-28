@@ -224,6 +224,13 @@ else
 fi
 
 TMP=$(mktemp -d) || exit 1
+# Probes call hooks directly, so SYG_PY_CACHE_ARG would be unset and every call
+# recompiles hooks/lib. Give them a bytecode cache in this run's TMP (it dies
+# with the run); run.sh-routed probes set their own value. A caller's value wins;
+# a relative TMP (relative TMPDIR) keeps the `-B` fallback, as run.sh does.
+case $TMP in
+  /*) [ -n "${SYG_PY_CACHE_ARG:-}" ] || export SYG_PY_CACHE_ARG="-Xpycache_prefix=$TMP/pycache" ;;
+esac
 # PID -> probe index of jobs still running; a finished job leaves this set at
 # once, so the trap never signals a PID the system may already have reused.
 declare -A live=()
