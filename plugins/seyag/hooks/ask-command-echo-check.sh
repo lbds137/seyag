@@ -31,11 +31,11 @@
 # the key (the ask's unbackticked line can run on into prose), so a shorter echo
 # can pass; accepted under fail-open. With a blank or absent envelope field
 # (the fallback path), the judged closing is the last transcript text after the
-# last ask; when that search finds no text — for instance when the closing was
-# recorded only as signed-empty thinking blocks, an Anthropic-lane shape
-# (TASK-67) — the fenced list comes out empty and the gate
-# blocks once. Accepted: fail-closed on an unreadable closing, bounded by the
-# block-once guard; the retry is not guaranteed readable text.
+# last ask. When the turn ends on a closing recorded only as signed-empty
+# thinking blocks, an Anthropic-lane shape (TASK-67), the closing exists but is
+# unreadable, so the gate passes: fail-open, rather than block once demanding a
+# repeat that may have been written (TASK-262). A turn with no assistant entry
+# after the ask is still judged, and blocks when the command is unechoed.
 #
 # Enforcement geometry mirrors blocking-question-channel-check.sh: a tail read of
 # the transcript, a strict turn boundary (no genuine user entry found → silent),
@@ -74,6 +74,7 @@ import hashlib, json, os, re, sys
 
 sys.path.insert(0, os.environ["HOOK_LIB"])
 from ask_detect import ask_fields, commands_in  # noqa: E402
+from turn_scan import is_signed_empty  # noqa: E402
 
 
 def judge():
@@ -182,6 +183,15 @@ def judge():
         return "ok"
 
     lam = os.environ.get("LAM", "")
+    # Empty-closing disposition (TASK-262): blank LAM and a turn ending on a
+    # signed-empty thinking entry means a closing exists that the transcript
+    # does not carry, so pass (fail open) rather than demand a repeat that
+    # may have been written. Visible text before that entry is not the closing
+    # (the closing is the entry whose prose is missing), so it is not judged
+    # either. A turn with nothing after the ask is still judged.
+    assistant_entries = [e for e in turn if e.get("type") == "assistant"]
+    if not lam.strip() and assistant_entries and is_signed_empty(assistant_entries[-1]):
+        return "ok"
     closing = lam if lam.strip() else text_after_ask
 
     fenced = []

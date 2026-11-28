@@ -36,8 +36,10 @@
 #     one-line acknowledgement route.
 #
 # Replay note: tests/replay-stop-hook.sh feeds no `last_assistant_message` in
-# the Stop envelope, so a replay judges the transcript fallback (the last
-# assistant text block in the tail window).
+# the Stop envelope, so a replay judges the transcript fallback: the current
+# turn's last text after its last tool call (the whole tail window when no
+# turn boundary is in it), and nothing when the closing was recorded only as
+# signed-empty thinking blocks (TASK-262).
 #
 # Knobs (each replaces its default when set, non-empty and valid; an invalid
 # regex falls back to the default without crashing):
@@ -149,7 +151,8 @@ def is_enforcing_credit(block):
 
 credited = any(is_enforcing_credit(block) for block in tool_uses(turn))
 
-final_text = closing_text(records, os.environ.get("LAM", ""))
+# `turn or records`: a found boundary is never empty; with none, the whole tail is read.
+final_text = closing_text(turn or records, os.environ.get("LAM", ""))
 if credited or not final_text.strip():
     print("ok"); sys.exit()
 

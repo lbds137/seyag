@@ -2,6 +2,16 @@
 
 All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY-MM-DD>` section per released version; under it, `###` categories in fixed order — Breaking Changes, Features, Bug Fixes, Improvements, Chores, Tests — empty ones omitted; items are `- **scope:** description (#PR)`, written from the version's merged commit subjects.
 
+## 0.3.241 - 2026-11-28
+
+### Bug Fixes
+- **promise-ledger-check, lesson-claim-check, blocking-question-channel-check:** with `last_assistant_message` blank or absent, the closing is the current turn's last text after its last tool call (the whole tail only when no turn boundary is in view), so a prior turn's closing or mid-turn narration is no longer judged when the closing was recorded only as signed-empty thinking (#472)
+- **ask-command-echo-check:** blank `last_assistant_message` and a turn ending on a signed-empty thinking entry pass (the closing is unreadable, fail open) instead of blocking once for an echo that may have been written; a turn with nothing after the ask is still judged (#472)
+
+### Tests
+- **replay-stop-hook:** each trip names its closing shape (`closing: signed-empty` or `visible`), and the summary gains `; signed-empty closings: T/N tripped` when any exist (#472)
+- **Stop-hook probes:** rows for the prior-turn, mid-turn and visible-closing shapes on each hook, built by the shared `tests/stop-turn-fixture.sh` (#472)
+
 ## 0.3.240 - 2026-11-28
 
 ### Features

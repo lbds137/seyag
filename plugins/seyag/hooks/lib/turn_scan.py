@@ -7,7 +7,8 @@ Public functions:
     load_records(path)          tail-bounded JSONL read (TAIL_BYTES = 4_000_000)
     is_genuine_user(entry)      True for a non-meta user record carrying text
     current_turn(records)       slice from the last genuine user record (or [])
-    closing_text(records, lam)  LAM when non-blank, else last assistant text block
+    closing_text(records, lam)  LAM when non-blank, else last text after the last tool_use
+    is_signed_empty(entry)      True for a thinking-only entry with blank thinking text
     strip_code(text)            strip fenced code blocks, then inline code spans
     tool_uses(turn)             yield assistant tool_use blocks in the turn
     bash_write_targets(cmd)     strict list of paths a Bash command writes
@@ -99,7 +100,13 @@ def current_turn(records):
 
 
 def closing_text(records, lam=""):
-    """Return `lam` when non-blank, else the last assistant text block anywhere in `records`."""
+    """Return `lam` when non-blank, else the last assistant text block written
+    after the last assistant `tool_use` in `records` ("" when none follows it).
+
+    Callers pass the current turn (or the whole tail when no boundary was
+    found). Text written before a later tool call is mid-turn narration, not
+    the closing, so a tool_use resets the candidate: a closing the transcript
+    does not carry (see `is_signed_empty`) yields "" rather than older text."""
     if lam and lam.strip():
         return lam
     final_text = ""
@@ -107,9 +114,31 @@ def closing_text(records, lam=""):
         if entry.get("type") != "assistant":
             continue
         for block in entry.get("message", {}).get("content", []) or []:
-            if block.get("type") == "text":
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "tool_use":
+                final_text = ""
+            elif block.get("type") == "text":
                 final_text = block.get("text", "")
     return final_text
+
+
+def is_signed_empty(entry):
+    """True for an assistant entry whose content is only thinking blocks with
+    blank thinking text: a closing recorded without its prose (an
+    Anthropic-lane recording shape, TASK-67). Twin: is_signed_empty in
+    tests/replay-stop-hook.sh."""
+    if entry.get("type") != "assistant":
+        return False
+    content = entry.get("message", {}).get("content")
+    if not isinstance(content, list) or not content:
+        return False
+    return all(
+        isinstance(b, dict)
+        and b.get("type") in ("thinking", "redacted_thinking")
+        and not str(b.get("thinking") or "").strip()
+        for b in content
+    )
 
 
 def strip_code(text):
