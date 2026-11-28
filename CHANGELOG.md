@@ -5,13 +5,13 @@ All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY
 ## 0.3.238 - 2026-11-27
 
 ### Improvements
-- **env-print-guard:** the bulk-jq block names a route that passes for non-env fields — select with a plain dotted path, then filter that output with a second jq on stdin — with the hit's own file path in the example (#PR)
-- **private-term-guard:** the block says to retry with the term reworded to a generic description (edit a body file first) instead of the bare "Remove it." (#PR)
-- **dispatch-posture-gate:** both block messages (over-size and cumulative) name the next call: the Agent tool with `subagent_type "seyag:implementer"`, model passed, spec as the prompt (#PR)
-- **recursive-rm-guard:** a block in a session with no usable job dir says so, so the `$CLAUDE_JOB_DIR/tmp` exemption is no longer implied; with a job dir set the message is unchanged (#PR)
+- **env-print-guard:** the bulk-jq block names a route that passes for non-env fields — select with a plain dotted path, then filter that output with a second jq on stdin — with the hit's own file path in the example (#466)
+- **private-term-guard:** the block says to retry with the term reworded to a generic description (edit a body file first) instead of the bare "Remove it." (#466)
+- **dispatch-posture-gate:** both block messages (over-size and cumulative) name the next call: the Agent tool with `subagent_type "seyag:implementer"`, model passed, spec as the prompt (#466)
+- **recursive-rm-guard:** a block in a session with no usable job dir says so, so the `$CLAUDE_JOB_DIR/tmp` exemption is no longer implied; with a job dir set the message is unchanged (#466)
 
 ### Tests
-- **env-print-guard, private-term-guard, dispatch-posture-gate, recursive-rm-guard:** each probe pins its new message line (the retry clause, the reword line and the absence of "Remove it.", the next-call line in both blocks, the no-job-dir line present without a job dir and absent with one) (#PR)
+- **env-print-guard, private-term-guard, dispatch-posture-gate, recursive-rm-guard:** each probe pins its new message line (the retry clause, the reword line and the absence of "Remove it.", the next-call line in both blocks, the no-job-dir line present without a job dir and absent with one) (#466)
 
 ## 0.3.237 - 2026-11-27
 
