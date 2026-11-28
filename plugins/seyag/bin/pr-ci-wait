@@ -45,13 +45,18 @@ gate BEFORE it prints that sentinel: it runs the real pr-merge-review-check
 hook through hooks/run.sh with a synthetic `gh pr merge N` payload, streaming
 the hook's output straight into this command's stdout, so the first-merge
 block (the latest review) reaches the agent ahead of the CI_COMPLETE line it
-acts on, and the session's own `gh pr merge N` then proceeds. Priming is
+acts on, and the session's own `gh pr merge N` then proceeds. The hook's
+default-branch release reminder is excluded from priming (the child runs with
+SYG_MERGE_REVIEW_PRIMING=1), so it still fires on the real merge. A project that
+ships its own .claude/hooks/pr-merge-review-check.sh is not primed (run.sh would
+silently defer to that copy); pr-ci-wait says so. The child runs in its own
+process group and a timeout kills the whole group. Priming is
 skipped silently when SYG_CI_AUTOMERGE_JOB is set (those PRs merge themselves)
 or SYG_CI_WAIT_PRIME_REVIEW=0 (any other value or unset = on). A priming
 failure only warns (a hook exit other than 0 or 2, or a timeout, says the ack
 state is unknown); it never changes the exit code or the sentinel. Internal test
 seam: SYG_CI_WAIT_PRIME_CMD, a path to an executable run INSTEAD of the hook
-dispatcher (same stdin).
+dispatcher (same stdin); PR_CI_WAIT_PRIME_TIMEOUT_S overrides the 60s child bound.
 
 Exit codes: 0 only on CI_COMPLETE; 1 for every other gate outcome (timeout,
 startup failure, review missing, automerge skipped); 2 for a usage/argument
@@ -100,6 +105,7 @@ import argparse
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -116,9 +122,6 @@ except Exception:
     pass
 
 FULL_SHA = re.compile(r"^[0-9a-f]{40}$", re.I)
-
-# Bound on the merge-gate priming child (see prime_merge_gate).
-PRIME_TIMEOUT_S = 60
 
 # gh substitutes these literal placeholders from the repo the command runs
 # in (or --repo), so no separate owner/repo lookup is needed.
@@ -168,6 +171,8 @@ HEARTBEAT_S = _env_float("PR_CI_WAIT_HEARTBEAT_S", 600)
 SETTLE_S = _env_float("PR_CI_WAIT_SETTLE_S", 5)
 QUIET_S = _env_float("PR_CI_WAIT_QUIET_S", 90)
 FAKE_TICK_S = _env_float("PR_CI_WAIT_FAKE_TICK_S", 0)
+# Bound on the merge-gate priming child (see prime_merge_gate); the env knob is a probe seam.
+PRIME_TIMEOUT_S = _env_float("PR_CI_WAIT_PRIME_TIMEOUT_S", 60)
 
 
 def log(msg):
@@ -713,23 +718,53 @@ def prime_merge_gate(pr):
     have acked before it failed). An OSError means nothing ran, so the gate is
     still armed. Runs BEFORE the sentinel is printed, so the review precedes
     the line the agent acts on.
+
+    The child gets SYG_MERGE_REVIEW_PRIMING=1, which keeps the default-branch
+    release reminder (and its ack) for the real merge call. A project that
+    ships its own pr-merge-review-check hook is skipped with a warning. The
+    child runs in its own process group so a timeout kills grandchildren too
+    (they would otherwise hold our stdout open).
     """
+    # Mirrors hooks/run.sh syg_hook_ready: a project copy of the hook wins there
+    # (silently), so priming would run nothing useful.
+    project_copy = os.path.join(
+        os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd(), ".claude", "hooks", "pr-merge-review-check.sh"
+    )
+    if os.path.isfile(project_copy):
+        log("⚠️  merge gate not primed: this project ships its own pr-merge-review-check hook, which decides what the first gh pr merge does")
+        return
     cmd = ["bash", os.path.join(_SYG_ROOT, "hooks", "run.sh"), "pr-merge-review-check"]
     # Test seam (probe only): an executable used INSTEAD, with the same stdin.
     seam = os.environ.get("SYG_CI_WAIT_PRIME_CMD")
     if seam:
         cmd = [seam]
+    child_env = dict(os.environ, SYG_MERGE_REVIEW_PRIMING="1")
     payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": f"gh pr merge {pr}"}})
     log(f"🔓 priming the merge gate for PR #{pr}: anything it prints below is what it acked or still owes")
     sys.stdout.flush()
     try:
-        result = subprocess.run(
-            cmd, input=payload, text=True, stdout=None, stderr=subprocess.STDOUT, timeout=PRIME_TIMEOUT_S
+        proc = subprocess.Popen(
+            cmd, stdin=subprocess.PIPE, stdout=None, stderr=subprocess.STDOUT, text=True,
+            env=child_env, start_new_session=True,
         )
-        if result.returncode not in (0, 2):
-            log(f"⚠️  merge gate priming: hook exited {result.returncode}; ack state unknown")
-    except subprocess.TimeoutExpired:
-        log(f"⚠️  merge gate priming timed out after {PRIME_TIMEOUT_S}s; ack state unknown")
+        completed = False
+        try:
+            try:
+                proc.communicate(payload, timeout=PRIME_TIMEOUT_S)
+                completed = True
+            finally:
+                # The child is in its own session, so an interrupt would not reach it.
+                if not completed:
+                    try:
+                        os.killpg(proc.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    proc.wait()
+        except subprocess.TimeoutExpired:
+            log(f"⚠️  merge gate priming timed out after {PRIME_TIMEOUT_S:g}s; ack state unknown")
+            return
+        if proc.returncode not in (0, 2):
+            log(f"⚠️  merge gate priming: hook exited {proc.returncode}; ack state unknown")
     except OSError as exc:
         log(f"⚠️  merge gate not primed: {exc}; the first gh pr merge will block once as usual")
 

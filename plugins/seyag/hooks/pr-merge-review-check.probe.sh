@@ -2223,6 +2223,17 @@ invoke 'gh pr merge 2010 --rebase'
 assert_exit "release PR whose key is a prefix of an acked one: still BLOCKS" 2
 assert_stderr_has "…and still gets the reminder" 'DEFAULT-BRANCH MERGE'
 
+# A priming call (pr-ci-wait sets SYG_MERGE_REVIEW_PRIMING=1) must neither show
+# nor ack the default-branch reminder; the real merge call afterwards still does.
+new_case; SHIM_PR_BASE='main'; SHIM_REVIEW_JSON=''
+SYG_MERGE_REVIEW_PRIMING=1 invoke 'gh pr merge 3010 --rebase'
+assert_stderr_lacks "priming call on a default-branch PR shows no reminder" 'DEFAULT-BRANCH MERGE'
+assert_ack_lacks "…and writes no RELEASE ack" 'RELEASE:acme-widgets/cli:3010'
+invoke 'gh pr merge 3010 --rebase'
+assert_exit "the real merge call afterwards BLOCKS" 2
+assert_stderr_has "…with the reminder" 'DEFAULT-BRANCH MERGE'
+assert_ack_has "…and acks it" 'RELEASE:acme-widgets/cli:3010'
+
 check_assert_helpers() {
   local src="${1:-$0}" fn missing=0 count=0
   if [ ! -r "$src" ]; then

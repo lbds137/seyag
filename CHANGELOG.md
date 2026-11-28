@@ -2,6 +2,19 @@
 
 All notable changes to the seyag plugin. Newest first. One `## <version> - <YYYY-MM-DD>` section per released version; under it, `###` categories in fixed order — Breaking Changes, Features, Bug Fixes, Improvements, Chores, Tests — empty ones omitted; items are `- **scope:** description (#PR)`, written from the version's merged commit subjects.
 
+## 0.3.240 - 2026-11-28
+
+### Features
+- **pr-ci-wait:** on CI_COMPLETE with no automerge job, runs the real pr-merge-review-check hook with a synthetic `gh pr merge N` and streams its block before the sentinel, so the first merge proceeds; `SYG_CI_WAIT_PRIME_REVIEW=0` turns it off; the default-branch release reminder is excluded (`SYG_MERGE_REVIEW_PRIMING=1` on the child) and still fires on the real merge; a project that ships its own hook copy is not primed; the child runs in its own process group, killed on timeout or interrupt; a non-0/2 exit or a timeout warns "ack state unknown" (#470)
+- **claude-role:** hook mode skips the role in a linked worktree whose branch (full ref under refs/heads/) matches `SYG_ROLE_WORKER_BRANCHES` (default `worktree-agent-*`; empty = never), printing a "Worker worktree" line; git failures fall through (#471)
+
+### Improvements
+- **delegation, review-response:** reviewer briefs name `scratch-dir <unit>-review` as the reviewer's scratch (#468)
+
+### Tests
+- **store-lint:** new `tests/store-lint.sh` (silent on pass) runs backlog-lint plus coupling-lint and is the store lint CLAUDE.md names for the direct backlog path; coupling-lint initialises its arrays; probe `tests/store-lint.probe.sh` (#469)
+- **pr-ci-wait, claude-role:** probes pin the priming flow and the worker-worktree skip (#470, #471)
+
 ## 0.3.239 - 2026-11-27
 
 ### Improvements

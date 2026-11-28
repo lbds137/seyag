@@ -322,6 +322,7 @@ An optional TOML file fills in knobs the environment left unset: user `${XDG_CON
 | `OPENROUTER_CREDITS_URL` | `bin/statusline` | Test seam overriding the OpenRouter credits endpoint URL in statusline. |
 | `PRICE_TABLE_MODELS_URL` | `bin/price-table` | Test seam overriding the OpenRouter models endpoint URL for price-table --sync. |
 | `PR_CI_WAIT_FAKE_TICK_S` | `bin/pr-ci-wait` | Test seam advancing the quiet-window clock by a fixed number of seconds per poll instead of wall time in pr-ci-wait (0 uses wall time). |
+| `PR_CI_WAIT_PRIME_TIMEOUT_S` | `bin/pr-ci-wait` | Probe seam: seconds pr-ci-wait lets the merge-gate priming child run before killing its process group. |
 | `RAILWAY_OPS_CLI` | `bin/railway-ops` | Test seam overriding the railway CLI binary path in railway-ops. |
 | `RAILWAY_OPS_ENDPOINT` | `bin/railway-ops` | Test seam overriding the Railway GraphQL endpoint URL in railway-ops. |
 | `SECURITY_SWEEP_GH` | `bin/security-sweep` | Test seam overriding the gh binary path in security-sweep. |
@@ -358,6 +359,7 @@ An optional TOML file fills in knobs the environment left unset: user `${XDG_CON
 | `SYG_MEM_PRESSURE_MEMINFO` | `bin/mem-pressure-log` | Test seam overriding the meminfo file mem-pressure-log reads. |
 | `SYG_MEM_PRESSURE_PSI` | `bin/mem-pressure-log` | Test seam overriding the PSI memory file mem-pressure-log reads. |
 | `SYG_MEM_WATCH_MEMINFO` | `bin/mem-watch` | Test seam overriding the meminfo file mem-watch reads. |
+| `SYG_MERGE_REVIEW_PRIMING` | `bin/pr-ci-wait`, `hooks/pr-merge-review-check.sh` | Set to 1 by pr-ci-wait on its priming call: the merge-review hook then skips the default-branch release reminder and its RELEASE ack, leaving both for the real merge. |
 | `SYG_PIN_ACTIONS_GH` | `bin/pin-actions` | Test seam naming the gh binary pin-actions calls for commit and tag lookups. |
 | `SYG_PLUGIN_MANIFEST` | `bin/statusline` | Test seam overriding the plugin.json path read by statusline for the SYG version segment. |
 | `SYG_PR_BODY_ACK_FILE` | `hooks/pr-body-ref-gate.sh` | Test seam overriding the path to pr-body-ref-gate's per-UTC-day claim-scan acknowledgement file. |

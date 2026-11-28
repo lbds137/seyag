@@ -94,7 +94,10 @@ stop after step 1 even if every check is green:
    merge gate's own block (the latest review, after a `🔓 priming the merge
    gate` line), printed BEFORE the `CI_COMPLETE` line: read it there, and the
    first `gh pr merge` then proceeds without blocking. A `⚠️  merge gate
-   priming` warning means the ack state is unknown. `SYG_CI_WAIT_PRIME_REVIEW=0` turns that off.
+   priming` warning means the ack state is unknown. The default-branch release
+   reminder still fires on the real merge, not on priming. A project that ships
+   its own copy of the hook is not primed (pr-ci-wait says so).
+   `SYG_CI_WAIT_PRIME_REVIEW=0` turns that off.
 
 2. **Confirm CI state and the SHA-pinned workflow run list.** Note the final
    CI state from `gh pr checks <N>`, **and** run the SHA-pinned run-list
