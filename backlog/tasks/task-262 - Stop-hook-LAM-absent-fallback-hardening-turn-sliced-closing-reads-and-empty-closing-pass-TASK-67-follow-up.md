@@ -3,10 +3,11 @@ id: TASK-262
 title: >-
   Stop-hook LAM-absent fallback hardening: turn-sliced closing reads and
   empty-closing pass (TASK-67 follow-up)
-status: In Progress
+status: Done
 assignee:
   - Seyag
 created_date: '2026-11-27T14:41:00Z'
+updated_date: '2026-11-28T11:15:00Z'
 labels:
   - hooks
 dependencies: []
@@ -27,3 +28,11 @@ TASK-67 (header bounds) measured the LAM-absent fallback paths of the Stop hooks
 
 Evidence 2026-11-27: replay --since 7, LAM-absent worst case — recorded-file trips vs live blocks: promise-ledger 55 vs 1, blocking-question 57 vs 1, echo-check 8 vs 0 (correlative, not est-attributed). hooks/** is Seyag's lane; Seyag B's TASK-67 PR carries the header bounds with the cross-lane sanction note (A ruling 11-27).
 <!-- SECTION:DESCRIPTION:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Shipped by lane A (B parked) in 0.3.241 (#472). With last_assistant_message blank or absent, promise-ledger, lesson-claim and blocking-question read the current turn's last text after its last tool call (the whole tail only with no turn boundary in view); ask-command-echo-check passes a turn ending on signed-empty thinking (fail open, policy pinned by a probe row). Probe rows from the shared tests/stop-turn-fixture.sh go red on the pre-fix hooks and green after. replay-stop-hook now attributes each trip's closing shape.
+
+Replay --since 7, pre (03:04) / post (04:38) 2026-11-28, trips/turn ends: promise-ledger 50/7761 -> 51/7832; blocking-question 169/7783 -> 167/7837; ask-command-echo 8/7800 -> 8/7844; lesson-claim 19/7817 -> 18/7856. Every trip in both runs is `closing: visible`: zero signed-empty closings in the window, so the est shape does not explain the 55-vs-1 recorded/live gap cited above. Measured effect of the fix: 3 false positives removed (blocking-question x2, lesson-claim x1), all turns cut off by compaction right after a tool result, where the old fallback judged earlier mid-turn narration. The one post-only promise-ledger trip is in a file written after the pre pass read it (new log content, inferred). Council review (gpt-5.5) found no correctness blocker; the signed-empty pass is kept on purpose (the closing is the unreadable entry). Follow-up filed: TASK-271 (handoff-pick-check, same fallback shape).
+<!-- SECTION:FINAL_SUMMARY:END -->
