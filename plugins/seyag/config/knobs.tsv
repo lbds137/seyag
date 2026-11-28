@@ -75,6 +75,8 @@ SYG_CHECK_TARGET	internal	guards	unset	The target argument the hook passes to it
 SYG_CI_ANCHOR	user	pr	unset	Workflow name whose completion (with nothing pending) settles pr-ci-wait; unset uses the quiet-window rule.	-
 SYG_CI_AUTOMERGE_JOB	user	pr	unset	Automerge job name in the review workflow run checked by pr-ci-wait: if skipped on a green, open, non-draft PR authored by the authenticated gh user, reports CI_GATE_AUTOMERGE_SKIPPED; unset or empty disables the check.	-
 SYG_CI_REVIEW	user	pr	prose:auto-detected: the workflow named Claude Code Review if one exists, otherwise no review check	Review workflow name that must complete before pr-ci-wait releases; set empty to disable.	-
+SYG_CI_WAIT_PRIME_CMD	internal	pr	unset	Test seam: path to an executable pr-ci-wait runs instead of hooks/run.sh pr-merge-review-check when priming the merge gate (same stdin).	-
+SYG_CI_WAIT_PRIME_REVIEW	user	pr	1	On CI_COMPLETE (no SYG_CI_AUTOMERGE_JOB) pr-ci-wait runs the merge-review hook ahead of the merge so its first-call block prints in the Monitor output; 0 turns priming off.	-
 SYG_CLASSIFIER_LEDGER	user	session	unset	JSONL file path opting in classifier-ledger to record PostToolUseFailure events.	path
 SYG_CLOCK_STAMP_HINT	user	guards	unset	Optional line appended to clock-stamp-guard block messages (for example naming a project stamping tool).	-
 SYG_CLOCK_STAMP_NOW	internal	guards	unset	Test clock (integer epoch seconds) overriding current time in clock-stamp-guard.	-

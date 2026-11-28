@@ -232,6 +232,9 @@ run() {
   # only treats a LITERAL, parse-time NAME=value token as an inline
   # assignment prefix; env inspects each argv string at runtime instead).
   #
+  # SYG_CI_WAIT_PRIME_REVIEW defaults to 0 here so a CI_COMPLETE case never runs
+  # the real merge-review hook against this machine's ack state; the priming
+  # cases (P1..P8 below) pass their own value after it, which wins.
   # The MAX_S and GRACE_S defaults are give-up ceilings that only a case
   # asserting a give-up reaches, and every such case sets its own short value;
   # a sub-second default let a loaded machine end a releasing case early
@@ -245,6 +248,7 @@ run() {
     PR_CI_WAIT_HEARTBEAT_S="${PR_CI_WAIT_HEARTBEAT_S:-600}" \
     PR_CI_WAIT_SETTLE_S="${PR_CI_WAIT_SETTLE_S:-0}" \
     PR_CI_WAIT_QUIET_S="${PR_CI_WAIT_QUIET_S:-0.3}" \
+    SYG_CI_WAIT_PRIME_REVIEW="${SYG_CI_WAIT_PRIME_REVIEW:-0}" \
     "$@" "$BIN" 8 --sha "$SHA_ARG" 2>&1)
   RC=$?
   if [ "$RC" -eq 124 ]; then
@@ -777,6 +781,171 @@ run "AS14: gh api user failure -> CI_COMPLETE" 0 \
 [[ "$OUT" == *"CI_COMPLETE"* && "$OUT" != *"CI_GATE_AUTOMERGE_SKIPPED"* && "$OUT" == *"automerge check could not run"* ]] \
   && pass "AS14: gh api user failure warns and reports CI_COMPLETE" \
   || { fail "AS14: gh api user failure warns and reports CI_COMPLETE"; printf '%s\n' "$OUT" | sed 's/^/      /'; }
+
+# --- P1..P8. merge-gate priming on CI_COMPLETE --------------------------------
+# run() defaults SYG_CI_WAIT_PRIME_REVIEW=0; each case below passes its own.
+# before_in_out A B: both strings are in $OUT and A's first occurrence is first.
+before_in_out() {
+  [[ "$OUT" == *"$1"* && "$OUT" == *"$2"* ]] || return 1
+  local head_a="${OUT%%"$1"*}" head_b="${OUT%%"$2"*}"
+  [ "${#head_a}" -lt "${#head_b}" ]
+}
+
+PRIME_STUB="$WORK/prime-stub.sh"
+cat > "$PRIME_STUB" <<'STUB'
+#!/bin/bash
+# Test double for the merge-review hook: records stdin and call count, then
+# prints a recognisable block on stdout (default) or stderr (STUB_STREAM=err).
+cat > "$STUB_STDIN"
+echo x >> "$STUB_CALLS"
+if [ "${STUB_STREAM:-out}" = err ]; then echo STUB-REVIEW-BLOCK >&2; else echo STUB-REVIEW-BLOCK; fi
+exit 2
+STUB
+chmod +x "$PRIME_STUB"
+PRIME_PAYLOAD='{"tool_name": "Bash", "tool_input": {"command": "gh pr merge 8"}}'
+PRIME_LINE="priming the merge gate for PR #8"
+D_REL=$(seq_dir prime-release "[$DONE_CI]")
+
+# P1. stub called once with the exact payload; order priming line < block < sentinel < checks report.
+rm -f "$WORK/p1.stdin" "$WORK/p1.calls"
+run "P1: CI_COMPLETE primes the merge gate" 0 \
+  FAKE_GH_SEQ_DIR="$D_REL" SYG_CI_REVIEW= SYG_CI_ANCHOR=CI \
+  SYG_CI_WAIT_PRIME_REVIEW=1 SYG_CI_WAIT_PRIME_CMD="$PRIME_STUB" \
+  STUB_STDIN="$WORK/p1.stdin" STUB_CALLS="$WORK/p1.calls"
+[ "$(wc -l < "$WORK/p1.calls" 2>/dev/null)" = "1" ] && [ "$(cat "$WORK/p1.stdin" 2>/dev/null)" = "$PRIME_PAYLOAD" ] \
+  && pass "P1: stub called once with the exact synthetic payload" \
+  || { fail "P1: stub called once with the exact synthetic payload (stdin=$(cat "$WORK/p1.stdin" 2>/dev/null))"; }
+before_in_out "$PRIME_LINE" "STUB-REVIEW-BLOCK" && before_in_out "STUB-REVIEW-BLOCK" "CI_COMPLETE" \
+  && before_in_out "CI_COMPLETE" "fake-checks-report" \
+  && pass "P1: order is priming line, stub block, sentinel, checks report" \
+  || { fail "P1: order is priming line, stub block, sentinel, checks report"; printf '%s\n' "$OUT" | sed 's/^/      /'; }
+
+# P1b. a block written to STDERR still reaches pr-ci-wait's stdout, in order.
+rm -f "$WORK/p1b.stdin" "$WORK/p1b.calls"
+OUT_ONLY=$(cd "$FIXTURE_REPO" && timeout "$CASE_TIMEOUT" env -i \
+  PATH="$FAKE_BIN:$PATH" HOME="$HOME" PYTHONDONTWRITEBYTECODE=1 FIXTURE_HEAD_SHA="$FIXTURE_HEAD_SHA" \
+  PR_CI_WAIT_POLL_S=0.05 PR_CI_WAIT_MAX_S=5 PR_CI_WAIT_GRACE_S=5 PR_CI_WAIT_SETTLE_S=0 PR_CI_WAIT_QUIET_S=0.3 \
+  FAKE_GH_SEQ_DIR="$D_REL" SYG_CI_REVIEW= SYG_CI_ANCHOR=CI \
+  SYG_CI_WAIT_PRIME_REVIEW=1 SYG_CI_WAIT_PRIME_CMD="$PRIME_STUB" STUB_STREAM=err \
+  STUB_STDIN="$WORK/p1b.stdin" STUB_CALLS="$WORK/p1b.calls" \
+  "$BIN" 8 --sha "$SHA_ARG" 2>/dev/null)
+OUT="$OUT_ONLY"
+before_in_out "$PRIME_LINE" "STUB-REVIEW-BLOCK" && before_in_out "STUB-REVIEW-BLOCK" "fake-checks-report" \
+  && pass "P1b: stderr block surfaces on pr-ci-wait's stdout, in order" \
+  || { fail "P1b: stderr block surfaces on pr-ci-wait's stdout, in order"; printf '%s\n' "$OUT" | sed 's/^/      /'; }
+
+# P2. a non-CI_COMPLETE outcome (zero-job failure) never primes.
+rm -f "$WORK/p2.stdin" "$WORK/p2.calls"
+D=$(seq_dir prime-nonrelease "[$FAIL_ZERO]")
+run "P2: non-CI_COMPLETE outcome -> exit 1" 1 \
+  FAKE_GH_SEQ_DIR="$D" SYG_CI_ANCHOR=CI SYG_CI_REVIEW= FAKE_GH_JOBS_TOTAL=0 \
+  SYG_CI_WAIT_PRIME_REVIEW=1 SYG_CI_WAIT_PRIME_CMD="$PRIME_STUB" \
+  STUB_STDIN="$WORK/p2.stdin" STUB_CALLS="$WORK/p2.calls"
+[ ! -e "$WORK/p2.calls" ] && [[ "$OUT" != *"$PRIME_LINE"* ]] \
+  && pass "P2: stub not called, no priming line" \
+  || { fail "P2: stub not called, no priming line"; printf '%s\n' "$OUT" | sed 's/^/      /'; }
+
+# P3. SYG_CI_WAIT_PRIME_REVIEW=0 skips silently.
+rm -f "$WORK/p3.stdin" "$WORK/p3.calls"
+run "P3: SYG_CI_WAIT_PRIME_REVIEW=0 on CI_COMPLETE" 0 \
+  FAKE_GH_SEQ_DIR="$D_REL" SYG_CI_REVIEW= SYG_CI_ANCHOR=CI \
+  SYG_CI_WAIT_PRIME_REVIEW=0 SYG_CI_WAIT_PRIME_CMD="$PRIME_STUB" \
+  STUB_STDIN="$WORK/p3.stdin" STUB_CALLS="$WORK/p3.calls"
+[ ! -e "$WORK/p3.calls" ] && [[ "$OUT" == *"CI_COMPLETE"* && "$OUT" != *"$PRIME_LINE"* ]] \
+  && pass "P3: stub not called, no priming line" \
+  || { fail "P3: stub not called, no priming line"; printf '%s\n' "$OUT" | sed 's/^/      /'; }
+
+# P4. an automerge job configured (job ran, so CI_COMPLETE) skips priming.
+rm -f "$WORK/p4.stdin" "$WORK/p4.calls"
+D=$(seq_dir prime-automerge "$AS_RUNS_GREEN")
+run "P4: automerge job configured, CI_COMPLETE" 0 \
+  FAKE_GH_SEQ_DIR="$D" SYG_CI_ANCHOR=Probes SYG_CI_REVIEW="Claude Code Review" \
+  SYG_CI_AUTOMERGE_JOB=automerge FAKE_GH_JOBLIST="$AS_JOBS_RAN" \
+  SYG_CI_WAIT_PRIME_REVIEW=1 SYG_CI_WAIT_PRIME_CMD="$PRIME_STUB" \
+  STUB_STDIN="$WORK/p4.stdin" STUB_CALLS="$WORK/p4.calls"
+[ ! -e "$WORK/p4.calls" ] && [[ "$OUT" == *"CI_COMPLETE"* && "$OUT" != *"$PRIME_LINE"* ]] \
+  && pass "P4: stub not called, no priming line" \
+  || { fail "P4: stub not called, no priming line"; printf '%s\n' "$OUT" | sed 's/^/      /'; }
+
+# P5. seam path not executable (OSError): warns, exit code and sentinel unchanged.
+: > "$WORK/not-executable"
+run "P5: unrunnable priming command still exits 0" 0 \
+  FAKE_GH_SEQ_DIR="$D_REL" SYG_CI_REVIEW= SYG_CI_ANCHOR=CI \
+  SYG_CI_WAIT_PRIME_REVIEW=1 SYG_CI_WAIT_PRIME_CMD="$WORK/not-executable"
+[[ "$OUT" == *"merge gate not primed:"* && "$OUT" == *"will block once as usual"* ]] && before_in_out "merge gate not primed" "fake-checks-report" \
+  && pass "P5: 'not primed' warning printed before the checks report" \
+  || { fail "P5: 'not primed' warning printed before the checks report"; printf '%s\n' "$OUT" | sed 's/^/      /'; }
+
+# P8. a priming command exiting neither 0 nor 2: warns the ack state is unknown,
+# exit code and sentinel unchanged.
+EXIT3_STUB="$WORK/exit3-stub.sh"
+printf '#!/bin/bash\ncat >/dev/null\nexit 3\n' > "$EXIT3_STUB"
+chmod +x "$EXIT3_STUB"
+run "P8: priming command exiting 3 still exits 0" 0 \
+  FAKE_GH_SEQ_DIR="$D_REL" SYG_CI_REVIEW= SYG_CI_ANCHOR=CI \
+  SYG_CI_WAIT_PRIME_REVIEW=1 SYG_CI_WAIT_PRIME_CMD="$EXIT3_STUB"
+[[ "$OUT" == *"CI_COMPLETE"* && "$OUT" == *"hook exited 3; ack state unknown"* ]] \
+  && pass "P8: CI_COMPLETE printed and 'hook exited 3; ack state unknown' warned" \
+  || { fail "P8: CI_COMPLETE printed and 'hook exited 3; ack state unknown' warned"; printf '%s\n' "$OUT" | sed 's/^/      /'; }
+
+# P6. INTEGRATION (no seam): the real run.sh + the real hook, a temp state dir and a
+# gh shim that answers the hook's calls for the fixture PR and defers everything else to the
+# pr-ci-wait shim. FAKE_INT_REVIEW_JSON is one raw comment; empty = no comments.
+INT_BIN="$WORK/intbin"
+mkdir -p "$INT_BIN"
+cat > "$INT_BIN/gh" <<'SHIM'
+#!/bin/bash
+case "$*" in
+  "pr view "*"--json "*)
+    case "$*" in
+      *baseRefName*) printf '%s\n%s\n' "${FAKE_INT_BASE:-develop}" "feat/x" ;;
+      *author,files*) printf '%s\n%s\n' "octo-user" "false" ;;
+      *) exit 64 ;;
+    esac ;;
+  "repo view "*"--json "*) printf '%s\n%s\n' "acme-widgets/cli" "main" ;;
+  *"/issues/"*"/comments"*)
+    if [ -n "${FAKE_INT_REVIEW_JSON:-}" ]; then printf '[[%s]]' "$FAKE_INT_REVIEW_JSON"; else printf '[[]]'; fi ;;
+  "pr diff "*) printf '' ;;
+  *) exec "$FAKE_BIN_REAL/gh" "$@" ;;
+esac
+SHIM
+chmod +x "$INT_BIN/gh"
+INT_UPDATED="2026-08-08T12:00:00Z"
+INT_REVIEW=$(jq -nc --arg u "$INT_UPDATED" \
+  '{id:4242,user:{login:"claude[bot]"},created_at:$u,updated_at:$u,body:"INT-REVIEW-BODY: add a test for the empty case"}')
+XDG_P6="$WORK/xdg-p6"
+INT_ACK="$XDG_P6/seyag/pr-merge-review-check/ack"
+run "P6: integration, real hook through run.sh" 0 \
+  PATH="$INT_BIN:$FAKE_BIN:$PATH" FAKE_BIN_REAL="$FAKE_BIN" FAKE_INT_BASE=develop \
+  FAKE_INT_REVIEW_JSON="$INT_REVIEW" FAKE_GH_SEQ_DIR="$D_REL" SYG_CI_REVIEW= SYG_CI_ANCHOR=CI \
+  SYG_CONFIG=0 XDG_STATE_HOME="$XDG_P6" SYG_CI_WAIT_PRIME_REVIEW=1
+[[ "$OUT" == *"PR MERGE GATE"* && "$OUT" == *"INT-REVIEW-BODY"* ]] && before_in_out "$PRIME_LINE" "PR MERGE GATE" \
+  && before_in_out "INT-REVIEW-BODY" "CI_COMPLETE" \
+  && pass "P6: the real hook's block and the review body print after the priming line and before CI_COMPLETE" \
+  || { fail "P6: the real hook's block and the review body print after the priming line and before CI_COMPLETE"; printf '%s\n' "$OUT" | sed 's/^/      /'; }
+grep -qxF "8:4242:$INT_UPDATED" "$INT_ACK" 2>/dev/null \
+  && pass "P6: ack file holds 8:<id>:<updated_at>" \
+  || { fail "P6: ack file holds 8:<id>:<updated_at> (file: $(cat "$INT_ACK" 2>/dev/null))"; }
+printf '%s' "$PRIME_PAYLOAD" | (cd "$FIXTURE_REPO" && env -i \
+  PATH="$INT_BIN:$FAKE_BIN:$PATH" HOME="$HOME" FAKE_BIN_REAL="$FAKE_BIN" FAKE_INT_BASE=develop \
+  FAKE_INT_REVIEW_JSON="$INT_REVIEW" SYG_CONFIG=0 XDG_STATE_HOME="$XDG_P6" \
+  bash "$SCRIPT_DIR/../plugins/seyag/hooks/run.sh" pr-merge-review-check >"$WORK/p6.second.out" 2>&1)
+P6_RC=$?
+[ "$P6_RC" -eq 0 ] && [ ! -s "$WORK/p6.second.out" ] \
+  && pass "P6: the session's own first merge call then proceeds (rc 0, no output)" \
+  || { fail "P6: the session's own first merge call then proceeds (rc $P6_RC)"; sed 's/^/      /' "$WORK/p6.second.out"; }
+
+# P7. INTEGRATION, non-acking path: no claude[bot] comment on a non-default-base PR
+# writes no review ack line.
+XDG_P7="$WORK/xdg-p7"
+run "P7: integration, no review comment" 0 \
+  PATH="$INT_BIN:$FAKE_BIN:$PATH" FAKE_BIN_REAL="$FAKE_BIN" FAKE_INT_BASE=develop \
+  FAKE_INT_REVIEW_JSON= FAKE_GH_SEQ_DIR="$D_REL" SYG_CI_REVIEW= SYG_CI_ANCHOR=CI \
+  SYG_CONFIG=0 XDG_STATE_HOME="$XDG_P7" SYG_CI_WAIT_PRIME_REVIEW=1
+{ [ ! -e "$XDG_P7/seyag/pr-merge-review-check/ack" ] || ! grep -q '^8:' "$XDG_P7/seyag/pr-merge-review-check/ack"; } \
+  && [[ "$OUT" == *"$PRIME_LINE"* && "$OUT" == *"CI_COMPLETE"* ]] \
+  && pass "P7: no review ack line written when there was no review" \
+  || { fail "P7: no review ack line written when there was no review"; printf '%s\n' "$OUT" | sed 's/^/      /'; }
 
 echo "---"
 echo "$FAILURES failed"
