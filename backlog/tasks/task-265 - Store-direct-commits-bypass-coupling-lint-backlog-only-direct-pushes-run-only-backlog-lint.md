@@ -3,9 +3,10 @@ id: TASK-265
 title: >-
   Store-direct commits bypass coupling-lint: backlog-only direct pushes run only
   backlog-lint
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-11-27T16:30:00Z'
+updated_date: '2026-11-28T05:30:00Z'
 labels:
   - ci
   - lint
@@ -28,3 +29,9 @@ Fix shapes to weigh (engineering call at pickup):
 
 Related: TASK-37 (coupling-lint TOKENS widening) — different defect: that one is what the lint matches; this one is where the lint is invoked. A/TASK-263 (cloud-gate re-vendor) unaffected.
 <!-- SECTION:DESCRIPTION:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Shipped shape 2 as one entry point (lane A, B parked): `tests/store-lint.sh` runs backlog-lint and tests/coupling-lint.probe.sh, silent on pass, and CLAUDE.md now names it as the direct path's store lint. Shape 1 ruled out: the coupling TOKENS are this repo's policy, and copying them into the generic plugin bin would itself be new coupling and would lose the allowlist. Probe tests/store-lint.probe.sh: clean store, coupling token in a task body, missing priority, empty allowlist, live repo. Fixed in passing: coupling-lint died under `set -u` on an empty allowlist (bare `declare -A`), found by the worker.
+<!-- SECTION:FINAL_SUMMARY:END -->

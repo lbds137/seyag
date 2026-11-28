@@ -124,6 +124,7 @@ tests/shell-state.probe.sh	0.2
 tests/shell-syntax.probe.sh	3.5
 tests/skill-name-lint.probe.sh	0.1
 tests/statusline.probe.sh	61.2
+tests/store-lint.probe.sh	1.4
 tests/suite-time.probe.sh	7.3
 tests/usage-sweep.probe.sh	13.4
 tests/week-burn-window.probe.sh	2.1
