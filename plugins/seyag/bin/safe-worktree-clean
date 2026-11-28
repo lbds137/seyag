@@ -1104,21 +1104,51 @@ judge_git() {
       hold ignored "$p is ignored and not a safe-clean cache name or a declared regenerable path"
     fi
   done
-  local op gp
-  local -a ops_found=()
-  for op in rebase-merge rebase-apply MERGE_HEAD CHERRY_PICK_HEAD REVERT_HEAD BISECT_LOG sequencer; do
-    if ! gp=$(git -C "$t" rev-parse --git-path "$op" 2>&1) || [ -z "$gp" ]; then
-      hold git-error "git rev-parse --git-path $op failed: ${gp//$'\n'/ }"
-      break
+  local op gp i batch_out batch_ok=0
+  local -a ops_found=() batch_gp=() op_args=()
+  local -a op_names=(rebase-merge rebase-apply MERGE_HEAD CHERRY_PICK_HEAD REVERT_HEAD BISECT_LOG sequencer)
+  for op in "${op_names[@]}"; do op_args+=(--git-path "$op"); done
+  # One git call for all ops, stdout only. Trusted only when it exits 0, prints exactly one line
+  # per op, and each line is non-empty and ends in "/<op>" (a git-path always does); anything
+  # else falls through to the per-op loop, which re-runs git and owns the error messages.
+  if batch_out=$(git -C "$t" rev-parse "${op_args[@]}" 2>/dev/null); then
+    mapfile -t batch_gp <<<"$batch_out"
+    if [ ${#batch_gp[@]} -eq ${#op_names[@]} ]; then
+      batch_ok=1
+      for i in "${!op_names[@]}"; do
+        case "${batch_gp[$i]}" in
+          */"${op_names[$i]}") ;;
+          *) batch_ok=0; break ;;
+        esac
+      done
     fi
-    case "$gp" in
-      /*) ;;
-      *) gp="$t/$gp" ;;
-    esac
-    if [ -e "$gp" ] || [ -L "$gp" ]; then
-      ops_found+=("$op")
-    fi
-  done
+  fi
+  if [ "$batch_ok" -eq 1 ]; then
+    for i in "${!op_names[@]}"; do
+      gp=${batch_gp[$i]}
+      case "$gp" in
+        /*) ;;
+        *) gp="$t/$gp" ;;
+      esac
+      if [ -e "$gp" ] || [ -L "$gp" ]; then
+        ops_found+=("${op_names[$i]}")
+      fi
+    done
+  else
+    for op in "${op_names[@]}"; do
+      if ! gp=$(git -C "$t" rev-parse --git-path "$op" 2>&1) || [ -z "$gp" ]; then
+        hold git-error "git rev-parse --git-path $op failed: ${gp//$'\n'/ }"
+        break
+      fi
+      case "$gp" in
+        /*) ;;
+        *) gp="$t/$gp" ;;
+      esac
+      if [ -e "$gp" ] || [ -L "$gp" ]; then
+        ops_found+=("$op")
+      fi
+    done
+  fi
   if [ ${#ops_found[@]} -gt 0 ]; then
     hold in-progress "in-progress git operation in the tree: ${ops_found[*]}"
   fi
