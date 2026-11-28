@@ -11,6 +11,17 @@
 # backstops predates the hook and relied on agent attention; this file is the
 # structural version.
 #
+# The first-call block need not land on the merge call: on a CI_COMPLETE outcome
+# (unless SYG_CI_WAIT_PRIME_REVIEW=0 or an automerge job is configured)
+# pr-ci-wait runs THIS hook through hooks/run.sh with a synthetic `gh pr merge N`
+# payload, before it prints the CI_COMPLETE line, so the block, and its acks,
+# land in pr-ci-wait's output ahead of that line and the
+# session's own first `gh pr merge` proceeds. Residuals: (a) a runner that does
+# not stream pr-ci-wait's stdout into the agent's context (the pr-monitoring
+# skill's background-Bash fallback) acks a review nobody read; (b) the ack is
+# per user, not per session, so another session, or a post-/clear context, then
+# merges unblocked.
+#
 # It also carries the default-branch merge reminder for PRs based on the
 # repo's default branch, on the same blocking channel: non-blocking
 # PostToolUse output never reaches the agent, so a reminder that rides it

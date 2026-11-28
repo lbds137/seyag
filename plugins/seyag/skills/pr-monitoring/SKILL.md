@@ -90,6 +90,12 @@ stop after step 1 even if every check is green:
 | `CI_GATE_AUTOMERGE_SKIPPED` | CI is green and the review run is green, but the review run's automerge job (`SYG_CI_AUTOMERGE_JOB`) was skipped on an open non-draft PR authored by the authenticated gh user, so it will not merge itself. | Re-trigger with `gh pr close <N> && gh pr reopen <N>` and re-arm; never merge by hand over the gate. |
 | _(none printed)_ | The Monitor's own 30-min `timeout_ms` killed the process first. | Re-arm. |
 
+   When CI is complete with no automerge job, the output also carries the
+   merge gate's own block (the latest review, after a `🔓 priming the merge
+   gate` line), printed BEFORE the `CI_COMPLETE` line: read it there, and the
+   first `gh pr merge` then proceeds without blocking. A `⚠️  merge gate
+   priming` warning means the ack state is unknown. `SYG_CI_WAIT_PRIME_REVIEW=0` turns that off.
+
 2. **Confirm CI state and the SHA-pinned workflow run list.** Note the final
    CI state from `gh pr checks <N>`, **and** run the SHA-pinned run-list
    query. **A green `gh pr checks` list is not proof CI ran**: a workflow run

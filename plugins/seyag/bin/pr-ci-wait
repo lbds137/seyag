@@ -40,6 +40,19 @@ draft-to-ready flip raced a push so the review run evaluated the draft event
 payload). The check is advisory: any gh or parse failure warns and degrades to
 CI_COMPLETE rather than holding release.
 
+When the outcome is CI_COMPLETE (and only then) pr-ci-wait primes the merge
+gate BEFORE it prints that sentinel: it runs the real pr-merge-review-check
+hook through hooks/run.sh with a synthetic `gh pr merge N` payload, streaming
+the hook's output straight into this command's stdout, so the first-merge
+block (the latest review) reaches the agent ahead of the CI_COMPLETE line it
+acts on, and the session's own `gh pr merge N` then proceeds. Priming is
+skipped silently when SYG_CI_AUTOMERGE_JOB is set (those PRs merge themselves)
+or SYG_CI_WAIT_PRIME_REVIEW=0 (any other value or unset = on). A priming
+failure only warns (a hook exit other than 0 or 2, or a timeout, says the ack
+state is unknown); it never changes the exit code or the sentinel. Internal test
+seam: SYG_CI_WAIT_PRIME_CMD, a path to an executable run INSTEAD of the hook
+dispatcher (same stdin).
+
 Exit codes: 0 only on CI_COMPLETE; 1 for every other gate outcome (timeout,
 startup failure, review missing, automerge skipped); 2 for a usage/argument
 error (bad --sha, --sha naming no local commit, or a PR head that persistently
@@ -103,6 +116,9 @@ except Exception:
     pass
 
 FULL_SHA = re.compile(r"^[0-9a-f]{40}$", re.I)
+
+# Bound on the merge-gate priming child (see prime_merge_gate).
+PRIME_TIMEOUT_S = 60
 
 # gh substitutes these literal placeholders from the repo the command runs
 # in (or --repo), so no separate owner/repo lookup is needed.
@@ -686,6 +702,38 @@ def run_checks(pr, watch, timeout_s=CHECKS_REPORT_TIMEOUT_S, bound="what was lef
         log(f"⚠️  `gh pr checks` could not run: {exc}")
 
 
+def prime_merge_gate(pr):
+    """Run the real merge-review hook for `gh pr merge PR` so its first-call block lands here.
+
+    No buffering, on purpose: the hook prints the review BEFORE it writes its
+    ack (its own inject-before-ack ordering), so the child writes straight to
+    our stdout. Capturing and re-printing after it exits would invert that
+    order. Exit 2 (it printed a block) and 0 (nothing due) are normal; any other
+    exit code, or a timeout, logs that the ack state is unknown (the hook may
+    have acked before it failed). An OSError means nothing ran, so the gate is
+    still armed. Runs BEFORE the sentinel is printed, so the review precedes
+    the line the agent acts on.
+    """
+    cmd = ["bash", os.path.join(_SYG_ROOT, "hooks", "run.sh"), "pr-merge-review-check"]
+    # Test seam (probe only): an executable used INSTEAD, with the same stdin.
+    seam = os.environ.get("SYG_CI_WAIT_PRIME_CMD")
+    if seam:
+        cmd = [seam]
+    payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": f"gh pr merge {pr}"}})
+    log(f"🔓 priming the merge gate for PR #{pr}: anything it prints below is what it acked or still owes")
+    sys.stdout.flush()
+    try:
+        result = subprocess.run(
+            cmd, input=payload, text=True, stdout=None, stderr=subprocess.STDOUT, timeout=PRIME_TIMEOUT_S
+        )
+        if result.returncode not in (0, 2):
+            log(f"⚠️  merge gate priming: hook exited {result.returncode}; ack state unknown")
+    except subprocess.TimeoutExpired:
+        log(f"⚠️  merge gate priming timed out after {PRIME_TIMEOUT_S}s; ack state unknown")
+    except OSError as exc:
+        log(f"⚠️  merge gate not primed: {exc}; the first gh pr merge will block once as usual")
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="pr-ci-wait", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -722,6 +770,8 @@ def main():
         if automerge_job and review:
             outcome = check_automerge(args.pr, sha, review, automerge_job)
 
+    if outcome == "releasable" and not automerge_job and os.environ.get("SYG_CI_WAIT_PRIME_REVIEW") != "0":
+        prime_merge_gate(args.pr)
     log(SENTINELS[outcome])
     run_checks(args.pr, watch=False)
 

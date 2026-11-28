@@ -203,6 +203,7 @@ An optional TOML file fills in knobs the environment left unset: user `${XDG_CON
 | `SYG_CI_ANCHOR` | unset | Workflow name whose completion (with nothing pending) settles pr-ci-wait; unset uses the quiet-window rule. | `bin/pr-ci-wait` | user + project |
 | `SYG_CI_AUTOMERGE_JOB` | unset | Automerge job name in the review workflow run checked by pr-ci-wait: if skipped on a green, open, non-draft PR authored by the authenticated gh user, reports CI_GATE_AUTOMERGE_SKIPPED; unset or empty disables the check. | `bin/pr-ci-wait` | user + project |
 | `SYG_CI_REVIEW` | auto-detected: the workflow named Claude Code Review if one exists, otherwise no review check | Review workflow name that must complete before pr-ci-wait releases; set empty to disable. | `bin/pr-ci-wait` | user + project |
+| `SYG_CI_WAIT_PRIME_REVIEW` | `1` | On CI_COMPLETE (no SYG_CI_AUTOMERGE_JOB) pr-ci-wait runs the merge-review hook ahead of the merge so its first-call block prints in the Monitor output; 0 turns priming off. | `bin/pr-ci-wait`, `hooks/pr-merge-review-check.sh` | user + project |
 | `SYG_MERGE_REVIEW_LOGIN` | `claude[bot]` | GitHub login whose latest PR comment must be surfaced before pr-merge-review-check allows gh pr merge. | `hooks/pr-merge-review-check.sh` | user + project |
 | `SYG_MERGE_REVIEW_RELEASE_REMINDER` | This PR merges into the repository's default branch — run this project's post-merge steps (version bump, release, deploy) before starting other work. | Custom reminder text shown once when merging a PR into the repository's default branch. | `hooks/pr-merge-review-check.sh` | user + project |
 | `SYG_MERGE_REVIEW_WORKFLOW` | `.github/workflows/claude-code-review.yml` | Review workflow file path whose self-edit in a PR explains a missing review comment in pr-merge-review-check. | `hooks/pr-merge-review-check.sh` | user only |
@@ -329,6 +330,7 @@ An optional TOML file fills in knobs the environment left unset: user `${XDG_CON
 | `SYG_ALLOW_COMMIT_BRANCH` | `hooks/lib/branch_switch.py` | Example per-command bypass assignment in the command text mentioned in lib/branch_switch.py docstring; not read by a hook. |
 | `SYG_CHECK_LIB` | `hooks/upstream-submission-guard.sh` | The hooks/lib directory the hook passes to its python child for shared target/owner resolution in the --check preflight. |
 | `SYG_CHECK_TARGET` | `hooks/upstream-submission-guard.sh` | The target argument the hook passes to its python child in the --check preflight. |
+| `SYG_CI_WAIT_PRIME_CMD` | `bin/pr-ci-wait` | Test seam: path to an executable pr-ci-wait runs instead of hooks/run.sh pr-merge-review-check when priming the merge gate (same stdin). |
 | `SYG_CLOCK_STAMP_NOW` | `hooks/clock-stamp-guard.sh`, `hooks/lib/clock_stamp.py` | Test clock (integer epoch seconds) overriding current time in clock-stamp-guard. |
 | `SYG_COMPONENTS_TSV` | `hooks/lib/components.sh` | Internal variable holding the resolved path to hooks/components.tsv in lib/components.sh. |
 | `SYG_CREDIT_ADMIN_URL` | `bin/api-credit`, `bin/statusline` | Test seam overriding the Anthropic Admin API origin URL in api-credit and statusline. |
